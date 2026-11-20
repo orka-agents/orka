@@ -95,7 +95,7 @@ func TestRepositoryMonitorNeedsChangesReadinessReflectsRepairEligibility(t *test
 					_, _ = fmt.Fprintf(w, "[%s]", body)
 				case strings.HasSuffix(req.URL.Path, "/check-runs"):
 					conclusion := "success"
-					if tc.ciFailed {
+					if tc.ciFailed && strings.Contains(req.URL.Path, "/commits/"+repositoryMonitorTestHeadSHA+"/") {
 						conclusion = "failure"
 					}
 					_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":%q}]}`, conclusion)

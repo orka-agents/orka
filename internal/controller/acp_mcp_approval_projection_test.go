@@ -17,22 +17,44 @@ import (
 )
 
 type approvalTerminalProjectionOutageStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	unavailable atomic.Bool
 	attempts    atomic.Int32
 }
 
 func (s *approvalTerminalProjectionOutageStore) AppendExecutionEventIfAbsent(ctx context.Context, event *store.ExecutionEvent, key string) (*store.ExecutionEvent, bool, error) {
+	if s.refuses(event) {
+		return nil, false, errors.New("injected terminal approval projection outage")
+	}
+	return s.DeduplicatingExecutionEventStore.AppendExecutionEventIfAbsent(ctx, event, key)
+}
+
+// AppendExecutionEventsIfAbsent refuses a whole group that carries a terminal
+// projection, so a recovery decision and its outcome stay unwritten together.
+func (s *approvalTerminalProjectionOutageStore) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	for _, entry := range appends {
+		if s.refuses(entry.Event) {
+			return nil, errors.New("injected terminal approval projection outage")
+		}
+	}
+	grouped, ok := s.DeduplicatingExecutionEventStore.(store.GroupedExecutionEventStore)
+	if !ok {
+		return nil, errors.New("grouped execution events are unavailable")
+	}
+	return grouped.AppendExecutionEventsIfAbsent(ctx, appends)
+}
+
+func (s *approvalTerminalProjectionOutageStore) refuses(event *store.ExecutionEvent) bool {
 	var payload struct {
 		ExecutionOutcome string `json:"executionOutcome"`
 	}
 	if event.Type == events.ExecutionEventTypeApprovalExecutionUpdated && json.Unmarshal(event.Content, &payload) == nil &&
 		payload.ExecutionOutcome != "" && payload.ExecutionOutcome != "running" && s.unavailable.Load() {
 		s.attempts.Add(1)
-		return nil, false, errors.New("injected terminal approval projection outage")
+		return true
 	}
-	return s.DeduplicatingExecutionEventStore.AppendExecutionEventIfAbsent(ctx, event, key)
+	return false
 }
 
 func TestMCPApprovalTerminalReceiptSurvivesProjectionOutage(t *testing.T) {
@@ -69,7 +91,7 @@ func TestMCPApprovalTerminalReceiptSurvivesProjectionOutage(t *testing.T) {
 				_, err := original.ExecuteACPMCPTool(ctx, request, descriptor)
 				return tc.toolResult, err
 			})
-			projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+			projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 			projection.unavailable.Store(true)
 			f.broker.ApprovalEvents = projection
 			f.dispatcher.EventStore = projection
@@ -155,7 +177,7 @@ func TestMCPApprovalReplayRejectsUnverifiedReceiptBeforeProjection(t *testing.T)
 	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 	awaitMCPApprovalResult(t, done)
 
-	projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	projection := &approvalTerminalProjectionOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	projection.unavailable.Store(true)
 	f.broker.ApprovalEvents = projection
 	f.broker.Effects = approvalUnverifiedReceiptStore{ExternalEffectStore: f.broker.Effects}
@@ -166,7 +188,7 @@ func TestMCPApprovalReplayRejectsUnverifiedReceiptBeforeProjection(t *testing.T)
 }
 
 type approvalAppendOutageStore struct {
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	store.DeduplicatingExecutionEventStore
 	attempts atomic.Int32
 }
@@ -186,7 +208,7 @@ func TestMCPApprovalReplaysTerminalReceiptDuringEventStoreOutage(t *testing.T) {
 
 	// Exact redelivery of a completed call must return the durable receipt
 	// even when no event can be appended; recovery repairs projection later.
-	outage := &approvalAppendOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataTransactionStore: f.events}
+	outage := &approvalAppendOutageStore{DeduplicatingExecutionEventStore: f.events, TaskDataAccessStore: f.storage}
 	f.broker.ApprovalEvents = outage
 	replayed := awaitMCPApprovalResult(t, f.start(f.request))
 	require.True(t, replayed.Replayed)

@@ -353,11 +353,7 @@ func activeScanPipelineTask(task *corev1alpha1.Task) bool {
 	default:
 		return false
 	}
-	switch task.Status.Phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return false
-	}
-	return true
+	return !task.Status.Phase.IsTerminal()
 }
 
 // RollbackScanRunAdmission cancels work whose admission lost status ownership.

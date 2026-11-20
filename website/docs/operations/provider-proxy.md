@@ -19,7 +19,7 @@ Either way it is one gateway install, one values file, and one `helm upgrade`.
 :::
 
 AI-worker tasks, `type: ai`, do not use a gateway. They read your
-[Provider resources](../reference/configuration.md#provider) and their API-key
+[Provider resources](../reference/resources.md#provider) and their API-key
 Secrets directly, and they work as soon as Orka is installed.
 
 Coding agents are different. They are third-party CLIs, so Orka never hands

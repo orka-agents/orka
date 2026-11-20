@@ -172,3 +172,38 @@ func TestTaskStatusUnknownOutcomeKeepsReplayPolicyInDefaultView(t *testing.T) {
 		}
 	}
 }
+
+// A Task held on an approval reports Running; --verbose and -o json still say
+// what it waits on, as the default view does.
+func TestTaskStatusVerboseAndJSONShowWhatATaskWaitsOn(t *testing.T) {
+	srv := taskStatusServer(t, map[string]any{
+		"metadata": map[string]any{"name": "deploy", "namespace": "team-a"},
+		"spec":     map[string]any{"type": "agent"},
+		"status": map[string]any{
+			"phase":      "Running",
+			"execution":  map[string]any{"state": "Running"},
+			"conditions": []any{map[string]any{"type": "WaitingForApproval", "status": "True"}},
+		},
+	})
+	defer srv.Close()
+	const want = "orka task approvals deploy -n team-a"
+
+	verbose, err := runCLI(t, srv.URL, "task", "status", "deploy", "--verbose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(verbose, "Waiting on") || !strings.Contains(verbose, want) {
+		t.Fatalf("--verbose does not say what the Task waits on:\n%s", verbose)
+	}
+	jsonOut, err := runCLI(t, srv.URL, "task", "status", "deploy", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &status); err != nil {
+		t.Fatal(err)
+	}
+	if waiting, _ := status["waitingOn"].(string); !strings.Contains(waiting, want) {
+		t.Fatalf("-o json waitingOn = %q, want it to name %q", waiting, want)
+	}
+}

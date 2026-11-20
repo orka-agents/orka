@@ -882,6 +882,10 @@ func TestKubernetesACPMCPBrokerCredentialResolverSupportsExternalRuntime(t *test
 		credentials.Task.UID != string(task.UID) {
 		t.Fatalf("resolved external task identity = %#v", credentials.Task)
 	}
+	if binding := task.Status.AgentExecutionBinding; binding == nil || binding.Agent == nil || binding.Agent.UID == "" ||
+		credentials.Task.AgentUID != string(binding.Agent.UID) {
+		t.Fatalf("resolved Agent UID = %q, want the binding's frozen Agent UID", credentials.Task.AgentUID)
+	}
 
 	runtimeObject := &corev1alpha1.AgentRuntime{}
 	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.runtime), runtimeObject); err != nil {

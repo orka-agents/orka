@@ -193,7 +193,8 @@ func (e *SubstrateActorPoolExecutor) PruneSubstrateActors(
 	if err != nil {
 		return 0, err
 	}
-	actorsByOrdinal := make(map[int]string)
+	type prunedActor struct{ id, uid string }
+	actorsByOrdinal := make(map[int]prunedActor)
 	ordinals := make([]int, 0)
 	for _, actor := range actors {
 		ordinal, ok := substratePoolActorOrdinal(actor.ActorID, prefix)
@@ -203,14 +204,15 @@ func (e *SubstrateActorPoolExecutor) PruneSubstrateActors(
 		if _, exists := actorsByOrdinal[ordinal]; exists {
 			continue
 		}
-		actorsByOrdinal[ordinal] = SubstrateActorKey(actor.Atespace, actor.ActorID)
+		actorsByOrdinal[ordinal] = prunedActor{id: SubstrateActorKey(actor.Atespace, actor.ActorID), uid: actor.ActorUID}
 		ordinals = append(ordinals, ordinal)
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(ordinals)))
 
 	deleted := 0
 	for _, ordinal := range ordinals {
-		if err := e.control.DeleteActor(ctx, actorsByOrdinal[ordinal]); err != nil {
+		pruned := actorsByOrdinal[ordinal]
+		if err := e.control.DeleteActor(ctx, pruned.id, pruned.uid); err != nil {
 			if IsKind(err, ErrorKindNotFound) {
 				continue
 			}

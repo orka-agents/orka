@@ -34,6 +34,7 @@ const (
 
 // ConnectorProviderSpec is the operator-owned catalog entry for one third-party
 // service that people may link through OAuth.
+// +kubebuilder:validation:XValidation:rule="has(self.agentHost) || (has(self.tools) && size(self.tools) > 0)",message="a provider declares tools unless it serves agent hosts"
 type ConnectorProviderSpec struct {
 	// DisplayName is shown to people in the dashboard and CLI. Defaults to the
 	// object name.
@@ -48,11 +49,25 @@ type ConnectorProviderSpec struct {
 	// Tools declares the tools this provider offers to agents acting for a
 	// linked person. Built-in tools name an Orka built-in; HTTP tools carry a
 	// curated definition executed by the controller with the person's token.
-	// +kubebuilder:validation:MinItems=1
+	// A provider that serves agent hosts may declare none.
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=map
 	// +listMapKey=name
-	Tools []ConnectorTool `json:"tools"`
+	// +optional
+	Tools []ConnectorTool `json:"tools,omitempty"`
+
+	// AgentHost makes this provider the source of agent hosts: each person who
+	// links it gets an AgentHost from the template, fed short-lived access
+	// tokens from their link. Linking discloses that code on the host can read
+	// those tokens. At most one provider in a namespace may set it.
+	// +optional
+	AgentHost *ConnectorAgentHost `json:"agentHost,omitempty"`
+}
+
+// ConnectorAgentHost selects the template a provider's agent hosts run.
+type ConnectorAgentHost struct {
+	// TemplateRef names an AgentHostTemplate in the provider's namespace.
+	TemplateRef LocalObjectReference `json:"templateRef"`
 }
 
 // ConnectorOAuthConfig holds the OAuth 2.0 client settings for a provider.
@@ -167,6 +182,7 @@ type ConnectorTool struct {
 // ConnectorHTTPTool defines a curated HTTPS request executed with a person's
 // linked credential.
 // +kubebuilder:validation:XValidation:rule="self.url.startsWith('https://')",message="connector tool url must use https"
+// +kubebuilder:validation:XValidation:rule="!has(self.forward) || !has(self.headers) || size(self.headers) == 0",message="a forwarding connector tool sets no headers"
 type ConnectorHTTPTool struct {
 	// URL is the absolute HTTPS endpoint called when the tool is invoked.
 	// +kubebuilder:validation:MinLength=1
@@ -195,6 +211,14 @@ type ConnectorHTTPTool struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s') && duration(self) <= duration('10m')",message="timeout must be positive and at most 10m"
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
+
+	// Forward makes this curated tool a route for a command-line client in an
+	// ACP runtime, as for a Tool's spec.http.forward. The person consents to
+	// the provider's scopes, and every request goes to this origin only. A
+	// forwarding tool must be class read, its url an HTTPS origin with no
+	// path, and it declares no parameters; provider validation checks these.
+	// +optional
+	Forward *HTTPForward `json:"forward,omitempty"`
 }
 
 // ConnectorProviderStatus contains only safe validation state.

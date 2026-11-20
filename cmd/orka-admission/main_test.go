@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,21 @@ func newServingCertificateFixture(
 			Type:  "RSA PRIVATE KEY",
 			Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 		}),
+	}
+}
+
+// A renamed worker that the provenance trust list leaves out still gets the
+// worker rules once --worker-service-accounts names it.
+func TestTaskProvenanceConfigCoversConfiguredWorkers(t *testing.T) {
+	opts := options{taskProvenanceTrustedSAs: "trusted-sa", workerServiceAccounts: "team-ai-worker, team-vendor-worker"}
+	cfg := opts.taskProvenanceConfig([]string{"system:serviceaccount:orka-system:orka-controller-manager"})
+	for _, name := range []string{"team-ai-worker", "team-vendor-worker", "trusted-sa", "orka-ai-worker"} {
+		if !slices.Contains(cfg.WorkerServiceAccountNames, name) {
+			t.Errorf("worker ServiceAccounts = %v, want %q", cfg.WorkerServiceAccountNames, name)
+		}
+	}
+	if slices.Contains(cfg.TrustedServiceAccountNames, "team-ai-worker") {
+		t.Errorf("trusted ServiceAccounts = %v; naming a worker must not trust it", cfg.TrustedServiceAccountNames)
 	}
 }
 

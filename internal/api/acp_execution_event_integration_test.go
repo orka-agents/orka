@@ -40,7 +40,7 @@ func TestACPJournalEventsFeedPublicTaskConsumers(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, dbPath)
+	persistence := testStorageClient(sqlite.NewStore(db, dbPath))
 
 	const taskName = "acp-public-consumers"
 	source := &corev1alpha1.Task{

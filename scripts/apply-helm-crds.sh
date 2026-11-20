@@ -29,10 +29,15 @@ if [[ -n "${kube_context}" ]]; then
 fi
 
 target_crds=$(mktemp)
+patch_file=""
 cleanup() {
   rm -f "${target_crds}"
+  if [[ -n "${patch_file}" ]]; then
+    rm -f "${patch_file}"
+  fi
 }
 trap cleanup EXIT
+patch_file=$(mktemp)
 
 helm show crds "${chart}" > "${target_crds}"
 if [[ ! -s "${target_crds}" ]]; then
@@ -54,15 +59,15 @@ fi
   jq -c '{name: .metadata.name, spec: .spec}' | \
   while IFS= read -r target; do
     name=$(jq -er '.name' <<< "${target}")
-    spec=$(jq -ec '.spec' <<< "${target}")
     resource_version=$("${kubectl_cmd[@]}" get customresourcedefinition "${name}" -o jsonpath='{.metadata.resourceVersion}')
-    patch=$(jq -cn \
+    # Large schemas exceed Linux's per-argument limit; keep both JSON payloads
+    # off argv while retaining the atomic resourceVersion fence.
+    jq -ec \
       --arg resourceVersion "${resource_version}" \
-      --argjson spec "${spec}" \
-      '[
+      '.spec | select(.) | [
         {"op":"test","path":"/metadata/resourceVersion","value":$resourceVersion},
-        {"op":"replace","path":"/spec","value":$spec}
-      ]')
-    "${kubectl_cmd[@]}" patch customresourcedefinition "${name}" --type=json -p "${patch}" >/dev/null
+        {"op":"replace","path":"/spec","value":.}
+      ]' <<< "${target}" > "${patch_file}"
+    "${kubectl_cmd[@]}" patch customresourcedefinition "${name}" --type=json --patch-file "${patch_file}" >/dev/null
     "${kubectl_cmd[@]}" wait --for=condition=Established --timeout=60s "customresourcedefinition/${name}"
   done

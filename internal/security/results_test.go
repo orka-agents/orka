@@ -220,13 +220,36 @@ func TestParseValidationResultRestrictsEvidenceToAcceptedFinding(t *testing.T) {
 		t.Fatalf("ParseValidationResult() error = %v", err)
 	}
 
-	result.Validation.Evidence[0].StartLine = 1
-	if _, err := ParseValidationResult(mustMarshalSecurityResult(t, result), expected); err == nil || !strings.Contains(err.Error(), "outside accepted finding evidence") {
-		t.Fatalf("ParseValidationResult(out of range) error = %v, want evidence rejection", err)
+	// Evidence the finding cannot absorb is dropped; the verdict survives.
+	for name, ref := range map[string]store.FindingEvidenceRef{
+		"out of range": {Kind: "file", Path: "internal/api/server.go", StartLine: 1, EndLine: 15},
+		"artifact":     {Kind: "artifact", Name: "transcript.txt"},
+	} {
+		result.Validation.Evidence = ValidationArtifactEvidenceRefs{ref}
+		artifact, err := ParseValidationResult(mustMarshalSecurityResult(t, result), expected)
+		if err != nil {
+			t.Fatalf("ParseValidationResult(%s) error = %v", name, err)
+		}
+		if artifact.Status != "validated" || len(artifact.Evidence) != 0 {
+			t.Fatalf("ParseValidationResult(%s) = %#v, want verdict without the evidence", name, artifact)
+		}
 	}
-	result.Validation.Evidence[0] = store.FindingEvidenceRef{Kind: "artifact", Name: "transcript.txt"}
-	if _, err := ParseValidationResult(mustMarshalSecurityResult(t, result), expected); err == nil || !strings.Contains(err.Error(), "task artifacts") {
-		t.Fatalf("ParseValidationResult(artifact) error = %v, want artifact rejection", err)
+}
+
+func TestParseValidationResultKeepsStructuredReproductionAsText(t *testing.T) {
+	finding := &store.Finding{ID: "fnd_1", ScanRunID: "scan_123"}
+	expected := ValidationResultExpectation{
+		Binding: AgentResultBinding{RepositoryScan: "vekil", ScanID: "scan_123", PolicyDigest: "sha256:policy"},
+		Finding: finding,
+	}
+	data := []byte(`{"schemaVersion":1,"kind":"orka.security.validation.v1","repositoryScan":"vekil","scanId":"scan_123","findingId":"fnd_1","policyDigest":"sha256:policy",` +
+		`"validation":{"version":1,"finding_id":"fnd_1","status":"validated","summary":"Confirmed.","reproduction":{"steps":["create","apply"]},"attack_path_analysis":["a","b"]}}`)
+	artifact, err := ParseValidationResult(data, expected)
+	if err != nil {
+		t.Fatalf("ParseValidationResult() error = %v", err)
+	}
+	if artifact.Reproduction != `{"steps":["create","apply"]}` || artifact.AttackPathAnalysis != `["a","b"]` {
+		t.Fatalf("structured text = %q / %q", artifact.Reproduction, artifact.AttackPathAnalysis)
 	}
 }
 

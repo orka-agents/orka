@@ -24,6 +24,9 @@ const (
 	ErrorKindCanceled           ErrorKind = "Canceled"
 	ErrorKindFailedPrecondition ErrorKind = "FailedPrecondition"
 	ErrorKindCommandFailed      ErrorKind = "CommandFailed"
+	// ErrorKindResourceExhausted reports exhausted provider capacity or quota.
+	// It is retryable; callers surface it as a wait for capacity.
+	ErrorKindResourceExhausted ErrorKind = "ResourceExhausted"
 )
 
 // Error is the structured error type returned by WorkspaceExecutor implementations.

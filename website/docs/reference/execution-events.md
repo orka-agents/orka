@@ -1,4 +1,5 @@
 ---
+sidebar_label: Execution events
 slug: /execution-events
 description: "The event stream behind task timelines, traces, forks, and approvals."
 ---
@@ -78,6 +79,28 @@ data: {"lastSeq":3,"type":"TaskSucceeded"}
 ```
 
 Reconnect by passing the last observed SSE id as `after`.
+
+### Live events
+
+Add `live=true` to also receive a running agent Task's events as they arrive,
+before they are durable:
+
+```text
+event: live
+data: {"taskUID":"…","runtime":{"type":"update","update":{"kind":"assistant_message_chunk","assistantMessage":{"text":"Looking at the"}}}}
+```
+
+`runtime` is the runtime's event: assistant text and reasoning deltas, tool calls with
+their name, input, output and file edits, plan and usage updates, and the turn's end.
+Content is redacted before it leaves the runtime: the exact credentials the runtime holds
+are replaced, then the shared credential patterns are applied to each delta. A pattern
+split across deltas can escape the live redaction; the durable events, redacted once the
+text is complete, remain the record.
+
+Live frames have no SSE id and are not replayed on reconnect. A client that reads too
+slowly gets one `live_lagged` frame and no further live frames; the durable events
+continue. Live events exist only on the API server that runs the Task, and are lost
+when it restarts.
 
 ## Session event aggregation
 
@@ -259,11 +282,13 @@ AgentKit and Foundry flow, bounded waiting, safe previews, and recovery.
 
 ## Redaction and truncation
 
-Workers redact before submitting events, and the store sanitizes again before persistence. Public APIs and SSE frames return sanitized payloads only. Fake values matching bearer tokens, JWT-like strings, API keys, cookies, GitHub tokens, Anthropic/OpenAI tokens, and transaction-token headers must be redacted before they appear in SQLite rows or public responses.
+Workers redact before submitting events, and Orka's storage client sanitizes every event again before it reaches the storage provider. Public APIs and SSE frames return sanitized payloads only. Fake values matching bearer tokens, JWT-like strings, API keys, cookies, GitHub tokens, Anthropic/OpenAI tokens, and transaction-token headers must be redacted before they reach the storage provider or appear in public responses.
 
 ## Metrics
 
 Execution event metrics intentionally avoid task names, session names, event ids, tool call ids, and other high-cardinality labels.
+
+Orka's storage client records the append, redaction and truncation metrics and the list metrics with `scope` `task_store` or `session_store`, so they are the same for every storage provider. The API records the list metrics with `scope` `task_api` or `session_api` and the stream metrics.
 
 Available metrics include:
 

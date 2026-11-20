@@ -42,7 +42,7 @@ func TestNewRootCmd_Subcommands(t *testing.T) {
 		subNames[sub.Name()] = true
 	}
 
-	for _, want := range []string{"login", "run", "config", "agent", "task", "audit", "status"} {
+	for _, want := range []string{"dashboard", "run", "config", "agent", "task", "audit", "status"} {
 		if !subNames[want] {
 			t.Errorf("missing subcommand %q", want)
 		}
@@ -89,7 +89,7 @@ func TestNewRootCmd_VersionFlag(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// extractKubeContext
+// kubeconfigNamespace
 // ---------------------------------------------------------------------------
 
 func writeKubeconfig(t *testing.T, dir string, config *clientcmdapi.Config) string {
@@ -101,7 +101,15 @@ func writeKubeconfig(t *testing.T, dir string, config *clientcmdapi.Config) stri
 	return path
 }
 
-func TestExtractKubeContext_WithToken(t *testing.T) {
+// kubeconfigNamespace, extractToken and kubeconfigIdentity read the current
+// context of the kubeconfig at path.
+func kubeconfigNamespace(path string) string { return currentKubeconfigContext(path).namespace }
+
+func extractToken(path string) (string, error) { return currentKubeconfigContext(path).token() }
+
+func kubeconfigIdentity(path string) string { return currentKubeconfigContext(path).identity }
+
+func TestKubeconfigNamespace_WithNamespace(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
@@ -120,16 +128,13 @@ func TestExtractKubeContext_WithToken(t *testing.T) {
 
 	path := writeKubeconfig(t, dir, config)
 
-	kc := extractKubeContext(path)
-	if kc.token != "my-secret-token" {
-		t.Errorf("token = %q, want %q", kc.token, "my-secret-token")
-	}
-	if kc.namespace != "my-ns" {
-		t.Errorf("namespace = %q, want %q", kc.namespace, "my-ns")
+	if ns := kubeconfigNamespace(path); ns != "my-ns" {
+		t.Errorf("namespace = %q, want %q", ns, "my-ns")
 	}
 }
 
-func TestExtractKubeContext_NoNamespace(t *testing.T) {
+// A context without a namespace yields none, not Kubernetes' "default".
+func TestKubeconfigNamespace_NoNamespace(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
@@ -147,16 +152,12 @@ func TestExtractKubeContext_NoNamespace(t *testing.T) {
 
 	path := writeKubeconfig(t, dir, config)
 
-	kc := extractKubeContext(path)
-	if kc.namespace != "" {
-		t.Errorf("namespace = %q, want empty", kc.namespace)
-	}
-	if kc.token != "tok123" {
-		t.Errorf("token = %q, want %q", kc.token, "tok123")
+	if ns := kubeconfigNamespace(path); ns != "" {
+		t.Errorf("namespace = %q, want empty", ns)
 	}
 }
 
-func TestExtractKubeContext_NoCurrentContext(t *testing.T) {
+func TestKubeconfigNamespace_NoCurrentContext(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
@@ -164,23 +165,18 @@ func TestExtractKubeContext_NoCurrentContext(t *testing.T) {
 
 	path := writeKubeconfig(t, dir, config)
 
-	kc := extractKubeContext(path)
-	if kc.token != "" {
-		t.Errorf("token = %q, want empty", kc.token)
-	}
-	if kc.namespace != "" {
-		t.Errorf("namespace = %q, want empty", kc.namespace)
+	if ns := kubeconfigNamespace(path); ns != "" {
+		t.Errorf("namespace = %q, want empty", ns)
 	}
 }
 
-func TestExtractKubeContext_BadPath(t *testing.T) {
-	kc := extractKubeContext("/nonexistent/kubeconfig")
-	if kc.token != "" || kc.namespace != "" {
-		t.Errorf("expected empty kubeContext for bad path, got %+v", kc)
+func TestKubeconfigNamespace_BadPath(t *testing.T) {
+	if ns := kubeconfigNamespace("/nonexistent/kubeconfig"); ns != "" {
+		t.Errorf("namespace = %q, want empty for bad path", ns)
 	}
 }
 
-func TestExtractKubeContext_MissingContext(t *testing.T) {
+func TestKubeconfigNamespace_MissingContext(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
@@ -189,9 +185,8 @@ func TestExtractKubeContext_MissingContext(t *testing.T) {
 
 	path := writeKubeconfig(t, dir, config)
 
-	kc := extractKubeContext(path)
-	if kc.token != "" {
-		t.Errorf("token = %q, want empty for missing context", kc.token)
+	if ns := kubeconfigNamespace(path); ns != "" {
+		t.Errorf("namespace = %q, want empty for missing context", ns)
 	}
 }
 
@@ -226,7 +221,8 @@ func TestExtractToken_WithTokenFile(t *testing.T) {
 	dir := t.TempDir()
 
 	tokenFile := filepath.Join(dir, "token")
-	if err := os.WriteFile(tokenFile, []byte("file-token"), 0o600); err != nil {
+	// A token file usually ends in a newline, which is not part of the token.
+	if err := os.WriteFile(tokenFile, []byte("file-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

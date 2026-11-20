@@ -55,8 +55,8 @@ See [Authentication](./api-reference.md#authentication).
 
 The `model` field supports two formats:
 
-- **`provider/model`** — e.g., `anthropic/claude-sonnet-4-20250514`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
-- **`model`** — e.g., `claude-sonnet-4-20250514`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
+- **`provider/model`** — e.g., `anthropic/claude-opus-5`. The part before `/` matches a Provider CRD name, and the part after is the model name sent to that provider.
+- **`model`** — e.g., `claude-opus-5`. Uses the default provider (from `--chat-provider` flag or a Provider CRD named `default`).
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ spec:
   secretRef:
     name: anthropic-secret
     key: api-key
-  defaultModel: claude-sonnet-4-20250514
+  defaultModel: claude-opus-5
 ```
 
 2. **Secret** with the API key:
@@ -121,7 +121,7 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
@@ -135,7 +135,7 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
@@ -159,7 +159,7 @@ curl https://orka.example.com/anthropic/v1/models \
 | System messages (string format) | Yes, but Orka's own prompt is prepended in coordinator mode |
 | System messages (content block array format) | Same |
 | `max_tokens` | Yes |
-| `temperature` | Yes |
+| `temperature` | Yes, except that an `anthropic` Provider doesn't send it to Claude Opus 4.7 and later models, which reject it |
 | `stop_sequences` | Yes |
 | Extended thinking (`thinking` with `budget_tokens`) | **No.** The field is accepted and ignored — see below |
 | Image inputs | Not yet |
@@ -249,7 +249,7 @@ curl -X POST https://orka.example.com/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "anthropic/claude-sonnet-4-20250514",
+    "model": "anthropic/claude-opus-5",
     "max_tokens": 4096,
     "messages": [{"role": "user", "content": "Search the web for Kubernetes 1.32 release highlights and summarize them."}],
     "stream": true

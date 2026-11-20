@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -23,14 +24,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 const (
@@ -54,8 +55,11 @@ const acpTestSandboxPoolName = "acp-ws-agent-sandbox-0123456789abcdef"
 func testACPWorkspaceScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := testWorkspaceScheme(t)
-	if err := acpworkspacev1alpha1.AddToScheme(scheme); err != nil {
+	if err := addACPFixtureAPIToScheme(scheme); err != nil {
 		t.Fatalf("add acp.workspace scheme: %v", err)
+	}
+	if err := authorizationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
 	}
 	if err := storagev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storage scheme: %v", err)
@@ -77,40 +81,11 @@ func acpTestDefaultStorageClass() *storagev1.StorageClass {
 	}
 }
 
-func TestValidateDurableStorageClassReclaimMatchesKubernetesDefaultNameTieBreak(t *testing.T) {
-	t.Parallel()
-	reclaim := corev1.PersistentVolumeReclaimDelete
-	created := metav1.NewTime(time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC))
-	defaultClass := func(name string) *storagev1.StorageClass {
-		return &storagev1.StorageClass{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:              name,
-				CreationTimestamp: created,
-				Annotations:       map[string]string{"storageclass.kubernetes.io/is-default-class": booleanTrueValue},
-			},
-			Provisioner:   acpTestStorageProvisioner,
-			ReclaimPolicy: &reclaim,
-		}
-	}
-	reader := fake.NewClientBuilder().WithScheme(testACPWorkspaceScheme(t)).WithObjects(
-		defaultClass("zeta-default"),
-		defaultClass("alpha-default"),
-	).Build()
-
-	class, err := validateDurableStorageClassReclaim(context.Background(), reader, "", "profile")
-	if err != nil {
-		t.Fatalf("resolve default StorageClass: %v", err)
-	}
-	if class.Name != "alpha-default" {
-		t.Fatalf("default StorageClass = %q, want Kubernetes tie-break winner %q", class.Name, "alpha-default")
-	}
-}
-
 type acpClassFixture struct {
 	class    *workspacev1alpha1.ExecutionWorkspaceClass
 	provider *workspacev1alpha1.ExecutionWorkspaceProvider
-	config   *acpworkspacev1alpha1.RuntimeProviderConfig
-	profile  *acpworkspacev1alpha1.RuntimeWorkspaceProfile
+	config   *RuntimeProviderConfig
+	profile  *RuntimeWorkspaceProfile
 }
 
 func (f *acpClassFixture) objects() []client.Object {
@@ -121,40 +96,59 @@ func (f *acpClassFixture) objects() []client.Object {
 // the class controller would, using the unstructured shape of the profile.
 func (f *acpClassFixture) pinProfileHash(t *testing.T) {
 	t.Helper()
+	f.profile.Spec.Suspend = nil
+	if f.profile.Spec.Substrate != nil {
+		f.profile.Spec.Suspend = f.profile.Spec.Substrate.Suspend
+	}
+	if f.profile.Spec.AgentSandbox != nil && f.profile.Spec.AgentSandbox.Suspend != nil {
+		f.profile.Spec.Suspend = &SubstrateSuspendPolicy{Mode: f.profile.Spec.AgentSandbox.Suspend.Mode}
+	}
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(f.profile)
 	if err != nil {
 		t.Fatalf("convert profile: %v", err)
 	}
 	u := &unstructured.Unstructured{Object: raw}
-	u.SetGroupVersionKind(acpworkspacev1alpha1.GroupVersion.WithKind(acpWorkspaceProviderProfileKind))
-	hash, err := acpWorkspaceClassProfileHash(f.class, f.provider, u)
+	u.SetGroupVersionKind(acpFixtureGroupVersion.WithKind(acpWorkspaceProviderProfileKind))
+	f.config.SetGroupVersionKind(acpFixtureGroupVersion.WithKind(acpWorkspaceProviderConfigKind))
+	f.profile.SetGroupVersionKind(acpFixtureGroupVersion.WithKind(acpWorkspaceProviderProfileKind))
+	configRaw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(f.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &unstructured.Unstructured{Object: configRaw}
+	config.SetGroupVersionKind(acpFixtureGroupVersion.WithKind(acpWorkspaceProviderConfigKind))
+	hash, err := externalACPClassProfileHash(f.class, f.provider, config, u)
 	if err != nil {
 		t.Fatalf("hash class profile: %v", err)
 	}
 	f.class.Status.ProfileHash = hash
 }
 
-func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProviderBackend, mutate ...func(*acpClassFixture)) *acpClassFixture {
+func newACPClassFixture(t *testing.T, backend RuntimeProviderBackend, mutate ...func(*acpClassFixture)) *acpClassFixture {
 	t.Helper()
 	fixture := &acpClassFixture{
 		provider: &workspacev1alpha1.ExecutionWorkspaceProvider{
 			ObjectMeta: metav1.ObjectMeta{Name: acpTestProviderName, UID: types.UID("acp-provider-uid"), Generation: 1},
 			Spec: workspacev1alpha1.ExecutionWorkspaceProviderSpec{
-				ControllerName: acpWorkspaceProviderControllerName,
+				ControllerName:    "fixture.workspace.orka.ai",
+				ServiceAccountRef: &workspacev1alpha1.ProviderServiceAccountReference{Namespace: "provider-system", Name: "adapter"},
 				ParametersRef: workspacev1alpha1.TypedObjectReference{
-					Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderConfigKind, Name: acpTestConfigName,
+					Group: acpFixtureGroupVersion.Group, Kind: acpWorkspaceProviderConfigKind, Name: acpTestConfigName,
 				},
 				LifecycleState:    workspacev1alpha1.ExecutionWorkspaceProviderActive,
-				RequiredContracts: []string{workspacev1alpha1.ContractVersionV1},
+				RequiredContracts: []string{workspacev1alpha1.LifecycleContractV1},
 			},
 			Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
 				ObservedGeneration:  1,
 				PinnedParametersUID: "acp-config-uid",
+				SupportedContracts:  []string{workspacev1alpha1.LifecycleContractV1},
 				SupportedFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{
 					workspacev1alpha1.WorkspaceFeatureExec,
 					workspacev1alpha1.WorkspaceFeatureFiles,
 					workspacev1alpha1.WorkspaceFeatureReset,
 					workspacev1alpha1.WorkspaceFeatureTLS,
+					workspacev1alpha1.WorkspaceFeatureACPRuntime,
+					workspacev1alpha1.WorkspaceFeaturePools,
 				},
 				Conditions: []metav1.Condition{{
 					Type: string(workspacev1alpha1.ConditionProviderReady), Status: metav1.ConditionTrue,
@@ -162,17 +156,17 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 				}},
 			},
 		},
-		config: &acpworkspacev1alpha1.RuntimeProviderConfig{
+		config: &RuntimeProviderConfig{
 			ObjectMeta: metav1.ObjectMeta{Name: acpTestConfigName, UID: types.UID("acp-config-uid"), Generation: 1},
-			Spec:       acpworkspacev1alpha1.RuntimeProviderConfigSpec{Backend: backend},
+			Spec:       RuntimeProviderConfigSpec{Backend: backend},
 		},
-		profile: &acpworkspacev1alpha1.RuntimeWorkspaceProfile{
+		profile: &RuntimeWorkspaceProfile{
 			ObjectMeta: metav1.ObjectMeta{Namespace: acpTestNamespace, Name: "acp-profile", UID: types.UID("acp-profile-uid"), Generation: 1},
 		},
 	}
-	if backend == acpworkspacev1alpha1.RuntimeProviderBackendSubstrate {
-		fixture.profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
-			TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: acpTestInfraTemplateName, Namespace: acpTestSubstrateNamespace},
+	if backend == RuntimeProviderBackendSubstrate {
+		fixture.profile.Spec.Substrate = &SubstrateProfileSpec{
+			TemplateRef: SubstrateTemplateReference{Name: acpTestInfraTemplateName, Namespace: acpTestSubstrateNamespace},
 		}
 	} else {
 		fixture.provider.Status.SupportedFeatures = append(
@@ -185,9 +179,10 @@ func newACPClassFixture(t *testing.T, backend acpworkspacev1alpha1.RuntimeProvid
 		Spec: workspacev1alpha1.ExecutionWorkspaceClassSpec{
 			ProviderRef: &workspacev1alpha1.ClusterObjectReference{Name: acpTestProviderName},
 			ParametersRef: &workspacev1alpha1.TypedObjectReference{
-				Group: acpworkspacev1alpha1.GroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: "acp-profile",
+				Group: acpFixtureGroupVersion.Group, Kind: acpWorkspaceProviderProfileKind, Name: "acp-profile",
 			},
 			Mode:               workspacev1alpha1.ExecutionWorkspaceModeInteractive,
+			RequiredFeatures:   []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureACPRuntime},
 			AllowedReuseScopes: []workspacev1alpha1.WorkspaceReuseScope{workspacev1alpha1.WorkspaceReuseScopeNone, workspacev1alpha1.WorkspaceReuseScopeSession},
 			Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
 				DefaultOnDetach: workspacev1alpha1.WorkspaceOnDetachDelete,
@@ -325,7 +320,16 @@ func admitTestACPWorkspace(t *testing.T, r *TaskReconciler, workspace *workspace
 func acpClassTestReconciler(t *testing.T, objects ...client.Object) *TaskReconciler {
 	t.Helper()
 	scheme := testACPWorkspaceScheme(t)
-	builder := fake.NewClientBuilder().WithScheme(scheme).
+	mapper := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{acpFixtureGroupVersion})
+	mapper.Add(acpFixtureGroupVersion.WithKind(acpWorkspaceProviderConfigKind), apimeta.RESTScopeRoot)
+	mapper.Add(acpFixtureGroupVersion.WithKind(acpWorkspaceProviderProfileKind), apimeta.RESTScopeNamespace)
+	builder := fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if sar, ok := obj.(*authorizationv1.SubjectAccessReview); ok {
+			sar.Status.Allowed = true
+			return nil
+		}
+		return c.Create(ctx, obj, opts...)
+	}}).
 		WithIndex(&corev1alpha1.Task{}, acpTaskSessionNameField, acpTaskSessionNameTestIndex).
 		WithStatusSubresource(
 			&workspacev1alpha1.ExecutionWorkspace{},
@@ -339,195 +343,15 @@ func acpClassTestReconciler(t *testing.T, objects ...client.Object) *TaskReconci
 	}
 	c := builder.Build()
 	return &TaskReconciler{
-		Client: c, APIReader: c, Scheme: scheme,
+		Client: authorizedACPFixtureClient{c}, APIReader: c, Scheme: scheme,
 		WorkspaceProviderAPIEnabled:  true,
 		WorkspaceSettlementProtected: true,
 	}
 }
 
-func TestResolveACPWorkspaceClassMatrix(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		backend     acpworkspacev1alpha1.RuntimeProviderBackend
-		mutate      func(*acpClassFixture)
-		mutateAfter func(*acpClassFixture)
-		task        *corev1alpha1.Task
-		wantErr     string
-		check       func(*testing.T, *acpResolvedWorkspaceClass)
-	}{
-		{
-			name:    "agent-sandbox class resolves",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			check: func(t *testing.T, resolved *acpResolvedWorkspaceClass) {
-				if resolved.Backend != corev1alpha1.WorkspaceProviderAgentSandbox {
-					t.Fatalf("backend = %s", resolved.Backend)
-				}
-				if resolved.SubstrateTemplateName != "" || resolved.SubstrateTemplateNamespace != "" {
-					t.Fatalf("agent-sandbox class resolved a substrate template")
-				}
-				if resolved.Binding.UID != "acp-class-uid" || resolved.Binding.ProviderUID != "acp-provider-uid" {
-					t.Fatalf("binding identity = %+v", resolved.Binding)
-				}
-				if resolved.Binding.MaxLifetime != "8h0m0s" || resolved.Binding.DetachTimeout != "2m0s" {
-					t.Fatalf("binding lifecycle = %+v", resolved.Binding)
-				}
-			},
-		},
-		{
-			name:    "substrate class resolves infrastructure template",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate,
-			check: func(t *testing.T, resolved *acpResolvedWorkspaceClass) {
-				if resolved.Backend != corev1alpha1.WorkspaceProviderSubstrate {
-					t.Fatalf("backend = %s", resolved.Backend)
-				}
-				if resolved.SubstrateTemplateNamespace != acpTestSubstrateNamespace || resolved.SubstrateTemplateName != acpTestInfraTemplateName {
-					t.Fatalf("substrate template = %s/%s", resolved.SubstrateTemplateNamespace, resolved.SubstrateTemplateName)
-				}
-			},
-		},
-		{
-			name:    "substrate template namespace defaults to the class namespace",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate,
-			mutate: func(f *acpClassFixture) {
-				f.profile.Spec.Substrate.TemplateRef.Namespace = ""
-			},
-			check: func(t *testing.T, resolved *acpResolvedWorkspaceClass) {
-				if resolved.SubstrateTemplateNamespace != acpTestNamespace {
-					t.Fatalf("substrate template namespace = %s", resolved.SubstrateTemplateNamespace)
-				}
-			},
-		},
-		{
-			name:    "class not ready at current generation",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutateAfter: func(f *acpClassFixture) {
-				f.class.Status.Conditions[0].ObservedGeneration = 0
-			},
-			wantErr: "not ready at its current generation",
-		},
-		{
-			name:    "pinned profile hash drift fails closed",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutateAfter: func(f *acpClassFixture) {
-				f.class.Status.ProfileHash = "sha256:" + strings.Repeat("0", 64)
-			},
-			wantErr: "drifted from its pinned hash",
-		},
-		{
-			name:    "foreign provider controllerName",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutate: func(f *acpClassFixture) {
-				f.provider.Spec.ControllerName = "someone.else/adapter"
-			},
-			wantErr: "is not the ACP RuntimePool adapter",
-		},
-		{
-			name:    "draining provider rejects new workspaces",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutate: func(f *acpClassFixture) {
-				f.provider.Spec.LifecycleState = workspacev1alpha1.ExecutionWorkspaceProviderDraining
-			},
-			wantErr: "rejects new ACP workspaces",
-		},
-		{
-			name:    "provider not ready",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutateAfter: func(f *acpClassFixture) {
-				f.provider.Status.Conditions[0].Status = metav1.ConditionFalse
-			},
-			wantErr: "is not ready",
-		},
-		{
-			name:    "class parameters kind is not an ACP profile",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutate: func(f *acpClassFixture) {
-				f.class.Spec.ParametersRef.Kind = "SomethingElse"
-			},
-			wantErr: "is not an ACP RuntimeWorkspaceProfile",
-		},
-		{
-			name:    "provider parameters kind is not an ACP config",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutate: func(f *acpClassFixture) {
-				f.provider.Spec.ParametersRef.Kind = "SomethingElse"
-			},
-			wantErr: "is not an ACP RuntimeProviderConfig",
-		},
-		{
-			name:    "service mode classes are rejected",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutate: func(f *acpClassFixture) {
-				f.class.Spec.Mode = workspacev1alpha1.ExecutionWorkspaceModeService
-			},
-			wantErr: "only Interactive classes",
-		},
-		{
-			name:    "retaining deletion policy is rejected",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutate: func(f *acpClassFixture) {
-				f.class.Spec.Lifecycle.DeletionPolicy.PersistentVolumes = workspacev1alpha1.WorkspaceDeletionActionRetain
-			},
-			wantErr: "retained workspace data is not yet supported",
-		},
-		{
-			name:    "substrate profile without a template",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendSubstrate,
-			mutate: func(f *acpClassFixture) {
-				f.profile.Spec.Substrate = nil
-			},
-			wantErr: "must name the operator-owned Substrate infrastructure ActorTemplate",
-		},
-		{
-			name:    "agent-sandbox profile with substrate inputs",
-			backend: acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox,
-			mutate: func(f *acpClassFixture) {
-				f.profile.Spec.Substrate = &acpworkspacev1alpha1.SubstrateProfileSpec{
-					TemplateRef: acpworkspacev1alpha1.SubstrateTemplateReference{Name: acpTestInfraName},
-				}
-			},
-			wantErr: "backend is agent-sandbox",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			mutations := []func(*acpClassFixture){}
-			if tt.mutate != nil {
-				mutations = append(mutations, tt.mutate)
-			}
-			fixture := newACPClassFixture(t, tt.backend, mutations...)
-			if tt.mutateAfter != nil {
-				tt.mutateAfter(fixture)
-			}
-			task := tt.task
-			if task == nil {
-				task = acpClassTestTask()
-			}
-			r := acpClassTestReconciler(t, fixture.objects()...)
-			resolved, err := r.resolveACPWorkspaceClass(context.Background(), task)
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("resolveACPWorkspaceClass() error = %v", err)
-			}
-			if resolved == nil {
-				t.Fatalf("resolved class is nil")
-			}
-			if tt.check != nil {
-				tt.check(t, resolved)
-			}
-		})
-	}
-}
-
 func TestResolveACPWorkspaceClassRequiresProviderAPI(t *testing.T) {
 	t.Parallel()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	r.WorkspaceProviderAPIEnabled = false
 	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
@@ -547,7 +371,7 @@ func TestResolveACPWorkspaceClassRejectsWithdrawnProviderFeature(t *testing.T) {
 	}
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	_, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
-	if err == nil || !strings.Contains(err.Error(), "no longer supports every required class or Task feature") {
+	if err == nil || !strings.Contains(err.Error(), "provider must advertise") {
 		t.Fatalf("error = %v, want live provider feature withdrawal rejected", err)
 	}
 }
@@ -570,7 +394,7 @@ func TestResolveACPWorkspaceClassRequiresRestoreFeatureForCheckpointTask(t *test
 			// The Task must add that requirement even when the class omits it.
 			if test.restoreSupported {
 				fixture.provider.Status.SupportedFeatures = append(fixture.provider.Status.SupportedFeatures,
-					workspacev1alpha1.WorkspaceFeatureRestore)
+					workspacev1alpha1.WorkspaceFeatureRestore, workspacev1alpha1.WorkspaceFeatureCheckpoint)
 			}
 			task := acpClassTestTask()
 			task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
@@ -582,7 +406,7 @@ func TestResolveACPWorkspaceClassRequiresRestoreFeatureForCheckpointTask(t *test
 			r := acpClassTestReconciler(t, fixture.objects()...)
 			resolved, err := r.resolveACPWorkspaceClass(t.Context(), task)
 			if test.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "no longer supports every") {
+				if err == nil || !strings.Contains(err.Error(), "every required feature") {
 					t.Fatalf("restore capability withdrawal error = %v, want live provider feature rejection", err)
 				}
 				return
@@ -594,190 +418,9 @@ func TestResolveACPWorkspaceClassRequiresRestoreFeatureForCheckpointTask(t *test
 	}
 }
 
-func TestResolveACPWorkspaceClassAllowsDeleteContinuationAfterSuspendWithdrawal(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	const sessionUID = "existing-session-uid"
-	fixture := suspendableSubstrateFixture(t)
-	fixture.provider.Status.SupportedFeatures = []workspacev1alpha1.ExecutionWorkspaceFeature{
-		workspacev1alpha1.WorkspaceFeatureExec,
-		workspacev1alpha1.WorkspaceFeatureFiles,
-		workspacev1alpha1.WorkspaceFeatureReset,
-		workspacev1alpha1.WorkspaceFeatureTLS,
-	}
-	fixture.class.Status.ObservedGeneration = fixture.class.Generation
-	apimeta.SetStatusCondition(&fixture.class.Status.Conditions, metav1.Condition{
-		Type:               string(workspacev1alpha1.ConditionClassReady),
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: fixture.class.Generation,
-		Reason:             reasonRequiredFeatures,
-		Message:            messageProviderFeaturesMissing,
-	})
-	task := suspendableSessionTask()
-	task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
-	newTaskReconciler := acpClassTestReconciler(t, fixture.objects()...)
-	if _, err := newTaskReconciler.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID); err == nil ||
-		!strings.Contains(err.Error(), "not ready at its current generation") {
-		t.Fatalf("brand-new Delete task after Suspend withdrawal error = %v, want current class readiness rejection", err)
-	}
-
-	probe := &ACPRuntimeWorkspaceBinding{
-		ReusePolicy:   corev1alpha1.WorkspaceReusePolicySession,
-		WorkspaceSlot: defaultWorkspaceSlotName,
-		SessionUID:    sessionUID,
-		Class:         &ACPWorkspaceClassBinding{UID: string(fixture.class.UID)},
-	}
-	workspaceName := acpClassWorkspaceName(task, probe)
-	poolName := "existing-delete-continuation-pool"
-	workspace := &workspacev1alpha1.ExecutionWorkspace{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: task.Namespace,
-			Name:      workspaceName,
-			UID:       types.UID("existing-delete-continuation-workspace-uid"),
-			Labels: map[string]string{
-				workspacev1alpha1.ProviderControllerLabel: acpWorkspaceControllerLabelValue,
-			},
-			Annotations: map[string]string{
-				acpExecutionWorkspacePoolAnnotation: poolName,
-				acpWorkspaceBackendAnnotation:       string(corev1alpha1.WorkspaceProviderSubstrate),
-			},
-		},
-		Spec: workspacev1alpha1.ExecutionWorkspaceSpec{
-			Mode: workspacev1alpha1.ExecutionWorkspaceModeInteractive,
-			ClassBinding: workspacev1alpha1.ImmutableObjectBinding{
-				Name: fixture.class.Name, UID: fixture.class.UID, Generation: fixture.class.Generation,
-				ProfileHash: fixture.class.Status.ProfileHash,
-			},
-			ProviderBinding: workspacev1alpha1.ImmutableObjectBinding{
-				Name: fixture.provider.Name, UID: fixture.provider.UID, Generation: fixture.provider.Generation,
-			},
-			SessionRef: &workspacev1alpha1.ObjectIdentityReference{
-				Name: acpTestSessionName, UID: types.UID(sessionUID),
-			},
-			Slot:         defaultWorkspaceSlotName,
-			DesiredState: workspacev1alpha1.ExecutionWorkspaceDesiredReady,
-		},
-		Status: workspacev1alpha1.ExecutionWorkspaceStatus{State: workspacev1alpha1.ExecutionWorkspaceStateReady},
-	}
-	pool := &corev1alpha1.RuntimePool{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:  task.Namespace,
-			Name:       poolName,
-			UID:        types.UID("existing-delete-continuation-pool-uid"),
-			Generation: 1,
-			Labels: map[string]string{
-				acpExecutionWorkspaceLinkLabel:   workspace.Name,
-				acpRuntimeWorkspaceProviderLabel: string(corev1alpha1.WorkspaceProviderSubstrate),
-			},
-			Annotations: map[string]string{
-				acpExecutionWorkspaceUIDAnnotation: string(workspace.UID),
-			},
-		},
-		Spec: corev1alpha1.RuntimePoolSpec{
-			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-				Provider:      corev1alpha1.WorkspaceProviderSubstrate,
-				BindingDigest: "sha256:" + strings.Repeat("a", 64),
-				Substrate: &corev1alpha1.RuntimePoolSubstrateWorkspaceSpec{
-					BaseTemplateNamespace: acpTestSubstrateNamespace,
-					BaseTemplateName:      acpTestInfraTemplateName,
-				},
-			},
-		},
-	}
-	objects := append(fixture.objects(), workspace, pool)
-	notServing := acpClassTestReconciler(t, objects...)
-	if _, err := notServing.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID); err == nil ||
-		!strings.Contains(err.Error(), "not ready at its current generation") {
-		t.Fatalf("non-serving Delete-bound continuation after Suspend withdrawal error = %v, want current class readiness rejection", err)
-	}
-	pool.Status = corev1alpha1.RuntimePoolStatus{
-		ObservedGeneration: pool.Generation,
-		Lifecycle:          corev1alpha1.RuntimePoolLifecycleServing,
-		AdmissionState:     corev1alpha1.RuntimePoolAdmissionAccepting,
-	}
-	objects = append(fixture.objects(), workspace, pool)
-	r := acpClassTestReconciler(t, objects...)
-	resolved, err := r.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID)
-	if err != nil {
-		t.Fatalf("resolve Delete-bound continuation after Suspend withdrawal: %v", err)
-	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, sessionUID, resolved)
-	if err != nil {
-		t.Fatalf("freeze Delete-bound continuation: %v", err)
-	}
-	if binding.Class == nil || binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
-		t.Fatalf("continuation class binding = %+v, want frozen Delete action", binding.Class)
-	}
-
-	suspendedWorkspace := workspace.DeepCopy()
-	suspendedWorkspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
-	suspendedWorkspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateSuspended
-	suspendedReconciler := acpClassTestReconciler(t, append(fixture.objects(), suspendedWorkspace, pool.DeepCopy())...)
-	if _, err := suspendedReconciler.resolveACPWorkspaceClassWithSessionUID(ctx, task, sessionUID); err == nil ||
-		!strings.Contains(err.Error(), "not ready at its current generation") {
-		t.Fatalf("Suspended Delete-bound continuation after Suspend withdrawal error = %v, want current class readiness rejection", err)
-	}
-}
-
-func TestResolveAgentExecutionCandidatePreservesTransientStorageClassReadErrors(t *testing.T) {
-	t.Parallel()
-	for _, tt := range []struct {
-		name  string
-		named bool
-	}{
-		{name: "default StorageClass list"},
-		{name: "named StorageClass get", named: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			fixture := suspendableSandboxFixture(t)
-			if tt.named {
-				fixture.profile.Spec.AgentSandbox.Suspend.Volume.StorageClassName = acpTestDefaultStorageClass().Name
-				fixture.pinProfileHash(t)
-			}
-			task := acpClassTestTask()
-			objects := append(fixture.objects(), bindingTestNamespace())
-			r := acpClassTestReconciler(t, objects...)
-			bindingReconciler, _ := newBindingTestReconciler(t)
-			r.AgentExecutionSnapshots = bindingReconciler.AgentExecutionSnapshots
-			r.ACPRuntimeEnabled = bindingReconciler.ACPRuntimeEnabled
-			r.ACPRuntimeNamespace = bindingReconciler.ACPRuntimeNamespace
-			r.ACPRuntimeImages = bindingReconciler.ACPRuntimeImages
-
-			withWatch, ok := r.Client.(client.WithWatch)
-			if !ok {
-				t.Fatal("fake client does not support watch interception")
-			}
-			transient := errors.New("temporary StorageClass API outage")
-			functions := interceptor.Funcs{}
-			if tt.named {
-				functions.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, isStorageClass := obj.(*storagev1.StorageClass); isStorageClass {
-						return transient
-					}
-					return c.Get(ctx, key, obj, opts...)
-				}
-			} else {
-				functions.List = func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-					if _, isStorageClasses := list.(*storagev1.StorageClassList); isStorageClasses {
-						return transient
-					}
-					return c.List(ctx, list, opts...)
-				}
-			}
-			r.APIReader = interceptor.NewClient(withWatch, functions)
-
-			_, err := r.resolveAgentExecutionCandidate(context.Background(), task, bindingTestAgent())
-			if !errors.Is(err, transient) || isPermanentACPAgentConfigurationError(err) {
-				t.Fatalf("candidate error = %v, permanent=%t, want retryable StorageClass read failure", err, isPermanentACPAgentConfigurationError(err))
-			}
-		})
-	}
-}
-
 func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 	t.Parallel()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	resolved, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
 	if err != nil {
@@ -786,29 +429,28 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 
 	t.Run("binding freezes class identity into the digest", func(t *testing.T) {
 		task := acpClassTestTask()
-		binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+		binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 		if err != nil {
 			t.Fatalf("resolve binding: %v", err)
 		}
 		if binding.Class == nil || binding.Class.EffectiveOnDetach != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
 			t.Fatalf("class binding = %+v", binding.Class)
 		}
-		if binding.Provider != corev1alpha1.WorkspaceProviderAgentSandbox ||
+		if binding.Provider != corev1alpha1.WorkspaceProvider("fixture.workspace.orka.ai") ||
 			binding.CleanupPolicy != corev1alpha1.WorkspaceCleanupPolicyDelete {
 			t.Fatalf("binding = %+v", binding)
 		}
 		if err := validateACPWorkspaceBindingValues(binding); err != nil {
 			t.Fatalf("frozen binding validation: %v", err)
 		}
-		legacyTask := acpClassTestTask(func(task *corev1alpha1.Task) {
-			task.Spec.Execution.Workspace = &corev1alpha1.ExecutionWorkspaceSpec{Enabled: true}
-		})
-		legacy, err := resolveACPWorkspaceBinding(legacyTask, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		classless := *binding
+		classless.Class = nil
+		legacyDigest, err := acpWorkspaceBindingDigest(&classless)
 		if err != nil {
-			t.Fatalf("resolve legacy binding: %v", err)
+			t.Fatal(err)
 		}
-		if legacy.BindingDigest == binding.BindingDigest {
-			t.Fatalf("class-backed binding digest must differ from the legacy digest")
+		if legacyDigest == binding.BindingDigest {
+			t.Fatal("class identity must affect the binding digest")
 		}
 	})
 
@@ -816,39 +458,14 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 		task := acpClassTestTask(func(task *corev1alpha1.Task) {
 			task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachSuspend
 		})
-		_, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+		_, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 		if err == nil || !strings.Contains(err.Error(), "is not allowed by class") {
 			t.Fatalf("error = %v", err)
 		}
 	})
 
-	t.Run("suspend default fails closed until cold resume exists", func(t *testing.T) {
-		suspendFixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
-			f.class.Spec.Lifecycle.DefaultOnDetach = workspacev1alpha1.WorkspaceOnDetachSuspend
-			f.class.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{
-				workspacev1alpha1.WorkspaceOnDetachSuspend, workspacev1alpha1.WorkspaceOnDetachDelete,
-			}
-		})
-		suspendReconciler := acpClassTestReconciler(t, suspendFixture.objects()...)
-		suspendResolved, err := suspendReconciler.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
-		if err != nil {
-			t.Fatalf("resolve class: %v", err)
-		}
-		if _, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", suspendResolved); err == nil ||
-			!strings.Contains(err.Error(), "permits DataOnly suspension") {
-			t.Fatalf("error = %v", err)
-		}
-		// The Task may still pick the executable Delete action explicitly.
-		deleteTask := acpClassTestTask(func(task *corev1alpha1.Task) {
-			task.Spec.Execution.Workspace.OnDetach = corev1alpha1.WorkspaceOnDetachDelete
-		})
-		if _, err := resolveACPWorkspaceBindingWithClass(deleteTask, "", false, "", suspendResolved); err != nil {
-			t.Fatalf("explicit Delete action: %v", err)
-		}
-	})
-
 	t.Run("reuse scope outside the class allowlist fails", func(t *testing.T) {
-		noneOnly := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		noneOnly := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
 			f.class.Spec.AllowedReuseScopes = []workspacev1alpha1.WorkspaceReuseScope{workspacev1alpha1.WorkspaceReuseScopeNone}
 		})
 		noneReconciler := acpClassTestReconciler(t, noneOnly.objects()...)
@@ -860,7 +477,7 @@ func TestResolveACPClassWorkspaceBindingPolicy(t *testing.T) {
 			task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName, Create: true}
 		})
-		if _, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", noneResolved); err == nil ||
+		if _, err := resolveACPWorkspaceBindingWithClass(task, "session-uid-1", noneResolved); err == nil ||
 			!strings.Contains(err.Error(), "not allowed by class") {
 			t.Fatalf("error = %v", err)
 		}
@@ -881,19 +498,13 @@ func TestRejectUnsupportedACPWorkspacePlanClassGates(t *testing.T) {
 			wantReject: "requires the workspace provider API",
 		},
 		{
-			name:       "agent-sandbox backend disabled",
-			configure:  func(r *TaskReconciler) { r.ACPWorkspaceDispatchEnabled = true },
-			wantReject: "agent-sandbox is disabled",
-		},
-		{
 			name:       "workspace dispatch disabled",
-			configure:  func(r *TaskReconciler) { r.AgentSandboxEnabled = true },
+			configure:  func(r *TaskReconciler) {},
 			wantReject: "dispatch is disabled",
 		},
 		{
 			name: "class-backed dispatch admitted",
 			configure: func(r *TaskReconciler) {
-				r.AgentSandboxEnabled = true
 				r.ACPWorkspaceDispatchEnabled = true
 			},
 		},
@@ -901,7 +512,7 @@ func TestRejectUnsupportedACPWorkspacePlanClassGates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 			r := acpClassTestReconciler(t, fixture.objects()...)
 			tt.configure(r)
 			plan, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, acpClassTestTask())
@@ -923,13 +534,13 @@ func TestRejectUnsupportedACPWorkspacePlanClassGates(t *testing.T) {
 
 func TestACPWorkspaceClassBindingSnapshotRoundTrip(t *testing.T) {
 	t.Parallel()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendSubstrate)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendSubstrate)
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	resolved, err := r.resolveACPWorkspaceClass(context.Background(), acpClassTestTask())
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -965,14 +576,14 @@ func TestACPWorkspaceClassBindingSnapshotRoundTrip(t *testing.T) {
 func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1051,7 +662,7 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 func TestResolveACPWorkspaceClassEnforcesLiveNamespacePolicy(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	fixture.provider.Spec.UsagePolicy = &workspacev1alpha1.ExecutionWorkspaceProviderUsagePolicy{
 		AllowedNamespaceSelector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{"workspace-tier": "allowed"},
@@ -1060,7 +671,7 @@ func TestResolveACPWorkspaceClassEnforcesLiveNamespacePolicy(t *testing.T) {
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: acpTestNamespace}}
 	r := acpClassTestReconciler(t, append(fixture.objects(), namespace)...)
 	_, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
-	if err == nil || !strings.Contains(err.Error(), "usage policy does not allow namespace") {
+	if err == nil || !strings.Contains(err.Error(), "usage policy rejects this namespace") {
 		t.Fatalf("a disallowed namespace must fail live class resolution, got %v", err)
 	}
 
@@ -1084,10 +695,9 @@ func TestResolveACPWorkspaceClassEnforcesLiveNamespacePolicy(t *testing.T) {
 func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	fixture.provider.Spec.LifecycleState = workspacev1alpha1.ExecutionWorkspaceProviderDraining
 	r := acpClassTestReconciler(t, fixture.objects()...)
-	r.AgentSandboxEnabled = true
 	r.ACPWorkspaceDispatchEnabled = true
 
 	unbound := acpClassTestTask()
@@ -1106,15 +716,11 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 	// VERIFIED frozen plan at the queue chokepoint - never against the
 	// public status projection, which can still be nil after a restart
 	// between the binding patch and the first queue operation.
-	frozen := &ACPRuntimeWorkspaceBinding{Provider: corev1alpha1.WorkspaceProviderAgentSandbox}
+	frozen := &ACPRuntimeWorkspaceBinding{Provider: "fixture.workspace.orka.ai", Class: &ACPWorkspaceClassBinding{ControllerName: "fixture.workspace.orka.ai"}}
 	if reason := r.frozenWorkspaceDispatchDisabledReason(frozen); reason != "" {
 		t.Fatalf("enabled flags must admit the frozen plan, got %q", reason)
 	}
-	r.AgentSandboxEnabled = false
-	if reason := r.frozenWorkspaceDispatchDisabledReason(frozen); reason == "" {
-		t.Fatal("the provider dispatch gate must still apply to the frozen plan")
-	}
-	r.AgentSandboxEnabled = true
+
 	r.ACPWorkspaceDispatchEnabled = false
 	if reason := r.frozenWorkspaceDispatchDisabledReason(frozen); reason == "" {
 		t.Fatal("the workspace dispatch gate must still apply to the frozen plan")
@@ -1143,14 +749,14 @@ func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 			task := acpClassTestTask()
 			r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 			resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 			if err != nil {
 				t.Fatalf("resolve class: %v", err)
 			}
-			binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+			binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 			if err != nil {
 				t.Fatalf("resolve binding: %v", err)
 			}
@@ -1189,7 +795,7 @@ func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 func TestEnsureACPClassWorkspacePersistsLinkBeforeCreation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask(func(task *corev1alpha1.Task) {
 		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: acpTestSessionName}
 		task.Spec.Execution.Workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
@@ -1207,7 +813,7 @@ func TestEnsureACPClassWorkspacePersistsLinkBeforeCreation(t *testing.T) {
 		},
 	}).Build()
 	r := &TaskReconciler{
-		Client: c, APIReader: c, Scheme: scheme,
+		Client: authorizedACPFixtureClient{c}, APIReader: c, Scheme: scheme,
 		WorkspaceProviderAPIEnabled:  true,
 		WorkspaceSettlementProtected: true,
 	}
@@ -1215,7 +821,7 @@ func TestEnsureACPClassWorkspacePersistsLinkBeforeCreation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1236,14 +842,14 @@ func TestEnsureACPClassWorkspacePersistsLinkBeforeCreation(t *testing.T) {
 func TestEnsureACPClassWorkspaceFailedStateIsTerminal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1274,14 +880,14 @@ func TestEnsureACPClassWorkspaceFailedStateIsTerminal(t *testing.T) {
 func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1330,7 +936,7 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	sessionScoped := func(name, uid string) *corev1alpha1.Task {
 		return acpClassTestTask(func(task *corev1alpha1.Task) {
 			task.Name = name
@@ -1346,11 +952,11 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, "session-uid-1", resolved)
+	holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve holder binding: %v", err)
 	}
-	competitorBinding, err := resolveACPWorkspaceBindingWithClass(competitor, "", false, "session-uid-1", resolved)
+	competitorBinding, err := resolveACPWorkspaceBindingWithClass(competitor, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve competitor binding: %v", err)
 	}
@@ -1389,14 +995,14 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 func TestEnsureACPClassWorkspaceRejectsSuspendedAttachedWorkspace(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1466,7 +1072,7 @@ func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 			sessionTask := func(name, uid string) *corev1alpha1.Task {
 				return acpClassTestTask(func(task *corev1alpha1.Task) {
 					task.Name = name
@@ -1482,11 +1088,11 @@ func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing
 			if err != nil {
 				t.Fatalf("resolve class: %v", err)
 			}
-			holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, "session-revision-uid", resolved)
+			holderBinding, err := resolveACPWorkspaceBindingWithClass(holder, "session-revision-uid", resolved)
 			if err != nil {
 				t.Fatalf("resolve holder binding: %v", err)
 			}
-			successorBinding, err := resolveACPWorkspaceBindingWithClass(successor, "", false, "session-revision-uid", resolved)
+			successorBinding, err := resolveACPWorkspaceBindingWithClass(successor, "session-revision-uid", resolved)
 			if err != nil {
 				t.Fatalf("resolve successor binding: %v", err)
 			}
@@ -1551,14 +1157,14 @@ func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing
 func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1592,7 +1198,7 @@ func TestEnsureACPClassWorkspaceRejectsForeignAdoption(t *testing.T) {
 		t.Fatalf("create foreign workspace: %v", err)
 	}
 	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err == nil ||
-		!strings.Contains(err.Error(), "class binding does not match") {
+		!strings.Contains(err.Error(), "materialization markers do not match") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -1602,7 +1208,7 @@ func TestEnsureACPClassWorkspaceBackfillsAndValidatesSuspendedCap(t *testing.T) 
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
 	limit := int32(1)
-	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	fixture.profile.Spec.Retention = &RetentionPolicy{MaxSuspendedWorkspaces: &limit}
 	fixture.pinProfileHash(t)
 	task := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
@@ -1610,7 +1216,7 @@ func TestEnsureACPClassWorkspaceBackfillsAndValidatesSuspendedCap(t *testing.T) 
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1680,14 +1286,14 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 		{
 			name: "backend drift",
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
-				workspace.Annotations[acpWorkspaceBackendAnnotation] = string(acpworkspacev1alpha1.RuntimeProviderBackendSubstrate)
+				workspace.Annotations[acpWorkspaceBackendAnnotation] = string(RuntimeProviderBackendSubstrate)
 			},
 			wantErr: frozenProviderError,
 		},
 		{
 			name: "suspend mode drift",
 			mutate: func(workspace *workspacev1alpha1.ExecutionWorkspace) {
-				workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = string(acpworkspacev1alpha1.SubstrateSuspendModeDataOnly)
+				workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = string(SubstrateSuspendModeDataOnly)
 			},
 			wantErr: frozenProviderError,
 		},
@@ -1717,14 +1323,14 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+			fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 			task := acpClassTestTask()
 			r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 			resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 			if err != nil {
 				t.Fatalf("resolve class: %v", err)
 			}
-			binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+			binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 			if err != nil {
 				t.Fatalf("resolve binding: %v", err)
 			}
@@ -1755,7 +1361,7 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 func TestSettleACPClassWorkspaceSkipsForeignLinkTarget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	foreign := &workspacev1alpha1.ExecutionWorkspace{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: acpTestNamespace, Name: "acp-ws-foreign", UID: types.UID("foreign-ws-uid"),
@@ -1814,14 +1420,14 @@ func TestSettleACPClassWorkspaceSkipsForeignLinkTarget(t *testing.T) {
 func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -1954,14 +1560,14 @@ func TestACPWorkspaceRevocationFencesReplacementIncarnation(t *testing.T) {
 func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2134,14 +1740,14 @@ func TestQuarantineACPWorkspacePastDetachTimeoutRefusesForeignCredentials(t *tes
 func TestResolveACPClassRejectsDeletingProviderConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
 		now := metav1.Now()
 		f.config.DeletionTimestamp = &now
 		f.config.Finalizers = []string{"acp.workspace.orka.ai/e2e-hold"}
 	})
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
-		!strings.Contains(err.Error(), "is being deleted") {
+		!strings.Contains(err.Error(), "provider parameters are deleting") {
 		t.Fatalf("error = %v, want the deleting provider config rejected", err)
 	}
 }
@@ -2149,14 +1755,14 @@ func TestResolveACPClassRejectsDeletingProviderConfig(t *testing.T) {
 func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2230,13 +1836,13 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 func TestValidateACPWorkspaceClassBindingRejectsRetainActions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2251,13 +1857,13 @@ func TestValidateACPWorkspaceClassBindingRejectsRetainActions(t *testing.T) {
 func TestValidateACPWorkspaceClassBindingRejectsInvalidLifecycle(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask())
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(acpClassTestTask(), "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2331,12 +1937,12 @@ func TestValidateACPWorkspaceClassBindingRejectsInvalidLifecycle(t *testing.T) {
 func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
 		f.provider.Status.PinnedParametersUID = "the-original-config-uid"
 	})
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
-		!strings.Contains(err.Error(), "was replaced") {
+		!strings.Contains(err.Error(), "protected UID pin") {
 		t.Fatalf("error = %v, want a fail-closed replaced-config rejection", err)
 	}
 }
@@ -2344,31 +1950,6 @@ func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
 // A durable-volume profile bound to a retaining StorageClass violates the
 // all-Delete lifecycle: finalization would report the volume deleted while
 // Kubernetes leaves the PV and repository data behind.
-func TestResolveACPWorkspaceClassRejectsRetainingStorageClass(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	retain := corev1.PersistentVolumeReclaimRetain
-	retaining := &storagev1.StorageClass{
-		ObjectMeta:    metav1.ObjectMeta{Name: "retaining-class"},
-		Provisioner:   acpTestStorageProvisioner,
-		ReclaimPolicy: &retain,
-	}
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
-		f.profile.Spec.AgentSandbox = &acpworkspacev1alpha1.AgentSandboxProfileSpec{
-			Suspend: &acpworkspacev1alpha1.AgentSandboxSuspendPolicy{
-				Mode: acpworkspacev1alpha1.SubstrateSuspendModeDataOnly,
-				Volume: acpworkspacev1alpha1.AgentSandboxDurableVolume{
-					Capacity: acpTestDurableCapacity, StorageClassName: "retaining-class",
-				},
-			},
-		}
-	})
-	r := acpClassTestReconciler(t, append(fixture.objects(), retaining)...)
-	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
-		!strings.Contains(err.Error(), "only Delete reclaim is admitted") {
-		t.Fatalf("error = %v, want a retaining-class rejection", err)
-	}
-}
 
 // The metadata annotation is only a mirror. Class resolution must wait for
 // the adapter to establish the controller-owned status pin before it can
@@ -2376,7 +1957,7 @@ func TestResolveACPWorkspaceClassRejectsRetainingStorageClass(t *testing.T) {
 func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
 		f.provider.Status.PinnedParametersUID = ""
 		f.provider.Annotations = map[string]string{
 			acpWorkspaceProviderConfigUIDAnnotation: string(f.config.UID),
@@ -2384,8 +1965,61 @@ func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T
 	})
 	r := acpClassTestReconciler(t, fixture.objects()...)
 	if _, err := r.resolveACPWorkspaceClass(ctx, acpClassTestTask()); err == nil ||
-		!strings.Contains(err.Error(), "no protected RuntimeProviderConfig UID pin") {
+		!strings.Contains(err.Error(), "protected UID pin") {
 		t.Fatalf("error = %v, want the missing protected-pin rejection", err)
+	}
+}
+
+// RuntimePool creation repeats the resolver's protected pin check. The config
+// object and its hash can stay unchanged while the provider reports that it
+// now operates against a different configuration.
+func TestACPWorkspacePoolRequiresProtectedProviderConfigPin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox, func(f *acpClassFixture) {
+		f.provider.Status.Adapter = &workspacev1alpha1.ExecutionWorkspaceAdapterStatus{Version: "fixture-v1"}
+		for _, conditionType := range []workspacev1alpha1.ExecutionWorkspaceConditionType{
+			workspacev1alpha1.ConditionProviderHeartbeat, workspacev1alpha1.ConditionProviderCompatible,
+		} {
+			f.provider.Status.Conditions = append(f.provider.Status.Conditions, metav1.Condition{
+				Type: string(conditionType), Status: metav1.ConditionTrue,
+				Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: 1,
+			})
+		}
+	})
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: acpClassWorkspaceName(task, binding)}, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	if _, err := r.acpWorkspacePoolRequiredFeatures(ctx, r.Client, plan, workspace); err != nil {
+		t.Fatalf("pool requirements with the frozen pin: %v", err)
+	}
+
+	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := r.Get(ctx, types.NamespacedName{Name: fixture.provider.Name}, provider); err != nil {
+		t.Fatalf("read provider: %v", err)
+	}
+	provider.Status.PinnedParametersUID = "rotated-config-uid"
+	if err := r.Status().Update(ctx, provider); err != nil {
+		t.Fatalf("rotate provider pin: %v", err)
+	}
+	if _, err := r.acpWorkspacePoolRequiredFeatures(ctx, r.Client, plan, workspace); err == nil ||
+		!strings.Contains(err.Error(), "protected UID pin") {
+		t.Fatalf("error = %v, want the rotated protected-pin rejection", err)
 	}
 }
 
@@ -2396,14 +2030,14 @@ func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T
 func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2444,14 +2078,14 @@ func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing
 func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2491,14 +2125,14 @@ func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}
@@ -2572,14 +2206,14 @@ func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T
 func TestHandleRunningRotatesExpiredACPClassWorkspaceAttachment(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	fixture := newACPClassFixture(t, acpworkspacev1alpha1.RuntimeProviderBackendAgentSandbox)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
 	task := acpClassTestTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}

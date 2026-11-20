@@ -347,8 +347,8 @@ your bug — read this section before calling create_agent):
     OpenCode is a built-in ACP RuntimePool profile. It requires model.name in literal
     provider/model form (for example openai/gpt-5.4) plus positive, reviewed
     model.contextWindow and model.maxTokens limits, with contextWindow greater than
-    maxTokens. OMIT systemPrompt and runtime.secretRef/secretRef because OpenCode
-    instructions belong in initialPrompt or Task prompts and credentials come from
+    maxTokens. Agent systemPrompt supplies role instructions; soul supplies persistent
+    persona defaults. OMIT runtime.secretRef/secretRef because credentials come from
     the controller proxy.
     For credential-backed compatibility runtimes, set runtime.secretRef when required.
     For codex, claude, and copilot, model.name is REQUIRED: the ACP runtime session has
@@ -788,6 +788,9 @@ func runToolLoopWithObserver(
 			finalReq := *req
 			finalReq.Model = model
 			finalReq.Messages = messages
+			if config.MaxSessionSize > 0 {
+				finalReq.Messages = llm.TruncateMessages(messages, config.MaxSessionSize/4)
+			}
 			finalReq.Tools = nil
 			resp, err := provider.Complete(ctx, &finalReq)
 			if err != nil && isStreamingRequiredErr(err) {
@@ -818,17 +821,19 @@ func runToolLoopWithObserver(
 			return resp, nil
 		}
 
-		// Truncate conversation if it exceeds the session size budget
+		// Truncate a view of the whole conversation if it exceeds the session
+		// size budget, never the conversation itself, so the cut stays where
+		// it was and the prompt prefix stays cacheable.
+		sent := messages
 		if config.MaxSessionSize > 0 {
-			tokenBudget := config.MaxSessionSize / 4
-			messages = llm.TruncateMessages(messages, tokenBudget)
+			sent = llm.TruncateMessages(messages, config.MaxSessionSize/4)
 		}
 
 		// Call LLM with tools
 		compReqCopy := *req
 		compReq := &compReqCopy
 		compReq.Model = model
-		compReq.Messages = messages
+		compReq.Messages = sent
 
 		resp, err := provider.Complete(ctx, compReq)
 		if err != nil && isStreamingRequiredErr(err) {
@@ -841,10 +846,10 @@ func runToolLoopWithObserver(
 		}
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
-			for _, m := range messages {
+			for _, m := range sent {
 				tokenEstimate += len(m.Content) / 4
 			}
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
+			messages = llm.TruncateMessages(sent, tokenEstimate/2)
 			compReq.Messages = messages
 			resp, err = provider.Complete(ctx, compReq)
 			if err != nil && isStreamingRequiredErr(err) {

@@ -1147,6 +1147,39 @@ func TestProviderUpstreamSuccessKeepsPromptCompleted(t *testing.T) {
 	})
 }
 
+// A completed answer is stored as the Task's result, so a credential-shaped
+// value the session does not know gets the pattern redaction streamed text
+// gets, not only the exact-value replacement.
+func TestCompletedResultIsPatternRedacted(t *testing.T) {
+	server, cfg, _ := newTestServer(t, "immediate")
+	fence := cfg.Fence
+	fence.RuntimeSessionUID = "session-uid"
+	fence.RuntimeSessionGeneration = 1
+	secret := "github" + "_pat_" + "1234567890abcdefghijklmnopqrstuvwxyz"
+	prompt := &promptState{request: testStartPromptRequest(t, cfg, fence), redactor: newCredentialRedactor()}
+	prompt.assistant.WriteString("found " + secret)
+	state := &sessionState{
+		descriptor: harnessv2.RuntimeSessionDescriptor{
+			RuntimeSessionUID: fence.RuntimeSessionUID, Generation: fence.RuntimeSessionGeneration,
+			State: harnessv2.RuntimeSessionStatePromptRunning,
+		},
+		operations:  make(map[harnessv2.OperationID]harnessv2.OperationRecord),
+		permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+		prompt:      prompt,
+	}
+	result := acp.PromptResult{
+		Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn,
+		Accepted: true, SettledAt: time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC),
+	}
+	completed := server.buildTerminalEventLocked(state, prompt, result, result.SettledAt)
+	if completed.Completed == nil || len(completed.Completed.Result.Content) != 1 {
+		t.Fatalf("completed event = %#v", completed)
+	}
+	if text := completed.Completed.Result.Content[0].Text; strings.Contains(text, secret) || !strings.HasPrefix(text, "found ") {
+		t.Fatalf("completed result = %q, want the credential-shaped value redacted", text)
+	}
+}
+
 func TestTerminalResultLimitIncludesFullSerializedEvent(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	fence := cfg.Fence
@@ -1598,4 +1631,46 @@ func testBeginInferenceRequest(s *providerProxySession) {
 		s.drainedInference = make(chan struct{})
 	}
 	s.inflightInference++
+}
+
+func TestPromptStateKeepsUntaggedTextAfterNamedMessages(t *testing.T) {
+	var state promptState
+	state.appendAssistantText("Reviewing the change.", "", "msg_progress", 1<<20)
+	// codex-acp sends a /review result without a message ID.
+	state.appendAssistantText("Review: ", "", "", 1<<20)
+	state.appendAssistantText("no issues found.", "", "", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Review: no issues found." {
+		t.Fatalf("terminalResultText() = %q, want the untagged review text", got)
+	}
+	state.appendAssistantText("Final.", "", "msg_final", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Final." {
+		t.Fatalf("terminalResultText() = %q, want the later named message", got)
+	}
+	// A warning in the middle of a named message does not drop its start.
+	state.appendAssistantText("Warning: slow\n\n", "", "", 1<<20)
+	state.appendAssistantText(" Done.", "", "msg_final", 1<<20)
+	if got, _ := state.terminalResultText(); got != "Final. Done." {
+		t.Fatalf("terminalResultText() = %q, want the whole resumed message", got)
+	}
+}
+
+func TestWorkspaceDeltaPathViolationReportsControlPathBeforeAllowlist(t *testing.T) {
+	limits := harnessv2.WorkspaceDeltaLimits{AllowedPaths: []string{"internal/**", "docs/**"}, DenyRepositoryControlPaths: true}
+	cases := []struct {
+		path string
+		want string
+	}{
+		{path: ".github/workflows/ci.yml", want: harnessv2.WorkspaceDeltaRepositoryControlPathMessage},
+		{path: "cmd/main.go", want: harnessv2.WorkspaceDeltaDisallowedPathMessage},
+		{path: "internal/x.go", want: ""},
+	}
+	for _, tc := range cases {
+		if got := workspaceDeltaPathViolation("", tc.path, limits); got != tc.want {
+			t.Errorf("workspaceDeltaPathViolation(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+	limits.DenyRepositoryControlPaths = false
+	if got := workspaceDeltaPathViolation("", ".github/workflows/ci.yml", limits); got != harnessv2.WorkspaceDeltaDisallowedPathMessage {
+		t.Errorf("without control-path denial, got %q", got)
+	}
 }

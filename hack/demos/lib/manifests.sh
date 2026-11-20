@@ -40,7 +40,6 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 100
     defaultAllowBash: true
@@ -84,7 +83,6 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 60
     defaultAllowBash: true
@@ -135,7 +133,6 @@ metadata:
     demo.orka.ai/scenario: pr-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 60
     defaultAllowBash: true
@@ -371,7 +368,6 @@ metadata:
     demo.orka.ai/scenario: cron-workflow
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 40
     defaultAllowBash: true
@@ -474,7 +470,6 @@ metadata:
     demo.orka.ai/scenario: security
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 120
     defaultAllowBash: true
@@ -513,7 +508,6 @@ metadata:
     demo.orka.ai/scenario: security
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_RUNTIME_TYPE}
     defaultMaxTurns: 120
     defaultAllowBash: true
@@ -588,183 +582,6 @@ EOF
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Demo 60 (agent sandbox) — manifests
-#
-# A scout agent (read-only tools) and a builder agent (file write + code exec)
-# share a single SandboxClaim across three Task turns via sessionRef. Turn 1
-# creates the session; turns 2 and 3 reuse it. The payoff helper asserts that
-# all three turns landed on the SAME claim.
-# ---------------------------------------------------------------------------
-
-: "${DEMO_SANDBOX_SESSION:=vekil-metrics-77}"
-: "${DEMO_SANDBOX_SCOUT_AGENT:=demo-sandbox-scout}"
-: "${DEMO_SANDBOX_BUILDER_AGENT:=demo-sandbox-builder}"
-: "${DEMO_SANDBOX_TEMPLATE_REF:=orka-live-template}"
-: "${DEMO_SANDBOX_TURN1_TASK:=demo-sandbox-turn-1-scout}"
-: "${DEMO_SANDBOX_TURN2_TASK:=demo-sandbox-turn-2-builder}"
-: "${DEMO_SANDBOX_TURN3_TASK:=demo-sandbox-turn-3-fixup}"
-: "${DEMO_SANDBOX_PUSH_BRANCH:=demo/sandbox-metrics-${DEMO_RUN_ID}}"
-
-render_sandbox_scout_agent() {
-  cat <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: Agent
-metadata:
-  name: ${DEMO_SANDBOX_SCOUT_AGENT}
-  namespace: ${DEMO_NAMESPACE}
-  labels:
-    orka.ai/demo: sandbox
-    demo.orka.ai/scenario: sandbox
-spec:
-  runtime:
-    contractVersion: orka.harness.v2
-    type: ${DEMO_RUNTIME_TYPE}
-    defaultMaxTurns: 30
-    # Codex CLI always requires shell execution; setting false makes the
-    # worker refuse to start. We keep the scout's "read-only" intent in
-    # the system prompt + Bash is gated by the allowed-tools list below.
-    defaultAllowBash: true
-    defaultAllowedTools:
-      - Read
-      - Grep
-      - Glob
-      - WebSearch
-      - Bash
-  model:
-    name: ${DEMO_RUNTIME_MODEL}
-  systemPrompt:
-    inline: |
-      You are the scout for a live Orka sandbox demo.
-      The repository is checked out in the sandbox workspace.
-      Read files, search the web for relevant context, and produce a short
-      plan in the task result. Do NOT modify, commit, or push anything —
-      no git add/commit/push, no file edits, no network writes.
-  resources:
-    requests:
-      cpu: ${DEMO_AGENT_CPU_REQUEST}
-      memory: ${DEMO_AGENT_MEMORY_REQUEST}
-    limits:
-      cpu: ${DEMO_AGENT_CPU_LIMIT}
-      memory: ${DEMO_AGENT_MEMORY_LIMIT}
-  secretRef:
-    name: ${DEMO_RUNTIME_SECRET_REF}
-EOF
-}
-
-render_sandbox_builder_agent() {
-  cat <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: Agent
-metadata:
-  name: ${DEMO_SANDBOX_BUILDER_AGENT}
-  namespace: ${DEMO_NAMESPACE}
-  labels:
-    orka.ai/demo: sandbox
-    demo.orka.ai/scenario: sandbox
-spec:
-  runtime:
-    contractVersion: orka.harness.v2
-    type: ${DEMO_RUNTIME_TYPE}
-    defaultMaxTurns: 80
-    defaultAllowBash: true
-    defaultAllowedTools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Grep
-      - Glob
-  model:
-    name: ${DEMO_RUNTIME_MODEL}
-  systemPrompt:
-    inline: |
-      You are the builder for a live Orka sandbox demo.
-      The sandbox workspace is reused across turns — the scout's notes and
-      any earlier edits are already present.
-      Implement the requested change, run the smallest validation you can,
-      then use git + gh inside the sandbox to push a branch and open a PR.
-      Note: open_pr is NOT a built-in tool; use git/gh from Bash.
-  resources:
-    requests:
-      cpu: ${DEMO_AGENT_CPU_REQUEST}
-      memory: ${DEMO_AGENT_MEMORY_REQUEST}
-    limits:
-      cpu: ${DEMO_AGENT_CPU_LIMIT}
-      memory: ${DEMO_AGENT_MEMORY_LIMIT}
-  secretRef:
-    name: ${DEMO_RUNTIME_SECRET_REF}
-EOF
-}
-
-# render_sandbox_turn_task <name> <agent> <prompt-file> [--create-session]
-render_sandbox_turn_task() {
-  local name="$1"
-  local agent="$2"
-  local prompt_file="$3"
-  local create_session="false"
-  if [[ "${4:-}" == "--create-session" ]]; then
-    create_session="true"
-  fi
-  if [[ ! -f "${prompt_file}" ]]; then
-    printf 'render_sandbox_turn_task: prompt file not found: %s\n' "${prompt_file}" >&2
-    return 1
-  fi
-  local prompt_body
-  prompt_body="$(cat "${prompt_file}")"
-  prompt_body="${prompt_body//\{\{DEMO_SANDBOX_PUSH_BRANCH\}\}/${DEMO_SANDBOX_PUSH_BRANCH}}"
-  cat <<EOF
-apiVersion: core.orka.ai/v1alpha1
-kind: Task
-metadata:
-  name: ${name}
-  namespace: ${DEMO_NAMESPACE}
-  labels:
-    orka.ai/demo: sandbox
-    orka.ai/session: ${DEMO_SANDBOX_SESSION}
-    demo.orka.ai/scenario: sandbox
-spec:
-  type: agent
-  agentRef:
-    name: ${agent}
-  sessionRef:
-    name: ${DEMO_SANDBOX_SESSION}
-    create: ${create_session}
-  timeout: 60m
-  env:
-    # agent-sandbox pods drop ALL caps + runAsNonRoot, so codex's inner
-    # bubblewrap sandbox cannot nest (bwrap: Operation not permitted). The
-    # sandbox IS the isolation boundary, so run codex with the sandbox
-    # bypassed. (No effect for non-codex runtimes.)
-    - name: ORKA_CODEX_DISABLE_SANDBOX
-      value: "true"
-  prompt: |
-EOF
-  emit_block "    " "${prompt_body}"
-  printf '\n'
-  cat <<EOF
-  workspace:
-    intent: read
-    gitRepo: ${DEMO_GIT_REPO}
-    branch: ${DEMO_GIT_BRANCH}
-EOF
-  if [[ -n "${DEMO_GIT_SECRET_REF:-}" ]]; then
-    cat <<EOF
-    readCredentialRef:
-      name: ${DEMO_GIT_SECRET_REF}
-EOF
-  fi
-  cat <<EOF
-  execution:
-    workspace:
-      enabled: true
-      templateRef:
-        name: ${DEMO_SANDBOX_TEMPLATE_REF}
-      reusePolicy: session
-      cleanupPolicy: retain
-EOF
-}
-
 render_security_story_file() {
   emit_block "" "Scenario:
 Demo 40 — Security Scanning + Auto-Remediation.
@@ -802,7 +619,7 @@ Beyond this demo, any scanner that emits structured findings (custom rules, LLM-
 # Demo 70 — Agent Substrate (real agentic run in a gVisor workspace).
 #
 # Substrate is a SECOND execution-workspace provider (distinct from Demo 60's
-# agent-sandbox). Orka Tasks request `execution.workspace.provider: substrate`;
+# agent-sandbox). Orka Tasks request `execution.workspace.classRef.name: ${DEMO_SUBSTRATE_CLASS_REF}`;
 # the controller claims a gVisor-isolated Actor from a Substrate WorkerPool via
 # the ActorTemplate and runs a REAL codex agent inside it. These renderers
 # assume install-substrate.sh already stood up: the Substrate control plane, a
@@ -827,6 +644,7 @@ Beyond this demo, any scanner that emits structured findings (custom rules, LLM-
 : "${DEMO_SUBSTRATE_NAMESPACE:=${DEMO_NAMESPACE:-default}}"
 : "${DEMO_SUBSTRATE_AGENT:=demo-substrate-codex}"
 : "${DEMO_SUBSTRATE_TEMPLATE_NAME:=orka-codex-ci}"
+: "${DEMO_SUBSTRATE_CLASS_REF:=substrate-coding}"
 : "${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE:=ate-demo}"
 : "${DEMO_SUBSTRATE_SESSION:=substrate-warm-70}"
 : "${DEMO_SUBSTRATE_COLD_TASK:=demo-substrate-cold}"
@@ -852,7 +670,6 @@ metadata:
     demo.orka.ai/scenario: substrate
 spec:
   runtime:
-    contractVersion: orka.harness.v2
     type: ${DEMO_SUBSTRATE_RUNTIME_TYPE}
     defaultMaxTurns: 30
     defaultAllowBash: true
@@ -883,8 +700,6 @@ render_substrate_task() {
   local reuse="${2:-session}"
   local create="${3:-false}"
   local prompt="${4:-Make the requested change and stop.}"
-  local cleanup="retain"
-  [[ "${reuse}" == "session" ]] || cleanup="delete"
   local session_block=""
   if [[ "${reuse}" == "session" ]]; then
     session_block="  sessionRef:
@@ -927,13 +742,9 @@ ${session_block}
       name: ${DEMO_SUBSTRATE_GIT_SECRET}
   execution:
     workspace:
-      enabled: true
-      provider: substrate
-      cleanupPolicy: ${cleanup}
+      classRef:
+        name: ${DEMO_SUBSTRATE_CLASS_REF}
       reusePolicy: ${reuse}
-      templateRef:
-        name: ${DEMO_SUBSTRATE_TEMPLATE_NAME}
-        namespace: ${DEMO_SUBSTRATE_TEMPLATE_NAMESPACE}
 EOF
 }
 
@@ -943,7 +754,7 @@ Demo 70 — Agent Substrate (a real agent in a gVisor-isolated workspace).
 
 THE FEATURE: Orka's workspace executor is provider-neutral. Demo 60 backed agent Tasks with agent-sandbox; this demo backs the SAME Task API with Agent Substrate — a second provider that runs each workspace as a gVisor-isolated Actor (a microVM-class sandbox) drawn from a pre-warmed WorkerPool, and keeps that Actor warm between turns.
 
-One Task field switches backends: execution.workspace.provider: substrate. Everything else — the Agent CR, the Task CR, the model call, the git push — is identical to every other Orka agent Task. Orka abstracts the execution substrate.
+One Task field switches backends: execution.workspace.classRef.name: ${DEMO_SUBSTRATE_CLASS_REF}. Everything else — the Agent CR, the Task CR, the model call, the git push — is identical to every other Orka agent Task. Orka abstracts the execution substrate.
 
 THIS DEMO (two beats, real ${DEMO_SUBSTRATE_RUNTIME_MODEL} agent):
 1. COLD — a fresh gVisor workspace. The agent clones ${DEMO_SUBSTRATE_PR_REPO}, makes a change, and stops. Orka pushes the branch; the demo opens a real pull request. status.executionWorkspace.provider == substrate.

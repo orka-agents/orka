@@ -11,7 +11,7 @@
 #   ./hack/demos/40-security-scanning.sh
 #   ./hack/demos/10-chat-pr.sh        # also needs the `claude` CLI on PATH
 #
-# The workspace demos (50/60/70) have their own env; see RECORDING.md.
+# The archived workspace demo (70) has its own env; see RECORDING.md.
 # Override any value before sourcing, or edit here.
 
 # Cluster + namespace. Demos 10-60 read Agents/Tasks/secrets from DEMO_NAMESPACE

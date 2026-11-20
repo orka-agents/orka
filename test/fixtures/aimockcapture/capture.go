@@ -36,8 +36,12 @@ const (
 	MaxEntries = 4096
 
 	healthTimeout = 2 * time.Second
-	capturePath   = "/__orka_eval/capture"
-	healthPath    = "/__orka_eval/health"
+	// clientGoneGrace lets a response finish after its client hangs up. A
+	// streaming client may close once it has the final event, before the
+	// upstream response ends.
+	clientGoneGrace = time.Second
+	capturePath     = "/__orka_eval/capture"
+	healthPath      = "/__orka_eval/health"
 )
 
 // Entry contains exactly the request body and safe response lifecycle metadata.
@@ -90,6 +94,10 @@ type relay struct {
 	handler *Handler
 	index   int
 	id      string
+	// client is the downstream request context. Once the client is gone, the
+	// relay may still reach the upstream response's end, but any further
+	// response bytes were not received.
+	client context.Context
 
 	mu      sync.Mutex
 	eof     bool
@@ -178,7 +186,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, message, status)
 		return
 	}
-	r = r.WithContext(context.WithValue(r.Context(), requestKey{}, state))
+	state.client = r.Context()
+	ctx, stop := afterClientGone(r.Context(), clientGoneGrace)
+	defer stop()
+	r = r.WithContext(context.WithValue(ctx, requestKey{}, state))
 	writer := &responseWriter{ResponseWriter: w, state: state}
 	returned := false
 	defer func() { state.finish(r.Context(), returned) }()
@@ -186,6 +197,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Flush server-side buffering before declaring a successfully relayed response.
 	_ = writer.FlushError()
 	returned = true
+}
+
+// afterClientGone returns a context canceled grace after parent is. A response
+// that ends within the grace, with no bytes left to send, is recorded
+// complete; a stalled upstream still sees the cancellation.
+func afterClientGone(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := context.AfterFunc(parent, func() { time.AfterFunc(grace, cancel) })
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 // Only one export may allocate a snapshot or encoding buffer at a time. Waiting
@@ -383,6 +406,9 @@ func (w *responseWriter) WriteHeader(status int) {
 }
 
 func (w *responseWriter) Write(p []byte) (int, error) {
+	if w.state.client.Err() != nil {
+		w.state.fail("downstream response failed")
+	}
 	n, err := w.ResponseWriter.Write(p)
 	if err != nil || n != len(p) {
 		w.state.fail("downstream response failed")

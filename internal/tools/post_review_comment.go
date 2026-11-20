@@ -99,11 +99,11 @@ func (t *PostReviewCommentTool) Parameters() json.RawMessage {
 func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args PostReviewCommentArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("failed to parse arguments: %w", err)
+		return "", notSent(fmt.Errorf("failed to parse arguments: %w", err))
 	}
 
 	if args.PRNumber == 0 || args.Body == "" || args.Event == "" {
-		return "", fmt.Errorf("pr_number, body, and event are required")
+		return "", notSent(fmt.Errorf("pr_number, body, and event are required"))
 	}
 
 	// Validate event value
@@ -111,17 +111,17 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 	case reviewEventApprove, reviewEventRequestChanges, reviewEventComment:
 		// valid
 	default:
-		return "", fmt.Errorf("invalid event value %q: must be APPROVE, REQUEST_CHANGES, or COMMENT", args.Event)
+		return "", notSent(fmt.Errorf("invalid event value %q: must be APPROVE, REQUEST_CHANGES, or COMMENT", args.Event))
 	}
 	for i, comment := range args.Comments {
 		if strings.TrimSpace(comment.Path) == "" || comment.Line < 1 || strings.TrimSpace(comment.Body) == "" {
-			return "", fmt.Errorf("comments[%d] needs a path, a line of at least 1, and a body", i)
+			return "", notSent(fmt.Errorf("comments[%d] needs a path, a line of at least 1, and a body", i))
 		}
 	}
 
 	owner, repo, token, _, err := resolveScopedForgeRepoAndToken(ctx, t.k8sClient, t.Name(), args.TaskName, args.RepoURL, t.apiBaseURL)
 	if err != nil {
-		return "", err
+		return "", notSent(err)
 	}
 
 	// Post the review via GitHub API
@@ -175,7 +175,7 @@ func postGitHubReview(ctx context.Context, token, owner, repo string, prNumber i
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, "", fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+		return 0, "", githubStatusError(resp, respBody)
 	}
 
 	var reviewResp struct {

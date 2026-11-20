@@ -146,8 +146,12 @@ func TestToolExecutorDistinguishesMCPExecutionAndProtocolErrors(t *testing.T) {
 				Spec: corev1alpha1.ToolSpec{MCP: &corev1alpha1.MCPToolServer{
 					SubstrateActor: &corev1alpha1.SubstrateMCPActor{TemplateRef: corev1alpha1.WorkspaceTemplateReference{Name: "fixture"}},
 				}},
-				Status: corev1alpha1.ToolStatus{Endpoint: server.URL, Actor: &corev1alpha1.ToolActorStatus{RouteHost: "fixture.actors.test"}},
+				Status: corev1alpha1.ToolStatus{
+					Endpoint: server.URL, Available: true, Conditions: readySubstrateMCPConditions(),
+					Actor: &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: "actor-1.tools"},
+				},
 			}
+			useSubstrateMCPTestRouter(t, executor, server.URL)
 			_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{}`))
 			var executionErr ToolExecutionError
 			if err == nil || errors.As(err, &executionErr) != tc.execution || !ToolRequestWasAttempted(err) {

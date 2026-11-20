@@ -607,10 +607,9 @@ func TestGatewayTaskMessagePreparedAdmissionSerializesTerminalCutoff(t *testing.
 	task.Status.Phase = corev1alpha1.TaskPhaseFailed
 	require.NoError(t, s.Client.Status().Update(t.Context(), task))
 	require.NoError(t, s.ProjectTerminals(t.Context()))
-	err = db.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
-		_, err := s.EnqueuePreparedTaskMessage(ctx, prepared)
-		return err
-	})
+	// The enqueue's own store transaction serializes admission with the
+	// terminal projection that already committed.
+	_, err = s.EnqueuePreparedTaskMessage(t.Context(), prepared)
 	var httpErr *HTTPError
 	require.ErrorAs(t, err, &httpErr)
 	require.Equal(t, 409, httpErr.Code)

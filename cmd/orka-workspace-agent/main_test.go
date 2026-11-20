@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	workspaceagent "github.com/orka-agents/orka/pkg/workspaceagent"
+	workspaceagent "github.com/orka-agents/orka-workspace/sdk/workspaceagent"
 )
 
 const (

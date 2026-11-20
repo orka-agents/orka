@@ -17,10 +17,24 @@ type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+// TargetActorHeader selects the Actor behind the Substrate router. The router
+// ignores Host and :authority for routing.
+const TargetActorHeader = "ate-target-actor"
+
+// TargetActor converts a qualified "name.atespace" Actor ID into the router's
+// "atespace/name" target. Unqualified IDs are rejected so a request can never
+// be routed to an Actor in an implied Atespace.
+func TargetActor(actorID string) (string, bool) {
+	name, atespace, qualified := strings.Cut(strings.TrimSpace(actorID), ".")
+	if !qualified || name == "" || atespace == "" || strings.ContainsAny(atespace, "./") || strings.Contains(name, "/") {
+		return "", false
+	}
+	return atespace + "/" + name, true
+}
+
 type HTTPClient struct {
-	RouterURL      string
-	ActorDNSSuffix string
-	HTTPClient     HTTPDoer
+	RouterURL  string
+	HTTPClient HTTPDoer
 }
 
 type ActorRequest struct {
@@ -125,7 +139,11 @@ func (c HTTPClient) do(ctx context.Context, req ActorRequest, method, relPath st
 	if err != nil {
 		return &Error{Reason: ErrorReasonCreateRequest, Message: "failed to create request", Cause: err}
 	}
-	httpReq.Host = strings.TrimSpace(req.ActorID) + "." + strings.TrimSpace(c.ActorDNSSuffix)
+	target, ok := TargetActor(req.ActorID)
+	if !ok {
+		return &Error{Reason: ErrorReasonCreateRequest, Message: "daemon request requires a qualified Actor ID"}
+	}
+	httpReq.Header.Set(TargetActorHeader, target)
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}

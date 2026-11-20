@@ -39,6 +39,26 @@ type workspaceManifest struct {
 	Entries      []workspaceEntry `json:"entries"`
 }
 
+// workspaceManifestCanonicalLimits bounds the manifest digest input by the
+// entries it describes instead of the 2 MiB v2 wire cap, so any tree that
+// already passed the configured workspace limits can also be digested. JSON
+// escaping expands a string byte to at most six bytes.
+func workspaceManifestCanonicalLimits(manifest workspaceManifest) (maxBytes, maxItems int) {
+	const (
+		fixedBytes = 1 << 10 // schema, OIDs, member keys, and punctuation
+		entryBytes = 192     // keys, mode, OID, size, and punctuation per entry
+		// The root object plus its six members, then one object with at most
+		// five members per entry.
+		fixedItems = 7
+		entryItems = 6
+	)
+	maxBytes = fixedBytes + 6*(len(manifest.Schema)+len(manifest.RepositoryID)+len(manifest.SourceRef))
+	for _, entry := range manifest.Entries {
+		maxBytes += entryBytes + 6*(len(entry.Path)+len(entry.Target))
+	}
+	return max(maxBytes, harnessv2.MaxCanonicalJSONBytes), fixedItems + entryItems*len(manifest.Entries)
+}
+
 type workspaceArchive struct {
 	path           string
 	digest         string
@@ -73,7 +93,8 @@ func buildWorkspaceArchive(
 		Schema: workspaceManifestSchema, RepositoryID: repositoryID, SourceRef: sourceRef,
 		BaselineOID: baselineOID, TreeOID: treeOID, Entries: entries,
 	}
-	manifestBytes, err := harnessv2.CanonicalValue(manifest)
+	maxManifestBytes, maxManifestItems := workspaceManifestCanonicalLimits(manifest)
+	manifestBytes, err := harnessv2.CanonicalValueWithLimits(manifest, maxManifestBytes, maxManifestItems)
 	if err != nil {
 		return workspaceArchive{}, invalidRequest("workspace manifest could not be canonicalized", err)
 	}

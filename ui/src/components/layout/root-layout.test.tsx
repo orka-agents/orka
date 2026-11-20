@@ -42,6 +42,11 @@ describe('RootLayout', () => {
     expect(screen.getByTestId('outlet')).toBeInTheDocument()
   })
 
+  it('positions main so sr-only text in horizontal scrollers cannot widen the page', () => {
+    render(<RootLayout />)
+    expect(screen.getByRole('main')).toHaveClass('relative')
+  })
+
   it('makes the page content inert while the mobile navigation drawer is open', () => {
     const original = window.matchMedia
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({

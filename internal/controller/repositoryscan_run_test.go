@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -337,6 +338,113 @@ func TestRepositoryScanReconcileUsesLiveCompletionForSchedule(t *testing.T) {
 	require.Len(t, runs, 1, "stale cache data must not admit another run after completion")
 	require.Equal(t, run.ID, runs[0].ID)
 	require.Greater(t, result.RequeueAfter, 59*time.Minute)
+}
+
+func TestRepositoryScanReconcileFailedRunsAdvanceSchedule(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		publishedCompletion bool
+	}{
+		{name: "failed completion published", publishedCompletion: true},
+		{name: "failed completion not yet published"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			started := time.Now().Add(-5 * time.Second).UTC()
+			completed := started.Add(4 * time.Second)
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "failing-scan", Namespace: defaultNS, UID: "scan-uid", Generation: 1,
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-3 * time.Hour)),
+					Finalizers:        []string{security.RepositoryScanRunFinalizer},
+				},
+				Spec: corev1alpha1.RepositoryScanSpec{
+					RepoURL: "https://github.com/example/repo", Schedule: "@every 1h",
+					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+				},
+				// No scan has ever succeeded, so LastSuccessfulScanAt stays unset.
+				Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseError, LastScanID: "scan_failed"},
+			}
+			if tt.publishedCompletion {
+				scan.Status.LastScanAt = &metav1.Time{Time: completed}
+			}
+			require.NoError(t, db.CreateScanRun(ctx, &store.ScanRun{
+				ID: scan.Status.LastScanID, Namespace: scan.Namespace, RepositoryScan: scan.Name,
+				RepositoryScanUID: string(scan.UID), RepositoryScanGeneration: scan.Generation,
+				Mode: scanModeIncremental, Phase: scanRunPhaseFailed, StartedAt: started, CompletedAt: &completed,
+				ErrorMessage: "clone failed",
+			}))
+			cl := repositoryScanRunTestClient(t, scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))
+			r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
+
+			for range 3 {
+				result, err := r.Reconcile(ctx, request)
+				require.NoError(t, err)
+				require.Greater(t, result.RequeueAfter, 59*time.Minute)
+			}
+			runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+			require.NoError(t, err)
+			require.Len(t, runs, 1, "a failed run must not admit another run in the same schedule slot")
+			tasks := &corev1alpha1.TaskList{}
+			require.NoError(t, cl.List(ctx, tasks))
+			require.Empty(t, tasks.Items)
+		})
+	}
+}
+
+func TestRepositoryScanReconcileInvalidRepositoryCreatesNoTasks(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		spec    corev1alpha1.RepositoryScanSpec
+		message string
+	}{
+		{name: "not a url", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "not a url"}, message: "spec.repoURL must be a GitHub repository URL"},
+		{name: "other forge", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://gitlab.com/a/b", Provider: "github"}, message: "spec.repoURL must be a GitHub repository URL"},
+		{name: "unsupported provider", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/repo", Provider: "gitlab"}, message: `spec.provider "gitlab" is not supported`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := setupControllerSQLiteStore(t)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1alpha1.AddToScheme(scheme))
+			tt.spec.Schedule = "@every 1h"
+			tt.spec.AnalysisAgentRef = corev1alpha1.AgentReference{Name: "analysis"}
+			scan := &corev1alpha1.RepositoryScan{
+				ObjectMeta: metav1.ObjectMeta{Name: "invalid-scan", Namespace: defaultNS, UID: "scan-uid", Generation: 1},
+				Spec:       tt.spec,
+			}
+			cl := repositoryScanRunTestClient(t, scan, repositoryScanTestAgent(scan.Spec.AnalysisAgentRef.Name))
+			r := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: db}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scan)}
+
+			for range 3 {
+				result, err := r.Reconcile(ctx, request)
+				require.NoError(t, err)
+				if result.RequeueAfter > time.Second {
+					t.Fatalf("invalid repository requeued after %s", result.RequeueAfter)
+				}
+			}
+			current := &corev1alpha1.RepositoryScan{}
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, current))
+			require.Equal(t, repositoryScanPhaseError, current.Status.Phase)
+			ready := meta.FindStatusCondition(current.Status.Conditions, readyConditionType)
+			require.NotNil(t, ready)
+			require.Equal(t, metav1.ConditionFalse, ready.Status)
+			require.Equal(t, repositoryScanReasonInvalidRepository, ready.Reason)
+			require.Contains(t, ready.Message, tt.message)
+			require.Empty(t, current.Status.LastScanID)
+			runs, _, err := db.ListScanRuns(ctx, scan.Namespace, scan.Name, 10, "")
+			require.NoError(t, err)
+			require.Empty(t, runs)
+			tasks := &corev1alpha1.TaskList{}
+			require.NoError(t, cl.List(ctx, tasks))
+			require.Empty(t, tasks.Items)
+		})
+	}
 }
 
 func TestCreateScanRunRollsBackChangedIdentity(t *testing.T) {

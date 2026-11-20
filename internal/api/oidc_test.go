@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -289,9 +290,12 @@ func TestValidateOIDCToken_RequiresAllowedSubject(t *testing.T) {
 	cfg.AllowedSubjects = nil
 	token := provider.issueToken(t, testOIDCTokenOptions{})
 
+	// An empty list allows no one, but still names the verified subject, so
+	// an installation can learn the first subjects to add.
 	_, err := validateOIDCToken(context.Background(), token, cfg)
-	if err == nil || !strings.Contains(err.Error(), "subject authorization") {
-		t.Fatalf("validateOIDCToken error = %v, want subject authorization error", err)
+	notAllowed, ok := errors.AsType[*oidcSubjectNotAllowedError](err)
+	if !ok || notAllowed.Subject == "" || !errors.Is(err, errOIDCAuthorization) {
+		t.Fatalf("validateOIDCToken error = %v, want a subject-not-allowed refusal naming the subject", err)
 	}
 }
 

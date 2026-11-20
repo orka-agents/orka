@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/orka-agents/orka/internal/acp"
@@ -31,10 +32,15 @@ type ProviderProfile struct {
 	AuthMethodID          string
 	AdapterName           string
 	AdapterDigest         string
-	PrepareSession        func(acp.SessionPaths) error
+	// ValidateWorkspace rejects a materialized workspace the provider cannot
+	// run safely, before any provider state or child process exists. Its
+	// error fails the create permanently with a caller-visible reason.
+	ValidateWorkspace func(acp.SessionPaths) error
+	PrepareSession    func(acp.SessionPaths) error
 }
 
 type ProviderSessionProjection struct {
+	Instructions   *acp.InstructionProjection
 	AdditionalArgs []string
 	Environment    map[string]string
 	NewSessionMeta acp.Meta
@@ -42,6 +48,10 @@ type ProviderSessionProjection struct {
 	// wrote into the ACP agent message stream instead of its own log. Nil
 	// forwards every chunk.
 	AgentDiagnosticFilter *AgentDiagnosticFilter
+	// RequiredModeID is the ACP session mode the adapter must report as
+	// current whenever it creates or resumes the provider session. Empty
+	// accepts any mode.
+	RequiredModeID string
 }
 
 // AgentDiagnosticFilter recognizes assistant text chunks that are provider
@@ -77,7 +87,12 @@ func (f WorkspaceMaterializerFunc) Materialize(ctx context.Context, request harn
 type Config struct {
 	// Tracer belongs to this supervisor. Nil disables instrumentation. It never
 	// enters the provider process configuration or environment.
-	Tracer        trace.Tracer
+	Tracer trace.Tracer
+	// GenAITracer and Meter record GenAI invoke_agent, chat and execute_tool
+	// telemetry derived from the ACP session stream and provider proxy. Nil
+	// disables each. They never capture prompt, completion or tool content.
+	GenAITracer   trace.Tracer
+	Meter         metric.Meter
 	ListenAddress string
 	Fence         harnessv2.Fence
 	Capabilities  harnessv2.CapabilitiesResponse
@@ -121,6 +136,19 @@ type Config struct {
 	// recording the operation. The one-shot record survives runtime and
 	// supervisor recreation so live conformance exposes an accidental retry.
 	E2EPromptWriteAmbiguityMarker string
+
+	// Toolboxes are the frozen profile toolboxes bound into this Pod, in
+	// declared order. Their PATH folders are appended after the default child
+	// PATH. The supervisor never opens or runs anything inside them.
+	Toolboxes []harnessv2.RuntimeToolbox
+	// ToolboxMountMethod is how the controller bound the toolboxes. With
+	// imageVolume the files were never sanitized, so startup runs the
+	// unprivileged architecture check.
+	ToolboxMountMethod string
+	// Skills are the frozen profile skills bound read-only into this Pod at
+	// harnessv2.RuntimeSkillMountRoot/<name>. Each session receives a
+	// validated private copy in its runtime's native skills folder.
+	Skills []harnessv2.RuntimeSkill
 }
 
 func (c Config) Validate() error {

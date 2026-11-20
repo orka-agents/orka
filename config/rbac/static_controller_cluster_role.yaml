@@ -1,7 +1,5 @@
-# Static controllers need only two common cluster-scoped capabilities:
-# reading namespace mode claims and binding the exact release worker roles into
-# the selected workload namespace. Mode-specific cluster APIs are granted by
-# the corresponding workload overlay, never by this common role.
+# Common cluster access is limited to namespace mode claims, exact worker-role
+# binding, and read-only startup inventory. Workload mutation stays namespaced.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -28,6 +26,19 @@ rules:
   - clusterroles
   verbs:
   - bind
+# Startup checks for retained legacy allocations are cluster-wide and read-only.
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - runtimepools
+  verbs:
+  - list
+- apiGroups:
+  - workspace.orka.ai
+  resources:
+  - executionworkspaces
+  verbs:
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

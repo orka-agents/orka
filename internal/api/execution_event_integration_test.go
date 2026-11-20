@@ -22,12 +22,13 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 func TestSubmitListExecutionEventSQLite(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	app := setupExecutionEventIntegrationApp(
 		t,
 		eventStore,
@@ -93,7 +94,7 @@ func TestSubmitListExecutionEventSQLite(t *testing.T) {
 }
 
 func TestTaskEventsSQLiteReadsPersistedEvents(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace:  "default",
 		StreamType: store.ExecutionEventStreamTypeTask,
@@ -120,7 +121,7 @@ func TestTaskEventsSQLiteReadsPersistedEvents(t *testing.T) {
 }
 
 func TestTaskLifecycleEventsQueryableThroughAPI(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	for _, typ := range []string{
 		events.ExecutionEventTypeTaskJobCreated,
 		events.ExecutionEventTypeTaskStarted,
@@ -165,7 +166,7 @@ func TestTaskLifecycleEventsQueryableThroughAPI(t *testing.T) {
 }
 
 func TestStreamTaskEventsSQLiteReplayLiveAndTerminal(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-stream", events.ExecutionEventTypeTaskStarted)
 
 	h, app := setupTaskEventHandlers(t, eventStore, testTask("default", "task-stream"))
@@ -221,7 +222,7 @@ func TestStreamTaskEventsSQLiteReplayLiveAndTerminal(t *testing.T) {
 }
 
 func TestReconnectSkipsSeenExecutionEventsSQLite(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-reconnect", events.ExecutionEventTypeTaskStarted)
 	appendIntegrationTaskEvent(t, eventStore, "task-reconnect", events.ExecutionEventTypeTaskSucceeded)
 
@@ -241,7 +242,7 @@ func TestReconnectSkipsSeenExecutionEventsSQLite(t *testing.T) {
 }
 
 func TestReconnectAfterTerminalExecutionEventCompletesSQLite(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-terminal-reconnect", events.ExecutionEventTypeTaskStarted)
 	appendIntegrationTaskEvent(t, eventStore, "task-terminal-reconnect", events.ExecutionEventTypeTaskSucceeded)
 
@@ -263,7 +264,7 @@ func TestReconnectAfterTerminalExecutionEventCompletesSQLite(t *testing.T) {
 }
 
 func TestStreamTaskEventsFilteredSQLiteCompletesAfterTerminal(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered", events.ExecutionEventTypeToolCallCompleted)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered", events.ExecutionEventTypeTaskSucceeded)
 
@@ -288,7 +289,7 @@ func TestStreamTaskEventsFilteredSQLiteCompletesAfterTerminal(t *testing.T) {
 }
 
 func TestStreamTaskEventsFilteredSQLiteCompletesWhenMatchingEventFollowsTerminal(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered-post-terminal", events.ExecutionEventTypeToolCallCompleted)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered-post-terminal", events.ExecutionEventTypeTaskSucceeded)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered-post-terminal", events.ExecutionEventTypeToolCallCompleted)
@@ -314,7 +315,7 @@ func TestStreamTaskEventsFilteredSQLiteCompletesWhenMatchingEventFollowsTerminal
 }
 
 func TestStreamTaskEventsFilteredSQLiteReconnectCompletesAfterPostTerminalMatch(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered-reconnect", events.ExecutionEventTypeToolCallCompleted)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered-reconnect", events.ExecutionEventTypeTaskSucceeded)
 	appendIntegrationTaskEvent(t, eventStore, "task-filtered-reconnect", events.ExecutionEventTypeToolCallCompleted)
@@ -338,7 +339,7 @@ func TestStreamTaskEventsFilteredSQLiteReconnectCompletesAfterPostTerminalMatch(
 }
 
 func TestStreamTaskEventsCompletesWhenTaskDeleted(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	task := testTask("default", "task-delete-stream")
 	h, app := setupTaskEventHandlers(t, eventStore, task)
 	configureShortTaskEventStream(h)
@@ -359,7 +360,7 @@ func TestStreamTaskEventsCompletesWhenTaskDeleted(t *testing.T) {
 }
 
 func TestStreamTaskEventsReconnectCatchUpSQLite(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	postApp := setupExecutionEventIntegrationApp(
 		t,
 		eventStore,
@@ -446,7 +447,7 @@ func TestStreamTaskEventsReconnectCatchUpSQLite(t *testing.T) {
 }
 
 func TestSSEExecutionEventFromInternalPostSQLite(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	app := setupExecutionEventIntegrationApp(
 		t,
 		eventStore,
@@ -475,7 +476,7 @@ func TestSSEExecutionEventFromInternalPostSQLite(t *testing.T) {
 }
 
 func TestEventAuthListAndStream(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-auth", events.ExecutionEventTypeTaskSucceeded)
 
 	provider := newTestOIDCProvider(t)
@@ -519,7 +520,7 @@ func TestEventAuthListAndStream(t *testing.T) {
 }
 
 func TestEventNamespaceIsolationPublicAndInternal(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	appendIntegrationTaskEvent(t, eventStore, "task-other", events.ExecutionEventTypeTaskStarted)
 
 	provider := newTestOIDCProvider(t)
@@ -556,7 +557,7 @@ func TestEventNamespaceIsolationPublicAndInternal(t *testing.T) {
 }
 
 func TestEventRedactPublicDTO(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	app := setupExecutionEventIntegrationApp(
 		t,
 		eventStore,
@@ -594,7 +595,7 @@ func TestEventRedactPublicDTO(t *testing.T) {
 }
 
 func TestEventRedactionAuditPersistsAndServesRedactedPayloads(t *testing.T) {
-	eventStore := newSQLiteExecutionEventStoreForTest(t)
+	eventStore := newExecutionEventClientForTest(t)
 	app := setupExecutionEventIntegrationApp(
 		t,
 		eventStore,
@@ -740,6 +741,13 @@ func setupAuthenticatedExecutionEventApp(
 	app.Get("/api/v1/tasks/:id/events", h.ListTaskEvents)
 	app.Get("/api/v1/tasks/:id/stream", h.StreamTaskEvents)
 	return app
+}
+
+// newExecutionEventClientForTest serves a fresh SQLite store through the
+// storage client, which runs fenced task data access.
+func newExecutionEventClientForTest(t *testing.T) *storageclient.Client {
+	t.Helper()
+	return testStorageClient(newSQLiteExecutionEventStoreForTest(t))
 }
 
 func newSQLiteExecutionEventStoreForTest(t *testing.T) *sqlite.Store {

@@ -114,9 +114,10 @@ func NewTracingMiddleware() fiber.Handler {
 
 // effectiveStatusCode resolves the status a client will actually receive.
 // Handler errors are mapped by the app error handler only after middleware
-// unwinds, so the response still carries the default 200 here. A 404 on a
-// non-API path is served as the SPA index page with 200 by that same error
-// handler, so it is reported as a success rather than a failure, and a 404 for
+// unwinds, so the response still carries the default 200 here. When the app
+// serves the dashboard, a 404 on a non-API path is served as the SPA index
+// page with 200 by that same error handler, so it is reported as a success
+// rather than a failure, and a 404 for
 // a deliberately unsupported compatibility route is rewritten there to 501.
 func effectiveStatusCode(c fiber.Ctx, err error) int {
 	status := c.Response().StatusCode()
@@ -127,8 +128,8 @@ func effectiveStatusCode(c fiber.Ctx, err error) int {
 			status = fiber.StatusInternalServerError
 		}
 	}
-	if status == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
-		if _, ok := spaIndexHTML(); ok {
+	if status == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
+		if _, ok := embeddedSPAIndexPage(); ok {
 			status = fiber.StatusOK
 		}
 	}

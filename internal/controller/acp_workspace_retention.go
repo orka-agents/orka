@@ -30,13 +30,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
-	"github.com/orka-agents/orka/pkg/workspaceprovider"
 )
 
 const (
@@ -110,7 +111,7 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if err := r.Get(ctx, req.NamespacedName, workspace); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue {
+	if !workspaceHasACPControllerOwnership(workspace) {
 		return ctrl.Result{}, nil
 	}
 	if !workspace.DeletionTimestamp.IsZero() ||
@@ -312,6 +313,22 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			r.recordRetention(workspace, "InvalidDurableCapability",
 				"class idleTimeout elapsed, but the durable-workspace marker is invalid; failing closed")
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
+		}
+		operatorTainted := false
+		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+			// The workspace marker and the marker of every Task linked to this
+			// exact incarnation both count; an unreadable Task holds retention.
+			tainted, err := acpWorkspaceOperatorTainted(ctx, r.quotaReader(), workspace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			operatorTainted = tainted
+		}
+		if operatorTainted {
+			// Operator access forfeits retention: a tainted workspace is never
+			// captured into a data checkpoint for continuation or forks.
+			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "OperatorTaintedIdleExpired",
+				"class idleTimeout elapsed for a workspace tainted by operator access; applying the Delete disposition instead of Suspend", true)
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) &&
@@ -1079,7 +1096,7 @@ func listACPSuspendQuotaWorkspaces(
 	workspaces := make(map[string]*workspacev1alpha1.ExecutionWorkspace, len(list.Items))
 	for i := range list.Items {
 		workspace := &list.Items[i]
-		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
+		if !workspaceHasACPControllerOwnership(workspace) ||
 			workspace.Spec.ClassBinding.UID != classUID || workspace.UID == "" {
 			continue
 		}
@@ -1324,6 +1341,16 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
+	// Backstop for every suspension path: a workspace tainted through its own
+	// marker or the marker of any Task linked to this exact incarnation is
+	// never checkpointed, and an unreadable Task refuses the suspension.
+	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace)
+	if err != nil {
+		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, err)
+	}
+	if tainted {
+		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
+	}
 	if settledTaskUID != "" &&
 		!acpWorkspaceResumeDemandBelongsToTask(
 			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], settledTaskUID,
@@ -1415,7 +1442,7 @@ func countSuspendedClassWorkspaces(
 	count := 0
 	for i := range list.Items {
 		workspace := &list.Items[i]
-		if workspace.Labels[workspacev1alpha1.ProviderControllerLabel] != acpWorkspaceControllerLabelValue ||
+		if !workspaceHasACPControllerOwnership(workspace) ||
 			workspace.Spec.ClassBinding.UID != classUID || (exclude != nil && exclude(workspace)) {
 			continue
 		}
@@ -1685,7 +1712,7 @@ func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.Executi
 // SetupWithManager registers retention enforcement for ACP class workspaces.
 func (r *ACPWorkspaceRetentionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ours := predicate.NewPredicateFuncs(func(object client.Object) bool {
-		return object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+		return object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue || (object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] != "" && object.GetAnnotations()[acpExecutionWorkspacePoolAnnotation] != "")
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspace{}).

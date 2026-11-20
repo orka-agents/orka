@@ -64,6 +64,14 @@ func (h *Handlers) HandleGatewayEvent(c fiber.Ctx) error {
 		if httpErr, ok := errors.AsType[*gatewayruntime.HTTPError](err); ok {
 			return fiber.NewError(httpErr.Code, httpErr.Message)
 		}
+		if errors.Is(err, store.ErrOutcomeUnknown) {
+			// Admission deduplicates by Gateway UID and externalEventId, so
+			// retrying the same event is safe even if the first write committed.
+			return fiber.NewError(fiber.StatusServiceUnavailable, "gateway admission outcome is unknown; retry the same event")
+		}
+		if temporary := temporaryStorageHTTPError(err); temporary != nil {
+			return temporary
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to accept gateway event")
 	}
 	return c.Status(fiber.StatusAccepted).JSON(response)
@@ -661,6 +669,9 @@ func splitGatewayFilter(raw string) []string {
 func gatewayStoreHTTPError(err error, operation string) error {
 	if httpErr, ok := errors.AsType[*gatewayruntime.HTTPError](err); ok {
 		return fiber.NewError(httpErr.Code, httpErr.Message)
+	}
+	if temporary := temporaryStorageHTTPError(err); temporary != nil {
+		return temporary
 	}
 	switch {
 	case errors.Is(err, store.ErrNotFound):

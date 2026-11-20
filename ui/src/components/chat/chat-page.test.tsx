@@ -63,6 +63,13 @@ describe('ChatPage', () => {
     expect(screen.getByText('Chat')).toBeInTheDocument()
   })
 
+  it('names the page in the browser tab', () => {
+    const { unmount } = render(<ChatPage />)
+    expect(document.title).toBe('Chat · Orka')
+    unmount()
+    expect(document.title).toBe('Orka')
+  })
+
   it('renders without crashing', () => {
     const { container } = render(<ChatPage />)
     expect(container).toBeTruthy()
@@ -75,6 +82,80 @@ describe('ChatPage', () => {
     useChatStore.setState({ messages: msgs })
     render(<ChatPage />)
     expect(screen.getByText('New Chat')).toBeInTheDocument()
+  })
+
+  it('New Chat resets an idle chat at once, without asking', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    try {
+      const epoch = useChatStore.getState().turnEpoch
+      useChatStore.setState({
+        messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }],
+        currentSessionId: 'chat-idle',
+      })
+      render(<ChatPage />)
+      const newChat = screen.getByRole('button', { name: /New Chat/ })
+      newChat.focus()
+      fireEvent.click(newChat)
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(useChatStore.getState().messages).toEqual([])
+      expect(useChatStore.getState().currentSessionId).toBeNull()
+      expect(useChatStore.getState().turnEpoch).toBe(epoch + 1)
+      // The button leaves with the transcript; focus moves to the composer
+      // instead of dropping to <body>.
+      expect(screen.queryByRole('button', { name: /New Chat/ })).not.toBeInTheDocument()
+      expect(screen.getByPlaceholderText('Message the meta agent...')).toHaveFocus()
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('New Chat during a reply asks first and keeps the running chat when declined', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    try {
+      const epoch = useChatStore.getState().turnEpoch
+      useChatStore.setState({
+        messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }],
+        currentSessionId: 'chat-running',
+        isStreaming: true,
+      })
+      render(<ChatPage />)
+      const newChat = screen.getByRole('button', { name: /New Chat/ })
+      newChat.focus()
+      fireEvent.click(newChat)
+      expect(confirmSpy).toHaveBeenCalledWith('Stop the current reply and delete this chat?')
+      expect(newChat).toHaveFocus()
+      expect(useChatStore.getState().messages).toHaveLength(1)
+      expect(useChatStore.getState().currentSessionId).toBe('chat-running')
+      expect(useChatStore.getState().isStreaming).toBe(true)
+      // The epoch is what orphans (and so cancels and deletes) the turn.
+      expect(useChatStore.getState().turnEpoch).toBe(epoch)
+    } finally {
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('New Chat during a reply resets once confirmed', () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      const epoch = useChatStore.getState().turnEpoch
+      useChatStore.setState({
+        messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }],
+        currentSessionId: 'chat-running',
+        isStreaming: true,
+      })
+      render(<ChatPage />)
+      const newChat = screen.getByRole('button', { name: /New Chat/ })
+      newChat.focus()
+      fireEvent.click(newChat)
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(useChatStore.getState().messages).toEqual([])
+      expect(useChatStore.getState().currentSessionId).toBeNull()
+      expect(useChatStore.getState().isStreaming).toBe(false)
+      expect(useChatStore.getState().turnEpoch).toBe(epoch + 1)
+      expect(screen.getByPlaceholderText('Message the meta agent...')).toHaveFocus()
+    } finally {
+      confirmSpy.mockRestore()
+    }
   })
 
   it('offers the server default plus Provider CRDs and prefills the model on pick', async () => {
@@ -103,6 +184,23 @@ describe('ChatPage', () => {
     expect(surface.className).toContain('-m-4')
     expect(surface.className).toContain('md:-m-6')
     expect(surface.className).not.toMatch(/(^|\s)-m-6(\s|$)/)
+    // The height adds the cancelled padding back so no band is left under
+    // the input and only the transcript scrolls.
+    expect(surface.className).toContain('h-[calc(100%+2rem)]')
+    expect(surface.className).toContain('md:h-[calc(100%+3rem)]')
+    expect(surface.className).not.toMatch(/(^|\s)h-full(\s|$)/)
+  })
+
+  it('lets the header controls wrap onto their own row on narrow screens', () => {
+    useChatStore.setState({ messages: [{ id: 'msg-1', role: 'user', content: 'Hello', timestamp: new Date().toISOString() }] })
+    render(<ChatPage />)
+    const newChat = screen.getByRole('button', { name: /New Chat/ })
+    const controls = newChat.parentElement as HTMLElement
+    expect(controls.className).toContain('w-full')
+    expect(controls.className).toContain('sm:w-auto')
+    expect(controls.parentElement!.className).toContain('flex-wrap')
+    expect(screen.getByRole('textbox', { name: 'Chat model' }).className).not.toMatch(/(^|\s)w-48(\s|$)/)
+    expect(screen.getByRole('combobox', { name: 'Chat provider' }).className).not.toMatch(/(^|\s)min-w-40(\s|$)/)
   })
 
   it('surfaces a not-authorized state instead of an empty provider list on 403', async () => {
@@ -232,5 +330,24 @@ describe('ChatPage', () => {
     useChatStore.setState({ currentSessionId: 'session-abc-123' })
     render(<ChatPage />)
     expect(screen.getByText('session-abc-123')).toBeInTheDocument()
+  })
+
+  it('ellipsizes a long model name from its end, with the full name in the title', () => {
+    const longModel = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0-with-a-very-long-deployment-suffix'
+    chatConfig.current = { ...chatConfig.current, model: longModel }
+    useChatStore.setState({ currentSessionId: 'chat-0123456789abcdef0123456789abcdef' })
+    render(<ChatPage />)
+    for (const text of [longModel, 'chat-0123456789abcdef0123456789abcdef']) {
+      const label = screen.getByText(text)
+      const badge = label.parentElement as HTMLElement
+      // A centered flex box would show only the middle of overflowing text;
+      // the inner span truncates from the end inside a left-aligned badge.
+      expect(label.tagName).toBe('SPAN')
+      expect(label).toHaveClass('truncate')
+      expect(badge).toHaveAttribute('data-slot', 'badge')
+      expect(badge).toHaveAttribute('title', text)
+      expect(badge).toHaveClass('min-w-0', 'max-w-full', 'justify-start')
+      expect(badge).not.toHaveClass('justify-center')
+    }
   })
 })

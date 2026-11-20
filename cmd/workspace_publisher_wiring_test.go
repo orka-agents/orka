@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/controller"
@@ -11,7 +12,7 @@ func TestWorkspacePublicationReclaimerWithoutPublisher(t *testing.T) {
 	t.Setenv("ORKA_WORKSPACE_PUBLISHER_URL", "")
 	t.Setenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE", "")
 
-	publisherClient, _, _, err := workspacePublisherClientFromEnv()
+	publisherClient, _, _, err := workspacePublisherClientFromEnv(context.Background(), startupRetry{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,7 @@ const (
 	repositoryMonitorCommandRetryDelay             = 30 * time.Second
 	repositoryMonitorCommandMaxRetries             = 3
 	repositoryMonitorCommandProcessed              = "processed"
+	repositoryMonitorCommandCompleted              = "completed"
 	repositoryMonitorRetiredAutomergeIntent        = "automerge"
 	repositoryMonitorRetiredApprovePlanIntent      = "approve_plan"
 	repositoryMonitorAutomergeCommandRetiredReason = "automerge_command_retired"
@@ -148,7 +149,7 @@ func (r *RepositoryMonitorReconciler) ensureNoExistingCommandRunBlocksQueue(ctx 
 		if mutation != nil && (mutation.Status == repositoryMonitorUpdateBranchSubmitting || mutation.Status == repositoryMonitorAutomergeStatePending || mutation.Status == repositoryMonitorRunPhaseSucceeded) {
 			now := time.Now()
 			deadline := repositoryMonitorUpdateBranchDeadline(mutation)
-			needsOutcomeVerification := strings.HasPrefix(run.Error, repositoryMonitorStaleRunError)
+			needsOutcomeVerification := repositoryMonitorRunErrorNeedsOutcomeVerification(run.Error)
 			if !deadline.IsZero() && !now.Before(deadline) && !needsOutcomeVerification {
 				run.Error = "[run_failed] " + repositoryMonitorUpdateBranchTimeoutReason
 				if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {
@@ -271,6 +272,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 		command.Status = repositoryMonitorCommandProcessed
 		command.ProcessedAt = &now
 		command.Error = firstNonEmptyWorkflow(action.Error, action.BlockedReason)
+		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {
+			return false, err
+		}
+		return true, nil
+	case repositoryMonitorWorkActionStatusCompleted:
+		// Command intake coalesced this command into an identical active
+		// action after the command was listed; record the outcome intake does.
+		command.Status = repositoryMonitorCommandCompleted
+		command.Error = store.RepositoryMonitorCoalescedCommandError(action.DependsOnActionID)
 		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {
 			return false, err
 		}

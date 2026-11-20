@@ -100,8 +100,13 @@ const (
 type TaskExecutionReason string
 
 const (
-	// TaskExecutionReasonAtCapacity is a scheduling reason, not a terminal Task phase.
+	// TaskExecutionReasonAtCapacity is a scheduling reason, not a terminal Task
+	// phase. It reports a generic runtime admission retry.
 	TaskExecutionReasonAtCapacity TaskExecutionReason = "AtCapacity"
+	// TaskExecutionReasonWaitingForCapacity reports admission blocked only by
+	// exhausted RuntimePool or provider capacity. It stays retryable and is
+	// bounded by the Task deadline; the WaitingForCapacity condition mirrors it.
+	TaskExecutionReasonWaitingForCapacity TaskExecutionReason = "WaitingForCapacity"
 	// TaskExecutionReasonRuntimeLost classifies accepted or running work lost with
 	// an unprovable terminal result; its outcome must be OutcomeUnknown.
 	TaskExecutionReasonRuntimeLost TaskExecutionReason = "RuntimeLost"
@@ -190,9 +195,9 @@ type TaskExecutionStatus struct {
 	// +optional
 	RuntimeSessionMCPDigest string `json:"runtimeSessionMCPDigest,omitempty"`
 
-	// RuntimeSessionWorkspaceDigest binds a reusable Session generation to the
-	// exact repository, source ref, verified baseline, intent, and relative root.
-	// It contains no credential material.
+	// RuntimeSessionWorkspaceDigest binds a reusable Session generation, or a
+	// task-scoped RuntimeSession, to the exact repository, source ref, verified
+	// baseline, intent, and relative root. It contains no credential material.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	// +optional
 	RuntimeSessionWorkspaceDigest string `json:"runtimeSessionWorkspaceDigest,omitempty"`
@@ -302,6 +307,9 @@ const (
 	// TaskDeliveryReasonCancellationRequestedAfterPublish records that publication
 	// won the durable CAS and must continue reconciliation despite cancellation.
 	TaskDeliveryReasonCancellationRequestedAfterPublish TaskDeliveryReason = "CancellationRequestedAfterPublish"
+	// TaskDeliveryReasonOperatorTainted records that publication was refused
+	// because operator access (orka task exec or cp) tainted the workspace.
+	TaskDeliveryReasonOperatorTainted TaskDeliveryReason = "OperatorTainted"
 )
 
 // TaskPullRequestReceipt is the bounded, non-secret receipt for an explicitly

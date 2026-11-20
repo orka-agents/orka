@@ -389,11 +389,22 @@ func validateChildToolCredentialConstraints(
 			}
 			return fmt.Errorf("resolve child task Tool %q in namespace %q: %w", toolName, child.Namespace, err)
 		}
-		if tool.Spec.HTTP == nil {
-			continue
-		}
 
 		requirements := childTransactionCredentialRequirements{secretNames: map[string]struct{}{}}
+		// The Substrate egress gateway injects these into the actor's
+		// requests, so invoking the Tool uses them.
+		for _, secretName := range aitools.SubstrateMCPEgressCredentialSecretNames(tool) {
+			if secretName == "" {
+				return fmt.Errorf("child task tool %q has an unresolved egress credential Secret reference", toolName)
+			}
+			requirements.addSecret(secretName)
+		}
+		if tool.Spec.HTTP == nil {
+			if err := validateChildTransactionCredentialRequirements(parent, fmt.Sprintf("tool %q credential", toolName), requirements); err != nil {
+				return err
+			}
+			continue
+		}
 		if authSecretRef := tool.Spec.HTTP.AuthSecretRef; authSecretRef != nil {
 			secretName := strings.TrimSpace(authSecretRef.Name)
 			if secretName == "" {

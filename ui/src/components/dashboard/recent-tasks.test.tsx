@@ -35,6 +35,14 @@ describe('RecentTasks', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
+  it('flags a recent task that is waiting for approval', () => {
+    const waiting = makeTask('gated', 'agent', 'Running', new Date().toISOString())
+    waiting.status = { phase: 'Running', conditions: [{ type: 'WaitingForApproval', status: 'True' }] }
+    render(<RecentTasks tasks={[waiting]} />)
+    expect(screen.getByText('gated')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for approval')).toBeInTheDocument()
+  })
+
   it('empty state shows "No tasks yet"', () => {
     render(<RecentTasks tasks={[]} />)
     expect(screen.getByText('No tasks yet')).toBeInTheDocument()

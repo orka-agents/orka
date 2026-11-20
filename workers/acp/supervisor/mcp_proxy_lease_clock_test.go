@@ -232,7 +232,7 @@ func TestMCPProxyCallerAheadTimeCannotLoosenAuthority(t *testing.T) {
 					renewedAuth.ExpiresAt = renewedLease.ExpiresAt
 					err = session.renew(renewedAuth, renewedLease, callerNow)
 				case "call":
-					_, _, _, err = session.authorizeCall("lookup", callerNow)
+					_, _, _, err = session.authorizeCall("lookup", callerNow, false)
 				case "permission":
 					err = session.authorizePermissionTool("claude", auth.PromptID, "lookup", callerNow)
 				case "running":
@@ -262,7 +262,7 @@ func TestMCPProxyAuthorizeCallUsesLockedTime(t *testing.T) {
 				} else {
 					time.Sleep(30 * time.Second)
 				}
-				gate, admitted, _, err := session.authorizeCall("lookup", now)
+				gate, admitted, _, err := session.authorizeCall("lookup", now, false)
 				if expired {
 					if err == nil || gate != nil || admitted.PromptID != "" {
 						t.Fatal("tool-call guard admitted expired authority using stale caller time")

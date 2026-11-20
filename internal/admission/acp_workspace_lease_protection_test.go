@@ -53,6 +53,10 @@ func TestACPWorkspaceLeaseProtectionReservesControllerLeases(t *testing.T) {
 		{name: "namespace controller delete", operation: apiserveradmission.Delete, username: namespaceControllerUsername, leaseName: quotaLease, allowed: true},
 		{name: "garbage collector update", operation: apiserveradmission.Update, username: genericGarbageCollectorUsername, leaseName: quotaLease},
 		{name: "garbage collector create", operation: apiserveradmission.Create, username: kubeControllerManagerUsername, leaseName: retentionFence},
+		{name: "forged enforcement marker create", operation: apiserveradmission.Create, username: untrustedUsername, leaseName: "orka-agent-use-enforcement"},
+		{name: "forged enforcement marker delete", operation: apiserveradmission.Delete, username: untrustedUsername, leaseName: "orka-agent-use-enforcement"},
+		{name: "controller enforcement marker create", operation: apiserveradmission.Create, username: trustedControllerUser, leaseName: "orka-agent-use-enforcement", allowed: true},
+		{name: "controller enforcement marker delete", operation: apiserveradmission.Delete, username: trustedControllerUser, leaseName: "orka-agent-use-enforcement", allowed: true},
 	}
 
 	kind := coordinationv1.SchemeGroupVersion.WithKind("Lease")

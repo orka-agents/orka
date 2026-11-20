@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, within } from '@/test/test-utils'
 import userEvent from '@testing-library/user-event'
+import { http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
 
 const navigateMock = vi.fn()
 vi.mock('@tanstack/react-router', async () => {
@@ -45,6 +47,27 @@ describe('ExecutionGraph', () => {
     expect(screen.getByText('reviewer')).toBeInTheDocument()
   })
 
+
+  it('gives truncated task, agent, and model labels their full text as a tooltip', () => {
+    const task = makeTask({
+      metadata: { name: 'a-very-long-parent-task-name-that-truncates', namespace: 'default', uid: 'uid-1' },
+      status: {
+        phase: 'Running',
+        childTasks: [{ name: 'a-very-long-child-task-name', agent: 'a-very-long-agent-name', phase: 'Running' }],
+      },
+    })
+    const events: ExecutionEvent[] = [{
+      id: 'event-1', namespace: 'default', streamType: 'task', streamID: 'parent-task', seq: 1,
+      type: 'ModelRequestCompleted', severity: 'info', provider: 'anthropic', model: 'claude-sonnet-4-long-model-id',
+      createdAt: '2026-01-01T00:00:00Z',
+    }]
+    render(<ExecutionGraph task={task} events={events} />)
+    for (const text of ['a-very-long-parent-task-name-that-truncates', 'a-very-long-child-task-name', 'a-very-long-agent-name', 'claude-sonnet-4-long-model-id · anthropic']) {
+      const label = screen.getByText(text)
+      expect(label).toHaveClass('truncate')
+      expect(label).toHaveAttribute('title', text)
+    }
+  })
 
   it('renders GenAI telemetry from model events', () => {
     const task = makeTask()
@@ -183,5 +206,64 @@ describe('ExecutionGraph', () => {
     })
     render(<ExecutionGraph task={task} />)
     expect(screen.getByText('done-42')).toBeInTheDocument()
+  })
+
+  it('tones a failed child result as a failure, not a success', () => {
+    const task = makeTask({
+      status: { phase: 'Running', childTasks: [{ name: 'c2', agent: 'r', phase: 'Failed', result: 'tests did not pass' }] },
+    })
+    render(<ExecutionGraph task={task} />)
+    const chip = screen.getByText('Failed: tests did not pass')
+    expect(chip).toHaveClass('text-status-failed')
+    expect(chip).not.toHaveClass('text-status-succeeded')
+    expect(chip).toHaveAttribute('title', 'tests did not pass')
+  })
+
+  it("shows a failed child's own status message when it reported no result", async () => {
+    const requested: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/children', ({ params }) => {
+        requested.push(String(params.id))
+        return HttpResponse.json({
+          items: [
+            { metadata: { name: 'c3', namespace: 'default' }, spec: { type: 'container' }, status: { phase: 'Failed', message: 'pod waiting: ErrImagePull - not found' } },
+            { metadata: { name: 'c4', namespace: 'default' }, spec: { type: 'container' }, status: { phase: 'Succeeded', message: 'Job completed' } },
+          ],
+          metadata: {},
+        })
+      }),
+    )
+    const task = makeTask({
+      status: {
+        phase: 'Running',
+        childTasks: [
+          { name: 'c3', agent: 'r', phase: 'Failed' },
+          { name: 'c4', agent: 'r', phase: 'Succeeded' },
+        ],
+      },
+    })
+    render(<ExecutionGraph task={task} />)
+    const chip = await screen.findByText('Failed: pod waiting: ErrImagePull - not found')
+    expect(chip).toHaveClass('text-status-failed')
+    // A succeeded child's message is not a result.
+    expect(screen.queryByText('Job completed')).not.toBeInTheDocument()
+    expect(requested).toEqual(['parent-task'])
+  })
+
+  it('does not read the children list when every failed child reported a result', async () => {
+    const requested: string[] = []
+    server.use(
+      http.get('/api/v1/tasks/:id/children', ({ params }) => {
+        requested.push(String(params.id))
+        return HttpResponse.json({ items: [], metadata: {} })
+      }),
+    )
+    const task = makeTask({
+      status: { phase: 'Running', childTasks: [{ name: 'c5', agent: 'r', phase: 'Failed', result: 'lint failed' }] },
+    })
+    render(<ExecutionGraph task={task} />)
+    expect(screen.getByText('Failed: lint failed')).toBeInTheDocument()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(requested).toEqual([])
   })
 })

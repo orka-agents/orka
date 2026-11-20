@@ -20,6 +20,10 @@ import (
 const (
 	maxOpenToolAccumulators     = 128
 	maxBufferedToolContentBytes = 1 << 20
+
+	// mappedAppendReconcileTimeout is the shortest budget a failed append's
+	// reconcile reads under. See reconcileFailedAppend.
+	mappedAppendReconcileTimeout = 5 * time.Second
 )
 
 // Journal owns duplicate-safe persistence of mapped harness v2 updates.
@@ -709,9 +713,16 @@ func (s *State) appendUpdateIfNew(
 		s.markProcessed(identity)
 		return nil, false, nil
 	}
-	if event.Update.Kind == harnessv2.UpdateAssistantMessageChunk {
+	if event.Update.Kind == harnessv2.UpdateAssistantMessageChunk || event.Update.Kind == harnessv2.UpdateAssistantThoughtChunk {
 		// The complete terminal transcript is persisted once redaction can see
-		// all chunk boundaries. Advance only the bounded sequence high-water.
+		// all chunk boundaries, and reasoning is never persisted. Advance only
+		// the bounded sequence high-water.
+		s.markProcessed(identity)
+		return nil, false, nil
+	}
+	if isLiveOnlyToolUpdate(event) && s.toolStartPersisted(event) {
+		// Raw input and file edits are live-only; once the start is durable an
+		// update carrying nothing else adds no telemetry.
 		s.markProcessed(identity)
 		return nil, false, nil
 	}
@@ -803,6 +814,17 @@ func isBufferedToolContentUpdate(event harnessv2.Event) bool {
 	content, multipleBlocks := toolContentFragment(tool.Content)
 	return (tool.ContentOmitted || tool.ContentReplace || content != "" || multipleBlocks) &&
 		tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
+}
+
+// isLiveOnlyToolUpdate reports a non-terminal tool update whose only payload
+// is live-update fields.
+func isLiveOnlyToolUpdate(event harnessv2.Event) bool {
+	if event.Update == nil || event.Update.ToolCall == nil || isTerminalToolUpdate(event) {
+		return false
+	}
+	tool := event.Update.ToolCall
+	return tool.Title == "" && tool.Kind == "" && len(tool.Content) == 0 && !tool.ContentReplace && !tool.ContentOmitted &&
+		(tool.Name != "" || len(tool.RawInput) > 0 || len(tool.Diffs) > 0)
 }
 
 func isNonTerminalToolUpdate(event harnessv2.Event) bool {
@@ -1243,11 +1265,9 @@ func (s *State) appendMappedEventWithPlan(
 ) (*store.ExecutionEvent, bool, error) {
 	// Usage attribution comes from the controller's frozen profile, not the
 	// runtime's free-text model field or the cross-turn redacted public event.
-	// Set it at the append boundary so mapped content cannot override it.
-	if mapped.Internal == nil {
-		mapped.Internal = make(map[string]any)
-	}
-	mapped.Internal["harnessV2UsageModel"] = s.journal.MapContext.normalized().Model
+	// Set it at the append boundary so mapped content cannot override it, and
+	// only for the appends: reconciliation reads do not carry it.
+	appendCtx := store.WithUsageAttribution(ctx, store.UsageAttribution{Model: s.journal.MapContext.normalized().Model})
 	key := identity.Key()
 	if isMappedToolTerminalEvent(*mapped) {
 		// Real runtime terminal updates and synthesized recovery closures race
@@ -1272,13 +1292,13 @@ func (s *State) appendMappedEventWithPlan(
 			if !ok {
 				return nil, false, fmt.Errorf("execution event store does not support atomic plan projection")
 			}
-			return atomicStore.AppendExecutionEventWithPlanIfAbsent(ctx, mapped, dedupeKey, plan)
+			return atomicStore.AppendExecutionEventWithPlanIfAbsent(appendCtx, mapped, dedupeKey, plan)
 		}
 		deduplicatingStore, ok := s.journal.EventStore.(store.DeduplicatingExecutionEventStore)
 		if !ok {
 			return nil, false, fmt.Errorf("execution event store does not support atomic deduplication")
 		}
-		return deduplicatingStore.AppendExecutionEventIfAbsent(ctx, mapped, dedupeKey)
+		return deduplicatingStore.AppendExecutionEventIfAbsent(appendCtx, mapped, dedupeKey)
 	}
 	appended, isNew, err := appendIfAbsent()
 	if err == nil {
@@ -1289,13 +1309,18 @@ func (s *State) appendMappedEventWithPlan(
 		return appended, true, nil
 	}
 	firstErr := fmt.Errorf("%s: %w", operation, err)
-	persisted, reconcileErr := s.journal.hasPersistedIdentity(ctx, key)
+	persisted, reconcileErr := s.journal.reconcileFailedAppend(ctx, key)
 	if reconcileErr != nil {
 		return nil, false, errors.Join(firstErr, fmt.Errorf("reconcile failed append: %w", reconcileErr))
 	}
 	if persisted {
 		s.markPersisted(identity, kind, false)
 		return nil, false, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The caller's context has ended, so a retry under it cannot reach
+		// the store, and its reconcile would only repeat the scan above.
+		return nil, false, errors.Join(firstErr, fmt.Errorf("%s retry skipped: %w", operation, ctxErr))
 	}
 
 	appended, isNew, err = appendIfAbsent()
@@ -1307,7 +1332,7 @@ func (s *State) appendMappedEventWithPlan(
 		return appended, true, nil
 	}
 	retryErr := fmt.Errorf("%s retry: %w", operation, err)
-	persisted, reconcileErr = s.journal.hasPersistedIdentity(ctx, key)
+	persisted, reconcileErr = s.journal.reconcileFailedAppend(ctx, key)
 	if reconcileErr != nil {
 		return nil, false, errors.Join(firstErr, retryErr, fmt.Errorf("reconcile failed append retry: %w", reconcileErr))
 	}
@@ -1338,6 +1363,31 @@ func (s *State) markPersisted(identity MappedUpdateIdentity, kind mappedJournalR
 	case mappedJournalRecordPromptTerminal:
 		s.promptTerminalSequence = identity.Sequence
 	}
+}
+
+// reconcileFailedAppend reports whether a failed append's key is durable.
+// An append that waited out its caller's deadline, for example behind a
+// stalled store, leaves no time to read under that deadline, and a read
+// under it would fail without reaching the store. So the reconcile reads
+// under at least mappedAppendReconcileTimeout, detached from the caller's
+// deadline. A caller that cancelled its context gets no further reads, and
+// one that cancels it before the deadline passes stops the reconcile. The
+// retry append that may follow still runs under the caller's context.
+func (j Journal) reconcileFailedAppend(ctx context.Context, key string) (bool, error) {
+	if deadline, ok := ctx.Deadline(); ok && !errors.Is(ctx.Err(), context.Canceled) &&
+		time.Until(deadline) < mappedAppendReconcileTimeout {
+		caller := ctx
+		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(caller), mappedAppendReconcileTimeout)
+		defer cancel()
+		stop := context.AfterFunc(caller, func() {
+			if errors.Is(caller.Err(), context.Canceled) {
+				cancel()
+			}
+		})
+		defer stop()
+		return j.hasPersistedIdentity(reconcileCtx, key)
+	}
+	return j.hasPersistedIdentity(ctx, key)
 }
 
 func (j Journal) hasPersistedIdentity(ctx context.Context, key string) (bool, error) {

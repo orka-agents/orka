@@ -30,7 +30,7 @@ func TestSubmitResultWaitsForJobIdentityPublication(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	data := sqlite.NewStore(db, ":memory:")
+	data := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewInternalHandlers(data, data, data, data, data, InternalHandlersConfig{Client: kube, APIReader: kube})
 
 	type publicationObservation struct {

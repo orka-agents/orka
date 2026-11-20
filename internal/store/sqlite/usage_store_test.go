@@ -7,8 +7,10 @@ import (
 	"math"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/stretchr/testify/require"
 
@@ -210,7 +212,7 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 		require.NoError(t, err)
 		event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
 			Severity: "info", Content: content, CreatedAt: start.Add(time.Duration(sequence) * time.Second)}
-		_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), event, fmt.Sprintf("%d/%s", sequence, journal))
+		_, _, err = orkaClient(t, s).AppendExecutionEventIfAbsent(context.Background(), event, fmt.Sprintf("%d/%s", sequence, journal))
 		require.NoError(t, err)
 		return event
 	}
@@ -233,7 +235,7 @@ func TestUsageJournalReplayCleanupAndRestart(t *testing.T) {
 	s = NewStore(db, path)
 	// The event journal itself was cleaned up. The accounting identity still
 	// prevents replay of its final summary from charging the team twice.
-	_, _, err = s.AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
+	_, _, err = orkaClient(t, s).AppendExecutionEventIfAbsent(context.Background(), final, "4/terminal_usage")
 	require.NoError(t, err)
 	require.Equal(t, int64(1500), get().Summary.TotalTokens)
 	require.Equal(t, "partial", get().Summary.Completeness)
@@ -271,7 +273,7 @@ func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
 			require.NoError(t, err)
 			event := &store.ExecutionEvent{Namespace: "a", TaskName: task.uid, StreamType: "task", StreamID: task.uid,
 				SessionName: "conversation", Type: events.ExecutionEventTypeModelUsageUpdated, Severity: "info", Content: content, CreatedAt: at}
-			_, err = s.AppendExecutionEvent(t.Context(), event)
+			_, err = orkaClient(t, s).AppendExecutionEvent(t.Context(), event)
 			require.NoError(t, err)
 			journal = append(journal, event)
 		}
@@ -296,7 +298,7 @@ func TestUsageEqualTimestampsPreserveJournalOrderAcrossTasks(t *testing.T) {
 		require.NoError(t, s.DeleteExecutionEvents(t.Context(), "a", "task", task))
 	}
 	for _, j := range slices.Backward(journal) {
-		_, err := s.AppendExecutionEvent(t.Context(), j)
+		_, err := orkaClient(t, s).AppendExecutionEvent(t.Context(), j)
 		require.NoError(t, err)
 	}
 	check()
@@ -348,10 +350,10 @@ func TestUsageInvalidACPCountsDoNotAbortJournal(t *testing.T) {
 					require.NoError(t, err)
 					event := &store.ExecutionEvent{Namespace: "a", TaskName: "task", StreamType: "task", StreamID: "task", Type: typ,
 						Severity: "info", Content: encoded, CreatedAt: start.Add(time.Duration(i+1) * time.Second)}
-					_, added, err := s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					_, added, err := orkaClient(t, s).AppendExecutionEventIfAbsent(t.Context(), event, typ)
 					require.NoError(t, err)
 					require.True(t, added)
-					_, added, err = s.AppendExecutionEventIfAbsent(t.Context(), event, typ)
+					_, added, err = orkaClient(t, s).AppendExecutionEventIfAbsent(t.Context(), event, typ)
 					require.NoError(t, err)
 					require.False(t, added)
 				}
@@ -865,4 +867,75 @@ func TestUsageLegacyPhaseHistoryKeepsItsOriginalVisibility(t *testing.T) {
 	require.NoError(t, s.RegisterUsageTask(t.Context(), legacy))
 	require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
 	require.Equal(t, "Succeeded", usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), time.Now().UTC()).Works[0].Tasks[0].Phase)
+}
+
+// Rows are found by session name as the controller reads it, without
+// surrounding space of any kind, and however many names are asked for.
+func TestUsageTasksInSessions(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for uid, session := range map[string]string{
+		"plain": "ahp-one", "padded": " ahp-one\t", "longer": "ahp-one-2", "other": "ahp-two", "team": "team-session",
+		"unicode-padded": "\u0085ahp-one\u3000\u2029", "prefixed": "x-ahp-one",
+	} {
+		require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team", TaskUID: uid, TaskName: uid, SessionName: session,
+			Phase: "Succeeded", StartedAt: at}))
+	}
+	names := make([]string, 0, 1501)
+	names = append(names, "ahp-one")
+	for i := range 1500 {
+		names = append(names, fmt.Sprintf("ahp-absent-%d", i))
+	}
+	tasks, err := s.ListUsageTasksInSessions(ctx, "team", "", names, time.Time{}, 100)
+	require.NoError(t, err)
+	found := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		found = append(found, task.TaskUID)
+	}
+	require.ElementsMatch(t, []string{"plain", "padded", "unicode-padded"}, found)
+	// A row whose name merely holds a wanted one is not read: this one would
+	// not decode.
+	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
+		"team", "superstring", "superstring", at.UnixNano(), `{"namespace":"team","taskUID":"superstring","sessionName":"ahp-one-3","startedAt":5}`)
+	require.NoError(t, err)
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 100)
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 1)
+	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
+	// A turn that started after the cut-off is not read either: this one
+	// would not decode, and the lookup's limit does not count it.
+	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
+		"team", "later", "later", at.Add(time.Hour).UnixNano(), `{"namespace":"team","taskUID":"later","sessionName":"ahp-one","startedAt":5}`)
+	require.NoError(t, err)
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, at, 3)
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Time{}, 100)
+	require.Error(t, err, "without a cut-off the later turn is read")
+	// The Unix epoch is a cut-off too, before every turn here.
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, time.Unix(0, 0), 100)
+	require.NoError(t, err)
+	require.Empty(t, tasks)
+	_, err = s.db.ExecContext(ctx, `DELETE FROM usage_tasks WHERE namespace = 'team' AND task_uid = 'later'`)
+	require.NoError(t, err)
+	// An earlier namespace of the same name stays out.
+	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "old", TaskUID: "old-turn", TaskName: "old-turn",
+		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
+	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "new", TaskUID: "new-turn", TaskName: "new-turn",
+		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
+	tasks, err = s.ListUsageTasksInSessions(ctx, "uids", "new", []string{"ahp-one"}, time.Time{}, 100)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "new-turn", tasks[0].TaskUID)
+}
+
+// SQL trims a session name of exactly what strings.TrimSpace does.
+func TestUsageSpaceIsEveryUnicodeSpace(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) != strings.ContainsRune(usageSpace, r) {
+			t.Fatalf("U+%04X: unicode.IsSpace = %v, in usageSpace = %v", r, unicode.IsSpace(r), !unicode.IsSpace(r))
+		}
+	}
 }

@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -33,29 +32,17 @@ func configureAgentExecutionBindingTest(
 		t.Fatal(err)
 	}
 	if reconciler.AgentExecutionSnapshots == nil {
-		if sqliteStore, ok := reconciler.DurableControlStore.(*sqlite.Store); ok {
-			cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x35}, sqlite.AgentExecutionSnapshotKeyBytes))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := sqliteStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-				t.Fatal(err)
-			}
-			reconciler.AgentExecutionSnapshots = sqliteStore
+		if sealed, ok := reconciler.DurableControlStore.(*sealedTestStore); ok {
+			reconciler.AgentExecutionSnapshots = sealed
+		} else if sqliteStore, ok := reconciler.DurableControlStore.(*sqlite.Store); ok {
+			reconciler.AgentExecutionSnapshots = sealedStore(t, sqliteStore)
 		} else {
 			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "binding-snapshots.db"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = db.Close() })
-			snapshotStore := sqlite.NewStore(db, "binding-test")
-			cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x35}, sqlite.AgentExecutionSnapshotKeyBytes))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := snapshotStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-				t.Fatal(err)
-			}
+			snapshotStore := sealedStore(t, sqlite.NewStore(db, "binding-test"))
 			reconciler.AgentExecutionSnapshots = snapshotStore
 		}
 	}

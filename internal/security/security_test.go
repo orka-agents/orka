@@ -15,28 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestArtifactWorkspacePath(t *testing.T) {
-	tests := []struct {
-		name    string
-		subPath string
-		want    string
-	}{
-		{name: "root", subPath: "", want: ArtifactWorkspaceDir},
-		{name: "single level", subPath: "services", want: "../" + ArtifactWorkspaceDir},
-		{name: "nested", subPath: "services/api", want: "../../" + ArtifactWorkspaceDir},
-		{name: "normalizes slashes", subPath: "/services/api/", want: "../../" + ArtifactWorkspaceDir},
-		{name: "ignores traversal", subPath: "../services", want: ArtifactWorkspaceDir},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ArtifactWorkspacePath(tt.subPath); got != tt.want {
-				t.Fatalf("ArtifactWorkspacePath(%q) = %q, want %q", tt.subPath, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseGitHubRepositoryURL(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -99,6 +77,36 @@ func TestParseGitHubRepositoryURL(t *testing.T) {
 			}
 			if owner != tt.wantOwner || repo != tt.wantRepo {
 				t.Fatalf("ParseGitHubRepositoryURL(%q) = %q/%q, want %q/%q", tt.repoURL, owner, repo, tt.wantOwner, tt.wantRepo)
+			}
+		})
+	}
+}
+
+func TestValidateRepositoryScanSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    corev1alpha1.RepositoryScanSpec
+		wantErr string
+	}{
+		{name: "default provider", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project"}},
+		{name: "SSH root", spec: corev1alpha1.RepositoryScanSpec{Provider: "github", RepoURL: "git@github.com:example/project.git"}},
+		{name: "not a URL", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "not a url"}, wantErr: "spec.repoURL must be a GitHub repository URL"},
+		{name: "other forge", spec: corev1alpha1.RepositoryScanSpec{Provider: "github", RepoURL: "https://gitlab.com/a/b"}, wantErr: "spec.repoURL must be a GitHub repository URL"},
+		{name: "missing repository", spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example"}, wantErr: "spec.repoURL must include GitHub owner and repository"},
+		{name: "empty", spec: corev1alpha1.RepositoryScanSpec{}, wantErr: "spec.repoURL is required"},
+		{name: "unsupported provider", spec: corev1alpha1.RepositoryScanSpec{Provider: "gitlab", RepoURL: "https://github.com/example/project"}, wantErr: `spec.provider "gitlab" is not supported`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRepositoryScanSource(tt.spec)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateRepositoryScanSource() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ValidateRepositoryScanSource() error = %v, want %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -335,7 +343,7 @@ func TestBuildValidationResultPromptIncludesFindingQualityPolicy(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
 	finding := &store.Finding{ID: "fnd_1", Title: "Finding", Severity: "high", Confidence: "high"}
 	got := BuildValidationResultPrompt(scan, finding, testResultBinding())
-	for _, want := range []string{"FINDING QUALITY POLICY", "theoretical, stale, docs-only, test-only, client-only", "status=failed"} {
+	for _, want := range []string{"FINDING QUALITY POLICY", "stale, docs-only, test-only, client-only", "status=failed"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("BuildValidationResultPrompt() missing %q:\n%s", want, got)
 		}

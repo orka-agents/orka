@@ -67,7 +67,7 @@ func newCompatRouterIntegration(t *testing.T) *compatRouterIntegration {
 		db, err := sqlite.NewDB(":memory:")
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, db.Close()) })
-		results := sqlite.NewStore(db, ":memory:")
+		results := testStorageClient(sqlite.NewStore(db, ":memory:"))
 		require.NoError(t, results.SaveResult(t.Context(), namespace, "same-task", []byte("RESULT:"+namespace)))
 		kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace, UID: types.UID(namespace + "-uid")}},

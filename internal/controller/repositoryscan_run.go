@@ -77,12 +77,16 @@ func readyCondition(generation int64, status metav1.ConditionStatus, reason, mes
 }
 
 func (r *RepositoryScanReconciler) listCurrentScanTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, runID string) (*corev1alpha1.TaskList, error) {
+	return r.listCurrentScanTasksFrom(ctx, r.Client, scan, runID)
+}
+
+func (r *RepositoryScanReconciler) listCurrentScanTasksFrom(ctx context.Context, reader client.Reader, scan *corev1alpha1.RepositoryScan, runID string) (*corev1alpha1.TaskList, error) {
 	selector := map[string]string{labels.LabelSecurityTarget: labels.SelectorValue(scan.Name)}
 	if runID != "" {
 		selector[labels.LabelSecurityScanID] = runID
 	}
 	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks, client.InNamespace(scan.Namespace), client.MatchingLabels(selector)); err != nil {
+	if err := reader.List(ctx, &tasks, client.InNamespace(scan.Namespace), client.MatchingLabels(selector)); err != nil {
 		return nil, err
 	}
 	var err error

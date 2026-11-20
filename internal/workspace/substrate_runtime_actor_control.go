@@ -538,7 +538,7 @@ func (c *substrateRuntimeActorControl) SettleActor(ctx context.Context, actorID 
 }
 
 func (c *substrateRuntimeActorControl) DeleteActor(ctx context.Context, actorID string) error {
-	if err := c.control.DeleteActor(ctx, actorID); err != nil && !IsKind(err, ErrorKindNotFound) {
+	if err := c.control.DeleteActor(ctx, actorID, ""); err != nil && !IsKind(err, ErrorKindNotFound) {
 		return err
 	}
 	return nil

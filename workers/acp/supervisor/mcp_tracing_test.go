@@ -85,7 +85,7 @@ func TestMCPProxyBrokerUsesAdmittedPromptTrace(t *testing.T) {
 			if err := session.markRunning(authorization.PromptID, now); err != nil {
 				t.Fatal(err)
 			}
-			gate, _, _, err := session.authorizeCall("lookup", now)
+			gate, _, _, err := session.authorizeCall("lookup", now, false)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -18,6 +18,21 @@ function stepIndex(phase?: string): number {
   return 2
 }
 
+// A step is done once the task has moved past it; the final step is done
+// when the task is terminal, marked by its outcome rather than shown as the
+// "current" step forever.
+function stepMarker(index: number, current: number, phase?: string): { mark: string; className: string } {
+  const finished = current === steps.length - 1
+  if (index < current) return { mark: '✓', className: 'bg-status-succeeded-bg text-status-succeeded' }
+  if (index === current && finished) {
+    if (phase === 'Succeeded') return { mark: '✓', className: 'bg-status-succeeded-bg text-status-succeeded' }
+    if (phase === 'Failed') return { mark: '✕', className: 'bg-status-failed-bg text-status-failed' }
+    return { mark: '✕', className: 'bg-muted text-foreground' }
+  }
+  if (index === current) return { mark: String(index + 1), className: 'bg-status-running-bg text-status-running' }
+  return { mark: String(index + 1), className: 'bg-muted text-muted-foreground' }
+}
+
 function statusClass(value?: string) {
   switch (value) {
     case 'Succeeded':
@@ -79,27 +94,6 @@ function ElapsedTime({ startTime, completionTime }: { startTime?: string; comple
   }, [startTime, completionTime])
 
   return <span data-testid="elapsed-time">{elapsed}</span>
-}
-
-function ChildTaskSummary({ childTasks }: { childTasks: NonNullable<Task['status']>['childTasks'] }) {
-  if (!childTasks?.length) return null
-  const running = childTasks.filter((child) => child.phase === 'Running').length
-  const succeeded = childTasks.filter((child) => child.phase === 'Succeeded').length
-  const failed = childTasks.filter((child) => child.phase === 'Failed').length
-  const pending = childTasks.filter((child) => child.phase === 'Pending').length
-
-  return (
-    <div data-testid="child-task-summary">
-      <span className="text-sm text-muted-foreground">Child Tasks: </span>
-      <span className="text-sm">
-        {childTasks.length} total
-        {pending > 0 && <span className="text-yellow-600 dark:text-yellow-400"> · {pending} pending</span>}
-        {running > 0 && <span className="text-blue-600 dark:text-blue-400"> · {running} running</span>}
-        {succeeded > 0 && <span className="text-green-600 dark:text-green-400"> · {succeeded} succeeded</span>}
-        {failed > 0 && <span className="text-red-600 dark:text-red-400"> · {failed} failed</span>}
-      </span>
-    </div>
-  )
 }
 
 function DurableExecution({ task }: { task: Task }) {
@@ -186,6 +180,10 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
   const totalIn = modelEvents.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0)
   const totalOut = modelEvents.reduce((sum, event) => sum + (event.outputTokens ?? 0), 0)
   const totalCachedIn = modelEvents.reduce((sum, event) => sum + (event.cachedInputTokens ?? 0), 0)
+  // Some runtimes (OpenCode) report model requests without token counts;
+  // a sum of zeros would read as a real "0 tokens" measurement.
+  const usageRecorded = modelEvents.some((event) =>
+    event.inputTokens !== undefined || event.outputTokens !== undefined || event.cachedInputTokens !== undefined)
   const current = stepIndex(phase)
 
   return (
@@ -194,22 +192,20 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
         <CardTitle>Execution</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
-        <div className="flex items-center gap-2" data-testid="progress-steps">
-          {steps.map((step, index) => (
-            <div key={step} className="flex items-center gap-2">
-              <div className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium ${
-                index < current
-                  ? 'bg-status-succeeded-bg text-status-succeeded'
-                  : index === current
-                    ? 'bg-status-running-bg text-status-running'
-                    : 'bg-muted text-muted-foreground'
-              }`}>
-                {index < current ? '✓' : index + 1}
+        {/* Steps wrap on narrow cards instead of running past the edge. */}
+        <div className="flex flex-wrap items-center gap-2" data-testid="progress-steps">
+          {steps.map((step, index) => {
+            const marker = stepMarker(index, current, phase)
+            return (
+              <div key={step} className="flex items-center gap-2">
+                <div className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium ${marker.className}`}>
+                  {marker.mark}
+                </div>
+                <span className={`text-sm ${index <= current ? 'font-medium' : 'text-muted-foreground'}`}>{step}</span>
+                {index < steps.length - 1 && <div className={`h-0.5 w-8 ${index < current ? 'bg-status-succeeded' : 'bg-muted'}`} />}
               </div>
-              <span className={`text-sm ${index <= current ? 'font-medium' : 'text-muted-foreground'}`}>{step}</span>
-              {index < steps.length - 1 && <div className={`h-0.5 w-8 ${index < current ? 'bg-status-succeeded' : 'bg-muted'}`} />}
-            </div>
-          ))}
+            )
+          })}
         </div>
 
         <div className="grid gap-3 text-sm md:grid-cols-2">
@@ -226,8 +222,14 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
           <div className="rounded-md border p-3 text-sm" aria-label="GenAI token rollup">
             <div className="font-medium">GenAI tokens</div>
             <div className="text-muted-foreground">
-              {totalIn + totalOut} total · {totalIn} input · {totalOut} output
-              {totalCachedIn > 0 ? ` · ${totalCachedIn} cached input` : ''}
+              {usageRecorded ? (
+                <>
+                  {totalIn + totalOut} total · {totalIn} input · {totalOut} output
+                  {totalCachedIn > 0 ? ` · ${totalCachedIn} cached input` : ''}
+                </>
+              ) : (
+                'Usage unavailable: the runtime did not report token counts.'
+              )}
             </div>
             <div className="mt-2 flex flex-wrap gap-2 text-xs">
               {modelEvents.map((event) => (
@@ -257,7 +259,6 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
           </div>
         )}
 
-        <ChildTaskSummary childTasks={task.status?.childTasks} />
       </CardContent>
     </Card>
   )

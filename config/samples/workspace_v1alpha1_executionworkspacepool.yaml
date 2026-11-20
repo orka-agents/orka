@@ -5,7 +5,7 @@ metadata:
   namespace: default
 spec:
   providerRef:
-    name: fake-local
+    name: fake
   parametersRef:
     group: fake.workspace.orka.ai
     kind: FakePoolParameters

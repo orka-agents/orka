@@ -9,11 +9,11 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
@@ -35,7 +35,7 @@ func assertNativeSessionEnvironment(t *testing.T, env []corev1.EnvVar, want int)
 	}
 }
 
-func TestRuntimePoolNativeSessionLimitsAllBackends(t *testing.T) {
+func TestRuntimePoolNativeSessionLimitsWorkloadContracts(t *testing.T) {
 	for _, limit := range []int{0, 12 << 20, harnessv2.MaxNativeSessionBytes} {
 		t.Run(strconv.Itoa(limit), func(t *testing.T) {
 			want := limit
@@ -66,41 +66,14 @@ func TestRuntimePoolNativeSessionLimitsAllBackends(t *testing.T) {
 				})
 			}
 
-			t.Run("agent sandbox", func(t *testing.T) {
-				pool := runtimePoolWorkspaceTestObject()
-				r := runtimePoolTestReconciler(t, runtimePoolWorkspaceTestScheme(t), nil, pool)
-				r.NativeSessionMaxBytes = limit
-				runtimePoolReconcile(t, r, pool)
-				template, _, _ := runtimePoolWorkspaceTestChildren(t, r, pool)
-				if template == nil {
-					t.Fatal("Agent Sandbox template was not created")
-				}
-				assertNativeSessionEnvironment(t, template.Spec.PodTemplate.Spec.Containers[0].Env, want)
-			})
-			t.Run("substrate", func(t *testing.T) {
-				r, pool := runtimePoolSubstrateTestReconciler(t, nil, &fakeSubstrateActorControl{})
-				r.NativeSessionMaxBytes = limit
-				cfg, err := r.runtimePoolConfig(pool)
-				if err != nil {
+			t.Run("external workspace", func(t *testing.T) {
+				f := newExternalRuntimePoolFixture(t)
+				f.r.NativeSessionMaxBytes = limit
+				workspace, _ := f.serve(t)
+				if err := workspaceprovider.ValidateWorkspaceWorkload(workspace); err != nil {
 					t.Fatal(err)
 				}
-				rendered, err := r.renderSubstrateRuntimeTemplate(pool, cfg, substrateTestBaseTemplate(), substrateTestTemplateNamespace, "test-actor", "test-nonce", "test-public-key")
-				if err != nil {
-					t.Fatal(err)
-				}
-				containers, _, err := unstructured.NestedSlice(rendered.object.Object, "spec", "containers")
-				if err != nil || len(containers) != 1 {
-					t.Fatalf("Substrate rendered container: %v", err)
-				}
-				env := containers[0].(map[string]any)["env"].([]any)
-				var typed []corev1.EnvVar
-				for _, item := range env {
-					values := item.(map[string]any)
-					if values["name"] == "ORKA_NATIVE_SESSION_MAX_BYTES" {
-						typed = append(typed, corev1.EnvVar{Name: values["name"].(string), Value: values["value"].(string)})
-					}
-				}
-				assertNativeSessionEnvironment(t, typed, want)
+				assertNativeSessionEnvironment(t, workspace.Spec.Workload.Runtime.Template.Spec.Containers[0].Env, want)
 			})
 		})
 	}
@@ -156,5 +129,30 @@ func TestRuntimePoolNativeSessionLimitChangesTemplateRevision(t *testing.T) {
 	}
 	if runtimePoolDeploymentNeedsRollout(&appsv1.Deployment{Spec: appsv1.DeploymentSpec{Template: after}}, after) {
 		t.Fatal("unchanged native policy triggered a new rollout")
+	}
+}
+
+func TestRuntimePoolEnvironmentCarriesNonDefaultCapacity(t *testing.T) {
+	capacityEnvironment := func(capacity *corev1alpha1.RuntimePoolCapacitySpec) map[string]string {
+		pool := runtimePoolTestObject(1)
+		pool.Spec.Capacity = capacity
+		out := map[string]string{}
+		for _, item := range runtimePoolCapacityEnvironment(pool) {
+			out[item.Name] = item.Value
+		}
+		return out
+	}
+	if got := capacityEnvironment(nil); len(got) != 0 {
+		t.Fatalf("default capacity environment = %v, want none", got)
+	}
+	got := capacityEnvironment(&corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 10, MaxRunningPrompts: 8})
+	if got["ORKA_ACP_MAX_RESIDENT_SESSIONS"] != "10" || got["ORKA_ACP_MAX_CONCURRENT_PROMPTS"] != "8" {
+		t.Fatalf("capacity environment = %v, want 10/8", got)
+	}
+	workspace := runtimePoolTestObject(1)
+	workspace.Spec.Capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+	workspace.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{}
+	if got := runtimePoolCapacityEnvironment(workspace); len(got) != 0 {
+		t.Fatalf("workspace capacity environment = %v, want none", got)
 	}
 }

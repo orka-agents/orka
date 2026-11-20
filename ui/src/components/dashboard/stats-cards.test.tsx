@@ -19,6 +19,24 @@ describe('StatsCards', () => {
     expect(skeletons.length).toBeGreaterThan(0)
   })
 
+  it('fills in each card as its own list arrives', () => {
+    const { container } = render(
+      <StatsCards
+        tasks={[makeTask('t1', 'Running')]}
+        agentCount={2}
+        loading={{ tasks: false, sessions: true, agents: false, tools: true }}
+      />,
+    )
+    expect(screen.getByText('Total Tasks')).toBeInTheDocument()
+    expect(screen.getByText('2')).toBeInTheDocument() // agents
+    const card = (title: string) => screen.getByText(title).closest('[data-slot="card"]') as HTMLElement
+    expect(card('Sessions').querySelector('[data-slot="skeleton"]')).not.toBeNull()
+    expect(card('Tools').querySelector('[data-slot="skeleton"]')).not.toBeNull()
+    expect(card('Agents').querySelector('[data-slot="skeleton"]')).toBeNull()
+    expect(card('Total Tasks').querySelector('[data-slot="skeleton"]')).toBeNull()
+    expect(container.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(2)
+  })
+
   it('renders correct counts for each task phase', () => {
     const tasks = [
       makeTask('t1', 'Running'),
@@ -48,7 +66,7 @@ describe('StatsCards', () => {
   })
 
   it('shows a not-authorized message on the Sessions card instead of 0', () => {
-    render(<StatsCards tasks={[]} sessionsForbiddenMessage="not authorized" agentCount={1} toolCount={2} />)
+    render(<StatsCards tasks={[]} sessionsProblem={{ forbidden: true, message: "not authorized" }} agentCount={1} toolCount={2} />)
     expect(screen.getByText('Not authorized')).toBeInTheDocument()
     expect(screen.getByText(/read permission \(not authorized\)/)).toBeInTheDocument()
     // total, running, succeeded, failed — the Sessions card no longer renders a 0

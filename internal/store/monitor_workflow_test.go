@@ -24,3 +24,28 @@ func TestRepositoryMonitorDesiredActionForIntentNormalizesBeforeMapping(t *testi
 		}
 	}
 }
+
+func TestRepositoryMonitorWorkActionStatusClassification(t *testing.T) {
+	for status, want := range map[string]bool{
+		RepositoryMonitorWorkActionStatusQueued:       true,
+		RepositoryMonitorWorkActionStatusLeased:       true,
+		RepositoryMonitorWorkActionStatusRunning:      true,
+		RepositoryMonitorWorkActionStatusRetryPending: true,
+		RepositoryMonitorWorkActionStatusSucceeded:    false,
+		RepositoryMonitorWorkActionStatusFailed:       false,
+		RepositoryMonitorWorkActionStatusBlocked:      false,
+		RepositoryMonitorWorkActionStatusCancelled:    false,
+		RepositoryMonitorWorkActionStatusCompleted:    false,
+		"":          false,
+		"processed": false,
+	} {
+		if got := IsRepositoryMonitorWorkActionActive(status); got != want {
+			t.Errorf("IsRepositoryMonitorWorkActionActive(%q) = %v, want %v", status, got, want)
+		}
+	}
+	for _, status := range RepositoryMonitorWorkActionActiveStatuses() {
+		if !IsRepositoryMonitorWorkActionActive(status) {
+			t.Errorf("active status list contains inactive %q", status)
+		}
+	}
+}

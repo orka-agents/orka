@@ -16,8 +16,9 @@ import (
 type workerRBACDocument struct {
 	Kind     string `json:"kind"`
 	Metadata struct {
-		Name      string `json:"name"`
-		Namespace string `json:"namespace"`
+		Name        string            `json:"name"`
+		Namespace   string            `json:"namespace"`
+		Annotations map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Rules           []rbacv1.PolicyRule     `json:"rules"`
 	AggregationRule *rbacv1.AggregationRule `json:"aggregationRule"`

@@ -142,6 +142,48 @@ func TestInitDisabledLeavesTracerProviderUnchanged(t *testing.T) {
 	}
 }
 
+func TestTracerProviderDoesNotRecordPanicText(t *testing.T) {
+	const marker = "SYNTHETIC_TOKEN_PANIC_VALUE"
+	endWhilePanicking := func(provider *sdktrace.TracerProvider) {
+		defer func() {
+			if recovered := recover(); recovered != marker {
+				t.Fatalf("recovered %v, want the original panic", recovered)
+			}
+		}()
+		_, span := provider.Tracer("test").Start(context.Background(), "operation")
+		defer span.End()
+		panic(marker)
+	}
+	for _, tc := range []struct {
+		name     string
+		provider func(...sdktrace.TracerProviderOption) *sdktrace.TracerProvider
+		leaks    bool
+	}{
+		{"sdk default", sdktrace.NewTracerProvider, true},
+		{"orka", newTracerProvider, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := tracetest.NewSpanRecorder()
+			provider := tc.provider(sdktrace.WithSpanProcessor(recorder))
+			defer provider.Shutdown(context.Background()) //nolint:errcheck
+			endWhilePanicking(provider)
+			spans := recorder.Ended()
+			if len(spans) != 1 {
+				t.Fatalf("ended spans = %d, want 1", len(spans))
+			}
+			leaked := false
+			for _, event := range spans[0].Events() {
+				for _, attr := range event.Attributes {
+					leaked = leaked || attr.Value.AsString() == marker
+				}
+			}
+			if leaked != tc.leaks {
+				t.Fatalf("panic text recorded = %v, want %v", leaked, tc.leaks)
+			}
+		})
+	}
+}
+
 func TestSDKSamplerEnvironmentAlwaysOffDropsSpans(t *testing.T) {
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
 	recorder := tracetest.NewSpanRecorder()

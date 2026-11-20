@@ -7,7 +7,9 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -20,8 +22,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -62,7 +66,7 @@ func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string
 		WithStatusSubresource(&corev1alpha1.Task{}).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
 		Client: k8sClient, APIReader: k8sClient, TaskProvenanceProtected: true,
 	})
@@ -113,6 +117,38 @@ func TestCancelChildTaskRecordsTheRequestForTheController(t *testing.T) {
 	require.Equal(t, "cancellation requested", decodeCancelResult(t, resp).Status)
 	require.Equal(t, "cancelled by parent task: wrong approach",
 		cancelChildTask(t, h, "my-child").Annotations[labels.AnnotationCancelRequested])
+}
+
+func TestCancelChildTaskAllowsSanitizedChildDisplayName(t *testing.T) {
+	h, post := setupCancelChildHandlers(t)
+	name := "sk-" + strings.Repeat("a", 20)
+	child := internalCallerAuthTaskObject(name, "sanitized-child-uid", "child-job", "my-task", "")
+	require.NoError(t, h.k8sClient.Create(t.Context(), child))
+	patches := 0
+	h.k8sClient = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches++
+			if patches == 1 {
+				return errors.New("temporary cancellation publication failure")
+			}
+			return c.Patch(ctx, object, patch, opts...)
+		},
+	})
+	path := "/internal/v1/tasks/default/my-task/children/" + name + "/cancel"
+	resp := post(path, map[string]string{"reason": "first reason"})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	require.Equal(t, 1, patches, "sanitized display text must not invalidate the committed UID-bound intent")
+	requireNoCancelRequest(t, h, name, corev1alpha1.TaskPhaseRunning)
+	resp = post(path, map[string]string{"reason": "retry reason"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, name, decodeCancelResult(t, resp).TaskName)
+	require.Equal(t, "cancelled by parent task: first reason", cancelChildTask(t, h, name).Annotations[labels.AnnotationCancelRequested])
+	intents := cancellationIntents(t, h)
+	require.Len(t, intents, 1)
+	var intent childCancellationIntent
+	require.NoError(t, json.Unmarshal(intents[0].Content, &intent))
+	require.Equal(t, "[REDACTED]", intent.ChildName)
+	require.Equal(t, string(child.UID), intent.ChildUID)
 }
 
 func TestCancelChildTaskLeavesTerminalChildUnchanged(t *testing.T) {
@@ -186,4 +222,67 @@ func TestCancelChildTaskRequiresProvenanceAdmission(t *testing.T) {
 	resp := post("/internal/v1/tasks/default/my-task/children/my-child/cancel", nil)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	requireNoCancelRequest(t, h, "my-child", corev1alpha1.TaskPhaseRunning)
+}
+
+func cancellationIntents(t *testing.T, h *InternalHandlers) []store.ExecutionEvent {
+	t.Helper()
+	intents, err := h.resultStore.(store.ExecutionEventStore).ListExecutionEvents(t.Context(), store.ExecutionEventFilter{
+		Namespace: "default", StreamID: "my-task", EventTypes: []string{events.ExecutionEventTypeTaskCancellationRequested},
+	})
+	require.NoError(t, err)
+	return intents
+}
+
+func TestCancelChildTaskRejectsRevocationBeforeIntentCommit(t *testing.T) {
+	h, post := setupCancelChildHandlers(t)
+	revoked := false
+	h.apiReader = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, object, opts...); err != nil {
+				return err
+			}
+			// This child read is inside access, after the initial fence check,
+			// immediately before cancellation commits its durable intent.
+			if _, fenced := store.TaskDataFenceFrom(ctx); !fenced || key.Name != "my-child" || revoked {
+				return nil
+			}
+			revoked = true
+			return h.resultStore.(store.TaskJobAuthorityStore).RevokeTaskJob(ctx, store.TaskJobIdentity{
+				Namespace: "default", TaskUID: "my-task-uid", JobUID: "my-task-job-uid",
+			})
+		},
+	})
+	resp := post("/internal/v1/tasks/default/my-task/children/my-child/cancel", nil)
+	require.True(t, revoked)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	requireNoCancelRequest(t, h, "my-child", corev1alpha1.TaskPhaseRunning)
+	require.Empty(t, cancellationIntents(t, h), "revocation before the intent authorizes nothing")
+}
+
+func TestCancelChildTaskPublishesIntentCommittedBeforeRevocation(t *testing.T) {
+	h, post := setupCancelChildHandlers(t)
+	patched := false
+	h.k8sClient = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			// The intent is durable before the external effect. Revocation can
+			// commit here because no provider transaction spans this patch.
+			require.Len(t, cancellationIntents(t, h), 1)
+			require.NoError(t, h.resultStore.(store.TaskJobAuthorityStore).RevokeTaskJob(ctx, store.TaskJobIdentity{
+				Namespace: "default", TaskUID: "my-task-uid", JobUID: "my-task-job-uid",
+			}))
+			patched = true
+			return c.Patch(ctx, object, patch, opts...)
+		},
+	})
+	resp := post("/internal/v1/tasks/default/my-task/children/my-child/cancel", map[string]string{"reason": "wrong approach"})
+	require.True(t, patched)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "cancelled by parent task: wrong approach", cancelChildTask(t, h, "my-child").Annotations[labels.AnnotationCancelRequested])
+	intents := cancellationIntents(t, h)
+	require.Len(t, intents, 1)
+	var intent childCancellationIntent
+	require.NoError(t, json.Unmarshal(intents[0].Content, &intent))
+	require.Equal(t, childCancellationIntent{
+		ParentUID: "my-task-uid", ChildUID: "my-child-uid", ChildName: "my-child", Message: "cancelled by parent task: wrong approach",
+	}, intent)
 }

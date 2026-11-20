@@ -478,3 +478,24 @@ func newDefaultArtifactClient(baseURL string, client *http.Client, authorization
 		MaxUploadBytes:   defaultWorkspaceDeltaUploadBytes,
 	})
 }
+
+func TestSyncMaterializedTreeFlushesStagedWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"README.md", "pkg/a.go", "pkg/nested/b.go"} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("pkg/a.go", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncMaterializedTree(root); err != nil {
+		t.Fatalf("syncMaterializedTree() error = %v", err)
+	}
+	if err := syncMaterializedTree(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("syncMaterializedTree() accepted a missing root")
+	}
+}

@@ -154,6 +154,7 @@ func TestRegisterBrokeredCoordinationToolsIsIdempotentAndBounded(t *testing.T) {
 	want := []string{
 		checkMessagesToolName,
 		delegateTaskToolName,
+		ParkUntilToolName,
 		"propose_memory",
 		"recall_memory",
 		"remember",
@@ -184,6 +185,26 @@ func TestRegisterBrokeredCoordinationToolsIsIdempotentAndBounded(t *testing.T) {
 		if _, ok := registry.Get(rejected); ok {
 			t.Fatalf("unsafe or unsupported broker tool %q was registered", rejected)
 		}
+	}
+}
+
+// BrokeredBuiltInToolNames classifies exactly what the three brokered
+// registrations register, so authorization cannot drift from the broker.
+func TestBrokeredBuiltInToolNamesMatchBrokeredRegistrations(t *testing.T) {
+	registry := NewRegistry()
+	if err := RegisterBrokeredCoordinationTools(registry, newFakeClient()); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterBrokeredWebTools(registry); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterBrokeredConnectionTools(registry); err != nil {
+		t.Fatal(err)
+	}
+	got := BrokeredBuiltInToolNames()
+	slices.Sort(got)
+	if want := registry.Names(); !slices.Equal(got, want) {
+		t.Fatalf("BrokeredBuiltInToolNames() = %v, want the registered broker tools %v", got, want)
 	}
 }
 
@@ -336,6 +357,9 @@ func TestBrokeredDelegateTaskUsesRequestScopedParentContext(t *testing.T) {
 	}
 	if got := child.Annotations[labels.AnnotationParentTaskUID]; got != string(parent.UID) {
 		t.Fatalf("child authenticated parent UID = %q, want %q", got, parent.UID)
+	}
+	if got := child.Annotations[labels.AnnotationParentTaskNamespace]; got != parent.Namespace {
+		t.Fatalf("child parent namespace = %q, want %q", got, parent.Namespace)
 	}
 	effectID, err := (store.ExternalEffectIdentity{
 		Kind: "acp-mcp-tool", Namespace: brokerTestNamespace,

@@ -225,8 +225,9 @@ func TestOpenCodeProviderSessionProjectionValidatesImmutableAgentConfiguration(t
 		true,
 	)
 	request.Profile.ModelLimits = testOpenCodeModelLimits()
-	if _, err := profile.ProjectSession(request, paths, proxy); err == nil || !strings.Contains(err.Error(), "systemPrompt") {
-		t.Fatalf("OpenCode systemPrompt projection error = %v, want rejection", err)
+	projection, err := profile.ProjectSession(request, paths, proxy)
+	if err != nil || projection.Instructions == nil || projection.Instructions.Content != request.AgentConfiguration.SystemPrompt || projection.Instructions.RelativePath != ".orka/agent-instructions.md" {
+		t.Fatalf("OpenCode native instruction projection failed: %v", err)
 	}
 
 	request.AgentConfiguration = nil
@@ -314,6 +315,29 @@ func TestOpenCodeBrokeredPermissionsUseDisjointNativeNamespace(t *testing.T) {
 	}
 	if _, exists := permissions["bash"]; exists {
 		t.Fatalf("brokered permission overwrote native Bash key: %#v", permissions)
+	}
+}
+
+// TestOpenCodeBrokeredPermissionsSkipForwardingTools covers a forwarding Tool
+// whose name normalizes to a built-in's, such as web.fetch beside web_fetch:
+// it is hidden from the model, takes no permission, and so cannot collide.
+func TestOpenCodeBrokeredPermissionsSkipForwardingTools(t *testing.T) {
+	policy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{"web_fetch", "web.fetch"},
+		Tools: []harnessv2.MCPToolDescriptor{
+			{Name: "web_fetch", Source: harnessv2.MCPToolSourceBrokeredBuiltin, Effect: harnessv2.MCPToolEffectReadOnly},
+			{
+				Name: "web.fetch", Source: harnessv2.MCPToolSourceBrokeredCustom, Effect: harnessv2.MCPToolEffectReadOnly,
+				Forward: &harnessv2.MCPToolForward{Protocol: "AzureResourceManager", Origin: "https://management.azure.com"},
+			},
+		},
+	}
+	permissions, err := openCodeBrokeredPermissions(policy)
+	if err != nil {
+		t.Fatalf("openCodeBrokeredPermissions() = %v, want the forwarding Tool skipped", err)
+	}
+	if len(permissions) != 1 || !permissions["orka_web_fetch"] {
+		t.Fatalf("permissions = %#v, want only the built-in", permissions)
 	}
 }
 

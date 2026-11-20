@@ -71,6 +71,14 @@ func filterDropReason(finding *store.Finding) string {
 			return "test-only finding without production exposure"
 		}
 	}
+	if allPathsAreExampleOnly(allPaths) {
+		if likelyAuditableSensitiveDisclosure(text) {
+			return ""
+		}
+		if !containsAny(text, "loaded by production", "shipped", "installed by default", "production deployment", "runtime loads") {
+			return "demo or example content without production exposure"
+		}
+	}
 	if containsAny(text, "dependency version", "outdated dependency", "vulnerable dependency", "vulnerable package", "cve-") {
 		if !containsAny(text, "untrusted dependency resolution", "dependency confusion", "malicious package", "new dependency source") {
 			return "dependency-version finding belongs in dependency scanner"
@@ -344,6 +352,31 @@ func allPathsAreTestOnly(paths []string) bool {
 	return true
 }
 
+// allPathsAreExampleOnly reports evidence confined to demo, example, or
+// vendored third-party directories.
+func allPathsAreExampleOnly(paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !isExamplePath(p) {
+			return false
+		}
+	}
+	return true
+}
+
+func isExamplePath(value string) bool {
+	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
+	for segment := range strings.SplitSeq(path.Dir(p), "/") {
+		switch segment {
+		case "demo", "demos", "example", "examples", "third_party":
+			return true
+		}
+	}
+	return false
+}
+
 func isDocsPath(value string) bool {
 	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
 	if strings.HasPrefix(p, "docs/") || strings.HasPrefix(p, "website/docs/") {
@@ -377,7 +410,9 @@ func isTestPath(value string) bool {
 	p := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(value, "\\", "/")))
 	base := path.Base(p)
 	return strings.HasPrefix(p, "test/") || strings.HasPrefix(p, "tests/") || strings.HasPrefix(p, "__tests__/") ||
+		strings.HasPrefix(p, "e2e/") || strings.HasPrefix(p, "testdata/") ||
 		strings.Contains(p, "/test/") || strings.Contains(p, "/tests/") || strings.Contains(p, "/__tests__/") ||
+		strings.Contains(p, "/e2e/") || strings.Contains(p, "/testdata/") ||
 		strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".test.tsx") ||
 		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, ".spec.tsx") || strings.HasSuffix(base, ".test.js") ||
 		strings.HasSuffix(base, ".spec.js")

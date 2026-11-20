@@ -2,5 +2,6 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
 - acp_workspace_lease_protection.yaml
+- ai_worker_identity_protection.yaml
 - gateway_task_protection.yaml
 - namespace_mode_protection.yaml

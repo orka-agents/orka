@@ -11,6 +11,25 @@ import yaml
 from agentkit_serve_common.brokered import generate_brokered_tools_from_orka_tool_crds
 from agentkit_serve_common.config import AgentSpec
 
+AGENTKIT_CONSTRAINTS = "agentkit-constraints.txt"
+
+
+def constrain_agentkit_dockerfile(dockerfile):
+    """Apply the fixture's pip constraints to the single-stage adapter build and verify the result."""
+    lines = dockerfile.splitlines(keepends=True)
+    stages = [index for index, line in enumerate(lines) if line.lstrip().upper().startswith("FROM ")]
+    if len(stages) != 1:
+        raise SystemExit("the AgentKit adapter Dockerfile must have exactly one FROM stage")
+    stage = stages[0]
+    lines[stage] = lines[stage].rstrip("\n") + "\n"
+    lines[stage + 1:stage + 1] = [f"COPY {AGENTKIT_CONSTRAINTS} /src/{AGENTKIT_CONSTRAINTS}\n",
+                                  f"ARG PIP_CONSTRAINT=/src/{AGENTKIT_CONSTRAINTS}\n"]
+    lines[-1] = lines[-1].rstrip("\n") + "\n"
+    # Without an index, installing the constraints as requirements succeeds only when the
+    # adapter venv already satisfies them, so the build fails if an install bypassed them.
+    lines.append(f"RUN /opt/agentkit/bin/pip install --no-index --no-deps -r /src/{AGENTKIT_CONSTRAINTS}\n")
+    return "".join(lines)
+
 
 def prepare_gateway_tls(directory):
     """Create a per-run CA and serving key outside image and evidence inputs."""
@@ -78,10 +97,12 @@ def main():
             shutil.copyfile(source / filename, target / filename)
         shutil.copytree(source / package, target / package,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"), dirs_exist_ok=True)
-    dockerfile = (args.agentkit / "runtimes/microsoft-agent-framework/Dockerfile").read_text()
+    dockerfile = constrain_agentkit_dockerfile(
+        (args.agentkit / "runtimes/microsoft-agent-framework/Dockerfile").read_text())
     dockerfile += "\nUSER 0\nCOPY --chown=0:0 agent-direct.yaml /agent/agent.yaml\nRUN chmod 0444 /agent/agent.yaml\nUSER 1000\n"
     (output / "Dockerfile.agentkit-base").write_text(dockerfile)
-    for name in ["Dockerfile.agentkit-hosted", "Dockerfile.foundry-base", "Dockerfile.fixture", "runtime_fixture.py", "held_tools.py"]:
+    for name in ["Dockerfile.agentkit-hosted", "Dockerfile.foundry-base", "Dockerfile.fixture", "runtime_fixture.py", "held_tools.py",
+                 AGENTKIT_CONSTRAINTS]:
         shutil.copyfile(Path(__file__).with_name(name), output / name)
     shutil.copyfile(example / "simulated_tools.py", output / "simulated_tools.py")
 

@@ -1,4 +1,3 @@
-{{- if eq .Values.controller.mode "harness-v2" }}
 {{- $issuerPrefix := printf "gateway.orka.ai/%s/" (include "orka.watchNamespace" .) -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -78,4 +77,3 @@ metadata:
 spec:
   policyName: {{ include "orka.fullname" . }}-gateway-task-protection
   validationActions: [Deny]
-{{- end }}

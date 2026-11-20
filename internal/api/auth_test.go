@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -637,6 +638,43 @@ func TestNewAuthMiddleware_OIDCAuthorizationFailureSkipsTokenReviewFallback(t *t
 	}
 	if createCalls != 0 {
 		t.Fatalf("TokenReview Create calls = %d, want 0 for terminal OIDC authorization failure", createCalls)
+	}
+}
+
+// TestNewAuthMiddleware_OIDCSubjectNotAllowedNamesTheSubject covers a person
+// who signed in but is not on the allow-list yet: the answer is 403 and names
+// their own subject, which an administrator needs in order to allow them. A
+// token that fails verification still gets the plain 401.
+func TestNewAuthMiddleware_OIDCSubjectNotAllowedNamesTheSubject(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	cfg := provider.config()
+	cfg.AllowedSubjects = []string{"someone-else"}
+	fakeClient := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	app := fiber.New()
+	app.Use(NewAuthMiddleware(fakeClient, AuthConfig{OIDC: cfg}))
+	app.Get("/test", func(ctx fiber.Ctx) error { return ctx.SendString("OK") })
+
+	request := func(token string) (int, string) {
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set(AuthHeader, "Bearer "+token)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Test request failed: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	status, body := request(provider.issueToken(t, testOIDCTokenOptions{Subject: "new-person-subject"}))
+	if status != http.StatusForbidden || !strings.Contains(body, `"new-person-subject"`) || !strings.Contains(body, "allowed OIDC subjects") {
+		t.Fatalf("not-allowed subject: status = %d, body = %q, want 403 naming the subject", status, body)
+	}
+
+	forged := provider.issueToken(t, testOIDCTokenOptions{Subject: "new-person-subject"})
+	forged = forged[:len(forged)-4] + "AAAA"
+	status, body = request(forged)
+	if status != http.StatusUnauthorized || strings.Contains(body, "new-person-subject") {
+		t.Fatalf("unverified token: status = %d, body = %q, want 401 without the subject", status, body)
 	}
 }
 

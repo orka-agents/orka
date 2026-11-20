@@ -11,7 +11,9 @@ import DemoVideo from '@site/src/components/DemoVideo';
 Watch Orka workflows on Kubernetes, grouped by feature. Each demo links to the
 documentation for its setup and behavior.
 
-[Watch the full playlist on YouTube](https://www.youtube.com/playlist?list=PLR43VQQvpyY8).
+[Watch the full playlist on YouTube](https://www.youtube.com/playlist?list=PLR43VQQvpyY8),
+or [click through the dashboard yourself](pathname:///demo/): it runs in your browser on
+sample data, with a guided tour.
 
 ## Chat and pull requests
 
@@ -65,7 +67,7 @@ Read about [shared OpenAI and Anthropic endpoints](operations/shared-compatibili
 Discover an Agent Card, ask an inventory agent for advice through A2A, retry
 without duplicate work, and continue the conversation in the same Session.
 
-Read about the [A2A gateway adapter](operations/gateways.md#external-adapters).
+Read about [gateways](guides/gateways.md) and the [A2A adapter](https://github.com/orka-agents/orka-gateway-a2a).
 
 ## Tool access controls
 
@@ -74,7 +76,7 @@ Read about the [A2A gateway adapter](operations/gateways.md#external-adapters).
 Expose a stock lookup while keeping the supplier's purchasing route closed.
 Verify that the lookup reaches the test supplier and no order is created.
 
-Read about [Tool configuration](reference/configuration.md#tool) and
+Read about [Tool configuration](reference/resources.md#tool) and
 [outbound access policies](concepts/outbound-access.md).
 
 ## Memory

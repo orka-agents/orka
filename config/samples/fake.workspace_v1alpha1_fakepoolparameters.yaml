@@ -1,6 +1,0 @@
-apiVersion: fake.workspace.orka.ai/v1alpha1
-kind: FakePoolParameters
-metadata:
-  name: coding-pool
-  namespace: default
-spec: {}

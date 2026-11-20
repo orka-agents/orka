@@ -27,19 +27,22 @@ const (
 	toolCheckTaskProgress = "check_task_progress"
 	toolWaitForTask       = "wait_for_task"
 	toolFetchTaskOutput   = "fetch_task_output"
+	toolDelegateTask      = "delegate_task"
+	toolCreateAgentTask   = "create_agent_task"
 	statusDone            = "done"
 )
 
 // agentEntry tracks one delegated sub-agent.
 type agentEntry struct {
-	name      string
-	taskName  string
-	prompt    string
-	status    string
-	startTime time.Time
-	done      bool
-	success   bool
-	result    string
+	name       string
+	taskName   string
+	toolCallID string
+	prompt     string
+	status     string
+	startTime  time.Time
+	done       bool
+	success    bool
+	result     string
 }
 
 // tracker manages the live subagent status panel.
@@ -146,7 +149,7 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 	switch evt.Event {
 	case "tool_call":
 		switch data.Name {
-		case "delegate_task", "create_agent_task":
+		case toolDelegateTask, toolCreateAgentTask:
 			t.addAgent(data)
 		case toolCheckTaskProgress, toolWaitForTask:
 			// Show that we're polling a task
@@ -160,6 +163,8 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		}
 	case "tool_result":
 		switch data.Name {
+		case toolDelegateTask, toolCreateAgentTask:
+			t.recordCreatedTaskName(data)
 		case "wait_for_tasks", toolWaitForTask:
 			t.completeAgents(data)
 		case toolCheckTaskProgress:
@@ -209,11 +214,12 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 	}
 
 	entry := &agentEntry{
-		name:      agentName,
-		taskName:  taskName,
-		prompt:    prompt,
-		status:    "starting",
-		startTime: time.Now(),
+		name:       agentName,
+		taskName:   taskName,
+		toolCallID: data.ID,
+		prompt:     prompt,
+		status:     "starting",
+		startTime:  time.Now(),
 	}
 	t.agents = append(t.agents, entry)
 
@@ -229,15 +235,77 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 	}
 }
 
-// completeAgents marks all pending agents as done.
-func (t *tracker) completeAgents(_ client.SSEEventData) {
+// recordCreatedTaskName stores the task name a delegate_task or
+// create_agent_task result reports. delegate_task always generates the child
+// name, so later progress and wait results can only be matched to the agent by
+// the name returned here.
+func (t *tracker) recordCreatedTaskName(data client.SSEEventData) {
+	var result struct {
+		TaskName string `json:"taskName"`
+		Name     string `json:"name"`
+		Data     struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data.Result, &result); err != nil {
+		return
+	}
+	taskName := result.TaskName
+	if taskName == "" {
+		taskName = result.Data.Name
+	}
+	if taskName == "" {
+		taskName = result.Name
+	}
+	if taskName == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var target *agentEntry
+	for _, a := range t.agents {
+		if data.ID != "" && a.toolCallID == data.ID {
+			target = a
+			break
+		}
+		// Without call IDs, the chat loop runs one tool call at a time, so the
+		// latest unnamed agent belongs to this result.
+		if data.ID == "" && a.taskName == "" {
+			target = a
+		}
+	}
+	if target != nil && target.taskName == "" {
+		target.taskName = taskName
+	}
+}
+
+// completeAgents applies the task phases a wait tool reported. Agents the
+// result does not report as terminal stay pending, so a later cancellation is
+// still recorded. A failed tool call finishes nothing; only a successful result
+// with no readable phase completes every pending agent, as before.
+func (t *tracker) completeAgents(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	if toolResultFailed(data.Result) {
+		return
+	}
+	reported := taskPhasesFromResult(data.Result)
+	for _, r := range reported {
+		t.applyTaskPhaseLocked(r.task, r.phase)
+	}
+	if len(reported) > 0 {
+		if t.isTTY && t.allAgentsDoneLocked() {
+			t.clearLines(len(t.agents))
+			t.renderFinal()
+		}
+		return
+	}
 	for _, a := range t.agents {
 		if !a.done {
 			a.done = true
-			a.success = true // Default success; real status parsed from result
+			a.success = true // The result reported no phase for this agent.
 			a.status = statusDone
 			elapsed := time.Since(a.startTime).Round(time.Second)
 
@@ -252,6 +320,17 @@ func (t *tracker) completeAgents(_ client.SSEEventData) {
 		t.clearLines(len(t.agents))
 		t.renderFinal()
 	}
+}
+
+// allAgentsDoneLocked reports whether every tracked agent is finished. The
+// caller must hold t.mu.
+func (t *tracker) allAgentsDoneLocked() bool {
+	for _, a := range t.agents {
+		if !a.done {
+			return false
+		}
+	}
+	return true
 }
 
 // updateAgentStatus updates the status text for a running agent.
@@ -276,26 +355,86 @@ func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	var result map[string]any
-	if err := json.Unmarshal(data.Result, &result); err == nil {
-		phase, _ := result["phase"].(string)
-		taskName, _ := result["name"].(string)
-		if phase == "" {
-			return
+	for _, reported := range taskPhasesFromResult(data.Result) {
+		t.applyTaskPhaseLocked(reported.task, reported.phase)
+	}
+}
+
+// reportedTaskPhase is one task phase found in a tool result.
+type reportedTaskPhase struct {
+	task  string
+	phase string
+}
+
+// toolResultFailed reports whether a tool result is a chat tool error
+// ({"success":false,...}), such as rejected arguments.
+func toolResultFailed(raw json.RawMessage) bool {
+	var envelope struct {
+		Success *bool `json:"success"`
+	}
+	return json.Unmarshal(raw, &envelope) == nil && envelope.Success != nil && !*envelope.Success
+}
+
+// taskPhasesFromResult extracts task phases from a check_task_progress,
+// wait_for_task or wait_for_tasks result. Chat tools wrap their payload as
+// {"success":true,"data":{...}}; unwrapped payloads are accepted as well.
+func taskPhasesFromResult(raw json.RawMessage) []reportedTaskPhase {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	payload := raw
+	if err := json.Unmarshal(raw, &envelope); err == nil && len(envelope.Data) > 0 {
+		payload = envelope.Data
+	}
+	var result struct {
+		Name    string `json:"name"`
+		Phase   string `json:"phase"`
+		Results []struct {
+			Task  string `json:"task"`
+			Phase string `json:"phase"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(payload, &result); err != nil {
+		return nil
+	}
+	var phases []reportedTaskPhase
+	for _, r := range result.Results {
+		if r.Phase != "" {
+			phases = append(phases, reportedTaskPhase{task: r.Task, phase: r.Phase})
 		}
-		for _, a := range t.agents {
-			if !a.done && (a.taskName == taskName || taskName == "") {
-				a.status = phase
-				switch phase {
-				case "Succeeded":
-					a.done = true
-					a.success = true
-				case "Failed":
-					a.done = true
-					a.success = false
-				}
-				break
+	}
+	if result.Phase != "" {
+		phases = append(phases, reportedTaskPhase{task: result.Name, phase: result.Phase})
+	}
+	return phases
+}
+
+// applyTaskPhaseLocked records a reported phase on the first pending agent for
+// the task. The caller must hold t.mu.
+func (t *tracker) applyTaskPhaseLocked(taskName, phase string) {
+	for _, a := range t.agents {
+		if !a.done && (a.taskName == taskName || taskName == "") {
+			a.status = phase
+			switch phase {
+			case "Succeeded":
+				a.done = true
+				a.success = true
+			case "Failed", "Cancelled":
+				// A cancelled task is terminal but not successful; leaving it
+				// pending would let stop/completeAgents report it as success.
+				a.done = true
+				a.success = false
 			}
+			if a.done && !t.isTTY {
+				// completeAgents and stop skip finished agents in non-TTY
+				// output, so print the terminal outcome now.
+				icon := "✓"
+				if !a.success {
+					icon = "✗"
+				}
+				fmt.Fprintf(t.w, "├─ %s %s  %s\n", icon, a.name, time.Since(a.startTime).Round(time.Second)) //nolint:errcheck
+			}
+			return
 		}
 	}
 }

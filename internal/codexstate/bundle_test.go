@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/orka-agents/sessionkit"
@@ -185,5 +186,49 @@ func TestNativeFormatRejectionClassificationStaysNarrow(t *testing.T) {
 	ioFailure := &os.PathError{Op: "read", Path: "private", Err: os.ErrPermission}
 	if got := classifyNativeFormatError(ioFailure); got != ioFailure {
 		t.Fatal("I/O failures must remain distinct")
+	}
+}
+
+// Capture runs after the writer stopped, so a session with no readable rollout
+// is a terminal unsupported outcome, never a retry. Timeouts and other I/O
+// failures stay distinct and retryable.
+func TestCaptureReportsAMissingOrUnreadableSessionAsUnsupported(t *testing.T) {
+	home, _ := fixtureHome(t)
+	rollout := filepath.Join(home, "sessions", "2026", "10", "02", fixtureName)
+	if err := os.Remove(rollout); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Capture(t.Context(), home, fixtureThread); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("missing rollout = %v, want ErrUnsupported", err)
+	}
+	if _, err := Capture(t.Context(), filepath.Join(home, "absent"), fixtureThread); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("missing Codex home = %v, want ErrUnsupported", err)
+	}
+	if os.Geteuid() != 0 {
+		unreadable, _ := fixtureHome(t)
+		if err := os.Chmod(filepath.Join(unreadable, "sessions", "2026", "10", "02", fixtureName), 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Capture(t.Context(), unreadable, fixtureThread); !errors.Is(err, ErrUnsupported) {
+			t.Fatalf("unreadable rollout = %v, want ErrUnsupported", err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"not found", &sessionkit.RejectionError{Rejections: []sessionkit.Rejection{{Code: "source_not_found"}}}, true},
+		{"missing path", &os.PathError{Op: "open", Path: "private", Err: os.ErrNotExist}, true},
+		{"permission", &os.PathError{Op: "open", Path: "private", Err: os.ErrPermission}, true},
+		{"not found with another rejection", &sessionkit.RejectionError{Rejections: []sessionkit.Rejection{{Code: "source_not_found"}, {Code: "duplicate_source"}}}, false},
+		{"duplicate", &sessionkit.RejectionError{Rejections: []sessionkit.Rejection{{Code: "duplicate_source"}}}, false},
+		{"empty rejection", &sessionkit.RejectionError{}, false},
+		{"timeout", context.DeadlineExceeded, false},
+		{"I/O error", &os.PathError{Op: "read", Path: "private", Err: syscall.EIO}, false},
+	} {
+		if got := captureSourceUnavailable(tc.err); got != tc.want {
+			t.Errorf("%s: captureSourceUnavailable = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

@@ -38,7 +38,7 @@ func parseAgentModelUpdate(value any) (agentModelUpdate, error) {
 		if err := parseAgentModelStringField(model, nameField, &update.name, &update.nameSet); err != nil {
 			return agentModelUpdate{}, err
 		}
-		if raw, ok := model["temperature"]; ok {
+		if raw, ok := model[temperatureField]; ok {
 			temperature, err := parseChatAgentTemperature(raw)
 			if err != nil {
 				return agentModelUpdate{}, err

@@ -37,6 +37,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -53,7 +55,7 @@ type connectorTestHarness struct {
 	// handlers lets a test replace the uncached reader to model informer lag.
 	handlers *Handlers
 	client   client.Client
-	store    *sqlite.Store
+	store    *storageclient.Client
 	identity *UserInfo
 	oauth    *httptest.Server
 	tokens   int
@@ -133,6 +135,25 @@ func newConnectorTestHarnessWithContextTokens(t *testing.T, objects ...runtime.O
 	return buildConnectorTestHarness(t, authz, objects...)
 }
 
+// refreshFixture answers a refresh_token grant. GitHub sign-in uses the
+// refresh token it is given once: each fixture person's refresh token yields
+// their own new tokens.
+func refreshFixture(w http.ResponseWriter, refreshToken string) {
+	// An expiry with no refresh token beside it, which GitHub never issues.
+	if refreshToken == "ghr_alice_final" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "ghu_alice_refreshed", "token_type": "bearer", "expires_in": 28800})
+		return
+	}
+	person := map[string]string{"ghr_alice": "alice", "ghr_bob": "bob", "ghr_alice_renamed": "alice_renamed"}[refreshToken]
+	if person == "" {
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_refresh_token"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"access_token": "ghu_" + person + "_refreshed", "refresh_token": "ghr_" + person + "_2", "token_type": "bearer", "expires_in": 28800,
+	})
+}
+
 func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConfig, objects ...runtime.Object) *connectorTestHarness {
 	t.Helper()
 	harness := &connectorTestHarness{t: t, contextTokenAuthorization: authz}
@@ -188,14 +209,7 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	sqliteStore := sqlite.NewStore(db, ":memory:")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sqliteStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	sqliteStore := storageclienttest.Client(t, sqlite.NewStore(db, ":memory:"))
 
 	h := harness
 	h.client, h.store = fakeClient, sqliteStore
@@ -209,6 +223,10 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 		}
 		if r.URL.Path != "/token" {
 			http.NotFound(w, r)
+			return
+		}
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			refreshFixture(w, r.PostForm.Get("refresh_token"))
 			return
 		}
 		if r.PostForm.Get("code") != "good-code" || r.PostForm.Get("code_verifier") == "" {
@@ -774,7 +792,7 @@ func TestConnectionHandlersDisabled(t *testing.T) {
 }
 
 func TestValidateConnectorConfig(t *testing.T) {
-	sqliteStore := sqlite.NewStore(nil, "")
+	sqliteStore := &storageclient.Client{}
 	oauth := connectors.NewOAuthClient(connectors.OAuthClientOptions{})
 	valid := ConnectorConfig{Enabled: true, CallbackBaseURL: "https://orka.example.test", StateKey: bytes.Repeat([]byte{1}, 32), Credentials: sqliteStore, Consents: sqliteStore, OAuth: oauth}
 	if err := ValidateConnectorConfig(valid); err != nil {
@@ -2009,5 +2027,40 @@ func TestConnectionViewsMarkDuplicateLinksUnready(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || json.Unmarshal(raw, &got) != nil || got.Ready || !strings.Contains(got.Message, "several links") {
 			t.Fatalf("get %s = %d %s, want unready as a duplicate", name, resp.StatusCode, raw)
 		}
+	}
+}
+
+// A link whose person declined an agent host gets none, so relinking it
+// neither discloses one nor has clients wait for one.
+func TestConnectionPromisesAHostOnlyToALinkThatGetsOne(t *testing.T) {
+	provider := acceptedTestProvider()
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	h := newConnectorTestHarness(t, provider)
+	first := h.create("readOnly")
+	if !first.AgentHost {
+		t.Fatal("linking a provider that serves hosts must promise one")
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: first.Connection.Name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if again := h.create("readOnly"); again.AgentHost {
+		t.Fatal("a link whose person declined a host must not be promised one")
+	}
+}
+
+// Clients disclose an agent host before consent from the provider view.
+func TestConnectorProviderResponseSaysWhenItServesAgentHosts(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}}
+	if connectorProviderResponse(provider).AgentHost {
+		t.Fatal("a provider without agentHost serves no hosts")
+	}
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	if !connectorProviderResponse(provider).AgentHost {
+		t.Fatal("the provider view must say it serves agent hosts")
 	}
 }

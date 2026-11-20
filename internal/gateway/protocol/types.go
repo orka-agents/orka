@@ -13,8 +13,11 @@ const (
 	// Version is the frozen gateway adapter contract version.
 	Version = "orka.gateway.v1"
 
-	// EventTypeText is the only inbound event type supported by V1.
+	// EventTypeText carries no delegated tool authority.
 	EventTypeText = "text"
+	// EventTypeDelegatedText requires a generation-bound nonsecret grant reference.
+	EventTypeDelegatedText = "delegatedText"
+	GatewayGrantRefKey     = "gatewayGrantRef"
 
 	// DeliveryKindFinal is a successful terminal assistant reply.
 	DeliveryKindFinal = "final"

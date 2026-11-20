@@ -47,6 +47,9 @@ func taskSpecWithServerDefaults(spec corev1alpha1.TaskSpec) corev1alpha1.TaskSpe
 	if out.SessionRef != nil && out.SessionRef.MaxMessages == 0 {
 		out.SessionRef.MaxMessages = taskSpecDefaultSessionMaxMessages
 	}
+	if out.AI != nil && out.AI.MemoryConsolidation != nil && out.AI.MemoryConsolidation.Mode == "" {
+		out.AI.MemoryConsolidation.Mode = corev1alpha1.MemoryConsolidationDryRun
+	}
 	if out.Workspace != nil {
 		for _, ref := range []*corev1alpha1.WorkspaceCredentialReference{
 			out.Workspace.ReadCredentialRef,

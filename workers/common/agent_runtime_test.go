@@ -18,149 +18,43 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-func TestLoadConfig_RequiredFields(t *testing.T) {
-	t.Setenv("ORKA_PROMPT", "")
-	t.Setenv("ORKA_TASK_NAME", "t1")
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
+func TestLoadWorkspaceConfig_AllFields(t *testing.T) {
+	t.Setenv(workerenv.GitRepo, "https://github.com/example/repo.git")
+	t.Setenv(workerenv.GitBranch, "main")
+	t.Setenv(workerenv.GitRef, "abc123")
+	t.Setenv(workerenv.GitRefShallow, "true")
+	t.Setenv(workerenv.PRBaseBranch, "release")
+	t.Setenv(workerenv.PRBaseRepo, "https://github.com/example/base.git")
+	t.Setenv(workerenv.PRBaseSHA, "def456")
+	t.Setenv(workerenv.WorkspaceSubpath, "src/./pkg")
 
-	_, err := LoadConfig(50)
-	if err == nil {
-		t.Fatal("expected error for missing ORKA_PROMPT")
-	}
-}
-
-func TestLoadConfig_Defaults(t *testing.T) {
-	t.Setenv("ORKA_PROMPT", "hello")
-	t.Setenv("ORKA_TASK_NAME", "t1")
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_MAX_TURNS", "")
-	t.Setenv("ORKA_ALLOWED_TOOLS", "")
-	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
-	t.Setenv("ORKA_MODEL", "")
-	t.Setenv("ORKA_SYSTEM_PROMPT", "")
-	t.Setenv("ORKA_GIT_REPO", "")
-	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
-
-	cfg, err := LoadConfig(50)
+	cfg, err := LoadWorkspaceConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Prompt != "hello" {
-		t.Errorf("expected Prompt 'hello', got %q", cfg.Prompt)
+	want := WorkspaceConfig{
+		GitRepo:       "https://github.com/example/repo.git",
+		GitBranch:     "main",
+		GitRef:        "abc123",
+		ShallowGitRef: true,
+		PRBaseBranch:  "release",
+		PRBaseRepo:    "https://github.com/example/base.git",
+		PRBaseSHA:     "def456",
+		SubPath:       "src/pkg",
 	}
-	if cfg.MaxTurns != 50 {
-		t.Errorf("expected MaxTurns 50, got %d", cfg.MaxTurns)
-	}
-	if !cfg.AllowedToolsSet || len(cfg.AllowedTools) != 0 {
-		t.Errorf("AllowedTools = %#v (set=%t), want explicit empty allowlist", cfg.AllowedTools, cfg.AllowedToolsSet)
-	}
-}
-
-func TestLoadConfig_DistinguishesOmittedAndEmptyAllowedTools(t *testing.T) {
-	t.Setenv(workerenv.Prompt, "hello")
-	t.Setenv(workerenv.MaxTurns, "")
-	t.Setenv(workerenv.AllowedTools, "temporary")
-	t.Setenv(workerenv.DisallowedTools, "")
-	t.Setenv(workerenv.TimeoutSeconds, "")
-	if err := os.Unsetenv(workerenv.AllowedTools); err != nil {
-		t.Fatal(err)
-	}
-
-	omitted, err := LoadConfig(50)
-	if err != nil {
-		t.Fatalf("LoadConfig with omitted allowed tools: %v", err)
-	}
-	if omitted.AllowedToolsSet || omitted.AllowedTools != nil {
-		t.Fatalf("omitted AllowedTools = %#v (set=%t), want nil and unset", omitted.AllowedTools, omitted.AllowedToolsSet)
-	}
-
-	t.Setenv(workerenv.AllowedTools, "")
-	empty, err := LoadConfig(50)
-	if err != nil {
-		t.Fatalf("LoadConfig with empty allowed tools: %v", err)
-	}
-	if !empty.AllowedToolsSet || len(empty.AllowedTools) != 0 {
-		t.Fatalf(
-			"empty AllowedTools = %#v (set=%t), want explicit empty allowlist",
-			empty.AllowedTools,
-			empty.AllowedToolsSet,
-		)
+	if *cfg != want {
+		t.Errorf("LoadWorkspaceConfig() = %+v, want %+v", *cfg, want)
 	}
 }
 
-func TestLoadConfig_AllFields(t *testing.T) {
-	t.Setenv("ORKA_PROMPT", "refactor code")
-	t.Setenv("ORKA_TASK_NAME", "task1")
-	t.Setenv("ORKA_TASK_NAMESPACE", "ns1")
-	t.Setenv(workerenv.TransactionID, "txn-123")
-	t.Setenv(workerenv.TransactionProfile, "transaction-token")
-	t.Setenv("ORKA_MODEL", "test-model")
-	t.Setenv("ORKA_SYSTEM_PROMPT", "Be helpful")
-	t.Setenv("ORKA_MAX_TURNS", "100")
-	t.Setenv("ORKA_ALLOWED_TOOLS", "Read,Write,Edit")
-	t.Setenv("ORKA_DISALLOWED_TOOLS", "Bash")
-	t.Setenv("ORKA_GIT_REPO", "https://github.com/example/repo.git")
-	t.Setenv("ORKA_GIT_BRANCH", "main")
-	t.Setenv("ORKA_GIT_REF", "abc123")
-	t.Setenv("ORKA_WORKSPACE_SUBPATH", "src")
-	t.Setenv("ORKA_TIMEOUT_SECONDS", "600")
-
-	cfg, err := LoadConfig(50)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Model != "test-model" {
-		t.Errorf("Model = %q, want test-model", cfg.Model)
-	}
-	if cfg.MaxTurns != 100 {
-		t.Errorf("MaxTurns = %d, want 100", cfg.MaxTurns)
-	}
-	if cfg.TransactionID != "txn-123" || cfg.TransactionProfile != "transaction-token" {
-		t.Errorf("transaction fields = %q/%q, want txn-123/transaction-token", cfg.TransactionID, cfg.TransactionProfile)
-	}
-	if len(cfg.AllowedTools) != 3 {
-		t.Errorf("AllowedTools len = %d, want 3", len(cfg.AllowedTools))
-	}
-	if len(cfg.DisallowedTools) != 1 {
-		t.Errorf("DisallowedTools len = %d, want 1", len(cfg.DisallowedTools))
-	}
-	if cfg.GitRepo != "https://github.com/example/repo.git" {
-		t.Errorf("GitRepo = %q", cfg.GitRepo)
-	}
-	if cfg.SubPath != "src" {
-		t.Errorf("SubPath = %q, want src", cfg.SubPath)
-	}
-	if cfg.TimeoutSeconds != 600 {
-		t.Errorf("TimeoutSeconds = %d, want 600", cfg.TimeoutSeconds)
-	}
-}
-
-func TestLoadConfig_InvalidMaxTurns(t *testing.T) {
-	t.Setenv("ORKA_PROMPT", "hello")
-	t.Setenv("ORKA_MAX_TURNS", "not-a-number")
-	t.Setenv("ORKA_ALLOWED_TOOLS", "")
-	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
-	t.Setenv("ORKA_TIMEOUT_SECONDS", "")
-
-	_, err := LoadConfig(50)
-	if err == nil {
-		t.Fatal("expected error for invalid ORKA_MAX_TURNS")
-	}
-}
-
-func TestLoadConfig_InvalidTimeoutSeconds(t *testing.T) {
-	t.Setenv("ORKA_PROMPT", "hello")
-	t.Setenv("ORKA_MAX_TURNS", "")
-	t.Setenv("ORKA_ALLOWED_TOOLS", "")
-	t.Setenv("ORKA_DISALLOWED_TOOLS", "")
-	t.Setenv("ORKA_TIMEOUT_SECONDS", "not-a-number")
-
-	_, err := LoadConfig(50)
-	if err == nil {
-		t.Fatal("expected error for invalid ORKA_TIMEOUT_SECONDS")
-	}
-	if !strings.Contains(err.Error(), "invalid ORKA_TIMEOUT_SECONDS") {
-		t.Errorf("error = %q, want it to mention ORKA_TIMEOUT_SECONDS", err.Error())
+func TestLoadWorkspaceConfig_RejectsSubPathTraversal(t *testing.T) {
+	for _, subPath := range []string{"../outside", "src/../../outside", "/etc"} {
+		t.Run(subPath, func(t *testing.T) {
+			t.Setenv(workerenv.WorkspaceSubpath, subPath)
+			if _, err := LoadWorkspaceConfig(); err == nil || !strings.Contains(err.Error(), "path traversal") {
+				t.Fatalf("LoadWorkspaceConfig() error = %v, want path traversal rejection", err)
+			}
+		})
 	}
 }
 
@@ -210,7 +104,7 @@ func TestSetupGitCredentials_WithTokenFile(t *testing.T) {
 
 func TestCloneRepo_InvalidRepo(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &AgentConfig{
+	cfg := &WorkspaceConfig{
 		GitRepo: "https://invalid.example.com/nonexistent/repo.git",
 	}
 
@@ -244,7 +138,7 @@ func TestCloneRepo_WithBranch(t *testing.T) {
 	runGit(t, workDir, "push", "origin", "main")
 
 	cloneDir := t.TempDir() + "/cloned"
-	cfg := &AgentConfig{
+	cfg := &WorkspaceConfig{
 		GitRepo:   bareDir,
 		GitBranch: "main",
 	}
@@ -285,7 +179,7 @@ func TestCloneRepo_PreChecksOutPushBranchFromEnv(t *testing.T) {
 
 	t.Setenv(workerenv.PushBranch, "orka/feature-branch")
 	cloneDir := t.TempDir() + "/cloned"
-	cfg := &AgentConfig{GitRepo: bareDir, GitBranch: "main"}
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
 	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("CloneRepo failed: %v", err)
 	}
@@ -322,7 +216,7 @@ func TestCloneRepo_NoPushBranchLeavesHEADAlone(t *testing.T) {
 
 	t.Setenv(workerenv.PushBranch, "")
 	cloneDir := t.TempDir() + "/cloned"
-	cfg := &AgentConfig{GitRepo: bareDir, GitBranch: "main"}
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
 	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("CloneRepo failed: %v", err)
 	}
@@ -357,7 +251,7 @@ func TestCloneRepo_WithRef(t *testing.T) {
 	runGit(t, workDir, "push", "origin", "main")
 
 	cloneDir := t.TempDir() + "/cloned"
-	cfg := &AgentConfig{
+	cfg := &WorkspaceConfig{
 		GitRepo: bareDir,
 		GitRef:  "main", // using branch name as ref
 	}
@@ -400,7 +294,7 @@ func TestCloneRepo_WithCommitRefFromNonDefaultBranch(t *testing.T) {
 	runGit(t, workDir, "push", "origin", "feature/validation")
 
 	cloneDir := t.TempDir() + "/cloned"
-	cfg := &AgentConfig{
+	cfg := &WorkspaceConfig{
 		GitRepo: "file://" + bareDir,
 		GitRef:  featureSHA,
 	}
@@ -482,7 +376,7 @@ exec "$REAL_GIT" "$@"
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	cfg := &AgentConfig{
+	cfg := &WorkspaceConfig{
 		GitRepo:       "file://" + bareDir,
 		GitRef:        targetSHA,
 		ShallowGitRef: true,
@@ -530,7 +424,7 @@ func TestCloneRepo_ReusedWorkspaceFastForwardsCheckedOutBranch(t *testing.T) {
 	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	cfg := &AgentConfig{GitRepo: bareDir, GitBranch: "main"}
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
 	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
@@ -579,7 +473,7 @@ func TestCloneRepo_ReusedWorkspacePreservesSessionBranch(t *testing.T) {
 	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	cfg := &AgentConfig{GitRepo: bareDir, GitBranch: "main"}
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
 	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
@@ -633,7 +527,7 @@ func TestCloneRepo_ReusedWorkspaceBranchFetchFailureIsFatal(t *testing.T) {
 	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	cfg := &AgentConfig{GitRepo: bareDir, GitBranch: "main"}
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
 	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
@@ -678,11 +572,13 @@ func TestCloneRepo_ReusedWorkspaceChecksOutRef(t *testing.T) {
 	runGit(t, workDir, "push", "origin", "feature/reused")
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
 
-	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitRef: featureSHA}, cloneDir); err != nil {
+	cfg = &WorkspaceConfig{GitRepo: bareDir, GitRef: featureSHA}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("reused CloneRepo with ref failed: %v", err)
 	}
 
@@ -723,11 +619,12 @@ func TestCloneRepo_ReusedWorkspaceChecksOutBranchRef(t *testing.T) {
 	runGit(t, workDir, "push", "origin", "feature/reused")
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
 
-	featureCfg := &AgentConfig{GitRepo: bareDir, GitRef: "feature/reused"}
+	featureCfg := &WorkspaceConfig{GitRepo: bareDir, GitRef: "feature/reused"}
 	if err := CloneRepo(context.Background(), featureCfg, cloneDir); err != nil {
 		t.Fatalf("reused CloneRepo with branch ref failed: %v", err)
 	}
@@ -761,7 +658,8 @@ func TestCloneRepo_ReusedWorkspaceRejectsUnresolvedRef(t *testing.T) {
 	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
 	runGit(t, cloneDir, "checkout", "-b", "missing/ref")
@@ -775,7 +673,7 @@ func TestCloneRepo_ReusedWorkspaceRejectsUnresolvedRef(t *testing.T) {
 	runGit(t, cloneDir, "checkout", "main")
 	startSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "HEAD"))
 
-	err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitRef: "missing/ref"}, cloneDir)
+	err := CloneRepo(context.Background(), &WorkspaceConfig{GitRepo: bareDir, GitRef: "missing/ref"}, cloneDir)
 	if err == nil {
 		t.Fatal("expected reused CloneRepo with unresolved ref to fail")
 	}
@@ -809,11 +707,12 @@ func TestCloneRepo_ReusedWorkspaceRejectsDifferentRemote(t *testing.T) {
 	runGit(t, bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	cloneDir := filepath.Join(t.TempDir(), "cloned")
-	if err := CloneRepo(context.Background(), &AgentConfig{GitRepo: bareDir, GitBranch: "main"}, cloneDir); err != nil {
+	cfg := &WorkspaceConfig{GitRepo: bareDir, GitBranch: "main"}
+	if err := CloneRepo(context.Background(), cfg, cloneDir); err != nil {
 		t.Fatalf("initial CloneRepo failed: %v", err)
 	}
 
-	err := CloneRepo(context.Background(), &AgentConfig{GitRepo: otherBareDir, GitBranch: "main"}, cloneDir)
+	err := CloneRepo(context.Background(), &WorkspaceConfig{GitRepo: otherBareDir, GitBranch: "main"}, cloneDir)
 	if err == nil {
 		t.Fatal("expected reused CloneRepo with different remote to fail")
 	}
@@ -826,7 +725,7 @@ func TestCloneRepo_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	cfg := &AgentConfig{
+	cfg := &WorkspaceConfig{
 		GitRepo: "https://github.com/example/repo.git",
 	}
 

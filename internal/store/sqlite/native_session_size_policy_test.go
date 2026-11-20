@@ -3,7 +3,6 @@ package sqlite
 import (
 	"bytes"
 	"fmt"
-	"path/filepath"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/codexstate"
@@ -32,28 +31,6 @@ func nativePolicyImport(snapshot harnessv2.NativeSessionSnapshot, name string) s
 		Namespace: "tenant", SessionName: name, OperationID: "import-" + name,
 		RequestDigest: store.NativeSessionImportDigest("tenant", name, snapshot.DataDigest), Snapshot: snapshot,
 	}
-}
-
-func TestNativeSessionSizePolicyStoreConfiguration(t *testing.T) {
-	s := nativeTestStore(t, ":memory:")
-	require.Equal(t, harnessv2.DefaultMaxNativeSessionBytes, s.nativeSessionMaxBytes)
-	for _, limit := range []int{640 << 10, harnessv2.MaxNativeSessionBytes, 0} {
-		require.NoError(t, s.SetNativeSessionMaxBytes(limit))
-		want := limit
-		if want == 0 {
-			want = harnessv2.DefaultMaxNativeSessionBytes
-		}
-		require.Equal(t, want, s.nativeSessionMaxBytes)
-	}
-	require.NoError(t, s.SetNativeSessionMaxBytes(640<<10))
-	for _, limit := range []int{-1, harnessv2.MaxNativeSessionBytes + 1} {
-		require.Error(t, s.SetNativeSessionMaxBytes(limit))
-		require.Equal(t, 640<<10, s.nativeSessionMaxBytes, "rejected configuration must not change the previous policy")
-	}
-	locked, err := OpenLockedStore(filepath.Join(t.TempDir(), "native-policy.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, locked.close()) })
-	require.Equal(t, harnessv2.DefaultMaxNativeSessionBytes, locked.nativeSessionMaxBytes)
 }
 
 func TestNativeSessionSizePolicyStoreImportLimitAndRetainedRead(t *testing.T) {
@@ -158,7 +135,7 @@ func TestNativeSessionSizePolicyStoreFinalizationAtomicLimit(t *testing.T) {
 		t.Run(fmt.Sprint(persistenceOnly), func(t *testing.T) {
 			s := nativeTestStore(t, ":memory:")
 			require.NoError(t, s.SetNativeSessionMaxBytes(limit))
-			request := sessionTurnFinalizationOwnershipFixture(t, s, persistenceOnly, "native-policy-task")
+			request := sessionTurnFinalizationOwnershipFixture(t, s.Store, persistenceOnly, "native-policy-task")
 			require.NoError(t, s.BindSessionCleanupIdentity(t.Context(), "ns", "session", request.Key.SessionUID))
 			request.NativeSession = &store.NativeSessionRecord{
 				Namespace: "ns", SessionName: "session", SessionUID: request.Key.SessionUID, Snapshot: nativePolicySnapshot(t, limit+1),
@@ -197,7 +174,7 @@ func TestNativeSessionSizePolicyStoreCarryAfterLoweringLimit(t *testing.T) {
 	const limit = 640 << 10
 	s := nativeTestStore(t, ":memory:")
 	require.NoError(t, s.SetNativeSessionMaxBytes(limit))
-	request := sessionTurnFinalizationOwnershipFixture(t, s, false, "native-policy-carry-task")
+	request := sessionTurnFinalizationOwnershipFixture(t, s.Store, false, "native-policy-carry-task")
 	uid := request.Key.SessionUID
 	require.NoError(t, s.BindSessionCleanupIdentity(t.Context(), "ns", "session", uid))
 	record := store.NativeSessionRecord{

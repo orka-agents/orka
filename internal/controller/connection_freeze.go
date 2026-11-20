@@ -52,6 +52,9 @@ type connectorToolInfo struct {
 	// ToolUID is the Tool object read, so a Tool deleted and recreated with
 	// the same spec is still a different object to a running native Job.
 	ToolUID string
+	// Delegated marks a Tool behind an agentIdentity policy in Delegated
+	// mode, which acts for the requester through the Agent's identity.
+	Delegated bool
 	// Builtin marks an Orka built-in tool a ConnectorProvider declares. It
 	// has no policy: PolicyName is its BuiltinConnectionKey and the
 	// controller resolves the person's credential for it directly.
@@ -332,7 +335,8 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 			}
 			policies[policyName] = policy
 		}
-		if policy == nil || policy.Spec.Connection == nil {
+		provider, connectorBacked := outboundaccess.ConnectionProviderName(policy)
+		if !connectorBacked {
 			continue
 		}
 		specDigest, err := ConnectorToolDispatchDigest(tool.Spec, policy.Spec)
@@ -341,12 +345,13 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 		}
 		result[name] = connectorToolInfo{
 			PolicyName:       policyName,
-			Provider:         policy.Spec.Connection.ProviderRef.Name,
+			Provider:         provider,
 			Class:            tool.Spec.BrokeredToolClass,
 			SpecDigest:       specDigest,
 			PolicyUID:        string(policy.UID),
 			PolicyGeneration: policy.Generation,
 			ToolUID:          string(tool.UID),
+			Delegated:        policy.Spec.AgentIdentity != nil,
 		}
 	}
 	return result, nil
@@ -517,18 +522,6 @@ func acpChildTaskSealOnce(reader client.Reader, parentNamespace, parentName, par
 	}
 }
 
-// FrozenConnectorToolDigests returns, for every named Tool backed by a
-// connection-mode policy, the digest of its spec as read now. The Job builder
-// freezes the result into the worker's environment so the controller executes
-// only the definition the worker was dispatched with.
-func FrozenConnectorToolDigests(ctx context.Context, reader client.Reader, namespace string, toolNames []string) (map[string]string, error) {
-	infos, err := connectorToolsFor(ctx, reader, tools.DefaultRegistry, namespace, toolNames)
-	if err != nil {
-		return nil, err
-	}
-	return nativeConnectorToolDigests(infos), nil
-}
-
 // nativeConnectorToolDigests is the native dispatch identity of each
 // classified connector tool.
 func nativeConnectorToolDigests(infos map[string]connectorToolInfo) map[string]string {
@@ -648,6 +641,18 @@ func requesterProvenanceVerified(ctx context.Context, reader client.Reader, task
 		return false, nil
 	}
 	return connectors.RequesterStampValid(requesterStampKey, task), nil
+}
+
+// verifiedTaskRequester returns the Task's requester when the controller key
+// sealed it for this Task, or nil. Executors carry only that requester, so a
+// requestedBy a worker or a planted Task claims never reaches a credential
+// lookup or another person's identity-use records. A stamp still pending
+// counts as none.
+func verifiedTaskRequester(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) *corev1alpha1.RequestedBy {
+	if verified, err := requesterProvenanceVerified(ctx, reader, task); err != nil || !verified {
+		return nil
+	}
+	return task.Spec.RequestedBy.DeepCopy()
 }
 
 // requesterConnection returns the requester's linked Connection for provider,
@@ -1112,6 +1117,11 @@ func freezeRequesterConnectionsClassified(
 ) ([]agentExecutionSnapshotConnection, map[string]connectorToolInfo, []string, error) {
 	var names, custom []string
 	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
+		if descriptor.Forward != nil && descriptor.Forward.Write {
+			// A forwarding write tool is no Tool of its own; it acts under
+			// its forwarding Tool's binding, which this loop also covers.
+			continue
+		}
 		if descriptor.Source == harnessv2.MCPToolSourceBrokeredCustom || descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin {
 			names = append(names, descriptor.Name)
 		}
@@ -1196,7 +1206,8 @@ func BindNativeTaskConnectorAuthority(
 	if task == nil || executor == nil {
 		return errors.New("native connector authority binding requires a Task and executor")
 	}
-	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetRequester(verifiedTaskRequester(ctx, reader, task))
+	executor.SetTaskUID(string(task.UID))
 	executor.SetFrozenConnections(FrozenConnectionsFromTaskStatus(task))
 	return bindVerifiedTaskTransactionAuthority(ctx, reader, task, readScopes, enforceCredentialAuth, executor)
 }
@@ -1236,6 +1247,7 @@ func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1al
 // policies fail closed.
 func bindFrozenConnections(
 	ctx context.Context,
+	reader client.Reader,
 	snapshots store.AgentExecutionSnapshotStore,
 	task *corev1alpha1.Task,
 	executor *workerexecutor.ToolExecutor,
@@ -1243,8 +1255,14 @@ func bindFrozenConnections(
 	if task == nil || executor == nil {
 		return errors.New("frozen connection binding requires a Task and executor")
 	}
-	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetRequester(verifiedTaskRequester(ctx, reader, task))
+	executor.SetTaskUID(string(task.UID))
 	executor.SetFrozenConnections(nil)
+	identity, err := agentIdentityBindingFromTask(ctx, reader, task)
+	if err != nil {
+		return err
+	}
+	executor.SetAgentIdentity(identity)
 	if snapshots == nil || task.Status.AgentExecutionBinding == nil {
 		return nil
 	}

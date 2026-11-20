@@ -36,7 +36,7 @@ func newACPLineageTestFixture(t *testing.T, wrapProjection func(store.SessionLin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "lineage-test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "lineage-test"))
 
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -74,7 +74,7 @@ func newACPLineageTestFixture(t *testing.T, wrapProjection func(store.SessionLin
 		t.Fatal(err)
 	}
 	return &acpLineageTestFixture{
-		continuity: continuity, controls: controls, persistence: persistence,
+		continuity: continuity, controls: controls, persistence: persistence.Store,
 		fence: store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID},
 	}
 }

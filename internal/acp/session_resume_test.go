@@ -113,6 +113,41 @@ func TestRuntimeSessionStartPromptDoesNotResumeExitedAdapter(t *testing.T) {
 	}
 }
 
+// A failed relaunch check must leave the exited adapter unreplaced and the
+// session lost, without sending session/resume.
+func TestRuntimeSessionRelaunchValidationBlocksIdleAdapterResume(t *testing.T) {
+	session, stateDir := newTestRuntimeSessionWithOptions(t, helperModeResume, nil, map[string]string{helperExitAfterPromptEnv: "1"})
+	rejected := errors.New("workspace rejected")
+	validations := 0
+	session.config.ValidateAdapterRelaunch = func() error {
+		validations++
+		return rejected
+	}
+	result, _ := runHelperPrompt(t, session, "prompt-1")
+	if result.Outcome != PromptOutcomeCompleted {
+		t.Fatalf("first prompt = %#v", result)
+	}
+	awaitAdapterExit(t, session)
+	exited := session.Process()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := session.RecoverExitedAdapter(ctx, "prompt-2", "sha256:prompt-2", defaultPromptLease(session))
+	lost, ok := errors.AsType[*AdapterLostError](err)
+	if !ok || !lost.Attempted || !errors.Is(err, rejected) {
+		t.Fatalf("RecoverExitedAdapter = %v, want attempted AdapterLostError wrapping the rejection", err)
+	}
+	if validations != 1 {
+		t.Fatalf("relaunch validations = %d, want 1", validations)
+	}
+	if session.Process() != exited || session.AdapterRestarts() != 0 {
+		t.Fatal("rejected relaunch replaced the exited adapter")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, helperResumedStateFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected relaunch sent session/resume: stat = %v", err)
+	}
+}
+
 // An idle adapter restart must not bypass the cancellation fence introduced
 // before resume support: an old queued cancel still owns this provider session.
 func TestRuntimeSessionCancellationFencePreventsIdleAdapterResume(t *testing.T) {

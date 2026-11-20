@@ -66,11 +66,11 @@ func TestSubstrateNativeRPCDeadlinesReachProvider(t *testing.T) {
 			ref := &ateapipb.ObjectRef{Atespace: "tenant", Name: "same"}
 			switch tc.method {
 			case "resume":
-				_, err = api.Control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref, Boot: true})
+				_, err = api.Control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref})
 			case "suspend":
 				_, err = api.Control.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: ref})
 			case "delete":
-				_, err = api.Control.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: ref, AnyState: true})
+				_, err = api.Control.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: ref, Options: &ateapipb.DeleteOptions{Uid: "actor-uid"}})
 			case "createTag":
 				_, err = api.Control.CreateTag(ctx, &ateapipb.CreateTagRequest{Tag: &ateapipb.Tag{
 					Metadata:    &ateapipb.ResourceMetadata{Atespace: ref.Atespace, Name: "checkpoint"},
@@ -112,7 +112,7 @@ func TestSubstrateNativeLifecycleCancellationDoesNotReplay(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, callErr := api.Control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: &ateapipb.ObjectRef{Atespace: "tenant", Name: "same"}, Boot: true})
+		_, callErr := api.Control.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: &ateapipb.ObjectRef{Atespace: "tenant", Name: "same"}})
 		result <- callErr
 	}()
 	select {

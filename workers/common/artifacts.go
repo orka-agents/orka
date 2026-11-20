@@ -31,8 +31,8 @@ const (
 	artifactsDirEnv           = "ORKA_ARTIFACTS_DIR"
 	defaultArtifactsDir       = "/tmp/artifacts"
 	workspaceArtifactsDirName = ".orka-artifacts"
-	maxTotalSize              = 50 << 20 // 50 MB
-	maxFileSize               = 10 << 20 // 10 MB
+	MaxArtifactTotalBytes     = 50 << 20 // 50 MB
+	MaxArtifactFileBytes      = 10 << 20 // 10 MB
 	artifactPath              = "internal/v1/artifacts"
 )
 
@@ -90,43 +90,6 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 		return fmt.Errorf("failed to create workspace artifact symlink: %w", err)
 	}
 	return nil
-}
-
-// MissingArtifacts returns required artifact filenames that do not exist yet
-// or are present but empty.
-func MissingArtifacts(filenames []string) ([]string, error) {
-	missing := make([]string, 0, len(filenames))
-	localNames := make([]string, 0, len(filenames))
-	for _, filename := range filenames {
-		localName, err := artifactFilename(filename)
-		if err != nil {
-			return nil, err
-		}
-		localNames = append(localNames, localName)
-	}
-	artifactRoot := artifactsDir()
-	root, err := os.OpenRoot(artifactRoot)
-	if os.IsNotExist(err) {
-		return append(missing, filenames...), nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to open artifacts directory: %w", err)
-	}
-	defer root.Close() //nolint:errcheck
-
-	for i, filename := range filenames {
-		localName := localNames[i]
-		info, err := root.Stat(localName)
-		switch {
-		case os.IsNotExist(err):
-			missing = append(missing, filename)
-		case err != nil:
-			return nil, fmt.Errorf("failed to stat artifact %s: %w", filename, err)
-		case info.IsDir() || info.Size() == 0:
-			missing = append(missing, filename)
-		}
-	}
-	return missing, nil
 }
 
 // WriteArtifactFile writes an artifact file into the shared upload directory.
@@ -279,12 +242,13 @@ func UploadArtifactsWithRequestAuthorizationContext(
 			_ = file.Close()
 			continue
 		}
-		if fi.Size() > maxFileSize {
+		if fi.Size() > MaxArtifactFileBytes {
 			_ = file.Close()
-			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, fi.Size(), maxFileSize)
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n",
+				filename, fi.Size(), MaxArtifactFileBytes)
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(file, maxFileSize+1))
+		data, err := io.ReadAll(io.LimitReader(file, MaxArtifactFileBytes+1))
 		_ = file.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "artifact: failed to read %s: %v\n", filename, err)
@@ -292,13 +256,14 @@ func UploadArtifactsWithRequestAuthorizationContext(
 			continue
 		}
 
-		if len(data) > maxFileSize {
-			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, len(data), maxFileSize)
+		if len(data) > MaxArtifactFileBytes {
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n",
+				filename, len(data), MaxArtifactFileBytes)
 			continue
 		}
 		totalSize += int64(len(data))
-		if totalSize > maxTotalSize {
-			return fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, maxTotalSize)
+		if totalSize > MaxArtifactTotalBytes {
+			return fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, MaxArtifactTotalBytes)
 		}
 		pending = append(pending, pendingArtifact{
 			filename:    filename,

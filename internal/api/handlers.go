@@ -9,10 +9,12 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,15 +29,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const (
@@ -113,9 +119,11 @@ type Handlers struct {
 	artifactStore             store.ArtifactStore
 	memoryStore               store.MemoryStore
 	memoryProposalStore       store.MemoryProposalStore
+	memoryConsolidationStore  store.MemoryConsolidationStore
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
+	liveEvents                *liveevents.Broker
 	gatewayEventStore         store.GatewayEventStore
 	gatewayDeliveryStore      store.GatewayDeliveryStore
 	gatewayService            *gatewayruntime.Service
@@ -123,7 +131,19 @@ type Handlers struct {
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
-	completionLocks           *completionLocks
+	githubSignIn              GitHubSignInConfig
+	signInLimiter             *gatewayIngressLimiter
+	invites                   *githubInvites
+	// oidcEnabled says whether OIDC sign-in is configured, for clients
+	// choosing how to sign in.
+	oidcEnabled        bool
+	ahp                *ahphost.Host
+	completionLocks    *completionLocks
+	substrateMCPRouter *workerexecutor.SubstrateMCPRouter
+	// chatTurns stops a chat Session's in-flight request on session cancel.
+	chatTurns chatTurnStopper
+	// attentionBounds overrides the attention scan bounds; zero uses defaults.
+	attentionBounds attentionBounds
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -144,13 +164,21 @@ type HandlersConfig struct {
 	ArtifactStore             store.ArtifactStore
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	Connectors                ConnectorConfig
+	// MemoryConsolidationStore serves memory consolidation run reports.
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	LiveEvents               *liveevents.Broker
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	Connectors               ConnectorConfig
+	GitHubSignIn             GitHubSignInConfig
+	OIDCEnabled              bool
+	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
+	AHP               *ahphost.Host
+	SubstrateMCPProxy SubstrateMCPProxyConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -176,9 +204,11 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		artifactStore:             cfg.ArtifactStore,
 		memoryStore:               cfg.MemoryStore,
 		memoryProposalStore:       cfg.MemoryProposalStore,
+		memoryConsolidationStore:  cfg.MemoryConsolidationStore,
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		executionEventStore:       cfg.ExecutionEventStore,
+		liveEvents:                cfg.LiveEvents,
 		gatewayEventStore:         cfg.GatewayEventStore,
 		gatewayDeliveryStore:      cfg.GatewayDeliveryStore,
 		gatewayService:            cfg.GatewayService,
@@ -186,6 +216,12 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		githubSignIn:              cfg.GitHubSignIn,
+		signInLimiter:             newGitHubSignInLimiter(),
+		invites:                   &githubInvites{},
+		oidcEnabled:               cfg.OIDCEnabled,
+		ahp:                       cfg.AHP,
+		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
 	}
 }
@@ -286,6 +322,7 @@ type CreateTaskRequest struct {
 	Priority          *int32                           `json:"priority,omitempty"`
 	RetryPolicy       *corev1alpha1.RetryPolicy        `json:"retryPolicy,omitempty"`
 	WebhookURL        string                           `json:"webhookURL,omitempty"`
+	WebhookEvents     []corev1alpha1.TaskWebhookEvent  `json:"webhookEvents,omitempty"`
 	SecretRef         *corev1alpha1.SecretReference    `json:"secretRef,omitempty"`
 	SessionRef        *corev1alpha1.SessionReference   `json:"sessionRef,omitempty"`
 	AI                *corev1alpha1.AISpec             `json:"ai,omitempty"`
@@ -299,6 +336,24 @@ type CreateTaskRequest struct {
 	TimeZone          *string                          `json:"timeZone,omitempty"`
 	ConcurrencyPolicy string                           `json:"concurrencyPolicy,omitempty"`
 	Suspend           *bool                            `json:"suspend,omitempty"`
+}
+
+// UnmarshalJSON validates status in Kubernetes-style manifests even though
+// creation never copies controller-owned status into the new Task.
+func (in *CreateTaskRequest) UnmarshalJSON(data []byte) error {
+	var status struct {
+		Status corev1alpha1.TaskStatus `json:"status"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return err
+	}
+	type plain CreateTaskRequest
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*in = CreateTaskRequest(value)
+	return nil
 }
 
 func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
@@ -325,6 +380,9 @@ func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
 	}
 	if req.WebhookURL != "" {
 		spec.WebhookURL = req.WebhookURL
+	}
+	if req.WebhookEvents != nil {
+		spec.WebhookEvents = req.WebhookEvents
 	}
 	if req.SecretRef != nil {
 		spec.SecretRef = req.SecretRef
@@ -433,6 +491,20 @@ func (h *Handlers) Readyz(c fiber.Ctx) error {
 	})
 }
 
+// jsonObjectHasField reports whether object has a member that encoding/json
+// decodes into a struct field named field. encoding/json matches field names
+// under strings.EqualFold, which also folds non-ASCII spellings such as U+017F
+// (ſ) to "s", so "RequestedBy" and "requeſtedBy" both fill a field tagged
+// "requestedBy". strings.ToLower or an exact lookup misses some of them.
+func jsonObjectHasField(object map[string]json.RawMessage, field string) bool {
+	for key := range object {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
+}
+
 func rejectRequestedByTampering(body []byte) error {
 	if len(body) == 0 {
 		return nil
@@ -443,28 +515,24 @@ func rejectRequestedByTampering(body []byte) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 
-	for key := range topLevel {
-		switch strings.ToLower(key) {
-		case "requestedby":
-			return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
-		case "transaction":
-			return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
-		}
+	if jsonObjectHasField(topLevel, "requestedBy") {
+		return fiber.NewError(fiber.StatusBadRequest, "requestedBy cannot be set by clients")
+	}
+	if jsonObjectHasField(topLevel, "transaction") {
+		return fiber.NewError(fiber.StatusBadRequest, "transaction cannot be set by clients")
 	}
 
 	for topKey, specRaw := range topLevel {
-		if strings.ToLower(topKey) != "spec" {
+		if !strings.EqualFold(topKey, "spec") {
 			continue
 		}
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(specRaw, &spec); err == nil {
-			for key := range spec {
-				switch strings.ToLower(key) {
-				case "requestedby":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
-				case "transaction":
-					return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
-				}
+			if jsonObjectHasField(spec, "requestedBy") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.requestedBy cannot be set by clients")
+			}
+			if jsonObjectHasField(spec, "transaction") {
+				return fiber.NewError(fiber.StatusBadRequest, "spec.transaction cannot be set by clients")
 			}
 		}
 	}
@@ -509,7 +577,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 
 	var req CreateTaskRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
 	name := req.Name
@@ -551,6 +619,21 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if spec.Type == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "type is required")
 	}
+	// An AHP conversation cannot be read through a Task that continues it:
+	// another person's is not found, and the owner's own is refused, since
+	// such a Task is not private.
+	if spec.SessionRef != nil {
+		hidden, err := ahpSessionHiddenIn(c.Context(), h.client, GetUserInfo(c), namespace, spec.SessionRef.Name)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to look up the session's owner: %v", err))
+		}
+		if hidden {
+			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		}
+		if ahpSessionContinuation(spec.SessionRef) {
+			return fiber.NewError(fiber.StatusBadRequest, errAHPSessionContinuation)
+		}
+	}
 	objectMeta := objectMetaFromRequest(name, namespace, req.Metadata)
 	objectMeta.Annotations = annotations
 	task := &corev1alpha1.Task{
@@ -576,6 +659,12 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		}
 		task.Spec.Timeout = duration
 	}
+	// A zero or negative timeout has always elapsed: the Task would fail as
+	// timed out the moment it started. Checked after both request forms (the
+	// flat field and spec.timeout) have been applied.
+	if task.Spec.Timeout != nil && task.Spec.Timeout.Duration <= 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid timeout: must be greater than zero")
+	}
 
 	ctx := c.Context()
 	if err := h.authorizeTaskCreate(ctx, c, task); err != nil {
@@ -590,6 +679,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "task already exists")
 		}
+		if invalid := invalidObjectError("task", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create task: %v", err))
 	}
 
@@ -597,7 +689,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 }
 
 func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *corev1alpha1.Task) error {
-	return authorizeKubernetesTaskCreate(ctx, h.clientset, GetUserInfo(c), task)
+	return authorizeKubernetesTaskCreate(ctx, h.uncachedReader(), h.clientset, GetUserInfo(c), task)
 }
 
 // ListTasks lists tasks
@@ -673,7 +765,11 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 					return nil, "", err
 				}
 			}
+			allowed = allowed && !ahpTaskHidden(GetUserInfo(c), task)
 			if allowed {
+				// Server-side apply bookkeeping is about a third of each
+				// serialized Task and no API client reads it.
+				task.ManagedFields = nil
 				filtered = append(filtered, *task)
 			}
 		}
@@ -727,6 +823,7 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	}
 
 	resp := taskResponse{Task: *task}
+	resp.ManagedFields = nil // server-side apply bookkeeping; no API client reads it
 	if h.planStore != nil {
 		if plan, planErr := h.planStore.GetPlan(ctx, task.Namespace, task.Name); planErr == nil {
 			resp.Plan = &planResponse{
@@ -740,6 +837,18 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	}
 
 	return c.JSON(resp)
+}
+
+// taskUIDQueryParam optionally fences a Task route to one Task UID, so a
+// client that resolved a Task earlier never reaches a later Task that reuses
+// its name.
+const taskUIDQueryParam = "uid"
+
+// taskMatchesExpectedUID reports whether the request names no UID or the
+// loaded Task's UID.
+func taskMatchesExpectedUID(c fiber.Ctx, task *corev1alpha1.Task) bool {
+	expected := c.Query(taskUIDQueryParam)
+	return expected == "" || string(task.UID) == expected
 }
 
 // DeleteTask deletes a task
@@ -767,8 +876,17 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "deleteTask", task); err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
-	if err := h.client.Delete(ctx, task); err != nil {
+	// Delete exactly the Task that was authorized, never a later Task that
+	// reused its name in the meantime.
+	uid := task.UID
+	if err := h.client.Delete(ctx, task, client.Preconditions{UID: &uid}); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete task: %v", err))
 	}
 
@@ -802,7 +920,11 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		})
 	}
 
-	// For pending/scheduled tasks with no job yet
+	// A scheduled parent never runs itself; each run is a child Task.
+	if task.Spec.Schedule != "" {
+		return fiber.NewError(fiber.StatusNotFound, "task runs on a schedule and has no logs of its own; each scheduled run is a child task with its own logs")
+	}
+	// For pending tasks with no job yet
 	if task.Status.JobName == "" {
 		return fiber.NewError(fiber.StatusNotFound, "task is pending, no logs available yet")
 	}
@@ -855,7 +977,10 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	}
 
 	// Non-follow mode: return the last N lines
-	var tailLines int64 = 100
+	tailLines, err := parseTaskLogTailLines(c.Query("tailLines"))
+	if err != nil {
+		return err
+	}
 	opts := &corev1.PodLogOptions{
 		Container: "worker",
 		TailLines: &tailLines,
@@ -877,6 +1002,33 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	})
 }
 
+const (
+	// defaultTaskLogTailLines is how many trailing pod log lines a non-follow
+	// task log request returns when it does not pass tailLines.
+	defaultTaskLogTailLines int64 = 100
+	// maxTaskLogTailLines caps tailLines: the lines are buffered in memory and
+	// returned in one JSON body, so a larger request is clamped to this bound.
+	maxTaskLogTailLines int64 = 10000
+)
+
+// parseTaskLogTailLines reads the tailLines query parameter of a non-follow
+// task log request: the default when absent, clamped to maxTaskLogTailLines.
+func parseTaskLogTailLines(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultTaskLogTailLines, nil
+	}
+	tailLines, err := strconv.ParseInt(raw, 10, 64)
+	if errors.Is(err, strconv.ErrRange) && tailLines > 0 {
+		// A positive value past int64 is still a request for "everything".
+		err = nil
+	}
+	if err != nil || tailLines < 1 {
+		return 0, fiber.NewError(fiber.StatusBadRequest, "tailLines must be a positive integer")
+	}
+	return min(tailLines, maxTaskLogTailLines), nil
+}
+
 // GetTaskResult gets the result of a task
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	id := c.Params("id")
@@ -889,6 +1041,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return fiber.NewError(fiber.StatusNotFound, "task has no result")
@@ -900,6 +1055,19 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "result not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get result: %v", err))
+	}
+	// Results are stored by name. A UID-fenced read confirms the same Task
+	// still holds the name after the read, so the output is that Task's. The
+	// check reads live: the cache could still hold the original Task after a
+	// same-name replacement has published its result.
+	if c.Query(taskUIDQueryParam) != "" {
+		current, err := h.taskAccess().loadLive(c, namespace, id)
+		if err != nil {
+			return err
+		}
+		if !taskMatchesExpectedUID(c, current) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -935,7 +1103,32 @@ func (h *Handlers) GetTaskPlan(c fiber.Ctx) error {
 	return c.JSON(plan)
 }
 
-// ListSessions lists sessions
+// sessionListCursor is the opaque continue token of the newest-first sessions
+// list: the creation time and name of the last session on the page.
+type sessionListCursor struct {
+	CreatedAt time.Time `json:"createdAt"`
+	Name      string    `json:"name"`
+}
+
+func encodeSessionListCursor(position store.SessionPageCursor) string {
+	data, _ := json.Marshal(sessionListCursor(position))
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeSessionListCursor(raw string) (*store.SessionPageCursor, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	var cursor sessionListCursor
+	if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Name == "" {
+		return nil, errors.New("invalid continue token")
+	}
+	position := store.SessionPageCursor(cursor)
+	return &position, nil
+}
+
+// ListSessions lists sessions newest first.
 func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -954,12 +1147,15 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	// The session cursor is a session name, not a Kubernetes cache token,
-	// so the cache sentinel normalization must not apply: a session named
-	// exactly like the sentinel is still a valid place to resume from.
-	sessionCursor := strings.TrimSpace(c.Query("continue", ""))
-	// The store applies the name cursor, gateway exclusion, ordering, and
-	// limit itself, so each page reads only its own rows.
+	// The session cursor is the store position of the last listed session,
+	// not a Kubernetes cache token, so the cache sentinel normalization must
+	// not apply.
+	sessionCursor, err := decodeSessionListCursor(strings.TrimSpace(c.Query("continue", "")))
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	// The store applies the cursor, gateway exclusion, newest-first ordering,
+	// and limit itself, so each page reads only its own rows.
 	// ParsePagination already caps Limit at MaxLimit; the explicit guard
 	// makes the narrowing conversion provably bounded.
 	limit := pagination.Limit
@@ -967,29 +1163,56 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	if limit <= MaxLimit {
 		pageLimit = int(limit)
 	}
-	sessions, more, err := h.sessionStore.ListSessionsPage(ctx, namespace, sessionCursor, pageLimit, store.SessionTypeGateway)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
-	}
-
-	items := make([]fiber.Map, 0, len(sessions))
+	// Sessions hidden from the caller are left out, and pages read on until
+	// one is full. The continue token names the last session listed, never
+	// a hidden one: the next page reads the rows after it again.
+	ui := GetUserInfo(c)
+	items := make([]fiber.Map, 0, pageLimit)
 	continueToken := ""
-	if more && len(sessions) > 0 {
-		continueToken = sessions[len(sessions)-1].Name
-	}
-	for _, s := range sessions {
-		items = append(items, fiber.Map{
-			"id":             s.Name,
-			apiFieldName:     s.Name,
-			toolNamespaceArg: namespace,
-			"sessionType":    s.SessionType,
-			"messageCount":   s.MessageCount,
-			"inputTokens":    s.InputTokens,
-			"outputTokens":   s.OutputTokens,
-			"activeTask":     s.ActiveTask,
-			"createdAt":      s.CreatedAt.Format(time.RFC3339),
-			"updatedAt":      s.UpdatedAt.Format(time.RFC3339),
-		})
+	cursor := sessionCursor
+	for len(items) < pageLimit {
+		sessions, more, err := h.sessionStore.ListSessionsPage(ctx, namespace, cursor, pageLimit, store.SessionTypeGateway)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
+		}
+		var ahpOwners map[string]*corev1alpha1.Task
+		if ahpPerson(ui) {
+			names := make([]string, 0, len(sessions))
+			for _, s := range sessions {
+				names = append(names, s.Name)
+			}
+			if ahpOwners, err = ahpSessionOwnersIn(ctx, h.client, namespace, names); err != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to look up session owners: %v", err))
+			}
+		}
+		for i, s := range sessions {
+			if ahpSessionHiddenBy(ui, s.Name, ahpOwners) {
+				continue
+			}
+			items = append(items, fiber.Map{
+				"id":             s.Name,
+				apiFieldName:     s.Name,
+				toolNamespaceArg: namespace,
+				"sessionType":    s.SessionType,
+				"messageCount":   s.MessageCount,
+				"inputTokens":    s.InputTokens,
+				"outputTokens":   s.OutputTokens,
+				"activeTask":     s.ActiveTask,
+				"createdAt":      s.CreatedAt.Format(time.RFC3339),
+				"updatedAt":      s.UpdatedAt.Format(time.RFC3339),
+			})
+			if len(items) == pageLimit {
+				if more || i < len(sessions)-1 {
+					continueToken = encodeSessionListCursor(store.SessionPageCursor{CreatedAt: s.CreatedAt, Name: s.Name})
+				}
+				break
+			}
+		}
+		if !more || len(sessions) == 0 {
+			break
+		}
+		last := sessions[len(sessions)-1]
+		cursor = &store.SessionPageCursor{CreatedAt: last.CreatedAt, Name: last.Name}
 	}
 
 	response := ListResponse{
@@ -1146,7 +1369,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	deleteSession := h.sessionStore.DeleteSession
+	deleteSession := func(ctx context.Context, namespace, name string) error {
+		return h.sessionStore.DeleteSession(ctx, namespace, name, time.Now().UTC())
+	}
 	if h.sessionManager != nil {
 		deleteSession = h.sessionManager.DeleteSession
 	}
@@ -1389,11 +1614,67 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	return c.JSON(agent)
 }
 
+// AgentSystemPromptResponse is the system prompt an Agent reads from a ConfigMap.
+type AgentSystemPromptResponse struct {
+	ConfigMapRef corev1alpha1.ConfigMapKeySelector `json:"configMapRef"`
+	Content      string                            `json:"content"`
+}
+
+// GetAgentSystemPrompt returns the key of the ConfigMap that an Agent's
+// spec.systemPrompt.configMapRef selects. It reads only that key, and only for
+// callers who may also read the ConfigMap itself.
+func (h *Handlers) GetAgentSystemPrompt(c fiber.Ctx) error {
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getAgentSystemPrompt", h.contextTokenAuthorization.AgentReadScopes); err != nil {
+		return err
+	}
+
+	agent := &corev1alpha1.Agent{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "agent not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "getAgentSystemPrompt", agent.Namespace, agent.Name); err != nil {
+		return err
+	}
+	if agent.Spec.SystemPrompt == nil || agent.Spec.SystemPrompt.ConfigMapRef == nil {
+		return fiber.NewError(fiber.StatusNotFound, "agent has no ConfigMap system prompt")
+	}
+	ref := *agent.Spec.SystemPrompt.ConfigMapRef
+	if err := h.authorizeContextTokenPolicyConfigMapName(c, "getAgentSystemPrompt", agent.Namespace, ref.Name); err != nil {
+		return err
+	}
+	if err := authorizeKubernetesResourceAction(ctx, h.clientset, GetUserInfo(c),
+		agent.Namespace, "get", "", "configmaps", ref.Name); err != nil {
+		return err
+	}
+
+	configMap := &corev1.ConfigMap{}
+	if err := h.client.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: agent.Namespace}, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "system prompt ConfigMap not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get system prompt ConfigMap: %v", err))
+	}
+	content, ok := configMap.Data[ref.Key]
+	if !ok {
+		return fiber.NewError(fiber.StatusNotFound, "key not found in system prompt ConfigMap")
+	}
+	return c.JSON(AgentSystemPromptResponse{ConfigMapRef: ref, Content: content})
+}
+
 // CreateAgent creates a new agent
 func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	var req CreateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
 	// Support both flat format {"name":"x"} and Kubernetes-style {"metadata":{"name":"x"}}
@@ -1418,11 +1699,17 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 		return err
 	}
 
+	if err := validateAgentSpec(req.Spec); err != nil {
+		return err
+	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata),
 		Spec:       req.Spec,
 	}
 	if err := executionmode.DefaultBuiltInAgentContract(agent, h.executionMode); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := agentcontext.ValidateAgentWrite(agent); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
@@ -1431,11 +1718,20 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	if err := authorizeContextTokenAgentSpec(c.Context(), h.uncachedReader(), contextTokenFromUserInfo(GetUserInfo(c)), h.contextTokenAuthorization, "createAgent", agent); err != nil {
 		return err
 	}
+	if err := authorizeAgentIdentityBind(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
+		return err
+	}
+	if err := authorizeAgentProviderRefsUse(c.Context(), h.clientset, GetUserInfo(c), agent, nil); err != nil {
+		return err
+	}
 
 	ctx := c.Context()
 	if err := h.client.Create(ctx, agent); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "agent already exists")
+		}
+		if invalid := invalidObjectError("agent", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create agent: %v", err))
 	}
@@ -1445,7 +1741,6 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 
 // UpdateAgent updates an existing agent
 func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
-	name := c.Params(apiFieldName)
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
@@ -1458,25 +1753,55 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	// namespace probes cannot learn whether the payload is syntactically valid.
 	var req UpdateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	}
+	if err := validateAgentSpec(req.Spec); err != nil {
+		return err
 	}
 
+	return h.updateAgentSpec(c, namespace, req.Spec, nil)
+}
+
+// updateAgentSpec keeps both routes on the same validation and authorization
+// path. Only the conditional route supplies expectations; they never advance
+// when a patch retries after a resourceVersion conflict.
+func (h *Handlers) updateAgentSpec(c fiber.Ctx, namespace string, spec corev1alpha1.AgentSpec, expected *UpdateAgentSpecRequest) error {
+	name := c.Params(apiFieldName)
 	ctx := c.Context()
 	token := contextTokenFromUserInfo(GetUserInfo(c))
+	var reader client.Reader = h.client
+	if expected != nil {
+		reader = h.uncachedReader()
+	}
 
 	var agent *corev1alpha1.Agent
-	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.Agent{}
-		if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
+		if err := reader.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, current); err != nil {
 			return err
 		}
 		if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "updateAgent", current.Namespace, current.Name); err != nil {
 			return err
 		}
 
+		if expected != nil && (string(current.UID) != expected.ExpectedUID || current.Generation != expected.ExpectedGeneration) {
+			return fiber.NewError(fiber.StatusConflict, "agent UID or generation does not match")
+		}
 		patchBase := current.DeepCopy()
-		current.Spec = req.Spec
+		current.Spec = spec
+		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		if err := agentcontext.ValidateAgentWrite(current); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
 		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
+			return err
+		}
+		if err := authorizeAgentIdentityBind(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
+			return err
+		}
+		if err := authorizeAgentProviderRefsUse(ctx, h.clientset, GetUserInfo(c), current, patchBase); err != nil {
 			return err
 		}
 		if err := h.client.Patch(ctx, current, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -1494,6 +1819,9 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 		}
 		if apierrors.IsConflict(err) {
 			return fiber.NewError(fiber.StatusConflict, "agent was modified concurrently")
+		}
+		if invalid := invalidObjectError("agent", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update agent: %v", err))
 	}
@@ -1680,6 +2008,9 @@ func (h *Handlers) CreateSkill(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "skill already exists")
 		}
+		if invalid := invalidObjectError("skill", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create skill: %v", err))
 	}
 
@@ -1713,6 +2044,9 @@ func (h *Handlers) UpdateSkill(c fiber.Ctx) error {
 
 	skill.Spec = req.Spec
 	if err := h.client.Update(ctx, skill); err != nil {
+		if invalid := invalidObjectError("skill", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update skill: %v", err))
 	}
 
@@ -1867,7 +2201,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -1876,7 +2210,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"artifacts": []any{}})
 	}
 
-	artifacts, err := h.artifactStore.ListArtifacts(ctx, namespace, id)
+	artifacts, err := h.artifactStore.ListArtifacts(ctx, store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(task.UID)})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list artifacts: %v", err))
 	}
@@ -1897,7 +2231,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -1906,7 +2240,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "artifact store not configured")
 	}
 
-	data, contentType, err := h.artifactStore.GetArtifact(ctx, namespace, id, filename)
+	data, contentType, err := h.artifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(task.UID)}, Filename: filename})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "artifact not found")
@@ -1929,4 +2263,13 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 // handleAuthValidate returns success if the request passes auth middleware
 func (s *Server) handleAuthValidate(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"authenticated": true})
+}
+
+// validateAgentSpec rejects Agent fields the CRD schema cannot express. A
+// negative ttlAfterLastTask would otherwise be stored and read as expired.
+func validateAgentSpec(spec corev1alpha1.AgentSpec) error {
+	if spec.TTLAfterLastTask != nil && spec.TTLAfterLastTask.Duration < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.ttlAfterLastTask must not be negative")
+	}
+	return nil
 }

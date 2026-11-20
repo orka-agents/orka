@@ -4,8 +4,10 @@ Date: 2026-08-07
 
 ## Status
 
-Accepted. Supersedes ADR 0016 and ADR 0017. The normative rollout and
-verification contract is `docs/harness-v1-v2-coexistence-plan.md` Revision 8.
+Superseded by [#568](https://github.com/orka-agents/orka/issues/568). Orka now
+supports harness v2 only. The namespace, storage, and resource ownership checks
+remain; the v1 installation and coexistence policy below are historical.
+This decision previously superseded ADR 0016 and ADR 0017.
 
 ## Context
 

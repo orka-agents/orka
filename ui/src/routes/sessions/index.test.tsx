@@ -17,6 +17,7 @@ vi.mock('@tanstack/react-router', async () => {
     }),
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
     useNavigate: () => vi.fn(),
+    useSearch: () => ({}),
     useLocation: () => ({ pathname: '/sessions' }),
   }
 })
@@ -54,6 +55,12 @@ describe('sessions routes', () => {
       expect(SessionDetailRoute).toBeDefined()
       expect(SessionDetailRoute.component).toBeDefined()
       expect(SessionDetailRoute.path).toBe('/sessions/$sessionId')
+    })
+
+    it('keeps only a string tab from the URL search', () => {
+      const validateSearch = (SessionDetailRoute as unknown as { validateSearch: (search: Record<string, unknown>) => { tab?: string } }).validateSearch
+      expect(validateSearch({ tab: 'timeline' })).toEqual({ tab: 'timeline' })
+      expect(validateSearch({ tab: 3 })).toEqual({ tab: undefined })
     })
 
     it('renders SessionDetail with sessionId param', () => {

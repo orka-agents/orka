@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -20,13 +22,17 @@ func recordInternalTaskJobAuthority(ctx context.Context, task *corev1alpha1.Task
 	}
 }
 
-func withInternalTaskDataTransaction(c fiber.Ctx, backing any, taskName string, authorize, mutate func(context.Context) error) error {
-	transactions, ok := backing.(store.TaskDataTransactionStore)
+// withInternalTaskData authorizes a worker request against live Kubernetes
+// state and runs mutate with the resulting cleanup fence. No store
+// transaction is open while authorization runs; each fenced store call in
+// mutate refuses once cleanup or a revocation of an authorized Job has
+// invalidated the authorization.
+func withInternalTaskData(c fiber.Ctx, backing any, taskName string, authorize, mutate func(context.Context) error) error {
+	access, ok := backing.(store.TaskDataAccessStore)
 	if !ok {
-		return fiber.NewError(fiber.StatusServiceUnavailable, "task data transactions unavailable")
+		return fiber.NewError(fiber.StatusServiceUnavailable, "task data access unavailable")
 	}
-	// Bound live authorization and cleanup retries without holding the SQLite
-	// writer during Kubernetes reads.
+	// Bound live authorization and cleanup retries.
 	previousContext := c.Context()
 	ctx, cancel := context.WithTimeout(previousContext, 10*time.Second)
 	defer cancel()
@@ -35,23 +41,24 @@ func withInternalTaskDataTransaction(c fiber.Ctx, backing any, taskName string, 
 	for range 3 {
 		identities := make(map[store.TaskJobIdentity]struct{})
 		attemptCtx := context.WithValue(ctx, internalTaskJobAuthoritiesKey{}, identities)
-		err = transactions.WithAuthorizedTaskDataTransaction(attemptCtx, c.Params("namespace"), taskName, func(authCtx context.Context) error {
+		err = access.WithAuthorizedTaskDataAccess(attemptCtx, c.Params("namespace"), taskName, func(authCtx context.Context) ([]store.TaskJobIdentity, error) {
 			c.SetContext(authCtx)
-			return authorize(authCtx)
-		}, func(txCtx context.Context) error {
-			c.SetContext(txCtx)
-			for identity := range identities {
-				if err := transactions.CheckTaskJobAuthority(txCtx, identity); err != nil {
-					return err
-				}
+			if err := authorize(authCtx); err != nil {
+				return nil, err
 			}
-			return mutate(txCtx)
+			return slices.Collect(maps.Keys(identities)), nil
+		}, func(fencedCtx context.Context) error {
+			c.SetContext(fencedCtx)
+			return mutate(fencedCtx)
 		})
-		if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
+		if errors.Is(err, store.ErrOutcomeUnknown) || !errors.Is(err, store.ErrTaskDataCleanupChanged) {
 			break
 		}
 	}
 	if err != nil {
+		if errors.Is(err, store.ErrOutcomeUnknown) {
+			return temporaryStorageHTTPError(err)
+		}
 		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 			return fiberErr
 		}
@@ -60,6 +67,9 @@ func withInternalTaskDataTransaction(c fiber.Ctx, backing any, taskName string, 
 		}
 		if errors.Is(err, store.ErrTaskJobRevoked) {
 			return fiber.NewError(fiber.StatusForbidden, "task Job is no longer active")
+		}
+		if temporary := temporaryStorageHTTPError(err); temporary != nil {
+			return temporary
 		}
 		logf.FromContext(ctx).Error(err, "internal task data access failed", "namespace", c.Params("namespace"))
 		return fiber.NewError(fiber.StatusInternalServerError, "task data access failed")

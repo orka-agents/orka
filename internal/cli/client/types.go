@@ -37,6 +37,7 @@ type SSEEventData struct {
 	Content string `json:"content,omitempty"`
 
 	// tool_call / tool_result event
+	ID   string          `json:"id,omitempty"`
 	Name string          `json:"name,omitempty"`
 	Args json.RawMessage `json:"args,omitempty"`
 

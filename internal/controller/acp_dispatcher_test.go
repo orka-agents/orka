@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,13 +28,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -45,6 +46,7 @@ import (
 	"github.com/orka-agents/orka/internal/tasktrace"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -153,7 +155,7 @@ func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "start-event-store-test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "start-event-store-test"))
 	dispatcher := &ACPDispatcher{
 		Client:      fake.NewClientBuilder().Build(),
 		Store:       persistence,
@@ -176,7 +178,7 @@ func TestACPDispatcherStartRequiresAtomicPlanProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "start-plan-store-test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "start-plan-store-test"))
 	dispatcher := &ACPDispatcher{
 		Client:      fake.NewClientBuilder().Build(),
 		Store:       persistence,
@@ -367,7 +369,7 @@ func prepareBoundACPDispatcherTaskForTest(
 	ctx context.Context,
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
-	controlStore *sqlite.Store,
+	controlStore *sealedTestStore,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
@@ -383,31 +385,26 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
 	controlStore store.DurableControlStore,
-	persistence *sqlite.Store,
+	persistence store.AgentExecutionSnapshotStore,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
 	epochs ...*ControllerEpochManager,
 ) *corev1alpha1.Task {
 	t.Helper()
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := persistence.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
 	binder := &TaskReconciler{
 		Client:                  kubeClient,
 		APIReader:               kubeClient,
 		Scheme:                  scheme,
 		DurableControlStore:     controlStore,
 		AgentExecutionSnapshots: persistence,
-		ACPRuntimeEnabled:       true,
 		ACPRuntimeImages:        images,
 	}
 	if len(epochs) > 0 {
 		binder.ControllerEpochManager = epochs[0]
+	}
+	if taskRequestsExecutionWorkspace(task) {
+		installTestACPWorkspaceClass(t, binder)
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, binder, task, agent)
 	verified, err := binder.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
@@ -792,7 +789,7 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 		t.Fatalf("unbound default deadline = %s, %v; want zero, false", deadline, ok)
 	}
 	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
-		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+		ContractVersion: corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
 	}
 	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
 		t.Fatalf("harness v1 default deadline = %s, %v; want zero, false", deadline, ok)
@@ -864,6 +861,19 @@ func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
 	}
 	if got := runtimeSessionStartFailureMessage(errors.New("raw-secret")); got != fallback {
 		t.Fatalf("raw error message = %q", got)
+	}
+	for _, message := range []string{acp.WorkspaceValidationFailedMessage, acp.OpenCodeProjectConfigurationRejectedMessage} {
+		rejected := &harnessv2.ClientError{StatusCode: http.StatusBadRequest, Code: harnessv2.ErrorCodeInvalidRequest, Message: message}
+		if got := runtimeSessionStartFailureMessage(rejected); got != message {
+			t.Fatalf("workspace rejection message = %q, want %q", got, message)
+		}
+	}
+	rejectedWithDetail := &harnessv2.ClientError{
+		StatusCode: http.StatusBadRequest, Code: harnessv2.ErrorCodeInvalidRequest,
+		Message: acp.OpenCodeProjectConfigurationRejectedMessage + ": found secret-path",
+	}
+	if got := runtimeSessionStartFailureMessage(rejectedWithDetail); got != fallback {
+		t.Fatalf("workspace rejection with appended detail = %q", got)
 	}
 }
 
@@ -1643,7 +1653,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 				TerminalEvent: harnessv2.EventFailed, Outcome: harnessv2.PromptOutcomeFailed,
 				StopReason: harnessv2.ACPStopReasonRefusal, SettledAt: time.Now().UTC(),
 			},
-			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: harnessV1ReasonFailed,
+			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: "PromptFailed",
 			wantAttempt: store.PromptExecutionFailed, wantTerminal: harnessv2.EventFailed,
 		},
 	} {
@@ -1693,7 +1703,7 @@ func TestACPDispatcherExplicitRuntimeRPCFailureIsPromptFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "rpc-failure")
 	defer stopEpoch()
 	fence, err := epochs.CurrentFence(ctx)
@@ -1860,12 +1870,12 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	persistence := sqlite.NewStore(db, "test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "test"))
 	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", persistence, kubestore.WithAPIReader(kubeClient))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "controller-test").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "controller-test").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -1900,7 +1910,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
 		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+		LiveEvents: liveevents.NewBroker(0),
 	}
+	live := dispatcher.LiveEvents.Subscribe(task.Namespace, task.Name)
+	defer live.Close()
 	prepareAdditionalTask := func(
 		name string,
 		uid types.UID,
@@ -1971,6 +1984,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		return additional, additionalAttemptID, parentID
 	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
+	assertACPDispatcherPublishedLiveEvents(t, live, task)
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
@@ -2381,7 +2395,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 				t.Fatal(err)
 			}
 			defer db.Close() //nolint:errcheck
-			controlStore := sqlite.NewStore(db, "frozen-dispatch-test")
+			controlStore := sealedStore(t, sqlite.NewStore(db, "frozen-dispatch-test"))
 			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "frozen-"+test.name)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
@@ -2527,7 +2541,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
-	var persistence *sqlite.Store
+	var persistence *sealedTestStore
 	var nativeSnapshot *harnessv2.NativeSessionSnapshot
 	if nativeCapture {
 		snapshot := storetest.NativeSessionSnapshot(t, "completed write-session native conversation")
@@ -2606,7 +2620,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	persistence = controlStore
 	epochs := NewControllerEpochManager(controlStore, "controller-write-session")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
@@ -2899,9 +2913,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}},
 	}
 	if workspaceLifetime {
-		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled: true, Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-		}}
+		task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}}
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "agent", UID: types.UID("agent-uid"), Generation: 1},
@@ -2915,7 +2927,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	images := ACPRuntimeImages{Codex: "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)}
 	plan := frozenACPDispatcherPlanForTest(t, task, agent, images)
 	if workspaceLifetime {
-		binding, err := resolveACPWorkspaceBinding(task, corev1alpha1.WorkspaceProviderAgentSandbox, false, "")
+		binding, err := resolveTestACPWorkspaceBinding(t, task, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2928,12 +2940,20 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	profileDigest := plan.Digest
 	task.Labels[acpRuntimeTaskPoolLabel] = plan.PoolName
 	task.Status.Execution.RuntimePoolName = plan.PoolName
+	runtimeUID := types.UID("pod-uid")
+	if workspaceLifetime {
+		runtimeUID = externalNativeRuntimeUID(&workspacev1alpha1.WorkloadRequest{
+			Sequence: 1, Key: workspacev1alpha1.AllocationKey{WorkspaceUID: "expiring-workspace-uid"},
+			Runtime: &workspacev1alpha1.RuntimeWorkload{PoolBinding: workspacev1alpha1.ImmutableObjectBinding{UID: "pool-uid"}},
+		})
+	}
+	runtimeInstanceID := harnessv2.RuntimeInstanceID(runtimePoolRuntimeInstanceID(runtimeUID, "boot-id"))
 	var deleteCalls atomic.Int32
 	deadlineCancels := make(chan context.CancelCauseFunc, 1)
 	accepted := make(chan struct{})
 	server := newDispatcherTimeoutRuntimeServer(t, profile, profileDigest, &deleteCalls, func() {
 		close(accepted)
-	})
+	}, runtimeInstanceID)
 	defer server.Close()
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -2950,15 +2970,13 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 			Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
 			ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{
 				PodNamespace: "orka-runtimes", PodName: "runtime-pod", PodAddress: parsed.Host,
-				PodUID: "pod-uid", BootID: "boot-id", RuntimeInstanceID: "pod-uid.boot-id", ControllerEpoch: 1,
+				PodUID: string(runtimeUID), BootID: "boot-id", RuntimeInstanceID: string(runtimeInstanceID), ControllerEpoch: 1,
 				ProtocolVersion: corev1alpha1.RuntimePoolProtocolHarnessV2, ProfileDigest: string(profileDigest), ProfileDigestSchemaVersion: strconv.FormatUint(uint64(harnessv2.ProfileDigestSchemaVersion), 10),
 			},
 		},
 	}
 	if workspaceLifetime {
-		pool.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
-			Provider: plan.Workspace.Provider, BindingDigest: plan.Workspace.BindingDigest,
-		}
+		pool.Spec.ExecutionWorkspace = testExternalPoolWorkspaceSpec(plan.Workspace, "expiring-workspace", "expiring-workspace-uid")
 		pool.Labels = map[string]string{acpExecutionWorkspaceLinkLabel: "expiring-workspace"}
 		pool.Annotations = map[string]string{acpExecutionWorkspaceUIDAnnotation: "expiring-workspace-uid"}
 	}
@@ -2980,13 +2998,13 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		}
 		pool.Annotations[runtimePoolPrivateAuthSecretBindingAnnotation(1)] = secret.Name + "/" + string(secret.UID)
 	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}).WithObjects(task, pool, secret, agent).Build()
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}).WithObjects(task, pool, secret, agent).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "timeout-store.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-timeout-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -2997,7 +3015,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task = prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
+	task = prepareBoundACPDispatcherTaskWithStoresForTest(t, ctx, kubeClient, scheme, controlStore, controlStore, task, agent, images, epochs)
 	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: promptID}
 	attemptID, err := key.CanonicalID()
 	if err != nil {
@@ -3025,17 +3043,31 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		// authenticated cancellation. The Task's own 30-second timeout must
 		// not be the cause of settlement within this test's 10-second bound.
 		dispatcher.runtimeContextFactory = nil
-		workspace := &workspacev1alpha1.ExecutionWorkspace{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: task.Namespace, Name: "expiring-workspace", UID: types.UID("expiring-workspace-uid"),
-				CreationTimestamp: metav1.NewTime(time.Now().UTC().Truncate(time.Second)),
-				Annotations:       map[string]string{acpExecutionWorkspacePoolAnnotation: pool.Name},
-			},
-			Spec: workspacev1alpha1.ExecutionWorkspaceSpec{Lifecycle: workspacev1alpha1.ExecutionWorkspaceLifecycle{
-				MaxLifetime: &metav1.Duration{Duration: 5 * time.Second},
-			}},
+		bootstrapPort, err := strconv.ParseInt(parsed.Port(), 10, 32)
+		if err != nil {
+			t.Fatal(err)
 		}
+		workspace := testAdmittedNativeDispatchWorkspace(t, plan.Workspace, pool, server.URL, int32(bootstrapPort))
+		workspace.CreationTimestamp = metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+		workspace.Spec.Lifecycle.MaxLifetime = &metav1.Duration{Duration: 5 * time.Second}
 		if err := kubeClient.Create(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+		worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "deadline-worker", UID: "deadline-worker-uid"}}
+		if err := kubeClient.Create(ctx, worker); err != nil {
+			t.Fatal(err)
+		}
+		// Model the core fence persisted after the one-time native challenge. This
+		// test exercises deadline settlement; the endpoint test verifies admission.
+		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), pool); err != nil {
+			t.Fatal(err)
+		}
+		pool.Status.ActiveInstance.PodAddress = parsed.Hostname()
+		if err := kubeClient.Status().Update(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		observer := &RuntimePoolReconciler{Client: kubeClient, APIReader: kubeClient}
+		if err := observer.bindExternalRuntimeInstanceEvidence(ctx, pool, workspace); err != nil {
 			t.Fatal(err)
 		}
 	} else {
@@ -3241,7 +3273,7 @@ func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPres
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -3274,7 +3306,7 @@ func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPres
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt = completeACPAttemptExecutionForTest(t, controlStore, fence, attempt, false)
+	attempt = completeACPAttemptExecutionForTest(t, controlStore.Store, fence, attempt, false)
 	transitionDigest := testControlDigestForDispatcher("delivery-validating")
 	_, err = controlStore.TransitionPromptAttemptDelivery(ctx, store.PromptAttemptDeliveryTransition{
 		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptDeliveryNotRequested,
@@ -3423,11 +3455,15 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 
 type dispatcherPublisherServerOptions struct {
 	disablePRPresentation bool
-	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
-	inspectPublish        func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest    func(publisher.PullRequestIntent)
+	// resolvedBaselineOID, when set, is the branch head workspace resolution
+	// reports, for example the commit an earlier turn published.
+	resolvedBaselineOID func() string
+	inspectPrepare      func(publisherservice.PublicationPrepareRequest)
+	inspectPublish      func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest  func(publisher.PullRequestIntent)
 }
 
+//nolint:gocyclo // Publisher test fixture exposes protocol operations and their fault-injection controls.
 func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest string, options ...dispatcherPublisherServerOptions) *httptest.Server {
 	t.Helper()
 	bundleArtifactID, err := artifactcap.ArtifactIDForDigest(bundleDigest)
@@ -3459,9 +3495,13 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 			if resolvedRef == defaultACPSourceBranch {
 				resolvedRef = "refs/heads/" + defaultACPSourceBranch
 			}
+			baselineOID := strings.Repeat("1", 40)
+			if len(options) > 0 && options[0].resolvedBaselineOID != nil {
+				baselineOID = options[0].resolvedBaselineOID()
+			}
 			writeDispatcherJSON(w, publisherservice.WorkspaceResolveResponse{
 				OperationID: request.Metadata.OperationID, RequestDigest: testControlDigestForDispatcher("workspace-resolve"),
-				RepositoryID: request.Source.ID, SourceRef: resolvedRef, BaselineOID: strings.Repeat("1", 40),
+				RepositoryID: request.Source.ID, SourceRef: resolvedRef, BaselineOID: baselineOID,
 			})
 		case publisherservice.WorkspacePreparePath:
 			var request publisherservice.WorkspacePrepareRequest
@@ -3594,6 +3634,7 @@ func newDispatcherTimeoutRuntimeServer(
 	digest harnessv2.ProfileDigest,
 	deleteCalls *atomic.Int32,
 	onAccepted func(),
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
 ) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -3605,7 +3646,9 @@ func newDispatcherTimeoutRuntimeServer(
 		descriptorMu.Lock()
 		current := descriptor
 		descriptorMu.Unlock()
-		writeDispatcherJSON(w, dispatcherRuntimeStatusResponse(digest, current))
+		response := dispatcherRuntimeStatusResponse(digest, current)
+		response.Fence.RuntimeInstanceID = runtimeInstanceID
+		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
@@ -3965,6 +4008,7 @@ type dispatcherRuntimeServerOptions struct {
 	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
+	nativePermissionAsk              bool
 	// rejectCreate answers a create request with the returned error response
 	// and status instead of creating the session when the response is non-nil.
 	// resident makes the runtime keep reporting the exact requested session as
@@ -3994,6 +4038,7 @@ func newDispatcherRuntimeServerWithOptions(
 	)
 }
 
+//nolint:gocyclo // Fake runtime server routes every v2 endpoint the dispatcher tests exercise.
 func newDispatcherRuntimeServerForPoolWithOptions(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
@@ -4023,7 +4068,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 			RuntimeProfileDigest: digest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 			AdapterDigests: profile.AdapterDigests, Limits: limits,
-			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: !options.disablePermissions, SupportsTools: true},
+			Provider: harnessv2.ProviderCapabilities{
+				ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true,
+				SupportsPermissions: !options.disablePermissions, SupportsTools: true, SupportsNativePermissionAsk: options.nativePermissionAsk,
+			},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
 			SupportsNativeSessions:            options.nativeSnapshot != nil,
@@ -4105,7 +4153,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				Sequence: seq, RequestDigest: request.Metadata.RequestDigest, Timestamp: at,
 			}
 		}
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1}})
+		// Like a current supervisor, confirm live updates when asked.
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1, LiveUpdates: r.Header.Get(harnessv2.LiveUpdatesHeader) == "1",
+		}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(2, now.Add(time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello "}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(3, now.Add(2*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Kind: acpDispatcherToolKind, Status: harnessv2.ToolCallStatusPending}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(4, now.Add(3*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Status: harnessv2.ToolCallStatusCompleted, Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: acpDispatcherToolResultPath}}}}})
@@ -4520,6 +4571,23 @@ func TestACPDispatcherSettlesDeletingTaskBeforeClosedAdmissionAndWorkerCapacity(
 	}, corev1alpha1.TaskExecutionReason("Cancelled"), "task cancelled before runtime admission", true)
 }
 
+func TestACPDispatcherSettlesCancelledTaskBeforeRuntimePoolAdmissionWithItsRequest(t *testing.T) {
+	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+		task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+		task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", false)
+}
+
+// A cancel request recorded before the controller writes the Cancelled phase
+// already stops runtime admission: the queued Task is settled, not started.
+func TestACPDispatcherSettlesCancelRequestedTaskBeforeRuntimePoolAdmission(t *testing.T) {
+	for _, throughDispatch := range []bool{false, true} {
+		runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+			task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+		}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", throughDispatch)
+	}
+}
+
 func TestACPDispatcherSettlesExpiredTaskBeforeRuntimePoolAdmission(t *testing.T) {
 	timeout := metav1.Duration{Duration: time.Minute}
 	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
@@ -4712,7 +4780,7 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -4765,7 +4833,7 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited task was not nonterminal: %#v", updated.Status.Execution)
 	}
 	cancelEpoch()
@@ -4791,7 +4859,7 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -4853,13 +4921,174 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		t.Fatal(err)
 	}
 	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
-		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity ||
 		updated.Status.Execution.AgentRuntimeName != "external-v2" || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited external task was not released for retry: %#v", updated.Status.Execution)
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// promptAdmissionWorkspacePool turns the reservation fixture's pool into a
+// dedicated execution-workspace pool in the given lifecycle and admission.
+func promptAdmissionWorkspacePool(
+	t *testing.T, kubeClient client.Client, pool *corev1alpha1.RuntimePool, workspace bool,
+	lifecycle corev1alpha1.RuntimePoolLifecycle, admission corev1alpha1.RuntimePoolAdmissionState, annotations map[string]string,
+) *corev1alpha1.RuntimePool {
+	t.Helper()
+	ctx := context.Background()
+	current := &corev1alpha1.RuntimePool{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		t.Fatal(err)
+	}
+	if workspace {
+		current.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+			WorkspaceRef: &workspacev1alpha1.ObjectIdentityReference{Name: "workspace", UID: "workspace-uid"},
+			Workload:     &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{},
+		}
+	}
+	current.Annotations = annotations
+	if err := kubeClient.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Lifecycle, current.Status.AdmissionState = lifecycle, admission
+	if err := kubeClient.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	return current.DeepCopy()
+}
+
+// A rate-limited prompt that was never accepted is requeued, not held for
+// capacity on the same exact instance, only when that instance is being
+// replaced: always for external runtimes, and for a dedicated
+// execution-workspace pool only while its current state shows a drain,
+// retirement, or eviction. A Serving and Accepting workspace pool, whose 429
+// means its prompt slot is busy, waits for capacity like a shared pool.
+func TestPromptAdmissionRejectionRequeuesReplaceableInstances(t *testing.T) {
+	evicted := map[string]string{externalRuntimeEvictionAnnotation: "{}"}
+	for _, test := range []struct {
+		name        string
+		external    bool
+		workspace   bool
+		lifecycle   corev1alpha1.RuntimePoolLifecycle
+		admission   corev1alpha1.RuntimePoolAdmissionState
+		annotations map[string]string
+		want        bool
+	}{
+		{name: "shared pool serving", lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting},
+		{name: "shared pool draining", lifecycle: corev1alpha1.RuntimePoolLifecycleDraining, admission: corev1alpha1.RuntimePoolAdmissionClosed},
+		{name: "external runtime", external: true, want: true},
+		{name: "workspace pool serving and accepting", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting},
+		{name: "workspace pool accepting with stale eviction marker", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionAccepting, annotations: evicted},
+		{name: "workspace pool draining", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleDraining, admission: corev1alpha1.RuntimePoolAdmissionClosed, want: true},
+		{name: "workspace pool evicted before lifecycle update", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleServing, admission: corev1alpha1.RuntimePoolAdmissionClosed, annotations: evicted, want: true},
+		{name: "workspace pool closed for another reason", workspace: true, lifecycle: corev1alpha1.RuntimePoolLifecycleStarting, admission: corev1alpha1.RuntimePoolAdmissionClosed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, _, _ := newRuntimePoolReservationTestFixture(t)
+			target := acpDispatchTarget{external: &corev1alpha1.AgentRuntime{}}
+			if !test.external {
+				target = acpDispatchTarget{pool: promptAdmissionWorkspacePool(t, kubeClient, pool, test.workspace, test.lifecycle, test.admission, test.annotations)}
+			}
+			if got := dispatcher.promptAdmissionRejectionRequeues(context.Background(), target); got != test.want {
+				t.Fatalf("promptAdmissionRejectionRequeues = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+// A prompt waiting for capacity after a 429 stops waiting once its
+// execution-workspace instance starts retiring, so it can be requeued for the
+// replacement instead of failing when the instance changes. A shared pool
+// keeps waiting.
+func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstance(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workspace bool
+		admission corev1alpha1.RuntimePoolAdmissionState
+		instance  harnessv2.RuntimeInstanceID
+		want      error
+	}{
+		{name: "workspace pool draining", workspace: true, admission: corev1alpha1.RuntimePoolAdmissionClosed, instance: "pod-uid.boot-id", want: errACPPromptAdmissionInstanceRetiring},
+		{name: "workspace pool replaced", workspace: true, admission: corev1alpha1.RuntimePoolAdmissionAccepting, instance: "evicted-pod.boot-id", want: errACPPromptAdmissionInstanceRetiring},
+		{name: "shared pool draining", admission: corev1alpha1.RuntimePoolAdmissionClosed, instance: "pod-uid.boot-id", want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+			dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+			lifecycle := corev1alpha1.RuntimePoolLifecycleDraining
+			if test.admission == corev1alpha1.RuntimePoolAdmissionAccepting {
+				lifecycle = corev1alpha1.RuntimePoolLifecycleServing
+			}
+			current := promptAdmissionWorkspacePool(t, kubeClient, pool, test.workspace, lifecycle, test.admission, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, test.instance)
+			if lease != nil || !errors.Is(err, test.want) {
+				t.Fatalf("waitForPromptCapacityReservation = %v, %v; want %v", lease, err, test.want)
+			}
+		})
+	}
+}
+
+// A retiring instance whose running prompts still hold every slot refuses a
+// prompt for capacity, not admission. The prompt was never accepted, so it is
+// requeued for the replacement instead of waiting on the retiring instance
+// until the runtime context ends. A serving instance at capacity keeps waiting.
+func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstanceAtCapacity(t *testing.T) {
+	evicted := map[string]string{externalRuntimeEvictionAnnotation: "{}"}
+	for _, test := range []struct {
+		name        string
+		admission   corev1alpha1.RuntimePoolAdmissionState
+		annotations map[string]string
+		want        error
+	}{
+		{name: "evicted instance at capacity", admission: corev1alpha1.RuntimePoolAdmissionClosed, annotations: evicted, want: errACPPromptAdmissionInstanceRetiring},
+		{name: "serving instance at capacity", admission: corev1alpha1.RuntimePoolAdmissionAccepting, want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+			dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+			current := promptAdmissionWorkspacePool(t, kubeClient, pool, true, corev1alpha1.RuntimePoolLifecycleServing, test.admission, test.annotations)
+			current.Status.Capacity.RunningPrompts = current.Status.Capacity.MaxRunningPrompts
+			if err := kubeClient.Status().Update(context.Background(), current); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := dispatcher.claimRuntimePoolReservation(context.Background(), task, current.Name, store.ControllerEpochFence{Epoch: 1}, 0); !errors.Is(err, errACPRuntimePoolAtCapacity) {
+				t.Fatalf("claim error = %v, want a capacity refusal", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, "pod-uid.boot-id")
+			if lease != nil || !errors.Is(err, test.want) {
+				t.Fatalf("waitForPromptCapacityReservation = %v, %v; want %v", lease, err, test.want)
+			}
+		})
+	}
+}
+
+// A prompt-only reservation is not gated on admission, so capacity can open on
+// an instance that started retiring while the prompt waited. The reservation
+// is released and the prompt requeued for the replacement rather than retried
+// on the retiring instance.
+func TestWaitForPromptCapacityDoesNotReuseCapacityOnARetiringInstance(t *testing.T) {
+	dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+	dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+	current := promptAdmissionWorkspacePool(t, kubeClient, pool, true, corev1alpha1.RuntimePoolLifecycleServing,
+		corev1alpha1.RuntimePoolAdmissionClosed, map[string]string{externalRuntimeEvictionAnnotation: "{}"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, "pod-uid.boot-id")
+	if lease != nil || !errors.Is(err, errACPPromptAdmissionInstanceRetiring) {
+		t.Fatalf("waitForPromptCapacityReservation = %v, %v; want the retiring instance refused", lease, err)
+	}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Capacity.Reservations) != 0 {
+		t.Fatalf("reservations = %#v, want the reservation on the retiring instance released", current.Status.Capacity.Reservations)
 	}
 }
 
@@ -4949,7 +5178,7 @@ func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *test
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	sqliteStore := sqlite.NewStore(db, "session-rollback-test")
+	sqliteStore := sealedStore(t, sqlite.NewStore(db, "session-rollback-test"))
 	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", sqliteStore)
 	if err != nil {
 		t.Fatal(err)
@@ -6151,5 +6380,83 @@ func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
 	case <-cancelled:
 		t.Fatal("renewal loop cancelled the runtime before prompt admission")
 	default:
+	}
+}
+
+// assertACPDispatcherPublishedLiveEvents checks that every event of the
+// Task's prompt reached live subscribers in protocol order.
+func assertACPDispatcherPublishedLiveEvents(t *testing.T, live *liveevents.Subscription, task *corev1alpha1.Task) {
+	t.Helper()
+	var published []harnessv2.EventType
+	var last uint64
+	for drained := false; !drained; {
+		select {
+		case event := <-live.C():
+			if event.Runtime == nil || event.TaskUID != string(task.UID) {
+				t.Fatalf("live event = %#v", event)
+			}
+			if event.Runtime.Identity.Sequence <= last {
+				t.Fatalf("live events out of order: %d after %d", event.Runtime.Identity.Sequence, last)
+			}
+			last = event.Runtime.Identity.Sequence
+			published = append(published, event.Runtime.Type)
+		default:
+			drained = true
+		}
+	}
+	if len(published) < 3 || published[0] != harnessv2.EventAccepted || !published[len(published)-1].IsTerminal() ||
+		!slices.Contains(published, harnessv2.EventUpdate) {
+		t.Fatalf("published live events = %v", published)
+	}
+}
+
+func TestACPLivePublisherPatternRedactsTheFinalAnswer(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
+	secret := "github" + "_pat_" + "1234567890abcdefghijklmnopqrstuvwxyz"
+	completed := harnessv2.Event{Type: harnessv2.EventCompleted, Completed: &harnessv2.CompletedEvent{
+		Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "found " + secret}}},
+	}}
+	broker := liveevents.NewBroker(0)
+	live := broker.Subscribe("default", "task")
+	livePublisher := acpLivePublisher{broker: broker, task: task}
+	livePublisher.observe(harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{LiveUpdates: true}})
+	livePublisher.observe(completed)
+	live.Close()
+	var final *harnessv2.Event
+	for event := range live.C() {
+		if event.Runtime != nil && event.Runtime.Type == harnessv2.EventCompleted {
+			final = event.Runtime
+		}
+	}
+	if final == nil {
+		t.Fatal("the completed event was not published")
+	}
+	if text := final.Completed.Result.Content[0].Text; strings.Contains(text, secret) {
+		t.Fatalf("published final answer kept a credential-shaped value: %q", text)
+	}
+	if completed.Completed.Result.Content[0].Text != "found "+secret {
+		t.Fatal("redacting the published copy changed the event the journal receives")
+	}
+}
+
+func TestACPLivePublisherPublishesOnlyConfirmedPrompts(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
+	update := harnessv2.Event{Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "text"},
+	}}
+	for _, confirmed := range []bool{false, true} {
+		broker := liveevents.NewBroker(0)
+		live := broker.Subscribe("default", "task")
+		livePublisher := acpLivePublisher{broker: broker, task: task}
+		livePublisher.observe(harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{LiveUpdates: confirmed}})
+		livePublisher.observe(update)
+		live.Close()
+		published := 0
+		for range live.C() {
+			published++
+		}
+		if want := map[bool]int{false: 0, true: 2}[confirmed]; published != want {
+			t.Fatalf("confirmed=%v published %d events, want %d", confirmed, published, want)
+		}
 	}
 }

@@ -26,6 +26,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -34,7 +35,7 @@ type gatewayMessageAPIFixture struct {
 	h       *InternalHandlers
 	app     *fiber.App
 	service *gatewayruntime.Service
-	db      *sqlite.Store
+	db      *storageclient.Client
 	task    *corev1alpha1.Task
 	event   *store.GatewayEvent
 	user    *UserInfo
@@ -50,7 +51,7 @@ func newGatewayMessageAPIFixture(t *testing.T) *gatewayMessageAPIFixture {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	f := &gatewayMessageAPIFixture{db: sqlite.NewStore(db, ":memory:"), token: fmt.Sprintf("gateway-message-test-%s-%d", t.Name(), time.Now().UnixNano())}
+	f := &gatewayMessageAPIFixture{db: testStorageClient(sqlite.NewStore(db, ":memory:")), token: fmt.Sprintf("gateway-message-test-%s-%d", t.Name(), time.Now().UnixNano())}
 	g := &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "default", UID: "gateway-uid", Generation: 1}, Spec: gatewayv1alpha1.GatewaySpec{GatewayClassName: "chat", Adapter: gatewayv1alpha1.GatewayAdapterLocation{Endpoint: "http://127.0.0.1:1"}, InboundAuthRef: gatewayv1alpha1.GatewayBearerAuthReference{Name: "inbound", Key: "token"}}, Status: gatewayv1alpha1.GatewayStatus{Ready: true, ObservedGeneration: 1, ObservedInboundAuthRefVersion: "1", ObservedCapabilities: &gatewayv1alpha1.GatewayObservedCapabilities{ContractVersion: protocol.Version, Capabilities: gatewayv1alpha1.GatewayCapabilities{InterimDelivery: true}}}}
 	binding := &gatewayv1alpha1.GatewayBinding{ObjectMeta: metav1.ObjectMeta{Name: "room", Namespace: "default", UID: "binding-uid", Generation: 1}, Spec: gatewayv1alpha1.GatewayBindingSpec{GatewayRef: gatewayv1alpha1.GatewayBindingReference{Name: "chat"}, AgentRef: gatewayv1alpha1.GatewayBindingReference{Name: "assistant"}, Match: gatewayv1alpha1.GatewayBindingMatch{AccountID: "acct", ContextID: "room"}, SenderPolicy: gatewayv1alpha1.GatewaySenderPolicy{Mode: gatewayv1alpha1.GatewaySenderPolicyAllowlist, AllowedSenderIDs: []string{"user"}}, Session: gatewayv1alpha1.GatewaySessionSpec{Mode: gatewayv1alpha1.GatewaySessionContext}}, Status: gatewayv1alpha1.GatewayBindingStatus{Ready: true, ObservedGeneration: 1}}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}, &gatewayv1alpha1.Gateway{}).WithObjects(
@@ -322,7 +323,9 @@ func TestInternalGatewayMessageChecksRevocationInsideWriter(t *testing.T) {
 	withdrawGatewayMessageCapability(t, f)
 	// Register the Task's cleanup fence first so the test revokes only during the
 	// admission authorization, after the worker has been authenticated.
-	require.NoError(t, f.db.WithAuthorizedTaskDataTransaction(t.Context(), "default", f.task.Name, func(context.Context) error { return nil }, func(context.Context) error { return nil }))
+	require.NoError(t, f.db.WithAuthorizedTaskDataAccess(t.Context(), "default", f.task.Name, func(context.Context) ([]store.TaskJobIdentity, error) {
+		return nil, nil
+	}, func(context.Context) error { return nil }))
 	revoked := false
 	fresh := interceptor.NewClient(f.h.k8sClient.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 		err := c.Get(ctx, key, obj, opts...)

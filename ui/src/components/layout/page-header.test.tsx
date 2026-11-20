@@ -9,6 +9,22 @@ describe('PageHeader', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Tasks' })).toBeInTheDocument()
   })
 
+  it('wraps a long unbroken title instead of widening the page', () => {
+    const title = 'z'.repeat(72)
+    render(<PageHeader title={title} />)
+    const heading = screen.getByRole('heading', { level: 1, name: title })
+    expect(heading).toHaveClass('break-words')
+    expect(heading.parentElement).toHaveClass('min-w-0')
+    expect(heading.parentElement?.parentElement).toHaveClass('min-w-0')
+  })
+
+  it('names the page in the browser tab until it unmounts', () => {
+    const { unmount } = render(<PageHeader title="Tasks" />)
+    expect(document.title).toBe('Tasks · Orka')
+    unmount()
+    expect(document.title).toBe('Orka')
+  })
+
   it('renders the description when provided', () => {
     render(<PageHeader title="Tasks" description="Manage your task execution" />)
     expect(screen.getByText('Manage your task execution')).toBeInTheDocument()

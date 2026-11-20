@@ -654,6 +654,17 @@ func TestFilterFindingsDropsTopLevelTestDirectoryFinding(t *testing.T) {
 	assertFilterDropped(t, got, "test-only")
 }
 
+func TestFilterFindingsDropsE2EAndTestdataFindings(t *testing.T) {
+	for _, filePath := range []string{"frontend/e2e/login.ts", "e2e/helpers.ts", "pkg/parser/testdata/fixture.go"} {
+		got := FilterFindings([]*store.Finding{filterFinding(
+			"Test-only helper issue",
+			filePath,
+			"Test-only fixture has an auth helper issue.",
+		)})
+		assertFilterDropped(t, got, "test-only")
+	}
+}
+
 func TestFilterFindingsKeepsDocsAWSAccessKeyLeak(t *testing.T) {
 	got := FilterFindings([]*store.Finding{filterFinding(
 		"AWS access key ID "+"A"+"KIA"+strings.Repeat("A", 16),
@@ -693,4 +704,18 @@ func TestFilterFindingsKeepsAuditLogInjection(t *testing.T) {
 		"Attacker-controlled username can forge admin audit entries and break audit integrity.",
 	)})
 	assertFilterKept(t, got)
+}
+
+func TestFilterFindingsDropsDemoAndExampleOnlyFindings(t *testing.T) {
+	for _, filePath := range []string{"demo/agilebank/policy.yaml", "examples/server/main.go", "third_party/lib/hack/patch.sh"} {
+		finding := filterFinding("Image allowlist accepts attacker prefix", filePath, "The policy accepts an attacker-owned registry namespace.")
+		finding.Category = filterTestAuthzCategory
+		assertFilterDropped(t, FilterFindings([]*store.Finding{finding}), "demo or example content")
+	}
+	shipped := filterFinding("Default policy is bypassable", "examples/policy.yaml", "The chart installs this example by default; it is loaded by production clusters.")
+	shipped.Category = filterTestAuthzCategory
+	assertFilterKept(t, FilterFindings([]*store.Finding{shipped}))
+	code := filterFinding("Example handler naming", "pkg/examplecheck/check.go", "Authorization is skipped for the runtime handler.")
+	code.Category = filterTestAuthzCategory
+	assertFilterKept(t, FilterFindings([]*store.Finding{code}))
 }

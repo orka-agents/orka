@@ -13,12 +13,12 @@ import (
 )
 
 func TestListExecutionEventsUsesTaskDataTransaction(t *testing.T) {
-	s := newCoexistenceTestStore(t)
+	s := newAgentExecutionTestStore(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	rollback := errors.New("rollback the uncommitted history")
 	filter := store.ExecutionEventFilter{Namespace: "ns", StreamType: "task", StreamID: "task"}
-	err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+	err := s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		_, err := s.AppendExecutionEvent(txCtx, &store.ExecutionEvent{
 			Namespace: "ns", StreamType: "task", StreamID: "task", TaskName: "task",
 			Type: events.ExecutionEventTypeApprovalRequested, ToolCallID: "approval-1", Summary: "Review operation",

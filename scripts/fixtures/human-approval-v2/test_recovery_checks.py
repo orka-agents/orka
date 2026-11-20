@@ -384,6 +384,23 @@ class RetainedReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(CheckFailed, "disappeared"):
             recovery.verify_task_cleanup(self.cluster, record)
 
+    def test_capture_accepts_only_exact_no_effect_failure(self):
+        def fail(receipt, **changes):
+            response = {"isError": True, "code": "tool_failed_without_effect", "approvalID": "approval-id",
+                        "error": "GitHub refused the request (HTTP 403)", **changes}
+            receipt["status"].update(state="Failed", response=response, responseDigest=recovery.digest(response))
+
+        fail(self.cluster.values[3])
+        self.assertEqual(self.capture()["retainedEffects"][1]["state"], "Failed")
+        for mutate in (lambda receipt: fail(receipt, approvalID="other"),
+                       lambda receipt: fail(receipt, error=" "),
+                       lambda receipt: fail(receipt, code="tool_execution_failed"),
+                       lambda receipt: (fail(receipt), receipt["status"].update(attempts=0))):
+            self.setUp()
+            mutate(self.cluster.values[3])
+            with self.subTest(mutation=mutate), self.assertRaisesRegex(CheckFailed, "no-effect execution"):
+                self.capture()
+
     def test_capture_rejects_unbound_succeeded_receipt_or_wrong_task(self):
         for mutate in (lambda value: value.update(taskUID="other"),
                        lambda value: value["binding"].update(requestDigest=recovery.digest("other")),

@@ -42,6 +42,7 @@ type FindingValidationResult struct {
 func ValidateFindingsV2(artifact FindingsV2Artifact, manifest ReviewContextManifest, opts FindingValidationOptions) FindingValidationResult {
 	result := FindingValidationResult{}
 	included := includedFileMap(manifest)
+	references := referenceFileMap(manifest)
 	for index, finding := range artifact.Findings {
 		if reason := validateFindingRequiredFields(finding); reason != "" {
 			result.Dropped = append(result.Dropped, droppedDiagnostic(index, reason, finding))
@@ -53,7 +54,8 @@ func ValidateFindingsV2(artifact FindingsV2Artifact, manifest ReviewContextManif
 			result.Dropped = append(result.Dropped, droppedDiagnostic(index, reason, finding))
 			continue
 		}
-		if reason := validateFindingEvidence(finding, included, opts.WorkspaceRoot); reason != "" {
+		finding, reason = usableFindingEvidence(finding, included, references, opts.WorkspaceRoot)
+		if reason != "" {
 			result.Dropped = append(result.Dropped, droppedDiagnostic(index, reason, finding))
 			continue
 		}
@@ -80,6 +82,14 @@ func findingRepositoryMetadata(artifactRepo FindingsV2Repository, opts FindingVa
 func includedFileMap(manifest ReviewContextManifest) map[string]ReviewContextIncludedFile {
 	out := make(map[string]ReviewContextIncludedFile, len(manifest.IncludedFiles))
 	for _, file := range manifest.IncludedFiles {
+		out[file.Path] = file
+	}
+	return out
+}
+
+func referenceFileMap(manifest ReviewContextManifest) map[string]ReviewContextReferenceFile {
+	out := make(map[string]ReviewContextReferenceFile, len(manifest.ReferenceFiles))
+	for _, file := range manifest.ReferenceFiles {
 		out[file.Path] = file
 	}
 	return out
@@ -119,6 +129,17 @@ func normalizeFindingEnums(finding FindingsV2Finding) (FindingsV2Finding, string
 	}
 	finding.Severity = severity
 	finding.Confidence = confidence
+	// Roles only annotate locations, so an unknown role is dropped rather
+	// than costing the finding.
+	evidence := make([]FindingsV2EvidenceRef, len(finding.Evidence))
+	for i, ref := range finding.Evidence {
+		ref.Role = strings.ToLower(strings.TrimSpace(ref.Role))
+		if _, ok := findingEvidenceRoles[ref.Role]; !ok {
+			ref.Role = ""
+		}
+		evidence[i] = ref
+	}
+	finding.Evidence = evidence
 	return finding, ""
 }
 
@@ -140,13 +161,49 @@ func canonicalFindingConfidence(value string) (string, bool) {
 	}
 }
 
-func validateFindingEvidence(finding FindingsV2Finding, included map[string]ReviewContextIncludedFile, workspaceRoot string) string {
+// usableFindingEvidence keeps the evidence the review context can verify. A
+// reviewer that traces across the repository may cite one file the mapper did
+// not index; that citation is dropped, and the finding stays while at least
+// one verified citation remains.
+func usableFindingEvidence(
+	finding FindingsV2Finding,
+	included map[string]ReviewContextIncludedFile,
+	references map[string]ReviewContextReferenceFile,
+	workspaceRoot string,
+) (FindingsV2Finding, string) {
+	kept := make([]FindingsV2EvidenceRef, 0, len(finding.Evidence))
+	firstReason := ""
+	for _, ref := range finding.Evidence {
+		single := finding
+		single.Evidence = []FindingsV2EvidenceRef{ref}
+		if reason := validateFindingEvidence(single, included, references, workspaceRoot); reason != "" {
+			if firstReason == "" {
+				firstReason = reason
+			}
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	if len(kept) == 0 {
+		return finding, firstReason
+	}
+	finding.Evidence = kept
+	return finding, ""
+}
+
+func validateFindingEvidence(
+	finding FindingsV2Finding,
+	included map[string]ReviewContextIncludedFile,
+	references map[string]ReviewContextReferenceFile,
+	workspaceRoot string,
+) string {
 	for _, ref := range finding.Evidence {
 		if !SafeRepoPath(ref.Path) {
 			return fmt.Sprintf("evidence path %q is not repo-relative and safe", ref.Path)
 		}
-		file, ok := included[ref.Path]
-		if !ok {
+		file, isIncluded := included[ref.Path]
+		reference, isReference := references[ref.Path]
+		if !isIncluded && !isReference {
 			return "evidence file was not included in review context"
 		}
 		if ref.StartLine <= 0 || ref.EndLine <= 0 {
@@ -155,8 +212,16 @@ func validateFindingEvidence(finding FindingsV2Finding, included map[string]Revi
 		if ref.EndLine < ref.StartLine {
 			return "evidence line range is inverted"
 		}
-		if !lineRangeIncluded(ref.StartLine, ref.EndLine, file.IncludedLineRanges) {
-			return "evidence line range is outside included review context"
+		if !isIncluded || !lineRangeIncluded(ref.StartLine, ref.EndLine, file.IncludedLineRanges) {
+			// A reference file was read from the workspace rather than
+			// excerpted, so only its line bounds can be checked.
+			if !isReference {
+				return "evidence line range is outside included review context"
+			}
+			if ref.EndLine > reference.Lines {
+				return "evidence line range is outside the reference file"
+			}
+			continue
 		}
 		if ref.Quote != nil && strings.TrimSpace(*ref.Quote) != "" {
 			if reason := validateEvidenceQuote(file, workspaceRoot, ref); reason != "" {
@@ -289,6 +354,7 @@ func ToFindingV2(
 			StartLine: ref.StartLine,
 			EndLine:   ref.EndLine,
 			Symbol:    derefString(ref.Symbol),
+			Role:      ref.Role,
 		})
 	}
 
@@ -329,9 +395,14 @@ func ToFindingV2(
 	}
 }
 
+// canonicalEvidenceRefs orders evidence by location, with test files last so
+// a finding's primary location is the code it is about.
 func canonicalEvidenceRefs(refs []FindingsV2EvidenceRef) []FindingsV2EvidenceRef {
 	out := append([]FindingsV2EvidenceRef{}, refs...)
 	sort.Slice(out, func(i, j int) bool {
+		if left, right := isTestPath(out[i].Path), isTestPath(out[j].Path); left != right {
+			return right
+		}
 		return canonicalEvidenceKey(findingV2FingerprintEvidenceRef{
 			Path:      out[i].Path,
 			StartLine: out[i].StartLine,

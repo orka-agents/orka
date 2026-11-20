@@ -17,7 +17,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const execHelperProtocolVersion = "orka-acp-exec-v1"
+const (
+	execHelperProtocolVersion = "orka-acp-exec-v1"
+	// operatorExecHelperProtocolVersion launches an operator command with one
+	// supplementary tag group. The tag is unforgeable (dropping or changing
+	// supplementary groups needs CAP_SETGID) and inherited by every
+	// descendant, so the supervisor can find and kill the whole operation even
+	// after processes leave the process group, session, or process tree.
+	operatorExecHelperProtocolVersion = "orka-acp-operator-exec-v1"
+)
 
 func newChildCommand(cfg ProcessConfig) (*exec.Cmd, error) {
 	helperCommand := strings.TrimSpace(cfg.ExecHelperCommand)
@@ -63,11 +71,24 @@ type execHelperInvocation struct {
 	parentPID int
 	uid       int
 	gid       int
+	tagGID    int
 	command   string
 	args      []string
 }
 
 func parseExecHelperInvocation(args []string) (execHelperInvocation, error) {
+	if len(args) >= 6 && args[0] == operatorExecHelperProtocolVersion {
+		tag, err := strconv.Atoi(args[4])
+		if err != nil || tag < OperatorTagFirstGID || tag > OperatorTagLastGID {
+			return execHelperInvocation{}, fmt.Errorf("invalid ACP operator exec helper tag group")
+		}
+		invocation, err := parseExecHelperInvocation(append([]string{execHelperProtocolVersion}, append(args[1:4], args[5:]...)...))
+		if err != nil {
+			return execHelperInvocation{}, err
+		}
+		invocation.tagGID = tag
+		return invocation, nil
+	}
 	if len(args) < 5 || args[0] != execHelperProtocolVersion {
 		return execHelperInvocation{}, fmt.Errorf("invalid ACP exec helper invocation")
 	}
@@ -107,7 +128,8 @@ func verifyExecHelperEnvelope(invocation execHelperInvocation) error {
 	if err != nil {
 		return fmt.Errorf("inspect ACP exec helper supplementary groups: %w", err)
 	}
-	if len(groups) != 0 {
+	if (invocation.tagGID == 0 && len(groups) != 0) ||
+		(invocation.tagGID != 0 && (len(groups) != 1 || groups[0] != invocation.tagGID)) {
 		return fmt.Errorf("ACP exec helper supplementary-group fence mismatch")
 	}
 	if unix.Getpgrp() != os.Getpid() {
@@ -295,8 +317,16 @@ func reapExitedProcessesForUIDExcept(uid, excludedPID int) {
 	if !supported {
 		return
 	}
+	// Operator leaders are reaped only by their owners; see operatorLeaders.
+	// The lock is held for the whole pass so a command cannot start, exit,
+	// and be reaped here before it is registered.
+	operatorLeaders.mu.Lock()
+	defer operatorLeaders.mu.Unlock()
 	for _, process := range processes {
 		if process.pid == excludedPID || process.state != 'Z' {
+			continue
+		}
+		if _, held := operatorLeaders.pids[process.pid]; held {
 			continue
 		}
 		var status unix.WaitStatus

@@ -10,10 +10,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	types "k8s.io/apimachinery/pkg/types"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 var _ = Describe("workspace.orka.ai schema validation", func() {
@@ -118,7 +119,7 @@ var _ = Describe("workspace.orka.ai schema validation", func() {
 		Expect(k8sClient.Create(ctx, agent)).NotTo(Succeed())
 	})
 
-	It("validates class-based Task reuse and legacy field separation", func(ctx context.Context) {
+	It("requires Task classes after pruning retired input fields and validates reuse", func(ctx context.Context) {
 		task := &corev1alpha1.Task{
 			ObjectMeta: metav1.ObjectMeta{Name: "task-session-required", Namespace: namespace},
 			Spec: corev1alpha1.TaskSpec{
@@ -136,19 +137,21 @@ var _ = Describe("workspace.orka.ai schema validation", func() {
 		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session"}
 		Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-		mixed := task.DeepCopy()
-		mixed.ResourceVersion = ""
-		mixed.UID = ""
-		mixed.Name = "task-mixed-workspace"
-		mixed.Spec.Execution.Workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-		Expect(k8sClient.Create(ctx, mixed)).NotTo(Succeed())
+		for _, workspace := range []map[string]any{
+			{},
+			{"classRef": nil},
+			{"classRef": map[string]any{}},
+			{"classRef": map[string]any{"name": ""}},
+			{"enabled": true, "provider": "substrate", "templateRef": map[string]any{"name": "infra"}},
+		} {
+			raw := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": corev1alpha1.GroupVersion.String(), "kind": "Task",
+				"metadata": map[string]any{"name": "task-class-required", "namespace": namespace},
+				"spec":     map[string]any{"type": "agent", "execution": map[string]any{"workspace": workspace}},
+			}}
+			Expect(k8sClient.Create(ctx, raw)).To(MatchError(ContainSubstring("classRef")))
+		}
 
-		cleanupMixed := task.DeepCopy()
-		cleanupMixed.ResourceVersion = ""
-		cleanupMixed.UID = ""
-		cleanupMixed.Name = "task-mixed-cleanup"
-		cleanupMixed.Spec.Execution.Workspace.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
-		Expect(k8sClient.Create(ctx, cleanupMixed)).NotTo(Succeed())
 	})
 
 	It("rejects ACP-only workspace publication guarantees for container Tasks", func(ctx context.Context) {

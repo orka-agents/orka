@@ -176,7 +176,7 @@ func TestScanRunCancellationFencesProgressAndCleanup(t *testing.T) {
 		Namespace: run.Namespace, RepositoryScan: run.RepositoryScan, ScanRunID: run.ID,
 		TaskName: "mapper", TaskUID: "task-uid", Stage: "mapper",
 	}
-	applied, err := s.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil, func(store.SecurityStore, *store.ScanRun) error {
+	applied, err := orkaClient(t, s).ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil, func(store.SecurityStore, *store.ScanRun) error {
 		t.Fatal("cancelled run invoked result ingestion")
 		return nil
 	})

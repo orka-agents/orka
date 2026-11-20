@@ -58,10 +58,10 @@ RUN npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npm
 RUN npm run build
 RUN artifact-tool compare /src/dist /published/package/dist
 RUN set -eu; \
-    printf '%s  %s\n' '538ac5d7ae6e3d46f3f0961439f914bfb9e427be6aea83c9b1025548ef8cac1d' /tmp/patch-agent-mode.mjs | sha256sum -c -; \
-    node /tmp/patch-agent-mode.mjs /src/src/AgentMode.ts; \
+    printf '%s  %s\n' '46682c7fc07e86a16147cace6334e632d71104233ecec247f7167d3f83322af9' /tmp/patch-agent-mode.mjs | sha256sum -c -; \
+    node /tmp/patch-agent-mode.mjs /src/src/AgentMode.ts /src/src/CodexAcpClient.ts; \
     npm run build; \
-    printf '%s  %s\n' '6792f51a6af4e1ae6317ad2197240836038bc53cb9f0fc9152a62d31b132d5a2' /src/dist/index.js | sha256sum -c -
+    printf '%s  %s\n' '796f3cf6d156ca937e3b571e94caa192914c2f06c5d3845e4b1cf036433a1a7c' /src/dist/index.js | sha256sum -c -
 
 FROM --platform=$BUILDPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS codex-layout
 ARG TARGETARCH
@@ -99,7 +99,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
       go build -buildvcs=false -trimpath -ldflags='-s -w' \
       -o /out/orka-acp-exec-helper ./cmd/orka-acp-exec-helper
 
-FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
+FROM --platform=$TARGETPLATFORM docker.io/library/node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e
 LABEL org.opencontainers.image.title="Orka ACP Codex runtime" \
       org.opencontainers.image.description="Orka harness v2 ACP supervisor with Codex ACP 2.1.1 and Codex CLI 0.160.0" \
       org.opencontainers.image.source="https://github.com/orka-agents/orka" \
@@ -108,8 +108,8 @@ LABEL org.opencontainers.image.title="Orka ACP Codex runtime" \
       ai.orka.acp.adapter.version="2.1.1" \
       ai.orka.acp.adapter.revision="68d7d2d5ddfc0ed5746f9f6130892dda685e65dd" \
       ai.orka.acp.adapter.digest="sha256:9da0d580518d006d257609a4b64b7c5bd96a7f36f2d86db5c8f2cb9385de5872" \
-      ai.orka.acp.adapter.patch.digest="sha256:538ac5d7ae6e3d46f3f0961439f914bfb9e427be6aea83c9b1025548ef8cac1d" \
-      ai.orka.acp.adapter.dist.digest="sha256:6792f51a6af4e1ae6317ad2197240836038bc53cb9f0fc9152a62d31b132d5a2" \
+      ai.orka.acp.adapter.patch.digest="sha256:46682c7fc07e86a16147cace6334e632d71104233ecec247f7167d3f83322af9" \
+      ai.orka.acp.adapter.dist.digest="sha256:796f3cf6d156ca937e3b571e94caa192914c2f06c5d3845e4b1cf036433a1a7c" \
       ai.orka.acp.provider.version="0.160.0" \
       ai.orka.acp.provider.revision="a956835d020762cb2b570053af06f643a11c0ecc" \
       ai.orka.acp.provider.digest.amd64="sha256:37a41d61c3399182b8c727b77090cc7a1566bd849d0f09070a0bbc6fec4c58dc" \

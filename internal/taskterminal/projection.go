@@ -28,17 +28,15 @@ const (
 
 // Projection is the canonical payload of a terminal Task outbox projection.
 type Projection struct {
-	Namespace      string                             `json:"namespace"`
-	Task           string                             `json:"task"`
-	TaskUID        string                             `json:"taskUID"`
-	Attempt        int32                              `json:"attempt"`
-	Phase          corev1alpha1.TaskPhase             `json:"phase"`
-	Message        string                             `json:"message,omitempty"`
-	BindingDigest  string                             `json:"bindingDigest,omitempty"`
-	HarnessRuntime *corev1alpha1.HarnessRuntimeStatus `json:"harnessRuntime,omitempty"`
-	ResultRef      *corev1alpha1.ResultReference      `json:"resultRef,omitempty"`
-	Execution      corev1alpha1.TaskExecutionStatus   `json:"execution"`
-	Delivery       *corev1alpha1.TaskDeliveryStatus   `json:"delivery,omitempty"`
+	Namespace     string                           `json:"namespace"`
+	Task          string                           `json:"task"`
+	TaskUID       string                           `json:"taskUID"`
+	Attempt       int32                            `json:"attempt"`
+	Phase         corev1alpha1.TaskPhase           `json:"phase"`
+	Message       string                           `json:"message,omitempty"`
+	BindingDigest string                           `json:"bindingDigest,omitempty"`
+	Execution     corev1alpha1.TaskExecutionStatus `json:"execution"`
+	Delivery      *corev1alpha1.TaskDeliveryStatus `json:"delivery,omitempty"`
 }
 
 // ValidateRestoredProjection decodes and proves that one immutable source
@@ -114,9 +112,6 @@ func validateProjection(
 			string(binding.Task.UID) != sourceTaskUID {
 			return nil, conflict("restored terminal projection source binding is invalid")
 		}
-	}
-	if projection.HarnessRuntime != nil || projection.ResultRef != nil {
-		return nil, conflict("restored harness v2 terminal projection contains harness v1 payload")
 	}
 	if projection.Namespace != task.Namespace || projection.Task != task.Name || projection.TaskUID != sourceTaskUID ||
 		projection.Attempt < 1 || projection.Attempt != task.Status.Execution.Attempt ||

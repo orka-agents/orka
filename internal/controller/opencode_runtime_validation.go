@@ -13,12 +13,10 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ValidateOpenCodeAgentSpec validates the reviewed managed OpenCode v2
-// runtime configuration. It is contract-aware: runtime.type: opencode exists
-// in both harness protocols and is never protocol evidence, so the v2 rules
-// apply only to an Agent explicitly classified orka.harness.v2. V1-selected
-// and still-unclassified stored legacy OpenCode Agents are preserved
-// unchanged; execution admission for them fails closed elsewhere.
+// ValidateOpenCodeAgentSpec validates the managed OpenCode runtime configuration
+// of an Agent classified orka.harness.v2. An Agent that omits the selector is
+// classified by the controller's execution mode before planning, which applies
+// these rules to the effective Agent.
 func ValidateOpenCodeAgentSpec(agent *corev1alpha1.Agent) error {
 	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		return nil
@@ -28,10 +26,6 @@ func ValidateOpenCodeAgentSpec(agent *corev1alpha1.Agent) error {
 	}
 	if strings.TrimSpace(agent.Spec.Runtime.DefaultReasoningEffort) != "" {
 		return fmt.Errorf("agent %q opencode runtime does not support spec.runtime.defaultReasoningEffort", agent.Name)
-	}
-	if agent.Spec.SystemPrompt != nil &&
-		(strings.TrimSpace(agent.Spec.SystemPrompt.Inline) != "" || agent.Spec.SystemPrompt.ConfigMapRef != nil) {
-		return fmt.Errorf("agent %q opencode runtime does not support spec.systemPrompt", agent.Name)
 	}
 	if agent.Spec.ProviderRef != nil {
 		return fmt.Errorf("agent %q opencode runtime does not accept spec.providerRef; provider identity is derived from spec.model.name", agent.Name)

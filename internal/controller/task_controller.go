@@ -44,8 +44,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
@@ -56,13 +57,13 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	workerpkg "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -113,9 +114,12 @@ const (
 // TaskReconciler reconciles a Task object
 type TaskReconciler struct {
 	client.Client
-	APIReader                    client.Reader
-	Scheme                       *runtime.Scheme
-	JobBuilder                   *JobBuilder
+	APIReader  client.Reader
+	Scheme     *runtime.Scheme
+	JobBuilder *JobBuilder
+	// TaskProvenanceProtected is the existing built-in/external admission declaration.
+	// Child gateway grants require it; root grants do not.
+	TaskProvenanceProtected      bool
 	GatewayService               *gatewayruntime.Service
 	SessionManager               *SessionManager
 	WebhookNotifier              *WebhookNotifier
@@ -137,23 +141,26 @@ type TaskReconciler struct {
 	ControllerEpochManager       *ControllerEpochManager
 	ControllerNamespace          string
 	ACPAdmissionGate             *ACPAdmissionGate
-	HarnessV1Enabled             bool
 	// Mode is the controller's static execution mode; it classifies built-in
 	// Agents that omitted contractVersion.
-	Mode                              executionmode.Mode
-	HarnessV1Endpoint                 string
-	HarnessV1AuthSecretNamespace      string
-	HarnessV1AuthSecretName           string
-	HarnessV1AuthSecretKey            string
-	HarnessV1Attempts                 store.HarnessV1AttemptStore
-	HarnessV1SettlementAcknowledger   HarnessV1SettlementAcknowledger
-	ACPRuntimeEnabled                 bool
-	ACPRuntimeImages                  ACPRuntimeImages
-	ACPRuntimeNamespace               string
-	EnforceNamespaceIsolation         bool
-	MaxTasksPerNamespace              int32
-	ExecutionWorkspaceDefaultProvider corev1alpha1.WorkspaceProvider
-	WorkspaceProviderAPIEnabled       bool
+	Mode             executionmode.Mode
+	ACPRuntimeImages ACPRuntimeImages
+	// ACPRuntimePoolCapacity sets the concurrency of new non-workspace
+	// RuntimePools; zero fields keep the API defaults.
+	ACPRuntimePoolCapacity corev1alpha1.RuntimePoolCapacitySpec
+	// ACPToolboxPolicy repeats the Agent toolbox admission rules at planning
+	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
+	ACPToolboxPolicy ACPToolboxPolicy
+	// Identity configures external Agent identities (ADR 0039).
+	Identity                  agentidentity.Config
+	ACPRuntimeNamespace       string
+	EnforceNamespaceIsolation bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled.
+	// The controller then refuses an ai Task that takes a Provider from an
+	// Agent in another namespace; see ProvidersFromAgentInAnotherNamespace.
+	ProviderUseAuthorization    bool
+	MaxTasksPerNamespace        int32
+	WorkspaceProviderAPIEnabled bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
 	// guards the reserved acp.workspace.orka.ai/ metadata settlement reads
 	// from. When false (a cleanup-only installation without the webhook),
@@ -165,10 +172,6 @@ type TaskReconciler struct {
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.
 	ACPWorkspaceDispatchEnabled       bool
-	AgentSandboxEnabled               bool
-	AgentSandboxConfig                AgentSandboxConfig
-	SubstrateEnabled                  bool
-	SubstrateConfig                   SubstrateConfig
 	AIWorkerServiceAccountName        string
 	VendorWorkerServiceAccountName    string
 	ContainerWorkerServiceAccountName string
@@ -181,16 +184,33 @@ type TaskReconciler struct {
 	OutboundAccessTrust               outboundaccess.TrustConfig
 	trustedServiceCleanupMu           sync.RWMutex
 	trustedServiceCleanupDone         bool
+	// WebhookDeliveryWorkers bounds the concurrent webhook attempts of the
+	// delivery runnable that SetupWithManager registers (ADR 0042). Zero
+	// selects DefaultTaskWebhookDeliveryWorkers.
+	WebhookDeliveryWorkers int
+	// webhookDeliveries sends the Task's webhook notices outside the
+	// reconcile worker.
+	webhookDeliveries *taskWebhookDispatcher
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
+// The controller, API, gateways, and monitors create Tasks for callers they
+// have already authorized, so they hold Agent and Provider `use` broadly.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=use
+// +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=use
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch
 // sessions is a virtual resource: the API server authorizes session endpoints with a
 // SubjectAccessReview on core.orka.ai/sessions, so the manager role must grant it.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
+// The controller creates the scheduled runs of a memory consolidation Task,
+// which the memory consolidation admission policy checks for list on memories
+// and memoryproposals and, in Propose mode, create on memoryproposals, as it
+// checked the parent's creator.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memories,verbs=list
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=list;create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -212,14 +232,9 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create;update;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=ai-worker-role;vendor-worker-role;container-worker-role,verbs=bind
-// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // The Events-v1 retention recorder needs write verbs: recording emits create
 // and patch requests that the read-only grant rejects at the API server.
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;create;patch
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxtemplates,verbs=get;list;watch
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=extensions.agents.x-k8s.io,resources=sandboxwarmpools,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch
 
 // updateStatusWithRetry updates the task status with retry on conflict.
 // It re-fetches the task on conflict, applies the mutate function, and retries.
@@ -336,7 +351,11 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
-		return ctrl.Result{}, err
+		// Delegated work still stops while usage storage is down: the
+		// cascade needs none of it, and runs once the Task's own stop has.
+		stopErr := r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
+		_ = r.cascadeTaskCancellation(ctx, task)
+		return ctrl.Result{}, stopErr
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
@@ -389,8 +408,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 		if err := r.patchTaskFinalizer(ctx, req.NamespacedName, true); err != nil {
 			log.Error(err, "failed to add finalizer")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -400,10 +418,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if task.Status.Phase == "" {
 		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 			t.Status.Phase = corev1alpha1.TaskPhasePending
+			startTrackingInitialApprovalSelection(t)
 		}); err != nil {
 			log.Error(err, "failed to update initial status")
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			tracing.RecordSpanError(span, err)
 			return ctrl.Result{}, err
 		}
 		_ = r.recordTaskLifecycleEvent(
@@ -416,15 +434,75 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+	// Work a cancelled Task delegated stops with it, at every depth, as soon
+	// as the cancel is requested. The cascade runs right after the Task's own
+	// stop, which it never delays, and before anything that can keep
+	// failing, such as result storage or the workspace projection. A refused
+	// child only requeues a finished Task once its own completion work is
+	// done.
+	stopThenCascade := func(result ctrl.Result, err error) (ctrl.Result, error) {
+		_ = r.cascadeTaskCancellation(ctx, task)
+		return result, err
+	}
+
+	// A deferred finalization records a stop already decided, so it settles
+	// before a later cancel request. A requested cancellation is applied
+	// before the workspace status projection, so a failing projection cannot
+	// keep a cancelled Task running; the projection resumes on the next
+	// reconcile.
+	if !task.Status.Phase.IsTerminal() {
+		intent, err := r.loadDeferredTaskFinalization(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if intent != nil {
+			result, err := r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome)
+			r.stopFinishedTaskJob(ctx, task, err)
+			return stopThenCascade(result, err)
+		}
+	}
+	if message, ok := requestedTaskCancellation(task); ok {
+		return stopThenCascade(r.cancelRequestedNativeTask(ctx, task, message))
+	}
+	if _, ok := requestedAgentTaskCancellation(task); ok {
+		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
+	}
+	if err := r.projectACPTaskAdmissionStatus(ctx, task); err != nil {
+		// A projection that keeps failing must not keep delegated work
+		// running.
+		_ = r.cascadeTaskCancellation(ctx, task)
 		return ctrl.Result{}, err
 	}
 
-	if message, ok := requestedTaskCancellation(task); ok {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
-	}
+	return r.reconcileTaskPhaseAndApprovalNotices(ctx, task)
+}
 
-	// Handle based on current phase
+// reconcileTaskPhaseAndApprovalNotices runs the Task's phase work between
+// recording and scheduling its opt-in approval notices (ADR 0053). Notices
+// follow the approval events in every phase, including after a parked turn
+// Succeeded while its sign-off is still decidable, and never hold back the
+// Task's own progress: new notices are recorded in status before the phase
+// work, which the history hold and expiry recording rely on, and are handed
+// to the delivery runnable only after it, even when it failed. The send runs
+// outside the reconcile worker, so a slow or unreachable receiver cannot
+// delay this Task's scheduling, monitoring or finalization, or any other
+// Task's reconcile. The Task requeues for the earlier of the phase's requeue
+// and the notices' next attempt.
+func (r *TaskReconciler) reconcileTaskPhaseAndApprovalNotices(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	approvalRequeue, err := r.prepareApprovalWebhooks(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err := r.reconcileTaskPhase(ctx, task)
+	approvalRequeue = minPositiveDuration(approvalRequeue, r.scheduleApprovalWebhooks(task))
+	if approvalRequeue > 0 && (result.RequeueAfter == 0 || approvalRequeue < result.RequeueAfter) {
+		result.RequeueAfter = approvalRequeue
+	}
+	return result, err
+}
+
+// reconcileTaskPhase dispatches to the handler of the Task's current phase.
+func (r *TaskReconciler) reconcileTaskPhase(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhasePending:
 		return r.handlePending(ctx, task)
@@ -435,10 +513,62 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case corev1alpha1.TaskPhaseFinalizing:
 		return r.handleFinalizing(ctx, task)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return r.handleCompleted(ctx, task)
+		return r.handleCompletedThenCascade(ctx, task)
 	}
-
 	return ctrl.Result{}, nil
+}
+
+// prepareApprovalWebhooks records the Task's new opt-in approval notices.
+func (r *TaskReconciler) prepareApprovalWebhooks(ctx context.Context, task *corev1alpha1.Task) (time.Duration, error) {
+	if r.WebhookNotifier == nil {
+		return 0, nil
+	}
+	return r.WebhookNotifier.prepareApprovalNotices(ctx, r.Status(), r.ExecutionEventStore, task)
+}
+
+// scheduleApprovalWebhooks hands the Task's next pending approval notice to
+// the delivery runnable once it is due, and returns when to look again (zero
+// when nothing is pending). The send never runs in the reconcile worker, so a
+// slow or hanging receiver delays neither this Task's phase work nor any other
+// Task's reconcile. Delivery reads the Task uncached, and a Task that is gone,
+// replaced or being deleted drops its notices. Its status writes reconcile the
+// Task again, so the phase work, such as a finished scheduled run's parent
+// history enforcement, runs once the last pending notice settles.
+func (r *TaskReconciler) scheduleApprovalWebhooks(task *corev1alpha1.Task) time.Duration {
+	if r.WebhookNotifier == nil {
+		return 0
+	}
+	index := firstPendingApprovalNotice(task.Status.ApprovalWebhooks)
+	if index < 0 {
+		return 0
+	}
+	now := r.WebhookNotifier.now()
+	if next := task.Status.ApprovalWebhooks.Notices[index].NextAttemptTime; next != nil && now.Before(next.Time) {
+		return next.Sub(now)
+	}
+	r.enqueueWebhookDelivery(task, false)
+	return webhookDeliveryRecheckInterval
+}
+
+// enqueueWebhookDelivery queues the Task's due notices for the delivery
+// runnable. terminal allows its terminal notice.
+func (r *TaskReconciler) enqueueWebhookDelivery(task *corev1alpha1.Task, terminal bool) {
+	if r.webhookDeliveries == nil {
+		logf.Log.WithName("task-webhook-delivery").Error(nil, "no webhook delivery runnable is registered; notice not sent",
+			"namespace", task.Namespace, "name", task.Name)
+		return
+	}
+	r.webhookDeliveries.enqueue(task, terminal)
+}
+
+// projectACPTaskAdmissionStatus projects the execution workspace status and
+// then the WaitingForCapacity condition, which reads the workspace admission
+// conditions that projection just refreshed.
+func (r *TaskReconciler) projectACPTaskAdmissionStatus(ctx context.Context, task *corev1alpha1.Task) error {
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		return err
+	}
+	return r.syncACPWaitingForCapacity(ctx, task)
 }
 
 func (r *TaskReconciler) recordTaskLifecycleEvent(
@@ -479,11 +609,11 @@ func (r *TaskReconciler) recordTaskLifecycleEvent(
 
 func (r *TaskReconciler) executionEventSessionName(ctx context.Context, task *corev1alpha1.Task) string {
 	sessionName := taskSessionName(task)
-	if sessionName == "" {
-		return ""
-	}
 	if r == nil || r.SessionManager == nil || r.SessionManager.store == nil {
 		return ""
+	}
+	if sessionName == "" {
+		return chatSessionEventAttribution(ctx, r.SessionManager.store, task)
 	}
 	if _, err := r.SessionManager.GetSession(ctx, task.Namespace, sessionName); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -506,6 +636,51 @@ func taskSessionName(task *corev1alpha1.Task) string {
 		return ""
 	}
 	return strings.TrimSpace(task.Spec.SessionRef.Name)
+}
+
+// sessionTypeReader reads a Session's type without loading its transcript.
+type sessionTypeReader interface {
+	GetSessionType(ctx context.Context, namespace, name string) (string, error)
+}
+
+// chatSessionEventAttribution names the chat Session a Task without a
+// spec.sessionRef attributes its execution events to, so the chat's timeline
+// lists the Tasks it created. The chat API names that Session in the
+// orka.ai/chat-session label, which API clients cannot set, and the label
+// counts only when it names an existing chat Session. It is for lifecycle
+// event attribution only: Session continuity follows spec.sessionRef alone,
+// and the ACP event journal keeps spec.sessionRef because a journal Session
+// with earlier text events redacts all later runtime text, which would blank
+// every chat-created ACP Task after the chat's first one.
+func chatSessionEventAttribution(ctx context.Context, sessions store.SessionStore, task *corev1alpha1.Task) string {
+	if task == nil || sessions == nil {
+		return ""
+	}
+	sessionName := strings.TrimSpace(task.Labels[labels.LabelChatSession])
+	if sessionName == "" {
+		return ""
+	}
+	var sessionType string
+	var err error
+	if reader, ok := sessions.(sessionTypeReader); ok {
+		sessionType, err = reader.GetSessionType(ctx, task.Namespace, sessionName)
+	} else {
+		var session *store.SessionRecord
+		if session, err = sessions.GetSession(ctx, task.Namespace, sessionName); err == nil {
+			sessionType = session.SessionType
+		}
+	}
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			logf.FromContext(ctx).Error(err, "failed to check chat session for execution event attribution",
+				"namespace", task.Namespace, "task", task.Name, "session", sessionName)
+		}
+		return ""
+	}
+	if sessionType != store.SessionTypeChat {
+		return ""
+	}
+	return sessionName
 }
 
 func executionEventSeverityForTaskPhase(phase corev1alpha1.TaskPhase) string {
@@ -576,60 +751,51 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		if taskManagedByHarnessV1(task) {
-			ready, err := r.harnessV1TaskDeletionReady(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
+		if active, err := r.parkedWaitActive(ctx, task); err != nil || active {
+			// The wait reconciler cancels the wait of a deleting Task and closes
+			// its parked approval in the execution history first, so that history
+			// is erased after that last write and never recreated behind it.
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+		prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !prepared {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		ready, err := r.acpTaskDeletionReady(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			// Publish while terminal status is retained for cleanup. Do not
+			// recreate erased history when finalizer removal later retries.
+			if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
-			if !ready {
-				// Publish while terminal status is retained for cleanup. Do not
-				// recreate erased history when finalizer removal later retries.
-				if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-		} else {
-			prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !prepared {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			ready, err := r.acpTaskDeletionReady(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !ready {
-				// Publish while terminal status is retained for cleanup. Do not
-				// recreate erased history when finalizer removal later retries.
-				if !r.recordTerminalTaskLifecycleEventIfMissing(ctx, task) {
-					return ctrl.Result{RequeueAfter: time.Second}, nil
-				}
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !reclaimed {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			retired, err := r.retireACPArtifactIdentities(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !retired {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
-			settled, err := r.settleACPClassWorkspace(ctx, task)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !settled {
-				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-			}
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		reclaimed, err := r.reclaimACPTaskPublicationBundles(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !reclaimed {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		retired, err := r.retireACPArtifactIdentities(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !retired {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+		settled, err := r.settleACPClassWorkspace(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !settled {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		// Clean up result data from store
 		if r.ResultStore != nil {
@@ -640,7 +806,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
-			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
+			if err := r.ArtifactStore.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
@@ -688,6 +854,9 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 				// Continue with finalizer removal anyway
 			}
 		}
+		if err := r.releaseMemoryConsolidationRun(ctx, task, true); err != nil {
+			return ctrl.Result{}, err
+		}
 		if r.ResultStore != nil {
 			authority, ok := r.ResultStore.(store.TaskJobAuthorityStore)
 			if !ok {
@@ -732,6 +901,13 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 
+	// A child whose Create committed after an ancestor's cancellation had
+	// already cascaded, as a delegation in another namespace whose outcome
+	// was unknown can, is reached by no cascade, so it checks for itself.
+	if requested, err := r.requestCancelForCancelledAncestor(ctx, task); err != nil || requested {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
+
 	if taskTransactionTokenPending(task) {
 		return r.handleTransactionTokenPending(ctx, task)
 	}
@@ -740,6 +916,20 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	// enforcement begins on the generated child Task rather than at parent creation.
 	if task.Spec.Schedule != "" {
 		return r.handleScheduledTask(ctx, task)
+	}
+
+	// A pause requested between autonomous iterations stops the next iteration
+	// before dispatch; handleAutonomousIteration covers a pause that arrives
+	// while a Job runs. Only autonomous iteration advances Iteration.
+	if task.Status.Iteration > 0 && task.Spec.Suspend != nil && *task.Spec.Suspend {
+		message := fmt.Sprintf("autonomous task suspended at iteration %d", task.Status.Iteration)
+		if task.Status.Message != message {
+			task.Status.Message = message
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// A persisted execution binding is the sole routing and recovery authority.
@@ -758,9 +948,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 
-	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
-	// claim protocol lineage and a fenced SessionTurn in their dispatcher only
-	// after the immutable execution binding has selected v1 or v2.
+	// Non-agent workers use the Session lock lifecycle. Agent Tasks claim
+	// protocol lineage and a fenced SessionTurn in their ACP dispatcher only
+	// after the immutable execution binding is recorded.
 	if task.Spec.SessionRef != nil && task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
 			return result, err
@@ -838,6 +1028,10 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		// Admission allows an omitted built-in contract. Use the same effective
+		// Agent for routing, SOUL validation and binding before its reconciler
+		// has had a chance to persist the namespace-mode default.
+		agent = withEffectiveBuiltInContract(agent, r.Mode)
 		plan := r.planAgentExecution(ctx, task, agent)
 		if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
 			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
@@ -845,17 +1039,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		switch plan.path {
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
-		case agentExecutionPathACP:
-			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
-				return result, err
-			}
-			return r.queueACPRuntimeTask(ctx, task, agent)
-		case agentExecutionPathHarnessV1:
-			if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, agent); handled {
-				return result, err
-			}
-			return r.queueHarnessV1Task(ctx, task)
-		case agentExecutionPathExternal:
+		case agentExecutionPathACP, agentExecutionPathExternal:
 			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
 				return result, err
 			}
@@ -903,11 +1087,6 @@ func (r *TaskReconciler) handleBoundAgentTaskPending(
 		return ctrl.Result{}, errors.New("bound agent Task is missing its execution binding")
 	}
 	switch binding.ContractVersion {
-	case corev1alpha1.AgentRuntimeContractHarnessV1:
-		if result, err, handled := r.ensureHarnessV1ExecutionBinding(ctx, task, nil); handled {
-			return result, err
-		}
-		return r.queueHarnessV1Task(ctx, task)
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
 		if task.Status.Execution == nil {
 			now := time.Now().UTC()
@@ -1181,6 +1360,14 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 
 // resolveProvider fetches the Provider referenced by the task or agent, if any.
 func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*corev1alpha1.Provider, error) {
+	if r.ProviderUseAuthorization {
+		if names := corev1alpha1.ProvidersFromAgentInAnotherNamespace(task, agent); len(names) > 0 {
+			return nil, fmt.Errorf("provider use authorization refuses Providers %s taken from Agent %s/%s in another namespace "+
+				"than the Task's %q; set the Task's spec.ai.providerRef and use an Agent without model fallbacks, "+
+				"or use an Agent from the Task's namespace",
+				strings.Join(names, ", "), agent.Namespace, agent.Name, task.Namespace)
+		}
+	}
 	providerRef := r.resolveProviderRef(task, agent)
 	if providerRef == nil {
 		return nil, nil
@@ -1207,8 +1394,16 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	return provider, nil
 }
 
+// isMemoryConsolidationTask reports a memory consolidation run (ADR 0051).
+// A run is one model call that submits one result, so it never iterates
+// autonomously or parks on an approval, whatever its Agent configures.
+func isMemoryConsolidationTask(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil
+}
+
 func taskNeedsApprovalState(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	return task != nil &&
+		!isMemoryConsolidationTask(task) &&
 		task.Spec.Type == corev1alpha1.TaskTypeAI &&
 		agent != nil &&
 		agent.Spec.Coordination != nil &&
@@ -1448,7 +1643,6 @@ func resolvedApprovalBlocksExecution(approval approvals.ResolvedApproval) bool {
 	return status != "" && status != approvals.StatusApproved
 }
 
-// createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
 // missingToolPolicyGrace bounds how long a native dispatch waits for an
 // OutboundAccessPolicy that one of the Task's Tools references but that does
 // not exist. Tools are classified strictly (a missing policy cannot be judged
@@ -1472,6 +1666,9 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 	return result, true, failErr
 }
 
+// createTaskJob builds the Job, sets owner reference, creates it, and updates the task status.
+//
+//nolint:gocyclo // Job creation revalidates provenance, credentials and runtime contract immediately before creation.
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -1485,9 +1682,25 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+	// A cancel the cached copy has not seen yet must not start the workload:
+	// the next pass applies it.
+	if _, requested := latest.Annotations[labels.AnnotationCancelRequested]; requested {
+		log.Info("skipping job creation because the task's cancellation was requested")
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if taskJobIdentityRejected(latest) {
 		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
 			return ctrl.Result{}, err
+		}
+		if latest.Spec.Type == corev1alpha1.TaskTypeAI {
+			job := &batchv1.Job{}
+			err := reader.Get(ctx, client.ObjectKey{Namespace: latest.Namespace, Name: latest.Status.JobName}, job)
+			if err == nil {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
 		}
 		return r.failTask(ctx, task, meta.FindStatusCondition(latest.Status.Conditions, ConditionTypeJobCreated).Message)
 	}
@@ -1516,9 +1729,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	jobTask := task
-	if validationTask {
-		// Render from the same fresh object whose immutable binding was just
-		// verified. This closes the gap between the reconcile read and Job build.
+	if validationTask || latest.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Validation tasks use the verified immutable binding. AI tasks use
+		// fresh status as well as spec so soul preparation cannot miss an
+		// existing binding or execution attempt from a stale cache snapshot.
 		jobTask = latest
 	}
 
@@ -1566,18 +1780,55 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			if latest.UID != task.UID || latest.Generation != task.Generation || task.Spec.AgentRef == nil || agent == nil {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
-			agentKey := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
-			if agentKey.Namespace == "" {
-				agentKey.Namespace = task.Namespace
-			}
-			latestAgent := &corev1alpha1.Agent{}
-			if err := reader.Get(ctx, agentKey, latestAgent); err != nil {
-				return ctrl.Result{}, fmt.Errorf("recheck gateway Job Agent: %w", err)
-			}
-			if latestAgent.UID != agent.UID || latestAgent.Generation != agent.Generation || !latestAgent.DeletionTimestamp.IsZero() {
-				return ctrl.Result{RequeueAfter: time.Second}, nil
+			if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+				return ctrl.Result{RequeueAfter: time.Second}, err
 			}
 		}
+	}
+
+	if (task.Spec.Type == corev1alpha1.TaskTypeAI || latest.Spec.Type == corev1alpha1.TaskTypeAI) &&
+		!existingGatewayJob && (task.UID != latest.UID || task.Generation != latest.Generation) {
+		// Agent/provider inputs belong to the caller's Task revision, even
+		// when its resolved Agent had no soul. Reconcile the complete tuple.
+		return ctrl.Result{}, aiSoulTaskChanged(task)
+	}
+	if !gatewayReplyEligible && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		task.Spec.AgentRef != nil && agent != nil {
+		// The first binding pins the Agent revision. A cached Agent can lag an
+		// update the API server accepted before this Task, so recheck it and
+		// let compatibility, Provider selection, and binding use one revision.
+		if changed, err := taskAgentRevisionChanged(ctx, reader, task, agent); err != nil || changed {
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
+	}
+
+	var aiSoul *resolvedAISoul
+	if existingGatewayJob && jobTask.Spec.Type == corev1alpha1.TaskTypeAI && jobTask.Status.SoulBinding == nil &&
+		agent != nil && agent.Spec.Soul != nil {
+		// Bindings are persisted before Job creation, so an unbound existing Job
+		// ran without a soul even when its start-status write was lost. Retire it
+		// without binding: a new digest would misstate what already executed.
+		err = invalidAISoulConfiguration("AI Task cannot acquire a soul after execution has started; create a new Task")
+	} else {
+		aiSoul, err = r.prepareAISoul(ctx, jobTask, agent)
+	}
+	if err != nil {
+		if isPermanentAISoulConfigurationError(err) {
+			message := fmt.Sprintf("AI soul configuration: %v", err)
+			retired, retirementErr := r.retireAISoulTaskJob(ctx, jobTask, message)
+			if retirementErr != nil {
+				return ctrl.Result{}, retirementErr
+			}
+			if retired {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.failTask(ctx, task, message)
+		}
+		return ctrl.Result{}, err
+	}
+	if jobTask.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Keep the launch attempt count consistent with the fresh Job inputs.
+		task.Status = jobTask.Status
 	}
 
 	// Freeze the requester's Connections before anything is created, so a
@@ -1599,6 +1850,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// Create the Job
 	job, err := r.JobBuilder.BuildWithOptions(ctx, jobTask, agent, provider, JobBuildOptions{
 		ResolvedApprovalsJSON:       resolvedApprovalsJSON,
+		AISoul:                      aiSoul,
 		RepositoryMonitorValidation: validationTask,
 		ConnectionBindings:          connectionBindings,
 		ConnectionBindingsFrozen:    true,
@@ -1725,36 +1977,43 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		if err := r.reconcileRunningACPClassWorkspaceAttachment(ctx, task); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
+			return ctrl.Result{}, err
+		}
 		// The leader-elected ACPDispatcher owns the non-reconnectable prompt stream,
 		// lease renewal, cancellation barrier, and terminal status projection.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if taskManagedByHarnessV1(task) {
-		// HarnessV1Dispatcher owns submission, stream recovery, cancellation,
-		// terminal settlement, and Task projection for binding-gated v1 work.
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
 
-	// Check timeout
+	// Check timeout. A Job that succeeded before the deadline is completed
+	// below instead: its completion may have been deferred past the timeout,
+	// for example by a storage write the store had not accepted yet.
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
+		deadline := task.Status.StartTime.Add(task.Spec.Timeout.Duration)
 		if elapsed > task.Spec.Timeout.Duration {
-			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
-				return result, err
-			}
-			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
-			validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+			succeeded, err := r.taskJobSucceededBy(ctx, task, deadline)
 			if err != nil {
-				log.Error(err, "failed to classify timed-out repository validation")
-				if errors.Is(err, errRepositoryMonitorValidationConfinement) {
-					return r.failTask(ctx, task, err.Error())
-				}
 				return ctrl.Result{}, err
 			}
-			if validationCommandStarted {
-				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			if !succeeded {
+				if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+					return result, err
+				}
+				log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
+				validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+				if err != nil {
+					log.Error(err, "failed to classify timed-out repository validation")
+					if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+						return r.failTask(ctx, task, err.Error())
+					}
+					return ctrl.Result{}, err
+				}
+				if validationCommandStarted {
+					return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
+				}
+				return r.failTask(ctx, task, timedOutTaskMessage(task))
 			}
-			return r.failTask(ctx, task, "task timed out")
 		}
 	}
 
@@ -1852,7 +2111,7 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			}
 			if r.shouldRetry(task) {
 				log.Info("job not found while task still has retry budget, scheduling retry", "attempt", task.Status.Attempts)
-				return r.retryTask(ctx, task)
+				return r.retryTaskAfterFailure(ctx, task, "job not found")
 			}
 			log.Info("Job not found, task may have been cleaned up")
 			return r.failTask(ctx, task, "job not found")
@@ -1899,14 +2158,15 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		}
 		if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
 			if !validationCommandFailed {
-				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 			}
-			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, "task timed out")
+			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
-			log.Info("retrying task", "attempt", task.Status.Attempts)
-			return r.retryTask(ctx, task)
+			failure := r.diagnoseFailedJob(ctx, task)
+			log.Info("retrying task", "attempt", task.Status.Attempts, "failure", failure)
+			return r.retryTaskAfterFailure(ctx, task, failure)
 		}
 		// Inspect terminated containers for a specific cause (OOMKilled, non-zero
 		// exit code, etc.) so the coordinator that delegated this Task can read
@@ -1924,16 +2184,20 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	var podList corev1.PodList
 	if err := r.List(ctx, &podList, client.InNamespace(task.Namespace),
 		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err == nil {
+		podWaiting := ""
 		for i := range podList.Items {
 			pod := &podList.Items[i]
 			if pod.Status.Phase != corev1.PodPending {
 				continue
 			}
+			if podWaiting == "" && podBelongsToJob(pod, task.Status.JobName) {
+				podWaiting = podWaitingMessage(pod)
+			}
 			// Check waiting container statuses for unrecoverable errors
 			for _, cs := range pod.Status.ContainerStatuses {
 				if cs.State.Waiting != nil {
 					reason := cs.State.Waiting.Reason
-					if reason == "CreateContainerConfigError" || reason == "ErrImageNeverPull" {
+					if reason == podWaitingReasonCreateContainerConfig || reason == "ErrImageNeverPull" {
 						msg := fmt.Sprintf("pod stuck: %s - %s", reason, cs.State.Waiting.Message)
 						log.Info("failing task due to unrecoverable pod error", "reason", reason)
 						return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
@@ -1966,16 +2230,99 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
+		if err := r.syncPodWaitingMessage(ctx, task, podWaiting); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Job still running, requeue
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
-func taskManagedByHarnessV1(task *corev1alpha1.Task) bool {
-	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent &&
-		task.Status.AgentExecutionBinding != nil &&
-		task.Status.AgentExecutionBinding.ContractVersion == corev1alpha1.AgentRuntimeContractHarnessV1
+// podWaitingMessagePrefix marks a Running Task message that reports why its
+// Pod cannot start, so the controller can clear it once the Pod moves on.
+const podWaitingMessagePrefix = "pod waiting: "
+
+// podWaitingMessage reports a container waiting state that keeps the Pod from
+// starting, such as an image pull failure.
+func podWaitingMessage(pod *corev1.Pod) string {
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses} {
+		for _, cs := range statuses {
+			waiting := cs.State.Waiting
+			if waiting == nil {
+				continue
+			}
+			switch waiting.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", podWaitingReasonCreateContainerConfig:
+				message := podWaitingMessagePrefix + waiting.Reason
+				if detail := strings.TrimSpace(waiting.Message); detail != "" {
+					message += " - " + detail
+				}
+				return sanitizeStatusMessage(message)
+			}
+		}
+	}
+	return ""
+}
+
+// syncPodWaitingMessage publishes the current Pod waiting reason as the
+// Running Task's message, and clears a previously published one after the
+// Pod stops waiting on it.
+func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1alpha1.Task, message string) error {
+	if message == task.Status.Message || (message == "" && !strings.HasPrefix(task.Status.Message, podWaitingMessagePrefix)) {
+		return nil
+	}
+	jobName := task.Status.JobName
+	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+		if t.Status.Phase != corev1alpha1.TaskPhaseRunning || t.Status.JobName != jobName {
+			return
+		}
+		if message == "" && !strings.HasPrefix(t.Status.Message, podWaitingMessagePrefix) {
+			return
+		}
+		t.Status.Message = message
+	})
+}
+
+// taskJobSucceededBy reports whether the Task's current Job succeeded no later
+// than deadline, so that a completion deferred past the Task timeout records
+// the Job's outcome rather than a timeout. A Job that finished after the
+// deadline, or whose completion time is unknown, does not qualify. Nor does
+// an autonomous Task: its timeout ends the loop even after a successful
+// iteration. Transient Job or Agent lookup errors leave the outcome unsettled
+// until a later reconciliation can observe the required state.
+func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) (bool, error) {
+	if strings.TrimSpace(task.Status.JobName) == "" {
+		return false, nil
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
+		return false, nil
+	}
+	if job.Status.Succeeded == 0 || job.Status.CompletionTime == nil || job.Status.CompletionTime.After(deadline) {
+		return false, nil
+	}
+	autonomous, err := r.taskAutonomousMode(ctx, task)
+	if apierrors.IsNotFound(err) {
+		// Match normal Job completion when the Agent has been deleted.
+		return true, nil
+	}
+	return !autonomous && err == nil, err
+}
+
+// timedOutTaskMessage keeps the last published Pod waiting reason, such as an
+// image pull failure, in the timeout failure so the cause is not lost.
+func timedOutTaskMessage(task *corev1alpha1.Task) string {
+	if strings.HasPrefix(task.Status.Message, podWaitingMessagePrefix) {
+		return "task timed out; " + task.Status.Message
+	}
+	return "task timed out"
 }
 
 func podWaitingForMountInitialization(pod *corev1.Pod) bool {
@@ -2255,7 +2602,7 @@ func (r *TaskReconciler) handleFinalizing(
 			return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 		}
 		revocationEpoch := workspaceStatus.AttachedEpoch
-		acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+		acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 		if acpWorkspace {
 			revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 			// Attach and the Task epoch annotation are separate API writes.
@@ -2297,7 +2644,7 @@ func (r *TaskReconciler) handleFinalizing(
 				return ctrl.Result{}, fmt.Errorf("execution workspace UID changed during finalization")
 			}
 			revocationEpoch := workspaceStatus.AttachedEpoch
-			acpWorkspace := workspaceObject.Labels[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue
+			acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 			if acpWorkspace {
 				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
 				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
@@ -2430,6 +2777,9 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	if waitingForJob {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+	if err := r.cleanupDeferredTaskFinalization(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if !terminalEventRecorded {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -2467,18 +2817,21 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 
 	// Send optional webhooks only after durable ACP artifact identities have
-	// retired. Failed delivery may retry indefinitely without delaying artifact
-	// reclamation; retirement itself retains the capability safety grace period.
-	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered {
-		if err := r.WebhookNotifier.Notify(ctx, task); err != nil {
-			log.Error(err, "failed to send webhook")
-			// Don't fail the task, just retry webhook later
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		task.Status.WebhookDelivered = true
-		if err := r.Status().Update(ctx, task); err != nil {
-			log.Error(err, "failed to update webhook status")
-			return ctrl.Result{}, err
+	// retired. Delivery state is durable in Task status and bounded; failed
+	// delivery never delays artifact reclamation, and retirement itself retains
+	// the capability safety grace period.
+	//
+	// The attempt itself runs in the delivery runnable, never here, so a slow
+	// or hanging receiver cannot hold the reconcile worker that every Task
+	// shares. Parent history enforcement still waits until the notice settles:
+	// the runnable's status writes reconcile this Task again.
+	if r.WebhookNotifier != nil {
+		if outstanding, nextAttempt := terminalNoticeOutstanding(task, r.WebhookNotifier.now()); outstanding {
+			if nextAttempt == 0 {
+				r.enqueueWebhookDelivery(task, true)
+				nextAttempt = webhookDeliveryRecheckInterval
+			}
+			return ctrl.Result{RequeueAfter: nextAttempt}, nil
 		}
 	}
 
@@ -2580,11 +2933,323 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 	return nil
 }
 
-// completeTask marks a task as completed without asserting that workload execution started.
+// cancelRequestedNativeTask records a requested cancel and deletes the Task's
+// Job. Recording the stop does not end the Job, so it is deleted here, before
+// the caller walks the delegated Tasks, and a large tree never keeps the
+// cancelled container running. The next reconcile repeats a cleanup that
+// fails.
+func (r *TaskReconciler) cancelRequestedNativeTask(ctx context.Context, task *corev1alpha1.Task, message string) (ctrl.Result, error) {
+	result, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
+	r.stopFinishedTaskJob(ctx, task, err)
+	return result, err
+}
+
+// stopFinishedTaskJob deletes the Job of a Task its completion just made
+// terminal, before its cascade runs: an earlier attempt's Job delete may have
+// failed, and the cascade must not run while the Task's own container still
+// does. A failure is logged; the completed Task's own reconcile retries it.
+func (r *TaskReconciler) stopFinishedTaskJob(ctx context.Context, task *corev1alpha1.Task, completeErr error) {
+	if completeErr != nil || !task.Status.Phase.IsTerminal() {
+		return
+	}
+	if _, err := r.cleanupTerminalTaskJob(ctx, task); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to clean up the finished task's Job")
+	}
+}
+
+// handleCompletedThenCascade runs a finished Task's own completion work, its
+// Job cleanup included, then cancels what it delegated, and requeues it soon
+// while a child refused its cancel.
+func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	if err := r.releaseMemoryConsolidationRun(ctx, task, false); err != nil {
+		return ctrl.Result{}, err
+	}
+	result, err := r.handleCompleted(ctx, task)
+	cascadeErr := r.cascadeTaskCancellation(ctx, task)
+	if err == nil && cascadeErr != nil && (result.RequeueAfter == 0 || result.RequeueAfter > 2*time.Second) {
+		result.RequeueAfter = 2 * time.Second
+	}
+	return result, err
+}
+
+// releaseMemoryConsolidationRun releases the run of a memory consolidation
+// Task that ended, abandoning a run it did not finish and clearing the
+// transcripts the run recorded. For a Task being deleted it also clears the
+// run's report and lets the store remove runs no cursor needs, so a recurring
+// run's history does not grow the store. Releasing again is a no-op.
+func (r *TaskReconciler) releaseMemoryConsolidationRun(ctx context.Context, task *corev1alpha1.Task, deleted bool) error {
+	if !isMemoryConsolidationTask(task) || task.UID == "" || r.ResultStore == nil {
+		return nil
+	}
+	runs, ok := r.ResultStore.(store.MemoryConsolidationStore)
+	if !ok {
+		return nil
+	}
+	if err := runs.ReleaseMemoryConsolidationRun(ctx, task.Namespace, string(task.UID), deleted); err != nil {
+		return fmt.Errorf("release memory consolidation run for task %s/%s: %w", task.Namespace, task.Name, err)
+	}
+	return nil
+}
+
+// cascadeTaskCancellation cancels what a Task delegated once the Task's
+// cancellation was requested, before the Task itself has stopped. A cancel
+// request counts even when the Task did not end Cancelled: recovery records
+// an interrupted cancel as Failed with an unknown outcome.
+func (r *TaskReconciler) cascadeTaskCancellation(ctx context.Context, task *corev1alpha1.Task) error {
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; !requested && task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		return nil
+	}
+	err := r.cancelChildTasks(ctx, task)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to cancel the Task's child Tasks")
+	}
+	return err
+}
+
+// cancelChildTasks requests cancellation of the Tasks a cancelled Task
+// delegated, at every depth. Every real child is walked: a finished one
+// keeps its outcome, because work it delegated can outlive it, and one
+// already cancel-requested may never cascade itself.
+func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha1.Task) error {
+	// One snapshot of every delegated Task in reach serves the whole walk,
+	// so a large tree costs at most two list requests, not one per Task.
+	index, err := r.delegatedTaskIndex(ctx, task)
+	if err != nil {
+		return err
+	}
+	visited := map[types.NamespacedName]bool{client.ObjectKeyFromObject(task): true}
+	parents := []*corev1alpha1.Task{task}
+	var errs []error
+	for len(parents) > 0 {
+		parent := parents[0]
+		parents = parents[1:]
+		message := "cancelled with its parent task " + parent.Name
+		if parent != task {
+			message = "cancelled with its ancestor task " + task.Name
+		}
+		children := index[labels.SelectorValue(parent.Name)]
+		for _, candidate := range children {
+			child := candidate.DeepCopy()
+			// A scheduled child is a template; cancelling it would end its
+			// future runs, so it is left for its own owner.
+			if visited[client.ObjectKeyFromObject(child)] || !delegatedBy(child, parent) ||
+				strings.TrimSpace(child.Spec.Schedule) != "" {
+				continue
+			}
+			visited[client.ObjectKeyFromObject(child)] = true
+			// A child that parked its turn continues in Tasks it does not
+			// control, so its continuation chain is cancelled with it.
+			members := []*corev1alpha1.Task{child}
+			continuations, chainErr := r.childContinuationChain(ctx, child)
+			if chainErr != nil {
+				errs = append(errs, chainErr)
+			}
+			for _, continuation := range continuations {
+				if !visited[client.ObjectKeyFromObject(continuation)] {
+					visited[client.ObjectKeyFromObject(continuation)] = true
+					members = append(members, continuation)
+				}
+			}
+			for _, member := range members {
+				// Every real child is walked, a deleting one included: its
+				// own cascade may never run, as when its status write or
+				// finalizer keeps failing.
+				parents = append(parents, member)
+				if err := r.requestDelegatedTaskCancellation(ctx, member, message); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// childContinuationChain returns the continuations a child's parked turns
+// created, each verified against the resumed wait that records it. A link
+// that is gone or no longer verifies ends the chain: nothing past it can run
+// as this child's turn.
+func (r *TaskReconciler) childContinuationChain(ctx context.Context, child *corev1alpha1.Task) ([]*corev1alpha1.Task, error) {
+	var chain []*corev1alpha1.Task
+	current := child
+	for range taskwait.MaxChainLength {
+		next, err := taskwait.Continuation(ctx, r.taskMetadataReader(), current)
+		if apierrors.IsNotFound(err) || errors.Is(err, taskwait.ErrChainBroken) {
+			return chain, nil
+		}
+		if err != nil || next == nil {
+			return chain, err
+		}
+		chain = append(chain, next)
+		current = next
+	}
+	return chain, nil
+}
+
+// requestDelegatedTaskCancellation asks a delegated Task to stop: an
+// unfinished Task gets a cancel request, and a parked wait, which a finished
+// turn can still hold, is cancelled so it never starts another turn.
+func (r *TaskReconciler) requestDelegatedTaskCancellation(ctx context.Context, task *corev1alpha1.Task, message string) error {
+	if !task.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	base := task.DeepCopy()
+	changed := false
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; !requested {
+		if phase := task.Status.Phase; phase == "" || phase == corev1alpha1.TaskPhasePending || phase == corev1alpha1.TaskPhaseRunning {
+			task.Annotations[labels.AnnotationCancelRequested] = message
+			changed = true
+		}
+	}
+	if taskwait.Active(task.Status.Wait) && strings.TrimSpace(task.Annotations[labels.AnnotationCancelWait]) == "" {
+		task.Annotations[labels.AnnotationCancelWait] = message
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := r.Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// delegatedTaskIndex lists every Task that names a parent, grouped by the
+// parent label value, for one cascade's walk. It reads the API server, not
+// the cache: a child in another namespace enqueues no reconcile of its parent
+// when it reaches the cache. The root's namespace is always listed. Children
+// elsewhere carry no owner reference and exist only when namespace isolation
+// is off, so other namespaces are listed then, and only where the controller
+// may list Tasks cluster-wide; delegatedBy keeps only real children.
+func (r *TaskReconciler) delegatedTaskIndex(ctx context.Context, root *corev1alpha1.Task) (map[string][]corev1alpha1.Task, error) {
+	selector := client.HasLabels{labels.LabelParentTask}
+	var local corev1alpha1.TaskList
+	if err := r.taskMetadataReader().List(ctx, &local, client.InNamespace(root.Namespace), selector); err != nil {
+		return nil, err
+	}
+	tasks := local.Items
+	if !r.EnforceNamespaceIsolation {
+		var all corev1alpha1.TaskList
+		switch err := r.taskMetadataReader().List(ctx, &all, selector); {
+		case err == nil:
+			for _, task := range all.Items {
+				if task.Namespace != root.Namespace {
+					tasks = append(tasks, task)
+				}
+			}
+		case apierrors.IsForbidden(err):
+			// Task access granted per namespace, as the standard install
+			// does, cannot list other namespaces; children there stay out
+			// of reach and must be cancelled directly.
+		default:
+			return nil, err
+		}
+	}
+	index := make(map[string][]corev1alpha1.Task, len(tasks))
+	for _, task := range tasks {
+		parent := task.Labels[labels.LabelParentTask]
+		index[parent] = append(index[parent], task)
+	}
+	return index, nil
+}
+
+// requestCancelForCancelledAncestor records a cancel request on a pending
+// delegated Task once a Task above it in its delegation chain was asked to
+// stop, and reports whether it did. A scheduled template is left alone, as
+// the cascade leaves it.
+func (r *TaskReconciler) requestCancelForCancelledAncestor(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if strings.TrimSpace(task.Spec.Schedule) != "" {
+		return false, nil
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; requested {
+		return false, nil
+	}
+	ancestor, err := r.stoppedAncestor(ctx, task)
+	if err != nil || ancestor == "" {
+		return false, err
+	}
+	current := task.DeepCopy()
+	base := current.DeepCopy()
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[labels.AnnotationCancelRequested] = "cancelled with its ancestor task " + ancestor
+	if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return true, nil
+}
+
+// stoppedAncestor walks the Task's delegation chain, through ancestors that
+// finished normally, and names the first one that was cancelled or had its
+// cancellation requested. Only that is a cancel signal: deleting a Task, as
+// retention does, cancels nothing, and an ancestor that is gone or replaced
+// ends the walk without a verdict, as does a link no immutable UID pins. A
+// link is pinned by the controller owner reference in the same namespace,
+// or by the parent UID a brokered delegation stamps, read in the parent's
+// recorded namespace (the child's own when none is recorded).
+func (r *TaskReconciler) stoppedAncestor(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	reader := r.taskMetadataReader()
+	current := task
+	for range maxDelegationChainDepth {
+		name := labels.ParentTaskName(current.Labels, current.Annotations)
+		if name == "" {
+			return "", nil
+		}
+		namespace, pinned := current.Namespace, ""
+		if owner := metav1.GetControllerOf(current); owner != nil && owner.Kind == taskResourceKind &&
+			owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Name == name {
+			pinned = string(owner.UID)
+		} else {
+			pinned = strings.TrimSpace(current.Annotations[labels.AnnotationParentTaskUID])
+			if recorded := strings.TrimSpace(current.Annotations[labels.AnnotationParentTaskNamespace]); recorded != "" {
+				namespace = recorded
+			}
+		}
+		if pinned == "" {
+			return "", nil
+		}
+		parent := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, parent); err != nil {
+			if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		if string(parent.UID) != pinned {
+			return "", nil
+		}
+		if _, requested := parent.Annotations[labels.AnnotationCancelRequested]; requested ||
+			parent.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+			return parent.Name, nil
+		}
+		// A scheduled template outlives whoever created it: the cascade
+		// leaves it to its own owner, so its runs answer only to it.
+		if strings.TrimSpace(parent.Spec.Schedule) != "" {
+			return "", nil
+		}
+		current = parent
+	}
+	return "", nil
+}
+
+// delegatedBy reports whether parent delegated child. In the parent's
+// namespace the controller owner reference says so. Owner references cannot
+// cross namespaces, so a child elsewhere must record the parent's UID, an
+// annotation only the controller and trusted workers may write.
+func delegatedBy(child, parent *corev1alpha1.Task) bool {
+	if child.Namespace == parent.Namespace {
+		return metav1.IsControlledBy(child, parent)
+	}
+	return parent.UID != "" && strings.TrimSpace(child.Annotations[labels.AnnotationParentTaskUID]) == string(parent.UID)
+}
+
 // requestedTaskCancellation returns the terminal message of a recorded
-// cancel_task request that this reconciler may complete. Agent Tasks and Tasks
-// with ACP execution are excluded: their terminal status needs the controller
-// epoch mutation guard, and the cancel endpoint refuses them.
+// cancel request that this reconciler may complete through the native
+// terminal path. Agent Tasks and Tasks with ACP execution are excluded: they
+// are cancelled by cancelRequestedAgentTask under the controller epoch guard.
 func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	message, ok := task.Annotations[labels.AnnotationCancelRequested]
 	if !ok || task.Spec.Type == corev1alpha1.TaskTypeAgent ||
@@ -2597,9 +3262,10 @@ func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	if strings.TrimSpace(message) == "" {
 		message = "cancelled by parent task"
 	}
-	return message, true
+	return boundACPStatusMessage(message), true
 }
 
+// completeTask marks a task as completed without asserting that workload execution started.
 func (r *TaskReconciler) completeTask(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -2626,10 +3292,6 @@ func taskExecutionWorkspaceNeedsFinalization(task *corev1alpha1.Task) bool {
 	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return false
 	}
-	request := task.Spec.Execution.Workspace
-	if !request.Enabled && request.ClassRef == nil {
-		return false
-	}
 	status := task.Status.ExecutionWorkspace
 	if status == nil {
 		return true
@@ -2650,7 +3312,7 @@ func (r *TaskReconciler) beginTaskFinalization(
 	log := logf.FromContext(ctx)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result before workspace finalization")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 	}
@@ -2696,37 +3358,87 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	task.Status.CompletionTime = &now
 	task.Status.Message = message
 
+	// Collect available output before cleanup, but stop failed or cancelled work even
+	// when storage finalization must wait for recovery. Keep the Task
+	// nonterminal in Kubernetes so those writes are retried. The staged intent
+	// and the workload outcome keep the decision this completion was given;
+	// collection may change only the Task's phase and message.
+	decidedPhase, decidedMessage := phase, message
+	retryFinalization := func(err error) (ctrl.Result, error) {
+		if decidedPhase == corev1alpha1.TaskPhaseCancelled || decidedPhase == corev1alpha1.TaskPhaseFailed {
+			cleanupErr := r.stopJobForDeferredFinalization(ctx, task, deferredTaskFinalization{
+				Phase: decidedPhase, OutcomePhase: outcomePhase, Message: decidedMessage, RecordOutcome: recordOutcome,
+			})
+			err = errors.Join(err, cleanupErr)
+		}
+		return ctrl.Result{}, err
+	}
+
 	if s := trace.SpanFromContext(ctx); s.IsRecording() {
 		s.AddEvent("phase.transition", trace.WithAttributes(
 			attribute.String("task.phase", string(phase)),
 		))
 	}
 
+	deferredIntent, err := r.loadDeferredTaskFinalization(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
-			return ctrl.Result{}, err
+		switch {
+		case errors.Is(err, store.ErrTooLarge):
+			// No retry can store a result above the limit. Finish without
+			// it and record why, rather than retry for good or report a
+			// success whose result was not stored.
+			phase, message = taskResultTooLargeOutcome(phase, message, err)
+			task.Status.Phase, task.Status.Message = phase, message
+		case deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err):
+			// A result the store has not accepted yet, or may have saved, is
+			// collected again on the next attempt rather than dropped.
+			return retryFinalization(err)
 		}
-		// Continue anyway, result collection is best-effort
+		// Otherwise continue: result collection is best-effort.
 	}
 
 	// Update session if configured
+	var inputTokens, outputTokens int64
 	if task.Spec.SessionRef != nil && task.Spec.SessionRef.Append {
 		if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
 			log.Error(err, "failed to append session messages")
+			// A transcript the store has not accepted yet, or may have saved,
+			// is appended again on the next attempt, before the lock is
+			// released; its stable message IDs make that safe.
+			if store.IsTemporaryStorageError(err) {
+				return retryFinalization(err)
+			}
 			// Continue anyway
 		}
+		var err error
+		if inputTokens, outputTokens, err = r.sessionTokenUsage(ctx, task); err != nil {
+			log.Error(err, "failed to read session token usage")
+			inputTokens, outputTokens = 0, 0
+		}
 	}
-	// Release session lock regardless of Append setting
+	// Release session lock regardless of Append setting, adding the Task's
+	// usage in the same write so a replayed completion counts nothing twice.
 	if task.Spec.SessionRef != nil {
-		if err := r.SessionManager.ReleaseLock(ctx, task); err != nil {
+		if err := r.SessionManager.ReleaseLockWithTokenUsage(ctx, task, inputTokens, outputTokens); err != nil {
 			log.Error(err, "failed to release session lock")
+			// A release the store has not accepted yet is retried rather
+			// than leaving the terminal Task holding the Session; a release
+			// that committed leaves no lock, so retrying it changes nothing.
+			if store.IsTemporaryStorageError(err) {
+				return retryFinalization(err)
+			}
 		}
 	}
 
-	// Clean up plan state on completion (best-effort)
-	if r.PlanStore != nil {
+	// Clean up plan state on completion (best-effort). A cancelled Task keeps
+	// its plan, which shows how far it got; deletion removes it.
+	if r.PlanStore != nil && phase != corev1alpha1.TaskPhaseCancelled {
 		if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 			log.Error(err, "failed to delete plan state on completion")
 		}
@@ -2756,7 +3468,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 				Attempt:    attempt,
 				ResultRef:  resultRef,
 				RecordedAt: now,
-				Message:    message,
+				Message:    decidedMessage,
 			}
 		}
 		meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
@@ -2882,6 +3594,24 @@ func (r *TaskReconciler) retryTask(ctx context.Context, task *corev1alpha1.Task)
 	return ctrl.Result{RequeueAfter: delay}, nil
 }
 
+// retryTaskAfterFailure schedules the next attempt and records why the
+// current one failed, so retried attempts are not silent in the timeline.
+func (r *TaskReconciler) retryTaskAfterFailure(ctx context.Context, task *corev1alpha1.Task, failure string) (ctrl.Result, error) {
+	attempt, jobName := task.Status.Attempts, task.Status.JobName
+	result, err := r.retryTask(ctx, task)
+	if err != nil {
+		return result, err
+	}
+	_ = r.recordTaskLifecycleEvent(
+		ctx,
+		task,
+		execevents.ExecutionEventTypeTaskPhaseChanged,
+		execevents.ExecutionEventSeverityWarning,
+		fmt.Sprintf("Attempt %d (Job %s) failed, retrying in %s: %s", attempt, jobName, result.RequeueAfter, failure),
+	)
+	return result, nil
+}
+
 // RequeueAfter does not prevent Task or owned Job events from reconciling
 // sooner. Enforce the same retry deadline on every attempt to start a Job.
 func (r *TaskReconciler) remainingRetryDelay(task *corev1alpha1.Task, now time.Time) time.Duration {
@@ -2969,34 +3699,25 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return nil
 	}
 
-	// No result yet — capture pod logs for tasks that actually created a Job.
-	// Some validation failures happen before Job creation; those terminal tasks should
-	// not produce noisy best-effort log collection errors for a non-existent Job.
-	stdoutResult := taskUsesStdoutResult(task)
-	if (task.Spec.Type != corev1alpha1.TaskTypeContainer && !stdoutResult) || r.KubeClient == nil || task.Status.JobName == "" {
-		return nil
+	// Prefer the durable snapshot after outage cleanup has removed the Pods.
+	// An intent with no chunks records that the workload had no output yet;
+	// recovery must not depend on logs from a Pod that never started.
+	intent, err := r.loadDeferredTaskFinalization(ctx, task)
+	if err != nil {
+		return err
 	}
-
 	var result []byte
-	if stdoutResult {
-		logs, err := r.readStdoutResultPodLogs(ctx, task)
-		if err != nil {
-			return fmt.Errorf("reading stdout result pod logs: %w", err)
-		}
-		stdoutPayload, ok, decodeErr := extractStdoutTaskResult(logs)
-		if decodeErr != nil {
-			return decodeErr
-		}
-		if !ok {
-			return nil
-		}
-		result = stdoutPayload
+	var available bool
+	if intent != nil {
+		result, available, err = r.deferredTaskResult(ctx, task, intent)
 	} else {
-		logs, err := r.readPodLogs(ctx, task)
-		if err != nil {
-			return fmt.Errorf("reading pod logs: %w", err)
-		}
-		result = []byte(logs)
+		result, available, err = r.taskPodResult(ctx, task, false)
+	}
+	if err != nil {
+		return err
+	}
+	if !available {
+		return nil
 	}
 
 	if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
@@ -3025,11 +3746,43 @@ func extractStdoutTaskResult(logs string) ([]byte, bool, error) {
 	if payload == "" {
 		return nil, false, nil
 	}
+	// Refuse a payload too long to decode to the limit before decoding it, so
+	// no more than the limit is decoded, staged or stored. Padding makes
+	// DecodedLen exceed a valid payload's decoded size by at most two bytes.
+	if base64.StdEncoding.DecodedLen(len(payload)) > store.MaxResultBytes+2 {
+		return nil, true, errTaskResultTooLarge
+	}
 	result, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
 		return nil, true, fmt.Errorf("decoding stdout task result: %w", err)
 	}
+	if len(result) > store.MaxResultBytes {
+		return nil, true, errTaskResultTooLarge
+	}
 	return result, true, nil
+}
+
+// errTaskResultTooLarge reports a Task result above store.MaxResultBytes. No
+// retry can store it, so it is permanent.
+var errTaskResultTooLarge = fmt.Errorf("%w: task result exceeds the %d byte limit", store.ErrTooLarge, store.MaxResultBytes)
+
+// taskResultTooLargeOutcome returns the terminal phase and message of a Task
+// whose result exceeds store.MaxResultBytes and is not stored: a Task that
+// would have succeeded fails, a cancelled or failed Task keeps its phase, and
+// the reason follows the message the Task was completed with.
+func taskResultTooLargeOutcome(phase corev1alpha1.TaskPhase, message string, err error) (corev1alpha1.TaskPhase, string) {
+	if phase == corev1alpha1.TaskPhaseSucceeded {
+		phase = corev1alpha1.TaskPhaseFailed
+	}
+	reason := fmt.Sprintf("task result exceeds the %d byte limit and was not stored", store.MaxResultBytes)
+	if errors.Is(err, errStdoutResultLogTooLarge) {
+		// The result itself may be small; the log it is read from is not.
+		reason = fmt.Sprintf("task log exceeds the %d byte stdout result read limit, so the result was not collected", stdoutResultLogLimitBytes)
+	}
+	if strings.TrimSpace(message) == "" {
+		return phase, reason
+	}
+	return phase, message + "; " + reason
 }
 
 // readPodLogs reads logs from the first pod of a task's job.
@@ -3037,9 +3790,34 @@ func (r *TaskReconciler) readPodLogs(ctx context.Context, task *corev1alpha1.Tas
 	return r.readPodLogsWithOptions(ctx, task, fullPodLogOptions(), true)
 }
 
+// readStdoutResultPodLogs reads the log a stdout result is extracted from. It
+// reads one byte past stdoutResultLogLimitBytes so a log cut at the limit is
+// refused rather than searched: the cut can fall inside the result line and
+// leave a base64 prefix that still decodes, or drop the result line entirely.
 func (r *TaskReconciler) readStdoutResultPodLogs(ctx context.Context, task *corev1alpha1.Task) (string, error) {
-	return r.readPodLogsWithOptions(ctx, task, stdoutResultPodLogOptions(), false)
+	opts := stdoutResultPodLogOptions()
+	limit := *opts.LimitBytes + 1
+	opts.LimitBytes = &limit
+	logs, err := r.readPodLogsWithOptions(ctx, task, opts, false)
+	if err != nil {
+		return "", err
+	}
+	return boundedStdoutResultLog(logs, stdoutResultLogLimitBytes)
 }
+
+// boundedStdoutResultLog refuses a log read past limit, which a reader that
+// requested limit+1 bytes sees as a longer log.
+func boundedStdoutResultLog(logs string, limit int64) (string, error) {
+	if int64(len(logs)) > limit {
+		return "", errStdoutResultLogTooLarge
+	}
+	return logs, nil
+}
+
+// errStdoutResultLogTooLarge reports a stdout result log longer than
+// stdoutResultLogLimitBytes. The log does not shrink on retry, so like an
+// oversized result it is permanent.
+var errStdoutResultLogTooLarge = fmt.Errorf("%w: task log exceeds the %d byte stdout result read limit", store.ErrTooLarge, stdoutResultLogLimitBytes)
 
 func fullPodLogOptions() corev1.PodLogOptions {
 	limit := podLogLimitBytes
@@ -3120,42 +3898,16 @@ func (r *TaskReconciler) validateExecutionWorkspace(task *corev1alpha1.Task) err
 	}
 
 	ws := task.Spec.Execution.Workspace
-	if ws.ClassRef != nil {
-		if strings.TrimSpace(ws.ClassRef.Name) == "" {
-			return fmt.Errorf("execution workspace classRef.name is required")
-		}
-		if !r.WorkspaceProviderAPIEnabled {
-			return fmt.Errorf("execution workspace classRef requires the workspace provider API")
-		}
-		if task.Spec.Type != corev1alpha1.TaskTypeAgent {
-			return fmt.Errorf("execution workspace classRef is only supported for type: agent tasks")
-		}
-		// Class resolution, policy validation, and provider gating run on the
-		// ACP execution plan path, which owns every class-shaped rejection.
-		return validateExecutionWorkspacePolicyShape(task, ws)
+	if ws.ClassRef == nil || strings.TrimSpace(ws.ClassRef.Name) == "" {
+		return fmt.Errorf("execution workspace classRef.name is required")
 	}
-	if !ws.Enabled {
-		return nil
-	}
-	provider := resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
-
-	if err := validateExecutionWorkspaceBasics(task, provider); err != nil {
-		return err
-	}
-	return validateExecutionWorkspacePolicyShape(task, ws)
-}
-
-func validateExecutionWorkspaceBasics(
-	task *corev1alpha1.Task,
-	provider corev1alpha1.WorkspaceProvider,
-) error {
-	if !supportedWorkspaceProvider(provider) {
-		return fmt.Errorf("unsupported execution workspace provider %q", provider)
+	if !r.WorkspaceProviderAPIEnabled {
+		return fmt.Errorf("execution workspace classRef requires the workspace provider API")
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return fmt.Errorf("execution workspace is only supported for type: agent tasks")
 	}
-	return nil
+	return validateExecutionWorkspacePolicyShape(task, ws)
 }
 
 func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1alpha1.ExecutionWorkspaceSpec) error {
@@ -3163,9 +3915,6 @@ func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1al
 		return fmt.Errorf("unsupported execution workspace reusePolicy %q", ws.ReusePolicy)
 	}
 
-	if !statusrules.IsOptionalCleanupPolicy(ws.CleanupPolicy) {
-		return fmt.Errorf("unsupported execution workspace cleanupPolicy %q", ws.CleanupPolicy)
-	}
 	if ws.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && (task.Spec.SessionRef == nil || task.Spec.SessionRef.Name == "") {
 		return fmt.Errorf("execution workspace reusePolicy %q requires spec.sessionRef.name", ws.ReusePolicy)
 	}
@@ -3174,8 +3923,7 @@ func validateExecutionWorkspacePolicyShape(task *corev1alpha1.Task, ws *corev1al
 }
 
 func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Context, task *corev1alpha1.Task, validationErr error) error {
-	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
-		(!task.Spec.Execution.Workspace.Enabled && task.Spec.Execution.Workspace.ClassRef == nil) {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return nil
 	}
 
@@ -3189,54 +3937,14 @@ func (r *TaskReconciler) markExecutionWorkspaceValidationFailed(ctx context.Cont
 		Message:    message,
 		ObservedAt: &now,
 	}
-	// A class-shaped request has no author-selected provider or template; the
-	// backend is resolved through the class and stays out of a failed
-	// projection so a wrong default is never displayed.
-	provider := corev1alpha1.WorkspaceProvider("")
-	if ws.ClassRef == nil {
-		provider = resolveWorkspaceProvider(ws, r.ExecutionWorkspaceDefaultProvider)
-		if supportedWorkspaceProvider(provider) {
-			failure.Provider = provider
-			failure.TemplateRef = r.executionWorkspaceStatusTemplateRef(task, provider)
-		}
-	}
 	if reusePolicy, ok := executionWorkspaceStatusReusePolicy(ws); ok {
 		failure.ReusePolicy = reusePolicy
-	}
-	if cleanupPolicy, ok := r.executionWorkspaceStatusCleanupPolicy(ws, provider); ok {
-		failure.CleanupPolicy = cleanupPolicy
 	}
 	status := statusrules.ValidationFailedStatus(failure)
 
 	return r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
 		t.Status.ExecutionWorkspace = status
 	})
-}
-
-func (r *TaskReconciler) executionWorkspaceStatusTemplateRef(task *corev1alpha1.Task, provider corev1alpha1.WorkspaceProvider) *corev1alpha1.WorkspaceTemplateReference {
-	ws := task.Spec.Execution.Workspace
-	var name string
-	var namespace string
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		cfg := r.AgentSandboxConfig.WithDefaults()
-		name = executionWorkspaceTemplateName(ws, cfg)
-		namespace = executionWorkspaceTemplateNamespace(ws, task.Namespace, cfg)
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		cfg := r.SubstrateConfig.WithDefaults()
-		name = substrateTemplateName(ws, cfg)
-		namespace = substrateTemplateNamespace(ws, task.Namespace, cfg)
-	default:
-		return nil
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
-	return &corev1alpha1.WorkspaceTemplateReference{
-		Name:      name,
-		Namespace: strings.TrimSpace(namespace),
-	}
 }
 
 func executionWorkspaceStatusReusePolicy(ws *corev1alpha1.ExecutionWorkspaceSpec) (corev1alpha1.WorkspaceReusePolicy, bool) {
@@ -3249,29 +3957,6 @@ func executionWorkspaceStatusReusePolicy(ws *corev1alpha1.ExecutionWorkspaceSpec
 	default:
 		return "", false
 	}
-}
-
-func (r *TaskReconciler) executionWorkspaceStatusCleanupPolicy(ws *corev1alpha1.ExecutionWorkspaceSpec, provider corev1alpha1.WorkspaceProvider) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	if ws != nil && ws.CleanupPolicy != "" {
-		switch ws.CleanupPolicy {
-		case corev1alpha1.WorkspaceCleanupPolicyDelete, corev1alpha1.WorkspaceCleanupPolicyRetain:
-			return ws.CleanupPolicy, true
-		default:
-			return "", false
-		}
-	}
-	switch provider {
-	case corev1alpha1.WorkspaceProviderAgentSandbox:
-		return executionWorkspaceStatusValidCleanupPolicy(r.AgentSandboxConfig.WithDefaults().CleanupPolicy)
-	case corev1alpha1.WorkspaceProviderSubstrate:
-		return executionWorkspaceStatusValidCleanupPolicy(r.SubstrateConfig.WithDefaults().CleanupPolicy)
-	default:
-		return corev1alpha1.WorkspaceCleanupPolicyDelete, true
-	}
-}
-
-func executionWorkspaceStatusValidCleanupPolicy(cleanupPolicy corev1alpha1.WorkspaceCleanupPolicy) (corev1alpha1.WorkspaceCleanupPolicy, bool) {
-	return statusrules.StatusCleanupPolicy(cleanupPolicy, "")
 }
 
 func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
@@ -3311,8 +3996,12 @@ func validatePlannedRuntimeRefAgentTaskRestrictions(
 	agent *corev1alpha1.Agent,
 	plan agentExecutionPlan,
 ) error {
+	// Soul compatibility applies to every new Agent Task path, not only runtimeRef.
+	if err := validateSoulRuntime(agent); err != nil {
+		return err
+	}
 	// planAgentExecution resolves runtimeRef before selecting the external path,
-	// so these v2-only checks cannot change harness v1 compatibility.
+	// before any agent runtime receives work.
 	if plan.path != agentExecutionPathExternal {
 		return nil
 	}
@@ -3356,6 +4045,11 @@ func validateHarnessV2RuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, a
 
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.
 func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	// An identity-bound Agent this controller cannot honor runs no Task of
+	// any type, not only the runtime Tasks that freeze its identity.
+	if err := r.Identity.ValidateAgent(agent); err != nil {
+		return err
+	}
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAgent:
 		return r.validateAgentRuntimeTaskCompatibility(task, agent)
@@ -3392,8 +4086,14 @@ func (r *TaskReconciler) validateAgentRuntimeTaskCompatibility(task *corev1alpha
 	default:
 		return fmt.Errorf("agent %q runtime must set exactly one of type or runtimeRef", agent.Name)
 	}
-	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil &&
-		(agent.Spec.Execution.Workspace.Enabled || agent.Spec.Execution.Workspace.ClassRef != nil) {
+	// runtimeRef Agents are judged during planning, against the registered
+	// AgentRuntime policy that dispatch actually exposes.
+	if !hasRuntimeRef {
+		if err := validateAgentRuntimeCeiling(task, agent); err != nil {
+			return err
+		}
+	}
+	if agent.Spec.Execution != nil && agent.Spec.Execution.Workspace != nil {
 		return fmt.Errorf("agent %q sets spec.execution.workspace, but execution workspace requests are only supported on Task.spec.execution.workspace", agent.Name)
 	}
 	if agent.Spec.ProviderRef != nil {
@@ -3536,10 +4236,9 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	sched, err := parser.Parse(task.Spec.Schedule)
 	if err != nil {
-		task.Status.Phase = corev1alpha1.TaskPhaseFailed
-		task.Status.Message = fmt.Sprintf("invalid cron expression: %v", err)
-		_ = r.Status().Update(ctx, task)
-		return ctrl.Result{}, nil
+		// A schedule edited to an invalid expression on an existing Task is
+		// terminal like the initial parse failure in handleScheduledTask.
+		return r.failTask(ctx, task, fmt.Sprintf("invalid cron expression: %v", err))
 	}
 
 	// Determine time zone
@@ -3613,7 +4312,13 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
 		}
 		for i := range childList.Items {
-			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) {
+			// A parked run still owns its unfinished work through its
+			// continuation chain, so it counts as active until the chain's
+			// tail is settled. A resumed wait is itself terminal, and its
+			// continuation may not have a phase yet or be in this cached
+			// list, so the tail is resolved from the authoritative reader.
+			_, settled := r.settledTaskContinuationTail(ctx, &childList.Items[i])
+			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) || !settled {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
 				nextSchedule := metav1.NewTime(next)
@@ -3724,10 +4429,24 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 		failedLimit = *task.Spec.FailedRunsHistoryLimit
 	}
 
+	// History limits apply to logical runs. A parked run and its
+	// continuations share the parent label, but they are one run: the chain's
+	// head represents it, its tail supplies the outcome, and deleting the head
+	// cascades to every continuation through their owner references.
 	var succeeded, failed []*corev1alpha1.Task
 	for i := range childList.Items {
 		child := &childList.Items[i]
-		switch child.Status.Phase {
+		if r.taskIsLinkedContinuation(ctx, child) {
+			// Counted, and pruned, with the head of its chain.
+			continue
+		}
+		tail, settled := r.settledTaskContinuationTail(ctx, child)
+		if !settled {
+			// Deleting a parked run, or a predecessor whose continuation is
+			// still running, would cancel that unfinished work.
+			continue
+		}
+		switch tail.Status.Phase {
 		case corev1alpha1.TaskPhaseSucceeded:
 			succeeded = append(succeeded, child)
 		case corev1alpha1.TaskPhaseFailed:
@@ -3745,13 +4464,25 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	sortByCreation(succeeded)
 	sortByCreation(failed)
 
+	// A run beyond the limit stays while its chain has a pending approval
+	// notice or approval events not yet projected. It still counts, so no
+	// newer run is pruned in its place. The Task's next reconcile projects
+	// the events as notices, the attempt that settles its last notice
+	// requeues it, and that reconcile reaches this again through
+	// enforceParentScheduledTaskHistory and prunes it then.
 	for i := 0; i < len(succeeded)-int(successLimit); i++ {
+		if r.approvalNoticesHoldRun(ctx, succeeded[i]) {
+			continue
+		}
 		if err := r.Delete(ctx, succeeded[i]); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting old succeeded child: %w", err)
 		}
 	}
 
 	for i := 0; i < len(failed)-int(failedLimit); i++ {
+		if r.approvalNoticesHoldRun(ctx, failed[i]) {
+			continue
+		}
 		if err := r.Delete(ctx, failed[i]); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("deleting old failed child: %w", err)
 		}
@@ -3794,6 +4525,16 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Event{}, eventReasonField, eventReasonIndex); err != nil {
 		return err
+	}
+	if r.WebhookNotifier != nil && r.webhookDeliveries == nil {
+		workers := r.WebhookDeliveryWorkers
+		if workers < 0 || workers > MaxTaskWebhookDeliveryWorkers {
+			return fmt.Errorf("webhook delivery workers must be between 1 and %d, got %d", MaxTaskWebhookDeliveryWorkers, workers)
+		}
+		r.webhookDeliveries = newTaskWebhookDispatcher(r.WebhookNotifier, uncachedReader(r.APIReader, r.Client), r.Status(), workers)
+		if err := mgr.Add(r.webhookDeliveries); err != nil {
+			return fmt.Errorf("register Task webhook delivery: %w", err)
+		}
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
@@ -3959,11 +4700,6 @@ func trustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName 
 		serviceAccountName = strings.TrimSpace(serviceAccountNames[0])
 	}
 	sum := sha256.Sum256([]byte(taskNamespace + "\x00" + serviceNamespace + "\x00" + serviceName + "\x00" + serviceAccountName))
-	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
-}
-
-func legacyTrustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName string) string {
-	sum := sha256.Sum256([]byte(taskNamespace + "\x00" + serviceNamespace + "\x00" + serviceName))
 	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
 }
 
@@ -4148,41 +4884,6 @@ func (r *TaskReconciler) deleteTrustedServiceReadBindingsForNamespaceLocked(
 			return fmt.Errorf("deleting trusted Service Role %s/%s for inactive namespace %q: %w", role.Namespace, role.Name, taskNamespace, err)
 		}
 	}
-	return r.deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(ctx, taskNamespace)
-}
-
-func (r *TaskReconciler) deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(
-	ctx context.Context,
-	taskNamespace string,
-) error {
-	refs := append(r.OutboundAccessTrust.Gateways.References(), r.OutboundAccessTrust.TokenEndpoints.References()...)
-	seen := map[types.NamespacedName]struct{}{}
-	for _, ref := range refs {
-		if ref.Namespace == "" || ref.Namespace == taskNamespace {
-			continue
-		}
-		key := types.NamespacedName{
-			Namespace: ref.Namespace,
-			Name:      legacyTrustedServiceReadBindingName(taskNamespace, ref.Namespace, ref.Name),
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		binding := &rbacv1.RoleBinding{}
-		if err := r.trustedServiceReadReader().Get(ctx, key, binding); apierrors.IsNotFound(err) {
-			continue
-		} else if err != nil {
-			return fmt.Errorf("getting legacy trusted Service RoleBinding %s/%s: %w", key.Namespace, key.Name, err)
-		}
-		ownerNamespace, ok := legacyTrustedServiceReadRoleBindingTaskNamespace(binding)
-		if !ok || ownerNamespace != taskNamespace {
-			continue
-		}
-		if err := r.deleteTrustedServiceReadGrant(ctx, binding, taskNamespace); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -4277,10 +4978,7 @@ func trustedServiceReadRoleOwned(role *rbacv1.Role, taskNamespace string, servic
 		strings.HasPrefix(role.Name, "orka-outbound-service-") {
 		return true
 	}
-	if len(serviceAccountNames) > 0 && trustedServiceReadRoleMatches(role, taskNamespace, serviceAccountNames[0]) {
-		return true
-	}
-	return legacyTrustedServiceReadRole(role, taskNamespace)
+	return len(serviceAccountNames) > 0 && trustedServiceReadRoleMatches(role, taskNamespace, serviceAccountNames[0])
 }
 
 func trustedServiceReadRoleMatches(role *rbacv1.Role, taskNamespace, serviceAccountName string) bool {
@@ -4288,13 +4986,6 @@ func trustedServiceReadRoleMatches(role *rbacv1.Role, taskNamespace, serviceAcco
 		return false
 	}
 	return role.Name == trustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0], serviceAccountName)
-}
-
-func legacyTrustedServiceReadRole(role *rbacv1.Role, taskNamespace string) bool {
-	if !trustedServiceReadRoleRuleValid(role) {
-		return false
-	}
-	return role.Name == legacyTrustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0])
 }
 
 func trustedServiceReadRoleRuleValid(role *rbacv1.Role) bool {
@@ -4354,7 +5045,8 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 				Name:      name,
 				Namespace: namespace,
 				Labels: map[string]string{
-					orkaManagedByLabelKey: managedByLabelValue,
+					orkaManagedByLabelKey:        managedByLabelValue,
+					labels.LabelPlatformIdentity: labels.PlatformIdentityValue,
 				},
 			},
 		}
@@ -4376,8 +5068,9 @@ func (r *TaskReconciler) ensureWorkerServiceAccount(ctx context.Context, namespa
 	if sa.Labels == nil {
 		sa.Labels = map[string]string{}
 	}
-	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue {
+	if sa.Labels[orkaManagedByLabelKey] != managedByLabelValue || sa.Labels[labels.LabelPlatformIdentity] != labels.PlatformIdentityValue {
 		sa.Labels[orkaManagedByLabelKey] = managedByLabelValue
+		sa.Labels[labels.LabelPlatformIdentity] = labels.PlatformIdentityValue
 		if err := r.Update(ctx, sa); err != nil {
 			return fmt.Errorf("updating worker ServiceAccount %s/%s labels: %w", namespace, name, err)
 		}
@@ -4530,8 +5223,15 @@ func subjectsEqual(a, b []rbacv1.Subject) bool {
 
 // isAutonomousTask checks if this task has autonomous mode enabled via its agent.
 func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha1.Task) bool {
-	if task.Spec.AgentRef == nil {
-		return false
+	autonomous, _ := r.taskAutonomousMode(ctx, task)
+	return autonomous
+}
+
+// taskAutonomousMode preserves lookup errors when the mode affects a terminal
+// decision. Other callers retain the existing best-effort boolean behavior.
+func (r *TaskReconciler) taskAutonomousMode(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task.Spec.AgentRef == nil || isMemoryConsolidationTask(task) {
+		return false, nil
 	}
 
 	agent := &corev1alpha1.Agent{}
@@ -4540,10 +5240,10 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 		agentNS = task.Spec.AgentRef.Namespace
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, agent); err != nil {
-		return false
+		return false, err
 	}
 
-	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous
+	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous, nil
 }
 
 func (r *TaskReconciler) pendingApprovalsForTask(ctx context.Context, task *corev1alpha1.Task) ([]approvals.Approval, error) {
@@ -4568,16 +5268,14 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 		return ctrl.Result{}, false, err
 	}
 	if len(pending) == 0 {
+		if setWaitingForApprovalCondition(task, nil) {
+			if err := r.Status().Update(ctx, task); err != nil {
+				return ctrl.Result{}, false, err
+			}
+		}
 		return ctrl.Result{}, false, nil
 	}
 	approval := pending[0]
-	target := approval.TargetTool
-	if target == "" {
-		target = approval.Action
-	}
-	if target == "" {
-		target = "requested action"
-	}
 	log.Info(
 		"autonomous task waiting for approval",
 		"approvalID", approval.ID,
@@ -4587,16 +5285,266 @@ func (r *TaskReconciler) parkOnPendingApproval(ctx context.Context, task *corev1
 	waitingMessage := fmt.Sprintf(
 		"waiting for approval %s for %s at iteration %d",
 		approval.ID,
-		target,
+		approvalTargetName(approval),
 		task.Status.Iteration,
 	)
-	if task.Status.Message != waitingMessage {
+	conditionChanged := setWaitingForApprovalCondition(task, pending)
+	if task.Status.Message != waitingMessage || conditionChanged {
 		task.Status.Message = waitingMessage
 		if err := r.Status().Update(ctx, task); err != nil {
 			return ctrl.Result{}, false, err
 		}
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+}
+
+const (
+	waitingForApprovalReasonPending  = "ApprovalPending"
+	waitingForApprovalReasonResolved = "ApprovalResolved"
+)
+
+func approvalTargetName(approval approvals.Approval) string {
+	if approval.TargetTool != "" {
+		return approval.TargetTool
+	}
+	if approval.Action != "" {
+		return approval.Action
+	}
+	return "requested action"
+}
+
+// setWaitingForApprovalCondition reports a running Task as waiting while it
+// has a pending approval, naming the first one, and as no longer waiting once
+// a condition it set before is resolved. It returns whether status changed.
+func setWaitingForApprovalCondition(task *corev1alpha1.Task, pending []approvals.Approval) bool {
+	existing := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval)
+	condition := metav1.Condition{Type: ConditionTypeWaitingForApproval, ObservedGeneration: task.Generation, LastTransitionTime: metav1.Now()}
+	switch {
+	case len(pending) > 0:
+		condition.Status, condition.Reason = metav1.ConditionTrue, waitingForApprovalReasonPending
+		condition.Message = fmt.Sprintf("waiting for approval %s for %s", pending[0].ID, approvalTargetName(pending[0]))
+		if len(pending) > 1 {
+			condition.Message += fmt.Sprintf(" and %d more", len(pending)-1)
+		}
+	case existing != nil && existing.Status == metav1.ConditionTrue:
+		condition.Status, condition.Reason = metav1.ConditionFalse, waitingForApprovalReasonResolved
+		condition.Message = "no approval is pending"
+	default:
+		return false
+	}
+	if existing != nil && existing.Status == condition.Status && existing.Reason == condition.Reason &&
+		existing.Message == condition.Message && existing.ObservedGeneration == condition.ObservedGeneration {
+		return false
+	}
+	meta.SetStatusCondition(&task.Status.Conditions, condition)
+	return true
+}
+
+// syncACPWaitingForApproval mirrors pending brokered-tool approvals of a
+// running ACP Task into its WaitingForApproval condition. The controller's
+// MCP broker records those approvals in the Task's event stream.
+func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *corev1alpha1.Task) error {
+	if r == nil || r.ExecutionEventStore == nil {
+		return nil
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return err
+	}
+	// Brokered approvals carry an expiry; one past it no longer blocks.
+	// A parked sign-off never blocks the running turn: the agent ends the
+	// turn and the decision starts a continuation instead.
+	pending := withoutParkedApprovals(approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC()))
+	if !setWaitingForApprovalCondition(task.DeepCopy(), pending) {
+		return nil
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+			return err
+		}
+		if current.UID != task.UID || current.Status.Phase != corev1alpha1.TaskPhaseRunning ||
+			!setWaitingForApprovalCondition(current, pending) {
+			return nil
+		}
+		if err := r.Status().Update(ctx, current); err != nil {
+			return err
+		}
+		task.ResourceVersion, task.Status = current.ResourceVersion, current.Status
+		return nil
+	})
+}
+
+// settledTaskContinuationTail returns the Task whose outcome represents
+// task's continuation chain, and false while the chain still owns unfinished
+// work through a parked wait or a running continuation. An unresolvable chain
+// is treated as unsettled so cleanup never cancels work it cannot see.
+func (r *TaskReconciler) settledTaskContinuationTail(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Task, bool) {
+	if task == nil || task.Status.Wait == nil {
+		return task, true
+	}
+	if taskwait.Active(task.Status.Wait) {
+		return nil, false
+	}
+	if task.Status.Wait.State != corev1alpha1.TaskWaitStateResumed {
+		return task, true
+	}
+	tail, err := taskwait.ResolveTail(ctx, uncachedReader(r.APIReader, r.Client), task)
+	if apierrors.IsNotFound(err) {
+		// The continuation is already gone; there is nothing left to protect.
+		return task, true
+	}
+	if err != nil || !taskwait.Settled(tail) {
+		return nil, false
+	}
+	return tail, true
+}
+
+// approvalNoticesHoldRun reports whether a run must be kept because a Task in
+// its continuation chain, from head, still has a pending approval notice or
+// an outstanding terminal notice, or approval events its projection has not
+// reached yet (ADR 0053). Deleting a
+// Task drops its queued notices and its stream, and only a reconcile of the
+// Task itself can project and send them. It reads uncached state, because the
+// notices may have been queued earlier in the same reconcile, and follows at
+// most the chain bound. A failed Task read keeps the run. A failed event
+// store read keeps it only within approvalWebhookSigningWindow of the chain
+// settling, so a store that stays unavailable, which projection cannot read
+// either, holds no run indefinitely. Only a configured notifier ever settles
+// a notice, so without one nothing is held.
+func (r *TaskReconciler) approvalNoticesHoldRun(ctx context.Context, head *corev1alpha1.Task) bool {
+	if r.WebhookNotifier == nil || head == nil {
+		return false
+	}
+	reader := uncachedReader(r.APIReader, r.Client)
+	current := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(head), current); err != nil {
+		return !apierrors.IsNotFound(err)
+	}
+	if current.UID != head.UID {
+		// Another incarnation holds the name; it is not this run to judge.
+		return true
+	}
+	storeFailed := false
+	now := r.WebhookNotifier.now()
+	for range taskwait.MaxChainLength + 1 {
+		if firstPendingApprovalNotice(current.Status.ApprovalWebhooks) >= 0 {
+			return true
+		}
+		// The terminal notice is sent asynchronously, after the run's own
+		// reconcile queued it, so the parent can see a finished run whose
+		// notice is still waiting for a delivery worker. A continuation that
+		// has not finished inherits the webhook URL but owes no notice yet.
+		if current.Status.Phase.IsTerminal() {
+			if outstanding, _ := terminalNoticeOutstanding(current, now); outstanding {
+				return true
+			}
+		}
+		unprojected, err := r.approvalEventsAwaitProjection(ctx, current)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "failed to read approval events for scheduled run history", "task", current.Name)
+			storeFailed = true
+		} else if unprojected {
+			return true
+		}
+		next, err := taskwait.Continuation(ctx, reader, current)
+		switch {
+		case apierrors.IsNotFound(err):
+			// The rest of the chain is gone, and its notices with it.
+			return storeFailed && r.approvalEventReadFailureHolds(current)
+		case err != nil:
+			return true
+		case next == nil:
+			return storeFailed && r.approvalEventReadFailureHolds(current)
+		}
+		current = next
+	}
+	return true
+}
+
+// approvalWebhookTransitionEventTypes are the approval events projection
+// turns into transitions. Execution updates never become one, so they do not
+// advance the cursor and must not hold a run.
+var approvalWebhookTransitionEventTypes = []string{
+	execevents.ExecutionEventTypeApprovalRequested,
+	execevents.ExecutionEventTypeApprovalApproved,
+	execevents.ExecutionEventTypeApprovalDeclined,
+	execevents.ExecutionEventTypeApprovalExpired,
+	execevents.ExecutionEventTypeApprovalCancelled,
+}
+
+// approvalEventsAwaitProjection reports whether task's stream has a selected
+// approval transition above its projection cursor, which a reconcile of task
+// would record as a notice. Only a tracking Task that selects approval events
+// and has not overflowed can still record one: an untracked selection starts
+// at the stream's high-water mark. One indexed read past the cursor answers
+// the common case. Only when it finds a transition event is the stream
+// derived as projection derives it, because an event that is not this
+// Task's transition, such as a duplicate request, never advances the cursor
+// and would otherwise hold the run for good.
+func (r *TaskReconciler) approvalEventsAwaitProjection(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	state := task.Status.ApprovalWebhooks
+	selected := selectedApprovalWebhookEvents(task)
+	if r.ExecutionEventStore == nil || task.UID == "" || !task.DeletionTimestamp.IsZero() ||
+		len(selected) == 0 || state == nil || !state.Tracking || state.Overflowed {
+		return false, nil
+	}
+	next, err := r.ExecutionEventStore.ListExecutionEvents(ctx, store.ExecutionEventFilter{
+		Namespace:  task.Namespace,
+		StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID:   task.Name,
+		EventTypes: approvalWebhookTransitionEventTypes,
+		AfterSeq:   state.ProjectedSeq,
+		Limit:      1,
+	})
+	if err != nil || len(next) == 0 {
+		return false, err
+	}
+	listed, err := approvals.ListEvents(ctx, r.ExecutionEventStore, task.Namespace, task.Name)
+	if err != nil {
+		return false, err
+	}
+	for _, transition := range approvalWebhookTransitions(taskApprovals(listed, string(task.UID))) {
+		if transition.seq > state.ProjectedSeq && selected.allows(transition.transition) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// approvalEventReadFailureHolds reports whether a failed approval event read
+// still keeps a run whose chain ends at tail: only within
+// approvalWebhookSigningWindow of the tail's completion, the same window
+// after which an approval notice that cannot be signed is given up.
+func (r *TaskReconciler) approvalEventReadFailureHolds(tail *corev1alpha1.Task) bool {
+	settled := tail.CreationTimestamp.Time
+	if tail.Status.CompletionTime != nil {
+		settled = tail.Status.CompletionTime.Time
+	}
+	return r.WebhookNotifier.now().Before(settled.Add(approvalWebhookSigningWindow))
+}
+
+// taskIsLinkedContinuation reports whether task continues a parked Task that
+// verifiably links it, so the predecessor's chain accounts for it. A lookup
+// failure counts as linked: the Task is then neither counted nor pruned.
+func (r *TaskReconciler) taskIsLinkedContinuation(ctx context.Context, task *corev1alpha1.Task) bool {
+	if task == nil || strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID]) == "" {
+		return false
+	}
+	_, linked, err := taskwait.Predecessor(ctx, uncachedReader(r.APIReader, r.Client), task)
+	return err != nil || linked
+}
+
+func withoutParkedApprovals(pending []approvals.Approval) []approvals.Approval {
+	kept := pending[:0]
+	for _, approval := range pending {
+		if approval.Binding == nil && approval.Action == taskwait.ParkedApprovalAction {
+			continue
+		}
+		kept = append(kept, approval)
+	}
+	return kept
 }
 
 func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
@@ -4694,6 +5642,9 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	// Collect result from this iteration (best-effort)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect iteration result")
+		if store.IsTemporaryStorageError(err) {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
@@ -4797,4 +5748,31 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// taskAgentRevisionChanged reports whether the Task's Agent differs from the
+// resolved revision on the uncached reader.
+func taskAgentRevisionChanged(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (bool, error) {
+	key := client.ObjectKey{Namespace: task.Spec.AgentRef.Namespace, Name: task.Spec.AgentRef.Name}
+	if key.Namespace == "" {
+		key.Namespace = task.Namespace
+	}
+	latest := &corev1alpha1.Agent{}
+	if err := reader.Get(ctx, key, latest); err != nil {
+		return false, fmt.Errorf("recheck Task Agent revision: %w", err)
+	}
+	return latest.UID != agent.UID || latest.Generation != agent.Generation || !latest.DeletionTimestamp.IsZero(), nil
+}
+
+// parkedWaitActive reports, from an authoritative read, whether task still
+// holds a parked wait that the wait reconciler has not ended yet.
+func (r *TaskReconciler) parkedWaitActive(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	latest := &corev1alpha1.Task{}
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return latest.UID == task.UID && taskwait.Active(latest.Status.Wait), nil
 }

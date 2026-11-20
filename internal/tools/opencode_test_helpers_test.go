@@ -8,6 +8,7 @@ package tools
 
 import corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 
+//nolint:unparam // Callers spell out the literal OpenCode model ID under test.
 func testOpenCodeModelConfig(name string) *corev1alpha1.ModelConfig {
 	contextWindow := int32(32768)
 	maxTokens := int32(4096)

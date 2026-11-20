@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
+FROM golang:1.27.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS builder
 
 WORKDIR /workspace
 
@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     CGO_ENABLED=0 GOOS=linux go build -o worker ./workers/ai
 
 # Runtime stage - using python slim for code_exec tool support
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 # Install Node.js for JavaScript execution
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-import { render, screen, waitFor, within } from '@/test/test-utils'
+import { useReducer } from 'react'
+import { fireEvent, render, screen, waitFor, within } from '@/test/test-utils'
 import { server } from '@/test/mocks/server'
 import { useUIStore } from '@/stores/ui'
 import { makeEvent } from '@/test/fixtures/events'
@@ -37,6 +38,7 @@ vi.mock('@/hooks/use-execution-event-stream', () => ({
 }))
 
 import { SessionEventTimeline } from './session-event-timeline'
+import { useSession } from '@/hooks/use-sessions'
 
 const API = '/api/v1'
 
@@ -163,5 +165,44 @@ describe('SessionEventTimeline', () => {
     }
     render(<SessionEventTimeline sessionId="sess" />)
     await waitFor(() => expect(screen.getByText(/this session was deleted/i)).toBeInTheDocument())
+  })
+
+  it('refreshes the session itself when the stream reports SessionDeleted', async () => {
+    let deleted = false
+    server.use(
+      http.get(`${API}/sessions/:id/events`, () =>
+        HttpResponse.json({
+          namespace: 'default', streamType: 'session', streamID: 'sess', afterSeq: 0, latestSeq: 1,
+          events: [sessionEvent(1, 'task-a', 'TaskStarted', 'a started')],
+        }),
+      ),
+      http.get(`${API}/sessions/:id`, () => deleted
+        ? HttpResponse.json({ error: { code: 404, message: 'not found' } }, { status: 404 })
+        : HttpResponse.json({ name: 'sess', namespace: 'default', messageCount: '2' })),
+    )
+    // Polling is off, so only the SessionDeleted frame can refresh the session.
+    function Page() {
+      const session = useSession('sess', false)
+      const [, rerender] = useReducer((n: number) => n + 1, 0)
+      return (
+        <>
+          <p>{session.error ? 'session gone' : `messages ${session.data?.messageCount ?? ''}`}</p>
+          <button type="button" onClick={rerender}>rerender</button>
+          <SessionEventTimeline sessionId="sess" />
+        </>
+      )
+    }
+    render(<Page />)
+    expect(await screen.findByText('messages 2')).toBeInTheDocument()
+
+    deleted = true
+    streamState.current = {
+      lastSeq: 1,
+      status: 'complete',
+      streamComplete: { lastSeq: 1, type: 'SessionDeleted' },
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'rerender' }))
+
+    expect(await screen.findByText('session gone')).toBeInTheDocument()
   })
 })

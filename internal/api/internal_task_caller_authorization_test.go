@@ -144,7 +144,7 @@ func TestInternalTaskScopedHandlersRequireActiveOwningWorker(t *testing.T) { //n
 		Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	dataStore := sqlite.NewStore(db, ":memory:")
+	dataStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	for _, name := range []string{"session-a", "session-peer-a", "session-b", "terminal-session", "outcome-session"} {
 		require.NoError(t, dataStore.CreateSession(context.Background(), &store.SessionRecord{
 			Namespace: "default", Name: name, SessionType: "task",
@@ -215,7 +215,7 @@ func TestInternalCallerAuthorizationUsesAPIReader(t *testing.T) {
 	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentTask, currentJob, currentPod).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	dataStore := sqlite.NewStore(db, ":memory:")
+	dataStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewInternalHandlers(dataStore, dataStore, dataStore, dataStore, dataStore, InternalHandlersConfig{
 		Client: cachedClient, APIReader: apiReader,
 	})

@@ -47,7 +47,7 @@ _manual_coordinator_status() {
   # which prints to STDOUT — so if an announce fires on the same tick the task
   # reaches a terminal phase, its line is captured into the phase string and
   # corrupts the "== Succeeded" check, failing an otherwise-green run. Force
-  # stderr (mirrors the _sandbox_turn_status fix in 60-agent-sandbox.sh).
+  # stderr.
   {
     local phase counts children_count latest_child latest_phase
     phase="$(kubectl get task "${parent}" -n "${DEMO_NAMESPACE}" \

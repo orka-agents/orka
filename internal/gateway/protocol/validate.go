@@ -91,8 +91,15 @@ func ValidateEvent(event *EventEnvelope) error {
 	if event.ProtocolVersion != Version {
 		return fmt.Errorf("unsupported protocolVersion %q", event.ProtocolVersion)
 	}
-	if event.EventType != EventTypeText {
+	if event.EventType != EventTypeText && event.EventType != EventTypeDelegatedText {
 		return fmt.Errorf("unsupported eventType %q", event.EventType)
+	}
+	ref, present := event.Metadata[GatewayGrantRefKey]
+	if (event.EventType == EventTypeDelegatedText && strings.TrimSpace(ref) == "") || (event.EventType != EventTypeDelegatedText && present) {
+		return errors.New("gatewayGrantRef is required only for delegatedText")
+	}
+	if event.EventType == EventTypeDelegatedText && SanitizeMessage(ref, MaxMetadataValueBytes) != ref {
+		return errors.New("gatewayGrantRef must survive sanitization unchanged")
 	}
 	for name, value := range map[string]string{
 		"externalEventId": event.ExternalEventID,

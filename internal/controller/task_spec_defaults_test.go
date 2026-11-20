@@ -65,6 +65,7 @@ func TestTaskSpecWithServerDefaultsMatchesCRD(t *testing.T) {
 			ForgeCredentialRef:           &corev1alpha1.WorkspaceCredentialReference{Name: "f"},
 		},
 		Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{}},
+		AI:        &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}},
 	}
 	encoded, err := json.Marshal(taskSpecWithServerDefaults(spec))
 	if err != nil {

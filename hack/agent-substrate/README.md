@@ -1,6 +1,6 @@
 # Official Substrate pin
 
-`upstream.env` pins [Agent Substrate v0.1.0](https://github.com/agent-substrate/substrate/tree/v0.1.0)
+`upstream.env` pins [Agent Substrate v1.0.0](https://github.com/agent-substrate/substrate/tree/v1.0.0)
 to its unmodified release commit and the SHA-256 of its `ateapi.proto`.
 Orka does not apply provider patches or consume fork-only APIs.
 

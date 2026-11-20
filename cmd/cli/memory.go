@@ -313,10 +313,11 @@ func newMemoryProposalGetCmd() *cobra.Command {
 }
 
 func newMemoryProposalReviewCmd() *cobra.Command {
-	var status, reviewer, note string
+	var status, note string
 	cmd := &cobra.Command{
 		Use:   "review <id>",
 		Short: "Review a memory proposal",
+		Long:  "Review a memory proposal. The server records your signed-in identity as the reviewer.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if status == "" {
@@ -324,36 +325,41 @@ func newMemoryProposalReviewCmd() *cobra.Command {
 			}
 			body, _ := json.Marshal(map[string]string{
 				cliStatusKey: status,
-				"reviewer":   reviewer,
 				"reviewNote": note,
 			})
 			c := newClientFromCmd(cmd)
 			path := "/api/v1/memory-proposals/" + url.PathEscape(args[0]) + "/review"
-			_, err := c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
+			result, err := c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Memory proposal reviewed: %s\n", args[0]) //nolint:errcheck
-			return nil
+			record := toGenericMap(result)
+			if firstString(record, "reviewer") == "" {
+				// Older servers answer a review with no body.
+				fmt.Fprintf(cmd.OutOrStdout(), "Memory proposal reviewed: %s\n", args[0]) //nolint:errcheck
+				return nil
+			}
+			return printDescribe(cmd, []describeRow{
+				{Label: labelStatus, Value: firstString(record, cliStatusKey)},
+				{Label: "Reviewer", Value: firstString(record, "reviewer")},
+			})
 		},
 	}
 	cmd.Flags().StringVar(&status, cliStatusKey, "", "Review status (accepted or rejected)")
-	cmd.Flags().StringVar(&reviewer, "reviewer", "", "Reviewer name")
 	cmd.Flags().StringVar(&note, "note", "", "Review note")
 	return cmd
 }
 
 func newMemoryProposalApplyCmd() *cobra.Command {
-	var appliedBy string
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "apply <id>",
 		Short: "Apply an accepted memory proposal",
+		Long:  "Apply an accepted memory proposal. The server records your signed-in identity as the applier.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			body, _ := json.Marshal(map[string]string{"appliedBy": appliedBy})
 			c := newClientFromCmd(cmd)
-			path := "/api/v1/memory-proposals/" + url.PathEscape(args[0]) + "/apply"
-			result, err := c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
+			path := "/api/v1/memory-proposals/" + url.PathEscape(args[0])
+			result, err := c.DoJSON(context.Background(), http.MethodPost, path+"/apply", nil, []byte("{}"))
 			if err != nil {
 				return err
 			}
@@ -363,11 +369,19 @@ func newMemoryProposalApplyCmd() *cobra.Command {
 				args[0],
 				metadataName(result),
 			)
+			// Apply returns the memory; the proposal records who applied it. The
+			// apply already succeeded, so a failed read is only a warning.
+			proposal, err := c.DoJSON(context.Background(), http.MethodGet, path, nil, nil)
+			if err != nil {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not read the recorded applier: %v\n", err)
+				return nil
+			}
+			if appliedBy := firstString(toGenericMap(proposal), "appliedBy"); appliedBy != "" {
+				return printDescribe(cmd, []describeRow{{Label: "Applied by", Value: appliedBy}})
+			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&appliedBy, "applied-by", "", "Reviewer applying the proposal")
-	return cmd
 }
 
 func newMemoryProposalArchiveCmd() *cobra.Command {

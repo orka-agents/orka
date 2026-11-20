@@ -129,8 +129,8 @@ treats the missing pool as cleanup proof and fresh demand recreates it by name.
 - Dispatch requires `--agent-sandbox-enabled` and
   `--acp-workspace-dispatch-enabled`; either missing fails closed with the
   workspace validation status projected on the Task.
-- The harness-v1 path rejects execution workspaces with a v1-specific message;
-  there is no cross-mode fallback in either direction.
+- Agent execution uses harness v2 only. Unsupported protocol requests fail
+  before creating workspace demand.
 - Missing provider CRDs degrade the pool and close admission; there is no
   fallback to a Deployment workload.
 - Task status projection stays provider-neutral (`provider`, `phase`,

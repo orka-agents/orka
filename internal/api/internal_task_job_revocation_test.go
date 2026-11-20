@@ -93,7 +93,7 @@ func TestInternalPlanReadAllowsOtherTaskCleanupDuringAuthorization(t *testing.T)
 				return nil
 			}
 			reads++
-			return data.DeleteArtifacts(ctx, "default", "other-task")
+			return data.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "default", TaskName: "other-task"})
 		},
 	})
 	app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))

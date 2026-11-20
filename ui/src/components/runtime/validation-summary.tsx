@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, AlertTriangle, HelpCircle } from 'lucide-react'
+import { CheckCircle2, XCircle, AlertTriangle, HelpCircle, Info } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
@@ -7,6 +7,7 @@ import {
   rollupStatus,
   type RuntimeCheck,
   type CheckStatus,
+  type RollupStatus,
 } from '@/lib/runtime-validation'
 import type { Task } from '@/schemas/task'
 import type { TaskTrace, Approval } from '@/schemas/execution-event'
@@ -29,9 +30,10 @@ const STATUS_META: Record<
   fail: { Icon: XCircle, label: 'Fail', color: 'text-status-failed', variant: 'destructive' },
   warn: { Icon: AlertTriangle, label: 'Warn', color: 'text-status-pending', variant: 'secondary' },
   unknown: { Icon: HelpCircle, label: 'Unknown', color: 'text-muted-foreground', variant: 'outline' },
+  info: { Icon: Info, label: 'Info', color: 'text-muted-foreground', variant: 'outline' },
 }
 
-const ROLLUP_LABEL: Record<CheckStatus, string> = {
+const ROLLUP_LABEL: Record<RollupStatus, string> = {
   pass: 'All derived checks pass',
   fail: 'Derived checks failing',
   warn: 'Derived checks need attention',
@@ -51,9 +53,11 @@ export function ValidationSummary({ task, trace, approvals, artifacts }: Validat
   return (
     <Card>
       <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-2">
+        {/* In a narrow column the rollup badge wraps below the title, and its
+            label wraps too, instead of overflowing the card. */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-sm font-medium">Derived checks</CardTitle>
-          <Badge variant={banner.variant} className={cn('gap-1', rollup !== 'fail' && banner.color)}>
+          <Badge variant={banner.variant} className={cn('shrink gap-1 whitespace-normal', rollup !== 'fail' && banner.color)}>
             <banner.Icon className="size-3" aria-hidden="true" />
             {ROLLUP_LABEL[rollup]}
           </Badge>

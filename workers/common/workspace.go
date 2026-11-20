@@ -132,7 +132,7 @@ func PrepareWorkspace(workDir string) error {
 
 // PreparePullRequestReviewContext writes safe, read-only PR diff context into
 // the workspace for reviewer agents that cannot run git commands themselves.
-func PreparePullRequestReviewContext(workDir string, cfg *AgentConfig) error {
+func PreparePullRequestReviewContext(workDir string, cfg *WorkspaceConfig) error {
 	if cfg == nil || strings.TrimSpace(cfg.PRBaseBranch) == "" {
 		return nil
 	}
@@ -266,7 +266,7 @@ Truncation: %s
 	return nil
 }
 
-func pullRequestReviewGitContext(cfg *AgentConfig) (baseBranch, baseRepo, baseSHA, fetchSource string, err error) {
+func pullRequestReviewGitContext(cfg *WorkspaceConfig) (baseBranch, baseRepo, baseSHA, fetchSource string, err error) {
 	baseBranch, err = safeGitBranchName(cfg.PRBaseBranch)
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("invalid PR base branch: %w", err)

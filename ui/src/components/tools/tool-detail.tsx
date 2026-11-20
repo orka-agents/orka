@@ -3,19 +3,80 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { ArrowLeft } from 'lucide-react'
+import { EmptyState } from '@/components/ui/empty-state'
+import { Activity, ArrowLeft, SearchX, ShieldCheck, type LucideIcon } from 'lucide-react'
 import { PageHeader } from '@/components/layout/page-header'
 import { useTool } from '@/hooks/use-tools'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
+
+// A missing or unreadable tool keeps the page heading (and so the tab title)
+// and a way back to the list.
+function ToolUnavailable({ title, icon, headline, hint, alert = false }: {
+  title: string
+  icon: LucideIcon
+  headline: string
+  hint: string
+  alert?: boolean
+}) {
+  return (
+    <div className="space-y-4">
+      <PageHeader title={title} />
+      <Card>
+        <CardContent>
+          <div role={alert ? 'alert' : undefined}>
+            <EmptyState
+              icon={icon}
+              headline={headline}
+              hint={hint}
+              action={
+                <Button asChild variant="outline" size="sm">
+                  <Link to="/tools"><ArrowLeft className="h-4 w-4" /> Back to tools</Link>
+                </Button>
+              }
+            />
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
 
 export function ToolDetail({ toolName }: { toolName: string }) {
-  const { data: tool, isLoading } = useTool(toolName)
+  const { data: tool, isLoading, error } = useTool(toolName)
 
   if (isLoading) {
     return <div className="space-y-4"><Skeleton className="h-8 w-64" /><Skeleton className="h-64 w-full" /></div>
   }
 
-  if (!tool) {
-    return <div className="text-muted-foreground">Tool not found</div>
+  // A 403 or 404 wins over cached data (React Query keeps the last
+  // successful `data` when a refetch fails); any other failure only replaces
+  // the page when nothing was loaded.
+  const missing = isNotFoundError(error)
+  const forbidden = isForbiddenError(error)
+  if (forbidden || (error && !missing && !tool)) {
+    const message = error instanceof Error ? error.message : ''
+    return (
+      <ToolUnavailable
+        alert
+        title="Could not load tool"
+        icon={forbidden ? ShieldCheck : Activity}
+        headline={forbidden ? 'Not authorized to view tools' : `Tool "${toolName}" failed to load`}
+        hint={forbidden
+          ? `Your token lacks tools read permission${message ? ` (${message})` : ''}.`
+          : message || 'The tool request failed.'}
+      />
+    )
+  }
+
+  if (missing || !tool) {
+    return (
+      <ToolUnavailable
+        title="Tool not found"
+        icon={SearchX}
+        headline={`No tool named "${toolName}"`}
+        hint="It may have been deleted, or it belongs to another namespace."
+      />
+    )
   }
 
   // Built-in tools have a simpler shape with a `builtin` field
@@ -34,7 +95,9 @@ export function ToolDetail({ toolName }: { toolName: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
-        <Link to="/tools"><Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button></Link>
+        <Button asChild variant="ghost" size="icon">
+          <Link to="/tools" aria-label="Back to tools"><ArrowLeft className="h-4 w-4" /></Link>
+        </Button>
         <div>
           <PageHeader title={isBuiltin ? (tool as Record<string, unknown>).name as string : tool.metadata?.name ?? toolName} />
           <div className="flex items-center gap-2">
@@ -64,7 +127,7 @@ export function ToolDetail({ toolName }: { toolName: string }) {
                 {httpConfig.headers && Object.keys(httpConfig.headers).length > 0 && (
                   <div>
                     <span className="text-muted-foreground">Headers:</span>
-                    <pre className="mt-1 rounded-md bg-muted p-2 text-xs">{JSON.stringify(httpConfig.headers, null, 2)}</pre>
+                    <pre tabIndex={0} role="region" aria-label="HTTP headers" className="mt-1 max-h-64 overflow-auto rounded-md bg-muted p-2 text-xs">{JSON.stringify(httpConfig.headers, null, 2)}</pre>
                   </div>
                 )}
               </CardContent>
@@ -134,7 +197,16 @@ export function ToolDetail({ toolName }: { toolName: string }) {
         <Card>
           <CardHeader><CardTitle>Parameters (JSON Schema)</CardTitle></CardHeader>
           <CardContent>
-            <pre className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-xs">{JSON.stringify(parameters, null, 2)}</pre>
+            {/* A named, focusable region, so keyboard users can scroll a schema
+                taller or wider than the box. */}
+            <pre
+              tabIndex={0}
+              role="region"
+              aria-label="Parameters JSON Schema"
+              className="max-h-64 overflow-auto rounded-md bg-muted p-4 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {JSON.stringify(parameters, null, 2)}
+            </pre>
           </CardContent>
         </Card>
       )}

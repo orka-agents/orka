@@ -2,8 +2,7 @@
 
 This Kustomize base deploys one static `harness-v2` Orka controller, worker
 RBAC, ACP runtime broker proxies, and the clean-room workspace publisher
-without installing CRDs. It does not contain the harness v1 wrapper or a
-cross-protocol fallback.
+without installing CRDs. All agent execution uses harness v2.
 
 Before applying it directly, create the required Secrets in `orka-system`:
 

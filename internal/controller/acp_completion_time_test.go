@@ -90,7 +90,9 @@ func TestACPTerminalStatusPreservesCompletionTimeAfterConflict(t *testing.T) {
 					State: test.delivery, Outcome: corev1alpha1.TaskDeliveryOutcome(test.delivery),
 				}
 				if writer == "direct" {
-					dispatcher := &ACPDispatcher{Client: cached}
+					// The live cancel-request lookup reads through the uncached API
+					// reader, as in production; the status write reads the cache.
+					dispatcher := &ACPDispatcher{Client: cached, APIReader: kube}
 					if err := test.settle(dispatcher, ctx, task, delivery, "terminal delivery settled"); err != nil {
 						t.Fatal(err)
 					}

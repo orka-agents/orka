@@ -77,6 +77,14 @@ func (l linkedBuiltinAccounts) BuiltinToolCredential(ctx context.Context, toolNa
 		Tool:      binding,
 	})
 	if err != nil {
+		if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); ok {
+			// Name the provider so the agent is told how the person relinks.
+			// The source may share the error among callers, so describe a
+			// copy.
+			described := *refusal
+			described.Provider, described.Namespace = frozen.Provider, l.namespace
+			return tools.LinkedAccountCredential{}, false, &described
+		}
 		return tools.LinkedAccountCredential{}, false, err
 	}
 	if strings.TrimSpace(credential.AccessToken) == "" {

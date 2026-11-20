@@ -57,7 +57,7 @@ _security_stage_status() {
   # value via `x="$(wait_for_... )"` with this hook running in the same command
   # substitution; demo_announce_once prints to STDOUT, so an announce firing on
   # the tick a wait resolves would be captured into the returned string and
-  # corrupt it. Force stderr (mirrors the _sandbox_turn_status fix in 60).
+  # corrupt it. Force stderr.
   {
     # One kubectl query → counts for all stages.
     local data

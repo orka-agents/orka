@@ -54,6 +54,14 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			allowed: true,
 		},
 		{
+			// The mark only makes a Task more private; a delegated child a
+			// worker creates carries it from its parent.
+			name:    "untrusted create with the AHP turn mark allowed",
+			user:    untrustedUsername,
+			task:    withAHPTurn(newAdmissionTestTask()),
+			allowed: true,
+		},
+		{
 			name:     "untrusted create with requestedBy denied",
 			user:     untrustedUsername,
 			task:     withRequestedBy(newAdmissionTestTask()),
@@ -88,6 +96,25 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			user:     untrustedUsername,
 			task:     withParentTaskUID(newAdmissionTestTask()),
 			contains: labels.AnnotationParentTaskUID,
+		},
+		{
+			name: "untrusted create with continuation lineage denied",
+			user: untrustedUsername,
+			task: func() *corev1alpha1.Task {
+				task := newAdmissionTestTask()
+				if task.Annotations == nil {
+					task.Annotations = map[string]string{}
+				}
+				task.Annotations[labels.AnnotationContinuationOfUID] = "victim-uid"
+				return task
+			}(),
+			contains: labels.AnnotationContinuationOfUID,
+		},
+		{
+			name:     "untrusted create with parent task namespace denied",
+			user:     untrustedUsername,
+			task:     withParentTaskNamespace(newAdmissionTestTask()),
+			contains: labels.AnnotationParentTaskNamespace,
 		},
 		{
 			name:     "untrusted create with workspace settlement marker denied",
@@ -279,10 +306,66 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			allowed: true,
 		},
 		{
+			name:     "untrusted update removing the AHP turn mark denied",
+			user:     untrustedUsername,
+			oldTask:  withAHPTurn(oldTask.DeepCopy()),
+			newTask:  oldTask,
+			contains: labels.LabelAHPTurn,
+		},
+		{
+			name:     "trusted worker update removing the AHP turn mark denied",
+			user:     trustedWorkerUser,
+			oldTask:  withAHPTurn(oldTask.DeepCopy()),
+			newTask:  oldTask,
+			contains: labels.LabelAHPTurn,
+		},
+		{
+			name:     "untrusted update adding the AHP turn mark denied",
+			user:     untrustedUsername,
+			oldTask:  oldTask,
+			newTask:  withAHPTurn(oldTask.DeepCopy()),
+			contains: labels.LabelAHPTurn,
+		},
+		{
+			name:    "trusted controller can change the AHP turn mark",
+			user:    trustedControllerUser,
+			oldTask: withAHPTurn(oldTask.DeepCopy()),
+			newTask: oldTask,
+			allowed: true,
+		},
+		{
 			name:    "trusted controller can update provenance",
 			user:    trustedControllerUser,
 			oldTask: oldTask,
 			newTask: withParentTaskUID(withTransaction(withRequestedBy(oldTask.DeepCopy()))),
+			allowed: true,
+		},
+		{
+			name:     "untrusted removal of the continuation link finalizer denied",
+			user:     untrustedUsername,
+			oldTask:  withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask:  oldTask.DeepCopy(),
+			contains: labels.ContinuationLinkFinalizer,
+		},
+		{
+			name:     "trusted worker removal of the continuation link finalizer denied",
+			user:     trustedWorkerUser,
+			oldTask:  withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask:  oldTask.DeepCopy(),
+			contains: labels.ContinuationLinkFinalizer,
+		},
+		{
+			name:    "controller removal of the continuation link finalizer allowed",
+			user:    trustedControllerUser,
+			oldTask: withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask: oldTask.DeepCopy(),
+			allowed: true,
+		},
+		{
+			name:    "untrusted update keeping the continuation link finalizer allowed",
+			user:    untrustedUsername,
+			oldTask: withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask: withImage(withContinuationLinkFinalizer(oldTask.DeepCopy()), "alpine"),
 			allowed: true,
 		},
 		{
@@ -447,6 +530,22 @@ func withParentTaskUID(task *corev1alpha1.Task) *corev1alpha1.Task {
 	return task
 }
 
+func withParentTaskNamespace(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationParentTaskNamespace] = "parent-namespace"
+	return task
+}
+
+func withAHPTurn(task *corev1alpha1.Task) *corev1alpha1.Task {
+	if task.Labels == nil {
+		task.Labels = map[string]string{}
+	}
+	task.Labels[labels.LabelAHPTurn] = labels.LabelAHPTurnValue
+	return task
+}
+
 func withCancelRequested(task *corev1alpha1.Task) *corev1alpha1.Task {
 	if task.Annotations == nil {
 		task.Annotations = map[string]string{}
@@ -537,5 +636,10 @@ func withRequestedBySubject(task *corev1alpha1.Task, subject string) *corev1alph
 		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{}
 	}
 	task.Spec.RequestedBy.Subject = subject
+	return task
+}
+
+func withContinuationLinkFinalizer(task *corev1alpha1.Task) *corev1alpha1.Task {
+	task.Finalizers = append(task.Finalizers, labels.ContinuationLinkFinalizer)
 	return task
 }

@@ -9,8 +9,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 func authorizeTaskWorkspaceClassUse(
@@ -19,9 +19,14 @@ func authorizeTaskWorkspaceClassUse(
 	userInfo *UserInfo,
 	task *corev1alpha1.Task,
 ) error {
-	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
-		task.Spec.Execution.Workspace.ClassRef == nil {
+	if task == nil || task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil {
 		return nil
+	}
+	if task.Spec.Execution.Workspace.ClassRef == nil || strings.TrimSpace(task.Spec.Execution.Workspace.ClassRef.Name) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "execution workspace classRef.name is required")
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
+		return fiber.NewError(fiber.StatusBadRequest, "execution workspace is only supported for type: agent tasks")
 	}
 	if err := authorizeWorkspaceClassUse(
 		ctx,

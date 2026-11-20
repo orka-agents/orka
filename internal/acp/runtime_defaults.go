@@ -36,6 +36,14 @@ var builtInRuntimeNativeTools = map[string][]string{
 	"opencode": {nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolApplyPatch, nativeToolBash, nativeToolGlob, nativeToolGrep},
 }
 
+// BuiltInRuntimeSupportsNativePermissionAsk reports whether a built-in
+// runtime can be launched to ask before every policy-allowed native tool that
+// acts, so the controller can hold those requests for a Task's requester.
+func BuiltInRuntimeSupportsNativePermissionAsk(provider string) bool {
+	_, ok := builtInRuntimeNativeTools[strings.ToLower(strings.TrimSpace(provider))]
+	return ok
+}
+
 // BuiltInRuntimeNativeToolNames returns the provider-native tool names owned by
 // one built-in ACP runtime. Callers receive a copy so policy tables remain
 // immutable.
@@ -60,14 +68,24 @@ func IsBuiltInRuntimeNativeTool(provider, name string) bool {
 
 // BuiltInRuntimeNativePolicyUnrestricted compares only provider-native grants.
 // A full native grant remains unrestricted when brokered tools are added; an
-// explicit empty allowlist remains deny-all. Deny metadata still narrows policy.
+// explicit empty allowlist remains deny-all. Denying a provider-native tool,
+// whole or scoped as in "Read(/workspace/private/**)", narrows the policy.
+// Denying any other tool, such as a brokered Tool or a forwarding Tool's
+// write tool, does not: the MCP policy enforces that deny, and the provider's
+// own tools are untouched.
 func BuiltInRuntimeNativePolicyUnrestricted(provider string, allowed, disallowed []string, allowBash bool) bool {
-	if !allowBash || len(disallowed) != 0 {
+	if !allowBash {
 		return false
 	}
 	native := BuiltInRuntimeNativeToolNames(provider)
 	if len(native) == 0 {
 		return false
+	}
+	for _, denied := range disallowed {
+		denied = builtInRuntimeToolBaseName(denied)
+		if slices.ContainsFunc(native, func(name string) bool { return strings.EqualFold(name, denied) }) {
+			return false
+		}
 	}
 	if allowed == nil {
 		return true

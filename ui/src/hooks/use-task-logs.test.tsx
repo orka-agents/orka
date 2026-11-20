@@ -56,6 +56,56 @@ describe('useTaskLogs', () => {
     expect(result.current.isStreaming).toBe(false)
   })
 
+  it('reports the server reason for a 404 as unavailable logs, not an error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 404, message: 'no pods found for task job' } }), {
+        status: 404,
+        statusText: 'Not Found',
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    const { result } = renderHook(() => useTaskLogs('podless-task'))
+    await waitFor(() => {
+      expect(result.current.unavailable).toBe('no pods found for task job')
+    })
+    expect(result.current.error).toBeNull()
+    expect(result.current.isStreaming).toBe(false)
+  })
+
+  it('shows the server message rather than the HTTP status text on failure', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 500, message: 'failed to list pods: etcd timeout' } }), {
+        status: 500,
+        statusText: 'Internal Server Error',
+      }),
+    )
+    const { result } = renderHook(() => useTaskLogs('flaky-task'))
+    await waitFor(() => {
+      expect(result.current.error).toBe('Failed to fetch logs: failed to list pods: etcd timeout')
+    })
+  })
+
+  it('keeps blank lines in the output', async () => {
+    const mockResponse = new Response(JSON.stringify({ logs: 'first\n\nthird\n' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+    Object.defineProperty(mockResponse, 'body', { value: null })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse)
+    const { result } = renderHook(() => useTaskLogs('spaced-task'))
+    await waitFor(() => {
+      expect(result.current.logs).toEqual(['first', '', 'third'])
+    })
+  })
+
+  it('keeps blank lines from a streamed log body', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('alpha\n\nbeta\ngamma', { status: 200 }))
+    const { result } = renderHook(() => useTaskLogs('streamed-task', true, 'Succeeded'))
+    await waitFor(() => {
+      expect(result.current.logs).toEqual(['alpha', '', 'beta', 'gamma'])
+    })
+  })
+
   it('clear function resets logs', async () => {
     const mockResponse = new Response(JSON.stringify({ logs: 'line1' }), { status: 200 })
     Object.defineProperty(mockResponse, 'body', { value: null })

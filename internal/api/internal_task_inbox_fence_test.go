@@ -29,7 +29,7 @@ func TestInternalInboxRejectsTaskReuseDuringAuthorization(t *testing.T) {
 			t.Cleanup(func() { _ = cleanupDB.Close() })
 			_, err = cleanupDB.ExecContext(t.Context(), `PRAGMA busy_timeout=0`)
 			require.NoError(t, err)
-			writer, cleanup := sqlite.NewStore(writerDB, dbPath), sqlite.NewStore(cleanupDB, dbPath)
+			writer, cleanup := testStorageClient(sqlite.NewStore(writerDB, dbPath)), testStorageClient(sqlite.NewStore(cleanupDB, dbPath))
 			h.messageStore = writer
 			message := &store.Message{
 				Namespace: "default", FromTask: "worker-b", ToTask: "my-task", ParentTask: "coordinator", Content: "original Task message",

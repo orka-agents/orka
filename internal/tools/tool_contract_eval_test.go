@@ -43,10 +43,12 @@ import (
 	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -1107,6 +1109,17 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
+			name:   "chat create_agent runtime contract",
+			limits: []string{"chat/create_agent.runtime.contractVersion enum=orka.harness.v2"},
+			check: func(t *testing.T) (bool, string) {
+				call := func() (Tool, context.Context) { return chatTool("create_agent", newFakeClient()) }
+				contract := func(v string) string {
+					return fmt.Sprintf(`{"name":"a","model":{"name":"test-model"},"runtime":{"type":"claude","contractVersion":%q}}`, v)
+				}
+				return evalRejectsChange(call, contract("orka.harness.v2"), contract("orka.harness.v1"), "contractVersion")
+			},
+		},
+		{
 			name:   "chat create_agent model counts",
 			limits: []string{"chat/create_agent.model.contextWindow minimum=1", "chat/create_agent.model.maxTokens minimum=1"},
 			check: func(t *testing.T) (bool, string) {
@@ -1345,6 +1358,18 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
+			name:   "worker create_agent runtime contract",
+			limits: []string{"worker/create_agent.runtime.contractVersion enum=orka.harness.v2"},
+			check: func(t *testing.T) (bool, string) {
+				t.Setenv(envOrkaTaskName, "parent")
+				call := func() (Tool, context.Context) { return workerTool("create_agent", evalParentTaskCluster()) }
+				contract := func(v string) string {
+					return fmt.Sprintf(`{"role":"coder","systemPrompt":"s","model":{"name":"m"},"runtime":{"type":"claude","contractVersion":%q}}`, v)
+				}
+				return evalRejectsChange(call, contract("orka.harness.v2"), contract("orka.harness.v1"), "contractVersion")
+			},
+		},
+		{
 			name:   "worker create_agent model maxTokens",
 			limits: []string{"worker/create_agent.model.maxTokens minimum=1"},
 			check: func(t *testing.T) (bool, string) {
@@ -1561,6 +1586,56 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
+			name: "brokered park_until",
+			limits: []string{
+				"brokered/park_until.kind enum=approval|tasks|timer",
+				"brokered/park_until.reason maxLength=512",
+				"brokered/park_until.tasks maxItems=16",
+			},
+			check: func(t *testing.T) (bool, string) {
+				call := func() (Tool, context.Context) {
+					parked := parkTestTask()
+					child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+						Name: "child", Namespace: defaultNamespace, UID: "uid-child",
+						Labels:      map[string]string{labels.LabelParentTask: parked.Name},
+						Annotations: map[string]string{labels.AnnotationParentTaskUID: string(parked.UID)},
+						OwnerReferences: []metav1.OwnerReference{
+							*metav1.NewControllerRef(parked, corev1alpha1.GroupVersion.WithKind("Task")),
+						},
+					}}
+					fc := newFakeClient(parked, child)
+					toolCtx := parkToolContext(fc, "eval-operation")
+					toolCtx.TaskProvenanceProtected = true
+					tool, _ := evalToolRegistries(fc)["brokered"].Get(ParkUntilToolName)
+					return tool, WithToolContext(context.Background(), toolCtx)
+				}
+				kind := func(value string) string {
+					switch value {
+					case "tasks":
+						return `{"kind":"tasks","reason":"r","tasks":["child"]}`
+					case "timer":
+						return `{"kind":"timer","reason":"r","duration":"10m"}`
+					}
+					return `{"kind":"` + value + `","reason":"r"}`
+				}
+				tooMany := make([]string, 0, 17)
+				for i := range 17 {
+					tooMany = append(tooMany, fmt.Sprintf("%q", fmt.Sprintf("child-%d", i)))
+				}
+				return evalAll(
+					func() (bool, string) {
+						return evalEnumEnforced(call, kind, "kind", "meh", "approval", "tasks", "timer")
+					},
+					func() (bool, string) {
+						return evalRejectsChange(call, `{"kind":"approval","reason":"`+long(512)+`"}`, `{"kind":"approval","reason":"`+long(513)+`"}`, "reason")
+					},
+					func() (bool, string) {
+						return evalRejectsChange(call, kind("tasks"), `{"kind":"tasks","reason":"r","tasks":[`+strings.Join(tooMany, ",")+`]}`, "tasks")
+					},
+				)
+			},
+		},
+		{
 			name:   "brokered run_validation command",
 			limits: []string{"brokered/run_validation.command maxLength=8192", "brokered/run_validation.command minLength=1"},
 			check: func(t *testing.T) (bool, string) {
@@ -1590,6 +1665,21 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				"worker/create_agent.coordination.allowedAgents[].name pattern=\\S",
 			},
 			check: evalAllowedAgentNameRequired(workerTool, `"role":"coder","systemPrompt":"p"`),
+		},
+		{
+			name:   "chat create_agent soul",
+			limits: evalSoulLimits("chat/create_agent"),
+			check:  evalSoulEnforced(chatTool, "create_agent", `"name":"a","systemPrompt":"p"`, evalParentTaskCluster),
+		},
+		{
+			name:   "chat update_agent soul",
+			limits: evalSoulLimits("chat/update_agent"),
+			check:  evalSoulEnforced(chatTool, "update_agent", `"name":"eval"`, evalToolClusters["seeded"]),
+		},
+		{
+			name:   "worker create_agent soul",
+			limits: evalSoulLimits("worker/create_agent"),
+			check:  evalSoulEnforced(workerTool, "create_agent", `"role":"coder","systemPrompt":"p"`, evalParentTaskCluster),
 		},
 		{
 			name:   "worker post_review_comment comment path",
@@ -1761,6 +1851,56 @@ func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context
 			`{"name":" \t\r\n ","namespace":"default"}`,
 		} {
 			if ok, detail := evalRejectsChange(call, valid, allowed(agent), "allowedAgents"); !ok {
+				return false, detail
+			}
+		}
+		return true, ""
+	}
+}
+
+// evalSoulLimits lists the limits soulParameterSchema declares for one tool.
+func evalSoulLimits(tool string) []string {
+	return []string{
+		tool + ".soul.inline minLength=1",
+		tool + ".soul.inline pattern=" + soulNonWhitespacePattern,
+		tool + ".soul.inline maxLength=" + strconv.Itoa(agentcontext.MaxSoulBytes),
+		tool + ".soul.digest pattern=^sha256:[0-9a-f]{64}$",
+		tool + ".soul.configMapRef.name required",
+		tool + ".soul.configMapRef.name minLength=1",
+		tool + ".soul.configMapRef.name pattern=" + soulNonWhitespacePattern,
+		tool + ".soul.configMapRef.key required",
+		tool + ".soul.configMapRef.key minLength=1",
+		tool + ".soul.configMapRef.key pattern=" + soulNonWhitespacePattern,
+	}
+}
+
+// evalSoulEnforced checks that an Agent tool, given its required fields,
+// rejects empty, whitespace-only, or oversized inline souls, incomplete
+// ConfigMap references, and malformed digests instead of storing them.
+func evalSoulEnforced(get func(string, client.Client) (Tool, context.Context), name, required string, cluster func() client.Client) func(*testing.T) (bool, string) {
+	return func(t *testing.T) (bool, string) {
+		t.Setenv(envOrkaTaskName, "parent")
+		call := func() (Tool, context.Context) { return get(name, cluster()) }
+		soul := func(value string) string { return `{` + required + `,"soul":` + value + `}` }
+		inline := func(text string) string { return soul(fmt.Sprintf(`{"inline":%q}`, text)) }
+		digest := agentcontext.Digest(evalPlaceholder)
+		ref := func(fields, digest string) string {
+			return soul(fmt.Sprintf(`{"configMapRef":{%s},"digest":%q}`, fields, digest))
+		}
+		validRef := ref(`"name":"eval","key":"eval"`, digest)
+		for _, change := range []struct{ valid, invalid string }{
+			{inline("eval"), inline("")},
+			{inline("eval"), inline(" \t\r\n ")},
+			{inline(strings.Repeat("x", agentcontext.MaxSoulBytes)), inline(strings.Repeat("x", agentcontext.MaxSoulBytes+1))},
+			{validRef, ref(`"name":"eval","key":"eval"`, "sha256:"+strings.Repeat("X", 64))},
+			{validRef, ref(`"key":"eval"`, digest)},
+			{validRef, ref(`"name":"","key":"eval"`, digest)},
+			{validRef, ref(`"name":" \t ","key":"eval"`, digest)},
+			{validRef, ref(`"name":"eval"`, digest)},
+			{validRef, ref(`"name":"eval","key":""`, digest)},
+			{validRef, ref(`"name":"eval","key":" \t "`, digest)},
+		} {
+			if ok, detail := evalRejectsChange(call, change.valid, change.invalid, "soul"); !ok {
 				return false, detail
 			}
 		}
@@ -1948,6 +2088,12 @@ func evalArgumentControl(t *testing.T, label, name string, schema map[string]any
 			tool.client = evalWebClient()
 		case *WebSearchTool:
 			tool.client = evalWebClient()
+		case *ParkUntilTool:
+			parked := parkTestTask()
+			parked.Name, parked.UID = parent.Name, parent.UID
+			pc := newFakeClient(parked)
+			tc.Client, tc.PolicyReader = pc, pc
+			tc.ExecutionEvents = storetest.NewFakeExecutionEventStore()
 		case *RunValidationTool:
 			monitor, review := runValidationFixtures()
 			fc := newFakeClient(monitor, review)
@@ -1981,6 +2127,8 @@ func evalArgumentSemanticValues(label, name, localURL string) map[string]any {
 		return map[string]any{"path": filepath.Join(os.Getenv(workerenv.WorkDir), "eval")}
 	case "wait_for_tasks":
 		return map[string]any{"tasks": []any{evalPlaceholder}}
+	case "park_until":
+		return map[string]any{"kind": "timer", "duration": "10m"}
 	case "post_review_comment":
 		return map[string]any{"event": "COMMENT"}
 	case "create_tool":
@@ -2104,6 +2252,11 @@ func evalArgumentValue(path []string, schema map[string]any) any {
 		return "100m"
 	case "roles.[]":
 		return "assistant"
+	case "soul":
+		// The ConfigMap form is the only valid soul with nested fields.
+		return map[string]any{"configMapRef": map[string]any{"name": evalPlaceholder, "key": evalPlaceholder}, "digest": agentcontext.Digest(evalPlaceholder)}
+	case "soul.digest":
+		return agentcontext.Digest(evalPlaceholder)
 	}
 	if enum, _ := schema["enum"].([]any); len(enum) > 0 {
 		return enum[0]
@@ -2307,6 +2460,10 @@ func TestToolEvalNestedArgumentTypes(t *testing.T) {
 					call, args := evalArgumentControl(t, label, name, schema)
 					if path[0] == "runtime" {
 						args["model"] = map[string]any{"name": "eval-model"}
+					}
+					if strings.Join(path, ".") == "soul.inline" {
+						// An inline soul excludes the default ConfigMap-backed soul.
+						args["soul"] = map[string]any{}
 					}
 					valid := evalSetArgumentPath(args, schema, path, nil, evalArgumentValue(path, node))
 					validRaw, _ := json.Marshal(valid)

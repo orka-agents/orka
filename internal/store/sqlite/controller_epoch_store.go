@@ -154,6 +154,13 @@ func (s *Store) SyncControllerEpochMirror(ctx context.Context, authoritative sto
 		return fmt.Errorf("begin controller epoch mirror sync: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	installation, err := readDatasetInstallation(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if installation != "" {
+		return store.FencedErrorf("dataset belongs to installation %q; its controller epoch moves only through AdvanceControllerEpoch", installation)
+	}
 	current, err := getControllerEpoch(ctx, tx, authoritative.Name)
 	if errors.Is(err, store.ErrNotFound) {
 		_, err = tx.ExecContext(ctx,

@@ -45,7 +45,7 @@ func TestSubstrateExecCollectsCommandTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 	executor := &SubstrateWorkspaceExecutor{
-		httpClient: server.Client(), routerURL: server.URL, actorDNSSuffix: "actors.test", handoffToken: substrateTestToken,
+		httpClient: server.Client(), routerURL: server.URL, atespace: "team-a", handoffToken: substrateTestToken,
 	}
 	result, err := executor.Exec(t.Context(), ExecRequest{
 		Ref: WorkspaceRef{ID: "actor-1"}, Command: []string{"sleep", "60"}, Timeout: time.Second,
@@ -82,7 +82,7 @@ func TestSubstrateExecResultCollectionHonorsCallerContext(t *testing.T) {
 			}))
 			defer server.Close()
 			executor := &SubstrateWorkspaceExecutor{
-				httpClient: server.Client(), routerURL: server.URL, actorDNSSuffix: "actors.test", handoffToken: substrateTestToken,
+				httpClient: server.Client(), routerURL: server.URL, atespace: "team-a", handoffToken: substrateTestToken,
 			}
 			result, err := executor.Exec(ctx, ExecRequest{
 				Ref: WorkspaceRef{ID: "actor-1"}, Command: []string{"sleep", "60"}, Timeout: time.Second,

@@ -361,3 +361,28 @@ func writeTestMessage(conn net.Conn, value any) error {
 	_, err = conn.Write(data)
 	return err
 }
+
+func TestParsePromptUsageIsTelemetryOnly(t *testing.T) {
+	usage := ParsePromptUsage(json.RawMessage(`{"inputTokens":120,"outputTokens":30,"totalTokens":150,"cachedReadTokens":0}`))
+	if usage == nil || *usage.InputTokens != 120 || *usage.OutputTokens != 30 || *usage.CachedReadTokens != 0 || usage.CachedWriteTokens != nil {
+		t.Fatalf("usage = %#v", usage)
+	}
+	for _, raw := range []string{``, `null`, `[]`, `"x"`, `{}`, `{"inputTokens":-1}`, `{"inputTokens":1.5}`, `{"inputTokens":"7"}`, `{"outputTokens":1099511627777}`} {
+		if got := ParsePromptUsage(json.RawMessage(raw)); got != nil {
+			t.Errorf("ParsePromptUsage(%s) = %#v, want nil", raw, got)
+		}
+	}
+	// A JSON null count is unreported, not an explicit zero.
+	if got := ParsePromptUsage(json.RawMessage(`{"inputTokens":null,"outputTokens":null,"cachedReadTokens":null,"cachedWriteTokens":null}`)); got != nil {
+		t.Errorf("ParsePromptUsage(all null counts) = %#v, want nil", got)
+	}
+	usage = ParsePromptUsage(json.RawMessage(`{"inputTokens":null,"outputTokens":0}`))
+	if usage == nil || usage.InputTokens != nil || usage.OutputTokens == nil || *usage.OutputTokens != 0 {
+		t.Fatalf("usage with null input and zero output = %#v", usage)
+	}
+	// A malformed usage report never fails the prompt response.
+	var response PromptResponse
+	if err := json.Unmarshal([]byte(`{"stopReason":"end_turn","usage":{"inputTokens":"bad"}}`), &response); err != nil || response.StopReason != StopReasonEndTurn {
+		t.Fatalf("prompt response with malformed usage = %v, %v", response, err)
+	}
+}

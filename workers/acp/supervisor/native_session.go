@@ -29,7 +29,7 @@ type nativeSessionCapture struct {
 type nativeCaptureUnsupportedError struct{}
 
 func (*nativeCaptureUnsupportedError) Error() string {
-	return "native agent context is unsupported or exceeds the transport budget; stopped private home retained"
+	return "native agent context is unsupported, unavailable, or exceeds the transport budget; stopped private home retained"
 }
 
 // A retry is safe only after the writer and all descendants are proven gone.
@@ -142,7 +142,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 		state.nativeCaptureReceipts = make(map[harnessv2.OperationID]*nativeSessionCapture)
 	}
 	state.nativeCaptureReceipts[request.Metadata.OperationID] = capture
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	state.descriptor.LastTransitionAt = now
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseRecorded, "", now)
 	s.mu.Unlock()
@@ -285,7 +285,7 @@ func (s *Server) retainUnresolvedCreate(state *sessionState, request harnessv2.C
 	}
 	state.profile = request.Profile
 	state.creating = false
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	state.descriptor.LastTransitionAt = now
 	replay := &failedCreateReplay{
 		operationID: request.Metadata.OperationID, requestDigest: request.Metadata.RequestDigest,
@@ -306,6 +306,9 @@ func (s *Server) retainUnresolvedCreate(state *sessionState, request harnessv2.C
 }
 
 func (s *Server) removeSessionPrivateFiles(state *sessionState) error {
+	// Callers have proven the session child stopped, so nothing can recreate
+	// the workspace under its recorded identity any more.
+	state.paths.ReleaseWorkspaceIdentity()
 	if err := os.RemoveAll(state.paths.Root); err != nil {
 		return err
 	}
@@ -333,6 +336,10 @@ func (s *Server) nativeCaptureLimit(r *http.Request) int {
 }
 
 func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, limit int) (harnessv2.NativeSessionSnapshot, error) {
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.poisonPool("operator_quiesce_unproven")
+		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native capture could not quiesce operator operations; private home retained")
+	}
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}

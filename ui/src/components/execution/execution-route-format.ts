@@ -7,7 +7,3 @@ export function abbreviateEvidence(value?: string) {
   if (value.length > 24) return `${value.slice(0, 12)}…${value.slice(-8)}`
   return value
 }
-
-export function words(value: string) {
-  return value.replace(/-/g, ' ')
-}

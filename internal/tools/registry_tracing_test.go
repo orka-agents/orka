@@ -36,7 +36,7 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 	metrics := testutil.NewMetricHarness(t)
 	registry := NewRegistry()
 	registry.Register(tracingTestTool{})
-	ctx := WithToolContext(context.Background(), &ToolContext{ToolCallID: "call-1"})
+	ctx := WithToolContext(context.Background(), &ToolContext{ToolCallID: "call-1", AgentUID: "reviewer-uid"})
 	if _, err := registry.Execute(ctx, tracingToolName, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -57,6 +57,9 @@ func TestRegistryExecuteEmitsGenAIToolSpanAndMetric(t *testing.T) {
 	}
 	if got := attrs[genai.AttrToolCallID].AsString(); got != "call-1" {
 		t.Fatalf("tool call id attr = %q", got)
+	}
+	if got := attrs[genai.AttrAgentID].AsString(); got != "reviewer-uid" {
+		t.Fatalf("agent id attr = %q, want the frozen Agent UID", got)
 	}
 	if got := attrs[tracing.AttrToolName].AsString(); got != tracingToolName {
 		t.Fatalf("orka tool name attr = %q", got)
@@ -194,7 +197,6 @@ func TestFailedToolResultForTelemetry(t *testing.T) {
 		result      string
 		wantFailed  bool
 		wantErrType string
-		wantMessage string
 	}{
 		{
 			name:   "success true skips failure",
@@ -205,14 +207,12 @@ func TestFailedToolResultForTelemetry(t *testing.T) {
 			result:      `{"success":false,"error":"bad input","errorType":"invalid_arguments"}`,
 			wantFailed:  true,
 			wantErrType: "invalid_arguments",
-			wantMessage: "bad input",
 		},
 		{
 			name:        "escaped success key keeps structured failure semantics",
 			result:      `{"\u0073uccess":false}`,
 			wantFailed:  true,
 			wantErrType: "tool_error",
-			wantMessage: "tool_error",
 		},
 		{
 			name:   "case variant is not structured failure",
@@ -226,15 +226,12 @@ func TestFailedToolResultForTelemetry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotFailed, gotErrType, gotMessage := FailedToolResultForTelemetry(tt.result)
+			gotFailed, gotErrType := FailedToolResultForTelemetry(tt.result)
 			if gotFailed != tt.wantFailed {
 				t.Fatalf("failed = %v, want %v", gotFailed, tt.wantFailed)
 			}
 			if gotErrType != tt.wantErrType {
 				t.Fatalf("errType = %q, want %q", gotErrType, tt.wantErrType)
-			}
-			if gotMessage != tt.wantMessage {
-				t.Fatalf("message = %q, want %q", gotMessage, tt.wantMessage)
 			}
 		})
 	}

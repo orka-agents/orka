@@ -15,6 +15,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -305,13 +306,13 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	}
 
 	cancelCheckCtx, cancelCheck := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	cancelled, err := d.taskCancellationRequested(cancelCheckCtx, task)
+	cancelled, refusal, err := d.taskPublicationRefused(cancelCheckCtx, task)
 	cancelCheck()
 	if err != nil {
 		return acpPublicationResult{}, err
 	}
 	if cancelled {
-		won, cancelErr := d.cancelPreparedPublication(ctx, task)
+		won, cancelErr := d.cancelPreparedPublication(ctx, task, refusal)
 		if cancelErr != nil {
 			return acpPublicationResult{}, cancelErr
 		}
@@ -322,7 +323,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 		if err != nil {
 			return acpPublicationResult{}, err
 		}
-		if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryPrepared, store.PromptDeliveryCancelledBeforePublish, "cancel-before-publish", ""); err != nil {
+		if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryPrepared, store.PromptDeliveryCancelledBeforePublish, "cancel-before-publish", refusal); err != nil {
 			return acpPublicationResult{}, err
 		}
 		if err := d.reclaimStandaloneTaskBranchClaim(ctx, task, attemptID, fence, publication); err != nil {
@@ -845,13 +846,25 @@ func legacyBranchClaimRequestDigest(
 	})
 }
 
+// taskPublicationCommitMessage returns the commit message for task's
+// publication: the Task-authored message, ending in exactly one newline as the
+// publisher requires, or the default title.
+func taskPublicationCommitMessage(task *corev1alpha1.Task) string {
+	if task.Spec.Workspace != nil {
+		if message := strings.TrimRight(task.Spec.Workspace.CommitMessage, "\n"); strings.TrimSpace(message) != "" {
+			return message + "\n"
+		}
+	}
+	return "orka: apply agent task " + task.Name + "\n"
+}
+
 func (d *ACPDispatcher) ensurePublication(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, sessionUID string, source publisher.Repository, sourceRef string, target publisher.Repository, targetRef string, claim store.BranchClaim, delta harnessv2.WorkspaceDeltaDescriptor) (*store.Publication, error) {
 	id := publicationID(task)
 	commitAt := task.CreationTimestamp.Time.UTC().Truncate(time.Second)
 	if commitAt.IsZero() {
 		commitAt = time.Now().UTC().Truncate(time.Second)
 	}
-	message := "orka: apply agent task " + task.Name + "\n"
+	message := taskPublicationCommitMessage(task)
 	requestDigest, err := acpDomainDigest("publication", map[string]any{
 		"id": id, attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
@@ -898,7 +911,7 @@ func publicationMatchesCreation(
 			return false
 		}
 	}
-	message := "orka: apply agent task " + task.Name + "\n"
+	message := taskPublicationCommitMessage(task)
 	expectedDigest, err := acpDomainDigest("publication", map[string]any{
 		"id": publicationIDForTask(task), attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
@@ -946,7 +959,10 @@ func (d *ACPDispatcher) taskCancellationRequested(ctx context.Context, task *cor
 	if err := d.APIReader.Get(ctx, clientObjectKey(task), latest); err != nil {
 		return false, err
 	}
-	return !latest.DeletionTimestamp.IsZero() || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled, nil
+	// A recorded cancel request stops publication at once; the Cancelled
+	// phase follows only when the Task is next reconciled.
+	_, requested := latest.Annotations[labels.AnnotationCancelRequested]
+	return !latest.DeletionTimestamp.IsZero() || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled || requested, nil
 }
 
 //nolint:gocyclo // Reclamation deliberately verifies every durable publication, attempt, effect, owner, and baseline fence together.
@@ -1177,6 +1193,9 @@ func publicationTaskDeliveryStatus(workspace *corev1alpha1.WorkspaceConfig, base
 		status.State, status.Outcome = corev1alpha1.TaskDeliveryStatePublicationOutcomeUnknown, corev1alpha1.TaskDeliveryOutcomePublicationOutcomeUnknown
 	}
 	status.Message = publication.TerminalReason
+	if publication.State == store.PublicationCancelledBeforePublish && publication.TerminalReason == operatorTaintedPublicationMessage {
+		status.Reason = corev1alpha1.TaskDeliveryReasonOperatorTainted
+	}
 	return status
 }
 
@@ -1476,6 +1495,15 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 }
 
 func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
+	// A requested cancellation ends with the request, which names who
+	// cancelled and why.
+	if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+		message = requested
+	}
+	// An operator-access taint refusal keeps its bounded message so the Task
+	// matches the publication and delivery records and stays distinguishable
+	// from a user cancellation.
+	message = cancelledBeforePublishMessage(status, message)
 	// Execution succeeded before the cancellation settled the publication, so
 	// the projection carries the frozen successful execution identity with the
 	// cancelled Phase.
@@ -1513,7 +1541,18 @@ func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *core
 	})
 }
 
-func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+// cancelledBeforePublishMessage replaces the generic cancellation message
+// when the delivery records an operator-taint refusal.
+func cancelledBeforePublishMessage(status corev1alpha1.TaskDeliveryStatus, message string) string {
+	if operatorTaintedDelivery(status) {
+		return operatorTaintedPublicationMessage
+	}
+	return message
+}
+
+// cancelPreparedPublication cancels a prepared publication before publish;
+// terminalReason is recorded on it (empty for a user cancellation).
+func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *corev1alpha1.Task, terminalReason string) (bool, error) {
 	if task == nil || task.Status.Execution == nil {
 		return false, nil
 	}
@@ -1535,7 +1574,7 @@ func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *cor
 		return false, err
 	}
 	_, err = d.transitionPublication(ctx, publication, fence, store.PublicationCancelledBeforePublish,
-		publicationOperationID("cancel-before-publish", task), mustACPDomainDigest("publication-cancel", publication.ID), nil, nil, nil, "")
+		publicationOperationID("cancel-before-publish", task), mustACPDomainDigest("publication-cancel", publication.ID), nil, nil, nil, terminalReason)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			latest, getErr := d.Store.GetPublication(ctx, publication.ID)

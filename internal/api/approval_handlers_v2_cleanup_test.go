@@ -39,7 +39,7 @@ func TestV2ApprovalAPICleanedCancellationCannotBeRevived(t *testing.T) {
 	}
 	id, err := identity.CanonicalID()
 	require.NoError(t, err)
-	saved, err := f.store.GetExternalEffect(t.Context(), id)
+	saved, err := f.effects.GetExternalEffect(t.Context(), id)
 	require.NoError(t, err)
 	require.Equal(t, store.ExternalEffectFailed, saved.State)
 	require.Zero(t, saved.Attempts)
@@ -62,7 +62,7 @@ func TestV2ApprovalAPICleanedCancellationCannotBeRevived(t *testing.T) {
 	listed, err := approvals.ListEvents(t.Context(), f.store, f.task.Namespace, f.task.Name)
 	require.NoError(t, err)
 	require.Empty(t, listed)
-	current, err := f.store.GetExternalEffect(t.Context(), id)
+	current, err := f.effects.GetExternalEffect(t.Context(), id)
 	require.NoError(t, err)
 	require.Equal(t, saved, current)
 	require.Zero(t, f.count.Load())

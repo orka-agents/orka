@@ -186,12 +186,10 @@ func legacySubstratePoolActorLeaseHasActiveTaskHolder(
 	if string(task.UID) != taskUID || !task.DeletionTimestamp.IsZero() {
 		return true, nil
 	}
-	switch task.Status.Phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
+	if task.Status.Phase.IsTerminal() {
 		return !statusrules.CleanupSucceeded(task.Status.ExecutionWorkspace), nil
-	default:
-		return true, nil
 	}
+	return true, nil
 }
 
 // substratePoolActorLeaseHasActiveToolHolder treats every Tool-held lease as

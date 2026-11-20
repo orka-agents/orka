@@ -376,7 +376,7 @@ func TestIntegration_ConcurrentLocking(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			err := s.AcquireLock(ctx, "ns", "lock-race", fmt.Sprintf("task-%d", i), "")
+			err := s.AcquireLock(ctx, "ns", "lock-race", fmt.Sprintf("task-%d", i), "", time.Now().UTC())
 			if err == nil {
 				winners <- i
 			}
@@ -413,12 +413,12 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	}
 
 	// 2. Acquire lock
-	if err := s.AcquireLock(ctx, ns, sessionName, taskName, ""); err != nil {
+	if err := s.AcquireLock(ctx, ns, sessionName, taskName, "", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 
 	// 3. Verify locked for other tasks
-	locked, err := s.IsLocked(ctx, ns, sessionName, "other-task", "")
+	locked, err := s.IsLocked(ctx, ns, sessionName, "other-task", "", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("IsLocked: %v", err)
 	}
@@ -482,7 +482,7 @@ func TestIntegration_FullTaskLifecycle(t *testing.T) {
 	if err := s.DeleteResult(ctx, ns, taskName); err != nil {
 		t.Fatalf("DeleteResult: %v", err)
 	}
-	if err := s.DeleteSession(ctx, ns, sessionName); err != nil {
+	if err := s.DeleteSession(ctx, ns, sessionName, time.Now().UTC()); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
@@ -556,7 +556,7 @@ func TestIntegration_MultiNamespaceIsolation(t *testing.T) {
 	}
 
 	// Delete one namespace's data — others unaffected
-	if err := s.DeleteSession(ctx, "team-a", "shared-session"); err != nil {
+	if err := s.DeleteSession(ctx, "team-a", "shared-session", time.Now().UTC()); err != nil {
 		t.Fatalf("DeleteSession team-a: %v", err)
 	}
 	if err := s.DeleteResult(ctx, "team-a", "shared-task"); err != nil {
@@ -864,7 +864,7 @@ func TestIntegration_ReleaseLockWrongTask(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	if err := s.AcquireLock(ctx, "ns", "wrong-release", "task-a", ""); err != nil {
+	if err := s.AcquireLock(ctx, "ns", "wrong-release", "task-a", "", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
 
@@ -874,7 +874,7 @@ func TestIntegration_ReleaseLockWrongTask(t *testing.T) {
 	}
 
 	// Lock should still be held by task-a
-	locked, err := s.IsLocked(ctx, "ns", "wrong-release", "task-b", "")
+	locked, err := s.IsLocked(ctx, "ns", "wrong-release", "task-b", "", time.Now().UTC())
 	if err != nil {
 		t.Fatalf("IsLocked: %v", err)
 	}

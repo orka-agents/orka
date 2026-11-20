@@ -58,6 +58,26 @@ func shortImage(image string) string {
 	return image
 }
 
+// taskWaitingOn says what a running Task is waiting on a person for, or
+// nothing. A Task held on an approval reports Running; its
+// WaitingForApproval condition is the only sign someone has to act. The
+// command it suggests names the Task's namespace, so it finds this Task
+// whatever namespace the CLI defaults to.
+func taskWaitingOn(task map[string]any) string {
+	conditions, _ := nestedMap(task, "status")["conditions"].([]any)
+	for _, item := range conditions {
+		condition, _ := item.(map[string]any)
+		if firstString(condition, "type") == "WaitingForApproval" && firstString(condition, "status") == "True" {
+			command := "orka task approvals " + nestedString(task, "metadata", "name")
+			if namespace := nestedString(task, "metadata", "namespace"); namespace != "" {
+				command += " -n " + namespace
+			}
+			return fmt.Sprintf("approval; see '%s'", command)
+		}
+	}
+	return ""
+}
+
 func taskDescribeRows(task map[string]any) []describeRow {
 	spec := nestedMap(task, "spec")
 	status := nestedMap(task, "status")
@@ -71,6 +91,7 @@ func taskDescribeRows(task map[string]any) []describeRow {
 		{Label: labelName, Value: nestedString(task, "metadata", "name")},
 		{Label: labelNamespace, Value: nestedString(task, "metadata", "namespace")},
 		{Label: labelPhase, Value: firstString(status, "phase")},
+		{Label: labelWaitingOn, Value: taskWaitingOn(task)},
 		{Label: labelType, Value: firstString(spec, "type")},
 		{Label: labelAgent, Value: nestedString(spec, "agentRef", "name")},
 		{Label: "Image", Value: firstString(spec, "image")},

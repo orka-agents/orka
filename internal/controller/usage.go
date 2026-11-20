@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -9,6 +10,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/usage"
 )
@@ -41,7 +43,7 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 	}
 	// Deleting an unfinished Task cancels its retained accounting lifecycle.
 	// Otherwise a snapshot can pin its cohort forever after the Task disappears.
-	if !task.DeletionTimestamp.IsZero() && phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed && phase != corev1alpha1.TaskPhaseCancelled {
+	if !task.DeletionTimestamp.IsZero() && !phase.IsTerminal() {
 		result.Phase = string(corev1alpha1.TaskPhaseCancelled)
 		result.PhaseObservedAt = task.DeletionTimestamp.Time
 		if outcome := task.Status.ExecutionOutcome; outcome != nil {
@@ -61,6 +63,13 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 		result.GatewayOwner = &store.UsageGatewayOwner{Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID,
 			Name: owner.GatewayName, UID: owner.GatewayUID}
 	}
+	result.AHPTurn = task.Labels[labels.LabelAHPTurn] == labels.LabelAHPTurnValue
+	// Only AHP usage is shown by who requested it, so only an AHP Task's
+	// requester outlives the Task: an ordinary Task's identity stays with it.
+	ahpSession := strings.HasPrefix(strings.TrimSpace(result.SessionName), labels.AHPNamePrefix)
+	if requester := task.Spec.RequestedBy; requester != nil && (result.AHPTurn || ahpSession) {
+		result.Requester = &store.UsageRequester{Issuer: requester.Issuer, Subject: requester.Subject}
+	}
 	return result
 }
 
@@ -76,6 +85,30 @@ func (r *TaskReconciler) retainUsageTask(ctx context.Context, task *corev1alpha1
 	snapshot := usageTaskSnapshot(task)
 	snapshot.NamespaceUID = uid
 	return usageStore.RegisterUsageTask(ctx, snapshot)
+}
+
+// taskTokenUsageReader reads a Task's consumed tokens as usage reports
+// attribute them.
+type taskTokenUsageReader interface {
+	TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error)
+}
+
+// sessionTokenUsage returns a Job-backed Task's final usage to add to the
+// Session whose transcript it appended; the caller adds it while releasing
+// the Session lock. Agent Tasks run as ACP Session turns, whose finalization
+// adds the usage the storage client attributes to the turn's prompt attempt,
+// so they report none here.
+// Chat Sessions count only their chat turns: Tasks a chat creates have no
+// spec.sessionRef, so chat tokens are never double counted.
+func (r *TaskReconciler) sessionTokenUsage(ctx context.Context, task *corev1alpha1.Task) (int64, int64, error) {
+	if r.SessionManager == nil || task.Spec.SessionRef == nil || task.Spec.Type == corev1alpha1.TaskTypeAgent {
+		return 0, 0, nil
+	}
+	reader, ok := r.ExecutionEventStore.(taskTokenUsageReader)
+	if !ok || task.UID == "" {
+		return 0, 0, nil
+	}
+	return reader.TaskTokenUsage(ctx, task.Namespace, string(task.UID))
 }
 
 func (r *RepositoryMonitorReconciler) prepareMonitorUsageWork(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repository, kind string, number int64) (string, error) {

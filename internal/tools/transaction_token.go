@@ -284,10 +284,20 @@ func validateChildTransactionScope(parentTask *corev1alpha1.Task, childScope str
 	return nil
 }
 
+// childTokenCleanupTimeout bounds a cleanup that runs on a context its caller
+// cannot cancel.
+const childTokenCleanupTimeout = 10 * time.Second
+
+// cleanupChildTransactionTokenSecret deletes a prepared child token Secret.
+// It runs on a context the caller cannot cancel: a delegation cancelled
+// right after preparing the token still removes it, since its owner, the
+// parent, is kept.
 func cleanupChildTransactionTokenSecret(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) {
 	if childTask == nil || childTask.Annotations == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), childTokenCleanupTimeout)
+	defer cancel()
 	secretName := strings.TrimSpace(childTask.Annotations[labels.AnnotationTransactionTokenSecret])
 	if secretName == "" {
 		return
@@ -302,7 +312,9 @@ func cleanupChildTaskAfterTokenAdoptionFailure(ctx context.Context, k8sClient cl
 		cleanupChildTransactionTokenSecret(ctx, k8sClient, childTask)
 		return
 	}
-	err := k8sClient.Delete(ctx, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: childTask.Name, Namespace: childTask.Namespace}})
+	deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), childTokenCleanupTimeout)
+	defer cancel()
+	err := k8sClient.Delete(deleteCtx, &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: childTask.Name, Namespace: childTask.Namespace}})
 	if err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "failed to cleanup child task after transaction token secret adoption failure", "task", childTask.Name, "namespace", childTask.Namespace)
 	}

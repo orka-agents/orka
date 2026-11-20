@@ -113,17 +113,22 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		verifyResultAvailable(searchTaskName)
 
 		if e2eMockOpenAI {
-			By("verifying the web_search results reached the model")
-			// Without SEARCH_API_URL the worker searches DuckDuckGo and falls
-			// back to canned results, so only the result shape is stable.
+			By("verifying the web_search output reached the model")
+			// Without SEARCH_API_URL the worker searches DuckDuckGo, which often
+			// answers CI runners with a bot challenge instead of results. Either
+			// outcome must be genuine: parsed results, or the tool error.
 			output := expectMockLLMToolResult("[e2e:tools-web-search]", "web_search", 30*time.Second)
-			var results []struct {
-				Title string `json:"title"`
-				URL   string `json:"url"`
+			if strings.HasPrefix(output, "Error executing tool: ") {
+				Expect(output).To(ContainSubstring("DuckDuckGo"), "web_search output: %s", output)
+			} else {
+				var results []struct {
+					Title string `json:"title"`
+					URL   string `json:"url"`
+				}
+				Expect(json.Unmarshal([]byte(output), &results)).To(Succeed(), "web_search output: %s", output)
+				Expect(results).NotTo(BeEmpty(), "web_search output: %s", output)
+				Expect(results[0].URL).NotTo(BeEmpty())
 			}
-			Expect(json.Unmarshal([]byte(output), &results)).To(Succeed(), "web_search output: %s", output)
-			Expect(results).NotTo(BeEmpty(), "web_search output: %s", output)
-			Expect(results[0].URL).NotTo(BeEmpty())
 		}
 	})
 

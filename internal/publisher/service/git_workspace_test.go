@@ -154,6 +154,57 @@ func TestWorkspacePrepareBatchesGitObjectAccess(t *testing.T) {
 	}
 }
 
+// A tree whose manifest exceeds the 2 MiB / 100k-item v2 wire caps must still
+// prepare when it fits the configured workspace limits.
+func TestWorkspacePrepareDigestsManifestLargerThanV2WireCaps(t *testing.T) {
+	repository := newRepositoryFixture(t, false)
+	const fileCount = 20_500
+	bulk := filepath.Join(repository.seed, "bulk")
+	if err := os.MkdirAll(bulk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for index := range fileCount {
+		if err := os.WriteFile(filepath.Join(bulk, fmt.Sprintf("%05d.txt", index)), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitEnv(t, repository.seed, fixedGitEnv(), "add", "--all")
+	runGitEnv(t, repository.seed, fixedGitEnv(), "commit", "-q", "-m", "large workspace manifest")
+	repository.baselineOID = strings.TrimSpace(runGit(t, repository.seed, "rev-parse", "HEAD"))
+	runGit(t, repository.seed, "push", repository.source.URL, "HEAD:refs/heads/main")
+
+	fixture := newServiceFixtureWithOptions(t, nil, func(config *Config) {
+		config.WorkspaceLimits.MaxEntries = fileCount + 64
+		// Each PAX tar entry costs about 2 KiB of headers.
+		config.WorkspaceLimits.MaxArtifactBytes = 64 << 20
+	})
+	request := WorkspacePrepareRequest{
+		Metadata: OperationMetadata{Namespace: testNamespace, OperationID: "workspace-large-manifest", TaskID: "task-large-manifest"},
+		Source:   repository.source, SourceRef: testMainRef, BaselineOID: repository.baselineOID,
+	}
+	response, err := fixture.client.PrepareWorkspace(context.Background(), request)
+	if err != nil {
+		t.Fatalf("PrepareWorkspace: %v", err)
+	}
+	if response.EntryCount < fileCount {
+		t.Fatalf("entry count = %d, want at least %d", response.EntryCount, fileCount)
+	}
+	archive := fixture.artifact.download(t, artifactcap.Identity{Namespace: testNamespace, TaskID: "task-large-manifest"}, response.Artifact)
+	if got := readWorkspaceTar(t, archive)[fmt.Sprintf("bulk/%05d.txt", fileCount-1)]; got != "x\n" {
+		t.Fatalf("last bulk entry = %q", got)
+	}
+
+	request.Metadata.OperationID = "workspace-large-manifest-again"
+	request.Metadata.TaskID = "task-large-manifest-again"
+	again, err := fixture.client.PrepareWorkspace(context.Background(), request)
+	if err != nil {
+		t.Fatalf("PrepareWorkspace again: %v", err)
+	}
+	if again.ManifestDigest != response.ManifestDigest {
+		t.Fatalf("manifest digest is not deterministic: %s != %s", again.ManifestDigest, response.ManifestDigest)
+	}
+}
+
 func TestWorkspacePreparationCancelsBlockedBlobBatch(t *testing.T) {
 	repository := newRepositoryFixture(t, false)
 	gitBinary, err := exec.LookPath("git")

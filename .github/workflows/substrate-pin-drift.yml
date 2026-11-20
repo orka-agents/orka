@@ -36,7 +36,7 @@ jobs:
           behind="$(git rev-list --count "${pin}..HEAD")"
           pin_date="$(git show -s --format=%cs "${pin}")"
           head_date="$(git show -s --format=%cs HEAD)"
-          protocol_changes="$(git rev-list --count "${pin}..HEAD" -- pkg/proto/ateapipb/ateapi.proto)"
+          protocol_changes="$(git rev-list --count "${pin}..HEAD" -- "${SUBSTRATE_UPSTREAM_PROTO_PATH}")"
           {
             echo "## Substrate pin drift"
             echo ""

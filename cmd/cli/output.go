@@ -333,9 +333,9 @@ func manifestWithNamespaceJSON(cmd *cobra.Command, path, namespace string) ([]by
 		return nil, fmt.Errorf("manifest metadata.namespace %q does not match top-level namespace %q", metadataNS, topLevelNS)
 	}
 	manifestNS := strings.TrimSpace(manifestNamespace(m))
-	flagNS, _ := cmd.Flags().GetString(cliNamespaceQuery)
-	if strings.TrimSpace(flagNS) != "" && manifestNS != "" && manifestNS != flagNS {
-		return nil, fmt.Errorf("manifest namespace %q does not match --namespace %q", manifestNS, flagNS)
+	selectedNS, selectedBy := explicitNamespace(cmd)
+	if selectedNS != "" && manifestNS != "" && manifestNS != selectedNS {
+		return nil, fmt.Errorf("manifest namespace %q does not match %s %q", manifestNS, selectedBy, selectedNS)
 	}
 	ensureManifestNamespace(m, namespace)
 	body, err := json.Marshal(m)
@@ -385,11 +385,11 @@ func namespaceQueryForManifest(
 	if manifestNS == "" {
 		return nil, nil
 	}
-	flagNS, _ := cmd.Flags().GetString(cliNamespaceQuery)
-	if strings.TrimSpace(flagNS) != "" && flagNS != manifestNS {
-		return nil, fmt.Errorf("manifest namespace %q does not match --namespace %q", manifestNS, flagNS)
+	selectedNS, selectedBy := explicitNamespace(cmd)
+	if selectedNS != "" && selectedNS != manifestNS {
+		return nil, fmt.Errorf("manifest namespace %q does not match %s %q", manifestNS, selectedBy, selectedNS)
 	}
-	if strings.TrimSpace(clientNamespace) != "" && strings.TrimSpace(flagNS) != "" && clientNamespace != manifestNS {
+	if strings.TrimSpace(clientNamespace) != "" && selectedNS != "" && clientNamespace != manifestNS {
 		return nil, fmt.Errorf("manifest namespace %q does not match selected namespace %q", manifestNS, clientNamespace)
 	}
 	return map[string]string{cliNamespaceQuery: manifestNS}, nil

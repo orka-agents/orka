@@ -10,12 +10,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -608,6 +610,67 @@ func TestJobBuilder_Build_AITask(t *testing.T) {
 	}
 }
 
+func TestJobBuilder_Build_AITaskWorkspaceDirectory(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		taskType      corev1alpha1.TaskType
+		workspace     *corev1alpha1.WorkspaceConfig
+		wantMount     bool
+		wantEmptyDir  bool
+		wantArtifacts string
+	}{
+		// File tools default to /workspace, so a repository-less AI task needs a
+		// writable one, and files written there are uploaded as artifacts.
+		{name: "AI task without repository", taskType: corev1alpha1.TaskTypeAI, wantMount: true, wantEmptyDir: true, wantArtifacts: workspaceRootPath},
+		{
+			name: "AI task with repository keeps the default artifact directory", taskType: corev1alpha1.TaskTypeAI,
+			workspace: &corev1alpha1.WorkspaceConfig{GitRepo: "https://github.com/example/repo"}, wantMount: true,
+		},
+		{name: "container task without repository", taskType: corev1alpha1.TaskTypeContainer},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: types.UID("12345678-1234-1234-1234-123456789012")},
+				Spec:       corev1alpha1.TaskSpec{Type: tt.taskType, Workspace: tt.workspace},
+			}
+			if tt.taskType == corev1alpha1.TaskTypeAI {
+				task.Spec.AI = &corev1alpha1.AISpec{Provider: "anthropic", Model: "claude-3-5-sonnet", Prompt: "Write fib.txt"}
+			}
+			job, err := setupJobBuilder().Build(context.Background(), task, nil, nil)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			container := job.Spec.Template.Spec.Containers[0]
+			mount, ok := findVolumeMount(container.VolumeMounts, taskWorkspaceVolume)
+			if ok != tt.wantMount {
+				t.Fatalf("workspace mount present = %v, want %v", ok, tt.wantMount)
+			}
+			if ok && (mount.MountPath != workspaceRootPath || mount.ReadOnly) {
+				t.Fatalf("workspace mount = %+v, want writable %s", mount, workspaceRootPath)
+			}
+			var emptyDir bool
+			for _, volume := range job.Spec.Template.Spec.Volumes {
+				if volume.Name == taskWorkspaceVolume {
+					emptyDir = volume.EmptyDir != nil
+				}
+			}
+			if tt.wantEmptyDir && !emptyDir {
+				t.Fatal("workspace volume is not an emptyDir")
+			}
+			env, ok := findEnvVar(container.Env, workerArtifactsDirEnv)
+			if tt.wantArtifacts == "" {
+				if ok {
+					t.Fatalf("%s = %q, want unset", workerArtifactsDirEnv, env.Value)
+				}
+				return
+			}
+			if !ok || env.Value != tt.wantArtifacts {
+				t.Fatalf("%s = %q (set %v), want %q", workerArtifactsDirEnv, env.Value, ok, tt.wantArtifacts)
+			}
+		})
+	}
+}
+
 func TestJobBuilder_Build_WithTimeout(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
@@ -678,6 +741,12 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 		t.Fatal("Job should have init container for session fetch")
 	}
 	initContainer := job.Spec.Template.Spec.InitContainers[0]
+	if !regexp.MustCompile(`^.+@sha256:[0-9a-f]{64}$`).MatchString(initContainer.Image) {
+		t.Fatalf("session loader image must be digest-pinned, got %q", initContainer.Image)
+	}
+	if initContainer.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("digest-pinned loader pull policy = %s, want IfNotPresent", initContainer.ImagePullPolicy)
+	}
 	if initContainer.Name != "fetch-session" {
 		t.Errorf("Init container name = %s, want fetch-session", initContainer.Name)
 	}
@@ -971,10 +1040,7 @@ func TestResolveExecution_IgnoresWorkspace(t *testing.T) {
 	task := &corev1alpha1.Task{
 		Spec: corev1alpha1.TaskSpec{
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:     true,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "default"},
-				},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 			},
 		},
 	}
@@ -3481,7 +3547,7 @@ func TestJobBuilder_buildEnvVars_Telemetry(t *testing.T) {
 	}
 }
 
-func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
+func TestReadOnlyAgentRuntimeTypeKeepsOpencode(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		Spec: corev1alpha1.AgentSpec{
 			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
@@ -3490,10 +3556,6 @@ func TestReadOnlyAgentRuntimeGuardsAllowOpencode(t *testing.T) {
 
 	if got := readOnlyAgentRuntimeType(agent); got != corev1alpha1.AgentRuntimeOpencode {
 		t.Fatalf("readOnlyAgentRuntimeType() = %q, want opencode", got)
-	}
-	keys, err := readOnlyAgentRuntimeSecretKeys(agent)
-	if err != nil || len(keys) != 0 {
-		t.Fatalf("readOnlyAgentRuntimeSecretKeys() = %#v, %v, want no runtime secret keys", keys, err)
 	}
 }
 
@@ -3754,4 +3816,79 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 	if _, err := build(readWrite); !errors.Is(err, ErrConnectorToolResolution) {
 		t.Fatalf("policy left connection mode: err = %v, want ErrConnectorToolResolution", err)
 	}
+}
+
+// The AI worker resolves its own ServiceAccount from the Downward API; task
+// env cannot replace it.
+func TestJobBuilder_buildEnvVars_ServiceAccountNameFromDownwardAPI(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI:   &corev1alpha1.AISpec{Provider: "anthropic", Model: "m", Prompt: "Hello"},
+			Env:  []corev1.EnvVar{{Name: workerenv.ServiceAccountName, Value: "orka"}},
+		},
+	}
+	var found []corev1.EnvVar
+	for _, env := range builder.buildEnvVars(context.Background(), task, nil, nil) {
+		if env.Name == workerenv.ServiceAccountName {
+			found = append(found, env)
+		}
+	}
+	if len(found) != 1 || found[0].Value != "" || found[0].ValueFrom == nil || found[0].ValueFrom.FieldRef == nil ||
+		found[0].ValueFrom.FieldRef.FieldPath != "spec.serviceAccountName" {
+		t.Fatalf("%s env = %#v, want one Downward API spec.serviceAccountName reference", workerenv.ServiceAccountName, found)
+	}
+}
+
+func TestJobBuilder_buildEnvVars_MemoryConsolidationTask(t *testing.T) {
+	builder := setupJobBuilder()
+	envValue := func(envVars []corev1.EnvVar, name string) (string, int) {
+		value, count := "", 0
+		for _, env := range envVars {
+			if env.Name == name {
+				value, count = env.Value, count+1
+			}
+		}
+		return value, count
+	}
+	task := func(consolidation *corev1alpha1.MemoryConsolidationSpec) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+			Spec: corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeAI,
+				// Task env cannot start, stop or widen a run.
+				Env: []corev1.EnvVar{
+					{Name: workerenv.MemoryConsolidationMode, Value: "Propose"},
+					{Name: workerenv.MemoryContextEnabled, Value: "true"},
+					{Name: workerenv.AITools, Value: "web_search"},
+				},
+				AI: &corev1alpha1.AISpec{Provider: "anthropic", Model: "claude-3-5-sonnet", Prompt: "Focus on release notes",
+					Tools: []string{"web_search", "code_exec"}, MemoryConsolidation: consolidation},
+			},
+		}
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task(&corev1alpha1.MemoryConsolidationSpec{}), nil, nil)
+	for name, want := range map[string]string{
+		workerenv.MemoryConsolidationMode: "DryRun",
+		workerenv.MemoryContextEnabled:    "false",
+		workerenv.AITools:                 "",
+	} {
+		value, count := envValue(envVars, name)
+		require.Equal(t, 1, count, "%s is controller-owned", name)
+		require.Equal(t, want, value, name)
+	}
+
+	envVars = builder.buildEnvVars(context.Background(), task(&corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose}), nil, nil)
+	mode, _ := envValue(envVars, workerenv.MemoryConsolidationMode)
+	require.Equal(t, "Propose", mode)
+
+	envVars = builder.buildEnvVars(context.Background(), task(nil), nil, nil)
+	mode, count := envValue(envVars, workerenv.MemoryConsolidationMode)
+	require.Equal(t, 1, count)
+	require.Empty(t, mode, "an ordinary Task's env cannot turn on a consolidation run")
+	tools, _ := envValue(envVars, workerenv.AITools)
+	require.Contains(t, tools, "web_search")
 }

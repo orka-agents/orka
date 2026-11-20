@@ -68,8 +68,26 @@ Base images are immutable multi-platform manifest-list references:
 | --- | --- |
 | Dockerfile frontend | `docker/dockerfile:1.7.1@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e` |
 | Go builder | `golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61` |
-| Node builder/runtime | `node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94` |
+| Node adapter builder (build platform only) | `node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94` |
+| Node runtime (Codex, Claude, Copilot final stages and the Claude layout stage) | `node:22.22.0-trixie-slim@sha256:465a8c8f0f4103861bcbcf3e512608394b7155eccb1955425f4ea3f672ddc53e` |
 | Debian OpenCode runtime | `debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd` |
+
+## Runtime base
+
+Every stage that runs on the target platform (`--platform=$TARGETPLATFORM`)
+uses Debian 13 ("trixie"). Build-only stages keep the bookworm builders so the
+adapter artifact digests pinned in `internal/acp/pins.go` are unchanged.
+[Toolbox](../../../website/docs/guides/toolboxes.md) authors build against this
+baseline: a toolbox binary must run with the runtime's glibc.
+
+| Runtime | Final base | Debian | glibc |
+| --- | --- | --- | --- |
+| Codex | `node:22.22.0-trixie-slim` | 13 (trixie) | 2.41 |
+| Claude | `node:22.22.0-trixie-slim` | 13 (trixie) | 2.41 |
+| Copilot | `node:22.22.0-trixie-slim` | 13 (trixie) | 2.41 |
+| OpenCode | `debian:trixie-slim` | 13 (trixie) | 2.41 |
+
+Verify after a rebuild with `docker run --rm --entrypoint ldd <image> --version`.
 
 Codex inputs:
 
@@ -77,8 +95,8 @@ Codex inputs:
 | --- | --- |
 | Codex ACP source | commit `68d7d2d5ddfc0ed5746f9f6130892dda685e65dd`; codeload archive SHA-256 `51ba8d1d302f8a854c0501887ffbe12fb267f6e8fdae9ad2b58e2c8fc9513b1e` |
 | Codex ACP release | `2.1.1`; npm tar SHA-256 `9da0d580518d006d257609a4b64b7c5bd96a7f36f2d86db5c8f2cb9385de5872` |
-| Orka Codex ACP external-sandbox patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `538ac5d7ae6e3d46f3f0961439f914bfb9e427be6aea83c9b1025548ef8cac1d` |
-| Patched Codex ACP `dist/index.js` | SHA-256 `6792f51a6af4e1ae6317ad2197240836038bc53cb9f0fc9152a62d31b132d5a2` |
+| Orka Codex ACP external-sandbox and no-session-root-trust patch | `workers/acp/images/codex/patch-agent-mode.mjs`; SHA-256 `46682c7fc07e86a16147cace6334e632d71104233ecec247f7167d3f83322af9` |
+| Patched Codex ACP `dist/index.js` | SHA-256 `796f3cf6d156ca937e3b571e94caa192914c2f06c5d3845e4b1cf036433a1a7c` |
 | Codex CLI | `0.160.0`; source commit `a956835d020762cb2b570053af06f643a11c0ecc` |
 | Codex CLI `linux/amd64` | npm tar SHA-256 `37a41d61c3399182b8c727b77090cc7a1566bd849d0f09070a0bbc6fec4c58dc` |
 | Codex CLI `linux/arm64` | npm tar SHA-256 `9286a7e01d500ab224c9e5b4b223b7adf5dd901fba23efd6a438316426798b17` |

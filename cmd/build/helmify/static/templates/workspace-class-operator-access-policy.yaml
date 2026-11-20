@@ -1,0 +1,57 @@
+# Operator workspace access (orka task exec / orka task cp) is disabled unless
+# an administrator opts a class in with the acp.workspace.orka.ai/operator-access
+# annotation ("read" or "exec"). Setting, changing, or removing that annotation
+# requires the dedicated "operator-access" verb on the class, which no built-in
+# role grants (cluster-admin's wildcard does). Class editors and Task authors who
+# can only "use" a class can therefore never enable it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-executionworkspaceclass-operator-access
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["workspace.orka.ai"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["executionworkspaceclasses"]
+  variables:
+    - name: newValue
+      expression: >-
+        has(object.metadata.annotations) && 'acp.workspace.orka.ai/operator-access' in object.metadata.annotations
+        ? object.metadata.annotations['acp.workspace.orka.ai/operator-access'] : '<absent>'
+    - name: oldValue
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations) &&
+        'acp.workspace.orka.ai/operator-access' in oldObject.metadata.annotations
+        ? oldObject.metadata.annotations['acp.workspace.orka.ai/operator-access'] : '<absent>'
+  validations:
+    - expression: >-
+        variables.newValue == variables.oldValue ||
+        authorizer.group('workspace.orka.ai')
+          .resource('executionworkspaceclasses')
+          .namespace(request.namespace)
+          .name(object.metadata.name)
+          .check('operator-access').allowed()
+      message: >-
+        only an administrator with the operator-access verb on
+        executionworkspaceclasses may set or change the
+        acp.workspace.orka.ai/operator-access annotation
+      reason: Forbidden
+    - expression: >-
+        variables.newValue in ['<absent>', 'read', 'exec']
+      message: acp.workspace.orka.ai/operator-access must be "read" or "exec"
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-executionworkspaceclass-operator-access
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-executionworkspaceclass-operator-access
+  validationActions: [Deny]

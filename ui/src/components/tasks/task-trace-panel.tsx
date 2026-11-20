@@ -13,7 +13,7 @@ export function TaskTracePanel({ taskId, taskUid }: { taskId: string; taskUid?: 
   if (isLoading) {
     return (
       <Card>
-        <CardContent className="space-y-3 pt-6">
+        <CardContent className="space-y-3">
           <Skeleton className="h-6 w-40" />
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-24 w-full" />
@@ -26,7 +26,7 @@ export function TaskTracePanel({ taskId, taskUid }: { taskId: string; taskUid?: 
     const notImplemented = error instanceof ApiError && error.status === 501
     return (
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <EmptyState
             icon={Network}
             headline={
@@ -51,7 +51,7 @@ export function TaskTracePanel({ taskId, taskUid }: { taskId: string; taskUid?: 
   if (!trace) {
     return (
       <Card>
-        <CardContent className="pt-6">
+        <CardContent>
           <EmptyState icon={Network} headline="No trace available for this task yet." />
         </CardContent>
       </Card>
@@ -60,7 +60,7 @@ export function TaskTracePanel({ taskId, taskUid }: { taskId: string; taskUid?: 
 
   return (
     <Card>
-      <CardContent className="space-y-4 pt-6">
+      <CardContent className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-semibold">Execution trace</h2>
           <Button variant="ghost" size="sm" onClick={() => refetch()} disabled={isFetching}>

@@ -424,9 +424,13 @@ def _validate_approval(task, effect, approval):
         exact = response.get("approvalID") == approval["id"] and not response.get("externalEffectID") and not response.get("requestDigest")
         abandoned = (not response.get("approvalID") and response.get("externalEffectID") == spec["id"] and
                      response.get("requestDigest") == spec["requestDigest"] and response.get("code") == "approval_stale")
-        require(status.get("attempts", 0) in {0, 1} and response.get("isError") is True and (exact or abandoned) and
-                response.get("code") in {"approval_declined", "approval_expired", "approval_cancelled", "approval_stale"},
-                "retained denial does not prove this unexecuted approval")
+        denial = (status.get("attempts", 0) in {0, 1} and (exact or abandoned) and
+                  response.get("code") in {"approval_declined", "approval_expired", "approval_cancelled", "approval_stale"})
+        # An approved call the tool proved had no effect ran exactly once.
+        no_effect = (status.get("attempts") == 1 and exact and response.get("code") == "tool_failed_without_effect" and
+                     isinstance(response.get("error"), str) and response["error"].strip())
+        require(response.get("isError") is True and (denial or no_effect),
+                "retained denial does not prove this unexecuted approval or no-effect execution")
     else:
         require(status.get("attempts") == 1, "retained action receipt has an unexpected execution count")
 

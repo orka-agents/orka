@@ -18,7 +18,7 @@ export function GatewayStatusBadge({ state }: { state?: string }) {
 export function GatewayBindingsTable({ bindings, loading }: { bindings: GatewayBinding[]; loading: boolean }) {
   return (
     <TableFrame>
-      <Table>
+      <Table scrollRegionLabel="Gateway bindings">
         <TableHeader><TableRow><TableHead>Binding</TableHead><TableHead>Gateway → Agent</TableHead><TableHead>External context</TableHead><TableHead>Session mode</TableHead><TableHead>Last activity</TableHead><TableHead>Status</TableHead></TableRow></TableHeader>
         <TableBody>
           {loading ? <LoadingRows columns={6} /> : bindings.length === 0 ? <EmptyRow columns={6} text="No GatewayBindings are configured." /> : bindings.map((binding) => (
@@ -52,13 +52,13 @@ export function GatewayBindingsTable({ bindings, loading }: { bindings: GatewayB
 export function GatewayEventsTable({ events, loading }: { events: GatewayEvent[]; loading: boolean }) {
   return (
     <TableFrame>
-      <Table>
+      <Table scrollRegionLabel="Gateway events">
         <TableHeader><TableRow><TableHead>Event</TableHead><TableHead>State</TableHead><TableHead>Context</TableHead><TableHead>Session</TableHead><TableHead>Task</TableHead><TableHead>Received</TableHead></TableRow></TableHeader>
         <TableBody>
           {loading ? <LoadingRows columns={6} /> : events.length === 0 ? <EmptyRow columns={6} text="No gateway events have been admitted." /> : events.map((event) => (
             <TableRow key={event.id}>
               <TableCell><div className="font-mono text-xs">{event.id}</div><div className="mt-1 max-w-56 truncate text-xs text-muted-foreground">{event.externalEventId}</div></TableCell>
-              <TableCell><GatewayStatusBadge state={event.state} />{event.stateMessage && <p className="mt-1 max-w-52 text-xs text-muted-foreground">{event.stateMessage}</p>}</TableCell>
+              <TableCell><GatewayStatusBadge state={event.state} />{event.stateMessage && <p className="mt-1 max-w-52 whitespace-normal break-words text-xs text-muted-foreground">{event.stateMessage}</p>}</TableCell>
               <TableCell className="font-mono text-xs">{event.accountId}/{event.contextId}</TableCell>
               <TableCell>
                 {event.sessionName ? (
@@ -85,13 +85,13 @@ export function GatewayDeliveriesTable({ deliveries, loading }: { deliveries: Ga
   const retry = useRetryGatewayDelivery()
   return (
     <TableFrame>
-      <Table>
+      <Table scrollRegionLabel="Gateway deliveries">
         <TableHeader><TableRow><TableHead>Delivery</TableHead><TableHead>State</TableHead><TableHead>Kind</TableHead><TableHead>Correlation</TableHead><TableHead>Attempts</TableHead><TableHead>Updated</TableHead><TableHead className="w-16" /></TableRow></TableHeader>
         <TableBody>
           {loading ? <LoadingRows columns={7} /> : deliveries.length === 0 ? <EmptyRow columns={7} text="No adapter deliveries have been created." /> : deliveries.map((delivery) => (
             <TableRow key={delivery.id}>
               <TableCell><div className="font-mono text-xs">{delivery.id}</div>{delivery.providerMessageId && <div className="mt-1 max-w-56 truncate text-xs text-muted-foreground">{delivery.providerMessageId}</div>}</TableCell>
-              <TableCell><GatewayStatusBadge state={delivery.state} />{delivery.lastError && <p className="mt-1 max-w-56 text-xs text-muted-foreground">{delivery.lastError}</p>}</TableCell>
+              <TableCell><GatewayStatusBadge state={delivery.state} />{delivery.lastError && <p className="mt-1 max-w-56 whitespace-normal break-words text-xs text-muted-foreground">{delivery.lastError}</p>}</TableCell>
               <TableCell>{delivery.kind}</TableCell>
               <TableCell><div className="font-mono text-xs">{delivery.eventId}</div>{delivery.taskName && <div className="mt-1 text-xs text-muted-foreground">{delivery.taskName}</div>}</TableCell>
               <TableCell className="font-mono text-xs tabular-nums">{delivery.attemptCount}/{delivery.maxAttempts}</TableCell>

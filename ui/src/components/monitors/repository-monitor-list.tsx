@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { Activity, GitPullRequest, Play, Plus, Wrench } from 'lucide-react'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -8,6 +9,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryMonitors, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import type { RepositoryMonitor } from '@/schemas/monitor'
+import { statusProblem } from '@/components/common/status-problem'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
 import { timeAgo } from '@/lib/time'
 
@@ -43,7 +45,7 @@ export function RepositoryMonitorList() {
           ))}
         </div>
       ) : error ? (
-        <Card><CardContent className="pt-6"><ListAccessError error={error} resource="repository monitors" /></CardContent></Card>
+        <Card><CardContent><ListAccessError error={error} resource="repository monitors" /></CardContent></Card>
       ) : monitors.length === 0 ? (
         <Card>
           <CardContent className="space-y-4 py-12 text-center">
@@ -74,18 +76,24 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
   const runMonitor = useRunRepositoryMonitor(monitor.metadata.name)
   const status = monitor.status
   const displayName = repositoryMonitorDisplayName(monitor)
+  const problem = statusProblem(status)
+  const run = () => runMonitor.mutate(undefined, {
+    onSuccess: () => toast.success(`Run of ${monitor.metadata.name} started`),
+    onError: (error) => toast.error(`Failed to start monitor run: ${error instanceof Error ? error.message : 'Unknown error'}`),
+  })
 
   return (
     <Card className="transition-colors hover:border-primary/50">
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-lg">
-            <Activity className="h-5 w-5 text-primary" />
+            <Activity className="h-5 w-5 shrink-0 text-primary" />
             <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }} className="hover:underline">
-              {displayName}
+              {monitor.metadata.name}
             </Link>
           </CardTitle>
-          <p className="text-sm text-muted-foreground">{monitor.spec.branch || 'main'} · {monitor.spec.schedule || 'manual'}</p>
+          <p className="text-sm text-muted-foreground">{displayName} · {monitor.spec.branch || 'main'} · {monitor.spec.schedule || 'manual'}</p>
+          {problem && <p className="text-sm font-medium text-status-failed" title={problem.message}>{problem.reason}</p>}
         </div>
         <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>
           {status?.phase || 'Pending'}
@@ -109,7 +117,7 @@ function RepositoryMonitorCard({ monitor }: { monitor: RepositoryMonitor }) {
           <Link to="/monitors/$monitorId" params={{ monitorId: monitor.metadata.name }}>
             <Button variant="outline">Open</Button>
           </Link>
-          <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
+          <Button variant="secondary" onClick={run} disabled={runMonitor.isPending}>
             <Play className="mr-2 h-4 w-4" />
             Run
           </Button>

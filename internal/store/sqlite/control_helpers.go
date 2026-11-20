@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -34,13 +33,13 @@ func requireControllerEpoch(ctx context.Context, q controlQueryRower, fence stor
 		fence.Name,
 	).Scan(&epoch, &holder)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: controller epoch %q does not exist", store.ErrConflict, fence.Name)
+		return store.FencedErrorf("controller epoch %q does not exist", fence.Name)
 	}
 	if err != nil {
 		return err
 	}
 	if epoch != fence.Epoch || holder != fence.HolderID {
-		return fmt.Errorf("%w: controller epoch fence %s/%d/%s does not match current %d/%s", store.ErrConflict, fence.Name, fence.Epoch, fence.HolderID, epoch, holder)
+		return store.FencedErrorf("controller epoch fence %s/%d/%s does not match current %d/%s", fence.Name, fence.Epoch, fence.HolderID, epoch, holder)
 	}
 	return nil
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,6 +27,34 @@ import {
 } from '@/lib/workspace-source-ref'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 import { splitShellWords } from '@/lib/shell-words'
+import { actionErrorMessage } from './action-error'
+import { taskNameError } from './task-name'
+
+// The Advanced section can be collapsed, so the browser's own number checks
+// never see these values: mirror the Task CRD's 0-1000 priority bound and
+// the API's Go duration parse instead of sending a value the server rejects.
+function priorityError(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (!/^\d+$/.test(trimmed) || Number(trimmed) > 1000) return 'Priority must be a whole number from 0 to 1000.'
+  return undefined
+}
+
+const goDuration = /^(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h))+$/
+
+function timeoutError(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (trimmed !== '0' && !goDuration.test(trimmed)) return 'Timeout must be a duration such as 90s, 30m, or 1h30m.'
+  // A zero timeout has elapsed the moment the task starts, so the API
+  // rejects it; units carry no digits, so no nonzero digit means zero.
+  if (!/[1-9]/.test(trimmed)) return 'Timeout must be greater than zero, such as 90s, 30m, or 1h30m.'
+  return undefined
+}
+
+function countLabel(count: number, noun: string) {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
 
 function optionalRepositoryIdentity(provider: string, id: string) {
   return provider.trim() && id.trim() ? { provider: provider.trim(), id: id.trim() } : undefined
@@ -68,6 +96,16 @@ export function TaskCreateForm() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [priority, setPriority] = useState('')
   const [timeout, setTimeout] = useState('')
+  // Field errors appear once a field is left or a submit is attempted, so a
+  // half-typed value ("my-", "30") is not flagged mid-keystroke.
+  const [visitedFields, setVisitedFields] = useState<ReadonlySet<string>>(() => new Set())
+  const [submitAttempted, setSubmitAttempted] = useState(false)
+  const visitField = (field: string) => setVisitedFields((prev) => (prev.has(field) ? prev : new Set(prev).add(field)))
+  const fieldError = (field: string, error: string | undefined) =>
+    submitAttempted || visitedFields.has(field) ? error : undefined
+  // isPending updates a render after the click, so a fast double click
+  // would otherwise POST twice (a 201 followed by a 409 toast).
+  const submittingRef = useRef(false)
 
   const [showWorkspace, setShowWorkspace] = useState(false)
   const [workspaceIntent, setWorkspaceIntent] = useState<WorkspaceIntent>('read')
@@ -148,15 +186,38 @@ export function TaskCreateForm() {
       : `AgentRuntime ${selectedRuntime.runtimeRef.name}`
     : undefined
 
+  const nameError = taskNameError(name)
+  const priorityIssue = priorityError(priority)
+  const timeoutIssue = timeoutError(timeout)
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
+    if (submittingRef.current) return
+    submittingRef.current = true
+    let created = false
+    try {
+      created = await submitTask()
+    } finally {
+      // A created task keeps the guard set while the page navigates away.
+      if (!created) submittingRef.current = false
+    }
+  }
+
+  const submitTask = async (): Promise<boolean> => {
+    setSubmitAttempted(true)
+    if (nameError) return false
+    if (priorityIssue || timeoutIssue) {
+      // Collapsed fields are still submitted, so reveal the invalid one.
+      setShowAdvanced(true)
+      return false
+    }
     const body: Record<string, unknown> = { name, namespace, type }
 
     if (type === 'container') {
       body.image = image
       if ('error' in parsedCommand) {
         toast.error(`Command is invalid: ${parsedCommand.error}`)
-        return
+        return false
       }
       if (parsedCommand.words.length > 0) body.command = parsedCommand.words
     } else if (type === 'ai') {
@@ -173,7 +234,7 @@ export function TaskCreateForm() {
       } else {
         if (!provider) {
           toast.error('Select an Agent or a Provider for the AI task')
-          return
+          return false
         }
         body.ai = { provider, model, prompt }
       }
@@ -194,23 +255,23 @@ export function TaskCreateForm() {
       const credentialWithoutName = credentialInputs.find(({ name: credentialName, key }) => key.trim() && !credentialName.trim())
       if (credentialWithoutName) {
         toast.error(`${credentialWithoutName.label} Secret is required when a key is set`)
-        return
+        return false
       }
       if (workspaceIntent === 'write' && !gitRepo.trim()) {
         toast.error('Source repository URL is required for write workspaces')
-        return
+        return false
       }
       if (workspaceIntent === 'write' && !publicationCredentialName.trim()) {
         toast.error('Publication write credential Secret is required for write workspaces')
-        return
+        return false
       }
       if (workspaceIntent === 'write' && createPR && !prBaseBranch.trim()) {
         toast.error('Pull request base branch is required when creating a pull request')
-        return
+        return false
       }
       if (workspaceIntent === 'write' && createPR && !forgeCredentialName.trim()) {
         toast.error('Forge credential Secret is required when creating a pull request')
-        return
+        return false
       }
 
       // The controller workspace preflight rejects source selectors and read
@@ -226,7 +287,7 @@ export function TaskCreateForm() {
         ].find((field) => field.value.trim())
         if (dependentField) {
           toast.error(`${dependentField.label} requires a source repository URL`)
-          return
+          return false
         }
       }
       // Mirror the controller's canonical source-ref validation so malformed
@@ -235,33 +296,33 @@ export function TaskCreateForm() {
         const refError = workspaceSourceRefError(gitRef.trim())
         if (refError) {
           toast.error(`Source ref is invalid: ${refError}`)
-          return
+          return false
         }
       }
       if (branch.trim()) {
         const branchError = workspaceSourceBranchError(branch.trim())
         if (branchError) {
           toast.error(`Source branch is invalid: ${branchError}`)
-          return
+          return false
         }
       }
       if (subPath.trim()) {
         const subPathError = workspaceSubPathError(subPath)
         if (subPathError) {
           toast.error(`Source subpath is invalid: ${subPathError}`)
-          return
+          return false
         }
       }
 
       const sourceRepoResult = validateWorkspaceRepositoryUrl('Source repository URL', gitRepo)
       if ('error' in sourceRepoResult) {
         toast.error(sourceRepoResult.error)
-        return
+        return false
       }
       const publicationRepoResult = validateWorkspaceRepositoryUrl('Publication repository URL', publicationGitRepo)
       if ('error' in publicationRepoResult) {
         toast.error(publicationRepoResult.error)
-        return
+        return false
       }
 
       // Mirror the controller's canonical repository identity checks: a
@@ -281,7 +342,7 @@ export function TaskCreateForm() {
       const sourceIdentityError = identityError('Source repository', sourceProvider, sourceRepositoryID, sourceRepoResult.url)
       if (sourceIdentityError) {
         toast.error(sourceIdentityError)
-        return
+        return false
       }
       if (workspaceIntent === 'write') {
         const publicationIdentityError = identityError(
@@ -292,7 +353,7 @@ export function TaskCreateForm() {
         )
         if (publicationIdentityError) {
           toast.error(publicationIdentityError)
-          return
+          return false
         }
         // Mirror the controller's publication branch validation.
         for (const field of [
@@ -303,7 +364,7 @@ export function TaskCreateForm() {
             const branchError = workspacePublicationBranchError(field.value.trim())
             if (branchError) {
               toast.error(`${field.label} is invalid: ${branchError}`)
-              return
+              return false
             }
           }
         }
@@ -336,15 +397,12 @@ export function TaskCreateForm() {
         if (prBaseBranch.trim()) workspace.prBaseBranch = prBaseBranch.trim()
         if (createPR) workspace.createPR = true
       }
-      // Only serialize workspace when a workspace field is actually configured:
-      // a bare {intent: "read"} would make an otherwise valid prompt-only Task
-      // fail preflight in harness-v1 mode, which requires gitRepo on any
-      // non-nil workspace.
+      // The implicit read workspace needs no serialized configuration.
       if (Object.keys(workspace).length > 1) {
         const workspaceResult = workspaceConfigSchema.safeParse(workspace)
         if (!workspaceResult.success) {
           toast.error(workspaceResult.error.issues[0]?.message ?? 'Invalid workspace configuration')
-          return
+          return false
         }
         body.workspace = workspaceResult.data
       }
@@ -358,35 +416,26 @@ export function TaskCreateForm() {
           )
         } catch (err) {
           toast.error(`Failed to load AgentRuntime ${runtimeName}: ${err instanceof Error ? err.message : 'Unknown error'}`)
-          return
+          return false
         }
-        if (registeredRuntime.spec.contractVersion === 'orka.harness.v2') {
-          const mcpPolicy = registeredRuntime.spec.capabilities.mcpPolicy
-          if (!mcpPolicy) {
-            toast.error(`AgentRuntime ${runtimeName} must define capabilities.mcpPolicy before orka.harness.v2 Task dispatch`)
-            return
-          }
-          const profileIntent = registeredRuntime.spec.capabilities.profile.workspaceIntent
-          if (profileIntent !== workspaceIntent) {
-            toast.error(`AgentRuntime ${runtimeName} profile workspace intent "${profileIntent}" does not match Task intent "${workspaceIntent}"`)
-            return
-          }
-          body.agentRuntime = {
-            allowedTools: [...mcpPolicy.allowedTools],
-          }
-        } else if (registeredRuntime.spec.contractVersion === 'orka.harness.v1') {
-          // External harness-v1 bindings require an explicit task-level list,
-          // even when the Task requests no brokered tools.
-          body.agentRuntime = { allowedTools: [] }
-        } else {
-          toast.error(`AgentRuntime ${runtimeName} must declare orka.harness.v1 or orka.harness.v2`)
-          return
+        const mcpPolicy = registeredRuntime.spec.capabilities.mcpPolicy
+        if (!mcpPolicy) {
+          toast.error(`AgentRuntime ${runtimeName} must define capabilities.mcpPolicy before orka.harness.v2 Task dispatch`)
+          return false
+        }
+        const profileIntent = registeredRuntime.spec.capabilities.profile.workspaceIntent
+        if (profileIntent !== workspaceIntent) {
+          toast.error(`AgentRuntime ${runtimeName} profile workspace intent "${profileIntent}" does not match Task intent "${workspaceIntent}"`)
+          return false
+        }
+        body.agentRuntime = {
+          allowedTools: [...mcpPolicy.allowedTools],
         }
       }
     }
 
-    if (priority) body.priority = parseInt(priority)
-    if (timeout) body.timeout = timeout
+    if (priority.trim()) body.priority = Number(priority.trim())
+    if (timeout.trim()) body.timeout = timeout.trim()
 
     try {
       const created = await createTask.mutateAsync(body)
@@ -397,8 +446,10 @@ export function TaskCreateForm() {
       } else {
         navigate({ to: '/tasks' })
       }
+      return true
     } catch (err) {
-      toast.error(`Failed to create task: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      toast.error(actionErrorMessage('Failed to create task', err))
+      return false
     }
   }
 
@@ -414,12 +465,24 @@ export function TaskCreateForm() {
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label htmlFor="task-name" className="text-sm font-medium">Name</label>
-                <Input id="task-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-task" required />
+                <Input
+                  id="task-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  onBlur={() => visitField('name')}
+                  placeholder="my-task"
+                  required
+                  aria-invalid={fieldError('name', nameError) ? true : undefined}
+                  aria-describedby={fieldError('name', nameError) ? 'task-name-error' : undefined}
+                />
+                {fieldError('name', nameError) && (
+                  <p id="task-name-error" className="text-xs text-destructive" role="alert">{nameError}</p>
+                )}
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Type</label>
+                <label htmlFor="task-type" className="text-sm font-medium">Type</label>
                 <Select value={type} onValueChange={setType}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectTrigger id="task-type"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="container">Container</SelectItem>
                     <SelectItem value="ai">AI</SelectItem>
@@ -459,7 +522,7 @@ export function TaskCreateForm() {
             {type === 'ai' && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Agent</label>
+                  <label htmlFor="ai-agent" className="text-sm font-medium">Agent</label>
                   <Select
                     value={aiAgentRef || '__none__'}
                     onValueChange={(value) => {
@@ -476,7 +539,12 @@ export function TaskCreateForm() {
                     }}
                     disabled={inlineAgents.length === 0}
                   >
-                    <SelectTrigger aria-label="AI agent"><SelectValue placeholder="Select an agent (optional)" /></SelectTrigger>
+                    {/* Capped at the field width so a long agent label (or the
+                        "No agent" choice on a phone) truncates instead of
+                        widening the card. */}
+                    <SelectTrigger id="ai-agent" aria-label="AI agent" className="max-w-full">
+                      <span className="min-w-0 truncate"><SelectValue placeholder="Select an agent (optional)" /></span>
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No agent — configure provider inline</SelectItem>
                       {inlineAgents.map((agent) => (
@@ -502,7 +570,7 @@ export function TaskCreateForm() {
                       {selectedAIAgent.spec.providerRef?.name && <span>Provider CRD {selectedAIAgent.spec.providerRef.name}</span>}
                       {selectedAIAgent.spec.model?.provider && <span>{selectedAIAgent.spec.model.provider}</span>}
                       {selectedAIAgent.spec.model?.name && <span>{selectedAIAgent.spec.model.name}</span>}
-                      {(selectedAIAgent.spec.tools?.length ?? 0) > 0 && <span>{selectedAIAgent.spec.tools!.length} tools</span>}
+                      {(selectedAIAgent.spec.tools?.length ?? 0) > 0 && <span>{countLabel(selectedAIAgent.spec.tools!.length, 'tool')}</span>}
                     </div>
                   </div>
                 )}
@@ -526,16 +594,16 @@ export function TaskCreateForm() {
                   >
                     {agentProviderLocked ? (
                       <div className="space-y-2">
-                        <label className="text-sm font-medium">Provider</label>
+                        <p className="text-sm font-medium">Provider</p>
                         <p className="text-xs text-muted-foreground" data-testid="ai-provider-locked">
                           Fixed by the Agent&apos;s Provider CRD ({selectedAIAgent?.spec.providerRef?.name}); only the model can be overridden.
                         </p>
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        <label className="text-sm font-medium">Provider</label>
+                        <label htmlFor="ai-provider" className="text-sm font-medium">Provider</label>
                         <Select value={provider} onValueChange={setProvider}>
-                          <SelectTrigger aria-label="AI provider"><SelectValue placeholder={aiAgentRef ? 'Agent default' : 'Select provider'} /></SelectTrigger>
+                          <SelectTrigger id="ai-provider" aria-label="AI provider"><SelectValue placeholder={aiAgentRef ? 'Agent default' : 'Select provider'} /></SelectTrigger>
                           <SelectContent>
                             <SelectItem value="anthropic">Anthropic</SelectItem>
                             <SelectItem value="openai">OpenAI</SelectItem>
@@ -571,9 +639,11 @@ export function TaskCreateForm() {
             {type === 'agent' && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Agent Reference</label>
+                  <label htmlFor="agent-ref" className="text-sm font-medium">Agent Reference</label>
                   <Select value={agentRef} onValueChange={setAgentRef} disabled={dispatchableAgents.length === 0}>
-                    <SelectTrigger><SelectValue placeholder="Select an agent" /></SelectTrigger>
+                    <SelectTrigger id="agent-ref" className="max-w-full">
+                      <span className="min-w-0 truncate"><SelectValue placeholder="Select an agent" /></span>
+                    </SelectTrigger>
                     <SelectContent>
                       {dispatchableAgents.map((agent) => (
                         <SelectItem key={agent.metadata.name} value={agent.metadata.name}>
@@ -595,7 +665,7 @@ export function TaskCreateForm() {
                       {selectedAgent.spec.model?.provider && <span>{selectedAgent.spec.model.provider}</span>}
                       {selectedAgent.spec.model?.name && <span>{selectedAgent.spec.model.name}</span>}
                       {selectedAgent.spec.coordination?.enabled && <Badge variant="outline">Coordination</Badge>}
-                      {(selectedAgent.spec.tools?.length ?? 0) > 0 && <span>{selectedAgent.spec.tools!.length} tools</span>}
+                      {(selectedAgent.spec.tools?.length ?? 0) > 0 && <span>{countLabel(selectedAgent.spec.tools!.length, 'tool')}</span>}
                     </div>
                   </div>
                 )}
@@ -618,20 +688,47 @@ export function TaskCreateForm() {
               type="button"
               onClick={() => setShowAdvanced(!showAdvanced)}
               className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+              aria-expanded={showAdvanced}
+              aria-controls="task-advanced-options"
             >
               {showAdvanced ? '▼' : '▶'} Advanced Options
             </button>
 
             {showAdvanced && (
-              <div className="space-y-4 border-l-2 border-border pl-4">
+              <div id="task-advanced-options" className="space-y-4 border-l-2 border-border pl-4">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label htmlFor="task-priority" className="text-sm font-medium">Priority</label>
-                    <Input id="task-priority" type="number" min={0} max={1000} value={priority} onChange={(e) => setPriority(e.target.value)} placeholder="500" />
+                    <Input
+                      id="task-priority"
+                      type="number"
+                      min={0}
+                      max={1000}
+                      value={priority}
+                      onChange={(e) => setPriority(e.target.value)}
+                      onBlur={() => visitField('priority')}
+                      placeholder="500"
+                      aria-invalid={fieldError('priority', priorityIssue) ? true : undefined}
+                      aria-describedby={fieldError('priority', priorityIssue) ? 'task-priority-error' : undefined}
+                    />
+                    {fieldError('priority', priorityIssue) && (
+                      <p id="task-priority-error" className="text-xs text-destructive" role="alert">{priorityIssue}</p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <label htmlFor="task-timeout" className="text-sm font-medium">Timeout</label>
-                    <Input id="task-timeout" value={timeout} onChange={(e) => setTimeout(e.target.value)} placeholder="30m" />
+                    <Input
+                      id="task-timeout"
+                      value={timeout}
+                      onChange={(e) => setTimeout(e.target.value)}
+                      onBlur={() => visitField('timeout')}
+                      placeholder="30m"
+                      aria-invalid={fieldError('timeout', timeoutIssue) ? true : undefined}
+                      aria-describedby={fieldError('timeout', timeoutIssue) ? 'task-timeout-error' : undefined}
+                    />
+                    {fieldError('timeout', timeoutIssue) && (
+                      <p id="task-timeout-error" className="text-xs text-destructive" role="alert">{timeoutIssue}</p>
+                    )}
                   </div>
                 </div>
 
@@ -641,13 +738,15 @@ export function TaskCreateForm() {
                       type="button"
                       onClick={() => setShowWorkspace(!showWorkspace)}
                       className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+                      aria-expanded={showWorkspace}
+                      aria-controls="task-workspace-policy"
                     >
                       {showWorkspace ? '▼' : '▶'} Workspace policy
                     </button>
                     {showWorkspace && (
-                      <div className="space-y-5 rounded-md border bg-muted/20 p-4">
+                      <div id="task-workspace-policy" className="space-y-5 rounded-md border bg-muted/20 p-4">
                         <div className="space-y-2">
-                          <label className="text-sm font-medium">Workspace intent</label>
+                          <label htmlFor="workspace-intent" className="text-sm font-medium">Workspace intent</label>
                           <Select
                             value={workspaceIntent}
                             onValueChange={(value) => {
@@ -656,7 +755,7 @@ export function TaskCreateForm() {
                               if (intent === 'read') setCreatePR(false)
                             }}
                           >
-                            <SelectTrigger><SelectValue /></SelectTrigger>
+                            <SelectTrigger id="workspace-intent"><SelectValue /></SelectTrigger>
                             <SelectContent>
                               <SelectItem value="read">Read — verified workspace must remain unchanged</SelectItem>
                               <SelectItem value="write">Write — produce a validated publication artifact</SelectItem>

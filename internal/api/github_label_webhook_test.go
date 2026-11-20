@@ -8,7 +8,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -609,18 +608,6 @@ func newGitHubWebhookFakeClient(t *testing.T, objs ...client.Object) client.Clie
 	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 }
 
-type githubWebhookAgentGetErrorClient struct {
-	client.Client
-	err error
-}
-
-func (c githubWebhookAgentGetErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*corev1alpha1.Agent); ok {
-		return c.err
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
-}
-
 func runtimeAgent(name string) *corev1alpha1.Agent {
 	return &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
@@ -691,7 +678,7 @@ func setupGitHubWebhookMonitorStore(t *testing.T) store.RepositoryMonitorStore {
 		t.Fatalf("NewDB() error = %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return sqlite.NewStore(db, ":memory:")
+	return testStorageClient(sqlite.NewStore(db, ":memory:"))
 }
 
 func performSignedGitHubWebhook(t *testing.T, server *Server, event, delivery, secret string, body []byte) *http.Response {

@@ -21,7 +21,21 @@ const (
 	// native checkpoint holds at most 64 MiB encoded, which its format lets
 	// expand at most eightfold.
 	DefaultLoadReplayBytes = 512 << 20
+
+	// MinPermissionTimeout and MaxPermissionTimeout bound how long a runtime
+	// waits for the answer to a permission request. A person may answer one,
+	// so the window is configurable; it can never be unbounded.
+	MinPermissionTimeout = time.Minute
+	MaxPermissionTimeout = time.Hour
 )
+
+// ValidatePermissionTimeout checks a configured permission timeout.
+func ValidatePermissionTimeout(timeout time.Duration) error {
+	if timeout < MinPermissionTimeout || timeout > MaxPermissionTimeout {
+		return fmt.Errorf("permission timeout must be between %s and %s", MinPermissionTimeout, MaxPermissionTimeout)
+	}
+	return nil
+}
 
 // ErrPromptCancellationPending rejects admission until an earlier session-scoped
 // cancellation write finishes. The prompt has not been accepted and may be retried.
@@ -47,12 +61,22 @@ type RuntimeSessionConfig struct {
 	Process        ProcessConfig
 	MCPServers     []MCPServer
 	NewSessionMeta Meta
+	// RequiredModeID, when set, is the session mode the adapter must report as
+	// current in its session/new, session/resume, and session/load responses.
+	// An adapter that fell back to another mode fails creation or the
+	// in-place resume.
+	RequiredModeID string
 	// ResumeSessionID requests an installed native provider session, through
 	// session/resume or, for an agent that cannot resume, session/load. Failure
 	// to advertise or complete either must fail creation without session/new.
 	ResumeSessionID string
 	AuthMethodID    string
 	ClientInfo      Implementation
+	// ValidateAdapterRelaunch, when set, runs after an idle adapter's exit is
+	// proven and before a replacement launches. Session creation checks the
+	// workspace once, but the agent can change it afterwards; an error retires
+	// the session as lost instead of starting a replacement.
+	ValidateAdapterRelaunch func() error
 
 	InitializeTimeout time.Duration
 	PromptLease       time.Duration
@@ -202,6 +226,8 @@ type PromptResult struct {
 	Err        error
 	Accepted   bool
 	SettledAt  time.Time
+	// Usage is the agent-reported turn token usage, for telemetry only.
+	Usage *PromptUsage
 }
 
 type PromptRun struct {
@@ -327,12 +353,15 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		return nil, initializationFailed(session, err)
 	}
 	if cfg.ResumeSessionID != "" {
+		var modes json.RawMessage
 		switch {
 		case capabilities.SessionCapability(SessionCapabilityResume):
-			_, err = process.Client().ResumeSession(initCtx, ResumeSessionRequest{
+			var resumed ResumeSessionResponse
+			resumed, err = process.Client().ResumeSession(initCtx, ResumeSessionRequest{
 				SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 				MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 			})
+			modes = resumed.Modes
 		case capabilities.LoadSession:
 			// The agent replays the history as session/update notifications
 			// before it answers. No prompt is active and the provider session
@@ -349,10 +378,12 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 				session.loading = ""
 				session.mu.Unlock()
 			}
-			_, err = process.Client().LoadSession(loadCtx, LoadSessionRequest{
+			var loaded LoadSessionResponse
+			loaded, err = process.Client().LoadSession(loadCtx, LoadSessionRequest{
 				SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 				MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 			}, endReplay)
+			modes = loaded.Modes
 			stopLoad()
 			endReplay()
 			session.mu.Lock()
@@ -374,6 +405,9 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		}
 		session.capabilities = capabilities
 		session.providerSessionID = cfg.ResumeSessionID
+		if err := verifySessionMode(modes, cfg.RequiredModeID); err != nil {
+			return nil, initializationFailed(session, err)
+		}
 		return session, nil
 	}
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
@@ -388,7 +422,25 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	// failed creation never sends session/close for an empty session ID.
 	session.capabilities = capabilities
 	session.providerSessionID = newSession.SessionID
+	if err := verifySessionMode(newSession.Modes, cfg.RequiredModeID); err != nil {
+		return nil, initializationFailed(session, err)
+	}
 	return session, nil
+}
+
+// verifySessionMode checks the current mode an adapter reported for a
+// created or resumed provider session.
+func verifySessionMode(modes json.RawMessage, required string) error {
+	if required == "" {
+		return nil
+	}
+	var state struct {
+		CurrentModeID string `json:"currentModeId"`
+	}
+	if len(modes) == 0 || json.Unmarshal(modes, &state) != nil || state.CurrentModeID != required {
+		return fmt.Errorf("ACP adapter did not start the provider session in the required %q mode", required)
+	}
+	return nil
 }
 
 // launchAdapter starts one adapter child and completes the ACP handshake:
@@ -414,6 +466,11 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 		ClientCapabilities: ClientCapabilities{
 			FS:       FileSystemCapabilities{},
 			Terminal: false,
+			// Adapters that support ACP session notices (the pinned codex-acp
+			// and claude-agent-acp) then send advisories, such as Codex's
+			// missing model metadata warning, as notice updates instead of
+			// prefixing them to the agent's reply.
+			Session: map[string]any{"notices": map[string]any{}},
 		},
 	})
 	if err != nil {
@@ -598,6 +655,11 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 	case <-resumeCtx.Done():
 		return nil, AgentCapabilities{}, fmt.Errorf("drain exited adapter output: %w", resumeCtx.Err())
 	}
+	if cfg.ValidateAdapterRelaunch != nil {
+		if err := cfg.ValidateAdapterRelaunch(); err != nil {
+			return nil, AgentCapabilities{}, fmt.Errorf("revalidate workspace before adapter relaunch: %w", err)
+		}
+	}
 	process, capabilities, err := s.launchAdapter(resumeCtx)
 	if err != nil {
 		if process != nil {
@@ -631,6 +693,10 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 	if resumed.SessionID != "" && resumed.SessionID != s.providerSessionID {
 		_ = stopProcessBestEffort(process, cfg.CancelGrace)
 		return nil, AgentCapabilities{}, fmt.Errorf("ACP session/resume bound a different provider session")
+	}
+	if err := verifySessionMode(resumed.Modes, cfg.RequiredModeID); err != nil {
+		_ = stopProcessBestEffort(process, cfg.CancelGrace)
+		return nil, AgentCapabilities{}, err
 	}
 	return process, capabilities, nil
 }
@@ -1112,6 +1178,9 @@ func (s *RuntimeSession) runPrompt(active *activePrompt, process *Process) {
 		s.mu.Unlock()
 	})
 	result := PromptResult{Accepted: written, SettledAt: time.Now().UTC()}
+	if err == nil {
+		result.Usage = ParsePromptUsage(response.Usage)
+	}
 	switch {
 	case err != nil:
 		result.Outcome = classifyPromptErrorOutcome(err, written)

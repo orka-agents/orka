@@ -185,15 +185,19 @@ func TestGetMessagesMarkReadLargeInbox(t *testing.T) {
 		}
 	}
 
-	msgs, err := s.GetMessages(ctx, namespace, taskName, parentTask, true)
-	if err != nil {
-		t.Fatalf("GetMessages markRead: %v", err)
-	}
-	if len(msgs) != count {
-		t.Fatalf("got %d messages, want %d", len(msgs), count)
+	// A consuming read returns at most one batch; the rest follows on the
+	// next read.
+	for _, want := range []int{store.MaxMessageBatch, count - store.MaxMessageBatch} {
+		msgs, err := s.GetMessages(ctx, namespace, taskName, parentTask, true)
+		if err != nil {
+			t.Fatalf("GetMessages markRead: %v", err)
+		}
+		if len(msgs) != want {
+			t.Fatalf("got %d messages, want %d", len(msgs), want)
+		}
 	}
 
-	msgs, err = s.GetMessages(ctx, namespace, taskName, parentTask, false)
+	msgs, err := s.GetMessages(ctx, namespace, taskName, parentTask, false)
 	if err != nil {
 		t.Fatalf("GetMessages after markRead: %v", err)
 	}

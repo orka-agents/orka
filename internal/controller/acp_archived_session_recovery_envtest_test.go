@@ -12,6 +12,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -94,12 +95,20 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	before := captureArchivedSessionEvidence(t, restarted, control, tasks)
 	_, stopInitial := startArchivedRecoveryEpoch(t, fixture.ctx, control, nil, "archive-api-initial")
 	stopInitial()
+	// The real API server stands in for the same installation restored with
+	// its identity: its ControllerEpoch object has a new UID, so the storage
+	// dataset's installation binding is carried over explicitly.
+	bound, err := fixture.persistence.GetControllerEpochMirror(fixture.ctx, store.DefaultControllerEpochName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredAuthority := installationEpochStore{ControllerEpochStore: control, installationID: bound.InstallationID}
 	blockedID, err := promptAttemptIDFromTask(tasks[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, epoch := range []int64{2, 3, 4, 5} {
-		epochs, stop := startArchivedRecoveryEpoch(t, fixture.ctx, control, fixture.persistence, fmt.Sprintf("archive-api-%d", epoch))
+		epochs, stop := startArchivedRecoveryEpoch(t, fixture.ctx, restoredAuthority, fixture.persistence, fmt.Sprintf("archive-api-%d", epoch))
 		var recovering store.DurableControlStore = control
 		if epoch == 3 || epoch == 4 {
 			var missingOrCorrupt = store.ErrNotFound
@@ -162,11 +171,11 @@ func newArchivedSessionAPIClient(t *testing.T) client.Client {
 	return apiClient
 }
 
-func startArchivedRecoveryEpoch(t *testing.T, ctx context.Context, control store.ControllerEpochStore, mirror store.ControllerEpochMirror, holder string) (*ControllerEpochManager, func()) {
+func startArchivedRecoveryEpoch(t *testing.T, ctx context.Context, control store.ControllerEpochStore, mirror EpochDataset, holder string) (*ControllerEpochManager, func()) {
 	t.Helper()
 	epochs := NewControllerEpochManager(control, holder)
 	if mirror != nil {
-		epochs.WithMirror(mirror)
+		epochs.WithStorage(storagev1.StateContract, mirror)
 	}
 	epochCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)

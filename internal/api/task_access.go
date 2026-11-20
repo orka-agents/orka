@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -35,8 +36,18 @@ func (h *Handlers) taskAccess() taskAccess {
 }
 
 func (a taskAccess) load(c fiber.Ctx, namespace, taskName string) (*corev1alpha1.Task, error) {
+	return a.loadFrom(c, a.h.client, namespace, taskName)
+}
+
+// loadLive reads the Task from the uncached API reader, for identity checks
+// that must not see the same stale cached object as an earlier read.
+func (a taskAccess) loadLive(c fiber.Ctx, namespace, taskName string) (*corev1alpha1.Task, error) {
+	return a.loadFrom(c, a.h.uncachedReader(), namespace, taskName)
+}
+
+func (a taskAccess) loadFrom(c fiber.Ctx, reader client.Reader, namespace, taskName string) (*corev1alpha1.Task, error) {
 	task := &corev1alpha1.Task{}
-	if err := a.h.client.Get(c.Context(), types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
+	if err := reader.Get(c.Context(), types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fiber.NewError(fiber.StatusNotFound, "task not found")
 		}

@@ -4,18 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 )
-
-const unknownMetricLabel = "unknown"
 
 type executionEventStreamKey struct {
 	namespace  string
@@ -40,7 +36,9 @@ type FakeExecutionEventStore struct {
 	events        []store.ExecutionEvent
 	latest        map[executionEventStreamKey]int64
 	latestSession map[sessionExecutionEventKey]int64
-	dedupe        map[executionEventDedupeIndexKey]store.ExecutionEvent
+	// sessionSeqs holds each stored event's Session sequence by event ID.
+	sessionSeqs map[string]int64
+	dedupe      map[executionEventDedupeIndexKey]store.ExecutionEvent
 }
 
 var _ store.ExecutionEventStore = (*FakeExecutionEventStore)(nil)
@@ -60,6 +58,7 @@ func NewFakeExecutionEventStoreWithClock(now func() time.Time) *FakeExecutionEve
 		now:           now,
 		latest:        make(map[executionEventStreamKey]int64),
 		latestSession: make(map[sessionExecutionEventKey]int64),
+		sessionSeqs:   make(map[string]int64),
 		dedupe:        make(map[executionEventDedupeIndexKey]store.ExecutionEvent),
 	}
 }
@@ -89,12 +88,6 @@ func (s *FakeExecutionEventStore) appendExecutionEvent(
 	event *store.ExecutionEvent,
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
-	started := time.Now()
-	metricStreamType, metricEventType := metricLabelsForExecutionEvent(event)
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventAppend(metricStreamType, metricEventType, success, time.Since(started).Seconds())
-	}()
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
@@ -142,7 +135,6 @@ func (s *FakeExecutionEventStore) appendExecutionEvent(
 	indexKey := executionEventDedupeIndexKey{executionEventStreamKey: key, dedupeKey: dedupeKey}
 	if dedupeKey != "" {
 		if existing, ok := s.dedupe[indexKey]; ok {
-			success = true
 			clone := cloneExecutionEvent(existing)
 			return &clone, false, nil
 		}
@@ -166,28 +158,17 @@ func (s *FakeExecutionEventStore) appendExecutionEvent(
 	if copy.SessionName != "" {
 		sessionKey := sessionExecutionEventKey{namespace: copy.Namespace, sessionName: copy.SessionName}
 		s.latestSession[sessionKey]++
-		if copy.Internal == nil {
-			copy.Internal = map[string]any{}
-		}
-		copy.Internal["sessionSeq"] = s.latestSession[sessionKey]
+		s.sessionSeqs[copy.ID] = s.latestSession[sessionKey]
 	}
 	s.events = append(s.events, cloneExecutionEvent(copy))
 	if dedupeKey != "" {
 		s.dedupe[indexKey] = cloneExecutionEvent(copy)
 	}
-	redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(&copy)
-	metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
-	success = true
 	return &copy, true, nil
 }
 
 // ListExecutionEvents returns events matching filter in ascending sequence order per stream.
 func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("task_store", success, time.Since(started).Seconds())
-	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -245,17 +226,11 @@ func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filte
 	if len(matches) > filter.Limit {
 		matches = matches[:filter.Limit]
 	}
-	success = true
 	return matches, nil
 }
 
 // ListSessionExecutionEvents returns task-derived events for one session with an aggregated cursor.
 func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context, filter store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("session_store", success, time.Since(started).Seconds())
-	}()
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -279,7 +254,7 @@ func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context
 			continue
 		}
 		event = cloneExecutionEvent(event)
-		sessionSeq := fakeExecutionEventSessionSeq(event)
+		sessionSeq := s.sessionSeqs[event.ID]
 		if sessionSeq <= filter.AfterSeq {
 			continue
 		}
@@ -297,7 +272,6 @@ func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context
 			break
 		}
 	}
-	success = true
 	return matches, latestSeq, nil
 }
 
@@ -353,6 +327,7 @@ func (s *FakeExecutionEventStore) DeleteExecutionEvents(ctx context.Context, nam
 	kept := s.events[:0]
 	for _, event := range s.events {
 		if event.Namespace == filter.Namespace && event.StreamType == filter.StreamType && event.StreamID == filter.StreamID {
+			delete(s.sessionSeqs, event.ID)
 			continue
 		}
 		kept = append(kept, event)
@@ -389,48 +364,9 @@ func (s *FakeExecutionEventStore) existingTerminalApprovalEvent(event store.Exec
 	return "", approvalID, false
 }
 
-func metricLabelsForExecutionEvent(event *store.ExecutionEvent) (string, string) {
-	if event == nil {
-		return unknownMetricLabel, unknownMetricLabel
-	}
-	streamType := strings.TrimSpace(event.StreamType)
-	if streamType == "" {
-		streamType = store.ExecutionEventStreamTypeTask
-	}
-	if !events.IsValidExecutionEventStreamType(streamType) {
-		streamType = unknownMetricLabel
-	}
-	eventType := strings.TrimSpace(event.Type)
-	if !events.IsValidExecutionEventType(eventType) {
-		eventType = unknownMetricLabel
-	}
-	return streamType, eventType
-}
-
-func fakeExecutionEventSessionSeq(event store.ExecutionEvent) int64 {
-	if event.Internal == nil {
-		return 0
-	}
-	switch value := event.Internal["sessionSeq"].(type) {
-	case int64:
-		return value
-	case int:
-		return int64(value)
-	case float64:
-		return int64(value)
-	default:
-		return 0
-	}
-}
-
 func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {
 	if event.Content != nil {
 		event.Content = append(json.RawMessage(nil), event.Content...)
-	}
-	if event.Internal != nil {
-		internal := make(map[string]any, len(event.Internal))
-		maps.Copy(internal, event.Internal)
-		event.Internal = internal
 	}
 	if event.Truncation != nil {
 		truncation := *event.Truncation

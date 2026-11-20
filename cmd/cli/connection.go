@@ -50,6 +50,7 @@ type connectionView struct {
 type connectionAuthorizeView struct {
 	Connection   connectionView `json:"connection"`
 	AuthorizeURL string         `json:"authorizeURL"`
+	AgentHost    bool           `json:"agentHost"`
 }
 
 // connectionStateError is the API's state for a link that cannot be used.
@@ -63,7 +64,7 @@ func newConnectCmd() *cobra.Command {
 		Use:   "connect <provider>",
 		Short: "Link one of your accounts to a connector provider",
 		Long: "Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your " +
-			"browser, and wait for the link to become ready. The token you use must identify you as a person " +
+			"browser, and wait for the link and any agent host to become ready within one timeout. The token you use must identify you as a person " +
 			"(OIDC or context token); ServiceAccount tokens cannot link accounts.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -87,6 +88,10 @@ func newConnectCmd() *cobra.Command {
 			if started.AuthorizeURL == "" {
 				fmt.Fprintf(out, "Connection %s to %s is already %s (%s)\n", started.Connection.Name, started.Connection.Provider, strings.ToLower(started.Connection.State), started.Connection.Mode) //nolint:errcheck
 				return nil
+			}
+			if started.AgentHost {
+				fmt.Fprintf(out, "Linking %s creates your Copilot environment on Orka. Code running there can read "+ //nolint:errcheck
+					"this account's token, whatever the link's mode.\n", args[0])
 			}
 			fmt.Fprintf(out, "Authorize %s (%s) at:\n%s\n", args[0], mode, started.AuthorizeURL) //nolint:errcheck
 			if noOpen {
@@ -136,6 +141,9 @@ func newConnectCmd() *cobra.Command {
 				// consent finished rather than reporting the old grant.
 				if current.Ready && (!started.Connection.Ready || current.GrantSequence > started.Connection.GrantSequence) {
 					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
+					if started.AgentHost {
+						return waitForAgentHost(ctx, cmd, c, started.Connection.Name)
+					}
 					return nil
 				}
 				// A fresh consent was just started, so the state the link
@@ -157,7 +165,7 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", connectionModeReadOnly, "Link mode: readOnly or readWrite (write tools ask for approval)")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "Print the consent URL without opening a browser")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return as soon as consent has started")
-	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "How long to wait for the link to become ready")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Total time to wait for the link and any agent host to become ready")
 	return cmd
 }
 

@@ -1,18 +1,64 @@
 ---
-description: "Review an exact AgentKit or Foundry tool call before Orka executes it."
+description: "Hold a consequential tool call for a person's decision, then run exactly the action they approved."
 ---
 
-# Human approval for v2 tools
+# Human approval
 
-Orka can let an agent look up inventory automatically and require a person to
-approve a proposed work order. The controller saves the exact action before
-showing it for review. The tool has not run at that point. Approval lets Orka
-execute that stored action and return its real result to the waiting agent.
+Some actions should not happen unattended: creating a work order, deploying, spending money,
+writing to someone's account. Orka can hold such a call until a person approves or declines
+it, then run exactly the stored action — never a regenerated one — and return the real result
+to the agent.
+
+Approvals appear in three places:
+
+| Where | What gets approved | Set up |
+| --- | --- | --- |
+| Native autonomous coordinators (`type: ai`) | Custom Tools listed in `coordination.approvalRequiredTools`, and requests the agent makes with `request_approval`. The Task parks until a decision arrives. | [Autonomous tasks](autonomous-tasks.md#human-approvals) |
+| External runtimes, such as AgentKit and Foundry agents | Orka-executed tools in the runtime's `approvalRequiredTools`. The tool call stays open while it waits. | This page |
+| Linked accounts | Every write tool that acts through a person's [connector](connectors.md) | Automatic |
+| Built-in runtimes (Codex, Claude, Copilot, OpenCode) | The runtime's own requests to run a tool, for a Task with `agentRuntime.permissionDecisions: Requester`. The prompt waits while the request is held. | [Permission requests](#permission-requests-from-built-in-runtimes) |
+
+People decide in the Task's **Approvals** tab in the dashboard, with `orka task approve` and
+`orka task decline`, or through the API. To alert reviewers instead of having them poll, see
+[Alerting reviewers](#alerting-reviewers). Most of this page covers the external-runtime
+path; the last section covers built-in runtimes' permission requests.
+
+## Alerting reviewers
+
+A Task can send a signed webhook when an approval is requested and when it is approved,
+declined, expired, or cancelled. Select the events next to the Task's `webhookURL`:
+
+```yaml
+spec:
+  webhookURL: https://hooks.example.com/orka
+  webhookEvents:
+    - task.approval_requested
+    - task.approval_resolved
+```
+
+This works for all three approval paths and for [parked sign-offs](parking-agent-turns.md),
+whose decision can arrive after the parked turn `Succeeded`. A notice carries the approval ID,
+the gated tool's name, severity, the deadline when the approval has one, and the resolution.
+It never carries the proposed arguments, the action text, the reviewer's reason, or who
+decided. Open the approval in the dashboard or the API to review it. A brokered review that
+times out is sent as `expired` a few seconds after its deadline. Approval notices are retried
+for about three minutes, since review lasts at most ten.
+
+Treat the notice as an alert. Decide through the dashboard, the CLI, or the API, which check
+the approval again. See [Approval events](task-webhooks.md#approval-events) for the body,
+deduplication, ordering, and how to verify the signature.
+
+## Approvals for external runtimes
+
+Orka can let an agent look up inventory automatically and require a person to approve a
+proposed work order. The controller saves the exact action before showing it for review.
+The tool has not run at that point. Approval lets Orka execute that stored action and return
+its real result to the waiting agent.
 
 This applies to tools executed by Orka for qualified AgentKit and Foundry
 `orka.harness.v2` runtimes. Runtime-native shell and file permissions are a
-separate capability. Existing `type: ai` autonomous approvals keep their
-worker parking behavior; v2 approvals keep the original tool call open.
+separate capability; see
+[Permission requests from built-in runtimes](#permission-requests-from-built-in-runtimes).
 
 :::tip[Video demo]
 Watch [Human approval before an agent takes action](https://www.youtube.com/watch?v=KgzcvW1WznE).
@@ -25,7 +71,6 @@ runtime profile whose policy digests match it:
 
 ```yaml
 spec:
-  contractVersion: orka.harness.v2
   capabilities:
     mcpPolicy:
       allowedTools: [create-work-order, read-inventory]
@@ -87,8 +132,61 @@ The panel separates the review decision from execution. An approved action
 can still fail, become stale before starting, or have an unknown outcome.
 History records the reviewer and decision, then `not_started`, `running`,
 `succeeded`, `failed`, or `unknown` as execution evidence becomes available.
-An unknown outcome means the action may have run. Check the target system
-before choosing whether to make a new request.
+When the tool sent nothing or the remote system refused the request, the
+outcome is `failed` and its reason says why, for example the HTTP status and
+message GitHub refused a missing permission with; nothing changed. An unknown
+outcome means the action may have run. Check the target system before
+choosing whether to make a new request. The controller logs the redacted
+cause of both.
+
+## Find pending approvals across Tasks
+
+The per-Task list answers one Task. To find every request waiting on a person
+in a namespace, read the approvals inbox or the wider attention view:
+
+```http
+GET /api/v1/approvals?namespace=<ns>&status=pending
+GET /api/v1/attention?namespace=<ns>&since=24h
+```
+
+Both are computed on each read and need only `list` on `core.orka.ai/tasks`.
+Every Task then passes the same context-token and Gateway read filters as
+`GET /api/v1/tasks`, and only Tasks that report a pending approval (a
+`WaitingForApproval` condition, or a parked approval wait that still takes a
+decision) have their approval history read. The inbox lists brokered, worker
+and parked approvals that can still be decided, soonest deadline first;
+expired and already decided requests drop out. The attention view adds Tasks
+with an unknown outcome, failed Tasks and Tasks whose Pod cannot start inside
+the `since` window (default 24 hours, at most 7 days), and blocked
+RepositoryMonitor work actions when the caller may also list
+`repositorymonitors` and `monitorworkactions`.
+
+Each item is a short safe summary: Task identity, the tool name of a brokered
+approval (recorded by the controller from the resolved tool), a fixed label for
+parked sign-offs, severity and deadline. It never includes action labels built
+from call arguments, fields of approvals the AI worker records, the input
+preview, risk
+summary, wait reason or decision reasons; open the Task's Approvals tab or the
+per-Task list for those before deciding. Each approval item carries
+`canApprove` and `canDecline`. They are hints from the same checks the
+decision endpoint runs, including the rule that only the requester may
+approve a call on a Task that acts on their behalf. `null` means the hint
+could not be settled cheaply, for example past the first 20 Tasks of a page
+for a ServiceAccount caller. The decision endpoint remains the only
+enforcement point.
+
+Results are ranked and paged with an opaque `continue` token that also fixes
+the `since` window. Scans are bounded; when a bound is hit the response sets
+`incomplete: true` and names it in `incompleteReasons`, and the ranking must
+not be read as complete. `sources.approvals` and `sources.monitors` report
+whether approval history and monitor items were included, unavailable, or
+forbidden to the caller. `sources.approvals` is `partial` when the caller may
+list a Task that reports a pending approval but may not read that Task's
+approvals, for example a context token with `orka:tasks:list` but not
+`orka:tasks:get`. Those approvals are left out without detail, so an empty
+inbox does not mean nothing is pending. `unavailable` takes precedence over
+`partial`; scan bounds are reported in `incompleteReasons` instead. See the
+[authorization reference](../reference/api-authorization.md#route-permissions).
 
 ## Waiting and cancellation
 
@@ -166,3 +264,55 @@ cancellation, and after expiry. Run it for both a direct AgentKit registration
 and an AgentKit agent hosted behind the Foundry bridge. Local deterministic
 model or hosted-process runs prove those transports; Azure-hosted acceptance
 also requires the deployed Foundry gateway and the configured hosted version.
+
+## Permission requests from built-in runtimes
+
+Built-in runtimes ask Orka before they run some tools, and by default Orka answers each
+request from the Task's frozen tool policy. In that default, a runtime runs the shell commands
+and file changes the policy allows without asking. To have a person decide instead, set:
+
+```yaml
+spec:
+  agentRuntime:
+    permissionDecisions: Requester
+```
+
+- Orka then launches the runtime so that it asks before every shell command and every file
+  write or edit the policy allows, including read-only commands. Tools outside the policy
+  stay removed or denied, exactly as in the default. A Codex Task whose policy grants only
+  `Read`, `Glob` and `Grep` has no such request to ask about: Codex reads with commands in its
+  read-only sandbox, which run without asking, as reads do on the other runtimes. Only the
+  built-in runtimes can be launched this way; a Task that sets `Requester` for an external
+  AgentRuntime is rejected before it runs.
+- Orka names each request from the runtime's structured description of the call, such as
+  its kind and arguments, never from its display title. A request it cannot name is refused.
+- Orka still refuses whatever the policy refuses. A request the policy would allow is held
+  for the Task's requester instead: the approvals list shows it with `kind: permission`,
+  the tool name, the runtime's description of the call and the offered `options`, and the
+  Task reports `WaitingForApproval`.
+- Only the Task's requester may decide it: the person whose verified OIDC or context-token
+  sign-in created the Task, recorded in `spec.requestedBy`. Other reviewers, including
+  ServiceAccounts with `update` on `tasks/approvals`, receive HTTP 403. A Task without a
+  verified requester has every such request refused.
+- `approve` answers the runtime's allow-once option and `decline` its reject-once option.
+  Orka never chooses an "always" option, so every later call asks again.
+- A held request expires ten seconds before the runtime's own permission timeout, or at the
+  Task deadline if that is sooner, and is then refused. The runtime waits five minutes by
+  default; set the controller's `--acp-permission-timeout` (between 1m and 1h) to give people
+  longer. Runtime Pods take the new value when their RuntimePool is replaced.
+- When the prompt ends or is cancelled first, the request is recorded as `cancelled`. A
+  request held when the controller restarts cannot be decided afterwards, because the run
+  it belonged to ended.
+- The setting is part of each Task, not of the runtime profile, so it never moves a Task to
+  another RuntimePool. A Session's runtime session, however, is launched in one mode: when a
+  turn's setting differs from the previous turn's, Orka retires the runtime session and
+  starts a new one from the Session transcript and its verified branch, as it does when the
+  tool policy changes. That turn starts slower and the agent keeps only what the transcript
+  carries. Orka never reuses a runtime session launched in the other mode.
+- How a declined request ends depends on the runtime. Claude Code tells the model and
+  continues. Copilot and OpenCode end the turn; OpenCode also declines its other pending
+  requests. Codex ends the turn as cancelled. Codex runs commands without a terminal in this
+  mode, so input written to an approved command cannot run commands nobody approved, and
+  Claude Code is limited to Orka's native tools.
+- A brokered tool that already requires an approval at the broker is not asked about again
+  at the runtime's prompt.

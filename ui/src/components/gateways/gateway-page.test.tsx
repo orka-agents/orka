@@ -81,6 +81,27 @@ describe('GatewayPage', () => {
     expect(screen.getByRole('button', { name: 'Previous events page' })).toBeEnabled()
   })
 
+  it('keeps every operator tab reachable on narrow screens', async () => {
+    server.use(
+      http.get('/api/v1/gateways', () => list([])),
+      http.get('/api/v1/gatewaybindings', () => list([])),
+      http.get('/api/v1/gateway-events', () => list([])),
+      http.get('/api/v1/gateway-deliveries', () => list([])),
+    )
+
+    render(<GatewayPage />)
+
+    const tabs = await screen.findByRole('tablist', { name: 'Gateway operator views' })
+    // The tab strip scrolls horizontally instead of pushing tabs past the viewport.
+    expect(tabs.parentElement).toHaveClass('overflow-x-auto')
+    const outbox = screen.getByRole('tab', { name: 'Delivery outbox' })
+    // Reaching a tab with the keyboard scrolls it fully into the strip.
+    const scrollIntoView = vi.fn()
+    outbox.scrollIntoView = scrollIntoView
+    outbox.focus()
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
+  })
+
   it('does not present a stale Gateway status as Ready', async () => {
     server.use(
       http.get('/api/v1/gateways', () => list([{

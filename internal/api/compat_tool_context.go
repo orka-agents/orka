@@ -65,6 +65,7 @@ type compatProxyToolContextConfig struct {
 	UserInfo                  *UserInfo
 	LinkedAccounts            LinkedAccountsFactory
 	ConnectorsEnabled         bool
+	DashboardEnabled          bool
 }
 
 func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolContext {
@@ -77,6 +78,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		Requester:                 requester,
 		LinkedAccounts:            scopedLinkedAccounts(cfg.LinkedAccounts, cfg.Namespace, requester, cfg.UserInfo, cfg.AuthorizationConfig),
 		AuthorizeConnectorRead:    connectorReadToolAuthorizer(cfg.UserInfo, cfg.AuthorizationConfig, cfg.ConnectorsEnabled),
+		DashboardEnabled:          cfg.DashboardEnabled,
 		CreatedTasks:              tools.NewCreatedTasks(),
 		KubeClient:                cfg.KubeClient,
 		Namespace:                 cfg.Namespace,
@@ -97,7 +99,7 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 		},
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if tasksCreated >= maxProxyCreatedTasks {
-				return &tools.ChatToolError{Type: "limit_reached", Message: fmt.Sprintf("task creation limit reached (max %d)", maxProxyCreatedTasks), Suggestion: "Wait for existing tasks to complete"}
+				return &tools.ChatToolError{Type: limitReachedCode, Message: fmt.Sprintf("task creation limit reached (max %d)", maxProxyCreatedTasks), Suggestion: "Wait for existing tasks to complete"}
 			}
 			return nil
 		},
@@ -120,10 +122,16 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 			return chatToolAuthorizationError(authorize, ctx, task, "Use a task authorized by the context token")
 		}
 	}
+	// Agents these tools write are written with Orka's identity, so each hook
+	// also checks the caller's Provider use. A profile installs a hook only
+	// for the Agent tools it exposes.
 	if cfg.Profile.AgentCreateAction != "" {
 		toolCtx.AuthorizeAgentCreate = func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-				return authorizeContextTokenToolAgentCreate(ctx, authorizationReader, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.AgentCreateAction, agent)
+				if err := authorizeContextTokenToolAgentCreate(ctx, authorizationReader, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.AgentCreateAction, agent); err != nil {
+					return err
+				}
+				return authorizeToolAgentCreateProviderUse(ctx, cfg.KubeClient, cfg.UserInfo, agent)
 			}
 			return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent configuration authorized by the context token")
 		}
@@ -131,7 +139,10 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 	if cfg.Profile.AgentUpdateAction != "" {
 		toolCtx.AuthorizeAgentUpdate = func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			authorize := func(ctx context.Context, agent *corev1alpha1.Agent) error {
-				return authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.AgentUpdateAction, agent)
+				if err := authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, cfg.AuthContext, cfg.AuthorizationConfig, cfg.Profile.AgentUpdateAction, agent); err != nil {
+					return err
+				}
+				return authorizeToolAgentUpdateProviderUse(ctx, authorizationReader, cfg.KubeClient, cfg.UserInfo, agent)
 			}
 			return chatToolAuthorizationError(authorize, ctx, agent, "Use an agent update authorized by the context token")
 		}

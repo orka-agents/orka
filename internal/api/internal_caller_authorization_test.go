@@ -113,7 +113,7 @@ func TestSubmitResultRequiresCurrentTaskWorkerWithKubernetesClient(t *testing.T)
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, job, pod).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	store := sqlite.NewStore(db, ":memory:")
+	store := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewInternalHandlers(store, store, store, store, store, InternalHandlersConfig{Client: k8sClient, APIReader: k8sClient})
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {

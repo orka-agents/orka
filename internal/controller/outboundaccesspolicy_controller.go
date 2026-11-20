@@ -41,10 +41,16 @@ const (
 // OutboundAccessPolicyReconciler validates policy structure and references.
 type OutboundAccessPolicyReconciler struct {
 	client.Client
-	APIReader                  client.Reader
+	APIReader client.Reader
+	// ReservedServiceAccount is the controller's own ServiceAccount, which
+	// no policy may request tokens for.
+	ReservedServiceAccount     outboundaccess.ReservedServiceAccount
 	Scheme                     *runtime.Scheme
 	Trust                      outboundaccess.TrustConfig
 	AIWorkerServiceAccountName string
+	// MaxDelegationAge is the controller's cap on delegated agentIdentity
+	// policies (--agent-identity-max-delegation-age); zero means the default.
+	MaxDelegationAge time.Duration
 }
 
 const (
@@ -100,7 +106,11 @@ func (r *OutboundAccessPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 		LastTransitionTime: now,
 	}
 
-	if issue := outboundaccess.ValidateSpec(policy); issue != nil {
+	issue := outboundaccess.ValidateSpec(policy)
+	if issue == nil {
+		issue = outboundaccess.ValidateReservedServiceAccount(policy, r.ReservedServiceAccount)
+	}
+	if issue != nil {
 		accepted.Status = metav1.ConditionFalse
 		accepted.Reason = issue.Reason
 		accepted.Message = issue.Message
@@ -108,6 +118,12 @@ func (r *OutboundAccessPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 		resolved.Reason = outboundaccess.ReasonInvalidPolicy
 		resolved.Message = "References were not resolved because the policy is invalid"
 		return r.finishWithoutOutboundTokenRequestGrant(ctx, policy, accepted, resolved, nil)
+	}
+	if identity := policy.Spec.AgentIdentity; identity != nil && identity.Delegated != nil {
+		if effective, requested := outboundaccess.EffectiveMaxDelegationAge(policy, r.MaxDelegationAge); effective < requested {
+			accepted.Message = fmt.Sprintf("Policy structure is valid; maxDelegationAge %s exceeds the controller's cap, so %s applies",
+				requested, effective)
+		}
 	}
 
 	issue, err := outboundaccess.ResolveReferences(ctx, r.referenceReader(), policy, r.Trust)
@@ -618,7 +634,8 @@ func outboundPolicyReferencesObject(policy *corev1alpha1.OutboundAccessPolicy, o
 			return matchService(&policy.Spec.Gateway.ServiceRef)
 		}
 	case *corev1alpha1.ConnectorProvider:
-		return policy.Spec.Connection != nil && namespace == policy.Namespace && policy.Spec.Connection.ProviderRef.Name == name
+		provider, ok := outboundaccess.ConnectionProviderName(policy)
+		return ok && namespace == policy.Namespace && provider == name
 	case *corev1.ServiceAccount:
 		if namespace != policy.Namespace {
 			return false

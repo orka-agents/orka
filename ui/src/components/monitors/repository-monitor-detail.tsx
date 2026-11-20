@@ -1,13 +1,22 @@
-import { Play } from 'lucide-react'
+import { Link } from '@tanstack/react-router'
+import { ArrowLeft, Play } from 'lucide-react'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/layout/page-header'
+import { AccessErrorView, NotFoundView } from '@/components/common/not-found-page'
+import { ListAccessError } from '@/components/ui/list-access-error'
+import { StatusProblemAlert } from '@/components/common/status-problem-alert'
+import { statusProblem } from '@/components/common/status-problem'
 import { useCreateRepositoryMonitorCommand, useRepositoryMonitor, useRepositoryMonitorActions, useRepositoryMonitorCommands, useRepositoryMonitorImplementationJobs, useRepositoryMonitorItems, useRepositoryMonitorMutations, useRepositoryMonitorRuns, useRepositoryMonitorWorkActions, useRunRepositoryMonitor } from '@/hooks/use-monitors'
 import { repositoryMonitorDisplayName } from './repository-monitor-display'
+import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 import { formatTimestamp } from '@/lib/time'
+import { useUIStore } from '@/stores/ui'
+import type { RepositoryMonitor } from '@/schemas/monitor'
 
 function shortSHA(value?: string) {
   if (!value) return '-'
@@ -29,17 +38,8 @@ function publishLabel(phase?: string, reason?: string) {
 }
 
 export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }) {
-  const { data: monitor, isLoading } = useRepositoryMonitor(monitorName)
-  const runs = useRepositoryMonitorRuns(monitorName)
-  const items = useRepositoryMonitorItems(monitorName)
-  const issueItems = useRepositoryMonitorItems(monitorName, 'issue')
-  const actions = useRepositoryMonitorActions(monitorName)
-  const commands = useRepositoryMonitorCommands(monitorName)
-  const workActions = useRepositoryMonitorWorkActions(monitorName)
-  const implementationJobs = useRepositoryMonitorImplementationJobs(monitorName)
-  const mutations = useRepositoryMonitorMutations(monitorName)
-  const runMonitor = useRunRepositoryMonitor(monitorName)
-  const createCommand = useCreateRepositoryMonitorCommand(monitorName)
+  const namespace = useUIStore((s) => s.namespace)
+  const { data: monitor, isLoading, error } = useRepositoryMonitor(monitorName)
 
   if (isLoading) {
     return (
@@ -50,28 +50,84 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
     )
   }
 
-  if (!monitor) {
-    return <div className="text-muted-foreground">Repository monitor not found.</div>
+  const backToMonitors = (
+    <Button asChild variant="outline">
+      <Link to="/monitors"><ArrowLeft className="mr-1 h-4 w-4" />Back to Monitors</Link>
+    </Button>
+  )
+
+  // A 403 replaces cached data (the token lost access); any other failure
+  // keeps what already loaded and only blocks a page that never loaded.
+  if (isForbiddenError(error) || (error && !isNotFoundError(error) && !monitor)) {
+    return <AccessErrorView title="Could not load repository monitor" resource={`repository monitor ${monitorName}`} error={error} action={backToMonitors} />
   }
+
+  // A 404 wins over cached data: a monitor deleted after it loaded keeps its
+  // last `data`. The detail queries live in RepositoryMonitorDetailContent, so
+  // a missing monitor sends none of them.
+  if (isNotFoundError(error) || !monitor) {
+    return (
+      <NotFoundView
+        title="Repository monitor not found"
+        headline={`No repository monitor named "${monitorName}" in ${namespace}`}
+        hint="It may have been deleted, or it belongs to another namespace."
+        action={backToMonitors}
+      />
+    )
+  }
+
+  return <RepositoryMonitorDetailContent monitorName={monitorName} monitor={monitor} />
+}
+
+function RepositoryMonitorDetailContent({ monitorName, monitor }: { monitorName: string; monitor: RepositoryMonitor }) {
+  const runs = useRepositoryMonitorRuns(monitorName)
+  const items = useRepositoryMonitorItems(monitorName)
+  const issueItems = useRepositoryMonitorItems(monitorName, 'issue')
+  const actions = useRepositoryMonitorActions(monitorName)
+  const commands = useRepositoryMonitorCommands(monitorName)
+  const workActions = useRepositoryMonitorWorkActions(monitorName)
+  const implementationJobs = useRepositoryMonitorImplementationJobs(monitorName)
+  const mutations = useRepositoryMonitorMutations(monitorName)
+  const runMonitor = useRunRepositoryMonitor(monitorName)
+  const createCommand = useCreateRepositoryMonitorCommand(monitorName)
+  const sendCommand = (command: Parameters<typeof createCommand.mutate>[0]) =>
+    createCommand.mutate(command, {
+      onSuccess: () => toast.success(`Queued ${command.intent.replace(/_/g, ' ')} for #${command.number}`),
+      onError: (error) => toast.error(`Failed to queue ${command.intent.replace(/_/g, ' ')}: ${error instanceof Error ? error.message : 'Unknown error'}`),
+    })
 
   const status = monitor.status
   const displayName = repositoryMonitorDisplayName(monitor)
+  const problem = statusProblem(status)
 
   return (
     <div className="space-y-4">
       <PageHeader
-        title={displayName}
-        description={monitor.spec.repoURL}
+        title={monitor.metadata.name}
+        description={displayName}
         action={
           <>
             <Badge variant={status?.phase === 'Ready' ? 'default' : 'secondary'}>{status?.phase || 'Pending'}</Badge>
-            <Button variant="secondary" onClick={() => runMonitor.mutate()} disabled={runMonitor.isPending}>
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                try {
+                  await runMonitor.mutateAsync()
+                  toast.success('Monitor run started')
+                } catch (error) {
+                  toast.error(`Failed to start monitor run: ${error instanceof Error ? error.message : 'Unknown error'}`)
+                }
+              }}
+              disabled={runMonitor.isPending}
+            >
               <Play className="mr-2 h-4 w-4" />
               Run
             </Button>
           </>
         }
       />
+
+      {problem && <StatusProblemAlert problem={problem} />}
 
       <div className="grid gap-4 md:grid-cols-6">
         <MetricCard title="Open PRs" value={status?.openPullRequests ?? 0} />
@@ -89,7 +145,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
             <CardTitle>PR Queue</CardTitle>
           </CardHeader>
           <CardContent>
-            {(items.data?.items ?? []).length === 0 ? (
+            {items.error && (isForbiddenError(items.error) || !items.data) ? (
+              <ListAccessError error={items.error} resource="pull requests" />
+            ) : (items.data?.items ?? []).length === 0 ? (
               <div className="py-10 text-center text-sm text-muted-foreground">No pull requests recorded yet.</div>
             ) : (
               <Table>
@@ -124,10 +182,10 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       </TableCell>
                       <TableCell><Badge variant="outline">{item.repairState || 'none'}</Badge></TableCell>
                       <TableCell className="space-x-1">
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'review', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Review</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Fix</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix_ci', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Fix CI</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'pull_request', number: item.number ?? 0, intent: 'update_branch', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Update branch</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'pull_request', number: item.number ?? 0, intent: 'review', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Review</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Fix</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'pull_request', number: item.number ?? 0, intent: 'fix_ci', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Fix CI</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'pull_request', number: item.number ?? 0, intent: 'update_branch', targetSHA: item.headSHA ?? '' })} disabled={createCommand.isPending || !item.number || !item.headSHA}>Update branch</Button>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -142,7 +200,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
             <CardTitle>Issue Inventory</CardTitle>
           </CardHeader>
           <CardContent>
-            {(issueItems.data?.items ?? []).length === 0 ? (
+            {issueItems.error && (isForbiddenError(issueItems.error) || !issueItems.data) ? (
+              <ListAccessError error={issueItems.error} resource="issues" />
+            ) : (issueItems.data?.items ?? []).length === 0 ? (
               <div className="py-10 text-center text-sm text-muted-foreground">No issues recorded yet.</div>
             ) : (
               <Table>
@@ -165,13 +225,13 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
                       <TableCell><Badge variant="outline">{item.lastActionKind || item.lastCommandIntent || 'none'}</Badge></TableCell>
                       <TableCell>{item.skipReason || '-'}</TableCell>
                       <TableCell className="space-x-1">
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'triage' })} disabled={createCommand.isPending || !item.number}>Triage</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'research' })} disabled={createCommand.isPending || !item.number}>Research</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'plan' })} disabled={createCommand.isPending || !item.number}>Plan</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'implement' })} disabled={createCommand.isPending || !item.number}>Implement</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'decompose' })} disabled={createCommand.isPending || !item.number}>Decompose</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'stop' })} disabled={createCommand.isPending || !item.number}>Stop</Button>
-                        <Button size="sm" variant="outline" onClick={() => createCommand.mutate({ kind: 'issue', number: item.number ?? 0, intent: 'resume' })} disabled={createCommand.isPending || !item.number}>Resume</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'issue', number: item.number ?? 0, intent: 'triage' })} disabled={createCommand.isPending || !item.number}>Triage</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'issue', number: item.number ?? 0, intent: 'research' })} disabled={createCommand.isPending || !item.number}>Research</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'issue', number: item.number ?? 0, intent: 'plan' })} disabled={createCommand.isPending || !item.number}>Plan</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'issue', number: item.number ?? 0, intent: 'implement' })} disabled={createCommand.isPending || !item.number}>Implement</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'issue', number: item.number ?? 0, intent: 'decompose' })} disabled={createCommand.isPending || !item.number}>Decompose</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'issue', number: item.number ?? 0, intent: 'stop' })} disabled={createCommand.isPending || !item.number}>Stop</Button>
+                        <Button size="sm" variant="outline" onClick={() => sendCommand({ kind: 'issue', number: item.number ?? 0, intent: 'resume' })} disabled={createCommand.isPending || !item.number}>Resume</Button>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -211,7 +271,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
               <CardTitle>Actions</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(actions.data?.items ?? []).length === 0 ? (
+              {actions.error && (isForbiddenError(actions.error) || !actions.data) ? (
+              <ListAccessError error={actions.error} resource="monitor actions" />
+            ) : (actions.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No actions recorded yet.</div>
               ) : (
                 (actions.data?.items ?? []).slice(0, 8).map((action) => (
@@ -235,7 +297,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
               <CardTitle>Commands</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(commands.data?.items ?? []).length === 0 ? (
+              {commands.error && (isForbiddenError(commands.error) || !commands.data) ? (
+              <ListAccessError error={commands.error} resource="monitor commands" />
+            ) : (commands.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No commands recorded yet.</div>
               ) : (
                 (commands.data?.items ?? []).slice(0, 8).map((command) => (
@@ -259,7 +323,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
               <CardTitle>Workflow Timeline</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(workActions.data?.items ?? []).length === 0 ? (
+              {workActions.error && (isForbiddenError(workActions.error) || !workActions.data) ? (
+              <ListAccessError error={workActions.error} resource="work actions" />
+            ) : (workActions.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No workflow actions queued yet.</div>
               ) : (
                 (workActions.data?.items ?? []).slice(0, 10).map((action) => (
@@ -286,7 +352,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
               <CardTitle>Implementation Jobs</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(implementationJobs.data?.items ?? []).length === 0 ? (
+              {implementationJobs.error && (isForbiddenError(implementationJobs.error) || !implementationJobs.data) ? (
+              <ListAccessError error={implementationJobs.error} resource="implementation jobs" />
+            ) : (implementationJobs.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No implementation jobs yet.</div>
               ) : (
                 (implementationJobs.data?.items ?? []).slice(0, 8).map((job) => (
@@ -311,7 +379,9 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
               <CardTitle>GitHub Mutations</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(mutations.data?.items ?? []).length === 0 ? (
+              {mutations.error && (isForbiddenError(mutations.error) || !mutations.data) ? (
+              <ListAccessError error={mutations.error} resource="mutations" />
+            ) : (mutations.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No GitHub mutations recorded yet.</div>
               ) : (
                 (mutations.data?.items ?? []).slice(0, 8).map((mutation) => (
@@ -334,7 +404,12 @@ export function RepositoryMonitorDetail({ monitorName }: { monitorName: string }
               <CardTitle>Recent Runs</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {(runs.data?.items ?? []).length === 0 ? (
+              {/* A failed load must not read as "No runs"; a later failed poll keeps what loaded. */}
+              {runs.error && (isForbiddenError(runs.error) || !runs.data) ? (
+                <ListAccessError error={runs.error} resource="monitor runs" />
+              ) : runs.isLoading ? (
+                <Skeleton className="h-24 w-full" />
+              ) : (runs.data?.items ?? []).length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">No runs recorded yet.</div>
               ) : (
                 (runs.data?.items ?? []).slice(0, 8).map((run) => (

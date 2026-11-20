@@ -8,6 +8,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
 type apiNamespaceSource uint8
@@ -41,6 +42,10 @@ type apiRoutePolicy struct {
 	trimStoreID  bool
 }
 
+// apiVerbUpdate is the Kubernetes verb for routes that change state without
+// editing the object, such as approval decisions and cancellation.
+const apiVerbUpdate = "update"
+
 func coreAPIPolicy(verb, resource, nameParam string, additional ...apiResourcePermission) apiRoutePolicy {
 	return apiRoutePolicy{permissions: append([]apiResourcePermission{{corev1alpha1.GroupVersion.Group, resource, verb, nameParam}}, additional...)}
 }
@@ -58,6 +63,10 @@ func (p apiRoutePolicy) withStoreID() apiRoutePolicy {
 	p.trimStoreID = true
 	return p
 }
+
+// operatorTaskGetPermission is the Task read that every operator workspace
+// access route requires in addition to its dedicated subresource verb.
+var operatorTaskGetPermission = apiResourcePermission{corev1alpha1.GroupVersion.Group, externalToolTaskResource, gatewayVerbGet, "id"}
 
 // externalAPIPolicies is the complete external user API inventory. Keep the
 // independent HTTP cases and the operator reference in sync when adding routes.
@@ -80,21 +89,42 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/tasks":               coreAPIPolicy("list", "tasks", ""),
 	"GET /api/v1/tasks/:id":           coreAPIPolicy("get", "tasks", "id"),
 	"DELETE /api/v1/tasks/:id":        coreAPIPolicy("delete", "tasks", "id"),
+	"POST /api/v1/tasks/:id/cancel":   coreAPIPolicy(apiVerbUpdate, "tasks/cancel", "id"),
 	"GET /api/v1/tasks/:id/logs":      coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/events":    coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/stream":    coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/trace":     coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/approvals": coreAPIPolicy("get", "tasks", "id"),
+	// The attention views list Tasks; each Task then passes the ListTasks
+	// filters, and monitor items need their own list grants in the handler.
+	"GET /api/v1/attention": coreAPIPolicy("list", "tasks", ""),
+	"GET /api/v1/approvals": coreAPIPolicy("list", "tasks", ""),
 	"POST /api/v1/tasks/:id/approvals/:approvalID/decision": coreAPIPolicy("update", "tasks/approvals", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "patch", "id"}),
 	"POST /api/v1/tasks/:id/fork": coreAPIPolicy("get", "tasks", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "create", ""}),
 	"GET /api/v1/tasks/:id/result": coreAPIPolicy("get", "tasks", "id"),
-	"GET /api/v1/tasks/:id/plan":   coreAPIPolicy("get", "tasks", "id"),
+	// A run's full report holds text drawn from every Session, memory and
+	// open proposal it read, so reading it needs what reading those inputs
+	// needs.
+	"GET /api/v1/tasks/:id/memory-consolidation-report": coreAPIPolicy("get", "tasks", "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, usageSessionResource, apiObjectList, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, usageSessionResource, gatewayVerbGet, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, memoriesResource, apiObjectList, ""},
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, memoryProposalsResource, apiObjectList, ""}),
+	"GET /api/v1/tasks/:id/plan": coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/children": coreAPIPolicy("get", "tasks", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "list", ""}),
 	"GET /api/v1/tasks/:id/artifacts":           coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/artifacts/:filename": coreAPIPolicy("get", "tasks", "id"),
+	// Operator workspace access uses dedicated virtual subresources that no
+	// built-in aggregate role grants; Task get alone never authorizes it.
+	"GET /api/v1/tasks/:id/exec": coreAPIPolicy(operatoraccess.ExecVerb, operatoraccess.ExecResource, "id",
+		operatorTaskGetPermission),
+	"GET /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesReadVerb, operatoraccess.FilesResource, "id",
+		operatorTaskGetPermission),
+	"PUT /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesWriteVerb, operatoraccess.FilesResource, "id",
+		operatorTaskGetPermission),
 
 	"GET /api/v1/sessions":            coreAPIPolicy("list", "sessions", ""),
 	"GET /api/v1/sessions/:id":        coreAPIPolicy("get", "sessions", "id"),
@@ -104,6 +134,8 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/sessions/:id/events": coreAPIPolicy("get", "sessions", "id"),
 	"GET /api/v1/sessions/:id/stream": coreAPIPolicy("get", "sessions", "id"),
 	"DELETE /api/v1/sessions/:id":     coreAPIPolicy("delete", "sessions", "id"),
+	"POST /api/v1/sessions/:id/cancel": coreAPIPolicy("get", "sessions", "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks/cancel", apiVerbUpdate, ""}),
 
 	"GET /api/v1/gatewayclasses":                gatewayAPIPolicy("list", "gatewayclasses", "").inNamespace(apiClusterScoped),
 	"GET /api/v1/gatewayclasses/:name":          gatewayAPIPolicy("get", "gatewayclasses", "name").inNamespace(apiClusterScoped),
@@ -132,34 +164,40 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "memories", "create", ""}).inNamespace(apiBodyThenQueryNamespace).withStoreID(),
 	"POST /api/v1/memory-proposals/:id/archive": coreAPIPolicy("update", "memoryproposals", "id").withStoreID(),
 
-	"GET /api/v1/providers":               coreAPIPolicy("list", "providers", ""),
-	"POST /api/v1/providers":              coreAPIPolicy("create", "providers", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/providers/:name":         coreAPIPolicy("get", "providers", "name"),
-	"PUT /api/v1/providers/:name":         coreAPIPolicy("update", "providers", "name"),
-	"DELETE /api/v1/providers/:name":      coreAPIPolicy("delete", "providers", "name"),
-	"GET /api/v1/tools":                   coreAPIPolicy("list", "tools", ""),
-	"POST /api/v1/tools":                  coreAPIPolicy("create", "tools", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/tools/:name":             coreAPIPolicy("get", "tools", "name"),
-	"PUT /api/v1/tools/:name":             coreAPIPolicy("update", "tools", "name"),
-	"DELETE /api/v1/tools/:name":          coreAPIPolicy("delete", "tools", "name"),
-	"GET /api/v1/runtime-pools":           coreAPIPolicy("list", "runtimepools", ""),
-	"GET /api/v1/runtime-pools/:name":     coreAPIPolicy("get", "runtimepools", "name"),
-	"GET /api/v1/agent-runtimes":          coreAPIPolicy("list", "agentruntimes", ""),
-	"POST /api/v1/agent-runtimes":         coreAPIPolicy("create", "agentruntimes", "").inNamespace(apiMetadataNamespace),
-	"GET /api/v1/agent-runtimes/:name":    coreAPIPolicy("get", "agentruntimes", "name"),
-	"PUT /api/v1/agent-runtimes/:name":    coreAPIPolicy("update", "agentruntimes", "name"),
-	"DELETE /api/v1/agent-runtimes/:name": coreAPIPolicy("delete", "agentruntimes", "name"),
-	"POST /api/v1/agents":                 coreAPIPolicy("create", "agents", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/agents":                  coreAPIPolicy("list", "agents", ""),
-	"GET /api/v1/agents/:name":            coreAPIPolicy("get", "agents", "name"),
-	"PUT /api/v1/agents/:name":            coreAPIPolicy("patch", "agents", "name"),
-	"DELETE /api/v1/agents/:name":         coreAPIPolicy("delete", "agents", "name"),
-	"POST /api/v1/skills":                 coreAPIPolicy("create", "skills", "").inNamespace(apiCreateNamespace),
-	"GET /api/v1/skills":                  coreAPIPolicy("list", "skills", ""),
-	"GET /api/v1/skills/:name":            coreAPIPolicy("get", "skills", "name"),
-	"GET /api/v1/skills/:name/content":    coreAPIPolicy("get", "skills", "name"),
-	"PUT /api/v1/skills/:name":            coreAPIPolicy("update", "skills", "name"),
-	"DELETE /api/v1/skills/:name":         coreAPIPolicy("delete", "skills", "name"),
+	"GET /api/v1/providers":          coreAPIPolicy("list", "providers", ""),
+	"POST /api/v1/providers":         coreAPIPolicy("create", "providers", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/providers/:name":    coreAPIPolicy("get", "providers", "name"),
+	"PUT /api/v1/providers/:name":    coreAPIPolicy("update", "providers", "name"),
+	"DELETE /api/v1/providers/:name": coreAPIPolicy("delete", "providers", "name"),
+	"GET /api/v1/tools":              coreAPIPolicy("list", "tools", ""),
+	"POST /api/v1/tools":             coreAPIPolicy("create", "tools", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/tools/:name":        coreAPIPolicy("get", "tools", "name"),
+	"PUT /api/v1/tools/:name":        coreAPIPolicy("update", "tools", "name"),
+	"DELETE /api/v1/tools/:name":     coreAPIPolicy("delete", "tools", "name"),
+	// The MCP proxy invokes the Tool's actor with the caller's Tool read
+	// permission, as workers did when they read the Tool and called it.
+	"POST /api/v1/tools/:name/mcp":           coreAPIPolicy("get", "tools", "name"),
+	"DELETE /api/v1/tools/:name/mcp":         coreAPIPolicy("get", "tools", "name"),
+	"GET /api/v1/runtime-pools":              coreAPIPolicy("list", "runtimepools", ""),
+	"GET /api/v1/runtime-pools/:name":        coreAPIPolicy("get", "runtimepools", "name"),
+	"GET /api/v1/agent-runtimes":             coreAPIPolicy("list", "agentruntimes", ""),
+	"POST /api/v1/agent-runtimes":            coreAPIPolicy("create", "agentruntimes", "").inNamespace(apiMetadataNamespace),
+	"GET /api/v1/agent-runtimes/:name":       coreAPIPolicy("get", "agentruntimes", "name"),
+	"PUT /api/v1/agent-runtimes/:name":       coreAPIPolicy("update", "agentruntimes", "name"),
+	"DELETE /api/v1/agent-runtimes/:name":    coreAPIPolicy("delete", "agentruntimes", "name"),
+	"POST /api/v1/agents":                    coreAPIPolicy("create", "agents", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/agents":                     coreAPIPolicy("list", "agents", ""),
+	"GET /api/v1/agents/:name":               coreAPIPolicy("get", "agents", "name"),
+	"GET /api/v1/agents/:name/system-prompt": coreAPIPolicy("get", "agents", "name"),
+	"PUT /api/v1/agents/:name":               coreAPIPolicy("patch", "agents", "name"),
+	"PUT /api/v1/agents/:name/spec":          coreAPIPolicy("patch", "agents", "name"),
+	"DELETE /api/v1/agents/:name":            coreAPIPolicy("delete", "agents", "name"),
+	"POST /api/v1/skills":                    coreAPIPolicy("create", "skills", "").inNamespace(apiCreateNamespace),
+	"GET /api/v1/skills":                     coreAPIPolicy("list", "skills", ""),
+	"GET /api/v1/skills/:name":               coreAPIPolicy("get", "skills", "name"),
+	"GET /api/v1/skills/:name/content":       coreAPIPolicy("get", "skills", "name"),
+	"PUT /api/v1/skills/:name":               coreAPIPolicy("update", "skills", "name"),
+	"DELETE /api/v1/skills/:name":            coreAPIPolicy("delete", "skills", "name"),
 
 	"POST /api/v1/security/repositories":                   coreAPIPolicy("create", "repositoryscans", "").inNamespace(apiCreateNamespace),
 	"GET /api/v1/security/repositories":                    coreAPIPolicy("list", "repositoryscans", ""),
@@ -235,15 +273,35 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"DELETE /api/v1/connections/:name":         {identityOnly: true},
 	"POST /api/v1/connections/:name/authorize": {identityOnly: true},
 	"POST /api/v1/connections/:name/complete":  {identityOnly: true},
-	"GET /api/v1/secrets":                      {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
-	"POST /api/v1/chat":                        coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
-	"GET /api/v1/chat/config":                  coreAPIPolicy("get", "chats/config", ""),
-	"DELETE /api/v1/chat/:sessionId":           coreAPIPolicy("delete", "sessions", "sessionId"),
-	"POST /openai/v1/responses":                coreAPIPolicy("create", "chats", ""),
-	"POST /openai/v1/chat/completions":         coreAPIPolicy("create", "chats", ""),
-	"GET /openai/v1/models":                    coreAPIPolicy("list", "providers", ""),
-	"POST /anthropic/v1/messages":              coreAPIPolicy("create", "chats", ""),
-	"GET /anthropic/v1/models":                 coreAPIPolicy("list", "providers", ""),
+	// A GitHub sign-in session renews and ends itself.
+	"POST /api/v1/auth/session/renew": {identityOnly: true},
+	"DELETE /api/v1/auth/session":     {identityOnly: true},
+	// A person's own agent host, found from their verified identity only.
+	"GET /api/v1/agent-hosts/me":       {identityOnly: true},
+	"POST /api/v1/agent-hosts/me/wake": {identityOnly: true},
+	"DELETE /api/v1/agent-hosts/me":    {identityOnly: true},
+	// Inviting someone to a host is an operator's act: create on agenthosts.
+	"POST /api/v1/agent-hosts/invites":    coreAPIPolicy("create", "agenthosts", ""),
+	"GET /api/v1/agent-hosts/invites/:id": coreAPIPolicy("create", "agenthosts", ""),
+	"GET /api/v1/secrets":                 {permissions: []apiResourcePermission{{"", "secrets", "list", ""}}},
+	"POST /api/v1/chat":                   coreAPIPolicy("create", "chats", "").inNamespace(apiBodyNamespace),
+	"GET /api/v1/chat/config":             coreAPIPolicy("get", "chats/config", ""),
+	"DELETE /api/v1/chat/:sessionId":      coreAPIPolicy("delete", "sessions", "sessionId"),
+	"POST /openai/v1/responses":           coreAPIPolicy("create", "chats", ""),
+	"POST /openai/v1/chat/completions":    coreAPIPolicy("create", "chats", ""),
+	"GET /openai/v1/models":               coreAPIPolicy("list", "providers", ""),
+	"POST /anthropic/v1/messages":         coreAPIPolicy("create", "chats", ""),
+	"GET /anthropic/v1/models":            coreAPIPolicy("list", "providers", ""),
+
+	// AHP token routes are identity-only like Connections: the handlers
+	// require a verified OIDC or context-token owner and refuse ServiceAccounts.
+	"POST /api/v1/ahp-tokens":       {identityOnly: true},
+	"GET /api/v1/ahp-tokens":        {identityOnly: true},
+	"DELETE /api/v1/ahp-tokens/:id": {identityOnly: true},
+	// MCP messages are authenticated here. Each tool call replays its REST
+	// route in process with the caller's credentials, so it is authorized
+	// by that route's policy and handler checks, never by this entry.
+	"POST /mcp": {identityOnly: true},
 }
 
 // externalAPIRouter installs authorization on the endpoint, where Fiber has
@@ -254,26 +312,47 @@ type externalAPIRouter struct {
 	router fiber.Router
 	prefix string
 	h      *Handlers
+	// pre runs before route authorization; nil for ordinary routes.
+	pre fiber.Handler
 }
 
 func (s *Server) externalAPIGroup(prefix string, auth fiber.Handler) externalAPIRouter {
 	return externalAPIRouter{router: s.app.Group(prefix, auth), prefix: prefix, h: s.handlers}
 }
 
+// withPreAuthorization returns a router whose routes run pre before route
+// authorization, for example to audit refused calls. pre must call Next.
+func (r externalAPIRouter) withPreAuthorization(pre fiber.Handler) externalAPIRouter {
+	r.pre = pre
+	return r
+}
+
+func (r externalAPIRouter) handlers(method, path string, handler fiber.Handler) (any, []any) {
+	authorize := r.h.authorizeExternalRoute(method + " " + r.prefix + path)
+	if r.pre != nil {
+		return r.pre, []any{authorize, handler}
+	}
+	return authorize, []any{handler}
+}
+
 func (r externalAPIRouter) Get(path string, handler fiber.Handler) {
-	r.router.Get(path, r.h.authorizeExternalRoute(fiber.MethodGet+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodGet, path, handler)
+	r.router.Get(path, first, rest...)
 }
 
 func (r externalAPIRouter) Post(path string, handler fiber.Handler) {
-	r.router.Post(path, r.h.authorizeExternalRoute(fiber.MethodPost+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodPost, path, handler)
+	r.router.Post(path, first, rest...)
 }
 
 func (r externalAPIRouter) Put(path string, handler fiber.Handler) {
-	r.router.Put(path, r.h.authorizeExternalRoute(fiber.MethodPut+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodPut, path, handler)
+	r.router.Put(path, first, rest...)
 }
 
 func (r externalAPIRouter) Delete(path string, handler fiber.Handler) {
-	r.router.Delete(path, r.h.authorizeExternalRoute(fiber.MethodDelete+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodDelete, path, handler)
+	r.router.Delete(path, first, rest...)
 }
 
 func (h *Handlers) authorizeExternalRoute(route string) fiber.Handler {
@@ -291,6 +370,32 @@ func (h *Handlers) authorizeExternalRoute(route string) fiber.Handler {
 	}
 }
 
+// githubSessionRoutes are the identity-only routes a GitHub sign-in session
+// may reach: those that act on the caller's own sign-in, links, agent host
+// and AHP tokens. The control-plane MCP endpoint is identity-only because
+// each tool call is authorized as the REST route it replays, but it is not
+// a session's.
+var githubSessionRoutes = map[string]bool{
+	"GET /api/v1/auth/validate":                true,
+	"GET /api/v1/auth/whoami":                  true,
+	"GET /api/v1/connectors":                   true,
+	"GET /api/v1/connections":                  true,
+	"POST /api/v1/connections":                 true,
+	"GET /api/v1/connections/:name":            true,
+	"PUT /api/v1/connections/:name":            true,
+	"DELETE /api/v1/connections/:name":         true,
+	"POST /api/v1/connections/:name/authorize": true,
+	"POST /api/v1/connections/:name/complete":  true,
+	"POST /api/v1/auth/session/renew":          true,
+	"DELETE /api/v1/auth/session":              true,
+	"GET /api/v1/agent-hosts/me":               true,
+	"POST /api/v1/agent-hosts/me/wake":         true,
+	"DELETE /api/v1/agent-hosts/me":            true,
+	"POST /api/v1/ahp-tokens":                  true,
+	"GET /api/v1/ahp-tokens":                   true,
+	"DELETE /api/v1/ahp-tokens/:id":            true,
+}
+
 func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	policy, ok := externalAPIPolicies[route]
 	if !ok || (!policy.identityOnly && len(policy.permissions) == 0) {
@@ -299,6 +404,13 @@ func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	ui := GetUserInfo(c)
 	if ui == nil {
 		return fiber.NewError(fiber.StatusForbidden, "not authorized")
+	}
+	// A GitHub sign-in session reaches only routes that act on the caller's
+	// own links, host and AHP tokens; everything else needs OIDC or
+	// Kubernetes credentials. Being identity-only is not enough: a route
+	// opts in, so one added later is closed to sessions until it does.
+	if ui.AuthType == AuthTypeGitHubSession && (!policy.identityOnly || !githubSessionRoutes[route]) {
+		return fiber.NewError(fiber.StatusForbidden, "a GitHub sign-in session reaches only your own links, agent host and AHP tokens")
 	}
 	// Direct OIDC validation and transaction tokens have their own contracts.
 	// Do not reinterpret them as Kubernetes TokenReview identities.

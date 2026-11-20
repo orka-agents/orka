@@ -184,7 +184,6 @@ func TestDeletingACPTaskStillUsesDurableCleanupStoreWhenACPAdmissionDisabled(t *
 	reconciler := &TaskReconciler{
 		DurableControlStore:    controlStore,
 		ControllerEpochManager: readyPromptAttemptReclaimEpochManager(),
-		ACPRuntimeEnabled:      false,
 	}
 
 	ready, err := reconciler.retireACPArtifactIdentities(context.Background(), task)
@@ -240,26 +239,32 @@ func TestACPTaskTimeoutRequiresAuthoritativeAttemptDiscovery(t *testing.T) {
 	}
 }
 
+// A workspace that already failed terminally rejects the Task in planning, like
+// an invalid one, so neither ever has a prompt attempt to reclaim.
 func TestACPNoAttemptReclamationIgnoresUnboundSessionReference(t *testing.T) {
-	task := artifactRetentionTask()
-	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "never-bound", Create: true, Append: true}
-	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
-		State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
-		Reason: corev1alpha1.TaskExecutionReason("InvalidWorkspace"),
-	}
-	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
-		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
-	}
-	reconciler := &TaskReconciler{
-		DurableControlStore:    &promptAttemptReclaimControlStore{},
-		ControllerEpochManager: readyPromptAttemptReclaimEpochManager(),
-	}
-	request, err := reconciler.acpPromptAttemptReclamationRequest(context.Background(), task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if request.Mode != store.PromptAttemptReclamationNoAttempt || !request.ContinuitySession || request.FinalContinuitySession {
-		t.Fatalf("request = %#v, want NoAttempt with Task history but no final continuity binding", request)
+	for _, reason := range []string{"InvalidWorkspace", "WorkspaceFailed"} {
+		t.Run(reason, func(t *testing.T) {
+			task := artifactRetentionTask()
+			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "never-bound", Create: true, Append: true}
+			task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+				State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
+				Reason: corev1alpha1.TaskExecutionReason(reason),
+			}
+			task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+				State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
+			}
+			reconciler := &TaskReconciler{
+				DurableControlStore:    &promptAttemptReclaimControlStore{},
+				ControllerEpochManager: readyPromptAttemptReclaimEpochManager(),
+			}
+			request, err := reconciler.acpPromptAttemptReclamationRequest(context.Background(), task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request.Mode != store.PromptAttemptReclamationNoAttempt || !request.ContinuitySession || request.FinalContinuitySession {
+				t.Fatalf("request = %#v, want NoAttempt with Task history but no final continuity binding", request)
+			}
+		})
 	}
 }
 

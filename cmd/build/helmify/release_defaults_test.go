@@ -60,8 +60,8 @@ func TestStaticChartDevelopmentDefaultsUseRollingImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(regexp.MustCompile(`(?m)^\s+tag: "0.0.0-dev"$`).FindAll(values, -1)); got != 5 {
-		t.Fatalf("source chart has %d development image tags, want all five", got)
+	if got := len(regexp.MustCompile(`(?m)^\s+tag: "0.0.0-dev"$`).FindAll(values, -1)); got != 4 {
+		t.Fatalf("source chart has %d development image tags, want all four", got)
 	}
 	for _, provider := range []string{"codex", "claude", "copilot", "opencode"} {
 		ref := provider + "Image: ghcr.io/orka-agents/orka/acp-" + provider + "-runtime:0.0.0-dev"

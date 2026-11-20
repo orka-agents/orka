@@ -369,3 +369,32 @@ func assertInFlightExternalEffectWithOneLease(
 // acpExternalEffectLease is the ledger lease a brokered custom-Tool effect
 // call must fit inside, including the settlement margin.
 const acpExternalEffectLease = maxACPExternalEffectCallDuration + externalEffectLeaseSettlementMargin
+
+// TestRunExternalEffectOnceNeverRunsAStartedEffectAgain covers a forwarded
+// write that a delivery claimed and left in flight: a redelivery of the same
+// identity is refused without calling the effect, where a reclaiming run
+// could send it again once the lease expired.
+func TestRunExternalEffectOnceNeverRunsAStartedEffectAgain(t *testing.T) {
+	controlStore, fence, closeStore := newACPSessionTestStore(
+		t, filepath.Join(t.TempDir(), "external-effect-once.db"),
+	)
+	defer closeStore()
+	identity := store.ExternalEffectIdentity{
+		Kind: "acp-mcp-tool", Namespace: "default", AggregateID: "session-once", OperationID: "mcp-call-once",
+	}
+	request := map[string]string{"call": "forwarded-write"}
+	delivered := errors.New("delivered, but the result was lost")
+	if _, _, err := runExternalEffectOnceWithReplay(context.Background(), controlStore, fence, identity, request,
+		func(context.Context) (string, error) { return "", delivered },
+	); !errors.Is(err, delivered) {
+		t.Fatalf("first delivery error = %v", err)
+	}
+	calls := 0
+	_, _, err := runExternalEffectOnceWithReplay(context.Background(), controlStore, fence, identity, request,
+		func(context.Context) (string, error) { calls++; return testBrokeredEffectCommittedResult, nil },
+	)
+	if !errors.Is(err, errExternalEffectAlreadyStarted) || calls != 0 {
+		t.Fatalf("redelivery error = %v, calls = %d; want a refusal without a call", err, calls)
+	}
+	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
+}

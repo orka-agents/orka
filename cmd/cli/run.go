@@ -34,13 +34,23 @@ func newRunCmd() *cobra.Command {
   Interactive: orka run
   Piped:       echo "fix bugs" | orka run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Without a prompt argument, run reads the prompt from piped stdin,
+			// so a credential cannot come from stdin too. The prompt is empty
+			// on the same condition as below, so "" counts as no prompt.
+			if strings.Join(args, " ") == "" {
+				if stdinStat, err := os.Stdin.Stat(); err == nil && stdinStat.Mode()&os.ModeCharDevice == 0 {
+					if err := rejectStdinCredential(cmd, "orka run uses for the prompt; pass the prompt as an argument"); err != nil {
+						return err
+					}
+				}
+			}
 			c := newClientFromCmd(cmd)
 
 			// Pre-flight check (retry once on stale cache)
 			cfg, err := c.GetChatConfig(context.Background())
 			if err != nil {
 				// Clear stale cache and re-discover
-				clearPortForwardCache()
+				clearPortForwardCache(cmd)
 				c = newClientFromCmd(cmd)
 				cfg, err = c.GetChatConfig(context.Background())
 				if err != nil {
@@ -292,7 +302,7 @@ func streamChat(
 
 func handleToolCallEvent(data client.SSEEventData, verbosity int) {
 	switch data.Name {
-	case "create_agent_task", "delegate_task":
+	case toolCreateAgentTask, toolDelegateTask:
 		var args map[string]any
 		if json.Unmarshal(data.Args, &args) == nil {
 			agentName, _ := args["agentRef"].(string)

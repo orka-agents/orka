@@ -1,4 +1,5 @@
 ---
+sidebar_label: Bring your own runtime
 description: "Registering your own external agent runtime with Orka using the AgentRuntime resource."
 ---
 
@@ -78,7 +79,6 @@ kind: AgentRuntime
 metadata:
   name: external-acp
 spec:
-  contractVersion: orka.harness.v2
   deployment:
     mode: external-endpoint
     endpoint: http://external-acp.default.svc.cluster.local:8080

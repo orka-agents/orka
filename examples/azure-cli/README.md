@@ -1,0 +1,14 @@
+# Azure CLI through Orka
+
+Run `az` in a built-in coding agent without giving it an Azure credential.
+Read requests to Azure Resource Manager go through Orka's broker, which adds
+the Agent's own Entra identity or the requester's linked account.
+
+- `Dockerfile`: the toolbox image, a self-contained Python and the stock
+  Azure CLI under `/opt/azure-cli`. Orka signs `az` in, so any toolbox that
+  puts `az` on `PATH` works the same way.
+- `as-agent.yaml`: az acts as the Agent's Entra agent identity.
+- `as-person.yaml`: az acts as the person who asked, through their linked
+  Azure account.
+
+See the [Azure CLI guide](../../website/docs/guides/azure-cli.md).

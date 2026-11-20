@@ -1,8 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { ChatMessageList } from './chat-message-list'
 import { ChatInput } from './chat-input'
 import { useSendMessage, useChatConfig } from '@/hooks/use-chat'
 import { useProviderList } from '@/hooks/use-providers'
+import { useDocumentTitle } from '@/hooks/use-document-title'
 import { useChatStore } from '@/stores/chat'
 import { useUIStore } from '@/stores/ui'
 import { isForbiddenError } from '@/lib/api-client'
@@ -15,10 +16,12 @@ import { Plus } from 'lucide-react'
 const SERVER_DEFAULT = '__default__'
 
 export function ChatPage() {
+  useDocumentTitle('Chat')
   const sendMessage = useSendMessage()
   const { data: config } = useChatConfig()
   const { data: providersData, error: providersError } = useProviderList()
   const namespace = useUIStore((s) => s.namespace)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const {
     currentSessionId,
     newSession,
@@ -93,6 +96,17 @@ export function ChatPage() {
   // and when there is none to pin to the input is disabled.
   const modelNeedsProvider = !provider && !config?.provider
 
+  // New Chat during a reply also cancels the server-side turn (the orphaned
+  // turn sends DELETE /chat/{sessionId}), which deletes the chat and its
+  // history like Stop does, so it asks first. An idle chat resets at once.
+  const handleNewChat = () => {
+    if (useChatStore.getState().isStreaming && !confirm('Stop the current reply and delete this chat?')) return
+    newSession()
+    // New Chat leaves with the transcript it clears, which would drop focus
+    // to <body>; the composer takes it for the next message.
+    composerRef.current?.focus()
+  }
+
   const handleProviderChange = (value: string) => {
     const next = value === SERVER_DEFAULT ? '' : value
     setProvider(next)
@@ -102,27 +116,34 @@ export function ChatPage() {
   }
 
   return (
-    <div className="flex h-full flex-col -m-4 md:-m-6">
+    // The negative margins cancel <main>'s padding, so the height adds that
+    // padding back: the surface fills the pane exactly, the transcript is the
+    // only thing that scrolls, and no empty band is left under the input.
+    <div className="-m-4 flex h-[calc(100%+2rem)] flex-col md:-m-6 md:h-[calc(100%+3rem)]">
       {/* Header */}
       <div className="border-b border-border bg-card px-4 py-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
             <h1 className="text-sm font-semibold">Chat</h1>
+            {/* A badge is a centered flex box, so long text ellipsizes in an
+                inner span; centering the overflow would show its middle. */}
             {currentSessionId && (
-              <Badge variant="secondary" className="font-mono text-[10px]">
-                {currentSessionId}
+              <Badge variant="secondary" className="min-w-0 max-w-full justify-start font-mono text-[10px]" title={currentSessionId}>
+                <span className="truncate">{currentSessionId}</span>
               </Badge>
             )}
             {effectiveModel && (
-              <Badge variant="outline" className="text-[10px]">
-                {effectiveModel}
+              <Badge variant="outline" className="min-w-0 max-w-full justify-start text-[10px]" title={effectiveModel}>
+                <span className="truncate">{effectiveModel}</span>
               </Badge>
             )}
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* On narrow screens the controls take their own full-width row and
+              share it, so New Chat stays reachable. */}
+          <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Select value={provider || (hasServerDefault ? SERVER_DEFAULT : '')} onValueChange={handleProviderChange} disabled={isStreaming}>
-              <SelectTrigger className="h-7 w-auto min-w-40 text-xs" aria-label="Chat provider">
-                <SelectValue placeholder="Provider" />
+              <SelectTrigger className="h-7 min-w-0 flex-1 text-xs sm:w-auto sm:min-w-40 sm:flex-none" aria-label="Chat provider">
+                <span className="min-w-0 truncate"><SelectValue placeholder="Provider" /></span>
               </SelectTrigger>
               <SelectContent>
                 {hasServerDefault && <SelectItem value={SERVER_DEFAULT}>{serverDefaultLabel}</SelectItem>}
@@ -142,10 +163,10 @@ export function ChatPage() {
               onChange={(e) => setModel(e.target.value)}
               placeholder={provider ? providers.find((p) => p.name === provider)?.defaultModel || 'model' : config?.model || 'model (server default)'}
               disabled={isStreaming || modelNeedsProvider}
-              className="h-7 w-48 text-xs"
+              className="h-7 min-w-0 flex-1 text-xs sm:w-48 sm:flex-none"
             />
             {messages.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={newSession} className="h-7 text-xs">
+              <Button variant="ghost" size="sm" onClick={handleNewChat} className="h-7 shrink-0 text-xs">
                 <Plus className="mr-1 h-3 w-3" /> New Chat
               </Button>
             )}
@@ -171,7 +192,7 @@ export function ChatPage() {
       <ChatMessageList />
 
       {/* Input */}
-      <ChatInput onSend={sendMessage} disabled={noProviderSelected} disabledHint={noProviderSelected ? 'Choose a provider before sending.' : undefined} />
+      <ChatInput textareaRef={composerRef} onSend={sendMessage} disabled={noProviderSelected} disabledHint={noProviderSelected ? 'Choose a provider before sending.' : undefined} />
     </div>
   )
 }

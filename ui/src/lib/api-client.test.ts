@@ -134,6 +134,32 @@ describe('error handling', () => {
     expect(clearTokenFn).toHaveBeenCalled()
   })
 
+  it('keeps a token that replaced the one a late 401 answers', async () => {
+    // Signing in while the previous page's requests are still in flight.
+    tokenValue = 'stale-token'
+    server.use(
+      http.get(`${API}/tasks`, () => {
+        tokenValue = 'fresh-token'
+        return new HttpResponse('Unauthorized', { status: 401 })
+      })
+    )
+
+    await expect(api.get('/tasks')).rejects.toThrow()
+    expect(clearTokenFn).not.toHaveBeenCalled()
+  })
+
+  it('keeps a token set after a request that carried none was rejected', async () => {
+    server.use(
+      http.get(`${API}/tasks`, () => {
+        tokenValue = 'fresh-token'
+        return new HttpResponse('Unauthorized', { status: 401 })
+      })
+    )
+
+    await expect(api.get('/tasks')).rejects.toThrow()
+    expect(clearTokenFn).not.toHaveBeenCalled()
+  })
+
   it('throws ApiError with correct status and message on non-OK response', async () => {
     server.use(
       http.get(`${API}/tasks`, () => {

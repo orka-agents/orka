@@ -54,6 +54,15 @@ type RuntimeProfile struct {
 	ProxyCredentialRole      string            `json:"proxyCredentialRole"`
 	ProxyCredentialScope     string            `json:"proxyCredentialScope"`
 	ResourceClass            string            `json:"resourceClass"`
+	// Toolboxes lists the read-only tool images bound into the runtime Pod,
+	// in declared order. An absent list serializes identically to profiles
+	// that predate toolboxes, so their digests are unchanged.
+	Toolboxes []RuntimeToolbox `json:"toolboxes,omitempty"`
+	// Skills lists the Agent Skills bound read-only into the runtime Pod and
+	// projected into each session's native skills folder, in declared order.
+	// An absent list serializes identically to profiles that predate skills,
+	// so their digests are unchanged.
+	Skills []RuntimeSkill `json:"skills,omitempty"`
 }
 
 func (p RuntimeProfile) Validate() error {
@@ -101,7 +110,13 @@ func (p RuntimeProfile) Validate() error {
 	if err := validateBoundedString("proxy credential scope", p.ProxyCredentialScope, true, 1024); err != nil {
 		return err
 	}
-	return validateBoundedString("resource class", p.ResourceClass, true, 128)
+	if err := validateBoundedString("resource class", p.ResourceClass, true, 128); err != nil {
+		return err
+	}
+	if err := ValidateRuntimeToolboxes(p.Toolboxes); err != nil {
+		return err
+	}
+	return ValidateRuntimeSkills(p.Skills)
 }
 
 const (
@@ -206,9 +221,8 @@ func validateAgentExecutionControls(providerKind string, maxTurns int32, reasoni
 	}
 	switch providerKind {
 	case providerKindCodex:
-		if reasoningEffort == reasoningEffortMax {
-			return fmt.Errorf("codex provider does not support reasoning effort %q", reasoningEffort)
-		}
+		// Codex accepts the full enum; the selected model may support a subset.
+		return nil
 	case providerKindClaude:
 		if reasoningEffort == "none" {
 			return fmt.Errorf("claude provider does not support reasoning effort %q", reasoningEffort)
