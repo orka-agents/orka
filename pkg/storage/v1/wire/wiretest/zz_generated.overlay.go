@@ -8,7 +8,7 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 )
 
-// stateOverlay serves the contract families that have wire RPCs through the
+// stateOverlay serves the state families that have wire RPCs through the
 // client, and every other family from the in-process provider.
 type stateOverlay struct {
 	storagev1.StateProvider
@@ -26,8 +26,13 @@ var overlayMethods = []string{
 	"ListUnreadMessages",
 	"SendMessage",
 	"DeletePlan",
+	"DeleteResult",
 	"GetPlan",
+	"GetPromptResultReceipt",
+	"GetResult",
 	"SavePlan",
+	"SavePromptResultReceipt",
+	"SaveResult",
 }
 
 func (overlay stateOverlay) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
@@ -62,10 +67,72 @@ func (overlay stateOverlay) DeletePlan(ctx context.Context, namespace string, ta
 	return overlay.client.DeletePlan(ctx, namespace, taskName)
 }
 
+func (overlay stateOverlay) DeleteResult(ctx context.Context, namespace string, taskName string) error {
+	return overlay.client.DeleteResult(ctx, namespace, taskName)
+}
+
 func (overlay stateOverlay) GetPlan(ctx context.Context, namespace string, taskName string) (*storagev1.PlanState, error) {
 	return overlay.client.GetPlan(ctx, namespace, taskName)
 }
 
+func (overlay stateOverlay) GetPromptResultReceipt(ctx context.Context, attemptID string) (*storagev1.PromptResultReceipt, error) {
+	return overlay.client.GetPromptResultReceipt(ctx, attemptID)
+}
+
+func (overlay stateOverlay) GetResult(ctx context.Context, namespace string, taskName string) ([]byte, error) {
+	return overlay.client.GetResult(ctx, namespace, taskName)
+}
+
 func (overlay stateOverlay) SavePlan(ctx context.Context, namespace string, taskName string, plan *storagev1.PlanState) error {
 	return overlay.client.SavePlan(ctx, namespace, taskName, plan)
+}
+
+func (overlay stateOverlay) SavePromptResultReceipt(ctx context.Context, receipt storagev1.PromptResultReceipt) error {
+	return overlay.client.SavePromptResultReceipt(ctx, receipt)
+}
+
+func (overlay stateOverlay) SaveResult(ctx context.Context, namespace string, taskName string, data []byte) error {
+	return overlay.client.SaveResult(ctx, namespace, taskName, data)
+}
+
+// artifactsOverlay serves the artifacts families that have wire RPCs through the
+// client, and every other family from the in-process provider.
+type artifactsOverlay struct {
+	storagev1.ArtifactProvider
+	client *wire.Client
+}
+
+// artifactsOverlayMethods names the contract methods artifactsOverlay sends through the
+// client.
+var artifactsOverlayMethods = []string{
+	"DeleteArtifacts",
+	"GetArtifact",
+	"ListArtifacts",
+	"SaveArtifact",
+	"Describe",
+	"HealthCheck",
+}
+
+func (overlay artifactsOverlay) DeleteArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) error {
+	return overlay.client.DeleteArtifacts(ctx, owner)
+}
+
+func (overlay artifactsOverlay) GetArtifact(ctx context.Context, key storagev1.ArtifactKey) ([]byte, string, error) {
+	return overlay.client.GetArtifact(ctx, key)
+}
+
+func (overlay artifactsOverlay) ListArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) ([]storagev1.ArtifactMetadata, error) {
+	return overlay.client.ListArtifacts(ctx, owner)
+}
+
+func (overlay artifactsOverlay) SaveArtifact(ctx context.Context, request storagev1.SaveArtifactRequest) error {
+	return overlay.client.SaveArtifact(ctx, request)
+}
+
+func (overlay artifactsOverlay) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	return overlay.client.Describe(ctx)
+}
+
+func (overlay artifactsOverlay) HealthCheck(ctx context.Context) error {
+	return overlay.client.HealthCheck(ctx)
 }

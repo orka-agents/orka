@@ -31,6 +31,22 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // request digest from the decoded request and refuses a mismatch with
 // VALIDATION before the provider runs.
 //
+// Blob framing
+//
+// A client-streaming RPC uploads a request whose blob field (marked with the
+// blob option) may be larger than one message. The request headers
+// orka-storage-blob-size (decimal bytes) and orka-storage-blob-sha256
+// (lowercase hex) describe the whole blob. The first message carries every
+// request field, with at most the first 1 MiB of the blob in its blob field;
+// each later message carries only the next part of the blob, at most 1 MiB and
+// never empty, in the same field. The server calls the provider once, after
+// the client ends the stream and the reassembled blob matches its size and
+// digest. A stream that ends early or fails its digest is refused with
+// UNAVAILABLE, and one larger than the server accepts with TOO_LARGE, so a
+// refused upload never reaches the provider. A server-streaming RPC returns
+// its response the same way, with the size and digest in the response
+// headers.
+//
 // Errors
 //
 // Every status the server library or a provider produces carries a
@@ -44,12 +60,13 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // TASK_JOB_REVOKED, TASK_DATA_CLEANUP_CHANGED, USAGE_SELECTION_TOO_LARGE,
 // CONNECTOR_CUSTODY_TOMBSTONED, CONNECTOR_CONSENT_SUPERSEDED,
 // CONNECTOR_RETIRED_LIMIT, TOO_LARGE, UNAVAILABLE, OUTCOME_UNKNOWN,
-// UNAUTHENTICATED, INCOMPATIBLE, CONTRACT_MISMATCH, UNSUPPORTED_FIELD and
-// PROVIDER_ERROR. VALIDATION, FENCED and PRECONDITION_FAILED carry the typed
-// error's client-safe "message" in the ErrorInfo metadata, and CONFLICT the
-// provider's error text; each is bounded and stripped of control characters.
-// TOO_LARGE carries "what", "size" and "limit". BINDING_CONFLICT carries a BindingConflictError message
-// as a second status detail.
+// UNAUTHENTICATED, INCOMPATIBLE, CONTRACT_MISMATCH, UNSUPPORTED_FIELD,
+// OVERLOADED and PROVIDER_ERROR. VALIDATION, FENCED and PRECONDITION_FAILED
+// carry the typed error's client-safe "message" in the ErrorInfo metadata,
+// and CONFLICT the provider's error text; each is bounded and stripped of
+// control characters. TOO_LARGE carries "what", "size" and "limit".
+// BINDING_CONFLICT carries a BindingConflictError message as a second status
+// detail.
 
 // NullableTime carries a Go *time.Time. An absent NullableTime is a nil
 // pointer; a present one with no value points to the zero time.

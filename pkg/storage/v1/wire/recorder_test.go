@@ -4,8 +4,11 @@ import (
 	"context"
 	"reflect"
 	"sync"
+	"testing"
+	"time"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
+	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 )
 
 // recordingProvider records every call to a method with a wire RPC and
@@ -41,9 +44,30 @@ type recordedCall struct {
 // sets another Describe result.
 const testDataset = "dataset-test"
 
+// boundConfig binds a client to the recording provider's dataset.
+var boundConfig = wire.ClientConfig{Dataset: testDataset}
+
+// serveBoth serves provider as both the state.v1 and the artifacts.v1
+// provider.
+func serveBoth(provider *recordingProvider) wire.ServerConfig {
+	return wire.ServerConfig{State: provider, Artifacts: provider}
+}
+
+// describeDefault is the recording provider's description.
+func describeDefault() storagev1.ProviderInfo {
+	return storagev1.ProviderInfo{
+		ContractVersion: storagev1.ContractVersion,
+		Contracts:       []string{storagev1.StateContract, storagev1.ArtifactsContract},
+		DatasetID:       testDataset,
+		DatasetOrigin:   storagev1.DatasetOriginNew,
+		Limits:          storagev1.ProviderLimits{MaxArtifactBytes: storagev1.MaxArtifactBytes},
+		Durability:      storagev1.DurabilityLocalFsync,
+	}
+}
+
 func newRecordingProvider() *recordingProvider {
 	return &recordingProvider{
-		results: map[string][]any{"Describe": {storagev1.ProviderInfo{DatasetID: testDataset}}},
+		results: map[string][]any{"Describe": {describeDefault()}},
 		written: map[string][]any{},
 		errs:    map[string]error{},
 		panics:  map[string]any{},
@@ -76,6 +100,24 @@ func (p *recordingProvider) called(ctx context.Context, method string, args ...a
 		panic(panicValue)
 	}
 	return results, err
+}
+
+// waitEntered waits until a call to method reaches the provider, skipping
+// calls to other methods, such as the Describe a server sends to learn its
+// dataset.
+func (p *recordingProvider) waitEntered(t *testing.T, method string) {
+	t.Helper()
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case entered := <-p.entered:
+			if entered == method {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("no call to %s reached the provider", method)
+		}
+	}
 }
 
 func (p *recordingProvider) set(method string, results []any, err error) {

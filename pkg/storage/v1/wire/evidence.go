@@ -83,6 +83,17 @@ func coverEvidence(own *atomic.Pointer[grpc.ClientConn]) grpc.UnaryClientInterce
 	}
 }
 
+// coverStreamEvidence is coverEvidence for streaming calls.
+func coverStreamEvidence(own *atomic.Pointer[grpc.ClientConn]) grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
+		streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		if evidence := sendEvidenceFrom(ctx); evidence != nil && cc != nil && cc == own.Load() && cc == evidence.conn {
+			evidence.covered.Store(true)
+		}
+		return streamer(ctx, desc, cc, method, opts...)
+	}
+}
+
 type sendEvidenceKey struct{}
 
 func withSendEvidence(ctx context.Context, evidence *sendEvidence) context.Context {

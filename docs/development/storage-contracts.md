@@ -1591,7 +1591,8 @@ carries back the record a pointer parameter of the same name points to, so
 the ID `SendMessage` assigns reaches the caller's `Message` as it does in
 process. Each RPC declares its kind (`READ`, `WRITE` or `ADMIN`), which must
 be the kind and contract part the method catalog (`storagev1.LookupMethod`)
-gives it. Generation fails when a method of a Go interface a service names
+gives it; a streaming RPC must be in the catalog's `CallBulk` class, an upload
+a write and a download a read. Generation fails when a method of a Go interface a service names
 (`go_interface`) has no RPC or an RPC no method, when an RPC's kind or contract
 part differs from the catalog, when any parameter, result or record field,
 including a `json:"-"` field, has no wire field or the reverse, when two Go
@@ -1599,12 +1600,15 @@ fields claim one wire field, or when a pair of types is outside the mapping
 table. A family whose service does not exist yet is not checked.
 CI regenerates the code and fails on a difference.
 
-The wire currently serves `Describe` and `HealthCheck`, inter-agent messages
-and plan state. The other families stay in process until their RPCs land.
+The wire currently serves `Describe` and `HealthCheck`, inter-agent messages,
+plan state, Task results, prompt result receipts and the `artifacts.v1`
+artifact store. The other families stay in process until their RPCs land.
 `wiretest.State` serves a provider over an in-memory loopback with TLS 1.3 and
 bearer authentication, sending each family that has RPCs through the server
-library and the generated client. The SQLite provider passes the suite's state
-families that way; its maintenance and durability harnesses and the
+library and the generated client, and `wiretest.Artifacts` does the same for
+an artifacts provider, keeping its epoch, receipt, binding, watermark and
+export families in process. The SQLite provider passes the suite's state and
+artifacts families that way; its maintenance and durability harnesses and the
 artifact-fence cases run only in process.
 
 - **Call metadata.** Every request names `orka-storage-contract`
@@ -1632,7 +1636,7 @@ artifact-fence cases run only in process.
   `ErrDatasetMismatch` for a read. It refuses an error for another dataset the
   same way, unless the server can send that error before its dataset check
   (`UNAUTHENTICATED`, `CONTRACT_MISMATCH`, `UNSUPPORTED_FIELD`,
-  `DATASET_MISMATCH`, `UNAVAILABLE` or `INCOMPATIBLE`), so another dataset's
+  `DATASET_MISMATCH`, `UNAVAILABLE`, `INCOMPATIBLE` or `OVERLOADED`), so another dataset's
   `NOT_FOUND` or refused write is never taken as an answer for its own. A
   write's `WriteEnvelope` travels as the binary header
   `orka-storage-envelope-bin`, and the server puts it in the
@@ -1649,16 +1653,50 @@ artifact-fence cases run only in process.
   digest covers them exactly as the caller wrote them; the client decodes a
   response's dynamic values as `encoding/json` does by default, as an
   in-process provider returns them.
+- **Blob framing.** Task results, prompt result receipts and artifacts move
+  on streaming RPCs. The request or response field marked with the `blob`
+  option crosses in messages of at most 1 MiB: the first message carries every
+  other field and the first part of the blob, and each later message only the
+  next part. The headers `orka-storage-blob-size` and
+  `orka-storage-blob-sha256` describe the whole blob, so the receiver refuses
+  an oversized blob before reading it. The server calls the provider once,
+  after the client ends the stream and the reassembled blob matches its size
+  and digest; a stream that ends early or fails its digest is refused as
+  `UNAVAILABLE`, one over the server's limit (64 MiB by default, and the
+  provider's `MaxArtifactBytes` for an artifact) as `TOO_LARGE`, and one that
+  breaks the framing as `VALIDATION`, so a refused upload never reaches the
+  provider. The client refuses a blob over its own limit, or an artifact over
+  the provider's described limit, without sending it. Given a second
+  connection (`ClientConfig.Bulk`), the client sends streaming calls over it,
+  so a large transfer has its own HTTP/2 flow-control window. Protobuf cannot
+  tell empty bytes from absent ones, so decoded bytes are never nil: a
+  provider receives an empty result, receipt or artifact as an empty slice,
+  as it would in process.
 - **Unknown fields.** The server refuses a request with a field it does not
-  know anywhere in its message tree (`UNSUPPORTED_FIELD`), so an older server
-  never ignores a newer precondition. The protocol revision starts at 1; a
-  release raises it when it adds RPCs or request fields, and the client calls
+  know anywhere in its message tree, including any message of a stream
+  (`UNSUPPORTED_FIELD`), so an older server
+  never ignores a newer precondition. The protocol revision starts at 1 and is 2
+  since the result, receipt and artifact RPCs; a release raises it when it adds RPCs or request fields, and the client calls
   an RPC only on a server of at least the revision that introduced it. A
   newer field of a read or an administrative call is sent only to such a
   server; on an older one the client refuses a call that sets it
   (`ErrIncompatible`) and sends one that leaves it unset. Generation refuses
   a newer field on a write's request, whose digest would then differ between
   revisions.
+- **Server limits.** A server can cap the calls it runs at once per call
+  class of the method catalog (`CallControl` for `Describe` and
+  `HealthCheck`, `CallInteractive`, `CallBackground`, and `CallBulk` for
+  results, receipts, artifact transfers and every streaming call) and how long each class may run. A call over its
+  class's limit is refused with `OVERLOADED` before the provider runs, which
+  the client returns as `ErrUnavailable`. The duration limit covers the whole
+  call, including the first description of the providers and every message a
+  streaming call receives or sends, so an upload or download whose peer stalls,
+  or never sends its request, is ended as `UNAVAILABLE` and frees its slot. A
+  write whose response cannot be sent in time after its provider ran is
+  `OUTCOME_UNKNOWN`, since the provider may have committed.
+  A client checks a download's declared size from the response headers before
+  it receives any of the blob, and a server describes the artifact limit it
+  enforces, which its own blob limit can lower.
 - **Errors.** Every status the server library produces for a storage call
   carries a `google.rpc.ErrorInfo` in domain `storage.orka.ai` whose reason
   names the contract error; every contract sentinel has one. The client rebuilds
@@ -1671,7 +1709,8 @@ artifact-fence cases run only in process.
   pointer to it, so `errors.As` finds the text it finds in process,
   and `CONFLICT` the error's text as the provider wrote it. `TOO_LARGE` forwards
   its typed fields, and `BINDING_CONFLICT` the `BindingConflictError` itself as
-  a second status detail. A failed authentication is `ErrUnauthenticated`, as
+  a second status detail. A server over a class's concurrency limit
+  answers `OVERLOADED`, which the client returns as `ErrUnavailable`. A failed authentication is `ErrUnauthenticated`, as
   is any call to a server with an `Authenticator` that reached it through a
   transport that runs no gRPC tap, such as `grpc.Server.ServeHTTP`, and a
   call the server refuses for its contract headers or an unknown field, or an
@@ -1696,6 +1735,24 @@ artifact-fence cases run only in process.
   fail it with a status that reads as a transport failure; the message byte
   budgets and identifier bounds keep a contract-conforming provider's message
   batches well under it.
+
+`pkg/storage/v1/wire/adapterkit` serves a provider as a separately deployed
+adapter. `adapterkit.Serve` requires TLS 1.3 with a serving certificate and
+key from files, reloaded when they change, and at least one client
+authentication method: bearer tokens from a mounted directory (every file named
+`token*` is accepted, so a token rotates by adding a second key, moving clients
+to it and removing the first), an mTLS client CA bundle with the client URI or
+DNS names it allows, or both, in which case a call must pass both. It applies
+per-class concurrency and duration limits, serves `/healthz`, `/readyz` (the
+providers describe a dataset and pass their health checks) and `/metrics` on a
+separate plain HTTP port that carries no stored data, and on shutdown reports
+not ready and lets calls in progress finish for up to a grace period (30
+seconds by default), after which it closes the remaining connections and
+returns. `adapterkit.SettleContext` gives a provider a context, bounded by a
+settle timeout (10 seconds by default), to finish a commit it has already sent
+after the caller's context ends, so the outcome the client reports as unknown
+is settled for its retry or resolution; the grace period should exceed the
+settle timeout.
 
 ### Orka policy above the client
 

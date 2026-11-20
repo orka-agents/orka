@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ var testFence = storagev1.TaskDataFence{
 // arguments, so a fill the wire did not preserve exactly fails here.
 func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 	clientValue := reflect.ValueOf(client)
 	require.NotEmpty(t, wireMethods)
 	for _, name := range wireMethods {
@@ -83,11 +84,17 @@ func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 			for index := 0; index < methodType.NumOut()-1; index++ {
 				results = append(results, wire.FillValue(methodType.Out(index), fmt.Sprintf("%s.result%d", name, index)).Interface())
 			}
-			if name == "Describe" {
-				// The client is bound to the dataset the provider serves.
-				info := results[0].(storagev1.ProviderInfo)
-				info.DatasetID = testDataset
-				results[0] = info
+			if len(results) > 0 {
+				if described, isInfo := results[0].(storagev1.ProviderInfo); isInfo {
+					// A Describe notes the serving dataset, which every later
+					// call must name, and the server describes only the
+					// contract parts it serves and the artifact limit it
+					// enforces.
+					described.DatasetID = testDataset
+					described.Contracts = []string{storagev1.StateContract, storagev1.ArtifactsContract}
+					described.Limits.MaxArtifactBytes = storagev1.MaxArtifactBytes
+					results[0] = described
+				}
 			}
 			provider.set(name, results, nil)
 			written := make([]any, 0, len(wireWriteBacks[name]))
@@ -126,7 +133,7 @@ func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 // sees it over the wire as it would in process.
 func TestSendMessageWritesTheAssignedIDBack(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
 	sentAt := time.Date(2026, 11, 17, 3, 4, 5, 6, time.UTC)
 	provider.setWritten("SendMessage", []any{storagev1.Message{ID: 42, Namespace: "n", Content: "hi", CreatedAt: sentAt}})
 
@@ -140,7 +147,7 @@ func TestSendMessageWritesTheAssignedIDBack(t *testing.T) {
 // the provider as a fence, as in process, never as no fence at all.
 func TestAZeroTaskDataFenceStillReachesTheProvider(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
 	_, err := client.GetPlan(storagev1.WithTaskDataFence(t.Context(), storagev1.TaskDataFence{}), "n", "t")
 	require.NoError(t, err)
 	calls := provider.callsTo("GetPlan")
@@ -151,7 +158,7 @@ func TestAZeroTaskDataFenceStillReachesTheProvider(t *testing.T) {
 
 func TestServerRefusesARequestThatDoesNotMatchItsDigest(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
 	plan := &storagev1.PlanState{Summary: "s"}
 	other := testEnvelope(t, "SavePlan", "n", "t", &storagev1.PlanState{Summary: "other"})
 	err := client.SavePlan(storagev1.WithWriteEnvelope(t.Context(), other), "n", "t", plan)
@@ -170,7 +177,7 @@ func TestServerRefusesARequestThatDoesNotMatchItsDigest(t *testing.T) {
 // and the server refuses one a read carries.
 func TestServerRefusesAnEnvelopeOnARead(t *testing.T) {
 	provider := newRecordingProvider()
-	plans := storagepb.NewResultsClient(wiretest.Dial(t, provider))
+	plans := storagepb.NewResultsClient(wiretest.Dial(t, wire.ServerConfig{State: provider}))
 	encoded, err := proto.Marshal(&storagepb.WriteEnvelope{DatasetId: "dataset-1", OperationId: "operation-1"})
 	require.NoError(t, err)
 	ctx := metadata.AppendToOutgoingContext(contractContext(t.Context()), wire.HeaderEnvelope, string(encoded))
@@ -183,7 +190,7 @@ func TestServerRefusesAnEnvelopeOnARead(t *testing.T) {
 
 func TestServerRefusesAnUndecodableTaskDataFence(t *testing.T) {
 	provider := newRecordingProvider()
-	plans := storagepb.NewResultsClient(wiretest.Dial(t, provider))
+	plans := storagepb.NewResultsClient(wiretest.Dial(t, wire.ServerConfig{State: provider}))
 	ctx := metadata.AppendToOutgoingContext(contractContext(t.Context()), wire.HeaderTaskDataFence, "\xff\xff")
 	_, err := plans.GetPlan(ctx, &storagepb.GetPlanRequest{Namespace: "n", TaskName: "t"})
 	_, reason := reasonOf(t, err)
@@ -199,10 +206,8 @@ func TestServerRefusesAnUndecodableTaskDataFence(t *testing.T) {
 	require.Empty(t, provider.callsTo("GetPlan"))
 }
 
-// contractContext names the contract and revision, as the client does, for a
-// raw stub call.
 // contractContext names the contract, revision 1 and the recording
-// provider's dataset, as a bound client does.
+// provider's dataset, as a bound client does, for a raw stub call.
 func contractContext(ctx context.Context) context.Context {
 	return datasetContext(ctx, testDataset)
 }
@@ -227,7 +232,7 @@ func reasonOf(t *testing.T, err error) (codes.Code, string) {
 
 func TestServerRefusesCallsWithoutTheContractHeaders(t *testing.T) {
 	provider := newRecordingProvider()
-	plans := storagepb.NewResultsClient(wiretest.Dial(t, provider))
+	plans := storagepb.NewResultsClient(wiretest.Dial(t, serveBoth(provider)))
 
 	var refusedHeader metadata.MD
 	_, err := plans.GetPlan(t.Context(), &storagepb.GetPlanRequest{Namespace: "n", TaskName: "t"}, grpc.Header(&refusedHeader))
@@ -236,7 +241,7 @@ func TestServerRefusesCallsWithoutTheContractHeaders(t *testing.T) {
 	require.Equal(t, wire.ReasonContractMismatch, reason)
 	require.Equal(t, []string{storagev1.ContractVersion}, refusedHeader.Get(wire.HeaderContract),
 		"a refused call still names the server's contract")
-	require.Equal(t, []string{"1"}, refusedHeader.Get(wire.HeaderRevision))
+	require.Equal(t, []string{strconv.Itoa(wire.ProtocolRevision)}, refusedHeader.Get(wire.HeaderRevision))
 
 	other := metadata.AppendToOutgoingContext(t.Context(), wire.HeaderContract, "orka.storage.v2", wire.HeaderRevision, "1")
 	_, err = plans.GetPlan(other, &storagepb.GetPlanRequest{})
@@ -257,7 +262,7 @@ func TestServerRefusesCallsWithoutTheContractHeaders(t *testing.T) {
 // precondition cannot be dropped silently.
 func TestServerRefusesUnknownRequestFields(t *testing.T) {
 	provider := newRecordingProvider()
-	plans := storagepb.NewResultsClient(wiretest.Dial(t, provider))
+	plans := storagepb.NewResultsClient(wiretest.Dial(t, serveBoth(provider)))
 	unknown := []byte{0xf8, 0x07, 0x01} // field 127, varint 1
 
 	request := &storagepb.DeletePlanRequest{Namespace: "n", TaskName: "t"}
@@ -278,7 +283,7 @@ func TestServerRefusesUnknownRequestFields(t *testing.T) {
 
 func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
 	envelope := testEnvelope(t, "SavePlan", "n", "t", &storagev1.PlanState{Summary: "s"})
 	ctx := storagev1.WithWriteEnvelope(t.Context(), envelope)
 
@@ -301,7 +306,7 @@ func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 
 func TestProviderFailuresCrossTheWire(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 
 	provider.set("GetPlan", nil, fmt.Errorf("lookup: %w", storagev1.ErrNotFound))
 	_, err := client.GetPlan(t.Context(), "n", "t")
@@ -337,7 +342,7 @@ func TestProviderFailuresCrossTheWire(t *testing.T) {
 
 func TestClientRefusesInvalidRequestsWithoutSending(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 
 	err := client.SendMessage(t.Context(), &storagev1.Message{Namespace: "n", Content: "bad \xff"})
 	require.ErrorIs(t, err, storagev1.ErrValidation)
@@ -370,7 +375,7 @@ func TestClientRefusesInvalidRequestsWithoutSending(t *testing.T) {
 // the client reports an unknown outcome rather than a refused request.
 func TestUnencodableResultsAreProviderErrors(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, serveBoth(provider))
 
 	provider.set("ConsumeMessages", []any{[]storagev1.Message{{Content: "stored \xff"}}}, nil)
 	_, err := client.ConsumeMessages(t.Context(), storagev1.ConsumeMessagesRequest{Namespace: "n", TaskName: "t", ParentTask: "p"})
@@ -392,7 +397,7 @@ func TestUnencodableResultsAreProviderErrors(t *testing.T) {
 // provider error instead.
 func TestOversizeResponsesAreProviderErrors(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
 	half := strings.Repeat("x", wire.MaxMessageBytes/2)
 	oversize := []any{[]storagev1.Message{{Content: half}, {Content: half}}}
 
@@ -414,7 +419,7 @@ func TestResponsesNameTheContractRevisionAndDataset(t *testing.T) {
 		DatasetID: "dataset-7", DatasetOrigin: storagev1.DatasetOriginNew, SchemaVersion: "1",
 		Durability: storagev1.DurabilityLocalFsync,
 	}}, nil)
-	conn := wiretest.Dial(t, provider)
+	conn := wiretest.Dial(t, serveBoth(provider))
 	info, server, err := wire.NewClient(conn, wire.ClientConfig{}).DescribeServer(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, "dataset-7", info.DatasetID)
@@ -426,7 +431,7 @@ func TestResponsesNameTheContractRevisionAndDataset(t *testing.T) {
 	_, err = storagepb.NewResultsClient(conn).GetPlan(datasetContext(t.Context(), "dataset-7"), &storagepb.GetPlanRequest{}, grpc.Header(&header))
 	require.NoError(t, err)
 	require.Equal(t, []string{storagev1.ContractVersion}, header.Get(wire.HeaderContract))
-	require.Equal(t, []string{"1"}, header.Get(wire.HeaderRevision))
+	require.Equal(t, []string{strconv.Itoa(wire.ProtocolRevision)}, header.Get(wire.HeaderRevision))
 	require.Equal(t, []string{"dataset-7"}, header.Get(wire.HeaderDataset))
 }
 
@@ -436,7 +441,7 @@ func TestResponsesNameTheContractRevisionAndDataset(t *testing.T) {
 // is checked too.
 func TestServerChecksTheRequestDataset(t *testing.T) {
 	provider := newRecordingProvider()
-	conn := wiretest.Dial(t, provider)
+	conn := wiretest.Dial(t, wire.ServerConfig{State: provider})
 
 	other := wire.NewClient(conn, wire.ClientConfig{Dataset: "dataset-other"})
 	_, err := other.GetPlan(t.Context(), "n", "t")
@@ -473,7 +478,7 @@ func TestServerChecksTheRequestDataset(t *testing.T) {
 // it served before, even when no Describe call came in between.
 func TestServerRechecksTheDatasetBeforeEachRead(t *testing.T) {
 	provider := newRecordingProvider()
-	conn := wiretest.Dial(t, provider)
+	conn := wiretest.Dial(t, wire.ServerConfig{State: provider})
 	client := wire.NewClient(conn, wire.ClientConfig{Dataset: testDataset})
 	_, err := client.GetPlan(t.Context(), "n", "t")
 	require.NoError(t, err)
@@ -506,7 +511,7 @@ func TestServerRechecksTheDatasetBeforeEachRead(t *testing.T) {
 func TestServerThatCannotNameItsDatasetIsUnavailable(t *testing.T) {
 	provider := newRecordingProvider()
 	provider.set("Describe", nil, errors.New("the dataset is not open"))
-	client := wire.NewClient(wiretest.Dial(t, provider), wire.ClientConfig{Dataset: testDataset})
+	client := wire.NewClient(wiretest.Dial(t, wire.ServerConfig{State: provider}), wire.ClientConfig{Dataset: testDataset})
 
 	err := client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 	require.ErrorIs(t, err, storagev1.ErrUnavailable)
@@ -699,19 +704,19 @@ func TestDatasetIDsNeedNotBeASCII(t *testing.T) {
 	provider := newRecordingProvider()
 	provider.set("Describe", []any{storagev1.ProviderInfo{DatasetID: "données"}}, nil)
 	provider.set("GetPlan", []any{&storagev1.PlanState{Summary: "s"}}, nil)
-	client := wiretest.Serve(t, provider)
+	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
 
 	plan, err := client.GetPlan(t.Context(), "n", "t")
 	require.NoError(t, err, "the response names the client's dataset")
 	require.Equal(t, "s", plan.Summary)
 	require.NoError(t, client.DeletePlan(t.Context(), "n", "t"))
 
-	other := wire.NewClient(wiretest.Dial(t, provider), wire.ClientConfig{Dataset: "donnée"})
+	other := wire.NewClient(wiretest.Dial(t, wire.ServerConfig{State: provider}), wire.ClientConfig{Dataset: "donnée"})
 	_, err = other.GetPlan(t.Context(), "n", "t")
 	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
 }
 
-func TestNewServerRequiresAStateProvider(t *testing.T) {
+func TestNewServerRequiresAProvider(t *testing.T) {
 	_, err := wire.NewServer(wire.ServerConfig{})
 	require.Error(t, err)
 }
@@ -720,13 +725,20 @@ func TestNewServerRequiresAStateProvider(t *testing.T) {
 // inject transport faults below TLS use it; wiretest always uses TLS.
 func serveInsecure(t *testing.T, server *wire.Server) *grpc.ClientConn {
 	t.Helper()
+	return dialInsecure(t, serveInsecureWith(t, server))
+}
+
+// serveInsecureWith serves server on a TCP loopback without TLS, with extra
+// gRPC server options, and returns its address.
+func serveInsecureWith(t *testing.T, server *wire.Server, opts ...grpc.ServerOption) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	grpcServer := grpc.NewServer(server.ServerOptions()...)
+	grpcServer := grpc.NewServer(append(server.ServerOptions(), opts...)...)
 	server.Register(grpcServer)
 	go func() { _ = grpcServer.Serve(listener) }()
 	t.Cleanup(grpcServer.Stop)
-	return dialInsecure(t, listener.Addr().String())
+	return listener.Addr().String()
 }
 
 func dialInsecure(t *testing.T, address string) *grpc.ClientConn {

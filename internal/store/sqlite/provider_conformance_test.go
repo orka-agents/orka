@@ -97,3 +97,12 @@ func TestArtifactsOnlyProviderConformance(t *testing.T) {
 		return artifactsOnly{ArtifactProvider: openConformanceStore(t)}
 	})
 }
+
+// The artifacts suite runs again with the artifact store served over the TLS
+// loopback, artifact bytes moving with blob framing on a separate bulk
+// connection. The families without RPCs yet are served in process.
+func TestArtifactProviderConformanceOverWire(t *testing.T) {
+	storagetest.RunArtifacts(t, func(t *testing.T) storagev1.ArtifactProvider {
+		return wiretest.Artifacts(t, openConformanceStore(t))
+	}, storagetest.Parallel(), storagetest.RecomputesRequestDigests(wiretest.ArtifactsMethods()...))
+}
