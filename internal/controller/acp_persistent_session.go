@@ -311,15 +311,54 @@ func acpPersistentSessionReuseDigest(input acpPersistentSessionReuseInput) (stri
 	return acpDomainDigest("acp-resident-runtime-reuse/v1", input)
 }
 
-// acpPersistentSessionTranscriptHeadDigest identifies the terminal transcript
-// message one turn appended.
-func acpPersistentSessionTranscriptHeadDigest(role, content string) string {
-	h := sha256.New()
-	_, _ = h.Write([]byte("orka.acp.resident-runtime-transcript-head/v1\x00"))
-	_, _ = h.Write([]byte(strings.TrimSpace(role)))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(content))
-	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+// acpTranscriptHeadMessage is one message a turn appended, by role and
+// content.
+type acpTranscriptHeadMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// acpPersistentSessionTranscriptHeadDigest identifies the end of the
+// transcript one turn left: the stable ID of the message before the turn
+// ("" for an empty transcript) and exactly the messages the turn appended.
+// The ID is unique, so a later exchange that repeats the same reply never
+// matches.
+func acpPersistentSessionTranscriptHeadDigest(precedingMessageID string, appended []acpTranscriptHeadMessage) string {
+	digest, err := acpDomainDigest("acp-resident-runtime-transcript-head/v2", map[string]any{
+		"precedingMessageID": strings.TrimSpace(precedingMessageID), "appended": appended,
+	})
+	if err != nil {
+		return ""
+	}
+	return digest
+}
+
+// acpTranscriptHeadMatches reports whether the transcript still ends exactly
+// where turn N left it. Turn N appended one or two messages.
+func (d *ACPDispatcher) acpTranscriptHeadMatches(ctx context.Context, namespace, name, want string) (string, bool, error) {
+	for appended := 1; appended <= 2; appended++ {
+		tail, err := d.Sessions.transcripts.LoadTranscript(ctx, namespace, name, appended+1)
+		if err != nil {
+			return "", false, fmt.Errorf("load ACP transcript head for persistent session reuse: %w", err)
+		}
+		if len(tail) < appended {
+			continue
+		}
+		preceding := ""
+		if len(tail) == appended+1 {
+			preceding, tail = tail[0].ID, tail[1:]
+		} else if len(tail) != appended {
+			continue
+		}
+		messages := make([]acpTranscriptHeadMessage, 0, len(tail))
+		for _, message := range tail {
+			messages = append(messages, acpTranscriptHeadMessage{Role: message.Role, Content: message.Content})
+		}
+		if acpPersistentSessionTranscriptHeadDigest(preceding, messages) == want {
+			return tail[len(tail)-1].ID, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // acpRuntimePoolServedRecordDigest digests the pool's served-record
@@ -415,14 +454,14 @@ func (d *ACPDispatcher) acpResidentRuntimeHistoryRefusal(
 	if control.Availability != store.SessionAvailable {
 		return acpPersistentReasonSessionUnavailable, nil
 	}
-	last, err := d.Sessions.transcripts.LoadTranscript(ctx, control.Namespace, control.SessionName, 1)
+	lastID, matches, err := d.acpTranscriptHeadMatches(ctx, control.Namespace, control.SessionName, record.TranscriptHeadDigest)
 	if err != nil {
-		return "", fmt.Errorf("load ACP transcript head for persistent session reuse: %w", err)
+		return "", err
 	}
-	if len(last) != 1 || acpPersistentSessionTranscriptHeadDigest(last[0].Role, last[0].Content) != record.TranscriptHeadDigest {
+	if !matches {
 		return acpPersistentReasonTranscriptChanged, nil
 	}
-	if through := strings.TrimSpace(ref.ThroughMessageID); through != "" && through != last[0].ID {
+	if through := strings.TrimSpace(ref.ThroughMessageID); through != "" && through != lastID {
 		return acpPersistentReasonHistoryBoundary, nil
 	}
 	if ref.MaxMessages > 0 {
@@ -574,6 +613,10 @@ func (d *ACPDispatcher) prepareACPPersistentSessionKeep(
 		observed.PendingPermissionCount != 0 {
 		return nil, acpPersistentReasonRuntimeSessionNotIdle, rebaseDuration
 	}
+	head, headErr := d.acpPersistentSessionKeepTranscriptHead(ctx, input)
+	if headErr != nil || head == "" {
+		return nil, acpPersistentReasonHistoryBoundary, rebaseDuration
+	}
 	keptAt := time.Now().UTC()
 	record, err := store.NewSessionResidentRuntime(store.SessionResidentRuntime{
 		SourceTaskUID: string(task.UID), SourceAttempt: int64(task.Status.Execution.Attempt),
@@ -588,7 +631,7 @@ func (d *ACPDispatcher) prepareACPPersistentSessionKeep(
 		ProfileDigest: string(input.runtimeFence.RuntimeProfileDigest), MCPDigest: input.mcpDigest,
 		WorkspaceDigest: workspaceDigest, LineageConfigDigest: input.lineageDigest,
 		ReuseDigest:          reuseDigest,
-		TranscriptHeadDigest: acpPersistentSessionTranscriptHeadDigest(acpSessionTurnAssistantRole, input.resultText),
+		TranscriptHeadDigest: head,
 		RebasedTreeDigest:    rebasedTree, VerifiedBaseline: verifiedBaseline, PromptDelivered: true,
 		KeptAt: keptAt, ExpiresAt: keptAt.Add(window),
 	})
@@ -638,6 +681,34 @@ func acpPersistentSessionKeepEligibility(input acpPersistentSessionKeepInput) (b
 	default:
 		return false, acpPersistentReasonIneligibleScope
 	}
+}
+
+// acpPersistentSessionKeepTranscriptHead reads the message before turn N's
+// appends, just before the finalization that appends them, and digests the
+// head that finalization will leave. A concurrent out-of-band append lands
+// between them, so the next turn then refuses with transcript-changed.
+func (d *ACPDispatcher) acpPersistentSessionKeepTranscriptHead(ctx context.Context, input acpPersistentSessionKeepInput) (string, error) {
+	ref := input.task.Spec.SessionRef
+	if d.Sessions == nil || d.Sessions.transcripts == nil || ref == nil || input.session == nil || input.session.Turn == nil {
+		return "", errors.New("transcript store is unavailable")
+	}
+	last, err := d.Sessions.transcripts.LoadTranscript(ctx, input.task.Namespace, strings.TrimSpace(ref.Name), 1)
+	if err != nil {
+		return "", err
+	}
+	preceding := ""
+	if len(last) == 1 {
+		preceding = last[0].ID
+		if strings.TrimSpace(preceding) == "" {
+			return "", errors.New("the transcript head has no stable message ID")
+		}
+	}
+	appended := make([]acpTranscriptHeadMessage, 0, 2)
+	if !input.session.Turn.SkipUserPromptAppend {
+		appended = append(appended, acpTranscriptHeadMessage{Role: acpBootstrapRoleUser, Content: input.session.Turn.Turn.UserPrompt})
+	}
+	appended = append(appended, acpTranscriptHeadMessage{Role: acpSessionTurnAssistantRole, Content: input.resultText})
+	return acpPersistentSessionTranscriptHeadDigest(preceding, appended), nil
 }
 
 // acpRuntimePoolResidentRefusal checks the pool state that a resident runtime

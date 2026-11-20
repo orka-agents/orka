@@ -213,8 +213,10 @@ func (h *persistentCompositeHarness) keep(task *corev1alpha1.Task, reuseDigest s
 		RuntimeSessionUID: session.Binding.SessionUID, RuntimeSessionGeneration: int64(session.Binding.Generation),
 		ProfileDigest: string(h.profile), MCPDigest: h.mcp, WorkspaceDigest: testControlDigestForDispatcher("workspace"),
 		LineageConfigDigest: h.lineage.ConfigDigest, ReuseDigest: reuseDigest,
-		TranscriptHeadDigest: acpPersistentSessionTranscriptHeadDigest(acpSessionTurnAssistantRole, answer),
-		PromptDelivered:      true, KeptAt: keptAt, ExpiresAt: keptAt.Add(5 * time.Minute),
+		TranscriptHeadDigest: acpPersistentSessionTranscriptHeadDigest("", []acpTranscriptHeadMessage{
+			{Role: acpBootstrapRoleUser, Content: task.Spec.Prompt}, {Role: acpSessionTurnAssistantRole, Content: answer},
+		}),
+		PromptDelivered: true, KeptAt: keptAt, ExpiresAt: keptAt.Add(5 * time.Minute),
 	})
 	if err != nil {
 		h.t.Fatal(err)

@@ -82,13 +82,21 @@ func persistentTestRecord(t *testing.T) *store.SessionResidentRuntime {
 		RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 2,
 		ProfileDigest: persistentTestDigest("profile"), MCPDigest: persistentTestDigest("mcp"),
 		WorkspaceDigest: persistentTestDigest("workspace"), LineageConfigDigest: persistentTestDigest("lineage"),
-		ReuseDigest: persistentTestDigest("reuse"), TranscriptHeadDigest: acpPersistentSessionTranscriptHeadDigest(acpSessionTurnAssistantRole, "answer n"),
+		ReuseDigest: persistentTestDigest("reuse"), TranscriptHeadDigest: persistentTestHead(),
 		PromptDelivered: true, KeptAt: persistentTestNow, ExpiresAt: persistentTestNow.Add(5 * time.Minute),
 	})
 	if err != nil {
 		t.Fatalf("NewSessionResidentRuntime: %v", err)
 	}
 	return &record
+}
+
+// persistentTestHead is turn N's head on an empty transcript: it appended
+// "question n" and "answer n".
+func persistentTestHead() string {
+	return acpPersistentSessionTranscriptHeadDigest("", []acpTranscriptHeadMessage{
+		{Role: acpBootstrapRoleUser, Content: "question n"}, {Role: acpSessionTurnAssistantRole, Content: "answer n"},
+	})
 }
 
 const persistentServedRecord = "sha256:spec 3 allocation-1 instance-1 rev-1 pod-uid boot-1"
@@ -315,12 +323,17 @@ func TestACPResidentRuntimeHistoryRefusalReasons(t *testing.T) {
 		control  func(*store.SessionControl)
 		want     string
 	}{
-		"prompt included":   {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.PromptIncluded = true }, want: acpPersistentReasonHistoryBoundary},
-		"other cutoff":      {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.ThroughMessageID = "m1" }, want: acpPersistentReasonHistoryBoundary},
-		"narrower history":  {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.MaxMessages = 1 }, want: acpPersistentReasonHistoryBoundary},
-		"appended later":    {messages: append(append([]store.SessionMessage(nil), transcript...), store.SessionMessage{ID: "m3", Role: "user", Content: "out of band"}), want: acpPersistentReasonTranscriptChanged},
-		"edited head":       {messages: []store.SessionMessage{transcript[0], {ID: "m2", Role: acpSessionTurnAssistantRole, Content: "edited"}}, want: acpPersistentReasonTranscriptChanged},
-		"empty transcript":  {messages: []store.SessionMessage{}, want: acpPersistentReasonTranscriptChanged},
+		"prompt included":  {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.PromptIncluded = true }, want: acpPersistentReasonHistoryBoundary},
+		"other cutoff":     {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.ThroughMessageID = "m1" }, want: acpPersistentReasonHistoryBoundary},
+		"narrower history": {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.MaxMessages = 1 }, want: acpPersistentReasonHistoryBoundary},
+		"appended later":   {messages: append(append([]store.SessionMessage(nil), transcript...), store.SessionMessage{ID: "m3", Role: "user", Content: "out of band"}), want: acpPersistentReasonTranscriptChanged},
+		"edited head":      {messages: []store.SessionMessage{transcript[0], {ID: "m2", Role: acpSessionTurnAssistantRole, Content: "edited"}}, want: acpPersistentReasonTranscriptChanged},
+		"empty transcript": {messages: []store.SessionMessage{}, want: acpPersistentReasonTranscriptChanged},
+		"repeated reply after an out-of-band exchange": {messages: append(append([]store.SessionMessage(nil), transcript...),
+			store.SessionMessage{ID: "m3", Role: "user", Content: "question n"}, store.SessionMessage{ID: "m4", Role: acpSessionTurnAssistantRole, Content: "answer n"}),
+			want: acpPersistentReasonTranscriptChanged},
+		"exchange inserted before turn n": {messages: []store.SessionMessage{{ID: "m0", Role: "user", Content: "earlier"}, transcript[0], transcript[1]},
+			want: acpPersistentReasonTranscriptChanged},
 		"session blocked":   {control: func(c *store.SessionControl) { c.Availability = store.SessionReconciliationBlocked }, want: acpPersistentReasonSessionUnavailable},
 		"exact cutoff kept": {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.ThroughMessageID = "m2" }, want: ""},
 		"wide enough limit": {task: func(t *corev1alpha1.Task) { t.Spec.SessionRef.MaxMessages = 2 }, want: ""},
@@ -752,7 +765,7 @@ func persistentKeepInput(t *testing.T, record *store.SessionResidentRuntime) acp
 		task: task, bound: &verifiedAgentExecution{plan: persistentTestPlan()}, target: acpDispatchTarget{pool: persistentTestPool()},
 		fence: persistentTestFence(),
 		session: &acpTaskSession{Turn: &ACPSessionTurn{Turn: store.SessionTurn{
-			ID: "turn-n", Key: store.SessionTurnKey{SessionUID: record.RuntimeSessionUID, LeaseGeneration: 2, TaskUID: record.SourceTaskUID, Attempt: 1, PromptID: "prompt-n"},
+			ID: "turn-n", UserPrompt: "question n", Key: store.SessionTurnKey{SessionUID: record.RuntimeSessionUID, LeaseGeneration: 2, TaskUID: record.SourceTaskUID, Attempt: 1, PromptID: "prompt-n"},
 		}}},
 		attemptID: "attempt-n",
 		attempt:   &store.PromptAttempt{ExecutionState: store.PromptExecutionSucceeded, DeliveryState: store.PromptDeliveryReadValidated},
@@ -854,7 +867,11 @@ func TestACPPersistentSessionKeepLiveRefusalReasonsAndRecord(t *testing.T) {
 			TargetRef: "refs/heads/orka/session", PreparedReceipt: &store.PreparedPublicationReceipt{CommitSHA: commit},
 			VerificationReceipt: &store.PublicationVerificationReceipt{ObservedRemote: store.RemoteRefState{SHA: commit}},
 		}}
-		kept, reason, _ := (&ACPDispatcher{Client: kubeClient, APIReader: kubeClient, Store: publications}).prepareACPPersistentSessionKeep(ctx, input)
+		dispatcher := &ACPDispatcher{
+			Client: kubeClient, APIReader: kubeClient, Store: publications,
+			Sessions: &ACPSessionContinuity{transcripts: &historyTranscriptStore{}},
+		}
+		kept, reason, _ := dispatcher.prepareACPPersistentSessionKeep(ctx, input)
 		return kept, reason
 	}
 
@@ -863,7 +880,7 @@ func TestACPPersistentSessionKeepLiveRefusalReasonsAndRecord(t *testing.T) {
 		t.Fatalf("eligible read turn was not kept: %q", reason)
 	}
 	if kept.State != store.SessionResidentRuntimeResident || kept.SourceTurnID != "turn-n" || !kept.ExpiresAt.After(kept.KeptAt) ||
-		kept.TranscriptHeadDigest != acpPersistentSessionTranscriptHeadDigest(acpSessionTurnAssistantRole, "answer n") || kept.RebasedTreeDigest != "" {
+		kept.TranscriptHeadDigest != persistentTestHead() || kept.RebasedTreeDigest != "" {
 		t.Fatalf("kept record = %#v", kept)
 	}
 
