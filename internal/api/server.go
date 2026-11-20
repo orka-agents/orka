@@ -302,6 +302,16 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
+	// The provider relay reads the worker's body before taking a relay slot,
+	// and streams the Provider's answer back. Bound both the upload and the
+	// worker's read of the answer, which a context deadline cannot interrupt.
+	if isProviderRelayPath(path) {
+		return fasthttp.RequestConfig{
+			MaxRequestBodySize: providerRelayMaxRequestBytes,
+			ReadTimeout:        providerRelayReadTimeout,
+			WriteTimeout:       providerRelayTimeout,
+		}
+	}
 	// The MCP handler reads its body before taking a concurrency permit;
 	// bound that read so stalled uploads only cost their own connection.
 	var mcpURI fasthttp.URI
@@ -741,6 +751,7 @@ func (s *Server) setupRoutes() {
 				GatewayService:           s.config.GatewayService,
 				TaskProvenanceProtected:  s.config.TaskProvenanceProtected,
 				ConnectorTools:           s.config.ConnectorTools,
+				ProviderIdentities:       s.config.Chat.ProviderIdentities,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -755,6 +766,9 @@ func (s *Server) setupRoutes() {
 		// Native workers run connector-backed tools here; the person's token
 		// never leaves the controller.
 		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
+		// AI workers reach keyless Providers here; the Provider identity's
+		// token never leaves the controller.
+		internal.All("/tasks/:namespace/:taskName/providers/:slot/*", s.internalHandlers.RelayProviderRequest)
 		internal.Post("/tasks/:namespace/:taskName/gateway-messages", s.internalHandlers.SubmitGatewayMessage)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/requester-stamp", s.internalHandlers.SealChildRequesterStamp)
 		internal.Post("/tasks/:namespace/:taskName/children/:child/cancel", s.internalHandlers.CancelChildTask)

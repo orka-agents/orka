@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -51,6 +52,11 @@ type InternalHandlers struct {
 	memoryConsolidationStore store.MemoryConsolidationStore
 	taskProvenanceProtected  bool
 	connectorTools           ConnectorToolExecutionConfig
+	// providerIdentities issues tokens for keyless Providers the worker
+	// reaches through the provider relay.
+	providerIdentities     ProviderIdentityTokenSource
+	providerRelaySlots     chan struct{}
+	providerRelayTransport http.RoundTripper
 }
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
@@ -69,16 +75,22 @@ type InternalHandlersConfig struct {
 	TaskProvenanceProtected bool
 	// ConnectorTools lets native workers run connector-backed tools here.
 	ConnectorTools ConnectorToolExecutionConfig
+	// ProviderIdentities lets AI workers reach keyless Providers through
+	// the provider relay; nil disables the relay.
+	ProviderIdentities ProviderIdentityTokenSource
+	// ProviderRelayTransport replaces the relay's shared transport (tests).
+	ProviderRelayTransport http.RoundTripper
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
 func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.PlanStore, ms store.MessageStore, as store.ArtifactStore, configs ...InternalHandlersConfig) *InternalHandlers {
 	h := &InternalHandlers{
-		resultStore:   rs,
-		sessionStore:  ss,
-		planStore:     ps,
-		messageStore:  ms,
-		artifactStore: as,
+		resultStore:        rs,
+		sessionStore:       ss,
+		planStore:          ps,
+		messageStore:       ms,
+		artifactStore:      as,
+		providerRelaySlots: make(chan struct{}, providerRelayMaxConcurrent),
 	}
 	if len(configs) > 0 {
 		h.k8sClient = configs[0].Client
@@ -91,6 +103,8 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.gatewayService = configs[0].GatewayService
 		h.taskProvenanceProtected = configs[0].TaskProvenanceProtected
 		h.connectorTools = configs[0].ConnectorTools
+		h.providerIdentities = configs[0].ProviderIdentities
+		h.providerRelayTransport = configs[0].ProviderRelayTransport
 	}
 	return h
 }

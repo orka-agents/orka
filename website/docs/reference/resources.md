@@ -492,10 +492,15 @@ origin, never following a redirect. No key or token is stored in a Secret or mou
 Pod. The `CredentialReady` condition reports whether the identity can obtain a token; it is
 checked when the Provider changes and hourly after that.
 
-Keyless Providers serve chat and the compatibility APIs. Tasks that would run a keyless
-Provider, as their Provider or a fallback, fail with a clear message until worker Pods can
-reach it through the controller. The REST API cannot set or change `auth`; manage keyless
-Providers with Kubernetes RBAC.
+Keyless Providers serve chat, the compatibility APIs, and `type: ai` Tasks, as their
+Provider or a fallback. The AI worker gets no token: the Job records which Provider each
+keyless slot was built for, and the worker sends its model requests to the controller with
+its own ServiceAccount token. The controller relays only Azure OpenAI chat completions and
+Responses requests, and only while the Task is running, its Job is the one it was built
+for, and the Provider is the same Ready keyless Provider; any other request is refused.
+Other Task types and read-only AI Tasks, whose workers have no ServiceAccount token, fail
+with a clear message. The REST API cannot set or change `auth`; manage keyless Providers
+with Kubernetes RBAC.
 
 ## Skill
 
