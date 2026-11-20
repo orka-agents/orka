@@ -70,6 +70,8 @@ const (
 	EnvProxyCredentialScope      = "ORKA_ACP_PROXY_CREDENTIAL_SCOPE"
 	EnvResourceClass             = "ORKA_ACP_RESOURCE_CLASS"
 	EnvProviderProxyBaseURL      = "ORKA_ACP_PROVIDER_PROXY_BASE_URL"
+	EnvCodex429RetryBaseURL      = "ORKA_ACP_CODEX_429_RETRY_BASE_URL"
+	EnvCodex429RetryModel        = "ORKA_ACP_CODEX_429_RETRY_MODEL"
 	EnvProviderTokenFile         = "ORKA_ACP_PROVIDER_TOKEN_FILE"
 	EnvArtifactAPIURL            = "ORKA_ACP_ARTIFACT_API_URL"
 	EnvWorkspaceArtifactMaxBytes = "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES"
@@ -376,6 +378,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: providerUpstreamBaseURL(providerKind, providerBaseURL), UpstreamBearerToken: providerToken,
 			ProviderKind: providerKind, Model: model,
+			Codex429RetryBaseURL: os.Getenv(EnvCodex429RetryBaseURL), Codex429RetryModel: os.Getenv(EnvCodex429RetryModel),
 		},
 		MCPBroker:                     mcpBroker,
 		WorkspaceMaterializer:         workspaceMaterializer,

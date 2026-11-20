@@ -21,6 +21,14 @@ const (
 	codexErrorWriteGrace      = time.Second
 )
 
+func (p *providerProxy) setCodex429Challenge(upstream, child *http.Request, original []byte) {
+	if p.codex429RouteID != "" && child.Method == http.MethodPost && upstream.URL.Path == providerOpenAIResponsesV1Path &&
+		child.URL.RawQuery == "" && !child.URL.ForceQuery && child.URL.RawPath == "" &&
+		providerproxy.DirectCodexHeaders(child.Header) && providerproxy.DirectCodexBody(original, p.model) {
+		upstream.Header.Set(providerproxy.Codex429RouteHeader, providerproxy.NewCodex429Challenge(p.codex429RouteID))
+	}
+}
+
 // On local revocation or expiry, finish the terminal HTTP error with
 // the bytes received so far. The normal relay sanitizes their bounded prefix.
 type codexRetryErrorBody struct {
@@ -45,6 +53,10 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 		deadline = d
 	}
 	for attempt := 1; attempt < codexInferenceMaxAttempts && response.StatusCode == http.StatusTooManyRequests; attempt++ {
+		proof := providerproxy.Codex429Challenge(response.Header, s.proxy.codex429RouteID)
+		if proof == "" || proof != req.Header.Get(providerproxy.Codex429RouteHeader) {
+			break // the first hop did not confirm the qualified route for this send
+		}
 		if providerproxy.HasDisallowedContentEncoding(response.Header) || response.ContentLength > s.proxy.maxResponseBytes {
 			break // let the normal relay reject the invalid response
 		}
@@ -71,10 +83,13 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 			break
 		}
 		_ = response.Body.Close()
-		next := req.Clone(ctx)
-		next.Body = io.NopCloser(bytes.NewReader(body))
+		req = req.Clone(ctx)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.Header.Set(providerproxy.Codex429RouteHeader, providerproxy.NewCodex429Challenge(s.proxy.codex429RouteID))
+		req.Header.Set(providerproxy.Codex429RetryHeader, "1")
+		req.Header.Set(providerAuthorizationHeader, providerproxy.Codex429RetryAuthScheme+" "+string(s.proxy.upstreamToken))
 		var err error
-		response, err = s.proxy.client.Do(next)
+		response, err = s.proxy.client.Do(req)
 		if err != nil {
 			return nil, err // no status: delivery is ambiguous
 		}

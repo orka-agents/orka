@@ -139,7 +139,7 @@ func preparePinnedNativeSession(t *testing.T, data []byte, threadID, freshCreden
 	if intent == harnessv2.WorkspaceIntentWrite {
 		cfg.ArtifactUploader, assertUploaded = pinnedNativeArtifactUploader(t, reply)
 	}
-	server, err := New(cfg)
+	server, err := newQualifiedNativeServer(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,11 +321,11 @@ func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent
 			return
 		}
 		mu.Lock()
-		wrongCredential = wrongCredential || r.Header.Get("Authorization") != "Bearer "+freshCredential
+		wrongCredential = wrongCredential || !validPinnedNativeAuthorization(r.Header, freshCredential, len(providerRequests) == 0)
 		providerRequests = append(providerRequests, pinnedNativeRequest{time.Now(), bytes.Clone(body)})
 		requestNumber := len(providerRequests)
 		mu.Unlock()
-		if fault != nil && fault(w, requestNumber) {
+		if fault != nil && fault(scriptedQualificationWriter{w, r.Header.Get(testRouteHeader)}, requestNumber) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")

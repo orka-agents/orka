@@ -11,31 +11,34 @@ import (
 
 func TestProviderProxy429Scope(t *testing.T) {
 	for _, tc := range []struct{ kind, model, method, path string }{
-		{"codex", "test-model", http.MethodGet, "/v1/models"},
+		{"codex", "test-model", http.MethodGet, "/models"},
 		{"codex", "test-model", http.MethodPost, "/responses/compact"},
-		{"codex", "test-model", http.MethodPost, "/v1/chat/completions"},
-		{"codex", "test-model", http.MethodPost, "/v1/responses?variant=other"},
-		{"copilot", "test-model", http.MethodPost, "/v1/responses"},
+		{"codex", "test-model", http.MethodPost, "/chat/completions"},
+		{"codex", "test-model", http.MethodPost, "/responses?variant=other"},
+		{"copilot", "test-model", http.MethodPost, "/responses"},
 		{"claude", "test-model", http.MethodPost, "/v1/messages"},
 		{"opencode", "openai/test-model", http.MethodPost, "/v1/chat/completions"},
 	} {
 		t.Run(tc.kind+tc.path, func(t *testing.T) {
 			var sends atomic.Int32
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if sends.Add(1) == 1 {
-					http.Error(w, "scripted rejection", http.StatusTooManyRequests)
+					http.Error(scriptedQualificationWriter{w, r.Header.Get(testRouteHeader)}, "scripted rejection", http.StatusTooManyRequests)
 					return
 				}
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer upstream.Close()
-			_, session, binding := activeTestProviderProxySession(t, ProviderProxyConfig{
+			cfg := ProviderProxyConfig{
 				UpstreamBaseURL: upstream.URL, UpstreamBearerToken: testUpstreamToken, ProviderKind: tc.kind, Model: tc.model, ModelOutputLimit: 4096,
-			})
+			}
+			qualifyScriptedProxy(&cfg)
+			proxy, session, binding := activeTestProviderProxySession(t, cfg)
+			dialTestUpstream(t, proxy, cfg.UpstreamBaseURL, upstream.URL)
 			defer session.close()
 			var body []byte
 			if tc.method == http.MethodPost {
-				body = []byte(`{"model":"` + tc.model + `"}`)
+				body = []byte(`{"model":"` + tc.model + `","stream":true}`)
 			}
 			resp := doProviderProxyRequest(t, tc.method, binding.BaseURL+tc.path, binding.Credential, body, nil)
 			_ = resp.Body.Close()
@@ -48,16 +51,22 @@ func TestProviderProxy429Scope(t *testing.T) {
 
 func TestProviderProxy429CannotOutliveLease(t *testing.T) {
 	var sends atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if sends.Add(1) == 1 {
+			if r.Header.Get(testRouteHeader) == "" {
+				t.Error("short-lease fixture did not exercise a qualified send")
+			}
 			w.Header().Set("Retry-After", "2")
-			http.Error(w, "scripted rejection", http.StatusTooManyRequests)
+			http.Error(scriptedQualificationWriter{w, r.Header.Get(testRouteHeader)}, "scripted rejection", http.StatusTooManyRequests)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
-	proxy := newTestProviderProxy(t, ProviderProxyConfig{UpstreamBaseURL: upstream.URL, UpstreamBearerToken: testUpstreamToken})
+	cfg := ProviderProxyConfig{ProviderKind: "codex", Model: "test-model", UpstreamBearerToken: testUpstreamToken}
+	qualifyScriptedProxy(&cfg)
+	proxy := newTestProviderProxy(t, cfg)
+	dialTestUpstream(t, proxy, cfg.UpstreamBaseURL, upstream.URL)
 	session, binding, err := proxy.newSession()
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +76,7 @@ func TestProviderProxy429CannotOutliveLease(t *testing.T) {
 	if err := session.activateWithMaxTurns("short-lease", 7, now.Add(500*time.Millisecond), now); err != nil {
 		t.Fatal(err)
 	}
-	resp := doProviderProxyRequest(t, http.MethodPost, binding.BaseURL+"/v1/responses", binding.Credential, []byte(`{"model":"test-model"}`), nil)
+	resp := doProviderProxyRequest(t, http.MethodPost, binding.BaseURL+"/responses", binding.Credential, []byte(`{"model":"test-model","stream":true}`), nil)
 	detail, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if elapsed := time.Since(now); elapsed >= 2*time.Second || resp.StatusCode != http.StatusTooManyRequests || readErr != nil || string(detail) != "scripted rejection\n" {

@@ -40,7 +40,8 @@ Watch [Compare hosted and routed agents on the same workload](https://www.youtub
 
 ## Choose a model gateway
 
-Any gateway that serves the APIs your agents need will work. Codex uses the
+Choose a gateway that serves the APIs your agents need and preserves their
+retry semantics. Codex uses the
 OpenAI Responses API, Claude Code uses the Anthropic Messages API, and OpenCode
 uses Chat Completions. [Vekil](https://github.com/sozercan/vekil) is the gateway
 Orka's own tests use, and the example below installs it.
@@ -51,9 +52,11 @@ request succeeds through it before connecting Orka.
 
 ### When Codex is rate limited
 
-For a built-in Codex `POST /responses` (or `/v1/responses`), the session proxy
-can resend the same validated request if its upstream returns **HTTP 429**
-before anything is relayed to Codex. The original send counts toward a maximum
+**Retries are off by default.** On an operator-qualified route, the session
+proxy can resend a direct, streaming Codex inference POST to the exact `/v1/responses`
+endpoint if the auth proxy confirms **HTTP 429** from that route before
+anything is relayed to Codex. Unqualified requests still report the failure;
+they are not replayed. The original send counts toward a maximum
 of three. Once a 429 is observed, backoff, retry response headers, and reading
 the final HTTP error body share a 30-second budget from the first send. If a
 retry returns 503 and its body stalls, for example, the proxy keeps the 503
@@ -88,6 +91,92 @@ Go transport retry of this POST on a reused connection. The limit counts sends
 external gateway or provider retries, fails over, or reports a 429 after doing
 work. For an end-to-end single retry owner, use a single-send gateway route
 that returns 429 only for rejected requests and verify at its upstream.
+
+#### Qualifying one route
+
+Qualify the entire chain, not a model name or the shared auth-proxy Service.
+Use a dedicated gateway DNS name whose first label ends in `-` and at least
+six lowercase hex digits identifying an immutable revision. Freeze its image,
+single-send route configuration, public model and physical deployment. An
+accepted provider response must never be translated into a replayable 429.
+Use a **new name** if any of these change; neither DNS nor a digest in a
+Service name verifies how an operator configured the backend.
+
+For example, a qualified gateway origin `http://gateway-a1b2c3.example.svc:1337`
+and public model `example-model` give frontend Service name
+`codex-429-24450096f2a7fa4adfb33fa6bca21e25`. Its suffix is the first 32
+lowercase hex digits of SHA-256 over these exact UTF-8 bytes:
+`orka-codex-429-v1\n<gateway origin>\n<model>\n` (`\n` denotes a newline).
+
+| Operator-owned startup setting | Value for this example |
+|---|---|
+| Auth proxy `--upstream-base-url` (env default `ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_BASE_URL`) | `http://gateway-a1b2c3.example.svc:1337` |
+| Auth proxy `ORKA_PROVIDER_AUTH_PROXY_CODEX_429_RETRY_BASE_URL` | `http://gateway-a1b2c3.example.svc:1337` |
+| Auth proxy `ORKA_PROVIDER_AUTH_PROXY_CODEX_429_RETRY_MODEL` | `example-model` |
+| Runtime `ORKA_ACP_PROVIDER_PROXY_BASE_URL` (existing controller setting `--acp-provider-proxy-base-url`) | `http://codex-429-24450096f2a7fa4adfb33fa6bca21e25.example.svc:8080` |
+| Runtime `ORKA_ACP_CODEX_429_RETRY_BASE_URL` | `http://codex-429-24450096f2a7fa4adfb33fa6bca21e25.example.svc:8080/v1` |
+| Runtime `ORKA_ACP_CODEX_429_RETRY_MODEL` (must match frozen `ORKA_ACP_MODEL`) | `example-model` |
+
+Set each qualification pair independently in reviewed, immutable startup
+configuration (for example the digest-pinned runtime image), **not** from
+the current request or by copying whatever destination is active. The auth
+proxy pin has no path; the supervisor pin includes the effective `/v1`.
+A partial or malformed opt-in fails startup. An unset pair or a valid pin
+that does not match the active route cannot authorize a retry. Neither
+component guesses qualifications from a provider response or client header.
+
+Both the original request (before normalization) and the forwarded body must
+contain one literal lowercase `model` matching the pin and one literal
+lowercase `stream` set to boolean `true`. Escaped selector names do not
+qualify; escaping inside text or tool data does not change qualification.
+Non-streaming, ambiguous, provider-state or compaction
+operations and routing overrides are not qualified. Ordinary messages, tool
+definitions and prior tool results do not authorize or prevent a retry.
+
+For each send the supervisor issues a fresh challenge. Only the auth proxy
+may confirm it, after checking its own egress pin, the bounded request body,
+and the upstream status. A conditional resend uses a distinct HTTP
+authentication scheme with the existing proxy credential: an older,
+Bearer-only proxy rejects it instead of forwarding it unchecked. Neither
+the child nor the provider receives these internal headers. Use both upgraded components and
+keep the legacy Service separate for rollback. Remove the opt-ins to disable
+replay; native Codex retries remain disabled either way. No new controller
+field is required.
+
+#### Vekil and Azure/Foundry
+
+**Vekil v0.14.14 does not meet that Codex retry contract.** Its Responses
+handler can turn an upstream HTTP 200 into an HTTP 429 if the first SSE event
+is `response.failed` with `rate_limit_exceeded`. This can happen without a
+`Retry-After` hint, or [even when the failed response reports token usage](https://github.com/sozercan/vekil/blob/554f8e261f477a5b45eb08442b82f9cee485c38a/proxy/responses_failure_translate_test.go#L857-L885).
+Orka sees the gateway's 429, not the original 200. Neither the error text nor
+the presence of a delay distinguishes it from a rejected POST. Do not use
+this route for automatic Codex retries until the gateway preserves accepted
+streams and is verified to make a single physical send per request.
+
+Once Vekil has sent HTTP 200, a later rate-limit event stays in the stream.
+In its [access log](https://github.com/sozercan/vekil/blob/554f8e261f477a5b45eb08442b82f9cee485c38a/server/server.go#L340-L385),
+`status=200, stats_status=429` means the stream failed **after** headers were
+committed. It neither authorizes replay nor proves what Azure returned on
+the wire before that event.
+
+The `providers[].models` example below omits `schema_version`, selecting
+version 1: a persistent upstream HTTP 429 can cause three physical sends
+for one request to Vekil. A version 2 **explicit** `model_routes` entry with
+`routing.mode: primary_only`, `max_target_attempts: 1` and
+`max_upstream_sends: 1` caps each gateway operation at one send. It does
+**not** disable conversion of an early failed stream into HTTP 429.
+
+Vekil's [Azure cooldown](https://github.com/sozercan/vekil/blob/554f8e261f477a5b45eb08442b82f9cee485c38a/docs/troubleshooting.md#L66-L120)
+applies to explicit `azure-openai` routes. It can delay *subsequent* requests
+after a throttle with valid reset information, or a successful response with
+an exhausted balance and reset. Aliases share the cooldown by resource origin
+and deployment within one Vekil process. It does not reserve TPM or RPM before
+every send or coordinate other replicas and callers. Neither completed token
+usage nor the model's context window tells a session how much deployment
+capacity remains. Preventing a burst requires bounded, cancellable admission
+before each physical model send, against the same operator-allocated deployment
+budget across callers and replicas. This is not a feature of Vekil v0.14.14.
 
 ## Example: Vekil on the same cluster
 

@@ -71,6 +71,9 @@ type ProviderProxyConfig struct {
 	UpstreamBearerToken   string
 	ProviderKind          string
 	Model                 string
+	Codex429RetryBaseURL  string
+	Codex429RetryModel    string
+	codex429RouteID       string
 	MaxRequestBytes       int64
 	MaxResponseBytes      int64
 	ResponseHeaderTimeout time.Duration
@@ -99,6 +102,7 @@ type providerProxy struct {
 	upstreamToken    []byte
 	providerKind     string
 	model            string
+	codex429RouteID  string
 	maxRequestBytes  int64
 	maxResponseBytes int64
 	modelOutputLimit int64
@@ -215,6 +219,12 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy kind and model are required")
 	}
 	c.UpstreamBaseURL = parsed.String()
+	if c.ProviderKind == providerKindCodex {
+		c.codex429RouteID, err = providerproxy.Codex429FrontendID(c.UpstreamBaseURL, c.Model, c.Codex429RetryBaseURL, c.Codex429RetryModel)
+		if err != nil {
+			return ProviderProxyConfig{}, nil, err
+		}
+	}
 	c.UpstreamBearerToken = normalizeBearerToken(c.UpstreamBearerToken)
 	if c.UpstreamBearerToken == "" || strings.IndexFunc(c.UpstreamBearerToken, func(value rune) bool { return value <= ' ' || value == 0x7f }) >= 0 {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream bearer token is required")
@@ -287,6 +297,7 @@ func newProviderProxy(cfg ProviderProxyConfig) (*providerProxy, error) {
 		upstreamToken:    []byte(normalized.UpstreamBearerToken),
 		providerKind:     normalized.ProviderKind,
 		model:            normalized.Model,
+		codex429RouteID:  normalized.codex429RouteID,
 		maxRequestBytes:  normalized.MaxRequestBytes,
 		maxResponseBytes: normalized.MaxResponseBytes,
 		modelOutputLimit: normalized.ModelOutputLimit,
@@ -1050,6 +1061,9 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(http.StatusForbidden, "provider request is outside the immutable profile")
 		return
 	}
+	// Normalization can collapse duplicate model/stream keys. Qualification
+	// must check what the child submitted, not only the rewritten request.
+	originalBody := body
 	body, err = normalizeProviderRequestBody(p.providerKind, p.model, suffix, p.modelOutputLimit, body)
 	if err != nil {
 		reject(http.StatusForbidden, "provider request is outside the immutable profile")
@@ -1087,6 +1101,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providerproxy.CopyRequestHeaders(upstreamRequest.Header, r.Header)
+	p.setCodex429Challenge(upstreamRequest, r, originalBody)
 	upstreamRequest.Header.Set(providerAuthorizationHeader, "Bearer "+string(p.upstreamToken))
 	upstreamRequest.Header.Set("Accept-Encoding", "identity")
 	if session.foundry != nil {
