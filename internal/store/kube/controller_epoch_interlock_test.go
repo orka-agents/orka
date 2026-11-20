@@ -846,8 +846,9 @@ func TestTakeoverIsRequestedEvenWhenEveryReadPairConflicts(t *testing.T) {
 
 // A stale epoch change that has already lost, replacing an epoch another
 // holder has replaced since, publishes no takeover request against the
-// winner, so its retries cannot hold off the winner's writes. Nobody
-// publishes against an epoch it already holds.
+// winner, so its retries cannot hold off the winner's writes. Neither does a
+// change that committed with an ambiguous result, retried against the epoch
+// it replaced.
 func TestStaleEpochChangeCannotHoldOffItsWinner(t *testing.T) {
 	_, raw, fence := newTestStoreWithEpoch(t)
 	ctx := t.Context()
@@ -869,7 +870,35 @@ func TestStaleEpochChangeCannotHoldOffItsWinner(t *testing.T) {
 	require.NoError(t, winner.WithControllerEpochMutation(ctx, winnerFence, func(context.Context) error { return nil }))
 	require.Less(t, time.Since(started), time.Second, "the stale change held off the winner's write")
 
-	winner.PublishControllerEpochTakeoverIntent(ctx, fence.Name, "winner", 0)
-	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "the winner published a request against its own epoch")
+	winner.PublishControllerEpochTakeoverIntent(ctx, fence.Name, "winner", fence.Epoch)
+	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "a committed change published a request against its own epoch")
 	require.NoError(t, winner.ReleaseHeldControllerEpochInterlock(ctx))
+}
+
+// A restart that keeps its holder ID replaces its predecessor's epoch while
+// the predecessor, still running, rolls its token over between every pair of
+// the restart's reads. The restart's request is published all the same, so
+// it changes the epoch within the bound.
+func TestTakeoverWithTheSameHolderIDIsRequestedEvenWhenEveryReadPairConflicts(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	predecessor := holdingStore(t, raw, time.Hour, 5*time.Second)
+	require.NoError(t, predecessor.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+	var rolls atomic.Int32
+	restartedClient := rollingHolderClient(t, raw, predecessor, fence, &rolls)
+	restarted, err := New(restartedClient, testControlNamespace, WithAPIReader(restartedClient))
+	require.NoError(t, err)
+	restart := store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch, NewEpoch: fence.Epoch + 1,
+		HolderID: fence.HolderID, RequestDigest: testDigest("same-identity-restart"), UpdatedAt: time.Now().UTC()}
+
+	started := time.Now()
+	var advanced *store.ControllerEpoch
+	for attempt := 0; advanced == nil; attempt++ {
+		require.Less(t, time.Since(started), 10*time.Second, "the same-identity restart was starved by token rollovers")
+		if advanced, err = restarted.CompareAndSwapControllerEpoch(t.Context(), restart); err != nil {
+			require.ErrorIs(t, err, store.ErrConflict)
+			time.Sleep(min(time.Duration(attempt+1)*10*time.Millisecond, time.Second))
+		}
+	}
+	require.Equal(t, fence.Epoch+1, advanced.Epoch)
+	require.Positive(t, rolls.Load())
 }

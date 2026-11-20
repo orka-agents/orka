@@ -188,7 +188,8 @@ type takeoverIntentPublisher interface {
 // can keep failing: an epoch read that keeps conflicting must not stop the
 // request from being made.
 // expectedEpoch is the epoch the manager is replacing, or zero before its
-// first read: whatever epoch is current, unless the manager already holds it.
+// first read: whatever epoch is current, which this process does not hold
+// yet, even when a predecessor shares its holder ID.
 func (m *ControllerEpochManager) publishTakeoverIntent(ctx context.Context, expectedEpoch int64) {
 	if publisher, ok := m.Store.(takeoverIntentPublisher); ok {
 		publisher.PublishControllerEpochTakeoverIntent(ctx, m.Name, m.HolderID, expectedEpoch)

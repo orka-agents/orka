@@ -413,9 +413,11 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 //
 // A positive expectedEpoch is the epoch the caller's change replaces: the
 // request is published only while the Lease still carries it, so a stale
-// change that has already lost cannot hold off the epoch that won. Nothing is
-// published against an epoch holder already holds, or before the epoch
-// exists. It is best effort.
+// change that has already lost, or one that committed with an ambiguous
+// result, cannot hold off the epoch that now stands. Zero means the current
+// epoch, for a caller that holds none yet; it may be a predecessor's that
+// shares the caller's holder ID, as after a restart that keeps its identity.
+// Nothing is published before the epoch exists. It is best effort.
 func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string, expectedEpoch int64) {
 	if s == nil || s.client == nil {
 		return
@@ -431,8 +433,7 @@ func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, 
 		return
 	}
 	epoch, err := parsePositiveInt64("controller epoch", lease.Annotations[annotationControllerEpoch])
-	if err != nil || (expectedEpoch > 0 && epoch != expectedEpoch) ||
-		(lease.Spec.HolderIdentity != nil && strings.TrimSpace(*lease.Spec.HolderIdentity) == holder) {
+	if err != nil || (expectedEpoch > 0 && epoch != expectedEpoch) {
 		return
 	}
 	s.requestControllerEpochTakeover(ctx, normalized, epoch, holder)
