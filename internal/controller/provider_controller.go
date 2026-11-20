@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -272,6 +274,12 @@ func (r *ProviderReconciler) validateKeylessProvider(provider *corev1alpha1.Prov
 	}
 	if provider.Spec.Azure == nil || provider.Spec.Azure.DeploymentName == "" {
 		return fmt.Errorf("azure.deploymentName is required for azure-openai provider")
+	}
+	// The Azure OpenAI SDK places a baseURL path after /openai, so a prefixed
+	// baseURL never reaches valid Azure paths; only the resource's origin does.
+	if base, err := url.Parse(provider.Spec.BaseURL); err != nil || strings.Trim(base.Path, "/") != "" ||
+		base.RawQuery != "" || base.Fragment != "" {
+		return fmt.Errorf("a keyless Provider's baseURL must be the resource's origin, such as https://example.openai.azure.com, without a path or query")
 	}
 	if r.Identities == nil {
 		return fmt.Errorf("Provider identity %q is not configured: this controller has no Provider identities", identity) //nolint:staticcheck // Resource kind begins the message.
