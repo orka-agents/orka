@@ -111,6 +111,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	}
 	acquisitionCtx, cancelAcquisition := context.WithTimeout(ctx, defaultEpochAcquisitionTimeout)
 	defer cancelAcquisition()
+	m.publishTakeoverIntent(acquisitionCtx)
 	current, err := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 	if err != nil {
 		return err
@@ -136,6 +137,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		if !errors.Is(err, store.ErrConflict) {
 			return fmt.Errorf("advance controller epoch: %w", err)
 		}
+		m.publishTakeoverIntent(acquisitionCtx)
 		observed, readErr := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 		if readErr != nil {
 			return fmt.Errorf("reconcile controller epoch CAS conflict: %w", readErr)
@@ -170,6 +172,22 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	err = m.openStorage(ctx, *acquired)
 	m.releaseHeldInterlock(ctx)
 	return err
+}
+
+// takeoverIntentPublisher is a control store whose token holder stops writing
+// new interlock tokens once a successor asks (ADR 0058).
+type takeoverIntentPublisher interface {
+	PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string)
+}
+
+// publishTakeoverIntent asks the current token holder to let this manager
+// change the epoch, before a read whose mirror checks a busy holder's token
+// can keep failing: an epoch read that keeps conflicting must not stop the
+// request from being made.
+func (m *ControllerEpochManager) publishTakeoverIntent(ctx context.Context) {
+	if publisher, ok := m.Store.(takeoverIntentPublisher); ok {
+		publisher.PublishControllerEpochTakeoverIntent(ctx, m.Name, m.HolderID)
+	}
 }
 
 // heldInterlockReleaser is a control store that can hold its controller-epoch

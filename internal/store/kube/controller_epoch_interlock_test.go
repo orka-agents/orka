@@ -792,3 +792,54 @@ func TestReleaseHeldInterlockHonoursTheCallersDeadline(t *testing.T) {
 	stall.Store(false)
 	waitForNoMutationToken(t, raw, fence)
 }
+
+// rollingHolderClient is the successor's view of the API: after each of its
+// reads of the epoch Lease, the holder rolls its token over (removes it and
+// writes a new one, unless a takeover request stops it), so every pair of
+// reads the successor makes sees a different resourceVersion for as long as
+// the holder keeps writing tokens.
+func rollingHolderClient(t *testing.T, raw client.Client, holder *Store, fence store.ControllerEpochFence, rolls *atomic.Int32) client.Client {
+	t.Helper()
+	epochLease := controllerEpochLeaseName(fence.Name)
+	return interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			err := delegate.Get(ctx, key, object, options...)
+			if key.Name == epochLease {
+				rolls.Add(1)
+				rollCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				_ = holder.ReleaseHeldControllerEpochInterlock(rollCtx)
+				_ = holder.WithControllerEpochMutation(rollCtx, fence, func(context.Context) error { return nil })
+				cancel()
+			}
+			return err
+		},
+	})
+}
+
+// A holder that rolls its token over between every pair of the successor's
+// reads makes each epoch change attempt conflict in its mirror checks, before
+// the attempt gets far. The successor still publishes its takeover request,
+// from a read that cannot conflict, so the holder stops writing tokens and
+// the successor changes the epoch within the bound.
+func TestTakeoverIsRequestedEvenWhenEveryReadPairConflicts(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	holder := holdingStore(t, raw, time.Hour, 5*time.Second)
+	require.NoError(t, holder.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+	var rolls atomic.Int32
+	successorClient := rollingHolderClient(t, raw, holder, fence, &rolls)
+	successor, err := New(successorClient, testControlNamespace, WithAPIReader(successorClient))
+	require.NoError(t, err)
+
+	started := time.Now()
+	var advanced *store.ControllerEpoch
+	for attempt := 0; advanced == nil; attempt++ {
+		require.Less(t, time.Since(started), 10*time.Second, "the successor was starved by token rollovers")
+		if advanced, err = successor.CompareAndSwapControllerEpoch(t.Context(), successorCAS(fence.Epoch)); err != nil {
+			require.ErrorIs(t, err, store.ErrConflict)
+			time.Sleep(min(time.Duration(attempt+1)*10*time.Millisecond, time.Second))
+		}
+	}
+	require.Positive(t, rolls.Load())
+	t.Logf("successor changed the epoch %s after it started, across %d forced rollovers", time.Since(started).Round(time.Millisecond), rolls.Load())
+	require.ErrorIs(t, holder.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }), store.ErrConflict)
+}

@@ -824,3 +824,74 @@ func TestControllerEpochManagerStopReleasesTheHeldInterlock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A holder that rolls its token over after every read the successor makes of
+// the epoch Lease makes the successor's epoch reads and changes conflict in
+// their mirror checks. The manager still publishes its takeover request
+// first, so the holder stops writing tokens and the successor acquires the
+// next epoch within the bound instead of aborting (ADR 0058).
+func TestControllerEpochManagerAcquiresWhileEveryReadPairConflicts(t *testing.T) {
+	_, kubeClient := newKubernetesControllerEpochAuthority(t)
+	holderStore, err := kubestore.New(kubeClient, controllerEpochManagerTestNamespace,
+		kubestore.WithControllerEpochInterlockHold(time.Hour, 5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := NewControllerEpochManager(holderStore, "controller-a")
+	holderCtx, stopHolder := context.WithCancel(t.Context())
+	defer stopHolder()
+	holderDone := make(chan error, 1)
+	go func() { holderDone <- holder.Start(holderCtx) }()
+	fence, err := holder.CurrentFence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holderStore.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	epochLease := "controller-epoch-lock-"
+	var rolls atomic.Int32
+	rolling := interceptor.NewClient(kubeClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			err := delegate.Get(ctx, key, object, options...)
+			if strings.HasPrefix(key.Name, epochLease) {
+				rolls.Add(1)
+				rollCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				_ = holderStore.ReleaseHeldControllerEpochInterlock(rollCtx)
+				_ = holderStore.WithControllerEpochMutation(rollCtx, fence, func(context.Context) error { return nil })
+				cancel()
+			}
+			return err
+		},
+	})
+	successorStore, err := kubestore.New(rolling, controllerEpochManagerTestNamespace, kubestore.WithAPIReader(rolling))
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor := NewControllerEpochManager(successorStore, "controller-b")
+	successorCtx, stopSuccessor := context.WithCancel(t.Context())
+	defer stopSuccessor()
+	successorDone := make(chan error, 1)
+	go func() { successorDone <- successor.Start(successorCtx) }()
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer readyCancel()
+	acquired, err := successor.CurrentFence(readyCtx)
+	if err != nil {
+		select {
+		case startErr := <-successorDone:
+			t.Fatalf("successor aborted acquisition: %v", startErr)
+		default:
+		}
+		t.Fatalf("successor did not acquire within the bound: %v", err)
+	}
+	if acquired.Epoch != fence.Epoch+1 || rolls.Load() == 0 {
+		t.Fatalf("acquired %+v after %d forced rollovers, want epoch %d", acquired, rolls.Load(), fence.Epoch+1)
+	}
+	stopSuccessor()
+	if err := <-successorDone; err != nil {
+		t.Fatal(err)
+	}
+	stopHolder()
+	<-holderDone
+}

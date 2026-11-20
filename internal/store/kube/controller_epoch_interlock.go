@@ -405,6 +405,32 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 	}
 }
 
+// PublishControllerEpochTakeoverIntent records that holder is waiting to
+// replace the current epoch of name, learned from a single read of the epoch
+// Lease. That read cannot conflict, so the request is published even while
+// a busy holder's token changes the Lease between any two reads, as the
+// mirror checks of an epoch read or change do (ADR 0058). It is best effort
+// and does nothing when the epoch does not exist yet.
+func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string) {
+	if s == nil || s.client == nil {
+		return
+	}
+	normalized, err := store.NormalizeControllerEpochName(name)
+	if err != nil || strings.TrimSpace(holder) == "" {
+		return
+	}
+	lease := &coordinationv1.Lease{}
+	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochLeaseName(normalized)}
+	if err := s.readClient().Get(ctx, key, lease); err != nil {
+		return
+	}
+	epoch, err := parsePositiveInt64("controller epoch", lease.Annotations[annotationControllerEpoch])
+	if err != nil {
+		return
+	}
+	s.requestControllerEpochTakeover(ctx, normalized, epoch, strings.TrimSpace(holder))
+}
+
 // clearControllerEpochTakeover deletes holder's takeover request once its
 // epoch change committed. A request left behind names an older epoch and is
 // ignored.
