@@ -106,6 +106,13 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	logger.Info("Reconciling Provider", "provider", provider.Name, "type", provider.Spec.Type)
 
+	// A Provider that no longer uses keyless auth keeps no credential state,
+	// whether or not its Secret is valid.
+	if !provider.UsesKeylessAuth() {
+		r.verifications.Delete(client.ObjectKeyFromObject(provider))
+		meta.RemoveStatusCondition(&provider.Status.Conditions, ConditionProviderCredentialReady)
+	}
+
 	// Validate the provider configuration
 	if err := r.validateProvider(ctx, provider); err != nil {
 		logger.Error(err, "Provider validation failed")
@@ -121,9 +128,6 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	if !provider.UsesKeylessAuth() {
-		r.verifications.Delete(client.ObjectKeyFromObject(provider))
-		meta.RemoveStatusCondition(&provider.Status.Conditions, ConditionProviderCredentialReady)
-		// Provider is valid
 		return r.updateStatus(ctx, provider, true, "Provider configuration is valid")
 	}
 

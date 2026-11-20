@@ -957,6 +957,9 @@ func main() {
 		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.Parse()
+	// Configuration errors below exit before the controller starts, so the
+	// logger must be live for them to be seen.
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
 		setupLog.Error(nativeSessionMaxBytesErr, "invalid native session size configuration")
@@ -1128,7 +1131,6 @@ func main() {
 		[]string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName}))
 
 	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 	// Read the storage configuration before anything opens storage. It reads
 	// only local flags and the configuration file.

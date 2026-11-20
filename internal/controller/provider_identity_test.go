@@ -270,3 +270,29 @@ func TestProviderReconcileKeylessForgetsDeletedProviders(t *testing.T) {
 		t.Fatalf("verifies = %d, want the replacement verified", identities.verifies)
 	}
 }
+
+// A keyless Provider switched to a Secret that does not exist keeps no
+// CredentialReady condition from its keyless days.
+func TestProviderReconcileDropsCredentialStateWhenSwitchedToAMissingSecret(t *testing.T) {
+	now := time.Now()
+	r, c := newKeylessReconciler(&fakeProviderIdentities{}, &now, keylessTestProvider())
+	got, _ := reconcileKeyless(t, r, c)
+	if meta.FindStatusCondition(got.Status.Conditions, ConditionProviderCredentialReady) == nil {
+		t.Fatal("the keyless Provider reported no CredentialReady condition")
+	}
+	got.Spec.Auth = nil
+	got.Spec.SecretRef = &corev1alpha1.ProviderSecretRef{Name: "missing"}
+	if err := c.Update(context.Background(), got); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = reconcileKeyless(t, r, c)
+	if got.Status.Ready {
+		t.Fatal("a Provider with a missing Secret is Ready")
+	}
+	if condition := meta.FindStatusCondition(got.Status.Conditions, ConditionProviderCredentialReady); condition != nil {
+		t.Fatalf("CredentialReady = %+v, want it removed", condition)
+	}
+	if _, ok := r.verifications.Load(client.ObjectKeyFromObject(got)); ok {
+		t.Fatal("the keyless verification outlived the switch to a Secret")
+	}
+}
