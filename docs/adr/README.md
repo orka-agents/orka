@@ -73,6 +73,7 @@ not do with a running agent's memory. See
 | [0055](0055-substrate-warm-detach-window.md) | Keep a detached Substrate workspace warm before suspending it | Accepted, amended by 0057 |
 | [0056](0056-substrate-shared-workers.md) | Let opted-in Substrate profiles share workers, with interim termination evidence | Accepted (interim) |
 | [0057](0057-substrate-continuation-latency.md) | Start a workspace runtime before its attachment settles, and keep new Substrate workspaces warm by default | Accepted |
+| [0061](0061-acp-resume-admission-reorder.md) | Re-admit a resumed ACP workspace in its publication write, queue on Core's fence, and reserve its slot while the runtime starts | Proposed |
 
 ### The Substrate control plane
 
