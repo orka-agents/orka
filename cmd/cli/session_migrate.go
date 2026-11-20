@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -395,6 +396,67 @@ func newSessionMigrateImportCmd() *cobra.Command {
 	return cmd
 }
 
+// requireLocalAgentRelease checks that binary reports a release that can
+// resume what local's Format installs.
+func requireLocalAgentRelease(ctx context.Context, local nativesession.Local, binary string) error {
+	version, err := exec.CommandContext(ctx, binary, "--version").Output()
+	if err == nil && local.Accepts(string(version)) {
+		return nil
+	}
+	later := ""
+	if local.NewerReleases {
+		later = " or later"
+	}
+	printed, _, _ := strings.Cut(strings.TrimSpace(string(version)), "\n")
+	if len(printed) > 80 {
+		printed = printed[:80]
+	}
+	return fmt.Errorf("destination requires %s %s%s (--agent-bin); %s --version printed %q",
+		local.Binary, local.Release, later, binary, printed)
+}
+
+// requireCodexSQLiteHome refuses a CODEX_SQLITE_HOME other than the
+// destination CODEX_HOME. Relative overrides depend on the resume CWD;
+// fresh-home validation covers databases in this exact absolute home only.
+func requireCodexSQLiteHome(resolvedState string) error {
+	sqliteHome := os.Getenv("CODEX_SQLITE_HOME")
+	if sqliteHome == "" {
+		return nil
+	}
+	resolvedSQLiteHome, sqliteErr := migrationDir(sqliteHome, false)
+	if sqliteHome != strings.TrimSpace(sqliteHome) || !filepath.IsAbs(sqliteHome) || sqliteErr != nil || resolvedSQLiteHome != resolvedState {
+		return errors.New("CODEX_SQLITE_HOME must be unset or an absolute path without surrounding whitespace resolving to the destination CODEX_HOME before native export")
+	}
+	return nil
+}
+
+// fetchMigrationExport downloads the Session's checkpoint, verifies it, and
+// saves it in the journal with a new operation ID before any installation.
+func fetchMigrationExport(ctx context.Context, c *client.Client, format nativesession.Format, expected migrationState, journal string, limit int) (*migrationState, error) {
+	response, err := c.ExportNativeSession(ctx, expected.Session)
+	if err != nil {
+		return nil, err
+	}
+	if response.ProviderKind != expected.Agent {
+		return nil, fmt.Errorf("session %s holds a %s conversation, not %s", expected.Session, response.ProviderKind, expected.Agent)
+	}
+	summary, err := format.Inspect(ctx, response.Data, limit)
+	if err != nil {
+		return nil, err
+	}
+	if summary.DataDigest != response.DataDigest || summary.ProviderSessionID != response.ProviderSessionID {
+		return nil, errors.New("native export identity mismatch")
+	}
+	expected.Data = response.Data
+	if expected.OperationID, err = migrationOperationID(); err != nil {
+		return nil, err
+	}
+	if err := persistMigrationState(journal, expected); err != nil {
+		return nil, err
+	}
+	return &expected, nil
+}
+
 func newSessionMigrateExportCmd() *cobra.Command {
 	var agent, stateDir, cwd, journal, binary string
 	cmd := &cobra.Command{
@@ -412,18 +474,8 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			if binary == "" {
 				binary = local.Binary
 			}
-			version, err := exec.CommandContext(cmd.Context(), binary, "--version").Output()
-			if err != nil || !local.Accepts(string(version)) {
-				later := ""
-				if local.NewerReleases {
-					later = " or later"
-				}
-				printed, _, _ := strings.Cut(strings.TrimSpace(string(version)), "\n")
-				if len(printed) > 80 {
-					printed = printed[:80]
-				}
-				return fmt.Errorf("destination requires %s %s%s (--agent-bin); %s --version printed %q",
-					local.Binary, local.Release, later, binary, printed)
+			if err := requireLocalAgentRelease(cmd.Context(), local, binary); err != nil {
+				return err
 			}
 			c, target, cleanup, err := newMigrationClient(cmd)
 			if err != nil {
@@ -451,12 +503,9 @@ func newSessionMigrateExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if sqliteHome := os.Getenv("CODEX_SQLITE_HOME"); agent == "codex" && sqliteHome != "" {
-				// Relative overrides depend on the resume CWD; fresh-home validation
-				// covers databases in this exact absolute home only.
-				resolvedSQLiteHome, sqliteErr := migrationDir(sqliteHome, false)
-				if sqliteHome != strings.TrimSpace(sqliteHome) || !filepath.IsAbs(sqliteHome) || sqliteErr != nil || resolvedSQLiteHome != resolvedState {
-					return errors.New("CODEX_SQLITE_HOME must be unset or an absolute path without surrounding whitespace resolving to the destination CODEX_HOME before native export")
+			if agent == "codex" {
+				if err := requireCodexSQLiteHome(resolvedState); err != nil {
+					return err
 				}
 			}
 			resolvedCWD, err := migrationDir(cwd, false)
@@ -485,29 +534,9 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				}
 			}
 			if saved == nil {
-				response, err := c.ExportNativeSession(cmd.Context(), args[0])
-				if err != nil {
+				if saved, err = fetchMigrationExport(cmd.Context(), c, format, expected, resolvedJournal, limit); err != nil {
 					return err
 				}
-				if response.ProviderKind != agent {
-					return fmt.Errorf("session %s holds a %s conversation, not %s", args[0], response.ProviderKind, agent)
-				}
-				summary, err := format.Inspect(cmd.Context(), response.Data, limit)
-				if err != nil {
-					return err
-				}
-				if summary.DataDigest != response.DataDigest || summary.ProviderSessionID != response.ProviderSessionID {
-					return errors.New("native export identity mismatch")
-				}
-				expected.Data = response.Data
-				expected.OperationID, err = migrationOperationID()
-				if err != nil {
-					return err
-				}
-				if err := persistMigrationState(resolvedJournal, expected); err != nil {
-					return err
-				}
-				saved = &expected
 			}
 			summary, err := format.Inspect(cmd.Context(), saved.Data, limit)
 			if err != nil {

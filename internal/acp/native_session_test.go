@@ -53,43 +53,7 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 				MaxLoadReplayBytes: replayBudget,
 			})
 			if mode != "resume-success" && mode != "load-success" {
-				if err == nil {
-					_, _ = session.Delete(ctx)
-					t.Fatal("unsupported or failed native resume succeeded")
-				}
-				want := map[string]string{
-					"resume-error":            "restore ACP provider session",
-					"load-error":              "restore ACP provider session",
-					"resume-unsupported":      "did not advertise session/resume",
-					"resume-wrong-id":         "bound a different provider session",
-					"load-wrong-id":           "replayed a different provider session",
-					"load-over-budget":        "session/load replayed more than 64 bytes",
-					"load-silent":             "replayed none of the provider session's history",
-					"load-silent-then-update": "replayed none of the provider session's history",
-				}[mode]
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("native resume error = %v, want %s", err, want)
-				}
-				initialization, ok := errors.AsType[*InitializationError](err)
-				if !ok || initialization.RuntimeSession() == nil || session != nil {
-					t.Fatalf("failed resume lost its runtime cleanup handle: %v", err)
-				}
-				if mode == "resume-error" || mode == "load-error" {
-					if rpc, ok := errors.AsType[*RPCError](err); !ok || rpc.Code != -32602 {
-						t.Fatalf("failed resume lost its RPC cause: %v", err)
-					}
-				}
-				failedSession := initialization.RuntimeSession()
-				if _, err := failedSession.StartPrompt(ctx, "after-failed-load", "digest", []ContentBlock{Text("continue")}); err == nil {
-					t.Fatal("failed initialization admitted a prompt")
-				}
-				if initialization.Cleanup.Proven != (runtime.GOOS == "linux") {
-					t.Fatalf("initialization cleanup proof = %#v", initialization.Cleanup)
-				}
-				cleanup, stopErr := failedSession.Delete(ctx)
-				if runtime.GOOS == "linux" && (stopErr != nil || !cleanup.Proven) {
-					t.Fatalf("retained cleanup retry: %#v %v", cleanup, stopErr)
-				}
+				requireFailedNativeResume(ctx, t, mode, session, err)
 				return
 			}
 			if err != nil {
@@ -112,6 +76,49 @@ func TestRuntimeSessionResumeRequiresSupportAndNeverCreatesFallback(t *testing.T
 				t.Fatalf("continued resume outcome = %#v", result)
 			}
 		})
+	}
+}
+
+// requireFailedNativeResume checks that a failed native resume or load
+// reports its cause and keeps a cleanup handle that admits no prompt.
+func requireFailedNativeResume(ctx context.Context, t *testing.T, mode string, session *RuntimeSession, err error) {
+	t.Helper()
+	if err == nil {
+		_, _ = session.Delete(ctx)
+		t.Fatal("unsupported or failed native resume succeeded")
+	}
+	want := map[string]string{
+		"resume-error":            "restore ACP provider session",
+		"load-error":              "restore ACP provider session",
+		"resume-unsupported":      "did not advertise session/resume",
+		"resume-wrong-id":         "bound a different provider session",
+		"load-wrong-id":           "replayed a different provider session",
+		"load-over-budget":        "session/load replayed more than 64 bytes",
+		"load-silent":             "replayed none of the provider session's history",
+		"load-silent-then-update": "replayed none of the provider session's history",
+	}[mode]
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("native resume error = %v, want %s", err, want)
+	}
+	initialization, ok := errors.AsType[*InitializationError](err)
+	if !ok || initialization.RuntimeSession() == nil || session != nil {
+		t.Fatalf("failed resume lost its runtime cleanup handle: %v", err)
+	}
+	if mode == "resume-error" || mode == "load-error" {
+		if rpc, ok := errors.AsType[*RPCError](err); !ok || rpc.Code != -32602 {
+			t.Fatalf("failed resume lost its RPC cause: %v", err)
+		}
+	}
+	failedSession := initialization.RuntimeSession()
+	if _, err := failedSession.StartPrompt(ctx, "after-failed-load", "digest", []ContentBlock{Text("continue")}); err == nil {
+		t.Fatal("failed initialization admitted a prompt")
+	}
+	if initialization.Cleanup.Proven != (runtime.GOOS == "linux") {
+		t.Fatalf("initialization cleanup proof = %#v", initialization.Cleanup)
+	}
+	cleanup, stopErr := failedSession.Delete(ctx)
+	if runtime.GOOS == "linux" && (stopErr != nil || !cleanup.Proven) {
+		t.Fatalf("retained cleanup retry: %#v %v", cleanup, stopErr)
 	}
 }
 
