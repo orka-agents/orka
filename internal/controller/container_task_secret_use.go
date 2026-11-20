@@ -13,9 +13,11 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -82,8 +84,10 @@ func containerTaskSecretNames(task *corev1alpha1.Task) []string {
 	return names
 }
 
-// scheduledRunSpec returns the spec the controller gives each run of a
-// scheduled container Task: a copy with the scheduling fields cleared.
+// scheduledRunSpec returns a Task's spec without the scheduling fields. The
+// controller copies a scheduled Task's spec into each run with these fields
+// cleared, and the API server then applies their CRD defaults to the run, so
+// they are cleared on both sides before a run is compared with its parent.
 func scheduledRunSpec(scheduled *corev1alpha1.Task) corev1alpha1.TaskSpec {
 	spec := *scheduled.Spec.DeepCopy()
 	spec.Schedule = ""
@@ -125,7 +129,7 @@ func (b *JobBuilder) containerTaskSecretUseGranted(ctx context.Context, task *co
 	if err != nil {
 		return false, err
 	}
-	enforcedSince, err := b.checkContainerTaskSecretUseBinding(ctx, reader)
+	enforcedSince, err := b.checkContainerTaskSecretUseBinding(ctx, reader, task.Namespace)
 	if err != nil {
 		return false, err
 	}
@@ -207,7 +211,7 @@ func (b *JobBuilder) checkScheduledRunSecretReferences(
 	}
 	// The run must be the copy the controller made: same image, command,
 	// Secrets and everything else that decides what receives the Secrets.
-	if !reflect.DeepEqual(scheduledRunSpec(parent), task.Spec) {
+	if !reflect.DeepEqual(scheduledRunSpec(parent), scheduledRunSpec(task)) {
 		return nil, fmt.Errorf("scheduled run's spec differs from its scheduled Task %q, so it cannot receive Secrets", parent.Name)
 	}
 	return parent, nil
@@ -219,11 +223,13 @@ func (b *JobBuilder) checkScheduledRunSecretReferences(
 const containerTaskSecretUsePropagation = 30 * time.Second
 
 // checkContainerTaskSecretUseBinding confirms the admission policy and a Deny
-// binding for it exist, so the mode never delivers while admission is not
-// checking the writers. It returns the time from which admission is known to
-// have been enforcing: the latest change to either object plus a propagation
-// window.
-func (b *JobBuilder) checkContainerTaskSecretUseBinding(ctx context.Context, reader client.Reader) (time.Time, error) {
+// binding for it exist and cover every Task write in namespace, so the mode
+// never delivers while admission is not checking the writers. It returns the
+// time from which admission is known to have been enforcing: the latest
+// change to either object plus a propagation window.
+func (b *JobBuilder) checkContainerTaskSecretUseBinding(
+	ctx context.Context, reader client.Reader, namespace string,
+) (time.Time, error) {
 	name := b.ContainerTaskSecretUse.policyName()
 	policy := &admissionregistrationv1.ValidatingAdmissionPolicy{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: name}, policy); err != nil {
@@ -242,28 +248,132 @@ func (b *JobBuilder) checkContainerTaskSecretUseBinding(ctx context.Context, rea
 	if binding.Spec.PolicyName != name || !slices.Contains(binding.Spec.ValidationActions, admissionregistrationv1.Deny) {
 		return time.Time{}, fmt.Errorf("the container Task Secret use admission policy %q is not bound with Deny, so container Tasks cannot receive Secrets", name)
 	}
+	if reason := containerTaskSecretUseCoverageGap(policy, binding, namespace); reason != "" {
+		return time.Time{}, fmt.Errorf("the container Task Secret use admission policy %q %s, so container Tasks cannot receive Secrets", name, reason)
+	}
 	return latestChange(&policy.ObjectMeta, &binding.ObjectMeta).Add(containerTaskSecretUsePropagation), nil
 }
 
-// latestChange returns the latest time the objects' specs may have changed:
-// their creation, or, once a spec change has raised an object's generation,
-// its latest managed-field update. Metadata-only writes, such as a chart
-// upgrade relabelling the policy, leave the generation alone and do not move
-// the cutoff.
+// containerTaskSecretUseCoverageGap returns why the policy and binding might
+// not check every Task write in namespace, or "". Anything it cannot prove
+// covers the namespace, such as an object selector, an exclusion, or a
+// namespace selector other than the namespace's own name, counts as a gap.
+func containerTaskSecretUseCoverageGap(
+	policy *admissionregistrationv1.ValidatingAdmissionPolicy,
+	binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding,
+	namespace string,
+) string {
+	if policy.Spec.FailurePolicy != nil && *policy.Spec.FailurePolicy != admissionregistrationv1.Fail {
+		return "does not fail closed"
+	}
+	checksUse := false
+	for _, validation := range policy.Spec.Validations {
+		if strings.Contains(validation.Expression, "resource('secrets')") && strings.Contains(validation.Expression, "check('use')") {
+			checksUse = true
+		}
+	}
+	if !checksUse {
+		return "does not check use on Secrets"
+	}
+	constraints := policy.Spec.MatchConstraints
+	if constraints == nil || !selectorEmpty(constraints.NamespaceSelector) || !selectorEmpty(constraints.ObjectSelector) ||
+		len(constraints.ExcludeResourceRules) > 0 || !rulesCoverTaskWrites(constraints.ResourceRules) {
+		return "does not match every Task create and update"
+	}
+	if binding.Spec.ParamRef != nil {
+		return "is bound with parameters"
+	}
+	if resources := binding.Spec.MatchResources; resources != nil {
+		if !selectorEmpty(resources.ObjectSelector) || len(resources.ExcludeResourceRules) > 0 || len(resources.ResourceRules) > 0 {
+			return "is bound to only some Tasks"
+		}
+		if !selectorEmpty(resources.NamespaceSelector) && !selectorIsNamespace(resources.NamespaceSelector, namespace) {
+			return fmt.Sprintf("is not bound to namespace %q", namespace)
+		}
+	}
+	return ""
+}
+
+func selectorEmpty(selector *metav1.LabelSelector) bool {
+	return selector == nil || (len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0)
+}
+
+// selectorIsNamespace reports whether selector matches exactly the namespace
+// by its immutable name label.
+func selectorIsNamespace(selector *metav1.LabelSelector, namespace string) bool {
+	return len(selector.MatchExpressions) == 0 && len(selector.MatchLabels) == 1 &&
+		selector.MatchLabels[corev1.LabelMetadataName] == namespace
+}
+
+func rulesCoverTaskWrites(rules []admissionregistrationv1.NamedRuleWithOperations) bool {
+	covers := func(values []string, want string) bool {
+		return slices.Contains(values, want) || slices.Contains(values, "*")
+	}
+	for _, rule := range rules {
+		if len(rule.ResourceNames) > 0 || !covers(rule.APIGroups, corev1alpha1.GroupVersion.Group) ||
+			!covers(rule.APIVersions, corev1alpha1.GroupVersion.Version) || !covers(rule.Resources, "tasks") {
+			continue
+		}
+		operations := make([]string, 0, len(rule.Operations))
+		for _, operation := range rule.Operations {
+			operations = append(operations, string(operation))
+		}
+		if covers(operations, string(admissionregistrationv1.Create)) && covers(operations, string(admissionregistrationv1.Update)) {
+			return true
+		}
+	}
+	return false
+}
+
+// specChanges remembers, per object UID, the generation last seen and the
+// time from which that generation is known to have been in place, so
+// metadata-only writes after a spec change do not move the cutoff again.
+var specChanges = struct {
+	sync.Mutex
+	seen map[types.UID]specChange
+}{seen: map[types.UID]specChange{}}
+
+type specChange struct {
+	generation int64
+	since      time.Time
+}
+
+// latestChange returns the latest time the objects' specs may have changed.
+// An object still at its first generation changed when it was created. For a
+// later generation, the change time is not recorded, so the first time this
+// process sees that generation it takes the object's latest managed-field
+// update, which is no earlier than the spec change, and keeps it while the
+// generation stays the same. Metadata-only writes, such as a chart upgrade
+// relabelling the policy, leave the generation alone and do not move the
+// cutoff.
 func latestChange(objects ...*metav1.ObjectMeta) time.Time {
 	var latest time.Time
 	for _, object := range objects {
-		if object.CreationTimestamp.After(latest) {
-			latest = object.CreationTimestamp.Time
+		since := object.CreationTimestamp.Time
+		if object.Generation > 1 {
+			since = generationSince(object)
 		}
-		if object.Generation <= 1 {
-			continue
-		}
-		for _, entry := range object.ManagedFields {
-			if entry.Time != nil && entry.Time.After(latest) {
-				latest = entry.Time.Time
-			}
+		if since.After(latest) {
+			latest = since
 		}
 	}
 	return latest
+}
+
+func generationSince(object *metav1.ObjectMeta) time.Time {
+	specChanges.Lock()
+	defer specChanges.Unlock()
+	if seen, ok := specChanges.seen[object.UID]; ok && object.UID != "" && seen.generation == object.Generation {
+		return seen.since
+	}
+	since := object.CreationTimestamp.Time
+	for _, entry := range object.ManagedFields {
+		if entry.Time != nil && entry.Time.After(since) {
+			since = entry.Time.Time
+		}
+	}
+	if object.UID != "" {
+		specChanges.seen[object.UID] = specChange{generation: object.Generation, since: since}
+	}
+	return since
 }
