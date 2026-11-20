@@ -1625,7 +1625,7 @@ func toProviderError(err error) *llm.ProviderError {
 	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
 		classified := *providerErr
 		if classified.Provider == "" {
-			classified.Provider = "openai"
+			classified.Provider = providerTypeOpenAI
 		}
 		return &classified
 	}
