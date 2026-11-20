@@ -277,8 +277,10 @@ Core makes these unusable, asynchronously:
     held while the Actor stays `SUSPENDING`. Once it is `SUSPENDED` the strong path
     starts, before the Tag capture; any other state starts it at once.
   - The hold is bounded by the continuations and by a 120 s window from the suspend's
-    issue. It applies only to that suspension's own doubt; any other trigger deletes
-    the pool at once. A continuation that still loses the race leaves the instance lost
+    issue; the Kubernetes-only bounds loop retires the pool once that window ends, even
+    if the held record is never reconciled again. It closes admission at once: the
+    pool admits no claim and no Resume while its deletion waits. It applies only to
+    that suspension's own doubt; any other trigger deletes the pool at once. A continuation that still loses the race leaves the instance lost
     as above.
 - **What it does.** The provider closes the pool and deletes it. Core observes the
   terminating worker and drains each co-hosted Actor for data-only suspension inside
