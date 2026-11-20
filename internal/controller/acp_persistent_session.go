@@ -440,30 +440,56 @@ func (d *ACPDispatcher) acpResidentRuntimeHistoryRefusal(
 // acpPersistentSessionKeepInput is everything turn N's settlement knows when
 // it decides whether to keep its live RuntimeSession.
 type acpPersistentSessionKeepInput struct {
-	task             *corev1alpha1.Task
-	bound            *verifiedAgentExecution
-	target           acpDispatchTarget
-	runtimeClient    *harnessv2.Client
-	runtimeFence     harnessv2.Fence
-	fence            store.ControllerEpochFence
-	session          *acpTaskSession
-	attemptID        string
-	attempt          *store.PromptAttempt
-	mcpDigest        string
-	lineageDigest    string
-	workspaceDigest  string
-	baseline         harnessv2.WorkspaceBaseline
-	intent           harnessv2.WorkspaceIntent
-	delta            harnessv2.WorkspaceDeltaDescriptor
-	publicationID    string
-	finalization     *runtimeSessionPublicationFinalization
-	resultText       string
-	scopeRefusal     string
-	parked           bool
-	rebaseSupported  bool
-	nativeCapture    bool
-	transcriptSkip   bool
-	publicationState store.PublicationState
+	task            *corev1alpha1.Task
+	bound           *verifiedAgentExecution
+	target          acpDispatchTarget
+	runtimeClient   *harnessv2.Client
+	runtimeFence    harnessv2.Fence
+	fence           store.ControllerEpochFence
+	session         *acpTaskSession
+	attemptID       string
+	attempt         *store.PromptAttempt
+	mcpDigest       string
+	lineageDigest   string
+	workspaceDigest string
+	baseline        harnessv2.WorkspaceBaseline
+	intent          harnessv2.WorkspaceIntent
+	delta           harnessv2.WorkspaceDeltaDescriptor
+	publicationID   string
+	finalization    *runtimeSessionPublicationFinalization
+	resultText      string
+	scopeRefusal    string
+	parked          bool
+	rebaseSupported bool
+	nativeCapture   bool
+	transcriptSkip  bool
+	// historyIncomplete reports a process that may not hold the whole
+	// canonical transcript (a partial bootstrap), which a later turn asking
+	// for more history must never reuse.
+	historyIncomplete bool
+	publicationState  store.PublicationState
+}
+
+// acpPersistentSessionProcessHoldsFullHistory reports whether the turn's
+// provider process holds the whole canonical transcript: it was reused from a
+// claimed record (whose keep already proved it), or it was created this turn
+// from a bootstrap that omitted nothing.
+func acpPersistentSessionProcessHoldsFullHistory(task *corev1alpha1.Task, session *acpTaskSession) bool {
+	if session == nil {
+		return false
+	}
+	if session.Reused {
+		return session.ResidentClaimed != nil
+	}
+	bootstrap := session.Bootstrap
+	ref := task.Spec.SessionRef
+	if bootstrap == nil || ref == nil || strings.TrimSpace(ref.ThroughMessageID) != "" || ref.PromptIncluded {
+		return false
+	}
+	// TotalMessages is how many messages the bounded load returned; reaching
+	// the limit may have omitted older ones.
+	return !bootstrap.Truncated && int(bootstrap.MessageCount) == bootstrap.TotalMessages &&
+		bootstrap.TotalMessages < acpSessionReferenceMaxMessages(ref)
 }
 
 // prepareACPPersistentSessionKeep decides whether turn N keeps its live
@@ -586,7 +612,7 @@ func acpPersistentSessionKeepEligibility(input acpPersistentSessionKeepInput) (b
 	if input.parked {
 		return false, acpPersistentReasonPreviousParked
 	}
-	if input.transcriptSkip {
+	if input.transcriptSkip || input.historyIncomplete {
 		return false, acpPersistentReasonHistoryBoundary
 	}
 	attempt := input.attempt

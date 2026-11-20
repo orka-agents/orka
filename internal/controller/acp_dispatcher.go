@@ -1227,7 +1227,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		persistentReuse.attempted = true
 		refused := strings.TrimSpace(task.Annotations[acpTaskPersistentSessionRefusedAnnotation])
 		switch {
-		case persistentScope == acpPersistentReasonClassDisabled:
+		case persistentScope == acpPersistentReasonClassDisabled || persistentScope == acpPersistentReasonRebaseUnsupported:
 			persistentReuse.miss(acpPersistentSessionStagePlan, persistentScope)
 			persistentClaim = &acpPersistentSessionClaimInput{forceFresh: true}
 		case persistentScope != "":
@@ -2702,8 +2702,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			delta: delta.Delta, publicationID: publicationID, finalization: runtimePublicationFinalization,
 			resultText: resultText, scopeRefusal: persistentScope, parked: turnParked,
 			rebaseSupported: rebaseSupported, nativeCapture: nativeSessionsSupported,
-			transcriptSkip:   appendPolicy.skipTranscriptAppend,
-			publicationState: publicationState,
+			transcriptSkip:    appendPolicy.skipTranscriptAppend,
+			historyIncomplete: !acpPersistentSessionProcessHoldsFullHistory(task, sessionExecution),
+			publicationState:  publicationState,
 		})
 		if persistentRebaseDuration > 0 {
 			turnTimings.mark(acpTurnStepRuntimeSessionRebase)

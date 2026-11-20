@@ -775,6 +775,7 @@ func TestACPPersistentSessionKeepRefusalReasons(t *testing.T) {
 		"native capture":   {mutate: func(in *acpPersistentSessionKeepInput) { in.nativeCapture = true }, want: acpPersistentReasonIneligibleScope},
 		"parked":           {mutate: func(in *acpPersistentSessionKeepInput) { in.parked = true }, want: acpPersistentReasonPreviousParked},
 		"skipped append":   {mutate: func(in *acpPersistentSessionKeepInput) { in.transcriptSkip = true }, want: acpPersistentReasonHistoryBoundary},
+		"partial history":  {mutate: func(in *acpPersistentSessionKeepInput) { in.historyIncomplete = true }, want: acpPersistentReasonHistoryBoundary},
 		"failed prompt":    {mutate: func(in *acpPersistentSessionKeepInput) { in.attempt.ExecutionState = store.PromptExecutionFailed }, want: acpPersistentReasonPreviousNotSucceeded},
 		"modified read":    {mutate: func(in *acpPersistentSessionKeepInput) { in.delta.State = harnessv2.WorkspaceDeltaReadOnlyModified }, want: acpPersistentReasonPreviousNotSucceeded},
 		"superseded write": {mutate: supersededWriteKeep, want: acpPersistentReasonPreviousNotSucceeded},
@@ -1083,4 +1084,34 @@ func staticPersistentEpochManager(t *testing.T) *ControllerEpochManager {
 	close(ready)
 	fence := persistentTestFence()
 	return &ControllerEpochManager{ready: ready, current: &store.ControllerEpoch{Name: fence.Name, Epoch: fence.Epoch, HolderID: fence.HolderID}}
+}
+
+func TestACPPersistentSessionProcessHoldsFullHistory(t *testing.T) {
+	task := persistentTestTask()
+	full := &ACPBootstrapTranscript{MessageCount: 4, TotalMessages: 4}
+	for name, tc := range map[string]struct {
+		session *acpTaskSession
+		mutate  func(*corev1alpha1.Task)
+		want    bool
+	}{
+		"complete bootstrap":       {session: &acpTaskSession{Bootstrap: full}, want: true},
+		"claimed reuse":            {session: &acpTaskSession{Reused: true, ResidentClaimed: &store.SessionResidentRuntime{}}, want: true},
+		"cache reuse":              {session: &acpTaskSession{Reused: true}},
+		"no bootstrap":             {session: &acpTaskSession{}},
+		"byte truncated":           {session: &acpTaskSession{Bootstrap: &ACPBootstrapTranscript{MessageCount: 4, TotalMessages: 4, Truncated: true}}},
+		"messages dropped":         {session: &acpTaskSession{Bootstrap: &ACPBootstrapTranscript{MessageCount: 3, TotalMessages: 4}}},
+		"limit reached":            {session: &acpTaskSession{Bootstrap: full}, mutate: func(t *corev1alpha1.Task) { t.Spec.SessionRef.MaxMessages = 4 }},
+		"earlier cutoff":           {session: &acpTaskSession{Bootstrap: full}, mutate: func(t *corev1alpha1.Task) { t.Spec.SessionRef.ThroughMessageID = "m2" }},
+		"prompt-included boundary": {session: &acpTaskSession{Bootstrap: full}, mutate: func(t *corev1alpha1.Task) { t.Spec.SessionRef.PromptIncluded = true }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := task.DeepCopy()
+			if tc.mutate != nil {
+				tc.mutate(candidate)
+			}
+			if got := acpPersistentSessionProcessHoldsFullHistory(candidate, tc.session); got != tc.want {
+				t.Fatalf("full history = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
