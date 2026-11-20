@@ -458,6 +458,7 @@ the endpoint does not support it.
 
 ### Keyless Azure OpenAI Providers
 
+The [keyless Azure OpenAI guide](../guides/keyless-azure-openai.md) sets this up end to end.
 Where key-based authentication is turned off, or not wanted, an `azure-openai` Provider can name
 an Entra identity instead of a Secret:
 

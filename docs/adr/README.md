@@ -123,6 +123,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0051](0051-offline-memory-consolidation.md) | Consolidate memory offline into reviewed proposals | Accepted, landing in stages |
 | [0053](0053-approval-webhook-events.md) | Opt-in signed approval webhook events from durable approval transitions | Accepted, partly superseded by 0054 |
 | [0054](0054-task-webhook-delivery-workers.md) | Deliver Task webhooks from a worker pool, not the Task reconcile | Accepted |
+| [0057](0057-keyless-azure-openai-providers.md) | Keyless Azure OpenAI Providers authenticate in the controller | Accepted |
 
 ### Agent hosts and the Agent Host Protocol
 
