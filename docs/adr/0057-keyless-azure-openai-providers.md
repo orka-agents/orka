@@ -59,7 +59,7 @@ anything the Task runs could copy it and use it elsewhere until it expires.
   next request; a request already relayed finishes within its bound.
 - Every relayed model call passes through the controller, which bounds them (64
   in flight, 64 MiB per response, 30 minutes per request). A controller restart
-  ends in-flight relayed calls, which the AI worker retries like other
-  transient provider errors.
+  ends in-flight relayed calls; the worker sees a failed answer, not a complete
+  one, and the AI Task can fail and need to be run again.
 - Adding a provider type, path, or Task type to keyless auth means extending the
   relay's allowlist and this record, not handing out tokens.

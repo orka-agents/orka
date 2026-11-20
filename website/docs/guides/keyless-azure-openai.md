@@ -48,7 +48,10 @@ Keyless Providers serve chat, the compatibility APIs, and
   (`kubectl label ns team-a pod-security.kubernetes.io/enforce=baseline`;
   run it with `--dry-run=server` first, which lists running Pods that break
   the profile, and delete them), and on every other namespace whose Pods can
-  be scheduled onto that node, or run the controller on dedicated nodes
+  be scheduled onto that node, or run the controller on dedicated nodes with
+  the chart's `nodeSelector` and `tolerations`, together with admission
+  control that keeps every other Pod from tolerating their taint or naming
+  them in `spec.nodeName`. A taint alone keeps no one off
   ([Security](../concepts/security.md#agent-identities)).
 - No Pod running as the controller ServiceAccount except the controller
   Deployment's own, and no ServiceAccount token Secret for it. Delete any
@@ -137,6 +140,8 @@ spec:
       identity: models
 ```
 
+The `baseURL` must be the resource's origin, without a path or query.
+
 `spec.auth` is managed with Kubernetes RBAC: the REST API cannot set or change
 it. Check that the identity can obtain a token:
 
@@ -180,7 +185,7 @@ key-based Provider for them.
 - The controller relays only the Azure OpenAI chat completions and Responses
   paths, at most 64 requests at a time across all Tasks, each up to 30
   minutes, with responses up to 64 MiB. A controller restart ends relayed
-  requests in flight, and the AI worker retries them.
+  requests in flight; the AI Task can then fail, and needs to be run again.
 - Deleting or replacing the Provider, switching it to `secretRef`, or removing
   the identity from the controller refuses the next relayed request once the
   controller sees the change. A request already being relayed runs to
