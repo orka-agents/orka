@@ -1906,8 +1906,9 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	namespaceReads := &namespaceReadCounter{Reader: kubeClient}
 	dispatcher := &ACPDispatcher{
-		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
+		Client: kubeClient, APIReader: namespaceReads, Store: controlStore, ResultStore: persistence,
 		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
 	}
 	prepareAdditionalTask := func(
@@ -1980,6 +1981,14 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		return additional, additionalAttemptID, parentID
 	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
+	// The turn reads its namespace once, to verify the binding; Session
+	// lineage records that verified UID instead of reading it again.
+	if got := namespaceReads.namespaces.Load(); got != 1 {
+		t.Fatalf("uncached namespace reads for one turn = %d, want 1", got)
+	}
+	if lineage, err := persistence.GetSessionLineage(ctx, task.Namespace, task.Spec.SessionRef.Name); err != nil || lineage.NamespaceUID != string(namespace.UID) {
+		t.Fatalf("session lineage = %#v, %v; want namespace UID %q", lineage, err, namespace.UID)
+	}
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
@@ -4031,6 +4040,8 @@ type dispatcherRuntimeServerOptions struct {
 	writePublication bool
 	onDelta          func(harnessv2.CreateWorkspaceDeltaRequest)
 	onRebase         func(harnessv2.RebaseRuntimeSessionRequest)
+	// onCapabilities observes every capabilities request.
+	onCapabilities func()
 }
 
 func newDispatcherRuntimeServerWithOptions(
@@ -4087,6 +4098,9 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
+		if options.onCapabilities != nil {
+			options.onCapabilities()
+		}
 		writeDispatcherJSON(w, harnessv2.CapabilitiesResponse{
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 			RuntimeProfileDigest: digest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,

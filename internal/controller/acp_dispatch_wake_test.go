@@ -39,7 +39,7 @@ func TestWaitForNextDispatchScan(t *testing.T) {
 	// A wakeup long after the last scan starts the next scan immediately.
 	wake <- struct{}{}
 	start := time.Now()
-	if !waitForNextDispatchScan(ctx, nil, wake, start.Add(-time.Second)) {
+	if !waitForNextDispatchScan(ctx, nil, wake, start.Add(-time.Second), nil) {
 		t.Fatal("wakeup did not start a scan")
 	}
 	if elapsed := time.Since(start); elapsed >= acpDispatchWakeMinInterval {
@@ -49,7 +49,7 @@ func TestWaitForNextDispatchScan(t *testing.T) {
 	// A wakeup right after a scan waits out the minimum interval.
 	wake <- struct{}{}
 	start = time.Now()
-	if !waitForNextDispatchScan(ctx, nil, wake, start) {
+	if !waitForNextDispatchScan(ctx, nil, wake, start, nil) {
 		t.Fatal("wakeup did not start a scan")
 	}
 	if elapsed := time.Since(start); elapsed < acpDispatchWakeMinInterval-10*time.Millisecond {
@@ -59,14 +59,117 @@ func TestWaitForNextDispatchScan(t *testing.T) {
 	// The periodic tick still drives scans without wakeups.
 	tick := make(chan time.Time, 1)
 	tick <- time.Now()
-	if !waitForNextDispatchScan(ctx, tick, wake, time.Now()) {
+	if !waitForNextDispatchScan(ctx, tick, wake, time.Now(), nil) {
 		t.Fatal("tick did not start a scan")
 	}
 
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if waitForNextDispatchScan(cancelled, nil, wake, time.Now()) {
+	if waitForNextDispatchScan(cancelled, nil, wake, time.Now(), nil) {
 		t.Fatal("a cancelled dispatcher kept scanning")
+	}
+}
+
+func TestWaitForNextDispatchScanAdmissionWakeSkipsInterval(t *testing.T) {
+	ctx := context.Background()
+	d := &ACPDispatcher{}
+
+	// A RuntimePool that just began admitting starts the scan at once, even
+	// right after a scan.
+	d.wakeForAdmission()
+	start := time.Now()
+	if !waitForNextDispatchScan(ctx, nil, d.wakeChannel(), start, d.takeAdmissionWake) {
+		t.Fatal("admission wakeup did not start a scan")
+	}
+	if elapsed := time.Since(start); elapsed >= acpDispatchWakeMinInterval/2 {
+		t.Fatalf("admission wakeup waited %s, want an immediate scan", elapsed)
+	}
+	if d.takeAdmissionWake() {
+		t.Fatal("admission wakeup was not consumed by the scan it started")
+	}
+
+	// An admission opening during an ordinary wakeup's interval ends the wait.
+	d.Wake()
+	start = time.Now()
+	go func() {
+		time.Sleep(acpDispatchWakeMinInterval / 4)
+		d.wakeForAdmission()
+	}()
+	if !waitForNextDispatchScan(ctx, nil, d.wakeChannel(), start, d.takeAdmissionWake) {
+		t.Fatal("wakeup did not start a scan")
+	}
+	if elapsed := time.Since(start); elapsed >= acpDispatchWakeMinInterval-10*time.Millisecond {
+		t.Fatalf("admission wakeup during the interval waited %s, want less than %s", elapsed, acpDispatchWakeMinInterval)
+	}
+
+	// An admission wakeup that arrives after the interval has elapsed is
+	// consumed by the scan it starts; it does not let the next ordinary
+	// wakeup skip the interval.
+	d.wakeForAdmission()
+	if !waitForNextDispatchScan(ctx, nil, d.wakeChannel(), time.Now().Add(-time.Second), d.takeAdmissionWake) {
+		t.Fatal("admission wakeup did not start a scan")
+	}
+	if d.takeAdmissionWake() {
+		t.Fatal("an admission wakeup outlived the scan it started")
+	}
+	// A tick that starts the scan consumes a pending admission wakeup too.
+	d.wakeForAdmission()
+	<-d.wakeChannel()
+	tick := make(chan time.Time, 1)
+	tick <- time.Now()
+	if !waitForNextDispatchScan(ctx, tick, make(chan struct{}), time.Now(), d.takeAdmissionWake) {
+		t.Fatal("tick did not start a scan")
+	}
+	if d.takeAdmissionWake() {
+		t.Fatal("an admission wakeup outlived the ticked scan")
+	}
+
+	// An ordinary wakeup during the interval still waits it out.
+	d.Wake()
+	start = time.Now()
+	go func() {
+		time.Sleep(acpDispatchWakeMinInterval / 4)
+		d.Wake()
+	}()
+	if !waitForNextDispatchScan(ctx, nil, d.wakeChannel(), start, d.takeAdmissionWake) {
+		t.Fatal("wakeup did not start a scan")
+	}
+	if elapsed := time.Since(start); elapsed < acpDispatchWakeMinInterval-10*time.Millisecond {
+		t.Fatalf("ordinary wakeups scanned after %s, want at least %s", elapsed, acpDispatchWakeMinInterval)
+	}
+}
+
+func TestACPRuntimePoolAdmissionOpened(t *testing.T) {
+	serving := &corev1alpha1.RuntimePool{Status: corev1alpha1.RuntimePoolStatus{
+		Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
+		ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "instance-1", ControllerEpoch: 1},
+		Capacity:       corev1alpha1.RuntimePoolCapacityStatus{RunningPrompts: 1},
+	}}
+	starting := serving.DeepCopy()
+	starting.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
+	closed := serving.DeepCopy()
+	closed.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	replaced := serving.DeepCopy()
+	replaced.Status.ActiveInstance.RuntimeInstanceID = "instance-2"
+	released := serving.DeepCopy()
+	released.Status.Capacity.RunningPrompts = 0
+	for _, tc := range []struct {
+		name     string
+		old, new *corev1alpha1.RuntimePool
+		want     bool
+	}{
+		{name: "started serving", old: starting, new: serving, want: true},
+		{name: "started accepting", old: closed, new: serving, want: true},
+		{name: "new active instance", old: serving, new: replaced, want: true},
+		{name: "freed capacity only", old: serving, new: released},
+		{name: "stopped serving", old: serving, new: starting},
+	} {
+		if got := acpRuntimePoolAdmissionOpened(tc.old, tc.new); got != tc.want {
+			t.Errorf("%s: acpRuntimePoolAdmissionOpened = %v, want %v", tc.name, got, tc.want)
+		}
+		if tc.want && !acpRuntimePoolOpenedForDispatch(tc.old, tc.new) {
+			t.Errorf("%s: an admission opening must also open the pool for dispatch", tc.name)
+		}
 	}
 }
 
