@@ -824,3 +824,137 @@ func TestControllerEpochManagerStopReleasesTheHeldInterlock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A holder that rolls its token over after every read the successor makes of
+// the epoch Lease makes the successor's epoch reads and changes conflict in
+// their mirror checks. The manager still publishes its takeover request
+// first, so the holder stops writing tokens and the successor acquires the
+// next epoch within the bound instead of aborting (ADR 0058).
+func TestControllerEpochManagerAcquiresWhileEveryReadPairConflicts(t *testing.T) {
+	_, kubeClient := newKubernetesControllerEpochAuthority(t)
+	holderStore, err := kubestore.New(kubeClient, controllerEpochManagerTestNamespace,
+		kubestore.WithControllerEpochInterlockHold(time.Hour, 5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := NewControllerEpochManager(holderStore, "controller-a")
+	holderCtx, stopHolder := context.WithCancel(t.Context())
+	defer stopHolder()
+	holderDone := make(chan error, 1)
+	go func() { holderDone <- holder.Start(holderCtx) }()
+	fence, err := holder.CurrentFence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holderStore.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	epochLease := "controller-epoch-lock-"
+	var rolls atomic.Int32
+	rolling := interceptor.NewClient(kubeClient.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			err := delegate.Get(ctx, key, object, options...)
+			if strings.HasPrefix(key.Name, epochLease) {
+				rolls.Add(1)
+				rollCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				_ = holderStore.ReleaseHeldControllerEpochInterlock(rollCtx)
+				_ = holderStore.WithControllerEpochMutation(rollCtx, fence, func(context.Context) error { return nil })
+				cancel()
+			}
+			return err
+		},
+	})
+	successorStore, err := kubestore.New(rolling, controllerEpochManagerTestNamespace, kubestore.WithAPIReader(rolling))
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor := NewControllerEpochManager(successorStore, "controller-b")
+	successorCtx, stopSuccessor := context.WithCancel(t.Context())
+	defer stopSuccessor()
+	successorDone := make(chan error, 1)
+	go func() { successorDone <- successor.Start(successorCtx) }()
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer readyCancel()
+	acquired, err := successor.CurrentFence(readyCtx)
+	if err != nil {
+		select {
+		case startErr := <-successorDone:
+			t.Fatalf("successor aborted acquisition: %v", startErr)
+		default:
+		}
+		t.Fatalf("successor did not acquire within the bound: %v", err)
+	}
+	if acquired.Epoch != fence.Epoch+1 || rolls.Load() == 0 {
+		t.Fatalf("acquired %+v after %d forced rollovers, want epoch %d", acquired, rolls.Load(), fence.Epoch+1)
+	}
+	stopSuccessor()
+	if err := <-successorDone; err != nil {
+		t.Fatal(err)
+	}
+	stopHolder()
+	<-holderDone
+}
+
+// losingPublisherStore lets another holder win the epoch change just before
+// the manager's own attempt, and records the epochs the manager publishes its
+// takeover request against.
+type losingPublisherStore struct {
+	*kubestore.Store
+	winner    *kubestore.Store
+	won       atomic.Bool
+	mu        sync.Mutex
+	published []int64
+	stop      func()
+}
+
+func (s *losingPublisherStore) CompareAndSwapControllerEpoch(ctx context.Context, change store.ControllerEpochCAS) (*store.ControllerEpoch, error) {
+	if s.won.CompareAndSwap(false, true) {
+		winning := change
+		winning.HolderID, winning.RequestDigest = "controller-winner", "sha256:"+strings.Repeat("b", 64)
+		if _, err := s.winner.CompareAndSwapControllerEpoch(ctx, winning); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.CompareAndSwapControllerEpoch(ctx, change)
+}
+
+func (s *losingPublisherStore) PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string, expectedEpoch int64) {
+	s.mu.Lock()
+	s.published = append(s.published, expectedEpoch)
+	recovery := len(s.published) == 2
+	s.mu.Unlock()
+	s.Store.PublishControllerEpochTakeoverIntent(ctx, name, holder, expectedEpoch)
+	if recovery {
+		s.stop() // the manager gives up after this recovery
+	}
+}
+
+// A manager whose epoch change loses to another holder publishes its
+// conflict-recovery takeover request only against the epoch it tried to
+// replace, which is gone, so it leaves no request that would hold off the
+// winner (ADR 0058).
+func TestControllerEpochManagerThatLostLeavesNoRequestAgainstTheWinner(t *testing.T) {
+	authority, kubeClient := newKubernetesControllerEpochAuthority(t)
+	previous := advanceKubernetesControllerEpoch(t, t.Context(), authority, 1)
+	winner, err := kubestore.New(kubeClient, controllerEpochManagerTestNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	losing := &losingPublisherStore{Store: authority, winner: winner, stop: cancel}
+	manager := NewControllerEpochManager(losing, "controller-loser")
+	if err := manager.Start(ctx); err == nil {
+		t.Fatal("the losing manager acquired the epoch")
+	}
+	losing.mu.Lock()
+	published := slices.Clone(losing.published)
+	losing.mu.Unlock()
+	if !slices.Equal(published, []int64{0, previous.Epoch}) {
+		t.Fatalf("published takeover requests against epochs %v, want [0 %d] (before the first read, then the failed attempt's)", published, previous.Epoch)
+	}
+	if controllerEpochTakeoverRequested(t, t.Context(), kubeClient) {
+		t.Fatal("the losing manager left a takeover request against the winner")
+	}
+}

@@ -374,6 +374,14 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 		return
 	}
 	exists := err == nil
+	if exists {
+		// Never downgrade a newer request: a publisher that read an older
+		// epoch before another change committed must not replace a request
+		// against the epoch that change created.
+		if newer, parseErr := strconv.ParseInt(request.Annotations[annotationEpochTakeoverFromEpoch], 10, 64); parseErr == nil && newer > epoch {
+			return
+		}
+	}
 	s.interlockMu.Lock()
 	written := s.takeoverWritten
 	s.interlockMu.Unlock()
@@ -405,13 +413,50 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 	}
 }
 
-// clearControllerEpochTakeover deletes holder's takeover request once its
-// epoch change committed. A request left behind names an older epoch and is
+// PublishControllerEpochTakeoverIntent records that holder is waiting to
+// replace the current epoch of name, learned from a single read of the epoch
+// Lease. That read cannot conflict, so the request is published even while
+// a busy holder's token changes the Lease between any two reads, as the
+// mirror checks of an epoch read or change do (ADR 0058).
+//
+// A positive expectedEpoch is the epoch the caller's change replaces: the
+// request is published only while the Lease still carries it, so a stale
+// change that has already lost, or one that committed with an ambiguous
+// result, cannot hold off the epoch that now stands. Zero means the current
+// epoch, for a caller that holds none yet; it may be a predecessor's that
+// shares the caller's holder ID, as after a restart that keeps its identity.
+// Nothing is published before the epoch exists. It is best effort.
+func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string, expectedEpoch int64) {
+	if s == nil || s.client == nil {
+		return
+	}
+	holder = strings.TrimSpace(holder)
+	normalized, err := store.NormalizeControllerEpochName(name)
+	if err != nil || holder == "" {
+		return
+	}
+	lease := &coordinationv1.Lease{}
+	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochLeaseName(normalized)}
+	if err := s.readClient().Get(ctx, key, lease); err != nil {
+		return
+	}
+	epoch, err := parsePositiveInt64("controller epoch", lease.Annotations[annotationControllerEpoch])
+	if err != nil || (expectedEpoch > 0 && epoch != expectedEpoch) {
+		return
+	}
+	s.requestControllerEpochTakeover(ctx, normalized, epoch, holder)
+}
+
+// clearControllerEpochTakeover deletes holder's request to replace
+// replacedEpoch once that change committed. A newer request, against the
+// epoch that change created, is left alone even when it shares the holder
+// ID, as a restart's does. A request left behind names an older epoch and is
 // ignored.
-func (s *Store) clearControllerEpochTakeover(ctx context.Context, name, holder string) {
+func (s *Store) clearControllerEpochTakeover(ctx context.Context, name, holder string, replacedEpoch int64) {
 	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochTakeoverLeaseName(name)}
 	request := &coordinationv1.Lease{}
-	if err := s.readClient().Get(ctx, key, request); err != nil || request.Annotations[annotationEpochTakeoverRequestedBy] != holder {
+	if err := s.readClient().Get(ctx, key, request); err != nil || request.Annotations[annotationEpochTakeoverRequestedBy] != holder ||
+		request.Annotations[annotationEpochTakeoverFromEpoch] != strconv.FormatInt(replacedEpoch, 10) {
 		return
 	}
 	_ = s.client.Delete(ctx, request, client.Preconditions{UID: &request.UID, ResourceVersion: &request.ResourceVersion})

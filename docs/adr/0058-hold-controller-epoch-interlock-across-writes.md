@@ -119,17 +119,42 @@ For takeover liveness under continuous writes:
   `FinalizeSessionTurn`, `ResumeSessionTurnFinalization`, the outbox, Session
   control, prompt attempt, publication, branch claim and external effect
   writes. Releasing the interlock cancels the context.
-- **A waiting successor stops new tokens.** Before every attempt to advance
-  the epoch, a successor records a takeover request: the epoch it waits to
-  replace, its holder ID and the time. Recording it before the attempt
-  matters. A successor that recorded it only after seeing a live token could
-  keep reading a gap and losing its update to the holder's next token, and
-  never ask. The request goes on a Lease of its own
+- **A waiting successor stops new tokens.** A successor records a takeover
+  request: the epoch it waits to replace, its holder ID and the time. It does
+  this before every attempt to advance the epoch, and in the epoch manager
+  before its first epoch read and before each read that recovers from a
+  conflict. It learns the epoch from a single read of the epoch Lease, which
+  cannot conflict.
+  - Recording it before the attempt matters. A successor that recorded it only
+    after seeing a live token could keep reading a gap, lose its update to the
+    holder's next token, and never ask.
+  - Recording it before those reads matters too. An epoch read or change
+    re-reads the Lease to check the `ControllerEpoch` mirror, and fails when
+    its `resourceVersion` changed in between. A busy holder's token rollovers
+    alone can change it every time. Those checks stay.
+  - An epoch change publishes its request only while the Lease still carries
+    the epoch it replaces. A stale change that has already lost cannot hold
+    off the epoch that won. A change that committed with an ambiguous result
+    cannot hold off its own new epoch either. The manager's conflict recovery
+    publishes only against the epoch its failed attempt replaces, so a
+    manager that lost to another holder leaves no request against the winner.
+    Before its first read, the manager publishes against whatever epoch is
+    current. It holds none yet, so that epoch is the one it replaces, even
+    when a restart kept its holder ID. The request goes on a Lease of its own
   (`controller-epoch-takeover-*`), which only successors write, so it never
-  competes with the holder's writes to the epoch Lease. An attempt rewrites it
+  competes with the holder's writes to the epoch Lease. The
+  `acp-workspace-lease-protection` admission policy reserves that prefix for
+  the controller's identity, as it does the admission ledgers: a forged
+  request kept fresh would otherwise stop the holder's new tokens and stall
+  every fenced write, and a removed one would let the holder starve its
+  successor. An attempt rewrites it
   once the successor's own last write of it is 10s old on its monotonic clock,
-  which gives the request a new `resourceVersion`. It is deleted once the
-  epoch change commits.
+  which gives the request a new `resourceVersion`. Once the epoch
+  change commits, it deletes its own request against the epoch it replaced.
+  A newer request against the epoch it created is left in place, even when it
+  shares the holder ID, as a restart's does. No publisher overwrites a
+  request against a newer epoch than the one it read, so a publisher delayed
+  past another change cannot downgrade a newer successor's request.
 - Before writing a token, a store reads that request. A request version is in
   force for 30s from when this store first saw it, on this store's own
   monotonic clock. No store compares the time a requester wrote into the

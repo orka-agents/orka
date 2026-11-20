@@ -792,3 +792,158 @@ func TestReleaseHeldInterlockHonoursTheCallersDeadline(t *testing.T) {
 	stall.Store(false)
 	waitForNoMutationToken(t, raw, fence)
 }
+
+// rollingHolderClient is the successor's view of the API: after each of its
+// reads of the epoch Lease, the holder rolls its token over (removes it and
+// writes a new one, unless a takeover request stops it), so every pair of
+// reads the successor makes sees a different resourceVersion for as long as
+// the holder keeps writing tokens.
+func rollingHolderClient(t *testing.T, raw client.Client, holder *Store, fence store.ControllerEpochFence, rolls *atomic.Int32) client.Client {
+	t.Helper()
+	epochLease := controllerEpochLeaseName(fence.Name)
+	return interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			err := delegate.Get(ctx, key, object, options...)
+			if key.Name == epochLease {
+				rolls.Add(1)
+				rollCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				_ = holder.ReleaseHeldControllerEpochInterlock(rollCtx)
+				_ = holder.WithControllerEpochMutation(rollCtx, fence, func(context.Context) error { return nil })
+				cancel()
+			}
+			return err
+		},
+	})
+}
+
+// A holder that rolls its token over between every pair of the successor's
+// reads makes each epoch change attempt conflict in its mirror checks, before
+// the attempt gets far. The successor still publishes its takeover request,
+// from a read that cannot conflict, so the holder stops writing tokens and
+// the successor changes the epoch within the bound.
+func TestTakeoverIsRequestedEvenWhenEveryReadPairConflicts(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	holder := holdingStore(t, raw, time.Hour, 5*time.Second)
+	require.NoError(t, holder.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+	var rolls atomic.Int32
+	successorClient := rollingHolderClient(t, raw, holder, fence, &rolls)
+	successor, err := New(successorClient, testControlNamespace, WithAPIReader(successorClient))
+	require.NoError(t, err)
+
+	started := time.Now()
+	var advanced *store.ControllerEpoch
+	for attempt := 0; advanced == nil; attempt++ {
+		require.Less(t, time.Since(started), 10*time.Second, "the successor was starved by token rollovers")
+		if advanced, err = successor.CompareAndSwapControllerEpoch(t.Context(), successorCAS(fence.Epoch)); err != nil {
+			require.ErrorIs(t, err, store.ErrConflict)
+			time.Sleep(min(time.Duration(attempt+1)*10*time.Millisecond, time.Second))
+		}
+	}
+	require.Positive(t, rolls.Load())
+	t.Logf("successor changed the epoch %s after it started, across %d forced rollovers", time.Since(started).Round(time.Millisecond), rolls.Load())
+	require.ErrorIs(t, holder.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }), store.ErrConflict)
+}
+
+// A stale epoch change that has already lost, replacing an epoch another
+// holder has replaced since, publishes no takeover request against the
+// winner, so its retries cannot hold off the winner's writes. Neither does a
+// change that committed with an ambiguous result, retried against the epoch
+// it replaced.
+func TestStaleEpochChangeCannotHoldOffItsWinner(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	ctx := t.Context()
+	winner := holdingStore(t, raw, time.Hour, 5*time.Second)
+	won, err := winner.CompareAndSwapControllerEpoch(ctx, store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch,
+		NewEpoch: fence.Epoch + 1, HolderID: "winner", RequestDigest: testDigest("winner"), UpdatedAt: time.Now().UTC()})
+	require.NoError(t, err)
+	winnerFence := store.ControllerEpochFence{Name: won.Name, Epoch: won.Epoch, HolderID: won.HolderID}
+	requestKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}
+
+	stale := holdingStore(t, raw, time.Hour, 5*time.Second)
+	for range 3 {
+		_, err = stale.CompareAndSwapControllerEpoch(ctx, store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch,
+			NewEpoch: fence.Epoch + 1, HolderID: "stale", RequestDigest: testDigest("stale"), UpdatedAt: time.Now().UTC()})
+		require.ErrorIs(t, err, store.ErrConflict)
+	}
+	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "the stale change published a request against the winner")
+	started := time.Now()
+	require.NoError(t, winner.WithControllerEpochMutation(ctx, winnerFence, func(context.Context) error { return nil }))
+	require.Less(t, time.Since(started), time.Second, "the stale change held off the winner's write")
+
+	winner.PublishControllerEpochTakeoverIntent(ctx, fence.Name, "winner", fence.Epoch)
+	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "a committed change published a request against its own epoch")
+	require.NoError(t, winner.ReleaseHeldControllerEpochInterlock(ctx))
+}
+
+// A restart that keeps its holder ID replaces its predecessor's epoch while
+// the predecessor, still running, rolls its token over between every pair of
+// the restart's reads. The restart's request is published all the same, so
+// it changes the epoch within the bound.
+func TestTakeoverWithTheSameHolderIDIsRequestedEvenWhenEveryReadPairConflicts(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	predecessor := holdingStore(t, raw, time.Hour, 5*time.Second)
+	require.NoError(t, predecessor.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+	var rolls atomic.Int32
+	restartedClient := rollingHolderClient(t, raw, predecessor, fence, &rolls)
+	restarted, err := New(restartedClient, testControlNamespace, WithAPIReader(restartedClient))
+	require.NoError(t, err)
+	restart := store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch, NewEpoch: fence.Epoch + 1,
+		HolderID: fence.HolderID, RequestDigest: testDigest("same-identity-restart"), UpdatedAt: time.Now().UTC()}
+
+	started := time.Now()
+	var advanced *store.ControllerEpoch
+	for attempt := 0; advanced == nil; attempt++ {
+		require.Less(t, time.Since(started), 10*time.Second, "the same-identity restart was starved by token rollovers")
+		if advanced, err = restarted.CompareAndSwapControllerEpoch(t.Context(), restart); err != nil {
+			require.ErrorIs(t, err, store.ErrConflict)
+			time.Sleep(min(time.Duration(attempt+1)*10*time.Millisecond, time.Second))
+		}
+	}
+	require.Equal(t, fence.Epoch+1, advanced.Epoch)
+	require.Positive(t, rolls.Load())
+}
+
+// A committed epoch change, or a replay of it, clears only its own request
+// against the epoch it replaced. A newer request against the epoch it
+// created, made by a restart that shares the holder ID, is left in place.
+func TestCommittedEpochChangeKeepsANewerSameHolderRequest(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	ctx := t.Context()
+	writer := holdingStore(t, raw, time.Hour, 5*time.Second)
+	change := store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch, NewEpoch: fence.Epoch + 1,
+		HolderID: "shared-holder", RequestDigest: testDigest("shared"), UpdatedAt: testNow}
+	_, err := writer.CompareAndSwapControllerEpoch(ctx, change)
+	require.NoError(t, err)
+	requestKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}
+	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "the committed change left its own request")
+
+	restart := holdingStore(t, raw, time.Hour, 5*time.Second)
+	restart.PublishControllerEpochTakeoverIntent(ctx, fence.Name, "shared-holder", fence.Epoch+1)
+	require.NoError(t, raw.Get(ctx, requestKey, &coordinationv1.Lease{}), "the restart did not publish its request")
+	// The earlier change is replayed and takes its idempotent path.
+	_, err = writer.CompareAndSwapControllerEpoch(ctx, change)
+	require.NoError(t, err)
+	request := &coordinationv1.Lease{}
+	require.NoError(t, raw.Get(ctx, requestKey, request), "the replay deleted the restart's newer request")
+	require.Equal(t, strconv.FormatInt(fence.Epoch+1, 10), request.Annotations[annotationEpochTakeoverFromEpoch])
+}
+
+// A publisher that read an older epoch, delayed past another change and a
+// newer successor's request, does not overwrite that newer request.
+func TestDelayedTakeoverRequestDoesNotDowngradeANewerOne(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	ctx := t.Context()
+	requestKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}
+	newer := holdingStore(t, raw, time.Hour, 5*time.Second)
+	newer.requestControllerEpochTakeover(ctx, fence.Name, fence.Epoch+1, "newer")
+	delayed := holdingStore(t, raw, time.Hour, 5*time.Second)
+	delayed.requestControllerEpochTakeover(ctx, fence.Name, fence.Epoch, "delayed")
+	request := &coordinationv1.Lease{}
+	require.NoError(t, raw.Get(ctx, requestKey, request))
+	require.Equal(t, strconv.FormatInt(fence.Epoch+1, 10), request.Annotations[annotationEpochTakeoverFromEpoch], "the delayed publisher downgraded the newer request")
+	require.Equal(t, "newer", request.Annotations[annotationEpochTakeoverRequestedBy])
+	// A request against the same epoch from another successor still replaces it.
+	delayed.requestControllerEpochTakeover(ctx, fence.Name, fence.Epoch+1, "delayed")
+	require.NoError(t, raw.Get(ctx, requestKey, request))
+	require.Equal(t, "delayed", request.Annotations[annotationEpochTakeoverRequestedBy])
+}
