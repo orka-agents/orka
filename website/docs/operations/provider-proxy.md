@@ -138,7 +138,14 @@ definitions and prior tool results do not authorize or prevent a retry.
 
 For each send the supervisor issues a fresh challenge. Only the auth proxy
 may confirm it, after checking its own egress pin, the bounded request body,
-and the upstream status. A conditional resend uses a distinct HTTP
+and the upstream status. The auth proxy sends confirmed 429 headers promptly,
+then reads up to 4 KiB of rejection detail for up to 250 ms. It bounds writes
+to the supervisor as well, allowing one extra second. The supervisor
+waits for the body to finish before resending, so the auth proxy has closed
+the gateway response and released its slot. If the retry deadline arrives
+first, the supervisor keeps the known 429 and the detail received so far.
+Other responses keep streaming normally.
+A conditional resend uses a distinct HTTP
 authentication scheme with the existing proxy credential: an older,
 Bearer-only proxy rejects it instead of forwarding it unchecked. Neither
 the child nor the provider receives these internal headers. Use both upgraded components and

@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httptrace"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,7 +97,8 @@ func TestProviderProxy429CannotOutliveLease(t *testing.T) {
 type codexTimedReader struct {
 	io.Reader
 	context.Context
-	readyAt time.Time
+	readyAt     time.Time
+	observedEOF *bool
 }
 
 func (r codexTimedReader) Read(buf []byte) (int, error) {
@@ -106,7 +106,11 @@ func (r codexTimedReader) Read(buf []byte) (int, error) {
 	case <-r.Done():
 		return 0, r.Err()
 	case <-time.After(time.Until(r.readyAt)):
-		return r.Reader.Read(buf)
+		read, err := r.Reader.Read(buf)
+		if err == io.EOF && r.observedEOF != nil {
+			*r.observedEOF = true
+		}
+		return read, err
 	}
 }
 
@@ -115,19 +119,24 @@ func TestProviderProxy429RetryBudget(t *testing.T) {
 		name           string
 		qualify        bool
 		firstHeaders   time.Duration
+		firstBodyAt    time.Duration
+		firstDetail    string
 		retryHeaders   time.Duration
 		bodyAt         time.Duration
+		retryRejects   bool
 		closeAdmission string
 		wantStatus     int
-		wantSends      int
+		wantRoundTrips int
 		wantBody       string
 	}{
-		{name: "unqualified late 429 keeps error body", firstHeaders: 31 * time.Second, bodyAt: 32 * time.Second, wantStatus: 429, wantSends: 1, wantBody: "rate limited"},
-		{name: "qualified late 429 truncates only body", qualify: true, firstHeaders: 31 * time.Second, bodyAt: 32 * time.Second, wantStatus: 429, wantSends: 1},
-		{name: "accepted retry streams beyond budget", qualify: true, retryHeaders: 29 * time.Second, bodyAt: 31 * time.Second, wantStatus: 200, wantSends: 2, wantBody: "accepted"},
-		{name: "late retry headers never relay partial success", qualify: true, retryHeaders: 31 * time.Second, bodyAt: 32 * time.Second, wantStatus: 502, wantSends: 2},
-		{name: "close stops buffered retry", qualify: true, closeAdmission: "before flush", wantStatus: 429, wantSends: 1, wantBody: "rate limited"},
-		{name: "accepted retry can drain", qualify: true, closeAdmission: "after headers", bodyAt: time.Second, wantStatus: 200, wantSends: 2, wantBody: "accepted"},
+		{name: "unqualified late 429 keeps error body", firstHeaders: 31 * time.Second, firstBodyAt: 32 * time.Second, wantStatus: 429, wantRoundTrips: 1, wantBody: "rate limited"},
+		{name: "qualified late 429 truncates only body", qualify: true, firstHeaders: 31 * time.Second, firstBodyAt: 32 * time.Second, wantStatus: 429, wantRoundTrips: 1},
+		{name: "accepted retry streams beyond budget", qualify: true, firstBodyAt: time.Second, retryHeaders: 29 * time.Second, bodyAt: 31 * time.Second, wantStatus: 200, wantRoundTrips: 2, wantBody: "accepted"},
+		{name: "rejection larger than relay cap is drained before retry", qualify: true, firstDetail: strings.Repeat("x", 2048), wantStatus: 200, wantRoundTrips: 2, wantBody: "accepted"},
+		{name: "confirmed retry 429 survives a body past the deadline", qualify: true, retryHeaders: 29 * time.Second, bodyAt: 31 * time.Second, retryRejects: true, wantStatus: 429, wantRoundTrips: 2, wantBody: "retry was rate limited"},
+		{name: "late retry headers never relay partial success", qualify: true, retryHeaders: 31 * time.Second, bodyAt: 32 * time.Second, wantStatus: 502, wantRoundTrips: 2},
+		{name: "close cancels retry awaiting headers", qualify: true, closeAdmission: "during retry", wantStatus: 429, wantRoundTrips: 2, wantBody: "rate limited"},
+		{name: "accepted retry can drain", qualify: true, closeAdmission: "after headers", bodyAt: time.Second, wantStatus: 200, wantRoundTrips: 2, wantBody: "accepted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -139,22 +148,44 @@ func TestProviderProxy429RetryBudget(t *testing.T) {
 					activePromptID: "test-prompt", turnPromptID: "test-prompt", gateContext: gate,
 					leaseExpiresAt: start.Add(time.Minute), admissionDone: make(chan struct{}),
 				}
-				var sends int
+				retryEntered := make(chan struct{})
+				finished := make(chan struct{})
+				defer close(finished)
+				if tc.closeAdmission == "during retry" {
+					go func() {
+						select {
+						case <-retryEntered:
+							session.closeAdmission("test-prompt")
+						case <-finished:
+						}
+					}()
+				}
+				var roundTrips int
+				var firstBodyEOF bool
 				session.proxy = &providerProxy{providerKind: providerKindCodex, codex429RouteID: routeID, maxResponseBytes: 1024,
 					client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-						if sends > 0 && tc.closeAdmission == "before flush" {
-							if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && trace.WroteRequest != nil {
-								trace.WroteRequest(httptrace.WroteRequestInfo{})
-							}
-							session.closeAdmission("test-prompt")
-							if err := req.Context().Err(); err != nil {
-								return nil, err
-							}
+						roundTrips++
+						status, wait, bodyAt, text := http.StatusTooManyRequests, tc.firstHeaders, tc.firstBodyAt, "rate limited"
+						if roundTrips == 1 && tc.firstDetail != "" {
+							text = tc.firstDetail
 						}
-						sends++
-						status, wait, text := http.StatusTooManyRequests, tc.firstHeaders, "rate limited"
-						if sends > 1 {
-							status, wait, text = http.StatusOK, tc.retryHeaders, "accepted"
+						if roundTrips > 1 {
+							if !firstBodyEOF {
+								t.Error("retry started before EOF on the previous rejection body")
+							}
+							if roundTrips == 2 && tc.closeAdmission == "during retry" {
+								close(retryEntered)
+								select {
+								case <-req.Context().Done():
+									return nil, req.Context().Err()
+								case <-time.After(time.Second):
+									t.Error("closing admission did not cancel the active retry transport")
+								}
+							}
+							status, wait, bodyAt, text = http.StatusOK, tc.retryHeaders, tc.bodyAt, "accepted"
+							if tc.retryRejects {
+								status = http.StatusTooManyRequests
+							}
 							if tc.closeAdmission == "after headers" {
 								time.AfterFunc(500*time.Millisecond, func() { session.closeAdmission("test-prompt") })
 							}
@@ -163,8 +194,19 @@ func TestProviderProxy429RetryBudget(t *testing.T) {
 						header := make(http.Header)
 						header.Set("Retry-After", "0")
 						header.Set(providerproxy.Codex429RouteHeader, req.Header.Get(providerproxy.Codex429RouteHeader))
-						return &http.Response{StatusCode: status, Header: header,
-							Body: io.NopCloser(codexTimedReader{strings.NewReader(text), req.Context(), start.Add(tc.bodyAt)})}, nil
+						timedBody := codexTimedReader{Reader: strings.NewReader(text), Context: req.Context(), readyAt: start.Add(bodyAt)}
+						if roundTrips == 1 {
+							timedBody.observedEOF = &firstBodyEOF
+						}
+						var body io.Reader = timedBody
+						contentLength := int64(-1)
+						if roundTrips == 1 && tc.firstDetail != "" {
+							contentLength = int64(len(tc.firstDetail))
+						}
+						if roundTrips > 1 && tc.retryRejects {
+							body = io.MultiReader(strings.NewReader("retry was rate limited"), body)
+						}
+						return &http.Response{StatusCode: status, Header: header, ContentLength: contentLength, Body: io.NopCloser(body)}, nil
 					})},
 				}
 				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://gateway.example/v1/responses", strings.NewReader("{}"))
@@ -177,8 +219,8 @@ func TestProviderProxy429RetryBudget(t *testing.T) {
 				out := httptest.NewRecorder()
 				session.forwardProviderRequest(out, req, providerOpenAIResponsesV1Path, []byte("{}"), providerRequestInference,
 					providerProxyAuthorization{promptID: "test-prompt", gateContext: gate, inferenceSeq: 1}, func(error) {})
-				if out.Code != tc.wantStatus || sends != tc.wantSends || tc.wantStatus != 502 && out.Body.String() != tc.wantBody {
-					t.Errorf("HTTP %d, %d sends, body %q; want HTTP %d, %d sends, body %q", out.Code, sends, out.Body.String(), tc.wantStatus, tc.wantSends, tc.wantBody)
+				if out.Code != tc.wantStatus || roundTrips != tc.wantRoundTrips || tc.wantStatus != 502 && out.Body.String() != tc.wantBody {
+					t.Errorf("HTTP %d, %d transport calls, body %q; want HTTP %d, %d transport calls, body %q", out.Code, roundTrips, out.Body.String(), tc.wantStatus, tc.wantRoundTrips, tc.wantBody)
 				}
 			})
 		})

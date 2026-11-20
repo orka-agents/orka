@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/providerproxy/testdata/codexroutes"
 )
@@ -97,6 +98,91 @@ func TestAuthProxyRejectsConflictingRetryAuthorization(t *testing.T) {
 	})
 }
 
+func TestAuthProxyConfirmed429ReleasesSlotBeforeRetry(t *testing.T) {
+	const rejection = `{"error":{"message":"gateway rejected request"}}`
+	var sends atomic.Int32
+	firstClosed := make(chan struct{})
+	firstHeaders := make(chan struct{})
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sends.Add(1) == 1 {
+			defer close(firstClosed)
+			w.Header().Set("Retry-After", "0")
+			w.Header().Set("Content-Length", "128")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.(http.Flusher).Flush()
+			select {
+			case <-firstHeaders:
+			case <-r.Context().Done():
+				return
+			}
+			_, _ = io.WriteString(w, rejection)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		_, _ = io.WriteString(w, "accepted")
+	}))
+	defer gateway.Close()
+	proxy := newQualificationProxy(t, proxyConfig{
+		UpstreamBaseURL: fixtureEgress, Codex429RetryBaseURL: fixtureEgress, Codex429RetryModel: fixtureModel, MaxConcurrentRequests: 1,
+	}, gateway.Listener.Addr().String())
+	frontend := httptest.NewServer(proxy)
+	defer frontend.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	send := func(retry bool) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, frontend.URL+"/v1/responses", strings.NewReader(fixturePost))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(authorizationHeader, "Bearer "+testSharedProviderToken)
+		req.Header.Set(routeHeader, fixtureChallenge)
+		if retry {
+			req.Header.Set(authorizationHeader, "Orka-Codex-429 "+testSharedProviderToken)
+			req.Header.Set(routeHeader, fixtureRouteID+".bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+			req.Header.Set(replayHeader, "1")
+		}
+		resp, err := frontend.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	first := send(false)
+	defer func() { _ = first.Body.Close() }()
+	if first.StatusCode != http.StatusTooManyRequests || first.Header.Get(routeHeader) != fixtureChallenge || first.Header.Get("Retry-After") != "0" {
+		t.Fatalf("first response HTTP=%d, want a confirmed 429 with no backoff", first.StatusCode)
+	}
+	close(firstHeaders)
+	firstBody, err := io.ReadAll(first.Body)
+	if string(firstBody) != rejection || err != nil {
+		t.Fatalf("original rejection body=%q, err=%v; want %q", firstBody, err, rejection)
+	}
+	retry := send(true)
+	defer func() { _ = retry.Body.Close() }()
+	retryBody, err := io.ReadAll(retry.Body)
+	if retry.StatusCode != http.StatusOK || string(retryBody) != "accepted" || err != nil || sends.Load() != 2 {
+		t.Fatalf("retry HTTP=%d, gateway sends=%d, body=%q, err=%v; want accepted after two sends", retry.StatusCode, sends.Load(), retryBody, err)
+	}
+	select {
+	case <-firstClosed:
+	case <-ctx.Done():
+		t.Fatal("gateway rejection stream was not cancelled")
+	}
+}
+
+type rejectionDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+	writeDeadline time.Time
+}
+
+func (r *rejectionDeadlineRecorder) SetWriteDeadline(deadline time.Time) error {
+	r.writeDeadline = deadline
+	return http.NewResponseController(r.ResponseRecorder).SetWriteDeadline(deadline)
+}
+
 func runQualificationWireExchange(t *testing.T, cfg proxyConfig, path, body, challenge string, replay bool, backendStatus, wantSends int, wantProof bool, extra http.Header) {
 	t.Helper()
 	var sends atomic.Int32
@@ -138,8 +224,11 @@ func runQualificationWireExchange(t *testing.T, cfg proxyConfig, path, body, cha
 			request.Header.Add(k, v)
 		}
 	}
-	resp := httptest.NewRecorder()
+	resp := &rejectionDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	proxy.ServeHTTP(resp, request)
+	if got := !resp.writeDeadline.IsZero(); got != wantProof {
+		t.Errorf("rejection write deadline set=%t, want %t", got, wantProof)
+	}
 	if int(sends.Load()) != wantSends {
 		t.Errorf("backend sends=%d, want %d", sends.Load(), wantSends)
 	}

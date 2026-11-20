@@ -118,9 +118,23 @@ func (s *providerProxySession) confirmedCodexRejection(req *http.Request, respon
 	return proof != "" && proof == req.Header.Get(providerproxy.Codex429RouteHeader)
 }
 
+func (response *codexInferenceResponse) snapshotRejection(deadline time.Time, maxResponseBytes int64) bool {
+	timer := time.AfterFunc(time.Until(deadline), response.cancel)
+	detail, err := io.ReadAll(io.LimitReader(response.Body, providerproxy.Codex429RejectionDetailBytes+1))
+	timer.Stop()
+	_ = response.Body.Close()
+	response.cancel()
+	complete := err == nil && len(detail) <= providerproxy.Codex429RejectionDetailBytes
+	detail = detail[:min(int64(len(detail)), maxResponseBytes, providerproxy.Codex429RejectionDetailBytes)]
+	response.Header.Del("Content-Length")
+	response.ContentLength = int64(len(detail))
+	response.Body = io.NopCloser(bytes.NewReader(detail))
+	return complete
+}
+
 // The caller has admitted, normalized and charged one Codex Responses POST.
-// Keep its last 429 untouched until another send is authorized: on exhaustion
-// the normal relay retains the status, headers and bounded, sanitized detail.
+// Keep its last 429 for fallback and wait for the auth proxy to finish that
+// response and release its slot before sending again.
 func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, body []byte, response *codexInferenceResponse, gate context.Context, deadline time.Time) (*codexInferenceResponse, error) {
 	ctx := req.Context()
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
@@ -130,7 +144,7 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 		if !s.confirmedCodexRejection(req, response.Response) {
 			break // the first hop did not confirm the qualified route for this send
 		}
-		if providerproxy.HasDisallowedContentEncoding(response.Header) || response.ContentLength > s.proxy.maxResponseBytes {
+		if providerproxy.HasDisallowedContentEncoding(response.Header) || response.ContentLength > providerproxy.Codex429RejectionDetailBytes {
 			break // let the normal relay reject the invalid response
 		}
 		now := time.Now()
@@ -151,6 +165,9 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 			return response, nil
 		case <-time.After(time.Until(due)):
 		}
+		if !response.snapshotRejection(deadline, s.proxy.maxResponseBytes) {
+			break
+		}
 		next := req.Clone(ctx)
 		next.Body = io.NopCloser(bytes.NewReader(body))
 		next.Header.Set(providerproxy.Codex429RouteHeader, providerproxy.NewCodex429Challenge(s.proxy.codex429RouteID))
@@ -160,8 +177,6 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 		if retried == nil && err == nil {
 			break
 		}
-		response.cancel()
-		_ = response.Body.Close()
 		if err != nil {
 			return nil, err // no status: delivery is ambiguous
 		}

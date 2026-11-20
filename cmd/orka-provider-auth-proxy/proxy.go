@@ -30,6 +30,8 @@ const (
 	defaultReadHeaderTimeout     = 5 * time.Second
 	defaultIdleTimeout           = 30 * time.Second
 	defaultMaxConcurrentRequests = 32
+	codexRejectionDetailTimeout  = 250 * time.Millisecond
+	codexRejectionWriteGrace     = time.Second
 	authorizationHeader          = "Authorization"
 )
 
@@ -200,7 +202,13 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), body)
+	ctx := r.Context()
+	var cancel context.CancelFunc
+	if challenge != "" {
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
+	upstreamRequest, err := http.NewRequestWithContext(ctx, r.Method, target.String(), body)
 	if err != nil {
 		providerproxy.WriteError(w, http.StatusBadGateway, "provider request could not be prepared")
 		return
@@ -232,7 +240,13 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providerproxy.CopyResponseHeaders(w.Header(), response.Header)
-	if challenge != "" && response.StatusCode == http.StatusTooManyRequests {
+	confirmedRejection := challenge != "" && response.StatusCode == http.StatusTooManyRequests
+	if confirmedRejection {
+		deadline := time.Now().Add(codexRejectionDetailTimeout + codexRejectionWriteGrace)
+		_ = http.NewResponseController(w).SetWriteDeadline(deadline)
+		timer := time.AfterFunc(codexRejectionDetailTimeout, cancel)
+		defer timer.Stop()
+		w.Header().Del("Content-Length")
 		w.Header().Set(providerproxy.Codex429RouteHeader, challenge)
 	}
 	w.WriteHeader(response.StatusCode)
@@ -241,6 +255,11 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// every chunk so streamed responses reach the ACP runtime promptly.
 	if flusher != nil {
 		flusher.Flush()
+	}
+	if confirmedRejection {
+		limit := min(providerproxy.Codex429RejectionDetailBytes, p.maxResponseBytes)
+		_ = providerproxy.StreamBoundedResponse(w, io.LimitReader(response.Body, limit), limit, flusher)
+		return
 	}
 	if err := providerproxy.StreamBoundedResponse(w, response.Body, p.maxResponseBytes, flusher); err != nil {
 		panic(http.ErrAbortHandler)

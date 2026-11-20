@@ -26,6 +26,8 @@ const (
 	Codex429RetryAuthScheme = "Orka-Codex-429"
 )
 
+const Codex429RejectionDetailBytes = 4 << 10
+
 var (
 	qualifiedFrontend = regexp.MustCompile(`^codex-429-([a-f0-9]{32})$`)
 	qualifiedBackend  = regexp.MustCompile(`-[a-f0-9]{6,}$`)
