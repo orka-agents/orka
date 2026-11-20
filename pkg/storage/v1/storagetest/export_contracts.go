@@ -209,7 +209,16 @@ func runStateExportImport(t *testing.T, newProvider StateFactory) {
 		target := newProvider(t)
 		_, err := exporter(target).BeginImport(t.Context(), beginImportRequest(t, describe(t, source), manifest))
 		require.NoError(t, err)
-		require.ErrorIs(t, target.SaveResult(t.Context(), exportSeedTenant, "task-b", []byte("written during the import")), storagev1.ErrNotReady)
+		// The write carries its own envelope, naming the import's dataset, so
+		// it reaches SaveResult rather than the suite's epoch setup. The
+		// dataset holds no controller epoch, so the dataset state check must
+		// come before the fence check for the write to return ErrNotReady.
+		data := []byte("written during the import")
+		ctx := storagev1.WithWriteEnvelope(t.Context(),
+			NewWriteEnvelope(t, describe(t, target).DatasetID, suiteFence, "SaveResult", exportSeedTenant, "task-b", data))
+		err = target.SaveResult(ctx, exportSeedTenant, "task-b", data)
+		require.ErrorIs(t, err, storagev1.ErrNotReady)
+		require.NotErrorIs(t, err, storagev1.ErrFenced)
 	})
 
 	t.Run("a migrated contract part refuses writes", func(t *testing.T) {

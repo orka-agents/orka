@@ -275,8 +275,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		_, err = target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
 			SessionID: session.SessionID, Family: schema.Name, Sequence: 1, Records: []storagev1.RawRecord{record},
 		})
-		var tooLarge storagev1.TooLargeError
-		require.ErrorAs(t, err, &tooLarge, "a result over MaxResultBytes cannot be split into smaller batches")
+		tooLarge := typedError[storagev1.TooLargeError](t, err, "a result over MaxResultBytes cannot be split into smaller batches")
 		require.Equal(t, info.Limits.MaxResultBytes, tooLarge.Limit)
 		progress, err := target.GetImportProgress(t.Context(), session.SessionID)
 		require.NoError(t, err)
@@ -353,7 +352,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 
 		complete := storagev1.CompleteImportRequest{SessionID: session.SessionID, ManifestDigest: request.Source.ManifestDigest}
 		_, err = target.CompleteImport(t.Context(), complete)
-		verification := importVerification(t, err)
+		verification := typedError[storagev1.ImportVerificationError](t, err, "CompleteImport returns an ImportVerificationError")
 		require.ErrorIs(t, err, storagev1.ErrConflict)
 		require.Equal(t, family, verification.Expected.Family)
 		require.Equal(t, verification.Expected.Count-1, verification.Actual.Count)
@@ -637,16 +636,19 @@ func changedExportValue(field storagev1.ExportField, value any) any {
 	}
 }
 
-// importVerification returns the ImportVerificationError in err, which a
-// provider may return as a value or a pointer.
-func importVerification(t *testing.T, err error) storagev1.ImportVerificationError {
+// typedError returns the error of type T in err, which a provider may
+// return as a value or a pointer, and fails the test when err holds neither.
+func typedError[T error, P interface {
+	*T
+	error
+}](t *testing.T, err error, msg string) T {
 	t.Helper()
-	if value, ok := errors.AsType[storagev1.ImportVerificationError](err); ok {
+	if value, ok := errors.AsType[T](err); ok {
 		return value
 	}
-	pointer, ok := errors.AsType[*storagev1.ImportVerificationError](err)
-	require.True(t, ok, "CompleteImport returns an ImportVerificationError: %v", err)
-	require.NotNil(t, pointer)
+	pointer, ok := errors.AsType[P](err)
+	require.True(t, ok, "%s: %v", msg, err)
+	require.NotNil(t, pointer, msg)
 	return *pointer
 }
 

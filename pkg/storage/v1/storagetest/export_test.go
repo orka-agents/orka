@@ -36,6 +36,13 @@ func TestRunExportImportSplitsBatchesAProviderRefuses(t *testing.T) {
 	}, seedMemoryExport)
 }
 
+// typedError accepts an error a provider returns as a value or a pointer.
+func TestTypedErrorAcceptsValuesAndPointers(t *testing.T) {
+	want := storagev1.TooLargeError{What: "result", Size: 2, Limit: 1}
+	require.Equal(t, want, typedError[storagev1.TooLargeError](t, fmt.Errorf("import: %w", want), "value"))
+	require.Equal(t, want, typedError[storagev1.TooLargeError](t, fmt.Errorf("import: %w", &want), "pointer"))
+}
+
 // The reference provider refuses a cursor it could not have issued, even
 // one with its own prefix.
 func TestReferenceProviderRefusesCursorsItDidNotIssue(t *testing.T) {
