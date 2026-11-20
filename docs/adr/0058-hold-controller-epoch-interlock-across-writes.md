@@ -140,7 +140,13 @@ For takeover liveness under continuous writes:
     manager that lost to another holder leaves no request against the winner.
     Before its first read, the manager publishes against whatever epoch is
     current. It holds none yet, so that epoch is the one it replaces, even
-    when a restart kept its holder ID. The request goes on a Lease of its own
+    when a restart kept its holder ID.
+    A manager read whose epoch Lease kept changing between the reads that
+    check its status mirror, as a busy holder's token writes make it, is
+    retried within the acquisition window, republishing the request each
+    time, instead of ending startup after the store's few quick retries.
+    Any other read error, including a stale or mismatched mirror, still ends
+    acquisition at once. The request goes on a Lease of its own
   (`controller-epoch-takeover-*`), which only successors write, so it never
   competes with the holder's writes to the epoch Lease. The
   `acp-workspace-lease-protection` admission policy reserves that prefix for
@@ -193,8 +199,26 @@ For takeover liveness under continuous writes:
   before. Consecutive writes under one held token record the same
   `resourceVersion`. That version is still a Lease state that carried this
   store's live token for the write's epoch.
-- The hold is on by default. `WithControllerEpochInterlockHold(0, 0)` turns it
-  off and restores an immediate release after each write.
+- The hold is opt-in: `--controller-epoch-interlock-hold`
+  (`ORKA_CONTROLLER_EPOCH_INTERLOCK_HOLD`), default off. Without it, the
+  controller passes `WithControllerEpochInterlockHold(0, 0)`, so every write
+  releases its token at once, as before this ADR. Takeover requests are
+  published and honoured either way.
+  - Why off by default: a controller from before this ADR publishes no
+    takeover request. If such a controller is the successor (a rollback) and
+    the holder runs with the hold on and keeps writing faster than the
+    linger, the epoch Lease is free only for a few reads at each max-hold
+    rollover. Against a real API server, that rollback pairing starved the
+    successor for 20s in 4 of 5 runs with writes 200ms apart, and for a
+    3-minute acquisition window with back-to-back writes. With the hold off
+    on both sides it took over at once. A holder keeps writing only after it
+    has lost leader election; a normal rollback stops the holder first, and
+    then the successor takes over in about 0.1s either way.
+  - Turn the hold on once no replica can roll back past this ADR. Takeover
+    requests from this release onward keep a successor live under the hold.
+  - Measured saving with the hold on: about 3 API calls per reused write,
+    about 0.17s per ACP session plan on kind. That is below the estimate
+    above, because a live Lease round trip cost about 25ms, not 110ms.
 
 ## Why the guarantee is unchanged
 

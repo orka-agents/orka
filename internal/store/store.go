@@ -12,6 +12,13 @@ import (
 // definitive epoch authority failures do not carry this marker.
 var ErrControllerEpochMutationContention = errors.New("controller epoch mutation contention")
 
+// ErrControllerEpochLeaseChanging marks an epoch read whose Lease kept
+// changing between the reads that check its status mirror, as a busy token
+// holder's writes make it (ADR 0058). It is contention, not a definitive
+// authority failure: errors carrying it also wrap ErrConflict, and a reader
+// may retry them.
+var ErrControllerEpochLeaseChanging = errors.New("controller epoch Lease snapshot changed")
+
 // MemoryProposalStore adds Orka's proposal application to the provider
 // contract's proposal family. The storage client implements
 // ApplyMemoryProposal with the contract's resolve and conditional commit, and
