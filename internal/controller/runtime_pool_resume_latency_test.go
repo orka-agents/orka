@@ -15,10 +15,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 // runtimePoolPatchCounter counts metadata/spec patches of RuntimePools (not
@@ -303,5 +306,267 @@ func TestExternalRuntimePoolPublishedResumeWaitsForProviderWithoutDegrading(t *t
 	pool = runtimePoolTestGetPool(t, f.r, f.pool)
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(pool.Status.Message, "does not prove the current runtime terminated") {
 		t.Fatalf("inconsistent stopped allocation: status = %s: %s, want Degraded", pool.Status.Lifecycle, pool.Status.Message)
+	}
+}
+
+// runtimePoolStatusWriteCounter counts RuntimePool status writes made
+// through the wrapped client, and how many of them conflicted.
+type runtimePoolStatusWriteCounter struct {
+	client.Client
+	mu        sync.Mutex
+	writes    int
+	conflicts int
+}
+
+type runtimePoolCountingStatusWriter struct {
+	client.SubResourceWriter
+	counter *runtimePoolStatusWriteCounter
+}
+
+func (c *runtimePoolStatusWriteCounter) Status() client.SubResourceWriter {
+	return &runtimePoolCountingStatusWriter{SubResourceWriter: c.Client.Status(), counter: c}
+}
+
+func (c *runtimePoolStatusWriteCounter) record(object client.Object, err error) error {
+	if _, ok := object.(*corev1alpha1.RuntimePool); ok {
+		c.mu.Lock()
+		c.writes++
+		if apierrors.IsConflict(err) {
+			c.conflicts++
+		}
+		c.mu.Unlock()
+	}
+	return err
+}
+
+func (c *runtimePoolStatusWriteCounter) take() (writes, conflicts int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	writes, conflicts = c.writes, c.conflicts
+	c.writes, c.conflicts = 0, 0
+	return writes, conflicts
+}
+
+func (w *runtimePoolCountingStatusWriter) Patch(ctx context.Context, object client.Object, patch client.Patch, options ...client.SubResourcePatchOption) error {
+	return w.counter.record(object, w.SubResourceWriter.Patch(ctx, object, patch, options...))
+}
+
+func (w *runtimePoolCountingStatusWriter) Update(ctx context.Context, object client.Object, options ...client.SubResourceUpdateOption) error {
+	return w.counter.record(object, w.SubResourceWriter.Update(ctx, object, options...))
+}
+
+// resumeExternalRuntime takes a served pool through a proven stop and the
+// next cold boot, as a resume does: the replica changes advance the pool's
+// generation, core re-admits the published successor, and the provider
+// reports its attested startup on a new Pod. It returns that Pod.
+func resumeExternalRuntime(t *testing.T, f *externalRuntimePoolFixture, oldPod corev1.Pod) corev1.Pod {
+	t.Helper()
+	ctx := context.Background()
+	stopExternalRuntime(t, f)
+	if err := f.r.Delete(ctx, &oldPod); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileExternalRuntimeUntilStopped(t, f)
+	// The API server advances the generation for the scale-down and again for
+	// the scale-up; the fake client does neither.
+	pool.Generation += 2
+	pool.Spec.DesiredReplicas = 1
+	if err := f.r.Update(ctx, &pool); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtimePoolTestGetPool(t, f.r, f.pool); got.Generation != pool.Generation {
+		t.Fatalf("fixture pool generation = %d, want %d", got.Generation, pool.Generation)
+	}
+	stopped := f.currentWorkspace(t).Status.Allocation.DeepCopy()
+	runtimePoolReconcile(t, f.r, f.pool)
+	workspace := f.currentWorkspace(t)
+	request := workspace.Spec.Workload
+	if request == nil || request.Sequence != stopped.Sequence+1 {
+		t.Fatalf("cold boot did not publish the successor request: %#v", request)
+	}
+	if workspace.Spec.CoreAdmission.AdmittedGeneration != workspace.Generation {
+		workspace.Spec.CoreAdmission.AdmittedGeneration = workspace.Generation
+		if err := f.r.Update(ctx, workspace); err != nil {
+			t.Fatal(err)
+		}
+		workspace = f.currentWorkspace(t)
+		request = workspace.Spec.Workload
+	}
+	pod := runtimePoolReadyPod(f.pool, request.Runtime.Template.Namespace, "external-runtime-resumed", "external-pod-uid-2", "10.0.0.72")
+	pod.Labels = cloneStringMap(request.Runtime.Template.Labels)
+	pod.Annotations = cloneStringMap(request.Runtime.Template.Annotations)
+	pod.Spec = *request.Runtime.Template.Spec.DeepCopy()
+	runtimePoolTestCreatePod(t, f.r, &pod)
+	identity := workspacev1alpha1.InstanceIdentity{AllocationID: stopped.Identity.AllocationID, InstanceID: string(pod.UID), RequestRevision: request.Revision}
+	workspace.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: request.Sequence, Key: request.Key, Identity: identity, State: workspacev1alpha1.AllocationReady,
+		Startup: &workspacev1alpha1.StartupEvidence{ContractVersion: workspacev1alpha1.LifecycleContractV1, Identity: identity, Endpoint: "http://10.0.0.72:8080", Pod: &workspacev1alpha1.PodReference{Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID}}}
+	workspace.Status.ObservedGeneration = workspace.Generation
+	if err := f.r.Status().Update(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	return pod
+}
+
+// The probe→Serving sequence of a resumed runtime, pinned pass by pass.
+//
+// In round 11 the provider's Ready report woke the pool to admit the resumed
+// runtime and, at the same moment, the waiting Task to finish its workspace
+// handshake. That handshake re-stamped the pool's image provenance because
+// the resume's replica change had advanced the pool's generation. The status
+// write landed while the pool probed, so the pool's optimistic Serving write
+// conflicted and the whole admission pass (attest, bootstrap, probe, fence)
+// ran again: admit.probeToServingMs rose from 179 to 434 ms on private
+// resumes and from 242 to 510 ms on shared ones.
+//
+// Here the Task's handshake runs inside every probe. A ready supervisor must
+// serve on the first pass and a booting one on the pass its one-second
+// re-probe starts, with one probe per pass and no conflicted status write.
+func TestExternalRuntimePoolResumeServesWhileTheTaskHandshakeLands(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		booting bool
+	}{
+		{name: "ready supervisor"},
+		{name: "booting then ready supervisor", booting: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newExternalRuntimePoolFixture(t)
+			_, oldPod := f.serve(t)
+			taskWrites := &runtimePoolStatusWriteCounter{Client: f.r.Client}
+			task := &TaskReconciler{Client: taskWrites}
+			// The first turn's Task proved the pool's image provenance.
+			served := runtimePoolTestGetPool(t, f.r, f.pool)
+			if err := task.recordACPRuntimePoolImageProvenance(ctx, &served); err != nil {
+				t.Fatal(err)
+			}
+			if writes, _ := taskWrites.take(); writes != 1 {
+				t.Fatalf("first-turn provenance writes = %d, want 1", writes)
+			}
+
+			pod := resumeExternalRuntime(t, f, oldPod)
+			resumed := runtimePoolTestGetPool(t, f.r, f.pool)
+			ready := runtimePoolValidProbe(&resumed, &pod, "external-boot-2", false)
+			f.supervisor.probe = ready
+			if test.booting {
+				booting := ready
+				booting.Status.Lifecycle = harnessv2.SupervisorLifecycleBooting
+				booting.Status.Drain.AcceptingNewSessions = false
+				f.supervisor.probe = booting
+			}
+			handshakes := 0
+			f.supervisor.afterProbe = func() {
+				handshakes++
+				current := runtimePoolTestGetPool(t, f.r, f.pool)
+				if err := task.recordACPRuntimePoolImageProvenance(ctx, &current); err != nil {
+					t.Errorf("Task handshake: %v", err)
+				}
+			}
+			poolWrites := &runtimePoolStatusWriteCounter{Client: f.r.Client}
+			f.r.Client = poolWrites
+			f.supervisor.probeCalls = 0
+
+			if test.booting {
+				result := runtimePoolReconcile(t, f.r, f.pool)
+				pool := runtimePoolTestGetPool(t, f.r, f.pool)
+				if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed ||
+					pool.Status.Message != "runtime supervisor is booting" {
+					t.Fatalf("booting probe: status = %s/%s: %q, want Starting/Closed booting", pool.Status.Lifecycle, pool.Status.AdmissionState, pool.Status.Message)
+				}
+				if result.RequeueAfter != runtimePoolBootingRequeue {
+					t.Fatalf("booting probe requeue = %s, want %s", result.RequeueAfter, runtimePoolBootingRequeue)
+				}
+				if f.supervisor.probeCalls != 1 {
+					t.Fatalf("booting pass probes = %d, want 1", f.supervisor.probeCalls)
+				}
+				if _, conflicts := poolWrites.take(); conflicts != 0 {
+					t.Fatalf("booting pass status conflicts = %d, want 0", conflicts)
+				}
+				f.supervisor.probe = ready
+				f.supervisor.probeCalls = 0
+			}
+
+			runtimePoolReconcile(t, f.r, f.pool)
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			if !runtimePoolAdmitting(&pool) {
+				t.Fatalf("resumed runtime did not serve on its ready pass: %s/%s: %s", pool.Status.Lifecycle, pool.Status.AdmissionState, pool.Status.Message)
+			}
+			if pool.Status.ActiveInstance == nil || pool.Status.ActiveInstance.PodUID != string(pod.UID) || pool.Status.ActiveInstance.BootID != "external-boot-2" {
+				t.Fatalf("active fence = %#v, want the resumed Pod", pool.Status.ActiveInstance)
+			}
+			if f.supervisor.probeCalls != 1 {
+				t.Fatalf("ready pass probes = %d, want 1", f.supervisor.probeCalls)
+			}
+			if _, conflicts := poolWrites.take(); conflicts != 0 {
+				t.Fatalf("ready pass status conflicts = %d, want 0", conflicts)
+			}
+			wantHandshakes := 1
+			if test.booting {
+				wantHandshakes = 2
+			}
+			if handshakes != wantHandshakes {
+				t.Fatalf("Task handshakes = %d, want %d", handshakes, wantHandshakes)
+			}
+			// The proof from the first turn still holds; the Task wrote nothing.
+			if writes, _ := taskWrites.take(); writes != 0 {
+				t.Fatalf("Task provenance writes during the resumed admission = %d, want 0", writes)
+			}
+			if !runtimePoolImageProvenanceRecorded(&pool) {
+				t.Fatal("resumed pool lost its image provenance")
+			}
+		})
+	}
+}
+
+// The Task stamps image provenance once per pool. A replica-only generation
+// change keeps the proof; a pool without a true proof is still stamped.
+func TestRecordACPRuntimePoolImageProvenanceKeepsAnEarlierGenerationProof(t *testing.T) {
+	ctx := context.Background()
+	f := newExternalRuntimePoolFixture(t)
+	writes := &runtimePoolStatusWriteCounter{Client: f.r.Client}
+	task := &TaskReconciler{Client: writes}
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if err := task.recordACPRuntimePoolImageProvenance(ctx, &pool); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	if n, _ := writes.take(); n != 1 || condition == nil || condition.ObservedGeneration != pool.Generation {
+		t.Fatalf("first provenance: writes = %d, condition = %#v", n, condition)
+	}
+	proven := pool.Generation
+
+	pool.Generation += 2
+	pool.Spec.DesiredReplicas = 0
+	if err := f.r.Update(ctx, &pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := task.recordACPRuntimePoolImageProvenance(ctx, &pool); err != nil {
+		t.Fatal(err)
+	}
+	condition = meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	if n, _ := writes.take(); n != 0 || condition == nil || condition.ObservedGeneration != proven {
+		t.Fatalf("after a replica change: writes = %d, condition = %#v; want the generation-%d proof kept", n, condition, proven)
+	}
+
+	for _, mutate := range []func(*metav1.Condition){
+		func(c *metav1.Condition) { c.Status = metav1.ConditionFalse },
+		func(c *metav1.Condition) { c.Reason = "Other" },
+		func(c *metav1.Condition) { c.ObservedGeneration = pool.Generation + 1 },
+	} {
+		current := runtimePoolTestGetPool(t, f.r, f.pool)
+		for i := range current.Status.Conditions {
+			if current.Status.Conditions[i].Type == acpRuntimePoolImageProvenanceCondition {
+				mutate(&current.Status.Conditions[i])
+			}
+		}
+		if err := f.r.Status().Update(ctx, &current); err != nil {
+			t.Fatal(err)
+		}
+		if err := task.recordACPRuntimePoolImageProvenance(ctx, &current); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := writes.take(); n != 1 || !runtimePoolImageProvenanceRecorded(&current) {
+			t.Fatalf("unproven pool: writes = %d, recorded = %v; want it stamped", n, runtimePoolImageProvenanceRecorded(&current))
+		}
 	}
 }
