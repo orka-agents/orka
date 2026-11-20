@@ -2765,7 +2765,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		// next turn claims it, so retire the session and its record instead.
 		if markErr := d.stampACPPersistentSessionKept(context.WithoutCancel(ctx), task, runtimeFence); markErr != nil {
 			logf.FromContext(ctx).Info("ACP persistent session keep marker was not recorded; retiring the RuntimeSession",
-				"namespace", task.Namespace, "task", task.Name, "diagnostic", boundedRuntimeSessionServerMessage(markErr))
+				"namespace", task.Namespace, "task", task.Name, "conflict", apierrors.IsConflict(markErr) || errors.Is(markErr, store.ErrConflict),
+				"error", markErr.Error())
 			d.retireACPResidentRuntime(ctx, task, fence, sessionExecution.KeepRecord)
 			persistentKept = false
 			persistentKeepReason = acpPersistentReasonKeepUnrecorded
