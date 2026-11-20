@@ -194,3 +194,79 @@ func TestProviderReconcileWithoutAuthOrSecretIsNotReady(t *testing.T) {
 		t.Fatalf("Ready = %v, Message = %q", got.Status.Ready, got.Status.Message)
 	}
 }
+
+// During an outage, Providers sharing an identity wait for the retry instead
+// of each waiting out the issuer's timeout.
+func TestProviderReconcileKeylessOutageBacksOffPerIdentity(t *testing.T) {
+	now := time.Now()
+	identities := &fakeProviderIdentities{verifyErr: fmt.Errorf("down: %w", provideridentity.ErrIssuerUnavailable)}
+	second := keylessTestProvider()
+	second.Name, second.UID = "azure-2", "uid-2"
+	r, c := newKeylessReconciler(identities, &now, keylessTestProvider())
+	if err := c.Create(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	reconcileKeyless(t, r, c)
+
+	now = now.Add(10 * time.Second)
+	key := types.NamespacedName{Name: "azure-2", Namespace: "default"}
+	result, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := &corev1alpha1.Provider{}
+	if err := c.Get(context.Background(), key, got); err != nil {
+		t.Fatal(err)
+	}
+	credential := meta.FindStatusCondition(got.Status.Conditions, ConditionProviderCredentialReady)
+	if identities.verifies != 1 || credential == nil || credential.Status != metav1.ConditionUnknown || credential.Reason != reasonIssuerUnavailable {
+		t.Fatalf("verifies = %d, CredentialReady = %+v; want Unknown without asking the issuer again", identities.verifies, credential)
+	}
+	if result.RequeueAfter != providerCredentialRetry-10*time.Second {
+		t.Fatalf("RequeueAfter = %v, want the rest of the backoff", result.RequeueAfter)
+	}
+
+	// After the backoff the issuer is asked again, and an answer ends it.
+	now = now.Add(providerCredentialRetry)
+	identities.verifyErr = nil
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if identities.verifies != 2 {
+		t.Fatalf("verifies = %d, want a retry after the backoff", identities.verifies)
+	}
+	if _, ok := r.issuerBackoff.Load("models"); ok {
+		t.Fatal("the backoff outlived the issuer's answer")
+	}
+}
+
+// A deleted Provider's verification is forgotten, and one recreated under the
+// same name is verified again.
+func TestProviderReconcileKeylessForgetsDeletedProviders(t *testing.T) {
+	now := time.Now()
+	identities := &fakeProviderIdentities{}
+	r, c := newKeylessReconciler(identities, &now, keylessTestProvider())
+	reconcileKeyless(t, r, c)
+	key := types.NamespacedName{Name: "azure", Namespace: "default"}
+	if err := c.Delete(context.Background(), keylessTestProvider()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.verifications.Load(key); ok {
+		t.Fatal("a deleted Provider's verification was kept")
+	}
+
+	// A replacement that reuses the name but not the UID, before the delete
+	// was observed, is verified on its own.
+	r.verifications.Store(key, providerVerification{uid: "uid-old", generation: 1, identity: "models",
+		baseURL: "https://example.openai.azure.com", at: now, condition: metav1.Condition{Status: metav1.ConditionTrue}})
+	if err := c.Create(context.Background(), keylessTestProvider()); err != nil {
+		t.Fatal(err)
+	}
+	reconcileKeyless(t, r, c)
+	if identities.verifies != 2 {
+		t.Fatalf("verifies = %d, want the replacement verified", identities.verifies)
+	}
+}

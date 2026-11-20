@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -65,12 +66,19 @@ type ProviderReconciler struct {
 	// Now returns the current time; time.Now when nil.
 	Now func() time.Time
 
-	// verifications remembers the last verification per Provider UID, so a
-	// status-only reconcile never asks the issuer again.
+	// verifications remembers the last verification per Provider
+	// namespace/name, so a status-only reconcile never asks the issuer again.
+	// A record for a replaced Provider (another UID) is ignored, and a
+	// deleted Provider's record is removed.
 	verifications sync.Map
+	// issuerBackoff records, per Provider identity, until when no Provider
+	// asks the issuer again after it did not answer, so Providers sharing an
+	// identity do not each wait out a timeout during an outage.
+	issuerBackoff sync.Map
 }
 
 type providerVerification struct {
+	uid        types.UID
 	generation int64
 	identity   string
 	baseURL    string
@@ -90,6 +98,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	provider := &corev1alpha1.Provider{}
 	if err := r.Get(ctx, req.NamespacedName, provider); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.verifications.Delete(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -101,7 +110,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.validateProvider(ctx, provider); err != nil {
 		logger.Error(err, "Provider validation failed")
 		if provider.UsesKeylessAuth() {
-			r.verifications.Delete(provider.UID)
+			r.verifications.Delete(client.ObjectKeyFromObject(provider))
 			meta.SetStatusCondition(&provider.Status.Conditions, metav1.Condition{
 				Type: ConditionProviderCredentialReady, Status: metav1.ConditionFalse,
 				Reason: reasonValidationFailed, Message: "the Provider configuration is invalid",
@@ -112,7 +121,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	if !provider.UsesKeylessAuth() {
-		r.verifications.Delete(provider.UID)
+		r.verifications.Delete(client.ObjectKeyFromObject(provider))
 		meta.RemoveStatusCondition(&provider.Status.Conditions, ConditionProviderCredentialReady)
 		// Provider is valid
 		return r.updateStatus(ctx, provider, true, "Provider configuration is valid")
@@ -142,19 +151,30 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func (r *ProviderReconciler) verifyCredential(ctx context.Context, provider *corev1alpha1.Provider) (metav1.Condition, time.Duration) {
 	identity, baseURL := provider.EntraIdentity(), provider.Spec.BaseURL
 	now := r.now()
-	if cached, ok := r.verifications.Load(provider.UID); ok {
+	key := client.ObjectKeyFromObject(provider)
+	if cached, ok := r.verifications.Load(key); ok {
 		last := cached.(providerVerification)
 		interval := providerCredentialRecheck
 		if last.condition.Status == metav1.ConditionUnknown {
 			interval = providerCredentialRetry
 		}
-		if last.generation == provider.Generation && last.identity == identity && last.baseURL == baseURL {
+		if last.uid == provider.UID && last.generation == provider.Generation && last.identity == identity && last.baseURL == baseURL {
 			if wait := last.at.Add(interval).Sub(now); wait > 0 {
 				return last.condition, wait
 			}
 		}
 	}
 	condition := metav1.Condition{Type: ConditionProviderCredentialReady, ObservedGeneration: provider.Generation}
+	unavailable := func() {
+		condition.Status, condition.Reason = metav1.ConditionUnknown, reasonIssuerUnavailable
+		condition.Message = fmt.Sprintf("the token issuer for Provider identity %q did not answer; retrying", identity)
+	}
+	if until, ok := r.issuerBackoff.Load(identity); ok {
+		if wait := until.(time.Time).Sub(now); wait > 0 {
+			unavailable()
+			return condition, wait
+		}
+	}
 	requeue := providerCredentialRecheck
 	verifyCtx, cancel := context.WithTimeout(ctx, providerVerifyTimeout)
 	defer cancel()
@@ -163,15 +183,18 @@ func (r *ProviderReconciler) verifyCredential(ctx context.Context, provider *cor
 		condition.Status, condition.Reason = metav1.ConditionTrue, reasonTokenIssued
 		condition.Message = fmt.Sprintf("Provider identity %q obtained a token", identity)
 	case errors.Is(err, provideridentity.ErrIssuerUnavailable) || errors.Is(err, context.DeadlineExceeded):
-		condition.Status, condition.Reason = metav1.ConditionUnknown, reasonIssuerUnavailable
-		condition.Message = fmt.Sprintf("the token issuer for Provider identity %q did not answer; retrying", identity)
+		unavailable()
 		requeue = providerCredentialRetry
+		r.issuerBackoff.Store(identity, now.Add(providerCredentialRetry))
 	default:
 		condition.Status, condition.Reason = metav1.ConditionFalse, reasonTokenRefused
 		condition.Message = fmt.Sprintf("Provider identity %q could not obtain a token: %v", identity, err)
 	}
-	r.verifications.Store(provider.UID, providerVerification{
-		generation: provider.Generation, identity: identity, baseURL: baseURL, at: now, condition: condition,
+	if condition.Status != metav1.ConditionUnknown {
+		r.issuerBackoff.Delete(identity)
+	}
+	r.verifications.Store(key, providerVerification{
+		uid: provider.UID, generation: provider.Generation, identity: identity, baseURL: baseURL, at: now, condition: condition,
 	})
 	return condition, requeue
 }

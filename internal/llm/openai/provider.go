@@ -1634,6 +1634,15 @@ func isUnsupportedStreamOptionsError(err error) bool {
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status
 // code from the OpenAI SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
+	// An error the HTTP client already classified, such as a failed token
+	// acquisition, keeps its status so retries still apply.
+	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
+		classified := *providerErr
+		if classified.Provider == "" {
+			classified.Provider = "openai"
+		}
+		return &classified
+	}
 	pe := &llm.ProviderError{Provider: "openai", Message: err.Error()}
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode
