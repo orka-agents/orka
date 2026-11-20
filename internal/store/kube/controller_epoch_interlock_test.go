@@ -650,3 +650,24 @@ func TestInterlockHoldWriteRacingAnEpochChangeCannotWinIt(t *testing.T) {
 	require.ErrorIs(t, racingErr, store.ErrControllerEpochMutationContention, "the racing holder wrote a token")
 	require.NoError(t, err, "the racing holder write made the epoch change conflict")
 }
+
+// A store that holds a token and then writes under another fence removes
+// the held token first instead of forgetting it. (One epoch name is
+// supported, so the other fence differs in holder.)
+func TestInterlockHoldRemovesATokenHeldForAnotherFence(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	writer := holdingStore(t, raw, time.Hour, 5*time.Second)
+	ctx := t.Context()
+	require.NoError(t, writer.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil }))
+	require.NotEmpty(t, readEpochLease(t, raw, fence).Annotations[annotationMutationToken])
+	stranger := fence
+	stranger.HolderID = "someone-else"
+	called := false
+	err := writer.WithControllerEpochMutation(ctx, stranger, func(context.Context) error { called = true; return nil })
+	require.ErrorIs(t, err, store.ErrConflict)
+	require.False(t, called)
+	require.Empty(t, readEpochLease(t, raw, fence).Annotations[annotationMutationToken], "the held token was forgotten")
+	writer.interlockMu.Lock()
+	require.Nil(t, writer.heldInterlock)
+	writer.interlockMu.Unlock()
+}

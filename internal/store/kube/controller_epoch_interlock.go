@@ -115,6 +115,21 @@ func (s *Store) interlockReusable(snapshot epochSnapshot) bool {
 		time.Since(snapshot.TokenWrittenAt) < s.interlockMaxHold
 }
 
+// heldInterlockFor takes the parked token for a write under fence. A token
+// held for another fence, possibly on another epoch Lease, is removed first;
+// a store holds one token at a time, so if that fails the write fails and
+// the token stays parked for retry. The caller holds the local slot.
+func (s *Store) heldInterlockFor(fence store.ControllerEpochFence) (*epochSnapshot, error) {
+	held := s.takeHeldInterlock()
+	if held == nil || (held.Name == fence.Name && held.Epoch == fence.Epoch && held.HolderID == fence.HolderID) {
+		return held, nil
+	}
+	if err := s.removeOrRetainInterlock(*held); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 // heldInterlockState is what a freshly read, fully checked Lease says about
 // a held token.
 type heldInterlockState int

@@ -939,7 +939,10 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 			s.epochMutations.Release(1)
 		}
 	}()
-	held := s.takeHeldInterlock()
+	held, err := s.heldInterlockFor(normalized)
+	if err != nil {
+		return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
+	}
 	// A held token neither reused nor written over is removed on every
 	// return, so a failed acquisition never strands it until it expires; a
 	// removal that fails leaves it parked for the idle timer to retry.
