@@ -173,6 +173,9 @@ type Server struct {
 
 	memoryConsolidationStore store.MemoryConsolidationStore
 
+	// githubAppMinter mints publisher installation tokens; nil uses GitHub.
+	githubAppMinter githubAppTokenMinter
+
 	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
 	substrateMCPProxyWriteTimeout time.Duration
 }

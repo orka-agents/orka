@@ -1863,7 +1863,8 @@ spec:
                         default: token
                         description: |-
                           Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
+                          Authorization header. It defaults to "token" when omitted. With type
+                          GitHubApp it names the entry holding the App's PEM private key.
                         maxLength: 253
                         minLength: 1
                         pattern: ^[A-Za-z0-9._-]+$
@@ -1873,6 +1874,17 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      type:
+                        description: |-
+                          Type is Token (the default) for a stored token, or GitHubApp for a
+                          Secret holding a GitHub App's ID under "appId" and its private key under
+                          Key. With GitHubApp the credential broker mints an installation token
+                          for each operation, limited to the Task's repository and the role's
+                          permission. GitHubApp is supported only on agent Tasks.
+                        enum:
+                        - Token
+                        - GitHubApp
                         type: string
                     required:
                     - name
@@ -1940,7 +1952,8 @@ spec:
                         default: token
                         description: |-
                           Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
+                          Authorization header. It defaults to "token" when omitted. With type
+                          GitHubApp it names the entry holding the App's PEM private key.
                         maxLength: 253
                         minLength: 1
                         pattern: ^[A-Za-z0-9._-]+$
@@ -1950,6 +1963,17 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      type:
+                        description: |-
+                          Type is Token (the default) for a stored token, or GitHubApp for a
+                          Secret holding a GitHub App's ID under "appId" and its private key under
+                          Key. With GitHubApp the credential broker mints an installation token
+                          for each operation, limited to the Task's repository and the role's
+                          permission. GitHubApp is supported only on agent Tasks.
+                        enum:
+                        - Token
+                        - GitHubApp
                         type: string
                     required:
                     - name
@@ -1969,7 +1993,8 @@ spec:
                         default: token
                         description: |-
                           Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
+                          Authorization header. It defaults to "token" when omitted. With type
+                          GitHubApp it names the entry holding the App's PEM private key.
                         maxLength: 253
                         minLength: 1
                         pattern: ^[A-Za-z0-9._-]+$
@@ -1979,6 +2004,17 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      type:
+                        description: |-
+                          Type is Token (the default) for a stored token, or GitHubApp for a
+                          Secret holding a GitHub App's ID under "appId" and its private key under
+                          Key. With GitHubApp the credential broker mints an installation token
+                          for each operation, limited to the Task's repository and the role's
+                          permission. GitHubApp is supported only on agent Tasks.
+                        enum:
+                        - Token
+                        - GitHubApp
                         type: string
                     required:
                     - name
@@ -2023,7 +2059,8 @@ spec:
                         default: token
                         description: |-
                           Key is the Secret data key containing one bearer token or one complete
-                          Authorization header. It defaults to "token" when omitted.
+                          Authorization header. It defaults to "token" when omitted. With type
+                          GitHubApp it names the entry holding the App's PEM private key.
                         maxLength: 253
                         minLength: 1
                         pattern: ^[A-Za-z0-9._-]+$
@@ -2033,6 +2070,17 @@ spec:
                         maxLength: 253
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      type:
+                        description: |-
+                          Type is Token (the default) for a stored token, or GitHubApp for a
+                          Secret holding a GitHub App's ID under "appId" and its private key under
+                          Key. With GitHubApp the credential broker mints an installation token
+                          for each operation, limited to the Task's repository and the role's
+                          permission. GitHubApp is supported only on agent Tasks.
+                        enum:
+                        - Token
+                        - GitHubApp
                         type: string
                     required:
                     - name
@@ -2152,6 +2200,16 @@ spec:
             - message: execution.workspace is only supported for agent Tasks
               rule: '!has(self.execution) || !has(self.execution.workspace) || self.type
                 == ''agent'''
+            - message: GitHubApp workspace credentials are only supported for agent
+                Tasks
+              rule: self.type == 'agent' || !has(self.workspace) || ((!has(self.workspace.readCredentialRef)
+                || !has(self.workspace.readCredentialRef.type) || self.workspace.readCredentialRef.type
+                != 'GitHubApp') && (!has(self.workspace.publicationReadCredentialRef)
+                || !has(self.workspace.publicationReadCredentialRef.type) || self.workspace.publicationReadCredentialRef.type
+                != 'GitHubApp') && (!has(self.workspace.publicationCredentialRef)
+                || !has(self.workspace.publicationCredentialRef.type) || self.workspace.publicationCredentialRef.type
+                != 'GitHubApp') && (!has(self.workspace.forgeCredentialRef) || !has(self.workspace.forgeCredentialRef.type)
+                || self.workspace.forgeCredentialRef.type != 'GitHubApp'))
             - message: agentRuntime.permissionDecisions Requester is only supported
                 for agent Tasks
               rule: self.type == 'agent' || !has(self.agentRuntime) || !has(self.agentRuntime.permissionDecisions)

@@ -20,6 +20,25 @@ const (
 	WorkspaceIntentWrite WorkspaceIntent = "write"
 )
 
+// WorkspaceCredentialType selects how the credential broker turns the
+// referenced Secret into operation credential material.
+// +kubebuilder:validation:Enum=Token;GitHubApp
+type WorkspaceCredentialType string
+
+const (
+	// WorkspaceCredentialToken releases the stored token or Authorization
+	// header as it is.
+	WorkspaceCredentialToken WorkspaceCredentialType = "Token"
+	// WorkspaceCredentialGitHubApp mints a GitHub App installation token for
+	// each operation, limited to the Task's repository and the role's
+	// permission.
+	WorkspaceCredentialGitHubApp WorkspaceCredentialType = "GitHubApp"
+)
+
+// GitHubAppIDSecretKey is the Secret data key that holds the GitHub App ID
+// (or Client ID) for a GitHubApp credential reference.
+const GitHubAppIDSecretKey = "appId"
+
 // WorkspaceCredentialReference references a Secret in the Task namespace. The
 // controller freezes the Secret resourceVersion when it reserves an attempt;
 // Secret contents are never copied to Task status.
@@ -32,13 +51,22 @@ type WorkspaceCredentialReference struct {
 	Name string `json:"name"`
 
 	// Key is the Secret data key containing one bearer token or one complete
-	// Authorization header. It defaults to "token" when omitted.
+	// Authorization header. It defaults to "token" when omitted. With type
+	// GitHubApp it names the entry holding the App's PEM private key.
 	// +optional
 	// +kubebuilder:default=token
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Key string `json:"key,omitempty"`
+
+	// Type is Token (the default) for a stored token, or GitHubApp for a
+	// Secret holding a GitHub App's ID under "appId" and its private key under
+	// Key. With GitHubApp the credential broker mints an installation token
+	// for each operation, limited to the Task's repository and the role's
+	// permission. GitHubApp is supported only on agent Tasks.
+	// +optional
+	Type WorkspaceCredentialType `json:"type,omitempty"`
 }
 
 // RepositoryIdentity is the canonical identity derived from a credential-free
