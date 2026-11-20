@@ -62,6 +62,8 @@ const (
 	// controllerEpochTokenRemovalAttempts bounds an explicit release's
 	// attempts to remove a held token; the idle timer keeps retrying after.
 	controllerEpochTokenRemovalAttempts = 5
+	// controllerEpochTokenRemovalTimeout caps one removal attempt.
+	controllerEpochTokenRemovalTimeout  = 5 * time.Second
 	maxControllerEpochTokenRemovalDelay = 5 * time.Second
 )
 
@@ -119,12 +121,12 @@ func (s *Store) interlockReusable(snapshot epochSnapshot) bool {
 // held for another fence, possibly on another epoch Lease, is removed first;
 // a store holds one token at a time, so if that fails the write fails and
 // the token stays parked for retry. The caller holds the local slot.
-func (s *Store) heldInterlockFor(fence store.ControllerEpochFence) (*epochSnapshot, error) {
+func (s *Store) heldInterlockFor(ctx context.Context, fence store.ControllerEpochFence) (*epochSnapshot, error) {
 	held := s.takeHeldInterlock()
 	if held == nil || (held.Name == fence.Name && held.Epoch == fence.Epoch && held.HolderID == fence.HolderID) {
 		return held, nil
 	}
-	if err := s.removeOrRetainInterlock(*held); err != nil {
+	if err := s.removeOrRetainInterlock(ctx, *held); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -206,8 +208,8 @@ func (s *Store) parkInterlockFor(snapshot epochSnapshot, delay, retryDelay time.
 // with backoff until the token would have expired anyway, so a transient
 // API failure does not leave it for a successor to wait out. The caller
 // holds the local slot.
-func (s *Store) removeOrRetainInterlock(snapshot epochSnapshot) error {
-	err := s.removeMutationToken(snapshot)
+func (s *Store) removeOrRetainInterlock(ctx context.Context, snapshot epochSnapshot) error {
+	err := s.removeMutationToken(ctx, snapshot)
 	if err != nil {
 		s.retainForRemoval(snapshot, 0)
 	}
@@ -248,7 +250,8 @@ func (s *Store) releaseIdleInterlock(generation uint64) {
 	snapshot, retryDelay := s.heldInterlock.snapshot, s.heldInterlock.retryDelay
 	s.heldInterlock = nil
 	s.interlockMu.Unlock()
-	if s.removeMutationToken(snapshot) != nil {
+	// The idle timer has no caller: each retry is bounded on its own.
+	if s.removeMutationToken(context.Background(), snapshot) != nil {
 		s.retainForRemoval(snapshot, retryDelay)
 	}
 }
@@ -273,7 +276,7 @@ func (s *Store) ReleaseHeldControllerEpochInterlock(ctx context.Context) error {
 	delay := 100 * time.Millisecond
 	var err error
 	for attempt := range controllerEpochTokenRemovalAttempts {
-		if err = s.removeMutationToken(*held); err == nil {
+		if err = s.removeMutationToken(ctx, *held); err == nil {
 			return nil
 		}
 		if attempt == controllerEpochTokenRemovalAttempts-1 {
@@ -307,9 +310,36 @@ func ControllerEpochTakeoverLeaseName(name string) string {
 	return controllerEpochTakeoverLeaseName(name)
 }
 
-// controllerEpochTakeoverWaiting reports a successor's unexpired request to
-// change epoch, the current epoch, and who made it.
-func (s *Store) controllerEpochTakeoverWaiting(ctx context.Context, name string, epoch int64, now time.Time) (bool, string, error) {
+// takeoverObservation is a takeover request version this store has seen,
+// and when it first saw it, on its own monotonic clock.
+type takeoverObservation struct {
+	uid             types.UID
+	resourceVersion string
+	firstSeen       time.Time
+}
+
+func (s *Store) takeoverRequestTTL() time.Duration {
+	if s.interlockTakeoverRequestTTL > 0 {
+		return s.interlockTakeoverRequestTTL
+	}
+	return controllerEpochTakeoverRequestTTL
+}
+
+func (s *Store) wallNow() time.Time {
+	if s.wallClock != nil {
+		return s.wallClock()
+	}
+	return time.Now()
+}
+
+// controllerEpochTakeoverWaiting reports whether a successor's request to
+// replace epoch is in force, and who made it. A request version is in force
+// for the takeover request TTL after this store first saw it, judged on this
+// store's own monotonic clock, never on the time the successor wrote into
+// it, so neither side's wall-clock skew can make a request last forever or
+// not at all. A successor that keeps trying rewrites it, which makes a new
+// version; one that stops loses its effect within the TTL (ADR 0058).
+func (s *Store) controllerEpochTakeoverWaiting(ctx context.Context, name string, epoch int64) (bool, string, error) {
 	request := &coordinationv1.Lease{}
 	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochTakeoverLeaseName(name)}
 	if err := s.readClient().Get(ctx, key, request); apierrors.IsNotFound(err) {
@@ -318,19 +348,25 @@ func (s *Store) controllerEpochTakeoverWaiting(ctx context.Context, name string,
 		return false, "", mapKubernetesError("get controller epoch takeover request", err)
 	}
 	by := strings.TrimSpace(request.Annotations[annotationEpochTakeoverRequestedBy])
-	at, err := parseTime("controller epoch takeover request time", request.Annotations[annotationEpochTakeoverRequestedAt])
-	if by == "" || err != nil || request.Annotations[annotationEpochTakeoverFromEpoch] != strconv.FormatInt(epoch, 10) {
+	if by == "" || request.Annotations[annotationEpochTakeoverFromEpoch] != strconv.FormatInt(epoch, 10) {
 		return false, "", nil
 	}
-	return now.Sub(at) < controllerEpochTakeoverRequestTTL, by, nil
+	s.interlockMu.Lock()
+	defer s.interlockMu.Unlock()
+	if s.takeoverSeen.uid != request.UID || s.takeoverSeen.resourceVersion != request.ResourceVersion {
+		s.takeoverSeen = takeoverObservation{uid: request.UID, resourceVersion: request.ResourceVersion, firstSeen: time.Now()}
+	}
+	return time.Since(s.takeoverSeen.firstSeen) < s.takeoverRequestTTL(), by, nil
 }
 
-// requestControllerEpochTakeover records that holder is waiting to change
+// requestControllerEpochTakeover records that holder is waiting to replace
 // epoch, so the token holder writes no new token and the epoch Lease is free
-// within one of its holds (ADR 0058). A request already fresh enough is left
-// alone. It is best effort: a request that does not commit only leaves the
-// successor retrying as before.
-func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string, epoch int64, holder string, now time.Time) {
+// within one of its holds (ADR 0058). The request is rewritten, making a new
+// version, whenever this store's own last write of it is
+// controllerEpochTakeoverRequestRefresh old on its monotonic clock, or the
+// request is not the version it wrote. It is best effort: a request that
+// does not commit only leaves the successor retrying as before.
+func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string, epoch int64, holder string) {
 	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochTakeoverLeaseName(name)}
 	request := &coordinationv1.Lease{}
 	err := s.readClient().Get(ctx, key, request)
@@ -338,12 +374,12 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 		return
 	}
 	exists := err == nil
-	if exists && request.Annotations[annotationEpochTakeoverRequestedBy] == holder &&
-		request.Annotations[annotationEpochTakeoverFromEpoch] == strconv.FormatInt(epoch, 10) {
-		if at, parseErr := parseTime("controller epoch takeover request time", request.Annotations[annotationEpochTakeoverRequestedAt]); parseErr == nil &&
-			now.Sub(at) < controllerEpochTakeoverRequestRefresh {
-			return
-		}
+	s.interlockMu.Lock()
+	written := s.takeoverWritten
+	s.interlockMu.Unlock()
+	if exists && written.uid == request.UID && written.resourceVersion == request.ResourceVersion &&
+		time.Since(written.firstSeen) < controllerEpochTakeoverRequestRefresh {
+		return
 	}
 	if !exists {
 		request = &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name, Labels: controlLabels(name)}}
@@ -354,11 +390,18 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 	request.Annotations[annotationLogicalName] = name
 	request.Annotations[annotationEpochTakeoverRequestedBy] = holder
 	request.Annotations[annotationEpochTakeoverFromEpoch] = strconv.FormatInt(epoch, 10)
-	request.Annotations[annotationEpochTakeoverRequestedAt] = formatTime(now)
+	// Diagnostic only: no store judges a request by this time.
+	request.Annotations[annotationEpochTakeoverRequestedAt] = formatTime(s.wallNow().UTC())
+	sent := time.Now()
 	if exists {
-		_ = s.client.Update(ctx, request)
+		err = s.client.Update(ctx, request)
 	} else {
-		_ = s.client.Create(ctx, request)
+		err = s.client.Create(ctx, request)
+	}
+	if err == nil {
+		s.interlockMu.Lock()
+		s.takeoverWritten = takeoverObservation{uid: request.UID, resourceVersion: request.ResourceVersion, firstSeen: sent}
+		s.interlockMu.Unlock()
 	}
 }
 

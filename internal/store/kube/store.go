@@ -96,6 +96,13 @@ type Store struct {
 	interlockLinger     time.Duration
 	interlockMaxHold    time.Duration
 	interlockWriteBound time.Duration // tests only; see fencedWriteBound
+	// interlockTakeoverRequestTTL and wallClock are test hooks.
+	interlockTakeoverRequestTTL time.Duration
+	wallClock                   func() time.Time
+	// takeoverSeen is the takeover request version this store last saw as
+	// holder; takeoverWritten the one it last wrote as successor (ADR 0058).
+	takeoverSeen        takeoverObservation
+	takeoverWritten     takeoverObservation
 	interlockMu         sync.Mutex
 	heldInterlock       *heldEpochInterlock
 	interlockGeneration uint64
