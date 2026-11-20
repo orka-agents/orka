@@ -355,6 +355,12 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"session rule object": {reason: "permission state", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET permission = ?`, `{"permission":"bash","pattern":"*","action":"deny"}`)
 		}},
+		"session from a later release": {reason: "recorded the session", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET version = '1.19.1'`)
+		}},
+		"session from an unknown release": {reason: "recorded the session", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET version = 'local'`)
+		}},
 		"trigger": {reason: "schema differs", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `CREATE TRIGGER mark AFTER INSERT ON message BEGIN SELECT 1; END`)
 		}},
@@ -404,6 +410,11 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		})
 	}
 	fixture := newOpenCodeFixture(t)
+	fixture.exec(t, `UPDATE session SET version = '1.18.4'`)
+	if _, err := format.Capture(t.Context(), fixture.dirs, openCodeFixtureSession, openCodeFixtureLimit); err != nil {
+		t.Fatalf("a session an earlier release recorded in the pinned schema must capture: %v", err)
+	}
+	fixture.exec(t, `UPDATE session SET version = '1.19.0'`)
 	if _, err := format.Capture(t.Context(), fixture.dirs, "ses_missing", openCodeFixtureLimit); err == nil || errors.Is(err, ErrUnsupported) {
 		t.Fatalf("a missing session is a capture failure, not an unsupported conversation: %v", err)
 	}
@@ -507,6 +518,10 @@ func TestOpenCodeInspectRejectsTamperedBundles(t *testing.T) {
 			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `CREATE INDEX costly ON part(length(hex(zeroblob(1000))))`)
 		}),
 		"not gzip": []byte("plain"),
+		// Capture refuses such a session, so a bundle holding one is invalid.
+		"session from a later release": rebuild(func(e map[string][]byte) {
+			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `UPDATE session SET version = '1.20.0'`)
+		}),
 	} {
 		if _, err := format.Inspect(t.Context(), tampered, openCodeFixtureLimit); err == nil || errors.Is(err, ErrUnsupported) {
 			t.Errorf("%s: must be rejected as invalid: %v", name, err)

@@ -87,7 +87,8 @@ migration support for reasoning-enabled Codex sessions.
 OpenCode keeps every session in one SQLite database. Import copies it with
 SQLite and keeps only the named session, its project, and the files its own
 tool calls spilled their output to. The source must be a database OpenCode
-1.19.0 wrote: any other schema is rejected. Import reads the database without
+1.19.0 wrote: any other schema is rejected, and so is a session that a later
+release recorded, even in the same schema. Import reads the database without
 changing it.
 
 Import rejects a session that holds state Orka does not carry: a todo list,

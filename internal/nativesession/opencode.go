@@ -619,13 +619,15 @@ func openCodePermissionOnlyDenies(permission sql.NullString) bool {
 
 type openCodeSession struct {
 	projectID, directory, path string
+	// version is the OpenCode release that recorded the session.
+	version string
 }
 
 // readOpenCodeSession requires the database to hold exactly one top-level
 // session, providerSessionID, whose messages and parts are its own.
 func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID string) (openCodeSession, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, project_id, directory, COALESCE(path, ''), parent_id IS NULL AND workspace_id IS NULL,
- permission FROM session`)
+ permission, version FROM session`)
 	if err != nil {
 		return openCodeSession{}, err
 	}
@@ -637,7 +639,7 @@ func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID stri
 		var id string
 		var topLevel bool
 		var permission sql.NullString
-		if err := rows.Scan(&id, &current.projectID, &current.directory, &current.path, &topLevel, &permission); err != nil {
+		if err := rows.Scan(&id, &current.projectID, &current.directory, &current.path, &topLevel, &permission, &current.version); err != nil {
 			return openCodeSession{}, err
 		}
 		count++
@@ -655,6 +657,11 @@ func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID stri
 		return openCodeSession{}, fmt.Errorf("%w: OpenCode database holds more than the captured session", ErrUnsupported)
 	case restricted:
 		return openCodeSession{}, fmt.Errorf("%w: OpenCode session carries child, workspace, or permission state", ErrUnsupported)
+	}
+	// The schema check compares only DDL, so a later release that kept the
+	// schema could still write rows Orka's release cannot read.
+	if order, ok := compareReleases(session.version, openCodeVersion); !ok || order > 0 {
+		return openCodeSession{}, fmt.Errorf("%w: OpenCode %q recorded the session; Orka runs %s", ErrUnsupported, session.version, openCodeVersion)
 	}
 	for _, query := range []string{
 		`SELECT EXISTS(SELECT 1 FROM message WHERE session_id != ?)`,
