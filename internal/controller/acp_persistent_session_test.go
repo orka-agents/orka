@@ -14,15 +14,18 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 
@@ -1295,4 +1298,61 @@ func TestACPPersistentSessionKeptMarkerNamesOneExactRuntime(t *testing.T) {
 	delete(read.Annotations, acpTaskPersistentSessionKeptAnnotation)
 	require.True(t, acpTaskSessionOwnsRuntimeSession(read, read.UID))
 	require.False(t, acpTaskWriteRuntimeSessionKept(read, read.UID))
+}
+
+// The keep marker survives a stale cached Task and a concurrent Task write:
+// the stamp reads uncached and retries a conflicting patch, rechecking the
+// exact RuntimeSession identity each time (round 10b: private write turns
+// lost their kept session to a single 409). A changed identity still refuses.
+func TestACPPersistentSessionKeepMarkerRetriesAConflictingPatch(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "write-turn", UID: "write-turn-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: "session"},
+			Workspace:  &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+		},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, RuntimeInstanceID: "instance-1",
+			RuntimeSessionSupervisorBootID: "boot-1", RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 2,
+		}},
+	}
+	fence := harnessv2.Fence{
+		RuntimeInstanceID: "instance-1", SupervisorBootID: "boot-1",
+		RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 2,
+	}
+	build := func(conflicts int32) (client.Client, *atomic.Int32) {
+		base := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).
+			WithObjects(task.DeepCopy()).WithStatusSubresource(&corev1alpha1.Task{}).Build()
+		var patches atomic.Int32
+		return interceptor.NewClient(base, interceptor.Funcs{
+			Patch: func(ctx context.Context, delegate client.WithWatch, object client.Object, patch client.Patch, options ...client.PatchOption) error {
+				if patches.Add(1) <= conflicts {
+					// Another writer lands between the read and the patch.
+					return apierrors.NewConflict(corev1alpha1.GroupVersion.WithResource("tasks").GroupResource(), object.GetName(), errors.New("modified"))
+				}
+				return delegate.Patch(ctx, object, patch, options...)
+			},
+		}), &patches
+	}
+
+	kubeClient, patches := build(2)
+	stored := &corev1alpha1.Task{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(task), stored))
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
+	stale := stored.DeepCopy()
+	require.NoError(t, dispatcher.stampACPPersistentSessionKept(t.Context(), stale, fence))
+	require.EqualValues(t, 3, patches.Load(), "two conflicts, then the marker lands")
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(task), stored))
+	require.True(t, acpTaskWriteRuntimeSessionKept(stored, stored.UID))
+	require.Equal(t, stored.Annotations[acpTaskPersistentSessionKeptAnnotation], stale.Annotations[acpTaskPersistentSessionKeptAnnotation])
+
+	// A different RuntimeSession on the fresh read is never marked.
+	kubeClient, _ = build(0)
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(task), stored))
+	dispatcher = &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}
+	other := fence
+	other.RuntimeSessionGeneration = 3
+	require.ErrorIs(t, dispatcher.stampACPPersistentSessionKept(t.Context(), stored.DeepCopy(), other), store.ErrConflict)
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(task), stored))
+	require.Empty(t, stored.Annotations[acpTaskPersistentSessionKeptAnnotation])
 }
