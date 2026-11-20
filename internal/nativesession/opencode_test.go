@@ -817,6 +817,30 @@ func TestOpenCodeInstallRecoversAnInstallKilledBeforePublishing(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(destination.State, "opencode", "opencode.db")); err != nil {
 		t.Fatalf("database not published: %v", err)
 	}
+	// A crash while writing a spill leaves only its staging, or the
+	// published spill beside staging the crash kept from removing.
+	for name, plant := range map[string]func(toolOutput string){
+		"partial staging": func(toolOutput string) {
+			_ = os.Remove(filepath.Join(toolOutput, openCodeFixtureSpill))
+			writeForTest(t, filepath.Join(toolOutput, "."+openCodeFixtureSpill+".restore"), "part")
+		},
+		"published spill and staging": func(toolOutput string) {
+			writeForTest(t, filepath.Join(toolOutput, "."+openCodeFixtureSpill+".restore"), string(source.spill))
+		},
+	} {
+		killed := leave(t, source.spill)
+		toolOutput := filepath.Join(killed.State, "opencode", "tool-output")
+		plant(toolOutput)
+		if err := format.Install(t.Context(), data, killed, realDir(t), openCodeFixtureLimit); err != nil {
+			t.Fatalf("%s: a retry must recover an interrupted spill write: %v", name, err)
+		}
+		if !holdsFile(filepath.Join(toolOutput, openCodeFixtureSpill), source.spill) {
+			t.Fatalf("%s: spill not restored", name)
+		}
+		if _, err := os.Lstat(filepath.Join(toolOutput, "."+openCodeFixtureSpill+".restore")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: spill staging left behind: %v", name, err)
+		}
+	}
 	other := leave(t, []byte("another session's output"))
 	if err := format.Install(t.Context(), data, other, realDir(t), openCodeFixtureLimit); err == nil {
 		t.Fatal("a retry must not replace a spill holding other output")

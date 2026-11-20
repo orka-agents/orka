@@ -344,7 +344,11 @@ func openCodeInstalled(record string, data []byte, bundle openCodeBundle, destin
 }
 
 // writeOpenCodeToolOutput writes the bundled spills into dir, reusing any
-// that already hold exactly their output, and appends what it creates.
+// that already hold exactly their output, and appends what it creates. Each
+// spill is written under a staging name, which no spill name can take since
+// spills start with a letter or digit, and then linked into place, so a crash
+// mid-write leaves only staging that a retry replaces, and a spill never
+// replaces an existing file.
 func writeOpenCodeToolOutput(dir string, outputs map[string][]byte, created *[]string) error {
 	if err := os.Mkdir(dir, 0o700); err == nil {
 		*created = append(*created, dir)
@@ -355,11 +359,24 @@ func writeOpenCodeToolOutput(dir string, outputs map[string][]byte, created *[]s
 		return err
 	}
 	for name, content := range outputs {
-		path := filepath.Join(dir, name)
+		path, staged := filepath.Join(dir, name), filepath.Join(dir, "."+name+".restore")
+		if err := requireRealPathIfPresent(staged, false); err != nil {
+			return err
+		}
+		if err := os.Remove(staged); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		if holdsFile(path, content) {
 			continue
 		}
-		if err := writeNewFile(path, content); err != nil {
+		if err := writeNewFile(staged, content); err != nil {
+			return err
+		}
+		linkErr := os.Link(staged, path)
+		if err := errors.Join(linkErr, os.Remove(staged)); err != nil {
+			if linkErr == nil {
+				*created = append(*created, path)
+			}
 			return err
 		}
 		*created = append(*created, path)
