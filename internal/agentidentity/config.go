@@ -6,12 +6,12 @@ package agentidentity
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/entraclient"
 )
 
 var guidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -28,22 +28,10 @@ type EntraConfig struct {
 	Authority string
 }
 
-// authority returns the canonical authority: no surrounding space or
-// trailing slash, scheme and host in lower case, the path as given, and
-// DefaultEntraAuthority when unset. Paths are case-sensitive, so they are
-// never folded.
+// authority returns the canonical authority; see
+// entraclient.CanonicalAuthority.
 func (c EntraConfig) authority() string {
-	authority := strings.TrimSuffix(strings.TrimSpace(c.Authority), "/")
-	if authority == "" {
-		return DefaultEntraAuthority
-	}
-	parsed, err := url.Parse(authority)
-	if err != nil || parsed.Host == "" {
-		// Validate refuses it; keep the value as given.
-		return authority
-	}
-	parsed.Scheme, parsed.Host = strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)
-	return parsed.String()
+	return entraclient.CanonicalAuthority(c.Authority)
 }
 
 // Config is the controller-wide identity configuration.
@@ -89,15 +77,7 @@ func (c Config) Validate() error {
 	if !guidPattern.MatchString(tenant) || !guidPattern.MatchString(blueprint) {
 		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs without surrounding space")
 	}
-	authority, err := url.Parse(c.Entra.authority())
-	// A bare "?" or "#" parses to an empty query or fragment but still changes
-	// the token endpoint built from the authority, so the delimiters are
-	// refused too.
-	if err != nil || authority.Scheme != "https" || authority.Hostname() == "" || authority.User != nil ||
-		authority.RawQuery != "" || authority.ForceQuery || authority.Fragment != "" || strings.ContainsAny(c.Entra.Authority, "?#") {
-		return fmt.Errorf("the Entra authority must be an https URL with a host and without credentials, query, or fragment")
-	}
-	return nil
+	return entraclient.ValidateAuthority(c.Entra.Authority)
 }
 
 // Instance returns the configured instance of an issuer type, which a Task

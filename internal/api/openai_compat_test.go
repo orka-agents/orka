@@ -173,7 +173,7 @@ func TestHandleListModels_WithProviders(t *testing.T) {
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "anthropic-secret",
 			},
 		},
@@ -398,7 +398,7 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 			Type:         corev1alpha1.ProviderTypeOpenAI,
 			DefaultModel: "gpt-4",
 			BaseURL:      mockAPI.URL,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "openai-secret",
 				Key:  "api-key",
 			},
@@ -1358,7 +1358,7 @@ func TestResolveProviderFromModel_SecretMissingKey(t *testing.T) {
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeOpenAI,
 			DefaultModel: "gpt-4",
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "secret1", Key: "missing-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "secret1", Key: "missing-key"},
 		},
 	}
 	secret := &corev1.Secret{
@@ -1380,7 +1380,7 @@ func TestResolveProviderFromModel_NoModel(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:      corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{Name: "secret1"},
+			SecretRef: &corev1alpha1.ProviderSecretRef{Name: "secret1"},
 		},
 	}
 	secret := &corev1.Secret{
@@ -1404,7 +1404,7 @@ func TestHandleChatCompletions_MaxTokensTooSmall(t *testing.T) {
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeOpenAI,
 			DefaultModel: "gpt-4",
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "secret1"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "secret1"},
 		},
 	}
 	secret := &corev1.Secret{
@@ -1454,7 +1454,7 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
 			BaseURL:      mockAPI.URL,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "anthropic-secret",
 				Key:  "api-key",
 			},
@@ -1542,7 +1542,7 @@ func TestOpenAICompatContextTokenDoesNotRevealDisallowedProviderExistence(t *tes
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "hidden-secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "hidden-secret"},
 		},
 	}
 	secret := &corev1.Secret{

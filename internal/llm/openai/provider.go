@@ -93,13 +93,27 @@ type Provider struct {
 
 // NewProvider creates a new OpenAI provider
 func NewProvider(config llm.ProviderConfig) (*Provider, error) {
-	if config.APIKey == "" {
+	if config.BearerToken != nil {
+		// Token authentication is Azure OpenAI's Entra flow; a key must not
+		// be sent next to it.
+		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" {
+			return nil, llm.ErrBearerTokenUnsupported
+		}
+	} else if config.APIKey == "" {
 		return nil, llm.ErrAPIKeyRequired
 	}
 
+	httpClient := llm.SharedHTTPClient()
+	if config.BearerToken != nil {
+		bearerClient, err := llm.NewBearerHTTPClient(config.BaseURL, config.BearerToken)
+		if err != nil {
+			return nil, err
+		}
+		httpClient = bearerClient
+	}
 	opts := []option.RequestOption{
 		option.WithMiddleware(llm.UsageHTTPMiddleware),
-		option.WithHTTPClient(llm.SharedHTTPClient()),
+		option.WithHTTPClient(httpClient),
 	}
 	if config.ProviderType == providerTypeAzureOpenAI {
 		apiVersion := config.AzureAPIVersion
@@ -107,7 +121,10 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 			apiVersion = "2025-03-01-preview"
 		}
 		endpoint := strings.TrimRight(config.BaseURL, "/")
-		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion), azure.WithAPIKey(config.APIKey))
+		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion))
+		if config.BearerToken == nil {
+			opts = append(opts, azure.WithAPIKey(config.APIKey))
+		}
 	} else {
 		opts = append(opts, option.WithAPIKey(config.APIKey))
 		if config.BaseURL != "" {
@@ -1603,6 +1620,15 @@ func isUnsupportedStreamOptionsError(err error) bool {
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status
 // code from the OpenAI SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
+	// An error the HTTP client already classified, such as a failed token
+	// acquisition, keeps its status so retries still apply.
+	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
+		classified := *providerErr
+		if classified.Provider == "" {
+			classified.Provider = providerTypeOpenAI
+		}
+		return &classified
+	}
 	pe := &llm.ProviderError{Provider: "openai", Message: err.Error()}
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode

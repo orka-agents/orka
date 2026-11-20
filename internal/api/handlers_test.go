@@ -1027,7 +1027,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsProviderModelResolv
 		ObjectMeta: metav1.ObjectMeta{Name: "anthropic-main", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "llm-key"},
 			DefaultModel: "claude-3-5-sonnet",
 		},
 	}
@@ -1113,7 +1113,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceProvi
 		ObjectMeta: metav1.ObjectMeta{Name: "llm", Namespace: "privileged"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeOpenAI,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "llm-key"},
 			DefaultModel: "gpt-4o-mini",
 		},
 	}
@@ -1121,7 +1121,7 @@ func TestHandlers_CreateTask_ContextTokenAuthorizationRejectsCrossNamespaceProvi
 		ObjectMeta: metav1.ObjectMeta{Name: "llm", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeOpenAI,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "llm-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "llm-key"},
 			DefaultModel: "gpt-4o-mini",
 		},
 	}
