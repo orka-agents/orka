@@ -78,6 +78,7 @@ const sidebars = {
             'guides/human-approval-v2',
             'guides/connectors',
             'guides/agent-identities',
+            'guides/keyless-azure-openai',
             'concepts/outbound-access',
             'concepts/transaction-tokens',
           ],

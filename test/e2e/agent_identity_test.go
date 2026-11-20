@@ -37,6 +37,11 @@ const (
 	fakeEntraBlueprnt = "0e2e0000-0000-4000-8000-000000000002"
 	fakeEntraIdentity = "0e2e0000-0000-4000-8000-000000000003"
 	fakeEntraResource = "api://orka-e2e-identity-probe"
+	// fakeEntraWorkload is the workload identity keyless Providers use. The
+	// fake trusts the same controller credential for it, and serves Azure
+	// OpenAI only to its tokens for fakeEntraModels.
+	fakeEntraWorkload = "0e2e0000-0000-4000-8000-000000000004"
+	fakeEntraModels   = "https://ai.azure.com"
 	// The controller caches a token until a minute before it expires, so a
 	// 70s lifetime keeps each one for 10s and a disabled identity is noticed
 	// on the next request.
@@ -318,6 +323,7 @@ func deployFakeEntra(assertion string) []byte {
 						"args": []string{
 							"--tenant=" + fakeEntraTenant, "--blueprint=" + fakeEntraBlueprnt,
 							"--identities=" + fakeEntraIdentity, "--resource=" + fakeEntraResource,
+							"--workloads=" + fakeEntraWorkload, "--model-resource=" + fakeEntraModels,
 							"--assertion-file=/etc/fakeentra/assertion", "--token-lifetime=" + fakeEntraTokenLifetime.String(),
 							"--tls-cert=/etc/fakeentra/tls.crt", "--tls-key=/etc/fakeentra/tls.key",
 						},
@@ -352,6 +358,22 @@ func deployFakeEntra(assertion string) []byte {
 // needs a plain-http localhost callback base, which nothing here uses. The
 // original pod template is restored when the spec ends.
 func configureControllerForFakeEntra() {
+	configureControllerWithFakeEntraTrust(map[string]string{
+		"agent-identity-entra-tenant-id":           fakeEntraTenant,
+		"agent-identity-entra-blueprint-client-id": fakeEntraBlueprnt,
+		"agent-identity-entra-authority":           "https://" + fakeEntraHost(),
+		"agent-identity-token-file":                fakeEntraTrustDir + "/assertion",
+		"agent-use-authorization-enabled":          "true",
+		"connectors-allow-private-endpoints":       "i-understand-tokens-may-leave-the-cluster",
+		"connector-callback-base-url":              "http://localhost:18080",
+	})
+}
+
+// configureControllerWithFakeEntraTrust sets flags on the controller, trusts
+// the fake's CA, and mounts the credential the fake expects from the
+// fakeEntraTrust Secret. The original pod template is restored when the spec
+// ends.
+func configureControllerWithFakeEntraTrust(flags map[string]string) {
 	name, err := controllerManagerDeploymentName()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	var deployment appsv1.Deployment
@@ -362,15 +384,7 @@ func configureControllerForFakeEntra() {
 	manager := podSpec.Containers[index]
 	original := []any{manager.Args, manager.Env, manager.VolumeMounts, podSpec.Volumes}
 
-	args := authorizationReplaceFlags(manager.Args, map[string]string{
-		"agent-identity-entra-tenant-id":           fakeEntraTenant,
-		"agent-identity-entra-blueprint-client-id": fakeEntraBlueprnt,
-		"agent-identity-entra-authority":           "https://" + fakeEntraHost(),
-		"agent-identity-token-file":                fakeEntraTrustDir + "/assertion",
-		"agent-use-authorization-enabled":          "true",
-		"connectors-allow-private-endpoints":       "i-understand-tokens-may-leave-the-cluster",
-		"connector-callback-base-url":              "http://localhost:18080",
-	})
+	args := authorizationReplaceFlags(manager.Args, flags)
 	// SSL_CERT_DIR adds the fake's CA to the system roots; the default CA
 	// bundle file is still read.
 	env := append(slices.Clone(manager.Env), corev1.EnvVar{Name: "SSL_CERT_DIR", Value: fakeEntraTrustDir + "/ca"})

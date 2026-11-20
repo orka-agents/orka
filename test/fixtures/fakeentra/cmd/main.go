@@ -25,6 +25,9 @@ func main() {
 	resource := flag.String("resource", "", "resource the probe accepts tokens for")
 	assertionFile := flag.String("assertion-file", "", "file holding the controller credential the blueprint must present")
 	lifetime := flag.Duration("token-lifetime", time.Hour, "expires_in of every issued token")
+	workloads := flag.String("workloads", "",
+		"comma-separated workload identity client IDs whose federated credential is the controller credential")
+	modelResource := flag.String("model-resource", "", "resource the Azure OpenAI endpoint accepts workload tokens for")
 	certFile := flag.String("tls-cert", "", "serving certificate")
 	keyFile := flag.String("tls-key", "", "serving key")
 	flag.Parse()
@@ -36,10 +39,18 @@ func main() {
 	fixture := fakeentra.New(fakeentra.Config{
 		TenantID: *tenant, BlueprintClientID: *blueprint, Assertion: strings.TrimSpace(string(assertion)),
 		Identities: strings.Split(*identities, ","), Resource: *resource, TokenLifetime: *lifetime,
+		Workloads: splitList(*workloads), ModelResource: *modelResource,
 	})
 	server := &http.Server{Addr: *listen, Handler: fixture.Handler(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
 	_ = server.ListenAndServeTLS(*certFile, *keyFile)
 	log.Print("fake Entra stopped")
 	os.Exit(1)
+}
+
+func splitList(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, ",")
 }
