@@ -129,6 +129,8 @@ workspace:
 | `publicationReadCredentialRef.name` | string | empty | Target-read Secret used only for publication preflight and independent verification. |
 | `publicationCredentialRef.name` | string | empty | Target-write Secret used only for the exact branch compare-and-swap push. |
 | `forgeCredentialRef.name` | string | empty | Forge API Secret used only for pull-request reconciliation; required when `createPR` is true. |
+| `*CredentialRef.key` | string | `token` | Secret entry holding the token or `Authorization` header. With `type: GitHubApp`, the entry holding the App's private key. |
+| `*CredentialRef.type` | string | `Token` | `Token` releases the stored value. `GitHubApp` mints a GitHub App installation token for each operation; see [GitHub App credentials](../concepts/agent-runtimes.md#github-app-credentials). Agent Tasks only. |
 | `subPath` | string | empty | Repository subdirectory exposed as the workspace root. |
 | `pushBranch` | string | generated for write Tasks | Publication branch. Orka-generated names use full Task or Session identity entropy. |
 | `prBaseBranch` | string | empty | Pull-request base branch. |
