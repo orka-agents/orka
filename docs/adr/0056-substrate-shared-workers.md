@@ -254,9 +254,14 @@ Core makes these unusable, asynchronously:
     itself fails. Admission refuses such a pool, and every bounds pass retries the Delete.
 
   Strong triggers are persisted under a fresh bounded context detached from the
-  request's deadline. A rejected or timed-out evidence-only Stop suspend is doubt too,
-  and so is a Stop that finds its Actor still `SUSPENDING` after that suspend: a Stop
-  needs no data, so it never waits for or continues the suspension.
+  request's deadline. A rejected evidence-only Stop suspend is doubt too, and so is a
+  Stop that finds its Actor still `RUNNING` or `SUSPENDING` after that suspend: a Stop
+  needs no data, so it never waits for or continues the suspension. A cancellation or
+  a deadline is never doubt by itself, whether the request's own context ended, a child
+  context derived from it timed out, or a call returned gRPC `Canceled` or
+  `DeadlineExceeded`: it is retried, and the next pass decides on fresh reads. Only a
+  definite failure retires a pool; a lasting native outage is bounded by the sweep's
+  isolation checks instead.
 - **No replay.** An unresolved suspend is never replayed against a `RUNNING` Actor. Once
   the worker Pod is proven absent, the instance is reported lost and retires through
   Stop with its last checkpoint.
