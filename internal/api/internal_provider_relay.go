@@ -7,15 +7,16 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -170,20 +171,57 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 		}
 	}
 	c.Status(response.StatusCode)
-	released = true // the stream writer releases the slot
-	slots := h.providerRelaySlots
-	// The server's write timeout for this route ends a write to a worker
-	// that stopped reading, which the request deadline cannot interrupt.
-	return c.SendStreamWriter(func(w *bufio.Writer) {
-		defer providerproxy.ReleaseSlot(slots)
-		defer cancel()
-		defer func() { _ = response.Body.Close() }()
-		if err := providerproxy.StreamBoundedResponse(w, response.Body, providerRelayMaxResponseBytes, bufioFlusher{w}); err != nil &&
-			!errors.Is(err, providerproxy.ErrDestinationWrite) {
-			log.Info("provider relay response ended early", "namespace", namespace, "task", taskName, "slot", slot, "reason", err.Error())
-		}
-		_ = w.Flush()
-	})
+	released = true // the response body releases the slot
+	// fasthttp writes each read as a chunk and closes the body when the
+	// response is done, which returns the slot. The server's write timeout
+	// for this route ends a write to a worker that stopped reading, which
+	// the request deadline cannot interrupt.
+	c.Response().SetBodyStream(&relayResponseBody{
+		body: response.Body, remaining: providerRelayMaxResponseBytes,
+		finish: func(err error) {
+			_ = response.Body.Close()
+			cancel()
+			providerproxy.ReleaseSlot(h.providerRelaySlots)
+			if err != nil {
+				log.Info("provider relay response ended early", "namespace", namespace, "task", taskName, "slot", slot, "reason", err.Error())
+			}
+		},
+	}, -1)
+	return nil
+}
+
+// relayResponseBody streams a Provider's answer to the worker. A read error,
+// or an answer over the size bound, is returned to fasthttp instead of a clean
+// end, so the chunked body is left unterminated and the worker reads it as a
+// failure rather than as a complete answer, such as a Responses stream that
+// lost its terminal event.
+type relayResponseBody struct {
+	body      io.ReadCloser
+	remaining int64
+	finish    func(error)
+	err       error
+	once      sync.Once
+}
+
+func (b *relayResponseBody) Read(p []byte) (int, error) {
+	if int64(len(p)) > b.remaining+1 {
+		p = p[:b.remaining+1]
+	}
+	n, err := b.body.Read(p)
+	if int64(n) > b.remaining {
+		b.err = providerproxy.ErrResponseTooLarge
+		return 0, b.err
+	}
+	b.remaining -= int64(n)
+	if err != nil && !errors.Is(err, io.EOF) {
+		b.err = err
+	}
+	return n, err
+}
+
+func (b *relayResponseBody) Close() error {
+	b.once.Do(func() { b.finish(b.err) })
+	return nil
 }
 
 // providerRelayRequest is a relay request that passed the caller, Task, path
@@ -232,10 +270,6 @@ func (h *InternalHandlers) providerRelayTarget(c fiber.Ctx) (providerRelayReques
 	request.query, err = providerRelayQuery(string(c.Request().URI().QueryString()))
 	return request, err
 }
-
-type bufioFlusher struct{ w *bufio.Writer }
-
-func (f bufioFlusher) Flush() { _ = f.w.Flush() }
 
 func providerRelayPathAllowed(path string) bool {
 	for _, allowed := range providerRelayPaths {

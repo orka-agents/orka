@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/providerproxy"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -376,4 +377,65 @@ func TestProviderRelayRouteMatchesOnlyTheRelay(t *testing.T) {
 	} {
 		require.False(t, isProviderRelayPath(path), path)
 	}
+}
+
+// An answer the Provider cuts off after its headers reaches the worker as a
+// failed body, not as a complete one.
+func TestProviderRelayFailsATruncatedAnswer(t *testing.T) {
+	h := newProviderRelayHarness(t, nil)
+	h.mu.Lock()
+	h.respond = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", "4096")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n\n")
+		w.(http.Flusher).Flush()
+		// Drop the connection before the rest of the declared body.
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}
+	h.mu.Unlock()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = h.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = h.app.Shutdown() })
+
+	request, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+relayChatPath, strings.NewReader(`{"messages":[]}`))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	require.NoError(t, err)
+	defer func() { _ = response.Body.Close() }()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	body, err := io.ReadAll(response.Body)
+	require.Error(t, err, "a truncated answer read as complete: %q", body)
+	require.Contains(t, string(body), "response.created", "what arrived before the cut is still forwarded")
+	require.Eventually(t, func() bool { return len(h.handlers.providerRelaySlots) == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+// The size bound and a failed read both end the body with an error, and the
+// relay finishes the request once, however often fasthttp closes it.
+func TestRelayResponseBodyEndsWithAnErrorAndFinishesOnce(t *testing.T) {
+	var finished []error
+	body := &relayResponseBody{body: io.NopCloser(strings.NewReader("0123456789")), remaining: 4,
+		finish: func(err error) { finished = append(finished, err) }}
+	data, err := io.ReadAll(body)
+	require.ErrorIs(t, err, providerproxy.ErrResponseTooLarge)
+	require.Empty(t, data, "bytes over the bound must not be forwarded")
+	require.NoError(t, body.Close())
+	require.NoError(t, body.Close())
+	require.Len(t, finished, 1)
+	require.ErrorIs(t, finished[0], providerproxy.ErrResponseTooLarge)
+
+	finished = nil
+	body = &relayResponseBody{body: io.NopCloser(strings.NewReader("ok")), remaining: 4,
+		finish: func(err error) { finished = append(finished, err) }}
+	data, err = io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, "ok", string(data))
+	require.NoError(t, body.Close())
+	require.Equal(t, []error{nil}, finished)
 }
