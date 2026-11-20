@@ -4,15 +4,18 @@ Date: 2026-11-20
 
 ## Status
 
-Proposed. This is a design only; nothing here is implemented. It would amend:
+Accepted. The maintainer resolved the open questions on 2026-11-20; their answers are recorded
+in "Maintainer decisions" below. The feature ships behind `--acp-workspace-persistent-session`,
+default off. It amends:
 
-- ADR 0024 and ADR 0055: a write-intent Session on a warm class-backed workspace would no
-  longer retire its RuntimeSession after every turn. ADR 0055's "a new RuntimeSession is still
-  created" would then stop applying to those Sessions.
+- ADR 0024 and ADR 0055: a write-intent Session on a warm class-backed workspace no longer
+  retires its RuntimeSession after every turn. ADR 0055's "a new RuntimeSession is still
+  created" stops applying to those Sessions.
 - ADR 0057's queue ordering, on the reuse path only. A Task that already *holds* its attachment
   may persist its PromptAttempt before the provider acknowledges the epoch. The full post-attach
-  handshake (`verifyACPWorkspaceReadyForPool`) moves to just before the first runtime contact. It
-  is not removed.
+  handshake (`verifyACPWorkspaceReadyForPool`'s readiness check) moves to just before the first
+  runtime contact. It is not removed. This amends ADR 0057's fencing argument, so it shares
+  ADR 0057's pending security review (decision 6).
 
 It changes none of these:
 
@@ -90,11 +93,20 @@ Persistence is attempted only when all of these hold:
 - the execution workspace is class-backed with `reusePolicy: session`. It is warm-window eligible
   (`acpWorkspaceWarmDetachWindow`), so in practice Substrate `DataOnly` with Suspend allowed. Agent
   Sandbox has no warm window and is excluded by construction;
-- for write intent, the supervisor advertises the new `rebase` capability (section 4);
+- the frozen workspace class does not opt out. A class annotated
+  `acp.workspace.orka.ai/persistent-session: disabled` forces a fresh session every turn
+  (decision 1). The annotation is read when the class is resolved and frozen into the execution
+  snapshot's class binding (`persistentSession: disabled`), like the rest of the class identity.
+  It is not part of the RuntimePool binding digest, so toggling it never breaks a continuation;
+  a later edit to the live class does not change an already-frozen Task;
+- the supervisor advertises the new `rebase` capability (`supportsRuntimeSessionRebase`,
+  section 4). A supervisor without it gets a fresh session, for read intent too, so one
+  capability gates the whole path;
 - the runtime does not use native sessions. Codex with `SupportsNativeSessions` keeps today's
-  capture-and-retire path (open question 3);
+  capture-and-retire path (decision 3). Claude, OpenCode and Copilot have no native session
+  support today and get reuse;
 - the Task is not a gateway conversation turn, has no Agent identity binding, carries no
-  transaction context, and is not operator-tainted. The first two are open question 4.
+  transaction context, and is not operator-tainted (decision 4).
 
 ### 2. Who owns the persisted session between turns
 
@@ -102,7 +114,12 @@ Persistence is attempted only when all of these hold:
 
 - **The record.** A new status field, `RuntimeSessionControl.status.residentRuntime` (store type
   `SessionControl.ResidentRuntime *SessionResidentRuntime`), is mirrored in the sqlite and kube
-  stores and `pkg/storage/v1`. It holds no credentials. It carries:
+  stores. `pkg/storage/v1` does not carry `SessionControl`, so it needs no change. The legacy
+  SQLite control store (not production storage; production uses the Kubernetes-authoritative
+  composite store) has no column for it: it does not advertise
+  `store.SessionResidentRuntimeSupport`, refuses a record at finalization, and so never keeps a
+  runtime. Adding the column needs a SQLite schema version and is deferred. The record holds no
+  credentials. It carries:
   - `handoffID`: a domain digest of the fields below;
   - the source: `sourceTaskUID`, `sourceAttempt`, `sourcePromptAttemptID`, `sourceTurnID`, and
     the released `sourceLeaseGeneration`;
@@ -116,7 +133,9 @@ Persistence is attempted only when all of these hold:
     `RuntimeSessionWorkspaceDigest`, and the lineage configuration digest
     (`acpSessionLineageConfigurationDigest`);
   - `reuseDigest` (section 5);
-  - `transcriptHead`: the last committed message ID and the message count;
+  - `transcriptHead`: a digest of the terminal message turn N appended. Message IDs are minted
+    inside the finalization write, so turn N cannot name its own message ID before the write;
+    N+1 instead requires the transcript's last message to match this digest;
   - `verifiedBaseline` (write intent);
   - `keptAt` and `expiresAt`. `expiresAt` is `keptAt` plus the workspace's frozen
     `acp.workspace.orka.ai/suspend-after-detach`, and is never extended;
@@ -131,12 +150,16 @@ Persistence is attempted only when all of these hold:
   `settleRetainedTaskScopedRuntimeSession`, `retireRecoveredRuntimeSessionBinding`) never write
   one.
 - **What turn N must prove first.** Its PromptAttempt is `Succeeded`. Its delivery state is
-  `NotRequested` or `ReadValidated` (read intent), or `VerifiedExact` or `NoChange` with a rebase
-  receipt (write intent, section 4). It did not park, and has no unresolved native-capture intent.
-  The supervisor reports the session `idle` and quiescent.
-- **The cleanup mark.** Once the record commits, turn N records its task-scoped cleanup as handed
-  off (`markTaskScopedRuntimeSessionCleanupComplete` with reason `persistent_session_handoff`)
-  instead of calling `cleanupRuntimeSession("task_finalized")`. If any write fails, turn N retires
+  `ReadValidated` (read intent), `NoChange` (write intent), or `VerifiedExact` with a rebase
+  receipt (write intent, section 4). It did not park, appended its result to the transcript, and
+  has no native capture. Its workspace has a frozen warm window, and its pool is `Serving` and
+  `Accepting` on the same instance with a served record. The supervisor reports the session
+  `idle` and quiescent.
+- **No cleanup receipt.** Once the record commits, turn N skips `cleanupRuntimeSession` and
+  records no task-scoped cleanup receipt. The kept process stays owned by the Session's newest
+  finalized turn, exactly as a resident read-intent session is today, so Session deletion
+  (`CleanupSessionRuntime`) and instance retirement still find and retire it. A receipt would make
+  them skip it. If the finalization refuses the record, turn N finalizes without it and retires
   the session as today.
 - **The attachment is revoked as today.** Turn N's settlement still revokes the attachment and
   opens the ADR 0055 window: `markACPWorkspaceRevocationStarted` stamps `suspend-at`, then
@@ -153,9 +176,11 @@ ordinary path.
 1. **Attach, still exclusive.** N+1 attaches through `WorkspaceAttachmentManager.attach` at epoch
    e+1, exactly as today. When the record is `Resident` and passes the static checks (section 5),
    the same optimistic attach patch also writes `acp.workspace.orka.ai/attached-from-warm: <task
-   UID> <epoch> <suspend-at it observed> <last-settled-task-uid>`. That patch is the one that
-   removes `suspend-at`, so the evidence is atomic with the observation. Once a suspension wins
-   the race, the attach is refused, because a direct attach requires desired `Ready`.
+   UID> <epoch> <suspend-at it observed> <last-settled-task-uid>`. The values are read from the
+   exact object version the patch is applied to, so the evidence is atomic with the observation.
+   `suspend-at` itself is still cleared by the post-acknowledgement detach-action write
+   (`recordACPWorkspaceDetachAction`), as today. Once a suspension wins the race, the attach is
+   refused, because a direct attach requires desired `Ready`.
 2. **Queue once the attachment is held.** On the reuse path, `queueACPRuntimeTask` treats the
    workspace as *held* once all of these hold:
    - `spec.attachment.taskRef.uid` is this Task, at the Task's
@@ -166,15 +191,16 @@ ordinary path.
    - the workspace is not tainted, quarantined or `Failed`.
 
    It then runs the pool identity checks of `ensureACPRuntimePoolDemand`: frozen name and UID,
-   workspace link, not deleting. It skips only the handshake, and persists the PromptAttempt with
-   the record's `handoffID`. It marks the new milestone `workspaceAttachHeld` in place of
-   `workspaceReady` and `runtimePoolReady`.
+   workspace link, not deleting. It skips only the handshake, persists the PromptAttempt, and
+   stamps the record's `handoffID` on the Task (`acp.workspace.orka.ai/persistent-session-handoff`)
+   in the same metadata patch that labels it for its pool. It marks the new milestone
+   `workspaceAttachHeld` in place of `workspaceReady` and `runtimePoolReady`.
 
    A rival Task of the same Session does not hold the attachment, so it stays on the ordinary path
    and queues behind the holder, as today.
-3. **Reserve.** `reserveTask` reserves with `residentSlots = 0`, as for any reused session. Unlike
-   today's reuse, it also requires `AdmissionState == Accepting`. A pool that stops admitting is
-   retiring its instance, and the turn falls back.
+3. **Reserve.** `reserveTask` reserves as today; a reused session then sets `residentSlots = 0`.
+   Unlike today's reuse, the gate (step 6) also requires `AdmissionState == Accepting`. A pool that
+   stops admitting is retiring its instance, and the turn falls back (`pool-not-accepting`).
 4. **Claim, in the lease write.** `bindAndOpenTaskSessionTurn` calls `AcquireSessionMutationLease`
    with `ClaimResidentRuntime{handoffID}`. The same CAS that acquires the lease moves the record
    from `Resident` to `Claimed{N+1}`. It succeeds only if all of these hold:
@@ -192,10 +218,12 @@ ordinary path.
    - generation *g*, the profile digest and the MCP digest match;
    - `bindACPRuntimeSessionWorkspace` reports no workspace change.
 
-   Anything else plans `Recreate` at *g*+1 with its reason. Recreation first deletes the exact
-   resident session (fenced `DeleteRuntimeSession`, reason `persistent_session_refused`). It
-   requeues pre-submission on failure, exactly like today's `workspace_binding_changed` path. A
-   missing or replaced instance is cleanup proof (ADR 0024).
+   Anything else plans `Recreate` above *g* with its reason, using the canonical bootstrap that
+   was resolved before the lease. The existing planned-session reconciliation then finds the
+   resident *g* on the same instance and deletes it (fenced `DeleteRuntimeSession`, reason
+   `replace_stale_runtime_session`) before a pre-submission requeue creates the fresh session. A
+   missing or replaced instance is cleanup proof (ADR 0024). On the reuse path the in-memory
+   binding is never consulted: a refusal always plans a fresh session.
 6. **Gate before first contact.** The new turn step `residentSessionGate` runs before any runtime
    mutation:
    - **The ADR 0057 handshake.** `verifyACPWorkspaceReadyForPool` must hold. It requires current
@@ -209,10 +237,15 @@ ordinary path.
    - **Workspace.** `attached-from-warm` names this Task and epoch. Its `last-settled-task-uid`
      equals the record's source Task. Its observed `suspend-at` is later than `keptAt`. No
      `warm-window-drained-at`, `suspend-pending` or retirement is set.
-   - **Session status.** An authenticated, operation-scoped `GET` on the RuntimeSession must
-     return the exact UID and generation in state `idle`, with no prompt, no pending permission,
-     no operator operation, and no running descendants. The supervisor gains a `quiescent` field
-     in the session descriptor for this.
+   - **Session status.** The authenticated, capability-bound status `GET` must return the exact
+     UID and generation in state `idle`, `quiescent`, with no prompt, no pending permission and no
+     finalization reservation. The supervisor reports `quiescent` per session (opt-in through the
+     `X-Orka-Runtime-Session-Rebase` header, so older strict clients never see it): idle, no
+     unsettled prompt, no pending permission, no registered operator operation, an unfrozen
+     workspace, and a live provider process. The existing `liveDescendantCount` reports only the
+     provider process itself, so per-tree descendant enumeration is not part of this check; a
+     background process left by turn N is in the same position as one left in a resident
+     read-intent session today.
 
    If any check fails, the turn misses, releases the claim to `Retiring`, and continues at step 5's
    recreation. If the handshake does not arrive within budget, the turn requeues pre-submission.
@@ -238,7 +271,7 @@ compares the record's epoch with its own fence.
 | Crash point | Durable state left | Outcome |
 | --- | --- | --- |
 | Before N's `FinalizeSessionTurn` | no record; session *g* resident | Recovery retires *g* as today. N+1 takes the ordinary path. |
-| After the record, before N's cleanup mark | record `Resident` | Recovery may delete *g*. It must also move a record naming *g* to `Retiring`. Otherwise N+1's status check misses. |
+| After the record, before N's Task completes | record `Resident` | The record is valid: N's canonical result committed in the same write. A restart changes the epoch, so the next acquisition retires it and the next turn's planned-session reconciliation deletes *g*. Without a restart, N+1's gate checks the exact quiescent status, so a *g* that recovery deleted misses with `runtime-session-missing`. |
 | Restart or ADR 0058 takeover before the claim | record `Resident` at the old epoch | The claim is refused (`controller-epoch-changed`). The new epoch also retires the pool's published request (ADR 0057 §7). |
 | After the claim, before `StartPrompt` | record `Claimed{N+1}`; lease held | `reconcileUnfinalizedTaskSession` treats the claim as consumed. A retry never reuses across an epoch change: it recreates at *g*+1. |
 | After `StartPrompt` | record consumed | Existing prompt recovery applies (`OutcomeUnknown`, never replay). Only N+1's live settlement can write a new record. |
@@ -253,25 +286,42 @@ restart therefore always costs one cold turn, which is the intended fail-closed 
 ### 4. Write intent: rebase instead of retire
 
 A write session ends at `finalizing`. To be reused it needs one new fenced harness v2 mutation,
-`POST /v2/runtime-sessions/{id}/rebase` (`RebaseRuntimeSessionRequest`). Its rules:
+`PUT /v2/runtime-sessions/{id}/rebase` (`RebaseRuntimeSessionRequest`), advertised as
+`supportsRuntimeSessionRebase`. It is a `PUT` with an operation ID, like every other v2
+mutation, so a retry is classified as a duplicate and replays the same receipt. Its rules:
 
 - **Allowed only after an exact, verified publication.** Turn N calls it after
   `FinalizeRuntimeSessionPublication` and before `finalizeTaskSessionResult`, and only when the
-  delivery state is `VerifiedExact` or `NoChange`. `DeliveredSuperseded`, `DeliveryConflict`,
+  delivery state is `VerifiedExact`. `DeliveredSuperseded`, `DeliveryConflict`,
   `CredentialBlocked` and `PublicationOutcomeUnknown` never rebase. The session is retired as
-  today.
+  today. A write turn whose delta is `NoChange` needs no rebase: the supervisor already returns
+  it to `idle` with its baseline unchanged, so it is kept like a read-intent turn.
 - **The request** carries:
-  - the publication finalization receipt digest;
-  - the published delta digest;
-  - the Session's new `VerifiedBranchBaseline`;
-  - the expected next-baseline digest.
-- **The supervisor** requires state `finalizing` with that exact receipt, and no prompt,
-  descendants or operator operation. It derives the next delta baseline as the previous baseline
-  with the published delta applied, and compares that with the expected digest. It does not
-  re-capture the baseline from the live tree, which keeps ADR 0027's rule: a baseline comes from
-  controller-verified state. It then returns the session to `idle` and records the receipt for
-  idempotent replay. The live tree is untouched, so anything left unpublished appears in the next
-  delta, as on a cold resume.
+  - the publication finalization receipt digest (`TerminalReceiptDigest` of the
+    `PublicationFinalizationReceipt` the supervisor accepted);
+  - the published delta's manifest digest;
+  - the Session's new `VerifiedBranchBaseline` (repository, ref, the published commit);
+  - the expected next-baseline tree digest.
+- **The next baseline identity.** The supervisor's `WorkspaceBaseline` is only an identity: it
+  compares it byte-for-byte with each delta request, and never hashes the tree with it. The next
+  baseline is `{repository: new baseline repository, revision: published commit, treeDigest:
+  acp-rebased-workspace-tree/v1 digest(previous treeDigest, published manifest digest, published
+  commit)}`, with no artifact. Both sides compute the tree digest from values they already hold,
+  and the supervisor refuses a mismatch. The controller records this rebased identity in the
+  handoff record. On N+1, `prepareRuntimeWorkspace` still resolves and prepares the branch in the
+  clean-room publisher (as for any reused session, and with no credential reaching the runtime).
+  Reuse then requires its resolved revision to equal the record's published commit, and the
+  workspace binding digest is computed over the record's rebased identity.
+- **The supervisor** requires state `finalizing` with that exact receipt, and no prompt, no
+  pending permission and no live descendants. It derives the next delta baseline as the previous
+  baseline with the published delta applied: the published changes and deletions are applied to
+  the trusted snapshot's entries (`workspacedelta.Snapshot.Rebase`). It does not re-capture the
+  baseline from the live tree, which keeps ADR 0027's rule: a baseline comes from
+  controller-verified state. Derived entries carry no content-policy flags or fingerprints, so a
+  later delta that touches them is checked without the baseline exemption, which is stricter. It
+  then thaws the frozen workspace, returns the session to `idle` and records the receipt for
+  idempotent replay. The live tree is untouched, so anything left unpublished (for example a file
+  written after the delta froze) appears in the next delta, as on a cold resume.
 - **No new credential.** The new baseline is derived, not fetched. No repository read credential
   is minted, and the publication credential stays in the clean-room publisher.
 - **Failure or ambiguity.** The turn retires the session as today and writes no record.
@@ -349,11 +399,19 @@ difference means a fresh session.
 outputs that the canonical transcript does not carry. Reuse is refused unless N+1 would have
 bootstrapped the whole history through turn N:
 
-- `throughMessageID` is empty or equals `transcriptHead`;
-- `maxMessages` is unset or at least the message count;
-- `promptIncluded` is consistent;
-- the Session's transcript head still equals `transcriptHead`, so nothing was appended or edited
-  out of band.
+- `throughMessageID` is empty or equals the transcript's last message ID;
+- `maxMessages` is unset or at least the current message count;
+- `promptIncluded` is false (a prompt-included continuation appended its prompt out of band);
+- the transcript's last message still matches `transcriptHead`, the digest of the assistant
+  result turn N appended, so nothing was appended or edited after it.
+
+The reuse digest covers: the profile digest, runtime image and runtime profile, the rebuilt
+AgentConfiguration, the MCP binding digest, the effective workspace intent, the frozen
+`Task.spec.workspace`, the PromptAttempt credential bindings (read and publication Secret
+identities and frozen versions), the frozen execution-workspace binding (class identity,
+provider, detach action, slot), Connections, whether a GatewayGrant is present, the Agent UID and
+generation, the runtime override and the default tool policy. A unit test changes each input in
+turn and requires the digest to change.
 
 **Refusal reasons.** Every refusal falls back to today's path. Each reason is a bounded enum, used
 in logs and metrics. The previous-turn reasons appear on turn N's `retained` log, because such a
@@ -361,7 +419,7 @@ turn writes no record and turn N+1 then sees `no-record`:
 
 | Group | Reasons |
 | --- | --- |
-| Configuration | `flag-disabled`, `ineligible-scope` (external, native, gateway, identity, transaction, tainted) |
+| Configuration | `flag-disabled`, `ineligible-scope` (external, native, gateway, identity, transaction, tainted, not session-reused, no warm window), `class-disabled` (the frozen class opt-out), `rebase-unsupported` (the supervisor does not advertise `rebase`) |
 | Record | `no-record`, `record-expired`, `controller-epoch-changed`, `claim-lost` |
 | Snapshot | `snapshot-mismatch` (sub-reason: profile, image, agent-configuration, mcp, workspace-binding, class, repository, credential-ref, connections, agent) |
 | Session | `history-boundary`, `transcript-changed`, `session-unavailable` (`ReconciliationBlocked`), `session-deleting` |
@@ -416,9 +474,10 @@ versions and observed instance. There is no warm window, no workspace evidence a
 - **`ACP persistent session reuse`.** Logged once per N+1 attempt with `namespace`, `task`,
   `result=hit|miss`, `reason`, `stage=queue|claim|plan|gate`, `handoffAgeMs`, `gateWaitMs`,
   `runtimeSessionGeneration`.
-- **Pre-dispatch timings** (`ACP pre-dispatch timings`) gain `workspaceAttachHeld`. On a hit,
-  `workspaceReady` and `runtimePoolReady` are marked when the gate observes them, so the waterfall
-  still shows when the acknowledgement arrived, off the critical path.
+- **Pre-dispatch timings** (`ACP pre-dispatch timings`) gain `workspaceAttachHeld`, marked in
+  place of `workspaceReady` and `runtimePoolReady` on the held path. The pre-dispatch record is
+  reported when the reserved execution starts, before the gate runs, so the time the gate waited
+  for the acknowledgement is reported as `gateWaitMs` on the reuse log instead.
 - **Turn timings** (`ACP turn timings`) gain `residentSessionGate` and `runtimeSessionRebase`. On
   a hit, `sessionCreate` is absent.
 - **Metric.** `orka_acp_persistent_session_total{decision="kept|retired|hit|miss",reason}` with
@@ -441,7 +500,7 @@ versions and observed instance. There is no warm window, no workspace evidence a
   1. The record, claim, gate and queue reorder, for read intent. The in-memory reuse becomes
      durable and gets the overlap saving.
   2. Write intent through `rebase`. This is the stage the round 8 benchmark needs.
-  3. Codex native sessions, only if open question 3 is resolved.
+  3. Codex native sessions are not planned: decision 3 excludes them.
 - **Unit tests.**
   - `PlanACPRuntimeSession` with a claimed record, plus the full refusal table.
   - `reuseDigest` coverage, using the field-at-a-time property test.
@@ -464,7 +523,7 @@ versions and observed instance. There is no warm window, no workspace evidence a
     - a parked, failed, cancelled, timed-out or `DeliveredSuperseded` turn N;
     - each snapshot field;
     - two concurrent continuations;
-    - fault injection (`storagefault`) between the record and the cleanup mark, between the
+    - fault injection between the record and the turn's completion, between the
       claim and the prompt, and during `rebase`.
 - **Live kind latency harness** (Substrate on gVisor, Vekil, aimock):
   - a round 9 waterfall for warm follow-ups: median and p90, hit rate, and miss reasons;
@@ -494,7 +553,7 @@ versions and observed instance. There is no warm window, no workspace evidence a
 The overlap holds because attempt → plan takes about 2.4 s against about 1.9 s for acknowledgement
 plus handshake. That is still about 1 s slower than kagent, so this does not reach parity on its
 own. The rest is mostly the two re-admission hops ADR 0057 left in place, and the fixed per-write
-costs ADR 0058 measured.
+costs ADR 0058 measured. Removing those hops is ADR 0060's subject (decision 7).
 
 ## Consequences
 
@@ -507,7 +566,7 @@ costs ADR 0058 measured.
   `verifyACPWorkspaceReadyForPool`.
 - **The reused agent knows more than a fresh one.** It remembers turn N's tool outputs and its
   reasoning, not only the canonical transcript. This is the point of the feature, but it is a
-  behavior difference (open question 1).
+  behavior difference (decision 1), and a class can opt out.
 - **Restart costs one cold turn.** Every controller restart or epoch takeover makes the next turn
   of each Session cold, by design.
 - **The saving depends on ordering.** It assumes the internal chain stays longer than the
@@ -544,26 +603,34 @@ costs ADR 0058 measured.
   ordering and exactly-once authority, and the claim needs them.
 - **Full-memory suspend and restore of the agent.** ADR 0030's gate is closed.
 
-## Open questions for the maintainer
+## Maintainer decisions
 
-1. **Memory beyond the transcript.** Is it acceptable product behavior for a reused agent to
-   remember turn N's tool outputs and reasoning? Should classes be able to opt out through a
-   frozen workspace annotation such as `acp.workspace.orka.ai/persistent-session: disabled`,
-   materialized like ADR 0057's default window?
-2. **Write-intent `rebase`.** Do you accept the new supervisor mutation, and the rule that
-   unpublished residue rolls into the next delta, as on a cold resume? Without it, the round 8
-   Session gains almost nothing: it creates a session every turn, so it is write-intent or
-   Codex-native.
-3. **Codex native sessions.** Exclude them, as proposed? Or accept that a fallback after a reused
-   turn bootstraps from the canonical transcript instead of a native capture? That changes
-   ADR-level native continuity semantics.
-4. **Gateway turns and Agent-identity Tasks.** These are excluded by default, following ADR 0041's
-   precedent. Should gateway turns be admitted? `reply_in_conversation` re-authenticates per
-   prompt.
-5. **The flag default and the promotion bar.** The flag starts off. Is "≥90% hit rate plus a
-   security review" the right bar to promote it?
-6. **Review scope.** Moving the handshake from "before PromptAttempt" to "before first contact"
-   amends ADR 0057's fencing argument 1. Should it go through the same security review that
-   ADR 0057's serving rule is still waiting for?
-7. **Re-admission hops.** Parity with kagent needs the two hops ADR 0057 left in place removed. Is
-   changing ADR 0023's admission contract on the table, as a separate decision?
+The maintainer answered the open questions of the proposal on 2026-11-20:
+
+1. **Memory beyond the transcript: accepted, with a class opt-out.** A reused agent may remember
+   turn N's tool outputs and reasoning wherever the flag allows reuse. An
+   ExecutionWorkspaceClass annotated `acp.workspace.orka.ai/persistent-session: disabled`
+   (named after ADR 0057's `acp.workspace.orka.ai/default-suspend-after-detach`) forces a fresh
+   session every turn. The class identity is frozen in the execution snapshot, so the opt-out is
+   read from the frozen class binding, never from the live class. Any other value, or no
+   annotation, leaves reuse enabled.
+2. **Write-intent `rebase`: accepted,** with unpublished leftovers rolling into the next delta,
+   as on a cold resume. It is a new supervisor capability. Reuse is attempted only against a
+   supervisor that advertises it; without it the session falls back to a fresh one.
+3. **Codex native sessions: excluded.** They keep today's path, a fresh session plus native
+   restore. Claude, OpenCode and Copilot get reuse.
+4. **Gateway turns, Agent-identity Tasks and transaction-bound Tasks: excluded,** as proposed.
+5. **Promotion bar.** `--acp-workspace-persistent-session` stays default off. Its default may
+   change only after the live harness shows at least a 90% reuse hit rate on back-to-back
+   follow-ups, and after a security review.
+6. **Review scope.** Moving the attach handshake later amends ADR 0057's fencing argument, so
+   this change shares ADR 0057's pending security review.
+7. **Re-admission hops.** Removing the two RuntimePool re-admission hops (an ADR 0023 change) is
+   being designed separately as ADR 0060. It is future work and is not part of this decision.
+
+### Fallback rule
+
+Every refusal reason in section 5's table falls back to the ordinary path: a fresh session on
+this turn or the next one, or an ordinary pre-submission requeue. No reason fails the Task. Each
+reuse decision logs the `ACP persistent session reuse` milestone with its `result` and `reason`,
+and each keep decision logs `ACP persistent session retained`.

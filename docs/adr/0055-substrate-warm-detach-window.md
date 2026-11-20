@@ -12,6 +12,10 @@ Amended by [ADR 0057](0057-substrate-continuation-latency.md): new eligible Subs
 freeze a controller default window when their profile sets none, replacing the **No default** rule
 for those workspaces only.
 
+Amended by [ADR 0059](0059-acp-persistent-warm-session.md): behind
+`--acp-workspace-persistent-session`, a continuation inside the window may reuse the previous
+turn's live RuntimeSession, so "a new RuntimeSession is still created" no longer applies to it.
+
 ## Context
 
 A session-reused Substrate workspace whose frozen detach action is `Suspend` is torn

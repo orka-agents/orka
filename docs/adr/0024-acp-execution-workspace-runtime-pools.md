@@ -9,6 +9,10 @@ Kubernetes Agent Sandbox). Supersedes the unconditional
 `Task.spec.execution.workspace` rejection that ADR 0006's cutover note left in
 `planAgentExecution`.
 
+Amended by [ADR 0059](0059-acp-persistent-warm-session.md): behind
+`--acp-workspace-persistent-session`, a write-intent Session on a warm class-backed workspace
+may keep its RuntimeSession across turns instead of retiring it after every turn.
+
 ## Context
 
 `Task.spec.workspace` is the agent repository/read/publication surface;

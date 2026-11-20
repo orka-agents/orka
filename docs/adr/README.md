@@ -57,7 +57,7 @@ not do with a running agent's memory. See
 
 | # | Decision | Status |
 | --- | --- | --- |
-| [0024](0024-acp-execution-workspace-runtime-pools.md) | Workspace-provider-backed ACP RuntimePools | Accepted |
+| [0024](0024-acp-execution-workspace-runtime-pools.md) | Workspace-provider-backed ACP RuntimePools | Accepted, amended by 0059 |
 | [0025](0025-substrate-backed-runtime-pools.md) | Substrate-backed pools, without suspension | Accepted |
 | [0026](0026-acp-class-backed-execution-workspaces.md) | Class-backed execution workspaces | Accepted, amended by 0055 and 0057 |
 | [0027](0027-substrate-data-only-suspension.md) | Substrate data-only cold suspension and resume | Accepted, amended by 0055 and 0057 |
@@ -70,9 +70,10 @@ not do with a running agent's memory. See
 | [0044](0044-operator-workspace-access.md) | Audited, taint-on-write operator exec and copy into ACP workspaces | Accepted |
 | [0045](0045-substrate-egress-credential-injection.md) | Inject the provider-proxy token and MCP upstream credentials at the Substrate egress gateway | Accepted |
 | [0046](0046-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
-| [0055](0055-substrate-warm-detach-window.md) | Keep a detached Substrate workspace warm before suspending it | Accepted, amended by 0057 |
+| [0055](0055-substrate-warm-detach-window.md) | Keep a detached Substrate workspace warm before suspending it | Accepted, amended by 0057 and 0059 |
 | [0056](0056-substrate-shared-workers.md) | Let opted-in Substrate profiles share workers, with interim termination evidence | Accepted (interim) |
-| [0057](0057-substrate-continuation-latency.md) | Start a workspace runtime before its attachment settles, and keep new Substrate workspaces warm by default | Accepted |
+| [0057](0057-substrate-continuation-latency.md) | Start a workspace runtime before its attachment settles, and keep new Substrate workspaces warm by default | Accepted, amended by 0059 |
+| [0059](0059-acp-persistent-warm-session.md) | Keep a Session's ACP RuntimeSession live across warm-window turns | Accepted (behind a default-off flag) |
 
 ### The Substrate control plane
 

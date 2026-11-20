@@ -14,6 +14,11 @@ Accepted, approved by the project owner. It amends:
 ADR 0030's full-memory gate, ADR 0031's data-only cold path, ADR 0049's credential model, and
 ADR 0056's shared-worker evidence are unchanged.
 
+Amended by [ADR 0059](0059-acp-persistent-warm-session.md): on the persistent-session reuse
+path only, a Task that holds its attachment may persist its PromptAttempt before the provider
+acknowledges the epoch; the readiness handshake moves to just before the first runtime contact.
+This amendment shares this ADR's pending security review.
+
 ## Context
 
 kagent v1.0.1 reaches the agent prompt about 4.2 s after a Session follow-up Task is created.
