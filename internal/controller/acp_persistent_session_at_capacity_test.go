@@ -166,6 +166,7 @@ func TestPersistentSessionClaudeKeepsAndReusesThroughTheLiveAtCapacityPool(t *te
 		RuntimeSessionUID: runtimeFence.RuntimeSessionUID, Generation: runtimeFence.RuntimeSessionGeneration,
 		State: harnessv2.RuntimeSessionStateIdle, Quiescent: true, LiveDescendantCount: 1, LastTransitionAt: time.Now().UTC(),
 	}}
+	supervisor.fence = &runtimeFence
 	runtimeClient := supervisor.client(t, h.profile)
 	record, reason, _ := h.dispatcher.prepareACPPersistentSessionKeep(ctx, acpPersistentSessionKeepInput{
 		task: turn1, bound: bound, target: acpDispatchTarget{pool: livePool}, runtimeClient: runtimeClient,
@@ -205,7 +206,9 @@ func TestPersistentSessionClaudeKeepsAndReusesThroughTheLiveAtCapacityPool(t *te
 	require.True(t, session2.Reused)
 	// The pool still reports Closed at capacity: turn 1's kept session is
 	// what fills its only resident slot.
-	refusal, err := h.dispatcher.acpPersistentSessionRuntimeGate(ctx, turn2, session2.ResidentClaimed, runtimeClient, runtimeFence, fence2, livePool)
+	// The dispatcher's runtime fence carries no RuntimeSession at the gate.
+	gateFence := runtimePoolFenceWithSession(runtimeFence, "", 0)
+	refusal, err := h.dispatcher.acpPersistentSessionRuntimeGate(ctx, turn2, session2.ResidentClaimed, runtimeClient, gateFence, fence2, livePool)
 	require.NoError(t, err)
 	require.Equal(t, "", refusal, "turn 2 must reuse the session its own Session's pool still holds")
 }

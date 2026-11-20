@@ -1050,12 +1050,20 @@ func (d *ACPDispatcher) acpPersistentSessionRuntimeGate(
 	if refusal := acpPersistentSessionWorkspaceRefusal(workspace, task, record); refusal != "" {
 		return refusal, nil
 	}
-	_, observed, err := runtimeSessionStatusForUID(ctx, runtimeClient, harnessv2.RuntimeSessionUID(record.RuntimeSessionUID))
+	expected, ok := acpPersistentSessionClaimedFence(record, runtimeFence)
+	if !ok {
+		return acpPersistentReasonRuntimeReplaced, nil
+	}
+	status, observed, err := runtimeSessionStatusForUID(ctx, runtimeClient, expected.RuntimeSessionUID)
 	if err != nil {
 		return acpPersistentReasonRuntimeSessionMissing, nil
 	}
-	if observed == nil || observed.Generation != uint64(record.RuntimeSessionGeneration) ||
-		observed.RuntimeSessionID != harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)) {
+	if harnessv2.CompareFence(runtimePoolFenceWithSession(expected, "", 0), status.Fence, false) != harnessv2.FenceMatch {
+		return acpPersistentReasonRuntimeReplaced, nil
+	}
+	if observed == nil || observed.RuntimeSessionUID != expected.RuntimeSessionUID ||
+		observed.Generation != expected.RuntimeSessionGeneration ||
+		observed.RuntimeSessionID != harnessv2.RuntimeSessionID(runtimeSessionID(expected)) {
 		return acpPersistentReasonRuntimeSessionMissing, nil
 	}
 	if observed.State != harnessv2.RuntimeSessionStateIdle || !observed.Quiescent || observed.ActivePromptID != "" ||
@@ -1063,6 +1071,24 @@ func (d *ACPDispatcher) acpPersistentSessionRuntimeGate(
 		return acpPersistentReasonRuntimeSessionNotIdle, nil
 	}
 	return "", nil
+}
+
+// acpPersistentSessionClaimedFence is the exact identity a claimed record
+// names: its RuntimeSession UID and generation on the runtime instance and
+// supervisor boot this turn reached. The dispatcher's runtime fence carries no
+// RuntimeSession until after the gate, so the gate must not derive the
+// expected session from it. It reports false when the record names another
+// instance or boot, or no valid session.
+func acpPersistentSessionClaimedFence(record *store.SessionResidentRuntime, runtimeFence harnessv2.Fence) (harnessv2.Fence, bool) {
+	if record == nil || strings.TrimSpace(record.RuntimeSessionUID) == "" || record.RuntimeSessionGeneration < 1 ||
+		strings.TrimSpace(record.RuntimeInstanceID) == "" || strings.TrimSpace(record.SupervisorBootID) == "" ||
+		record.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID) ||
+		record.SupervisorBootID != string(runtimeFence.SupervisorBootID) {
+		return harnessv2.Fence{}, false
+	}
+	return runtimePoolFenceWithSession(
+		runtimeFence, harnessv2.RuntimeSessionUID(record.RuntimeSessionUID), uint64(record.RuntimeSessionGeneration),
+	), true
 }
 
 // acpPersistentSessionWorkspaceRefusal checks the warm-window evidence the
@@ -1288,10 +1314,23 @@ func (d *ACPDispatcher) runACPPersistentSessionGates(
 	if err != nil {
 		return requeue(acpPersistentReasonRuntimeSessionMissing, err)
 	}
+	if reason == "" && (session.Binding.SessionUID != record.RuntimeSessionUID ||
+		session.Binding.Generation != uint64(record.RuntimeSessionGeneration) ||
+		string(session.Binding.RuntimeInstanceID) != record.RuntimeInstanceID ||
+		string(session.Binding.SupervisorBootID) != record.SupervisorBootID) {
+		// The turn would address a session other than the one the gate proved.
+		reason = acpPersistentReasonRuntimeSessionMissing
+	}
 	if reason != "" {
 		reuse.miss(acpPersistentSessionStageGate, reason)
 		d.stampACPPersistentSessionRefused(ctx, task, reason)
-		d.retireACPResidentRuntime(ctx, task, fence, record)
+		if retired := d.retireACPResidentRuntime(ctx, task, fence, record); retired != nil && session.Turn != nil &&
+			validateACPSessionLease(retired, session.Turn.Lease.Key) == nil {
+			// Retirement advanced the SessionControl version under this
+			// turn's exact lease; the fresh session's generation commit in
+			// this same pass must expect that version, not requeue on it.
+			session.Turn.Lease.Session = *retired
+		}
 		session.ResidentClaimed = nil
 		plan := acpPersistentSessionRecreatePlan(
 			ACPRuntimeSessionPlan{Binding: session.Binding}, record, session.LeaseGeneration,
@@ -1331,21 +1370,25 @@ func (d *ACPDispatcher) stampACPPersistentSessionRefused(ctx context.Context, ta
 	}
 }
 
-// retireACPResidentRuntime moves an exact record to Retiring. A failure is
-// harmless: the record was claimed by this turn's lease and can never be
-// claimed again, and the turn's own finalization clears it.
+// retireACPResidentRuntime moves an exact record to Retiring and returns the
+// resulting SessionControl, or nil when it did not. A failure is harmless:
+// the record was claimed by this turn's lease and can never be claimed again,
+// and the turn's own finalization clears it.
 func (d *ACPDispatcher) retireACPResidentRuntime(
 	ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence, record *store.SessionResidentRuntime,
-) {
+) *store.SessionControl {
 	support, ok := d.Store.(store.SessionResidentRuntimeSupport)
 	if !ok || record == nil || task == nil || task.Spec.SessionRef == nil {
-		return
+		return nil
 	}
-	if _, err := support.RetireSessionResidentRuntime(context.WithoutCancel(ctx), store.RetireSessionResidentRuntimeRequest{
+	control, err := support.RetireSessionResidentRuntime(context.WithoutCancel(ctx), store.RetireSessionResidentRuntimeRequest{
 		Namespace: task.Namespace, SessionName: strings.TrimSpace(task.Spec.SessionRef.Name),
 		SessionUID: record.RuntimeSessionUID, HandoffID: record.HandoffID, Fence: fence, RetiredAt: time.Now().UTC(),
-	}); err != nil {
+	})
+	if err != nil {
 		logf.FromContext(ctx).Info("retire ACP persistent session record failed; it stays unclaimable",
 			"namespace", task.Namespace, "task", task.Name)
+		return nil
 	}
+	return control
 }

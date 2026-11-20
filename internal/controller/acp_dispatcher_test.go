@@ -4017,6 +4017,13 @@ type dispatcherRuntimeServerOptions struct {
 	onPrompt                func(harnessv2.StartPromptRequest)
 	workspaceDeltaState     harnessv2.WorkspaceDeltaState
 	workspaceDeltaFailure   *harnessv2.ErrorResponse
+	// quiescent, when it returns true, reports the resident session as
+	// quiescent, as a supervisor does once the provider process tree settled.
+	quiescent func() bool
+	// supportsRebase advertises runtime-session rebase (ADR 0059).
+	supportsRebase bool
+	// runtimeInstanceID overrides the status fence's runtime instance.
+	runtimeInstanceID harnessv2.RuntimeInstanceID
 }
 
 func newDispatcherRuntimeServerWithOptions(
@@ -4055,6 +4062,12 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		if options.nativeInstallUnresolved && len(response.Sessions) > 0 {
 			response.Sessions[0].NativeInstallUnresolved = true
 		}
+		if options.quiescent != nil && options.quiescent() && len(response.Sessions) > 0 {
+			response.Sessions[0].Quiescent = true
+		}
+		if options.runtimeInstanceID != "" {
+			response.Fence.RuntimeInstanceID = options.runtimeInstanceID
+		}
 		writeDispatcherJSON(w, response)
 	})
 	mux.HandleFunc("GET "+harnessv2.CapabilitiesPath, func(w http.ResponseWriter, _ *http.Request) {
@@ -4067,6 +4080,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			SupportsDrain:                     true,
 			SupportsNativeSessions:            options.nativeSnapshot != nil,
 			SupportsAgentSessionConfiguration: !options.disableAgentSessionConfiguration,
+			SupportsRuntimeSessionRebase:      options.supportsRebase,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {

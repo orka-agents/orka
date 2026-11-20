@@ -1333,13 +1333,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if reservationLease != nil && sessionExecution != nil {
 		residentSlots := int32(0)
+		staleRetired := false
 		if !sessionExecution.Reused {
 			residentSlots = 1
 			// A fresh RuntimeSession on a Session's dedicated single-session
 			// pool needs the slot its own older resident session still fills,
 			// so retire that one first, as the planned-session reconciliation
 			// below would only after the slot was granted.
-			holdsSlot, retireErr := d.retireStaleSessionRuntimeBeforeCreate(ctx, runtimeClient, task, sessionExecution, runtimeFence)
+			holdsSlot, retired, retireErr := d.retireStaleSessionRuntimeBeforeCreate(ctx, runtimeClient, task, sessionExecution, runtimeFence)
 			if retireErr != nil {
 				if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
 					ctx, task, attemptID, fence, retireErr, &sessionExecution.Binding,
@@ -1352,8 +1353,19 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			if holdsSlot {
 				residentSlots = 0
 			}
+			staleRetired = retired
 		}
-		if err := reservationLease.setSlots(ctx, residentSlots); err != nil {
+		err := reservationLease.setSlots(ctx, residentSlots)
+		if err != nil && staleRetired && residentSlots == 1 &&
+			(errors.Is(err, errACPRuntimePoolNotAdmitting) || errors.Is(err, errACPRuntimePoolAtCapacity)) {
+			// The pool still publishes the slot the retired session filled.
+			// Claim it in this pass when the runtime proves it is free,
+			// instead of requeueing until the pool controller's next probe.
+			if freed := observeFreedResidentSlot(ctx, runtimeClient, runtimeFence); freed != nil {
+				err = reservationLease.setSlotsWithFreedResident(ctx, residentSlots, freed)
+			}
+		}
+		if err != nil {
 			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
 				ctx, task, attemptID, fence, err, &sessionExecution.Binding,
 			); requeueErr != nil {
@@ -3431,46 +3443,76 @@ func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 // replace_stale_runtime_session the planned-session reconciliation performs.
 // It reports holdsSlot when the planned generation itself is already resident
 // (an earlier attempt of this turn created it): that session keeps its slot and
-// the reconciliation adopts it.
+// the reconciliation adopts it. It reports retired when it deleted the older
+// session, whose slot the pool's published capacity still counts until the
+// RuntimePool controller's next probe.
 func (d *ACPDispatcher) retireStaleSessionRuntimeBeforeCreate(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
 	task *corev1alpha1.Task,
 	session *acpTaskSession,
 	runtimeFence harnessv2.Fence,
-) (bool, error) {
+) (holdsSlot, retired bool, err error) {
 	if session == nil || runtimeClient == nil || strings.TrimSpace(session.Binding.SessionUID) == "" {
-		return false, nil
+		return false, false, nil
 	}
 	sessionUID := harnessv2.RuntimeSessionUID(session.Binding.SessionUID)
 	status, observed, err := runtimeSessionStatusForUID(ctx, runtimeClient, sessionUID)
 	if err != nil {
-		return false, fmt.Errorf("read the Session's resident RuntimeSession before creating a fresh one: %w", err)
+		return false, false, fmt.Errorf("read the Session's resident RuntimeSession before creating a fresh one: %w", err)
 	}
 	if observed == nil {
-		return false, nil
+		return false, false, nil
 	}
-	poolFence := runtimeFence
-	poolFence.RuntimeSessionUID = ""
-	poolFence.RuntimeSessionGeneration = 0
+	poolFence := runtimePoolFenceWithSession(runtimeFence, "", 0)
 	if mismatch := harnessv2.CompareFence(poolFence, status.Fence, false); mismatch != harnessv2.FenceMatch {
-		return false, fmt.Errorf("%w: RuntimeSession status fence mismatch: %s", store.ErrConflict, mismatch)
+		return false, false, fmt.Errorf("%w: RuntimeSession status fence mismatch: %s", store.ErrConflict, mismatch)
 	}
 	planned := session.Binding.Generation
 	if observed.Generation >= planned {
 		expected := runtimePoolFenceWithSession(poolFence, sessionUID, planned)
-		return observed.Generation == planned && observed.RuntimeSessionID == harnessv2.RuntimeSessionID(runtimeSessionID(expected)), nil
+		return observed.Generation == planned && observed.RuntimeSessionID == harnessv2.RuntimeSessionID(runtimeSessionID(expected)), false, nil
 	}
 	observedFence := runtimePoolFenceWithSession(poolFence, observed.RuntimeSessionUID, observed.Generation)
 	if err := d.deleteRuntimeSessionReconciled(
 		context.WithoutCancel(ctx), runtimeClient, observed.RuntimeSessionID, task, observedFence, "replace_stale_runtime_session",
 	); err != nil {
-		return false, fmt.Errorf("retire the Session's stale resident RuntimeSession before creating a fresh one: %w", err)
+		return false, false, fmt.Errorf("retire the Session's stale resident RuntimeSession before creating a fresh one: %w", err)
 	}
 	logf.FromContext(ctx).Info("ACP stale resident RuntimeSession retired before a fresh one",
 		"namespace", task.Namespace, "task", task.Name, "runtimeSessionGeneration", observed.Generation,
 		"plannedGeneration", planned)
-	return false, nil
+	return false, true, nil
+}
+
+// acpFreedResidentSlot is the exact runtime on which a turn just retired its
+// Session's own resident RuntimeSession and then observed no resident session
+// at all.
+type acpFreedResidentSlot struct {
+	supervisorBootID string
+}
+
+// observeFreedResidentSlot re-reads the runtime after the stale session's
+// retirement and returns the freed slot only if the exact fenced runtime is
+// ready, not draining, and holds no RuntimeSession.
+func observeFreedResidentSlot(
+	ctx context.Context, runtimeClient *harnessv2.Client, runtimeFence harnessv2.Fence,
+) *acpFreedResidentSlot {
+	if runtimeClient == nil {
+		return nil
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	status, err := runtimeClient.Status(statusCtx)
+	if err != nil {
+		return nil
+	}
+	if harnessv2.CompareFence(runtimePoolFenceWithSession(runtimeFence, "", 0), status.Fence, false) != harnessv2.FenceMatch ||
+		status.Lifecycle != harnessv2.SupervisorLifecycleReady || status.Drain.Requested || !status.Drain.AcceptingNewSessions ||
+		len(status.Sessions) != 0 || status.Pressure.ResidentSessions != 0 {
+		return nil
+	}
+	return &acpFreedResidentSlot{supervisorBootID: string(status.Fence.SupervisorBootID)}
 }
 
 func runtimePoolFenceWithSession(pool harnessv2.Fence, uid harnessv2.RuntimeSessionUID, generation uint64) harnessv2.Fence {
@@ -3748,7 +3790,31 @@ func (l *acpRuntimePoolReservationLease) setSlots(ctx context.Context, residentS
 	if !l.held {
 		return errACPRuntimePoolReservationLost
 	}
-	if err := l.dispatcher.updateRuntimePoolReservationSlots(ctx, l.identity, residentSlots, 1); err != nil {
+	if err := l.dispatcher.updateRuntimePoolReservationSlots(ctx, l.identity, residentSlots, 1, nil); err != nil {
+		if errors.Is(err, errACPRuntimePoolReservationLost) {
+			l.held = false
+		}
+		return err
+	}
+	return nil
+}
+
+// setSlotsWithFreedResident is setSlots for a turn that retired its Session's
+// own resident RuntimeSession and observed the runtime empty: admission may
+// credit that one slot while the pool still publishes it (see
+// runtimePoolFreedResidentAdmission).
+func (l *acpRuntimePoolReservationLease) setSlotsWithFreedResident(
+	ctx context.Context, residentSlots int32, freed *acpFreedResidentSlot,
+) error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.held {
+		return errACPRuntimePoolReservationLost
+	}
+	if err := l.dispatcher.updateRuntimePoolReservationSlots(ctx, l.identity, residentSlots, 1, freed); err != nil {
 		if errors.Is(err, errACPRuntimePoolReservationLost) {
 			l.held = false
 		}
@@ -3906,6 +3972,34 @@ func runtimePoolReservationAdmission(
 	return active.RuntimeInstanceID, nil
 }
 
+// runtimePoolFreedResidentAdmission admits a resident slot that the pool
+// still publishes as filled by the Session's own RuntimeSession, which this
+// turn retired and then observed gone from the exact runtime. It credits only
+// that one session, only where the pool may serve its resident at all
+// (acpRuntimePoolResidentRefusal: Serving, accepting or closed solely at its
+// own single-session capacity, the exact active instance and boot, the
+// current epoch, no retirement or eviction). Every other admission check runs
+// unchanged against the credited capacity; otherwise refused is returned.
+func runtimePoolFreedResidentAdmission(
+	pool *corev1alpha1.RuntimePool,
+	others []corev1alpha1.RuntimePoolCapacityReservationStatus,
+	identity acpRuntimePoolReservationIdentity,
+	residentSlots, promptSlots int32,
+	freed *acpFreedResidentSlot,
+	refused error,
+) (string, error) {
+	if pool == nil || freed == nil || strings.TrimSpace(freed.supervisorBootID) == "" ||
+		acpRuntimePoolResidentRefusal(pool, identity.RuntimeInstanceID, freed.supervisorBootID,
+			store.ControllerEpochFence{Epoch: identity.ControllerEpoch}) != "" ||
+		pool.Status.Capacity.ResidentSessions < 1 {
+		return "", refused
+	}
+	credited := pool.DeepCopy()
+	credited.Status.Capacity.ResidentSessions--
+	credited.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionAccepting
+	return runtimePoolReservationAdmission(credited, others, identity.ControllerEpoch, residentSlots, promptSlots)
+}
+
 func (d *ACPDispatcher) renewRuntimePoolReservation(ctx context.Context, identity acpRuntimePoolReservationIdentity) (*corev1alpha1.RuntimePool, error) {
 	var renewed *corev1alpha1.RuntimePool
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -3945,7 +4039,9 @@ func (d *ACPDispatcher) renewRuntimePoolReservation(ctx context.Context, identit
 	return renewed, err
 }
 
-func (d *ACPDispatcher) updateRuntimePoolReservationSlots(ctx context.Context, identity acpRuntimePoolReservationIdentity, residentSlots, promptSlots int32) error {
+func (d *ACPDispatcher) updateRuntimePoolReservationSlots(
+	ctx context.Context, identity acpRuntimePoolReservationIdentity, residentSlots, promptSlots int32, freed *acpFreedResidentSlot,
+) error {
 	if residentSlots < 0 || residentSlots > 1 || promptSlots < 0 || promptSlots > 1 || residentSlots+promptSlots == 0 {
 		return fmt.Errorf("RuntimePool reservation slots must be zero or one and claim at least one slot")
 	}
@@ -3973,6 +4069,11 @@ func (d *ACPDispatcher) updateRuntimePoolReservationSlots(ctx context.Context, i
 					runtimeInstanceID, admissionErr := runtimePoolReservationAdmission(
 						latest, others, identity.ControllerEpoch, residentSlots, promptSlots,
 					)
+					if admissionErr != nil && freed != nil && residentSlots > reservations[i].ResidentSlots {
+						runtimeInstanceID, admissionErr = runtimePoolFreedResidentAdmission(
+							latest, others, identity, residentSlots, promptSlots, freed, admissionErr,
+						)
+					}
 					if admissionErr != nil {
 						if err := updateRuntimePoolReservationStatusIfChanged(ctx, d.Client, latest, changed); err != nil {
 							return err

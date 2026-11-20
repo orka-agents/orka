@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -614,6 +615,8 @@ type fakePersistentSupervisor struct {
 	rebaseErr bool
 	rebased   int
 	headers   http.Header
+	// fence, when set, is the runtime fence the status reports.
+	fence *harnessv2.Fence
 }
 
 func (f *fakePersistentSupervisor) client(t *testing.T, profileDigest harnessv2.ProfileDigest) *harnessv2.Client {
@@ -624,6 +627,9 @@ func (f *fakePersistentSupervisor) client(t *testing.T, profileDigest harnessv2.
 			f.headers = r.Header.Clone()
 			response := dispatcherRuntimeStatusResponse(profileDigest, harnessv2.RuntimeSessionDescriptor{})
 			response.Fence.RuntimeInstanceID, response.Fence.SupervisorBootID = "instance-1", "boot-1"
+			if f.fence != nil {
+				response.Fence = runtimePoolFenceWithSession(*f.fence, "", 0)
+			}
 			if f.status.RuntimeSessionUID != "" {
 				response.Sessions = []harnessv2.RuntimeSessionStatus{f.status}
 				response.Pressure.ResidentSessions = 1
@@ -681,17 +687,21 @@ func persistentGateFixture(t *testing.T, record *store.SessionResidentRuntime, o
 	workspace := persistentWarmWorkspace(task, record)
 	objects = append([]client.Object{pool, workspace}, objects...)
 	kubeClient := fake.NewClientBuilder().WithScheme(testWorkspaceScheme(t)).WithObjects(objects...).Build()
+	// The dispatcher's runtime fence at the gate names the exact runtime but
+	// no RuntimeSession yet: it gains the session only after the gates run.
 	fence := harnessv2.Fence{
-		RuntimeInstanceID: "instance-1", SupervisorBootID: "boot-1",
-		RuntimeSessionUID: harnessv2.RuntimeSessionUID(record.RuntimeSessionUID), RuntimeSessionGeneration: uint64(record.RuntimeSessionGeneration),
-		RuntimeProfileDigest: harnessv2.ProfileDigest(record.ProfileDigest),
+		RuntimeInstanceID: "instance-1", SupervisorBootID: "boot-1", ControllerEpoch: 1,
+		RuntimePoolUID: acpDispatcherTestPoolUID, RuntimePoolGeneration: 1,
+		RuntimeProfileDigest: harnessv2.ProfileDigest(record.ProfileDigest), ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 	}
 	return &ACPDispatcher{Client: kubeClient, APIReader: kubeClient}, task, fence
 }
 
+// quiescentStatus is the supervisor's status of the record's exact session.
 func quiescentStatus(record *store.SessionResidentRuntime, fence harnessv2.Fence) harnessv2.RuntimeSessionStatus {
+	identity := runtimePoolFenceWithSession(fence, harnessv2.RuntimeSessionUID(record.RuntimeSessionUID), uint64(record.RuntimeSessionGeneration))
 	return harnessv2.RuntimeSessionStatus{
-		RuntimeSessionID:  harnessv2.RuntimeSessionID(runtimeSessionID(fence)),
+		RuntimeSessionID:  harnessv2.RuntimeSessionID(runtimeSessionID(identity)),
 		RuntimeSessionUID: harnessv2.RuntimeSessionUID(record.RuntimeSessionUID), Generation: uint64(record.RuntimeSessionGeneration),
 		State: harnessv2.RuntimeSessionStateIdle, Quiescent: true, LiveDescendantCount: 1, LastTransitionAt: persistentTestNow,
 	}
@@ -711,13 +721,31 @@ func TestACPPersistentSessionRuntimeGateReasons(t *testing.T) {
 		t.Fatal("the gate's status read must opt into the quiescent field")
 	}
 	for name, tc := range map[string]struct {
-		status func(*harnessv2.RuntimeSessionStatus)
-		pool   func(*corev1alpha1.RuntimePool)
-		want   string
+		status  func(*harnessv2.RuntimeSessionStatus)
+		pool    func(*corev1alpha1.RuntimePool)
+		reached func(*harnessv2.Fence)
+		served  func(*harnessv2.Fence)
+		record  func(*store.SessionResidentRuntime)
+		want    string
 	}{
 		"session missing":   {status: func(s *harnessv2.RuntimeSessionStatus) { *s = harnessv2.RuntimeSessionStatus{} }, want: acpPersistentReasonRuntimeSessionMissing},
 		"session recreated": {status: func(s *harnessv2.RuntimeSessionStatus) { s.Generation = 9 }, want: acpPersistentReasonRuntimeSessionMissing},
-		"session busy":      {status: func(s *harnessv2.RuntimeSessionStatus) { s.Quiescent = false }, want: acpPersistentReasonRuntimeSessionNotIdle},
+		"another generation's session ID": {status: func(s *harnessv2.RuntimeSessionStatus) {
+			s.RuntimeSessionID = harnessv2.RuntimeSessionID(runtimeSessionID(runtimePoolFenceWithSession(fence, s.RuntimeSessionUID, 3)))
+		}, want: acpPersistentReasonRuntimeSessionMissing},
+		"another session's ID": {status: func(s *harnessv2.RuntimeSessionStatus) {
+			s.RuntimeSessionID = harnessv2.RuntimeSessionID(runtimeSessionID(runtimePoolFenceWithSession(fence, "other-session-uid", s.Generation)))
+		}, want: acpPersistentReasonRuntimeSessionMissing},
+		"the dispatcher's session-less ID": {status: func(s *harnessv2.RuntimeSessionStatus) {
+			s.RuntimeSessionID = harnessv2.RuntimeSessionID(runtimeSessionID(fence))
+		}, want: acpPersistentReasonRuntimeSessionMissing},
+		"supervisor reports another boot":     {served: func(f *harnessv2.Fence) { f.SupervisorBootID = "boot-2" }, want: acpPersistentReasonRuntimeReplaced},
+		"supervisor reports another instance": {served: func(f *harnessv2.Fence) { f.RuntimeInstanceID = "instance-2" }, want: acpPersistentReasonRuntimeReplaced},
+		"supervisor reports another epoch":    {served: func(f *harnessv2.Fence) { f.ControllerEpoch = 2 }, want: acpPersistentReasonRuntimeReplaced},
+		"turn reached another boot":           {reached: func(f *harnessv2.Fence) { f.SupervisorBootID = "boot-2" }, want: acpPersistentReasonRuntimeReplaced},
+		"turn reached another instance":       {reached: func(f *harnessv2.Fence) { f.RuntimeInstanceID = "instance-2" }, want: acpPersistentReasonRuntimeReplaced},
+		"record names no session generation":  {record: func(r *store.SessionResidentRuntime) { r.RuntimeSessionGeneration = 0 }, want: acpPersistentReasonRuntimeReplaced},
+		"session busy":                        {status: func(s *harnessv2.RuntimeSessionStatus) { s.Quiescent = false }, want: acpPersistentReasonRuntimeSessionNotIdle},
 		"session finalizing": {status: func(s *harnessv2.RuntimeSessionStatus) {
 			s.State, s.Quiescent, s.ReservedForFinalization = harnessv2.RuntimeSessionStateFinalizing, false, true
 		}, want: acpPersistentReasonRuntimeSessionNotIdle},
@@ -739,8 +767,18 @@ func TestACPPersistentSessionRuntimeGateReasons(t *testing.T) {
 			if tc.status != nil {
 				tc.status(&status)
 			}
-			client := (&fakePersistentSupervisor{status: status}).client(t, profileDigest)
-			reason, err := d.acpPersistentSessionRuntimeGate(ctx, task, record, client, fence, persistentTestFence(), persistentTestPool())
+			served, reached, claimed := fence, fence, store.CloneSessionResidentRuntime(record)
+			if tc.served != nil {
+				tc.served(&served)
+			}
+			if tc.reached != nil {
+				tc.reached(&reached)
+			}
+			if tc.record != nil {
+				tc.record(claimed)
+			}
+			client := (&fakePersistentSupervisor{status: status, fence: &served}).client(t, profileDigest)
+			reason, err := d.acpPersistentSessionRuntimeGate(ctx, task, claimed, client, reached, persistentTestFence(), persistentTestPool())
 			if err != nil || reason != tc.want {
 				t.Fatalf("gate = %q, %v; want %q", reason, err, tc.want)
 			}
@@ -1164,4 +1202,45 @@ func TestACPPersistentSessionKeepRefusesAnAppendTheProcessNeverSaw(t *testing.T)
 	if _, err := dispatcher.acpPersistentSessionKeepTranscriptHead(context.Background(), input); err == nil {
 		t.Fatal("a reused process without a claimed head must refuse the keep")
 	}
+}
+
+// A turn reuses only the exact session the gate proved: a planned binding
+// that names another generation, instance or boot than the claimed record
+// falls back to a fresh session even when the runtime gate passes.
+func TestACPPersistentSessionGatesRefuseABindingOtherThanTheClaimedRecord(t *testing.T) {
+	record := persistentTestRecord(t)
+	ctx := context.Background()
+	for name, mutate := range map[string]func(*ACPRuntimeSessionBinding){
+		"generation": func(b *ACPRuntimeSessionBinding) { b.Generation++ },
+		"session":    func(b *ACPRuntimeSessionBinding) { b.SessionUID = "other-session-uid" },
+		"instance":   func(b *ACPRuntimeSessionBinding) { b.RuntimeInstanceID = "instance-2" },
+		"boot":       func(b *ACPRuntimeSessionBinding) { b.SupervisorBootID = "boot-2" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dispatcher, task, fence := persistentGateFixture(t, record)
+			runtimeClient := (&fakePersistentSupervisor{status: quiescentStatus(record, fence), fence: &fence}).client(t, harnessv2.ProfileDigest(record.ProfileDigest))
+			binding := acpRuntimeSessionBindingFromResidentRuntime(record)
+			mutate(&binding)
+			session := &acpTaskSession{Binding: binding, Reused: true, ResidentClaimed: store.CloneSessionResidentRuntime(record), LeaseGeneration: 3}
+			reuse := &acpPersistentSessionReuse{attempted: true}
+			requeued, err := dispatcher.runACPPersistentSessionGates(ctx, ctx, task, "attempt", persistentTestFence(),
+				acpDispatchTarget{pool: persistentTestPool()}, runtimeClient, fence, session, false, reuse, nil)
+			require.NoError(t, err)
+			require.False(t, requeued)
+			require.False(t, reuse.hit)
+			require.Equal(t, acpPersistentReasonRuntimeSessionMissing, reuse.reason)
+			require.False(t, session.Reused, "the turn must plan a fresh session")
+			require.Nil(t, session.ResidentClaimed)
+		})
+	}
+	dispatcher, task, fence := persistentGateFixture(t, record)
+	runtimeClient := (&fakePersistentSupervisor{status: quiescentStatus(record, fence), fence: &fence}).client(t, harnessv2.ProfileDigest(record.ProfileDigest))
+	session := &acpTaskSession{Binding: acpRuntimeSessionBindingFromResidentRuntime(record), Reused: true, ResidentClaimed: store.CloneSessionResidentRuntime(record)}
+	reuse := &acpPersistentSessionReuse{attempted: true}
+	requeued, err := dispatcher.runACPPersistentSessionGates(ctx, ctx, task, "attempt", persistentTestFence(),
+		acpDispatchTarget{pool: persistentTestPool()}, runtimeClient, fence, session, false, reuse, nil)
+	require.NoError(t, err)
+	require.False(t, requeued)
+	require.True(t, reuse.hit, "the exact claimed binding reuses: %s", reuse.reason)
+	require.True(t, session.Reused)
 }
