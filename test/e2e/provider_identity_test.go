@@ -143,8 +143,10 @@ var _ = Describe("Keyless Azure OpenAI Provider with a fake Entra", Ordered, Ser
 				Expect(err).NotTo(HaveOccurred())
 				exposed = append(exposed, string(output))
 			}
-			logs, _ := exec.Command("kubectl", "logs", "-n", namespace, "-l", taskSelector(keylessProviderE2ETask),
+			logs, err := exec.Command("kubectl", "logs", "-n", namespace, "-l", taskSelector(keylessProviderE2ETask),
 				"--all-containers", "--tail=-1").Output()
+			Expect(err).NotTo(HaveOccurred(), "the worker logs must be readable to check them for tokens")
+			Expect(logs).NotTo(BeEmpty())
 			exposed = append(exposed, string(logs))
 			Expect(state.Issued).NotTo(BeEmpty())
 			for _, token := range state.Issued {

@@ -12,9 +12,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/provideridentity"
 	"github.com/orka-agents/orka/test/fixtures/fakeentra"
 )
+
+// An agent identity can also get a token for the model resource, but the
+// model endpoint serves only workload identities.
+func TestFakeEntraModelEndpointRefusesAgentIdentityTokens(t *testing.T) {
+	server, _ := newModelFixture(t)
+	config := agentidentity.EntraConfig{TenantID: tenant, BlueprintClientID: blueprint, Authority: server.URL}
+	issuer := &agentidentity.EntraIssuer{
+		Config: config, HTTPClient: server.Client(),
+		Credential: func() (string, error) { return assertion, nil },
+	}
+	token, err := issuer.AppToken(context.Background(), identity, modelResource)
+	if err != nil {
+		t.Fatalf("AppToken() error = %v", err)
+	}
+	status, _ := callModel(t, server, "/openai/deployments/gpt-x/chat/completions?api-version=1",
+		`{"messages":[]}`, http.Header{"Authorization": {"Bearer " + token}})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want an agent identity's token refused", status)
+	}
+}
 
 const (
 	workload      = "55555555-5555-4555-8555-555555555555"

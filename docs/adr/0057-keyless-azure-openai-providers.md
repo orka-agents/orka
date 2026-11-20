@@ -55,7 +55,8 @@ anything the Task runs could copy it and use it elsewhere until it expires.
 
 - A compromised worker can make model calls only through the relay, only to its
   own Provider's two paths, and only while its Task runs. It cannot take a
-  credential elsewhere, and replacing or re-keying the Provider cuts it off.
+  credential elsewhere, and replacing or re-keying the Provider refuses its
+  next request; a request already relayed finishes within its bound.
 - Every relayed model call passes through the controller, which bounds them (64
   in flight, 64 MiB per response, 30 minutes per request). A controller restart
   ends in-flight relayed calls, which the AI worker retries like other

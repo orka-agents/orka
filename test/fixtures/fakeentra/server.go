@@ -248,18 +248,20 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelCall checks a call to the Azure OpenAI endpoint and records it. It is
-// authorized only with a workload token this fake issued for ModelResource.
+// authorized only with a workload token this fake issued for ModelResource;
+// an agent identity's token for the same resource is refused.
 func (s *Server) modelCall(r *http.Request, stream bool) ModelCall {
 	token, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	grant, ok := s.app[token]
 	call := ModelCall{
-		Path:       r.URL.Path,
-		Authorized: ok && bearer && s.cfg.ModelResource != "" && grant.resource == s.cfg.ModelResource,
-		Identity:   grant.identity,
-		APIKey:     r.Header.Get("Api-Key") != "",
-		Stream:     stream,
+		Path: r.URL.Path,
+		Authorized: ok && bearer && s.cfg.ModelResource != "" && grant.resource == s.cfg.ModelResource &&
+			slices.Contains(s.cfg.Workloads, grant.identity),
+		Identity: grant.identity,
+		APIKey:   r.Header.Get("Api-Key") != "",
+		Stream:   stream,
 	}
 	s.state.Models = append(s.state.Models, call)
 	return call

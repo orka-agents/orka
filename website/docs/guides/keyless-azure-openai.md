@@ -91,10 +91,18 @@ controller:
 The chart mounts a projected ServiceAccount token for the controller with
 that audience, and installs the policy that stops other workloads from
 obtaining a token the federated credential trusts. In the public cloud the
-token scope defaults to `https://ai.azure.com/.default`. For Azure Government
-set `cloud: AzureUSGovernment` and `scope`; for Azure China also set
-`exchangeAudience` and `tokenAudience`. See
-[`--provider-identities`](../reference/configuration.md) for every field.
+token scope defaults to `https://ai.azure.com/.default`. Other clouds use
+their own token-exchange audience, and `tokenAudience`, every identity's
+exchange audience, and the federated credential's `--audiences` must all
+match it:
+
+- Azure Government: set `cloud: AzureUSGovernment`, `scope`, and
+  `tokenAudience: api://AzureADTokenExchangeUSGov`, and create the federated
+  credential with `--audiences api://AzureADTokenExchangeUSGov`.
+- Azure China: set `cloud: AzureChina`, `scope`, `exchangeAudience`, and the
+  same value in `tokenAudience` and the federated credential.
+
+See [`--provider-identities`](../reference/configuration.md) for every field.
 
 ## Create the Provider
 
@@ -158,6 +166,7 @@ key-based Provider for them.
   paths, at most 64 requests at a time across all Tasks, each up to 30
   minutes, with responses up to 64 MiB. A controller restart ends relayed
   requests in flight, and the AI worker retries them.
-- Removing the identity from the controller, deleting or replacing the
-  Provider, or switching it to `secretRef` stops relayed requests for running
-  Tasks immediately.
+- Deleting or replacing the Provider, switching it to `secretRef`, or removing
+  the identity from the controller refuses the next relayed request once the
+  controller sees the change. A request already being relayed runs to
+  completion, within its 30-minute bound.
