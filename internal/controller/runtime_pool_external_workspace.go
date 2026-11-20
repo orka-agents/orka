@@ -259,10 +259,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
+	// The instance evidence and the credential binding land in one pool write.
+	evidenceErr, bootstrapErr := r.bindExternalRuntimeInstanceAdmission(ctx, pool, w, auth, pod.UID)
+	if evidenceErr != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
 	}
-	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, auth, pod.UID); err != nil {
+	if bootstrapErr != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
 	}
 	if err := r.recordExternalRuntimeServed(ctx, pool, w, pod); err != nil {
@@ -1303,13 +1305,25 @@ func externalRuntimeEvidence(pool *corev1alpha1.RuntimePool) (*externalRuntimeIn
 }
 
 func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) error {
+	evidence, err := desiredExternalRuntimeInstanceEvidence(pool, w)
+	if err != nil || evidence == "" {
+		return err
+	}
+	return r.patchExternalRuntimeAdmissionBindings(ctx, pool, evidence, "")
+}
+
+// desiredExternalRuntimeInstanceEvidence returns the instance-evidence
+// annotation the current startup requires, or "" when the pool already
+// records exactly it. It refuses evidence that does not continue the recorded
+// instance's lineage.
+func desiredExternalRuntimeInstanceEvidence(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (string, error) {
 	a := w.Status.Allocation
 	binding := externalRuntimeInstanceEvidence{WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Endpoint: a.Startup.Endpoint}
 	if a.Startup.Process != nil {
 		var err error
 		binding.RuntimeUID, _, err = externalNativeRuntimeIdentity(w.Spec.Workload, a.Identity.InstanceID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		binding.Pod = a.Startup.Process.Worker
 		binding.NativeProcess = true
@@ -1319,25 +1333,75 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 	}
 	previous, err := externalRuntimeEvidence(pool)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if previous != nil {
 		if *previous == binding {
-			return nil
+			return "", nil
 		}
 		if previous.WorkspaceUID != w.UID || previous.Sequence+1 != binding.Sequence || w.Spec.Workload.PreviousInstance == nil || *w.Spec.Workload.PreviousInstance != previous.Identity {
-			return workspaceprovider.ErrStaleIdentity
+			return "", workspaceprovider.ErrStaleIdentity
 		}
 	}
 	encoded, err := json.Marshal(binding)
 	if err != nil {
-		return err
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// bindExternalRuntimeInstanceAdmission records, in one optimistic pool
+// write, the independently observed instance evidence and the binding of the
+// private bootstrap credentials to that exact workload. Each is validated
+// exactly as when they were written separately: evidenceErr reports evidence
+// that conflicts with the recorded instance (nothing is written), and
+// bootstrapErr a credential binding to another workload (the evidence is
+// still recorded, as before, and the binding is not).
+func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceAdmission(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	w *workspacev1alpha1.ExecutionWorkspace,
+	authSecret *corev1.Secret,
+	workloadUID types.UID,
+) (evidenceErr, bootstrapErr error) {
+	evidence, err := desiredExternalRuntimeInstanceEvidence(pool, w)
+	if err != nil {
+		return err, nil
+	}
+	bootstrap, bootstrapErr := desiredRuntimePoolBootstrapInstanceBinding(pool, authSecret, workloadUID)
+	if bootstrapErr != nil {
+		bootstrap = ""
+	}
+	if err := r.patchExternalRuntimeAdmissionBindings(ctx, pool, evidence, bootstrap); err != nil {
+		return err, nil
+	}
+	return nil, bootstrapErr
+}
+
+// patchExternalRuntimeAdmissionBindings writes the non-empty annotation
+// values in one patch, which refreshes pool in place. Evidence keeps its
+// optimistic lock; a credential binding alone keeps its plain merge patch, as
+// when each was written on its own.
+func (r *RuntimePoolReconciler) patchExternalRuntimeAdmissionBindings(ctx context.Context, pool *corev1alpha1.RuntimePool, evidence, bootstrap string) error {
+	if evidence == "" && bootstrap == "" {
+		return nil
 	}
 	before := pool.DeepCopy()
 	if pool.Annotations == nil {
 		pool.Annotations = map[string]string{}
 	}
-	pool.Annotations[externalRuntimeEvidenceAnnotation] = string(encoded)
+	if evidence != "" {
+		pool.Annotations[externalRuntimeEvidenceAnnotation] = evidence
+	}
+	if bootstrap != "" {
+		pool.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] = bootstrap
+	}
+	if evidence == "" {
+		if err := r.Patch(ctx, pool, client.MergeFrom(before)); err != nil {
+			return fmt.Errorf("record RuntimePool annotation: %w", err)
+		}
+		return nil
+	}
 	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 

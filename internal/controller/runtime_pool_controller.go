@@ -2043,31 +2043,34 @@ func runtimePoolBootstrapInstanceBindingFromAnnotation(
 	return &binding, nil
 }
 
-func (r *RuntimePoolReconciler) bindWorkspaceRuntimePoolBootstrapInstance(
-	ctx context.Context,
+// desiredRuntimePoolBootstrapInstanceBinding returns the bootstrap-instance
+// annotation binding the private auth Secret to the exact workload, or ""
+// when the pool already records exactly that binding. Credentials bound to
+// another workload are a conflict.
+func desiredRuntimePoolBootstrapInstanceBinding(
 	pool *corev1alpha1.RuntimePool,
 	authSecret *corev1.Secret,
 	workloadUID types.UID,
-) error {
+) (string, error) {
 	if authSecret == nil || authSecret.UID == "" || workloadUID == "" {
-		return fmt.Errorf("RuntimePool bootstrap auth Secret and workload UIDs are required")
+		return "", fmt.Errorf("RuntimePool bootstrap auth Secret and workload UIDs are required")
 	}
 	desired := runtimePoolBootstrapInstanceBinding{AuthSecretUID: authSecret.UID, WorkloadUID: workloadUID}
 	existing, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if existing != nil {
 		if *existing == desired {
-			return nil
+			return "", nil
 		}
-		return errRuntimePoolBootstrapInstanceConflict
+		return "", errRuntimePoolBootstrapInstanceConflict
 	}
 	value, err := json.Marshal(desired)
 	if err != nil {
-		return fmt.Errorf("encode RuntimePool bootstrap instance binding: %w", err)
+		return "", fmt.Errorf("encode RuntimePool bootstrap instance binding: %w", err)
 	}
-	return r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolBootstrapInstanceBindingAnnotation, string(value))
+	return string(value), nil
 }
 
 // rotateConsumedWorkspaceRuntimePoolAuthSecret advances private auth Secret
