@@ -144,8 +144,10 @@ For takeover liveness under continuous writes:
   (`controller-epoch-takeover-*`), which only successors write, so it never
   competes with the holder's writes to the epoch Lease. An attempt rewrites it
   once the successor's own last write of it is 10s old on its monotonic clock,
-  which gives the request a new `resourceVersion`. It is deleted once the
-  epoch change commits.
+  which gives the request a new `resourceVersion`. Once the epoch
+  change commits, it deletes its own request against the epoch it replaced.
+  A newer request against the epoch it created is left in place, even when it
+  shares the holder ID, as a restart's does.
 - Before writing a token, a store reads that request. A request version is in
   force for 30s from when this store first saw it, on this store's own
   monotonic clock. No store compares the time a requester wrote into the
