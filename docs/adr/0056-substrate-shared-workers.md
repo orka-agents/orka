@@ -361,8 +361,9 @@ Core makes these unusable, asynchronously:
     - a continuation whose checkpoint was not yet committed;
     - node or kubelet failure, which is out of scope.
   - **Later heads.** The later orka-workspace heads changed only error classification and
-    bookkeeping, except for one item: the continuation hold.
-    - The live injections surfaced as gRPC `Canceled`, which is now a retry. The same
-      runs today continue the suspension without retiring the pool.
-    - The hold itself applies only to definite failures, which are covered by unit
-      tests but were not injected live.
+    bookkeeping. The one exception, the continuation hold, was re-run live on dd3e74b.
+    - A cancellation (`Canceled`) was retried. The suspension finished on its interim
+      proof, and no pool was retired.
+    - A definite failure (`Unavailable`) held the strong path until the continuation
+      succeeded, 34.7 s after the suspend and inside the 120 s window. The pool then
+      retired strongly, and its neighbours were evicted with their data kept.
