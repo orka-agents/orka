@@ -616,14 +616,7 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (bool, error) {
-	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
-	if condition != nil && condition.Status == metav1.ConditionTrue &&
-		condition.ObservedGeneration > 0 && condition.ObservedGeneration <= pool.Generation &&
-		condition.Reason == acpRuntimePoolImageProvenanceReason {
-		// RuntimePool UID plus the CRD's immutable runtime image/profile,
-		// trust-domain, runtime-namespace, and workspace binding keep this proof
-		// attached to one exact workload identity. Controller-owned replica and
-		// capacity changes may advance generation without invalidating it.
+	if runtimePoolImageProvenanceRecorded(pool) {
 		return true, nil
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
@@ -648,6 +641,19 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 		}
 	}
 	return historicalRuntimePoolTemplateMatches(pool, cfg, deployment.Spec.Template), nil
+}
+
+// runtimePoolImageProvenanceRecorded reports a pool whose status already
+// carries the Task-verified image provenance proof. RuntimePool UID plus the
+// CRD's immutable runtime image/profile, trust-domain, runtime-namespace, and
+// workspace binding keep this proof attached to one exact workload identity.
+// Controller-owned replica and capacity changes may advance generation without
+// invalidating it, so a proof observed at any earlier generation still holds.
+func runtimePoolImageProvenanceRecorded(pool *corev1alpha1.RuntimePool) bool {
+	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	return condition != nil && condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration > 0 && condition.ObservedGeneration <= pool.Generation &&
+		condition.Reason == acpRuntimePoolImageProvenanceReason
 }
 
 func (r *RuntimePoolReconciler) backfillHistoricalWorkspaceRuntimePoolImageProvenance(
