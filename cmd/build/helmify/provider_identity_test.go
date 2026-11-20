@@ -80,3 +80,31 @@ func TestStaticChartProtectsTheControllerServiceAccountWithProviderIdentities(t 
 	require.Contains(t, rendered, "kind: ValidatingAdmissionPolicy\n")
 	require.Contains(t, rendered, "kind: ValidatingAdmissionPolicyBinding\n")
 }
+
+// An empty or padded audience must not leave the projected token and the
+// controller with different audiences.
+func TestStaticChartDefaultsAnEmptyProviderTokenAudienceForTokenAndFlag(t *testing.T) {
+	for _, audience := range []string{"", "  "} {
+		rendered, err := helmTemplateStaticChart(t,
+			"--set-json", "controller.providerIdentities.identities="+testProviderIdentities,
+			"--set-string", "controller.providerIdentities.tokenAudience="+audience,
+			"--show-only", "templates/deployment.yaml")
+		require.NoError(t, err, "%s", rendered)
+		var deployment appsv1.Deployment
+		require.NoError(t, yaml.Unmarshal([]byte(requireRenderedDocument(t, rendered, "kind: Deployment\n")), &deployment))
+		container := deployment.Spec.Template.Spec.Containers[0]
+		var raw map[string]any
+		for _, arg := range append(append([]string{}, container.Command...), container.Args...) {
+			if value, ok := strings.CutPrefix(arg, "--provider-identities="); ok {
+				require.NoError(t, json.Unmarshal([]byte(value), &raw))
+			}
+		}
+		require.Equal(t, "api://AzureADTokenExchange", raw["tokenAudience"], "audience %q", audience)
+		for _, volume := range deployment.Spec.Template.Spec.Volumes {
+			if volume.Name == "provider-identity-token" {
+				require.Equal(t, "api://AzureADTokenExchange", volume.Projected.Sources[0].ServiceAccountToken.Audience,
+					"audience %q", audience)
+			}
+		}
+	}
+}

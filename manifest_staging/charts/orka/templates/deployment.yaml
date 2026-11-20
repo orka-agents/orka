@@ -220,7 +220,7 @@ spec:
             {{- end }}
             {{- end }}
             {{- with dig "providerIdentities" "identities" (list) .Values.controller }}
-            - {{ printf "--provider-identities=%s" (dict "tokenAudience" (dig "providerIdentities" "tokenAudience" "api://AzureADTokenExchange" $.Values.controller) "identities" . | toJson) | quote }}
+            - {{ printf "--provider-identities=%s" (dict "tokenAudience" (dig "providerIdentities" "tokenAudience" "" $.Values.controller | toString | trim | default "api://AzureADTokenExchange") "identities" . | toJson) | quote }}
             {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
@@ -760,7 +760,7 @@ spec:
           projected:
             sources:
               - serviceAccountToken:
-                  audience: {{ dig "providerIdentities" "tokenAudience" "api://AzureADTokenExchange" .Values.controller | quote }}
+                  audience: {{ dig "providerIdentities" "tokenAudience" "" .Values.controller | toString | trim | default "api://AzureADTokenExchange" | quote }}
                   expirationSeconds: 3600
                   path: token
         {{- end }}
