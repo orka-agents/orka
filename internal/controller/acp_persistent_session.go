@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1520,29 +1521,44 @@ func (d *ACPDispatcher) stampACPPersistentSessionKept(ctx context.Context, task 
 	if task == nil || d.Client == nil {
 		return errors.New("persistent session keep marker requires the Task")
 	}
-	latest := &corev1alpha1.Task{}
-	if err := d.Client.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
-		return err
-	}
-	execution := latest.Status.Execution
-	if latest.UID != task.UID || execution == nil || execution.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID) ||
-		execution.RuntimeSessionSupervisorBootID != string(runtimeFence.SupervisorBootID) ||
-		execution.RuntimeSessionUID != string(runtimeFence.RuntimeSessionUID) ||
-		execution.RuntimeSessionGeneration != int64(runtimeFence.RuntimeSessionGeneration) {
-		return fmt.Errorf("%w: Task RuntimeSession identity differs from the kept session", store.ErrConflict)
-	}
-	marker, err := acpPersistentSessionKeptDigest(latest.UID, execution)
+	// The Task is read uncached and the patch retried on a conflict: the
+	// cached client can trail this dispatch's own status writes, and an
+	// unrelated concurrent write is not a reason to give up a kept session.
+	// Each attempt re-checks the exact RuntimeSession identity on the fresh
+	// read, so the marker is only ever bound to the status it was computed
+	// from.
+	reader := uncachedReader(d.APIReader, d.Client)
+	var marker string
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+			return err
+		}
+		execution := latest.Status.Execution
+		if latest.UID != task.UID || execution == nil || execution.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID) ||
+			execution.RuntimeSessionSupervisorBootID != string(runtimeFence.SupervisorBootID) ||
+			execution.RuntimeSessionUID != string(runtimeFence.RuntimeSessionUID) ||
+			execution.RuntimeSessionGeneration != int64(runtimeFence.RuntimeSessionGeneration) {
+			return fmt.Errorf("%w: Task RuntimeSession identity differs from the kept session", store.ErrConflict)
+		}
+		digest, err := acpPersistentSessionKeptDigest(latest.UID, execution)
+		if err != nil {
+			return err
+		}
+		base := latest.DeepCopy()
+		if latest.Annotations == nil {
+			latest.Annotations = map[string]string{}
+		}
+		latest.Annotations[acpTaskPersistentSessionKeptAnnotation] = digest
+		// The optimistic lock binds the marker to the exact status it was
+		// computed from.
+		if err := d.Client.Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		marker = digest
+		return nil
+	})
 	if err != nil {
-		return err
-	}
-	base := latest.DeepCopy()
-	if latest.Annotations == nil {
-		latest.Annotations = map[string]string{}
-	}
-	latest.Annotations[acpTaskPersistentSessionKeptAnnotation] = marker
-	// The optimistic lock binds the marker to the exact status it was
-	// computed from.
-	if err := d.Client.Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}
 	if task.Annotations == nil {
