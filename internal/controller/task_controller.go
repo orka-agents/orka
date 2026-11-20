@@ -1394,23 +1394,27 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	if !provider.Status.Ready {
 		return nil, fmt.Errorf("provider %s is not ready: %s", providerRef.Name, provider.Status.Message)
 	}
-	if provider.UsesKeylessAuth() {
+	if provider.UsesKeylessAuth() && (task.Spec.Type != corev1alpha1.TaskTypeAI || taskRequestsReadOnlyAgent(task)) {
 		return nil, keylessProviderTaskError(provider.Name)
 	}
 	return provider, nil
 }
 
-// keylessProviderTaskError refuses a keyless Provider in a Task Pod: its
-// token is issued only to the controller, and worker Pods have no relay for
-// it yet, so the Task fails closed rather than run without credentials.
+// keylessProviderTaskError refuses a keyless Provider for a Task that is not
+// type: ai. Its token is issued only to the controller, and only the AI
+// worker reaches it, through the controller's relay with its ServiceAccount
+// token; any other Pod would run without credentials, so the Task fails
+// closed.
 func keylessProviderTaskError(name string) error {
-	return fmt.Errorf("provider %s uses spec.auth, which Tasks do not support yet; use it through the chat or compatibility APIs, or use a Provider with a secretRef", name)
+	return fmt.Errorf("provider %s uses spec.auth, which only type: ai Tasks that are not read-only support; use a Provider with a secretRef", name)
 }
 
-// refuseKeylessFallbackProviders fails a Task whose Agent lists a keyless
-// fallback Provider, which the Job builder would otherwise skip silently.
+// refuseKeylessFallbackProviders fails a Task that cannot use a keyless
+// fallback Provider its Agent lists, which the Job builder would otherwise
+// skip silently.
 func (r *TaskReconciler) refuseKeylessFallbackProviders(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
-	if task.Spec.Type == corev1alpha1.TaskTypeAgent || !agentHasFallbackProviders(agent) {
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent || !agentHasFallbackProviders(agent) ||
+		(task.Spec.Type == corev1alpha1.TaskTypeAI && !taskRequestsReadOnlyAgent(task)) {
 		return nil
 	}
 	for _, fallback := range agent.Spec.Model.Fallbacks {

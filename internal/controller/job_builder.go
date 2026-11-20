@@ -1373,6 +1373,14 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue})
 	}
 
+	// Keyless Providers are reached through the controller's relay; the Job
+	// freezes which Provider each relayed slot was built for. Reserve the
+	// value even when empty, so Task env cannot claim a slot.
+	relay := map[string]workerenv.ProviderRelayTarget{}
+	if providerCRD != nil && providerCRD.UsesKeylessAuth() {
+		relay[workerenv.ProviderRelayPrimary] = providerRelayTarget(providerCRD)
+	}
+
 	// Add fallback provider environment variables
 	if agent != nil && agent.Spec.Model != nil && len(agent.Spec.Model.Fallbacks) > 0 {
 		envVars = append(envVars, corev1.EnvVar{
@@ -1402,10 +1410,22 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 			}
 			envVars = append(envVars, fallbackEnv.EnvVars(i)...)
 			envVars = setControllerEnvValue(envVars, deploymentKey, fallbackEnv.AzureDeploymentName)
+			if fbProvider.UsesKeylessAuth() {
+				relay[workerenv.ProviderRelayFallback(i)] = providerRelayTarget(fbProvider)
+			}
 		}
 	}
+	relayValue, err := workerenv.EncodeProviderRelay(relay)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode the provider relay: %w", err)
+	}
+	envVars = setControllerEnvValue(envVars, workerenv.AIProviderRelay, relayValue)
 
 	return envVars, nil
+}
+
+func providerRelayTarget(provider *corev1alpha1.Provider) workerenv.ProviderRelayTarget {
+	return workerenv.ProviderRelayTarget{Namespace: provider.Namespace, Name: provider.Name, UID: string(provider.UID)}
 }
 
 func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {

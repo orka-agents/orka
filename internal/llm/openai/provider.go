@@ -93,18 +93,32 @@ type Provider struct {
 
 // NewProvider creates a new OpenAI provider
 func NewProvider(config llm.ProviderConfig) (*Provider, error) {
-	if config.BearerToken != nil {
+	switch {
+	case config.Relay != nil:
+		// The controller relays only Azure OpenAI's Entra flow, and the
+		// worker must not send a credential of its own next to it.
+		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" || config.BearerToken != nil {
+			return nil, llm.ErrBearerTokenUnsupported
+		}
+	case config.BearerToken != nil:
 		// Token authentication is Azure OpenAI's Entra flow; a key must not
 		// be sent next to it.
 		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" {
 			return nil, llm.ErrBearerTokenUnsupported
 		}
-	} else if config.APIKey == "" {
+	case config.APIKey == "":
 		return nil, llm.ErrAPIKeyRequired
 	}
 
 	httpClient := llm.SharedHTTPClient()
-	if config.BearerToken != nil {
+	switch {
+	case config.Relay != nil:
+		relayClient, err := llm.NewControllerRelayHTTPClient(config.BaseURL, config.Relay)
+		if err != nil {
+			return nil, err
+		}
+		httpClient = relayClient
+	case config.BearerToken != nil:
 		bearerClient, err := llm.NewBearerHTTPClient(config.BaseURL, config.BearerToken)
 		if err != nil {
 			return nil, err
@@ -122,7 +136,7 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		}
 		endpoint := strings.TrimRight(config.BaseURL, "/")
 		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion))
-		if config.BearerToken == nil {
+		if config.BearerToken == nil && config.Relay == nil {
 			opts = append(opts, azure.WithAPIKey(config.APIKey))
 		}
 	} else {

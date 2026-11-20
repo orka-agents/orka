@@ -176,20 +176,29 @@ func run(transcriptPath string) (err error) {
 	baseURL := workerEnv.BaseURL
 	azureAPIVersion := workerEnv.AzureAPIVersion
 
-	// Get API key
-	apiKey := getAPIKey(provider)
-	if apiKey == "" {
-		return fmt.Errorf("API key for %s not found", provider)
+	// Keyless Providers are reached through the controller's relay; the
+	// worker holds no credential for them.
+	relaySlots, err := workerenv.ParseProviderRelay(os.Getenv(workerenv.AIProviderRelay))
+	if err != nil {
+		return err
 	}
-
-	// Create LLM provider
-	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
-		APIKey:              apiKey,
+	primaryConfig := llm.ProviderConfig{
 		BaseURL:             baseURL,
 		ProviderType:        provider,
 		AzureAPIVersion:     azureAPIVersion,
 		AzureDeploymentName: workerEnv.AzureDeploymentName,
-	})
+	}
+	if _, relayed := relaySlots[workerenv.ProviderRelayPrimary]; relayed {
+		primaryConfig.Relay = providerRelay(workerEnv, workerenv.ProviderRelayPrimary)
+	} else {
+		primaryConfig.APIKey = getAPIKey(provider)
+		if primaryConfig.APIKey == "" {
+			return fmt.Errorf("API key for %s not found", provider)
+		}
+	}
+
+	// Create LLM provider
+	llmProvider, err := llm.NewProvider(provider, primaryConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
 	}
@@ -201,18 +210,23 @@ func run(transcriptPath string) (err error) {
 	if len(workerEnv.Fallbacks) > 0 {
 		var fallbacks []llm.FallbackEntry
 		for i, fallbackEnv := range workerEnv.Fallbacks {
-			if fallbackEnv.Provider == "" || fallbackEnv.APIKey == "" {
-				fmt.Printf("Warning: skipping fallback %d: missing provider or API key\n", i)
-				continue
-			}
-
-			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, llm.ProviderConfig{
+			fallbackConfig := llm.ProviderConfig{
 				APIKey:              fallbackEnv.APIKey,
 				BaseURL:             fallbackEnv.BaseURL,
 				ProviderType:        fallbackEnv.Provider,
 				AzureAPIVersion:     fallbackEnv.AzureAPIVersion,
 				AzureDeploymentName: fallbackEnv.AzureDeploymentName,
-			})
+			}
+			if _, relayed := relaySlots[workerenv.ProviderRelayFallback(i)]; relayed {
+				fallbackConfig.APIKey = ""
+				fallbackConfig.Relay = providerRelay(workerEnv, workerenv.ProviderRelayFallback(i))
+			}
+			if fallbackEnv.Provider == "" || (fallbackConfig.APIKey == "" && fallbackConfig.Relay == nil) {
+				fmt.Printf("Warning: skipping fallback %d: missing provider or API key\n", i)
+				continue
+			}
+
+			fbProvider, err := llm.NewProvider(fallbackEnv.Provider, fallbackConfig)
 			if err != nil {
 				fmt.Printf("Warning: skipping fallback %d: %v\n", i, err)
 				continue
@@ -907,6 +921,21 @@ func workerServiceAccountToken() string {
 		return strings.TrimSpace(string(data))
 	}
 	return ""
+}
+
+// providerRelay sends a slot's model requests through the controller,
+// authenticated with this worker's ServiceAccount token, read per request
+// because the kubelet rotates it.
+func providerRelay(workerEnv workerenv.AIWorkerEnv, slot string) *llm.ControllerRelay {
+	return &llm.ControllerRelay{
+		URL: workerenv.ProviderRelayURL(workerEnv.ControllerURL, workerEnv.TaskNamespace, workerEnv.TaskName, slot),
+		Token: func(context.Context) (string, error) {
+			if token := workerServiceAccountToken(); token != "" {
+				return token, nil
+			}
+			return "", errors.New("the worker has no ServiceAccount token")
+		},
+	}
 }
 
 func memoryContextLimit() int {

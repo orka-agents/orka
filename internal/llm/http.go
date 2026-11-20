@@ -47,6 +47,12 @@ var ErrBearerTokenUnsupported = &ProviderError{Message: "this provider type does
 // forwarded to another endpoint. Connections are shared with
 // SharedHTTPClient.
 func NewBearerHTTPClient(baseURL string, source BearerTokenSource) (*http.Client, error) {
+	return NewBearerHTTPClientWithTransport(baseURL, source, nil)
+}
+
+// NewBearerHTTPClientWithTransport is NewBearerHTTPClient over base, or over
+// SharedHTTPClient's transport when base is nil.
+func NewBearerHTTPClientWithTransport(baseURL string, source BearerTokenSource, base http.RoundTripper) (*http.Client, error) {
 	origin, err := httpsOrigin(baseURL)
 	if err != nil {
 		return nil, err
@@ -54,8 +60,11 @@ func NewBearerHTTPClient(baseURL string, source BearerTokenSource) (*http.Client
 	if source == nil {
 		return nil, errors.New("a bearer token source is required")
 	}
+	if base == nil {
+		base = SharedHTTPClient().Transport
+	}
 	return &http.Client{
-		Transport:     &bearerTransport{base: SharedHTTPClient().Transport, origin: origin, source: source},
+		Transport:     &bearerTransport{base: base, origin: origin, source: source},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}, nil
 }

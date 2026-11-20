@@ -221,7 +221,11 @@ type ProviderConfig struct {
 	// BearerToken, when set, authenticates every request with a short-lived
 	// token instead of APIKey; see NewBearerHTTPClient. Exactly one of
 	// APIKey and BearerToken is set.
-	BearerToken         BearerTokenSource
+	BearerToken BearerTokenSource
+	// Relay, when set, sends every request through the Orka controller,
+	// which authenticates it to the Provider; see
+	// NewControllerRelayHTTPClient. APIKey and BearerToken are then unset.
+	Relay               *ControllerRelay
 	BaseURL             string // Optional override for API URL
 	ProviderType        string // e.g. "openai", "azure-openai"
 	AzureAPIVersion     string // Azure OpenAI API version (e.g. "2024-02-15-preview")
