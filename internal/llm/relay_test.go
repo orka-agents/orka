@@ -71,33 +71,22 @@ func TestControllerRelaySendsTheSDKRequestToTheRelay(t *testing.T) {
 	}
 }
 
-func TestControllerRelayKeepsRequestsBelowTheBasePath(t *testing.T) {
-	var seenPath string
-	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenPath = r.URL.EscapedPath()
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(relay.Close)
-	client, err := NewControllerRelayHTTPClient("https://gateway.example/azure", &ControllerRelay{
-		URL:   relay.URL + "/relay/",
-		Token: func(context.Context) (string, error) { return "t", nil },
-	})
-	if err != nil {
-		t.Fatal(err)
+// The Azure SDK places a baseURL path after /openai, so a relay is built
+// only for a Provider whose baseURL is its resource's origin.
+func TestControllerRelayNeedsAnOriginBaseURL(t *testing.T) {
+	relay := &ControllerRelay{URL: "http://controller:8080/relay", Token: func(context.Context) (string, error) { return "t", nil }}
+	for _, baseURL := range []string{"https://example.openai.azure.com", "https://example.openai.azure.com/"} {
+		if _, err := NewControllerRelayHTTPClient(baseURL, relay); err != nil {
+			t.Fatalf("NewControllerRelayHTTPClient(%s) error = %v", baseURL, err)
+		}
 	}
-	request, _ := http.NewRequest(http.MethodPost, "https://gateway.example/azure/openai/responses", strings.NewReader("{}"))
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = response.Body.Close()
-	if seenPath != "/relay/openai/responses" {
-		t.Fatalf("relay path = %q", seenPath)
-	}
-	for _, outside := range []string{"https://gateway.example/azurex/openai/responses", "https://gateway.example/openai/responses"} {
-		request, _ := http.NewRequest(http.MethodPost, outside, strings.NewReader("{}"))
-		if _, err := client.Do(request); err == nil {
-			t.Fatalf("a request for %s was relayed", outside)
+	for _, baseURL := range []string{
+		"https://gateway.example/azure",
+		"https://example.openai.azure.com/?api-version=1",
+		"https://example.openai.azure.com/#x",
+	} {
+		if _, err := NewControllerRelayHTTPClient(baseURL, relay); err == nil {
+			t.Fatalf("NewControllerRelayHTTPClient(%s) accepted a baseURL that is not an origin", baseURL)
 		}
 	}
 }
