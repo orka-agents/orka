@@ -136,7 +136,9 @@ Persistence is attempted only when all of these hold:
   - `transcriptHead`: a digest of the stable ID of the message before turn N's appends (read
     just before the finalization write) and the exact messages N appends. Message IDs are minted
     inside that write, so N cannot name its own; anchoring on the preceding message's unique ID
-    means a later exchange that repeats N's reply never matches;
+    means a later exchange that repeats N's reply never matches. That preceding message must be
+    the last one N's process received (its bootstrap's last message, or the head it matched on a
+    claimed reuse); a message appended out of band during N refuses the keep;
   - `verifiedBaseline` (write intent);
   - `keptAt` and `expiresAt`. `expiresAt` is `keptAt` plus the workspace's frozen
     `acp.workspace.orka.ai/suspend-after-detach`, and is never extended;
