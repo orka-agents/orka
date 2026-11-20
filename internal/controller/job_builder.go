@@ -1428,6 +1428,21 @@ func providerRelayTarget(provider *corev1alpha1.Provider) workerenv.ProviderRela
 	return workerenv.ProviderRelayTarget{Namespace: provider.Namespace, Name: provider.Name, UID: string(provider.UID)}
 }
 
+// jobProviderRelaySlots returns the slots the Job's worker container relays,
+// from the controller-reserved env var the builder already set.
+func jobProviderRelaySlots(job *batchv1.Job) map[string]workerenv.ProviderRelayTarget {
+	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
+		return nil
+	}
+	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == workerenv.AIProviderRelay {
+			slots, _ := workerenv.ParseProviderRelay(env.Value)
+			return slots
+		}
+	}
+	return nil
+}
+
 func (b *JobBuilder) addTransactionTokenSecret(job *batchv1.Job, task *corev1alpha1.Task) {
 	if job == nil || len(job.Spec.Template.Spec.Containers) == 0 {
 		return
@@ -1580,7 +1595,13 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 
 	// Add fallback provider secrets
 	if allowDirectProviderSecrets && agentHasFallbackProviders(agent) {
+		// A slot the Job already relays stays without a key, even if its
+		// Provider switched to a Secret since the env was assembled.
+		relayed := jobProviderRelaySlots(job)
 		for i, fb := range agent.Spec.Model.Fallbacks {
+			if _, ok := relayed[workerenv.ProviderRelayFallback(i)]; ok {
+				continue
+			}
 			fbProvider := &corev1alpha1.Provider{}
 			if err := b.Get(ctx, client.ObjectKey{
 				Namespace: task.Namespace,
