@@ -131,8 +131,9 @@ So the flip, the publication, and the attachment now land in **one workspace wri
   Desired state stays `Suspended`. A rival continuation waits for the flip instead of making its
   own.
 - **The RuntimePool.** It holds that pending resume's pool and treats it as not stopping. It
-  proves the previous instance terminated, rotates the consumed bootstrap material, and then, in
-  one optimistic write:
+  proves the previous instance terminated, rotates the consumed bootstrap material (usually
+  already done when the stop was proven; see ADR 0027, "Rotation timing"), and then, in one
+  optimistic write:
   - flips desired state to `Ready`;
   - publishes the next request with the retained data;
   - installs the staged attachment as `spec.attachment` at its epoch.

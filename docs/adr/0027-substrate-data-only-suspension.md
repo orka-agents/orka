@@ -129,6 +129,29 @@ replacement actor can never resume from stale data. The logical RuntimeSession
 continues from Orka's canonical transcripts with a new boot ID and
 RuntimeInstanceID.
 
+**Rotation timing (2026-11-20).** The consumed material now rotates as soon as
+the RuntimePool proves the stopped instance terminated and records Stopped,
+not when the continuation publishes, so the resume skips the rotation passes.
+The guarantees do not change:
+
+- **Same proof, same order.** Rotation runs only after the independent
+  termination proof that gated it at resume: exact Pod absence, or the
+  core-authorized native-process termination of the current instance. The
+  credential path re-checks that proof, deletes the consumed Secret, and
+  observes it gone before it creates the replacement.
+- **The old instance never holds them.** The new credentials are created after
+  the old instance is proven terminated. They reach a runtime only through the
+  sealed, signed bootstrap, sent to the instance bound at the next attested
+  startup. That startup renders the rotated nonce and verification key into the
+  template.
+- **No stale window.** The bootstrap-instance binding is cleared while no
+  replacement request exists. A request published under an older controller
+  epoch still fails the frozen-fence check.
+- **Fallback.** The early rotation is best effort. Cleanup-only controllers,
+  an unavailable epoch or configuration, or any failure leave the remaining
+  steps to the unchanged rotation before publication, which fails closed. An
+  unused rotated Secret is deleted with the pool.
+
 ### Cleanup and retention
 
 Deleting a suspended workspace tears the pool down through the existing
