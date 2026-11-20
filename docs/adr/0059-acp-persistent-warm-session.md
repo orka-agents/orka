@@ -405,6 +405,12 @@ bootstrapped the whole history through turn N:
 - the transcript's last message still matches `transcriptHead`, the digest of the assistant
   result turn N appended, so nothing was appended or edited after it.
 
+Turn N keeps its runtime only if its process holds the whole transcript: it was itself reused
+from a claimed record, or it was created this turn from a bootstrap that omitted nothing (no
+cutoff, no byte or message truncation, and fewer messages than its limit). Otherwise it is
+retired with `history-boundary`, so a later turn asking for more history never reuses a process
+that saw less.
+
 The reuse digest covers: the profile digest, runtime image and runtime profile, the rebuilt
 AgentConfiguration, the MCP binding digest, the effective workspace intent, the frozen
 `Task.spec.workspace`, the PromptAttempt credential bindings (read and publication Secret
@@ -636,6 +642,6 @@ reuse decision logs the `ACP persistent session reuse` milestone with its `resul
 and each keep decision logs `ACP persistent session retained`.
 
 A kept session is never left in the dispatcher's in-memory binding cache: only a claimed record
-may authorize its reuse. A class opt-out, or a Task whose reuse was already refused at the gate,
-plans a fresh session without consulting the record or the cache. Other scope exclusions (for
+may authorize its reuse. A class opt-out, a supervisor without `rebase`, or a Task whose reuse was already
+refused at the gate, plans a fresh session without consulting the record or the cache. Other scope exclusions (for
 example a gateway turn) take today's path unchanged.
