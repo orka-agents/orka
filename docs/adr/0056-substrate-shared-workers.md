@@ -343,6 +343,26 @@ Core makes these unusable, asynchronously:
 - **Exit criterion.** Replace the interim evidence with an upstream per-Actor
   sandbox-exit attestation when Agent Substrate provides one. Until then, do not widen
   this decision.
-- **Live validation is still needed.** Capacity, label propagation, `observed_epoch`,
-  egress revocation on a running Actor, and eviction of a strongly retired shared worker
-  must be validated live before the opt-in is recommended.
+- **Live validation.** Two rounds ran on kind with gVisor and Agent Substrate v1.0.0,
+  on orka-workspace bfc87ab and c0de5dd. orka-workspace ADR 0008 has the detail.
+  - **Shown:**
+    - label propagation;
+    - capacity for `N = 4`, with the fifth Actor on a fresh pool;
+    - `observed_epoch`, with a worker-restart negative control;
+    - egress revocation on a running Actor, with neighbours unaffected;
+    - taint eviction, and lifetime-doubt eviction of every neighbour with its data kept;
+    - the capped first grace and the 1 s escalation;
+    - the suspension-continuation hold, including across a provider restart;
+    - a concurrent stress run.
+  - **Not shown on kind:**
+    - a moment where `observed_epoch` differs from `registered_epoch`, which polling
+      never caught;
+    - escalation and eviction in one run, which the 3 h minimum lifetime prevents;
+    - a continuation whose checkpoint was not yet committed;
+    - node or kubelet failure, which is out of scope.
+  - **Later heads.** The later orka-workspace heads changed only error classification and
+    bookkeeping, except for one item: the continuation hold.
+    - The live injections surfaced as gRPC `Canceled`, which is now a retry. The same
+      runs today continue the suspension without retiring the pool.
+    - The hold itself applies only to definite failures, which are covered by unit
+      tests but were not injected live.
