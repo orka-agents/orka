@@ -476,6 +476,8 @@ spec:
     deploymentName: gpt-example
 ```
 
+A keyless Provider's `baseURL` must be the resource's origin, without a path or query.
+
 The operator configures each identity on the controller with the Helm value
 `controller.providerIdentities` (the `--provider-identities` flag): its tenant and client ID,
 its cloud, the data-plane token scope (`https://ai.azure.com/.default` in the public cloud;
