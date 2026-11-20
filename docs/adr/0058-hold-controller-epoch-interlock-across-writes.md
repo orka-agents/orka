@@ -134,11 +134,13 @@ For takeover liveness under continuous writes:
     alone can change it every time. Those checks stay.
   - An epoch change publishes its request only while the Lease still carries
     the epoch it replaces. A stale change that has already lost cannot hold
-    off the epoch that won. Nobody publishes against an epoch it already
-    holds, as after a change that committed with an ambiguous result. The
-    manager's conflict recovery publishes only against the epoch its failed
-    attempt replaces, so a manager that lost to another holder leaves no
-    request against the winner. The request goes on a Lease of its own
+    off the epoch that won. A change that committed with an ambiguous result
+    cannot hold off its own new epoch either. The manager's conflict recovery
+    publishes only against the epoch its failed attempt replaces, so a
+    manager that lost to another holder leaves no request against the winner.
+    Before its first read, the manager publishes against whatever epoch is
+    current. It holds none yet, so that epoch is the one it replaces, even
+    when a restart kept its holder ID. The request goes on a Lease of its own
   (`controller-epoch-takeover-*`), which only successors write, so it never
   competes with the holder's writes to the epoch Lease. An attempt rewrites it
   once the successor's own last write of it is 10s old on its monotonic clock,
