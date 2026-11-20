@@ -9,6 +9,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -43,18 +46,33 @@ func secretUseScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// shippedSecretUsePolicy loads the policy and binding this repository ships.
+func shippedSecretUsePolicy() (*admissionregistrationv1.ValidatingAdmissionPolicy, *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "container-task-secret-use-policy",
+		"container_task_secret_use_policy.yaml"))
+	if err != nil {
+		panic(err)
+	}
+	documents := strings.Split(string(raw), "\n---\n")
+	policy := &admissionregistrationv1.ValidatingAdmissionPolicy{}
+	binding := &admissionregistrationv1.ValidatingAdmissionPolicyBinding{}
+	if err := yaml.UnmarshalStrict([]byte(documents[0]), policy); err != nil {
+		panic(err)
+	}
+	if err := yaml.UnmarshalStrict([]byte(documents[1]), binding); err != nil {
+		panic(err)
+	}
+	return policy, binding
+}
+
 func secretUsePolicyObjects(actions ...admissionregistrationv1.ValidationAction) []client.Object {
-	if len(actions) == 0 {
-		actions = []admissionregistrationv1.ValidationAction{admissionregistrationv1.Deny}
+	policy, binding := shippedSecretUsePolicy()
+	if len(actions) > 0 {
+		binding.Spec.ValidationActions = actions
 	}
 	return []client.Object{
-		&admissionregistrationv1.ValidatingAdmissionPolicy{ObjectMeta: metav1.ObjectMeta{Name: DefaultContainerTaskSecretUsePolicyName}},
-		&admissionregistrationv1.ValidatingAdmissionPolicyBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: DefaultContainerTaskSecretUsePolicyName},
-			Spec: admissionregistrationv1.ValidatingAdmissionPolicyBindingSpec{
-				PolicyName: DefaultContainerTaskSecretUsePolicyName, ValidationActions: actions,
-			},
-		},
+		policy,
+		binding,
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "bot-key", Namespace: defaultNS},
 			Data:       map[string][]byte{"key.pem": []byte(secretUseTestSecretValue)},
@@ -380,17 +398,79 @@ func TestLatestChangeCountsSpecUpdates(t *testing.T) {
 	created := metav1.NewTime(time.Now().Add(-time.Hour))
 	updated := metav1.NewTime(time.Now())
 	policy := &metav1.ObjectMeta{CreationTimestamp: created}
-	relabelled := &metav1.ObjectMeta{CreationTimestamp: created, Generation: 1,
+	relabelled := &metav1.ObjectMeta{UID: "relabelled", CreationTimestamp: created, Generation: 1,
 		ManagedFields: []metav1.ManagedFieldsEntry{{Time: &updated}}}
 	if got := latestChange(policy, relabelled); !got.Equal(created.Time) {
 		t.Fatalf("latestChange() = %v, want a metadata-only update ignored", got)
 	}
-	respecified := &metav1.ObjectMeta{CreationTimestamp: created, Generation: 2,
+	respecified := &metav1.ObjectMeta{UID: "respecified", CreationTimestamp: created, Generation: 2,
 		ManagedFields: []metav1.ManagedFieldsEntry{{Time: &updated}}}
 	if got := latestChange(policy, respecified); !got.Equal(updated.Time) {
 		t.Fatalf("latestChange() = %v, want the binding's later spec update %v", got, updated.Time)
 	}
+	relabelledLater := metav1.NewTime(updated.Add(time.Hour))
+	respecified.ManagedFields = []metav1.ManagedFieldsEntry{{Time: &relabelledLater}}
+	if got := latestChange(policy, respecified); !got.Equal(updated.Time) {
+		t.Fatalf("latestChange() = %v, want a metadata-only update after a spec change ignored", got)
+	}
+	respecified.Generation = 3
+	if got := latestChange(policy, respecified); !got.Equal(relabelledLater.Time) {
+		t.Fatalf("latestChange() = %v, want a new spec change %v", got, relabelledLater.Time)
+	}
 	if got := latestChange(policy); !got.Equal(created.Time) {
 		t.Fatalf("latestChange() = %v, want the creation time %v", got, created.Time)
 	}
+}
+
+func TestContainerTaskSecretUseRequiresThePolicyToCoverTheNamespace(t *testing.T) {
+	failOpen := admissionregistrationv1.Ignore
+	cases := map[string]func(*admissionregistrationv1.ValidatingAdmissionPolicy, *admissionregistrationv1.ValidatingAdmissionPolicyBinding){
+		"another namespace": func(_ *admissionregistrationv1.ValidatingAdmissionPolicy, b *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			b.Spec.MatchResources = &admissionregistrationv1.MatchResources{NamespaceSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{corev1.LabelMetadataName: "elsewhere"}}}
+		},
+		"an object selector": func(_ *admissionregistrationv1.ValidatingAdmissionPolicy, b *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			b.Spec.MatchResources = &admissionregistrationv1.MatchResources{ObjectSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"checked": "true"}}}
+		},
+		"an exclusion": func(_ *admissionregistrationv1.ValidatingAdmissionPolicy, b *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			b.Spec.MatchResources = &admissionregistrationv1.MatchResources{ExcludeResourceRules: []admissionregistrationv1.NamedRuleWithOperations{{}}}
+		},
+		"a fail-open policy": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			p.Spec.FailurePolicy = &failOpen
+		},
+		"a policy that never checks use": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			p.Spec.Validations = []admissionregistrationv1.Validation{{Expression: "true"}}
+		},
+		"a policy that skips updates": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			p.Spec.MatchConstraints.ResourceRules[0].Operations = []admissionregistrationv1.OperationType{admissionregistrationv1.Create}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			objects := secretUsePolicyObjects()
+			mutate(objects[0].(*admissionregistrationv1.ValidatingAdmissionPolicy),
+				objects[1].(*admissionregistrationv1.ValidatingAdmissionPolicyBinding))
+			requireSecretRefused(t, secretUseBuilder(t, objects...), secretUseContainerTask(), "cannot receive Secrets")
+		})
+	}
+
+	t.Run("a binding scoped to the Task's namespace is enough", func(t *testing.T) {
+		objects := secretUsePolicyObjects()
+		objects[1].(*admissionregistrationv1.ValidatingAdmissionPolicyBinding).Spec.MatchResources = &admissionregistrationv1.MatchResources{
+			NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: defaultNS}}}
+		requireSecretDelivered(t, secretUseBuilder(t, objects...), secretUseContainerTask())
+	})
+}
+
+func TestContainerTaskSecretUseScheduledRunWithCRDDefaults(t *testing.T) {
+	parent := secretUseContainerTask()
+	parent.Spec.Schedule = "0 3 * * *"
+	parent.Spec.ConcurrencyPolicy = corev1alpha1.ForbidConcurrent
+	run := scheduledRunOf(parent)
+	// The API server defaults these on the run after the controller clears them.
+	run.Spec.ConcurrencyPolicy = corev1alpha1.ForbidConcurrent
+	deadline := int64(100)
+	run.Spec.StartingDeadlineSeconds = &deadline
+	requireSecretDelivered(t, secretUseBuilder(t, append(secretUsePolicyObjects(), parent.DeepCopy())...), run)
 }
