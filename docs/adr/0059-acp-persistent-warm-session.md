@@ -634,3 +634,8 @@ Every refusal reason in section 5's table falls back to the ordinary path: a fre
 this turn or the next one, or an ordinary pre-submission requeue. No reason fails the Task. Each
 reuse decision logs the `ACP persistent session reuse` milestone with its `result` and `reason`,
 and each keep decision logs `ACP persistent session retained`.
+
+A kept session is never left in the dispatcher's in-memory binding cache: only a claimed record
+may authorize its reuse. A class opt-out, or a Task whose reuse was already refused at the gate,
+plans a fresh session without consulting the record or the cache. Other scope exclusions (for
+example a gateway turn) take today's path unchanged.
