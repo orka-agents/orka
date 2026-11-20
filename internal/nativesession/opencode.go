@@ -438,6 +438,28 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string,
 	return nil
 }
 
+// boundedBuffer is a strings.Builder that refuses to grow past limit bytes.
+type boundedBuffer struct {
+	strings.Builder
+	limit int64
+}
+
+var errBoundedBufferFull = errors.New("bounded buffer is full")
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if int64(b.Len()+len(p)) > b.limit {
+		return 0, errBoundedBufferFull
+	}
+	return b.Builder.Write(p)
+}
+
+func (b *boundedBuffer) WriteString(s string) (int, error) {
+	if int64(b.Len()+len(s)) > b.limit {
+		return 0, errBoundedBufferFull
+	}
+	return b.Builder.WriteString(s)
+}
+
 // relocateOpenCodeRows rewrites every message and part with replacer, adding
 // at most budget bytes in total.
 func relocateOpenCodeRows(ctx context.Context, tx *sql.Tx, replacer *strings.Replacer, budget int64) error {
@@ -464,13 +486,18 @@ func relocateOpenCodeRows(ctx context.Context, tx *sql.Tx, replacer *strings.Rep
 			if err := tx.QueryRowContext(ctx, `SELECT data FROM `+table+` WHERE id = ?`, id).Scan(&data); err != nil {
 				return err
 			}
-			relocated := replacer.Replace(data)
+			// The rewritten row is bounded while it is written, so a row of
+			// repeated short paths moved somewhere long never grows past the
+			// budget in memory.
+			out := &boundedBuffer{limit: int64(len(data)) + budget - growth}
+			if _, err := replacer.WriteString(out, data); err != nil {
+				return errors.New("relocating the OpenCode session would exceed its expanded budget")
+			}
+			relocated := out.String()
 			if relocated == data {
 				continue
 			}
-			if growth += max(0, int64(len(relocated)-len(data))); growth > budget {
-				return errors.New("relocating the OpenCode session would exceed its expanded budget")
-			}
+			growth += max(0, int64(len(relocated)-len(data)))
 			if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET data = ? WHERE id = ?`, relocated, id); err != nil {
 				return fmt.Errorf("relocate OpenCode session: %w", err)
 			}

@@ -763,3 +763,26 @@ func TestOpenCodeInstallRecognizesItsRecordedInstall(t *testing.T) {
 		t.Fatal("a retry must not adopt a database that changed after the install")
 	}
 }
+
+// A relocation stops writing a row as soon as it would pass its limit.
+func TestBoundedBufferStopsAReplacementAtItsLimit(t *testing.T) {
+	out := &boundedBuffer{limit: 64}
+	replacer := strings.NewReplacer("/a", "/"+strings.Repeat("b", 1000))
+	if _, err := replacer.WriteString(out, strings.Repeat("/a ", 1000)); !errors.Is(err, errBoundedBufferFull) {
+		t.Fatalf("replacement past the limit = %v", err)
+	}
+	if out.Len() > 64 {
+		t.Fatalf("buffer grew to %d bytes", out.Len())
+	}
+}
+
+// Entry names that could leave a directory are refused while reading, even
+// when the format would accept them.
+func TestReadBundleRefusesTraversingEntryNames(t *testing.T) {
+	for _, name := range []string{"../escape", "tool-output/../../escape", `tool-output\escape`, "a..b"} {
+		data := tarGzipForTest(t, map[string][]byte{bundleManifestEntry: []byte("{}"), name: []byte("x")})
+		if _, _, err := readBundle(data, 1<<20, func(string) bool { return true }); err == nil {
+			t.Errorf("%q: entry name must be refused", name)
+		}
+	}
+}
