@@ -343,6 +343,30 @@ func openCodeInstalled(record string, data []byte, bundle openCodeBundle, destin
 	return err == nil && dataDigest(database) == recorded.Database && holdsFiles(toolOutputDir, bundle.toolOutput)
 }
 
+// writeOpenCodeToolOutput writes the bundled spills into dir, reusing any
+// that already hold exactly their output, and appends what it creates.
+func writeOpenCodeToolOutput(dir string, outputs map[string][]byte, created *[]string) error {
+	if err := os.Mkdir(dir, 0o700); err == nil {
+		*created = append(*created, dir)
+	} else if !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if err := requireRealPath(dir, true); err != nil {
+		return err
+	}
+	for name, content := range outputs {
+		path := filepath.Join(dir, name)
+		if holdsFile(path, content) {
+			continue
+		}
+		if err := writeNewFile(path, content); err != nil {
+			return err
+		}
+		*created = append(*created, path)
+	}
+	return nil
+}
+
 func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string, maxBytes int) (err error) {
 	limit, err := normalizeLimit(maxBytes)
 	if err != nil {
@@ -396,23 +420,8 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string,
 	// its own staging; a spill holding anything else is refused, and nothing
 	// else is removed.
 	if len(bundle.toolOutput) > 0 {
-		if err = os.Mkdir(toolOutputDir, 0o700); err == nil {
-			created = append(created, toolOutputDir)
-		} else if !errors.Is(err, os.ErrExist) {
+		if err = writeOpenCodeToolOutput(toolOutputDir, bundle.toolOutput, &created); err != nil {
 			return err
-		}
-		if err = requireRealPath(toolOutputDir, true); err != nil {
-			return err
-		}
-		for name, content := range bundle.toolOutput {
-			path := filepath.Join(toolOutputDir, name)
-			if holdsFile(path, content) {
-				continue
-			}
-			if err = writeNewFile(path, content); err != nil {
-				return err
-			}
-			created = append(created, path)
 		}
 	}
 	staged := filepath.Join(root, ".opencode.db.restore")
