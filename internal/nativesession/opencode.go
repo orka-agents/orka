@@ -276,17 +276,74 @@ func (openCodeFormat) Inspect(ctx context.Context, data []byte, maxBytes int) (S
 // OpenCode database and points it at the new working directory, because
 // OpenCode resumes in the session's recorded directory rather than the cwd it
 // is given. Every file is created new and a failed install removes those it
-// created, so journalDir is unused.
-func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, _ string, maxBytes int) error {
+// created. The relocated database differs from the bundled one, so before
+// publishing it an install records its digest in an existing journalDir; a
+// retry that finds exactly that database and the bundled spills treats the
+// session as installed. Installs into one destination run one at a time.
+func (openCodeFormat) Install(ctx context.Context, data []byte, dirs Dirs, journalDir string, maxBytes int) error {
 	unlock, err := lockInstallDestination(ctx, dirs.State)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return installOpenCode(ctx, data, dirs, maxBytes)
+	return installOpenCode(ctx, data, dirs, openCodeInstallRecordPath(journalDir), maxBytes)
 }
 
-func installOpenCode(ctx context.Context, data []byte, dirs Dirs, maxBytes int) (err error) {
+// openCodeInstallRecord identifies a database an install published.
+type openCodeInstallRecord struct {
+	Bundle   string `json:"bundle"`
+	Database string `json:"database"`
+}
+
+// openCodeInstallRecordPath returns where an install records what it
+// publishes, or "" when journalDir does not exist.
+func openCodeInstallRecordPath(journalDir string) string {
+	if journalDir == "" || requireRealPath(journalDir, true) != nil {
+		return ""
+	}
+	return filepath.Join(journalDir, "opencode-install.json")
+}
+
+// recordOpenCodeInstall replaces record with the digests of the bundle and
+// of the database about to be published.
+func recordOpenCodeInstall(record string, data []byte, database string, limit int) error {
+	content, err := readBoundedFile(database, limit)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(openCodeInstallRecord{Bundle: dataDigest(data), Database: dataDigest(content)})
+	if err != nil {
+		return err
+	}
+	staged := record + ".tmp"
+	if err := os.Remove(staged); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := writeNewFile(staged, body); err != nil {
+		return err
+	}
+	if err := os.Rename(staged, record); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(record))
+}
+
+// openCodeInstalled reports whether an earlier install of data recorded the
+// database at destination and wrote every bundled spill.
+func openCodeInstalled(record string, data []byte, bundle openCodeBundle, destination, toolOutputDir string, limit int) bool {
+	if record == "" || requireRealPath(record, false) != nil || requireRealPath(destination, false) != nil {
+		return false
+	}
+	body, err := readBoundedFile(record, 1<<10)
+	var recorded openCodeInstallRecord
+	if err != nil || json.Unmarshal(body, &recorded) != nil || recorded.Bundle != dataDigest(data) {
+		return false
+	}
+	database, err := readBoundedFile(destination, limit)
+	return err == nil && dataDigest(database) == recorded.Database && holdsFiles(toolOutputDir, bundle.toolOutput)
+}
+
+func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string, maxBytes int) (err error) {
 	limit, err := normalizeLimit(maxBytes)
 	if err != nil {
 		return err
@@ -320,10 +377,19 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, maxBytes int) 
 		return err
 	}
 	destination := filepath.Join(root, openCodeDatabaseEntry)
+	toolOutputDir := filepath.Join(root, openCodeToolOutputDir)
+	synced := []string{root, dirs.State}
+	if len(bundle.toolOutput) > 0 {
+		synced = append([]string{toolOutputDir}, synced...)
+	}
 	if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+		if openCodeInstalled(record, data, bundle, destination, toolOutputDir, expandedLimit(limit)) {
+			// A retry after an install that completed but was not
+			// acknowledged finds exactly what that install published.
+			return syncDirs(synced...)
+		}
 		return errors.New("OpenCode state directory already holds a database")
 	}
-	toolOutputDir := filepath.Join(root, openCodeToolOutputDir)
 	if len(bundle.toolOutput) > 0 {
 		if err = os.Mkdir(toolOutputDir, 0o700); err != nil {
 			return err
@@ -354,16 +420,17 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, maxBytes int) 
 	if err = relocateOpenCodeSession(ctx, staged, bundle.manifest, dirs.Workspace, toolOutputDir, expandedLimit(limit)-carried); err != nil {
 		return err
 	}
+	if record != "" {
+		if err = recordOpenCodeInstall(record, data, staged, expandedLimit(limit)); err != nil {
+			return err
+		}
+	}
 	if err = os.Rename(staged, destination); err != nil {
 		return err
 	}
 	// Until the directories are synced, a failure still removes the published
 	// database, so a retry finds no partial install.
 	created[len(created)-1] = destination
-	synced := []string{root, dirs.State}
-	if len(bundle.toolOutput) > 0 {
-		synced = append([]string{toolOutputDir}, synced...)
-	}
 	if err = syncDirs(synced...); err != nil {
 		return err
 	}

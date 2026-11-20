@@ -722,3 +722,44 @@ func TestOpenSQLiteOpensPathsWithURIMetacharacters(t *testing.T) {
 		})
 	}
 }
+
+// A retry with the same journal after an unacknowledged install finds the
+// database that install recorded and treats the session as installed.
+func TestOpenCodeInstallRecognizesItsRecordedInstall(t *testing.T) {
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, journal := freshOpenCodeDirs(t), realDir(t)
+	if err := format.Install(t.Context(), data, destination, journal, openCodeFixtureLimit); err != nil {
+		t.Fatal(err)
+	}
+	if err := format.Install(t.Context(), data, destination, journal, openCodeFixtureLimit); err != nil {
+		t.Fatalf("a retry with the same journal must find the recorded install: %v", err)
+	}
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err == nil {
+		t.Fatal("another journal must not adopt an existing database")
+	}
+	spill := filepath.Join(destination.State, "opencode", "tool-output", openCodeFixtureSpill)
+	if err := os.WriteFile(spill, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := format.Install(t.Context(), data, destination, journal, openCodeFixtureLimit); err == nil {
+		t.Fatal("a retry must not adopt an install whose spilled output changed")
+	}
+	database := filepath.Join(destination.State, "opencode", "opencode.db")
+	if err := os.WriteFile(spill, source.spill, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(database, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.Write([]byte{0})
+	_ = f.Close()
+	if err := format.Install(t.Context(), data, destination, journal, openCodeFixtureLimit); err == nil {
+		t.Fatal("a retry must not adopt a database that changed after the install")
+	}
+}
