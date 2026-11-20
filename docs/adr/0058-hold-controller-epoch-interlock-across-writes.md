@@ -147,7 +147,9 @@ For takeover liveness under continuous writes:
   which gives the request a new `resourceVersion`. Once the epoch
   change commits, it deletes its own request against the epoch it replaced.
   A newer request against the epoch it created is left in place, even when it
-  shares the holder ID, as a restart's does.
+  shares the holder ID, as a restart's does. No publisher overwrites a
+  request against a newer epoch than the one it read, so a publisher delayed
+  past another change cannot downgrade a newer successor's request.
 - Before writing a token, a store reads that request. A request version is in
   force for 30s from when this store first saw it, on this store's own
   monotonic clock. No store compares the time a requester wrote into the
