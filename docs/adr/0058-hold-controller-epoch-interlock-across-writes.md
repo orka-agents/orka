@@ -142,7 +142,12 @@ For takeover liveness under continuous writes:
     current. It holds none yet, so that epoch is the one it replaces, even
     when a restart kept its holder ID. The request goes on a Lease of its own
   (`controller-epoch-takeover-*`), which only successors write, so it never
-  competes with the holder's writes to the epoch Lease. An attempt rewrites it
+  competes with the holder's writes to the epoch Lease. The
+  `acp-workspace-lease-protection` admission policy reserves that prefix for
+  the controller's identity, as it does the admission ledgers: a forged
+  request kept fresh would otherwise stop the holder's new tokens and stall
+  every fenced write, and a removed one would let the holder starve its
+  successor. An attempt rewrites it
   once the successor's own last write of it is 10s old on its monotonic clock,
   which gives the request a new `resourceVersion`. Once the epoch
   change commits, it deletes its own request against the epoch it replaced.

@@ -16,7 +16,12 @@ import (
 	apiserveradmission "k8s.io/apiserver/pkg/admission"
 
 	"github.com/orka-agents/orka/internal/labels"
+	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
+
+// controllerEpochTakeoverPrefix is the reserved takeover-request Lease prefix
+// in acp_workspace_lease_protection.yaml.
+const controllerEpochTakeoverPrefix = "controller-epoch-takeover-"
 
 func TestACPWorkspaceLeaseProtectionReservesControllerLeases(t *testing.T) {
 	policy := compileAdmissionPolicy(t, "acp_workspace_lease_protection.yaml", strings.NewReplacer(
@@ -27,6 +32,10 @@ func TestACPWorkspaceLeaseProtectionReservesControllerLeases(t *testing.T) {
 	retentionFence := labels.ACPWorkspaceRetentionFenceLeaseNamePrefix + "0123456789abcdef01234567"
 	namespaceLedger := labels.TaskAdmissionNamespaceLedgerNamePrefix + "0123456789abcdef0123"
 	childLedger := labels.TaskAdmissionChildrenLedgerNamePrefix + "0123456789abcdef0123"
+	// The store's own name for a takeover request, so a renamed prefix
+	// fails here rather than leaving requests unprotected.
+	takeoverRequest := storekube.ControllerEpochTakeoverLeaseName("orka-controller")
+	require.True(t, strings.HasPrefix(takeoverRequest, controllerEpochTakeoverPrefix), takeoverRequest)
 	tests := []struct {
 		name      string
 		operation apiserveradmission.Operation
@@ -77,6 +86,18 @@ func TestACPWorkspaceLeaseProtectionReservesControllerLeases(t *testing.T) {
 		{name: "controller child ledger delete", operation: apiserveradmission.Delete, username: trustedControllerUser, leaseName: childLedger, allowed: true},
 		{name: "garbage collector ledger update", operation: apiserveradmission.Update, username: genericGarbageCollectorUsername, leaseName: childLedger},
 		{name: "namespace controller ledger delete", operation: apiserveradmission.Delete, username: namespaceControllerUsername, leaseName: namespaceLedger, allowed: true},
+		// Controller-epoch takeover requests (ADR 0058): a forged request
+		// kept fresh would stop the epoch holder writing new tokens and stall
+		// every fenced write; a removed one would let the holder starve its
+		// successor.
+		{name: "forged takeover request create", operation: apiserveradmission.Create, username: untrustedUsername, leaseName: takeoverRequest},
+		{name: "forged takeover request generateName", operation: apiserveradmission.Create, username: untrustedUsername, generate: controllerEpochTakeoverPrefix},
+		{name: "forged takeover request update", operation: apiserveradmission.Update, username: untrustedUsername, leaseName: takeoverRequest},
+		{name: "forged takeover request delete", operation: apiserveradmission.Delete, username: untrustedUsername, leaseName: takeoverRequest},
+		{name: "controller takeover request create", operation: apiserveradmission.Create, username: trustedControllerUser, leaseName: takeoverRequest, allowed: true},
+		{name: "controller takeover request update", operation: apiserveradmission.Update, username: trustedControllerUser, leaseName: takeoverRequest, allowed: true},
+		{name: "controller takeover request delete", operation: apiserveradmission.Delete, username: trustedControllerUser, leaseName: takeoverRequest, allowed: true},
+		{name: "garbage collector takeover request update", operation: apiserveradmission.Update, username: genericGarbageCollectorUsername, leaseName: takeoverRequest},
 	}
 
 	kind := coordinationv1.SchemeGroupVersion.WithKind("Lease")
