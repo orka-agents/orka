@@ -102,6 +102,9 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 		if err != nil || !controllerEpochsEqual(current, previous) {
 			t.Fatalf("waiting startup changed the authoritative epoch: %v", err)
 		}
+		if !controllerEpochTakeoverRequested(t, t.Context(), kubeClient) {
+			t.Fatal("waiting startup did not record its takeover request")
+		}
 
 		// The next capped retry must recover without restarting the manager.
 		time.Sleep(time.Second + time.Nanosecond)
@@ -131,6 +134,9 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 		_, recovered := kubernetesControllerEpochObjects(t, t.Context(), kubeClient)
 		if recovered.Annotations[mutationTokenAnnotation] != "" || recovered.Annotations[mutationExpiryAnnotation] != "" {
 			t.Fatal("successful takeover retained the expired mutation lock")
+		}
+		if controllerEpochTakeoverRequested(t, t.Context(), kubeClient) {
+			t.Fatal("successful takeover left its takeover request behind")
 		}
 		called := false
 		err = authority.WithControllerEpochMutation(t.Context(), previousFence, func(context.Context) error { called = true; return nil })

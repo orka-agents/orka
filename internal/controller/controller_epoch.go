@@ -167,7 +167,30 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		}
 	}
 	cancelAcquisition()
-	return m.openStorage(ctx, *acquired)
+	err = m.openStorage(ctx, *acquired)
+	m.releaseHeldInterlock(ctx)
+	return err
+}
+
+// heldInterlockReleaser is a control store that can hold its controller-epoch
+// interlock token between writes (ADR 0058).
+type heldInterlockReleaser interface {
+	ReleaseHeldControllerEpochInterlock(context.Context) error
+}
+
+// releaseHeldInterlock removes a token the store holds between writes once
+// this manager stops, on leadership loss or shutdown, so a successor does not
+// wait for it to expire.
+func (m *ControllerEpochManager) releaseHeldInterlock(ctx context.Context) {
+	releaser, ok := m.Store.(heldInterlockReleaser)
+	if !ok {
+		return
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := releaser.ReleaseHeldControllerEpochInterlock(releaseCtx); err != nil {
+		logf.FromContext(ctx).Error(err, "unable to release the held controller epoch interlock")
+	}
 }
 
 // openStorage advances every registered dataset to the acquired epoch and

@@ -18,7 +18,7 @@ func (s *Store) WithControllerEpochMutation(ctx context.Context, fence store.Con
 	if mutate == nil {
 		return store.ValidationErrorf("controller epoch mutation callback is required")
 	}
-	_, snapshot, err := s.requireControllerEpoch(ctx, fence)
+	ctx, _, snapshot, err := s.requireControllerEpoch(ctx, fence)
 	if err != nil {
 		return err
 	}

@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
@@ -76,7 +78,7 @@ func TestInterlockHoldReusesOneTokenAcrossConsecutiveWrites(t *testing.T) {
 	ctx := t.Context()
 	var token string
 	for write := range 3 {
-		_, snapshot, err := writer.requireControllerEpoch(ctx, fence)
+		_, _, snapshot, err := writer.requireControllerEpoch(ctx, fence)
 		require.NoError(t, err)
 		lease := readEpochLease(t, raw, fence)
 		require.Equal(t, snapshot.MutationToken, lease.Annotations[annotationMutationToken], "write %d ran without its token on the Lease", write)
@@ -167,14 +169,14 @@ func TestInterlockHoldReplacesItsTokenOnAChangedLeaseWithAGap(t *testing.T) {
 	owner, err := New(recording, testControlNamespace, WithAPIReader(raw), WithControllerEpochInterlockHold(time.Hour, 30*time.Second))
 	require.NoError(t, err)
 	ctx := t.Context()
-	_, first, err := owner.requireControllerEpoch(ctx, fence)
+	_, _, first, err := owner.requireControllerEpoch(ctx, fence)
 	require.NoError(t, err)
 	owner.releaseControllerEpochMutation(first)
 	lease := readEpochLease(t, raw, fence)
 	lease.Annotations["orka.ai/test-unrelated"] = "changed"
 	require.NoError(t, raw.Update(ctx, lease))
 
-	_, second, err := owner.requireControllerEpoch(ctx, fence)
+	_, _, second, err := owner.requireControllerEpoch(ctx, fence)
 	require.NoError(t, err)
 	require.NotEqual(t, first.MutationToken, second.MutationToken)
 	require.Equal(t, second.MutationToken, readEpochLease(t, raw, fence).Annotations[annotationMutationToken])
@@ -193,11 +195,11 @@ func TestInterlockHoldMaxHoldWritesAFreshToken(t *testing.T) {
 	_, raw, fence := newTestStoreWithEpoch(t)
 	owner := holdingStore(t, raw, time.Hour, 50*time.Millisecond)
 	ctx := t.Context()
-	_, first, err := owner.requireControllerEpoch(ctx, fence)
+	_, _, first, err := owner.requireControllerEpoch(ctx, fence)
 	require.NoError(t, err)
 	owner.releaseControllerEpochMutation(first)
 	time.Sleep(80 * time.Millisecond)
-	_, second, err := owner.requireControllerEpoch(ctx, fence)
+	_, _, second, err := owner.requireControllerEpoch(ctx, fence)
 	require.NoError(t, err)
 	require.NotEqual(t, first.MutationToken, second.MutationToken, "a token older than the max hold was reused")
 	owner.releaseControllerEpochMutation(second)
@@ -281,7 +283,7 @@ func TestInterlockHoldIdleTimerRetriesWhileTheSlotIsBusy(t *testing.T) {
 	_, raw, fence := newTestStoreWithEpoch(t)
 	owner := holdingStore(t, raw, 20*time.Millisecond, 5*time.Second)
 	ctx := t.Context()
-	_, snapshot, err := owner.requireControllerEpoch(ctx, fence)
+	_, _, snapshot, err := owner.requireControllerEpoch(ctx, fence)
 	require.NoError(t, err)
 	// Park the token but keep the slot, as between parking and freeing it.
 	owner.parkInterlock(snapshot)
@@ -380,13 +382,13 @@ func TestInterlockHoldTokenAgingDuringTheReadsIsRemovedFirst(t *testing.T) {
 	owner, err := New(recording, testControlNamespace, WithAPIReader(recording), WithControllerEpochInterlockHold(time.Hour, 60*time.Millisecond))
 	require.NoError(t, err)
 	ctx := t.Context()
-	_, first, err := owner.requireControllerEpoch(ctx, fence)
+	_, _, first, err := owner.requireControllerEpoch(ctx, fence)
 	require.NoError(t, err)
 	owner.releaseControllerEpochMutation(first)
 	// Young at the start of the next write, past the max hold after its reads.
 	time.Sleep(30 * time.Millisecond)
 	slowReads.Store(true)
-	_, second, err := owner.requireControllerEpoch(ctx, fence)
+	_, _, second, err := owner.requireControllerEpoch(ctx, fence)
 	slowReads.Store(false)
 	require.NoError(t, err)
 	require.NotEqual(t, first.MutationToken, second.MutationToken)
@@ -397,4 +399,197 @@ func TestInterlockHoldTokenAgingDuringTheReadsIsRemovedFirst(t *testing.T) {
 		"the aged token was overwritten without being removed first")
 	owner.releaseControllerEpochMutation(second)
 	require.NoError(t, owner.ReleaseHeldControllerEpochInterlock(ctx))
+}
+
+// A fenced write by a direct store caller, whose context has no deadline,
+// still ends at the fenced-write bound after its token was written, while
+// the token is live.
+func TestFencedWriteWithoutADeadlineEndsAtTheBound(t *testing.T) {
+	kubeStore, raw, fence := newTestStoreWithEpoch(t)
+	const bound = 150 * time.Millisecond
+	kubeStore.interlockWriteBound = bound
+	var deadlineSeen atomic.Bool
+	kubeStore.client = interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.CreateOption) error {
+			if _, claim := object.(*corev1alpha1.BranchClaim); !claim {
+				return delegate.Create(ctx, object, options...)
+			}
+			_, bounded := ctx.Deadline()
+			deadlineSeen.Store(bounded)
+			<-ctx.Done() // a write that would never finish on its own
+			return ctx.Err()
+		},
+	})
+	started := time.Now()
+	_, _, err := kubeStore.CreateBranchClaimWithResult(context.Background(), &store.BranchClaim{
+		RepositoryID: "github.com/orka/target", Ref: "refs/heads/bounded",
+		OwnerKind: store.BranchClaimOwnerTask, OwnerUID: "task-bounded",
+		LastVerified: store.RemoteRefState{Absent: true}, RequestDigest: testDigest("bounded"), CreatedAt: testNow,
+	}, fence)
+	elapsed := time.Since(started)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.True(t, deadlineSeen.Load(), "the fenced write ran without a deadline")
+	require.GreaterOrEqual(t, elapsed, bound)
+	require.Less(t, elapsed, 5*time.Second, "the fenced write outran its bound")
+}
+
+// Under continuous writes by the token holder, a successor whose reads are
+// slow enough to miss every gap between tokens still changes the epoch
+// promptly: its refused attempt asks the holder to stop writing new tokens,
+// and the holder's next write frees the Lease. The holder's writes then
+// fail closed.
+func TestInterlockHoldWaitingSuccessorIsNotStarvedByContinuousWrites(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	owner := holdingStore(t, raw, 20*time.Millisecond, 50*time.Millisecond)
+	slowReads := interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+			time.Sleep(20 * time.Millisecond)
+			return delegate.Get(ctx, key, object, options...)
+		},
+	})
+	successor, err := New(slowReads, testControlNamespace, WithAPIReader(slowReads))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var wg sync.WaitGroup
+	var ownerWrites, ownerFailedClosed atomic.Int32
+	wg.Go(func() {
+		for ctx.Err() == nil {
+			err := owner.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil })
+			switch {
+			case err == nil:
+				ownerWrites.Add(1)
+			case errors.Is(err, store.ErrConflict):
+				ownerFailedClosed.Add(1)
+			}
+		}
+	})
+	require.Eventually(t, func() bool { return ownerWrites.Load() > 20 }, 5*time.Second, time.Millisecond)
+
+	started := time.Now()
+	var advanced *store.ControllerEpoch
+	for attempt := 0; advanced == nil; attempt++ {
+		require.Less(t, time.Since(started), 10*time.Second, "the successor was starved by continuous writes")
+		advanced, err = successor.CompareAndSwapControllerEpoch(t.Context(), successorCAS(fence.Epoch))
+		if err != nil {
+			require.ErrorIs(t, err, store.ErrConflict)
+			time.Sleep(min(time.Duration(attempt+1)*10*time.Millisecond, time.Second))
+		}
+	}
+	t.Logf("successor changed the epoch %s after it started waiting, during %d holder writes", time.Since(started).Round(time.Millisecond), ownerWrites.Load())
+	require.Eventually(t, func() bool { return ownerFailedClosed.Load() > 0 }, 5*time.Second, time.Millisecond)
+	cancel()
+	wg.Wait()
+	writesAfter := ownerWrites.Load()
+	require.ErrorIs(t, owner.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }), store.ErrConflict)
+	require.Equal(t, writesAfter, ownerWrites.Load())
+	err = raw.Get(t.Context(), client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}, &coordinationv1.Lease{})
+	require.True(t, apierrors.IsNotFound(err), "the epoch change left its takeover request behind: %v", err)
+	require.NoError(t, owner.ReleaseHeldControllerEpochInterlock(t.Context()))
+}
+
+// failingRemovals fails the next n token removals (Lease updates that clear
+// the token) with a transient error.
+func failingRemovals(raw client.Client, n *atomic.Int32) client.Client {
+	return interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+		Update: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.UpdateOption) error {
+			if lease, ok := object.(*coordinationv1.Lease); ok && lease.Annotations[annotationMutationToken] == "" && n.Add(-1) >= 0 {
+				return errors.New("simulated transient API failure")
+			}
+			return delegate.Update(ctx, object, options...)
+		},
+	})
+}
+
+// An explicit release reports a removal that kept failing, keeps the token
+// so the idle timer retries it, and succeeds through a transient failure.
+func TestReleaseHeldInterlockReportsAndRetriesAFailedRemoval(t *testing.T) {
+	t.Run("persistent failure is reported and retried later", func(t *testing.T) {
+		_, raw, fence := newTestStoreWithEpoch(t)
+		var failures atomic.Int32
+		owner, err := New(failingRemovals(raw, &failures), testControlNamespace, WithAPIReader(raw),
+			WithControllerEpochInterlockHold(time.Hour, 5*time.Second))
+		require.NoError(t, err)
+		require.NoError(t, owner.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+		failures.Store(1000)
+		releaseCtx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
+		require.Error(t, owner.ReleaseHeldControllerEpochInterlock(releaseCtx), "a failed removal was reported as a release")
+		require.NotEmpty(t, readEpochLease(t, raw, fence).Annotations[annotationMutationToken])
+		owner.interlockMu.Lock()
+		retained := owner.heldInterlock != nil
+		owner.interlockMu.Unlock()
+		require.True(t, retained, "the store forgot a token it failed to remove")
+		failures.Store(0)
+		waitForNoMutationToken(t, raw, fence)
+	})
+	t.Run("transient failure is retried within the release", func(t *testing.T) {
+		_, raw, fence := newTestStoreWithEpoch(t)
+		var failures atomic.Int32
+		owner, err := New(failingRemovals(raw, &failures), testControlNamespace, WithAPIReader(raw),
+			WithControllerEpochInterlockHold(time.Hour, 5*time.Second))
+		require.NoError(t, err)
+		require.NoError(t, owner.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+		failures.Store(2)
+		require.NoError(t, owner.ReleaseHeldControllerEpochInterlock(t.Context()))
+		require.Empty(t, readEpochLease(t, raw, fence).Annotations[annotationMutationToken])
+	})
+	t.Run("idle timer retries a failed removal", func(t *testing.T) {
+		_, raw, fence := newTestStoreWithEpoch(t)
+		var failures atomic.Int32
+		owner, err := New(failingRemovals(raw, &failures), testControlNamespace, WithAPIReader(raw),
+			WithControllerEpochInterlockHold(20*time.Millisecond, 5*time.Second))
+		require.NoError(t, err)
+		failures.Store(3)
+		require.NoError(t, owner.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+		waitForNoMutationToken(t, raw, fence)
+		require.LessOrEqual(t, failures.Load(), int32(0), "the idle timer did not retry the failed removals")
+	})
+}
+
+// A process that stopped without a clean exit, holding its token, is
+// restarted as a new store with the same identity. The new store cannot adopt
+// the token: its writes under the old fence fail after the bounded
+// acquisition wait. Its epoch change waits only for the token to expire, as
+// after any unclean exit, and records a takeover request meanwhile. After the
+// epoch change neither store can write under the old fence.
+func TestInterlockHoldRestartedStoreCannotAdoptItsPredecessorsToken(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	predecessor := holdingStore(t, raw, time.Hour, 5*time.Second)
+	ctx := t.Context()
+	require.NoError(t, predecessor.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil }))
+	predecessor.interlockMu.Lock()
+	predecessor.heldInterlock.timer.Stop() // the process stops here
+	predecessor.interlockMu.Unlock()
+	token := readEpochLease(t, raw, fence).Annotations[annotationMutationToken]
+	require.NotEmpty(t, token)
+
+	restarted := holdingStore(t, raw, time.Hour, 5*time.Second)
+	called := false
+	started := time.Now()
+	err := restarted.WithControllerEpochMutation(ctx, fence, func(context.Context) error { called = true; return nil })
+	require.ErrorIs(t, err, store.ErrControllerEpochMutationContention)
+	require.False(t, called, "the restarted store wrote under its predecessor's token")
+	require.Less(t, time.Since(started), 5*time.Second, "the restarted store waited past the bounded acquisition")
+	require.Equal(t, token, readEpochLease(t, raw, fence).Annotations[annotationMutationToken])
+
+	restart := store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch, NewEpoch: fence.Epoch + 1,
+		HolderID: fence.HolderID, RequestDigest: testDigest("restart"), UpdatedAt: time.Now().UTC()}
+	_, err = restarted.CompareAndSwapControllerEpoch(ctx, restart)
+	require.ErrorIs(t, err, store.ErrConflict, "the epoch changed past the predecessor's unexpired token")
+	require.NoError(t, raw.Get(ctx, client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}, &coordinationv1.Lease{}),
+		"the waiting restart did not record its takeover request")
+	expireMutationToken(t, raw, fence)
+	advanced, err := restarted.CompareAndSwapControllerEpoch(ctx, restart)
+	require.NoError(t, err)
+	newFence := store.ControllerEpochFence{Name: advanced.Name, Epoch: advanced.Epoch, HolderID: advanced.HolderID}
+	require.NoError(t, restarted.WithControllerEpochMutation(ctx, newFence, func(context.Context) error { return nil }))
+	for _, writer := range []*Store{predecessor, restarted} {
+		called = false
+		err = writer.WithControllerEpochMutation(ctx, fence, func(context.Context) error { called = true; return nil })
+		require.ErrorIs(t, err, store.ErrConflict)
+		require.False(t, called, "a write ran under the old fence after the restart's epoch change")
+	}
+	require.NoError(t, restarted.ReleaseHeldControllerEpochInterlock(ctx))
 }

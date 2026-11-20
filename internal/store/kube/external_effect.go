@@ -57,7 +57,7 @@ func (s *Store) ReserveExternalEffect(ctx context.Context, request store.Reserve
 			return nil, store.ValidationErrorf("external effect Task UID must be a valid discovery label")
 		}
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func (s *Store) TransitionExternalEffect(ctx context.Context, transition store.E
 	if err := store.ValidateControlIdentifier("external effect ID", transition.ID); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, transition.Fence)
 	if err != nil {
 		return nil, err
 	}

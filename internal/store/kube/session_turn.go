@@ -24,7 +24,7 @@ func (s *Store) CreateSessionTurn(ctx context.Context, request store.CreateSessi
 	if request.ExpectedSessionVersion < 1 {
 		return nil, store.ValidationErrorf("expected session version must be at least 1")
 	}
-	_, snapshot, err := s.requireControllerEpoch(ctx, fence)
+	ctx, _, snapshot, err := s.requireControllerEpoch(ctx, fence)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	if err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, normalized.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,7 @@ func (s *Store) ResumeSessionTurnFinalization(ctx context.Context, request store
 	if err := store.ValidateCanonicalDigest("session turn finalization digest", request.FinalizationDigest); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}

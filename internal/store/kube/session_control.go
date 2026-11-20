@@ -51,7 +51,7 @@ func (s *Store) CreateSessionControl(ctx context.Context, control *store.Session
 	if err != nil {
 		return nil, err
 	}
-	_, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
+	ctx, _, snapshot, err := s.requireControllerEpoch(ctx, normalizedFence)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +151,7 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 	if err := normalizeAcquireSessionMutationLeaseRequest(&request); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +240,7 @@ func (s *Store) CommitSessionRuntimeGeneration(ctx context.Context, request stor
 	if request.Key.SessionUID != request.SessionUID || request.ExpectedSessionVersion < 1 || request.Generation < 1 {
 		return nil, store.ValidationErrorf("Session RuntimeSession generation commit fence is invalid")
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +296,7 @@ func (s *Store) ReleaseSessionMutationLease(ctx context.Context, request store.R
 	if err := normalizeReleaseSessionMutationLeaseRequest(&request); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +375,7 @@ func (s *Store) ReconcileSessionControl(ctx context.Context, request store.Recon
 	if err := normalizeReconcileSessionControlRequest(&request); err != nil {
 		return nil, err
 	}
-	fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
+	ctx, fence, snapshot, err := s.requireControllerEpoch(ctx, request.Fence)
 	if err != nil {
 		return nil, err
 	}
