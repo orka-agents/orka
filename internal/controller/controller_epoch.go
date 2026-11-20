@@ -177,7 +177,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 // takeoverIntentPublisher is a control store whose token holder stops writing
 // new interlock tokens once a successor asks (ADR 0058).
 type takeoverIntentPublisher interface {
-	PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string)
+	PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string, expectedEpoch int64)
 }
 
 // publishTakeoverIntent asks the current token holder to let this manager
@@ -186,7 +186,9 @@ type takeoverIntentPublisher interface {
 // request from being made.
 func (m *ControllerEpochManager) publishTakeoverIntent(ctx context.Context) {
 	if publisher, ok := m.Store.(takeoverIntentPublisher); ok {
-		publisher.PublishControllerEpochTakeoverIntent(ctx, m.Name, m.HolderID)
+		// Zero: whatever epoch is current, unless this manager already holds
+		// it, as after a change that committed with an ambiguous result.
+		publisher.PublishControllerEpochTakeoverIntent(ctx, m.Name, m.HolderID, 0)
 	}
 }
 

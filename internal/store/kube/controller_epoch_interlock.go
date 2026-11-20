@@ -409,14 +409,20 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 // replace the current epoch of name, learned from a single read of the epoch
 // Lease. That read cannot conflict, so the request is published even while
 // a busy holder's token changes the Lease between any two reads, as the
-// mirror checks of an epoch read or change do (ADR 0058). It is best effort
-// and does nothing when the epoch does not exist yet.
-func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string) {
+// mirror checks of an epoch read or change do (ADR 0058).
+//
+// A positive expectedEpoch is the epoch the caller's change replaces: the
+// request is published only while the Lease still carries it, so a stale
+// change that has already lost cannot hold off the epoch that won. Nothing is
+// published against an epoch holder already holds, or before the epoch
+// exists. It is best effort.
+func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string, expectedEpoch int64) {
 	if s == nil || s.client == nil {
 		return
 	}
+	holder = strings.TrimSpace(holder)
 	normalized, err := store.NormalizeControllerEpochName(name)
-	if err != nil || strings.TrimSpace(holder) == "" {
+	if err != nil || holder == "" {
 		return
 	}
 	lease := &coordinationv1.Lease{}
@@ -425,10 +431,11 @@ func (s *Store) PublishControllerEpochTakeoverIntent(ctx context.Context, name, 
 		return
 	}
 	epoch, err := parsePositiveInt64("controller epoch", lease.Annotations[annotationControllerEpoch])
-	if err != nil {
+	if err != nil || (expectedEpoch > 0 && epoch != expectedEpoch) ||
+		(lease.Spec.HolderIdentity != nil && strings.TrimSpace(*lease.Spec.HolderIdentity) == holder) {
 		return
 	}
-	s.requestControllerEpochTakeover(ctx, normalized, epoch, strings.TrimSpace(holder))
+	s.requestControllerEpochTakeover(ctx, normalized, epoch, holder)
 }
 
 // clearControllerEpochTakeover deletes holder's takeover request once its

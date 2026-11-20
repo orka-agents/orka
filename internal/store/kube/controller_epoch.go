@@ -153,7 +153,9 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	// Ask the token holder to stop writing new tokens before any read below
 	// that a token rollover can make conflict, so asking never depends on
 	// winning this attempt (ADR 0058).
-	s.PublishControllerEpochTakeoverIntent(ctx, change.Name, change.HolderID)
+	if change.ExpectedEpoch > 0 {
+		s.PublishControllerEpochTakeoverIntent(ctx, change.Name, change.HolderID, change.ExpectedEpoch)
+	}
 
 	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochLeaseName(change.Name)}
 	lease := &coordinationv1.Lease{}

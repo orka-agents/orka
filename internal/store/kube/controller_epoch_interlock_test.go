@@ -843,3 +843,33 @@ func TestTakeoverIsRequestedEvenWhenEveryReadPairConflicts(t *testing.T) {
 	t.Logf("successor changed the epoch %s after it started, across %d forced rollovers", time.Since(started).Round(time.Millisecond), rolls.Load())
 	require.ErrorIs(t, holder.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }), store.ErrConflict)
 }
+
+// A stale epoch change that has already lost, replacing an epoch another
+// holder has replaced since, publishes no takeover request against the
+// winner, so its retries cannot hold off the winner's writes. Nobody
+// publishes against an epoch it already holds.
+func TestStaleEpochChangeCannotHoldOffItsWinner(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	ctx := t.Context()
+	winner := holdingStore(t, raw, time.Hour, 5*time.Second)
+	won, err := winner.CompareAndSwapControllerEpoch(ctx, store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch,
+		NewEpoch: fence.Epoch + 1, HolderID: "winner", RequestDigest: testDigest("winner"), UpdatedAt: time.Now().UTC()})
+	require.NoError(t, err)
+	winnerFence := store.ControllerEpochFence{Name: won.Name, Epoch: won.Epoch, HolderID: won.HolderID}
+	requestKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}
+
+	stale := holdingStore(t, raw, time.Hour, 5*time.Second)
+	for range 3 {
+		_, err = stale.CompareAndSwapControllerEpoch(ctx, store.ControllerEpochCAS{ExpectedVersion: fence.Epoch, ExpectedEpoch: fence.Epoch,
+			NewEpoch: fence.Epoch + 1, HolderID: "stale", RequestDigest: testDigest("stale"), UpdatedAt: time.Now().UTC()})
+		require.ErrorIs(t, err, store.ErrConflict)
+	}
+	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "the stale change published a request against the winner")
+	started := time.Now()
+	require.NoError(t, winner.WithControllerEpochMutation(ctx, winnerFence, func(context.Context) error { return nil }))
+	require.Less(t, time.Since(started), time.Second, "the stale change held off the winner's write")
+
+	winner.PublishControllerEpochTakeoverIntent(ctx, fence.Name, "winner", 0)
+	require.True(t, apierrors.IsNotFound(raw.Get(ctx, requestKey, &coordinationv1.Lease{})), "the winner published a request against its own epoch")
+	require.NoError(t, winner.ReleaseHeldControllerEpochInterlock(ctx))
+}
