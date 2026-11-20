@@ -72,13 +72,6 @@ rules:
   verbs:
   - create
 - apiGroups:
-  - admissionregistration.k8s.io
-  resources:
-  - validatingadmissionpolicies
-  - validatingadmissionpolicybindings
-  verbs:
-  - get
-- apiGroups:
   - apiextensions.k8s.io
   resourceNames:
   - gatewaybindings.gateway.orka.ai

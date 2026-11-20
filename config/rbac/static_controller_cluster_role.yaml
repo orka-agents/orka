@@ -39,6 +39,18 @@ rules:
   - executionworkspaces
   verbs:
   - list
+# With --container-task-secret-use-authorization-enabled, the controller
+# confirms the container Task Secret use policy and its binding exist before
+# it delivers a Secret to a container Task.
+- apiGroups:
+  - admissionregistration.k8s.io
+  resourceNames:
+  - container-task-secret-use.orka.ai
+  resources:
+  - validatingadmissionpolicies
+  - validatingadmissionpolicybindings
+  verbs:
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

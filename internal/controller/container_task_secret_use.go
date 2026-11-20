@@ -26,8 +26,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingadmissionpolicies;validatingadmissionpolicybindings,verbs=get
-
 // DefaultContainerTaskSecretUsePolicyName names the ValidatingAdmissionPolicy,
 // and its binding, that requires the `use` verb on every Secret a container
 // Task names (config/container-task-secret-use-policy).
