@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // A GitHubApp reference freezes the App Secret as a token reference freezes
@@ -26,9 +27,15 @@ func TestPromptCredentialBindingsFreezeGitHubAppSecret(t *testing.T) {
 		Workspace: &corev1alpha1.WorkspaceConfig{ReadCredentialRef: ref, PublicationCredentialRef: ref},
 	}}
 	bindings, versions, err := resolvePromptCredentialBindings(context.Background(), reader, task)
-	if err != nil || len(bindings) != 2 || versions.SourceRead == "" || versions.SourceRead != versions.TargetWrite ||
-		bindings[0].SecretKey != "privateKey" || bindings[0].SecretUID != "app-secret-uid" {
+	if err != nil || len(bindings) != 2 || versions.SourceRead == "" || versions.SourceRead != versions.TargetWrite {
 		t.Fatalf("bindings = %#v, versions = %#v, err = %v", bindings, versions, err)
+	}
+	for i, role := range []store.PromptCredentialRole{store.PromptCredentialSourceRead, store.PromptCredentialTargetWrite} {
+		want := store.PromptCredentialBinding{Role: role, Namespace: "default", SecretName: "publisher-app", SecretKey: "privateKey",
+			SecretUID: "app-secret-uid", ResourceVersion: versions.SourceRead}
+		if bindings[i] != want {
+			t.Fatalf("binding %d = %#v, want %#v", i, bindings[i], want)
+		}
 	}
 	dispatcher := &ACPDispatcher{Client: reader}
 	if version, err := dispatcher.workspaceCredentialResourceVersion(context.Background(), task, ref); err != nil || version != versions.SourceRead {

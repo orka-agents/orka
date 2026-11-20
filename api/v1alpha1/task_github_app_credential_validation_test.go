@@ -50,9 +50,10 @@ func TestTaskGitHubAppCredentialsOnlyOnAgentTasks(t *testing.T) {
 		"container with Token and untyped refs": {spec: map[string]any{"type": "container", "workspace": map[string]any{
 			"readCredentialRef": map[string]any{}, "publicationCredentialRef": token,
 		}}},
-		"container with App read":        {spec: map[string]any{"type": "container", "workspace": map[string]any{"readCredentialRef": app}}, wantErr: true},
-		"container with App publication": {spec: map[string]any{"type": "container", "workspace": map[string]any{"publicationCredentialRef": app}}, wantErr: true},
-		"ai with App forge":              {spec: map[string]any{"type": "ai", "workspace": map[string]any{"forgeCredentialRef": app}}, wantErr: true},
+		"container with App read":             {spec: map[string]any{"type": "container", "workspace": map[string]any{"readCredentialRef": app}}, wantErr: true},
+		"container with App publication read": {spec: map[string]any{"type": "container", "workspace": map[string]any{"publicationReadCredentialRef": app}}, wantErr: true},
+		"container with App publication":      {spec: map[string]any{"type": "container", "workspace": map[string]any{"publicationCredentialRef": app}}, wantErr: true},
+		"ai with App forge":                   {spec: map[string]any{"type": "ai", "workspace": map[string]any{"forgeCredentialRef": app}}, wantErr: true},
 	} {
 		errs, _ := validator.Validate(context.Background(), nil, structural, tc.spec, nil, celconfig.RuntimeCELCostBudget)
 		if tc.wantErr != (len(errs) != 0) {
