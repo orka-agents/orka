@@ -70,10 +70,15 @@ var (
 )
 
 const (
-	runtimePoolFinalizer          = "orka.ai/runtime-pool-cleanup"
-	runtimePoolRequeue            = 10 * time.Second
-	runtimePoolProbeTimeout       = 10 * time.Second
-	runtimePoolPort         int32 = 8080
+	runtimePoolFinalizer    = "orka.ai/runtime-pool-cleanup"
+	runtimePoolRequeue      = 10 * time.Second
+	runtimePoolProbeTimeout = 10 * time.Second
+	// runtimePoolBootingRequeue re-probes a supervisor that answered while
+	// still booting. Booting is a short in-process phase that writes no
+	// Kubernetes object the pool watches, so waiting the general requeue
+	// would add up to that whole interval to its admission.
+	runtimePoolBootingRequeue       = time.Second
+	runtimePoolPort           int32 = 8080
 
 	runtimePoolManagedByLabel                     = "app.kubernetes.io/managed-by"
 	runtimePoolManagedByLabelValue                = "orka"
@@ -1225,7 +1230,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		return r.finishEnrolledRuntimePoolServing(ctx, pool, status, boot)
 	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	requeue := runtimePoolRequeue
+	if probe.Status.Lifecycle == harnessv2.SupervisorLifecycleBooting && !probe.Status.Drain.Requested {
+		requeue = runtimePoolBootingRequeue
+	}
+	return r.finishRuntimePoolStatus(ctx, pool, status, requeue)
 }
 
 func (r *RuntimePoolReconciler) reconcileRuntimePoolInPlaceSupervisorRestart(
