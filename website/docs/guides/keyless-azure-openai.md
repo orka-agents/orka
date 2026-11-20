@@ -40,6 +40,21 @@ Keyless Providers serve chat, the compatibility APIs, and
   `az aks show -g <group> -n <cluster> --query oidcIssuerProfile.issuerUrl -o tsv`.
 - An Azure OpenAI (or Azure AI Foundry) resource with a model deployment, and
   permission to assign roles on it.
+- Orka installed with Helm in the namespace `team-a`. A release reconciles
+  only its own namespace, so the Provider and Tasks below live there too.
+- No privileged or `hostPath` Pod able to run on the controller's node, since
+  one could read the controller's projected token from it: enforce at least
+  the `baseline` Pod Security profile on `team-a`
+  (`kubectl label ns team-a pod-security.kubernetes.io/enforce=baseline`;
+  run it with `--dry-run=server` first, which lists running Pods that break
+  the profile, and delete them), and on every other namespace whose Pods can
+  be scheduled onto that node, or run the controller on dedicated nodes
+  ([Security](../concepts/security.md#agent-identities)).
+- No Pod running as the controller ServiceAccount except the controller
+  Deployment's own, and no ServiceAccount token Secret for it. Delete any
+  before you configure the identity, since they could obtain a token the
+  federated credential trusts. The chart's admission policy keeps new ones
+  from being created.
 
 ## Create the identity
 
@@ -50,7 +65,7 @@ federated identity credential works the same way.
 RG=<resource group>
 ISSUER=<cluster OIDC issuer URL>
 # The controller ServiceAccount, whose name the chart derives from the release
-ORKA_SA=system:serviceaccount:orka-system:$(kubectl -n orka-system get deploy \
+ORKA_SA=system:serviceaccount:team-a:$(kubectl -n team-a get deploy \
   -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}')
 MODELS=$(az cognitiveservices account show -g "$RG" -n <resource> --query id -o tsv)
 

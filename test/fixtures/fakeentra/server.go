@@ -260,8 +260,9 @@ func (s *Server) modelCall(r *http.Request, stream bool) ModelCall {
 		Authorized: ok && bearer && s.cfg.ModelResource != "" && grant.resource == s.cfg.ModelResource &&
 			slices.Contains(s.cfg.Workloads, grant.identity),
 		Identity: grant.identity,
-		APIKey:   r.Header.Get("Api-Key") != "",
-		Stream:   stream,
+		// Any api-key header counts, even an empty first value.
+		APIKey: len(r.Header.Values("Api-Key")) > 0,
+		Stream: stream,
 	}
 	s.state.Models = append(s.state.Models, call)
 	return call

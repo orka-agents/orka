@@ -114,9 +114,10 @@ func TestFakeEntraServesAzureOpenAIToItsWorkloadIdentityOnly(t *testing.T) {
 		t.Fatal("a workload token was issued for the wrong federated credential")
 	}
 	for name, header := range map[string]http.Header{
-		"no token":          {},
-		"unknown token":     {"Authorization": {"Bearer fx-entra-workload-forged"}},
-		"token and api key": {"Authorization": {"Bearer " + token}, "Api-Key": {"key"}},
+		"no token":                   {},
+		"unknown token":              {"Authorization": {"Bearer fx-entra-workload-forged"}},
+		"token and api key":          {"Authorization": {"Bearer " + token}, "Api-Key": {"key"}},
+		"token and a second api key": {"Authorization": {"Bearer " + token}, "Api-Key": {"", "key"}},
 	} {
 		if status, _ := callModel(t, server, chat, `{"messages":[]}`, header); status != http.StatusUnauthorized {
 			t.Fatalf("%s: status = %d, want 401", name, status)
@@ -124,7 +125,7 @@ func TestFakeEntraServesAzureOpenAIToItsWorkloadIdentityOnly(t *testing.T) {
 	}
 
 	got := state(t, server)
-	if len(got.Models) != 6 || !got.Models[0].Authorized || got.Models[0].Identity != workload ||
+	if len(got.Models) != 7 || !got.Models[0].Authorized || got.Models[0].Identity != workload ||
 		!got.Models[1].Stream {
 		t.Fatalf("model calls = %+v", got.Models)
 	}
