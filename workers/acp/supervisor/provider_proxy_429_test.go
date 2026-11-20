@@ -1,12 +1,18 @@
 package supervisor
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/orka-agents/orka/internal/providerproxy"
 )
 
 func TestProviderProxy429Scope(t *testing.T) {
@@ -86,5 +92,95 @@ func TestProviderProxy429CannotOutliveLease(t *testing.T) {
 	time.Sleep(time.Until(now.Add(2250 * time.Millisecond)))
 	if sends.Load() != 1 {
 		t.Errorf("short lease: upstream sends=%d, want 1", sends.Load())
+	}
+}
+
+type codexTimedReader struct {
+	io.Reader
+	context.Context
+	readyAt time.Time
+}
+
+func (r codexTimedReader) Read(buf []byte) (int, error) {
+	select {
+	case <-r.Done():
+		return 0, r.Err()
+	case <-time.After(time.Until(r.readyAt)):
+		return r.Reader.Read(buf)
+	}
+}
+
+func TestProviderProxy429RetryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		qualify        bool
+		firstHeaders   time.Duration
+		retryHeaders   time.Duration
+		bodyAt         time.Duration
+		closeAdmission string
+		wantStatus     int
+		wantSends      int
+		wantBody       string
+	}{
+		{name: "unqualified late 429 keeps error body", firstHeaders: 31 * time.Second, bodyAt: 32 * time.Second, wantStatus: 429, wantSends: 1, wantBody: "rate limited"},
+		{name: "qualified late 429 truncates only body", qualify: true, firstHeaders: 31 * time.Second, bodyAt: 32 * time.Second, wantStatus: 429, wantSends: 1},
+		{name: "accepted retry streams beyond budget", qualify: true, retryHeaders: 29 * time.Second, bodyAt: 31 * time.Second, wantStatus: 200, wantSends: 2, wantBody: "accepted"},
+		{name: "late retry headers never relay partial success", qualify: true, retryHeaders: 31 * time.Second, bodyAt: 32 * time.Second, wantStatus: 502, wantSends: 2},
+		{name: "close stops buffered retry", qualify: true, closeAdmission: "before flush", wantStatus: 429, wantSends: 1, wantBody: "rate limited"},
+		{name: "accepted retry can drain", qualify: true, closeAdmission: "after headers", bodyAt: time.Second, wantStatus: 200, wantSends: 2, wantBody: "accepted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const routeID = "12345678901234567890123456789012"
+				gate, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				start := time.Now()
+				session := &providerProxySession{
+					activePromptID: "test-prompt", turnPromptID: "test-prompt", gateContext: gate,
+					leaseExpiresAt: start.Add(time.Minute), admissionDone: make(chan struct{}),
+				}
+				var sends int
+				session.proxy = &providerProxy{providerKind: providerKindCodex, codex429RouteID: routeID, maxResponseBytes: 1024,
+					client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						if sends > 0 && tc.closeAdmission == "before flush" {
+							if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && trace.WroteRequest != nil {
+								trace.WroteRequest(httptrace.WroteRequestInfo{})
+							}
+							session.closeAdmission("test-prompt")
+							if err := req.Context().Err(); err != nil {
+								return nil, err
+							}
+						}
+						sends++
+						status, wait, text := http.StatusTooManyRequests, tc.firstHeaders, "rate limited"
+						if sends > 1 {
+							status, wait, text = http.StatusOK, tc.retryHeaders, "accepted"
+							if tc.closeAdmission == "after headers" {
+								time.AfterFunc(500*time.Millisecond, func() { session.closeAdmission("test-prompt") })
+							}
+						}
+						time.Sleep(time.Until(start.Add(wait)))
+						header := make(http.Header)
+						header.Set("Retry-After", "0")
+						header.Set(providerproxy.Codex429RouteHeader, req.Header.Get(providerproxy.Codex429RouteHeader))
+						return &http.Response{StatusCode: status, Header: header,
+							Body: io.NopCloser(codexTimedReader{strings.NewReader(text), req.Context(), start.Add(tc.bodyAt)})}, nil
+					})},
+				}
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://gateway.example/v1/responses", strings.NewReader("{}"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.qualify {
+					req.Header.Set(providerproxy.Codex429RouteHeader, providerproxy.NewCodex429Challenge(routeID))
+				}
+				out := httptest.NewRecorder()
+				session.forwardProviderRequest(out, req, providerOpenAIResponsesV1Path, []byte("{}"), providerRequestInference,
+					providerProxyAuthorization{promptID: "test-prompt", gateContext: gate, inferenceSeq: 1}, func(error) {})
+				if out.Code != tc.wantStatus || sends != tc.wantSends || tc.wantStatus != 502 && out.Body.String() != tc.wantBody {
+					t.Errorf("HTTP %d, %d sends, body %q; want HTTP %d, %d sends, body %q", out.Code, sends, out.Body.String(), tc.wantStatus, tc.wantSends, tc.wantBody)
+				}
+			})
+		})
 	}
 }

@@ -121,23 +121,7 @@ func runQualificationWireExchange(t *testing.T, cfg proxyConfig, path, body, cha
 		_, _ = io.WriteString(w, `{"error":{"message":"fixture evidence"}}`)
 	}))
 	defer backend.Close()
-	proxy, err := newProviderAuthProxy(cfg, []byte(testSharedProviderToken))
-	if err != nil {
-		t.Fatal(err)
-	}
-	actual, err := url.Parse(cfg.UpstreamBaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr := proxy.client.Transport.(*http.Transport).Clone()
-	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if addr != actual.Host {
-			t.Errorf("unexpected dial destination %q", addr)
-		}
-		return (&net.Dialer{}).DialContext(ctx, network, backend.Listener.Addr().String())
-	}
-	proxy.client.Transport = tr
-	defer tr.CloseIdleConnections()
+	proxy := newQualificationProxy(t, cfg, backend.Listener.Addr().String())
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(authorizationHeader, "Bearer "+testSharedProviderToken)
@@ -169,4 +153,26 @@ func runQualificationWireExchange(t *testing.T, cfg proxyConfig, path, body, cha
 	if (wantProof && (len(proofs) != 1 || proofs[0] != challenge)) || (!wantProof && len(proofs) != 0) || resp.Header().Get(replayHeader) != "" {
 		t.Errorf("invalid returned route qualification: proof count=%d, want proof=%t", len(proofs), wantProof)
 	}
+}
+
+func newQualificationProxy(t *testing.T, cfg proxyConfig, backendAddr string) *providerAuthProxy {
+	t.Helper()
+	proxy, err := newProviderAuthProxy(cfg, []byte(testSharedProviderToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := url.Parse(cfg.UpstreamBaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := proxy.client.Transport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if addr != actual.Host {
+			t.Errorf("unexpected dial destination %q", addr)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, backendAddr)
+	}
+	proxy.client.Transport = transport
+	t.Cleanup(transport.CloseIdleConnections)
+	return proxy
 }

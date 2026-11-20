@@ -62,8 +62,16 @@ func TestProviderAuthProxyForwards429WithoutRetry(t *testing.T) {
 }
 
 func TestProviderAuthProxyDoesNotReplayAmbiguousPOST(t *testing.T) {
-	for _, key := range []string{"Idempotency-Key", "X-Idempotency-Key"} {
-		t.Run(key, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		qualified bool
+	}{
+		{"ordinary/idempotency", "Idempotency-Key", false},
+		{"ordinary/x-idempotency", "X-Idempotency-Key", false},
+		{"qualified/idempotency", "Idempotency-Key", true},
+		{"qualified/x-idempotency", "X-Idempotency-Key", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			var warmAddr atomic.Value
 			var reused atomic.Bool
 			var posts atomic.Int32
@@ -81,12 +89,19 @@ func TestProviderAuthProxyDoesNotReplayAmbiguousPOST(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer upstream.Close()
-			proxy := newTestProxy(t, upstream.URL, testSharedProviderToken)
+			cfg := proxyConfig{UpstreamBaseURL: upstream.URL}
+			if tc.qualified {
+				cfg = proxyConfig{UpstreamBaseURL: fixtureEgress, Codex429RetryBaseURL: fixtureEgress, Codex429RetryModel: fixtureModel}
+			}
+			proxy := newQualificationProxy(t, cfg, upstream.Listener.Addr().String())
 			send := func(method, path, body string) int {
 				r := httptest.NewRequest(method, path, strings.NewReader(body))
 				r.Header.Set(authorizationHeader, "Bearer "+testSharedProviderToken)
 				if method == http.MethodPost {
-					r.Header.Set(key, "fixture-request")
+					r.Header.Set(tc.key, "fixture-request")
+					if tc.qualified {
+						r.Header.Set(routeHeader, fixtureChallenge)
+					}
 				}
 				w := httptest.NewRecorder()
 				proxy.ServeHTTP(w, r)
@@ -95,7 +110,7 @@ func TestProviderAuthProxyDoesNotReplayAmbiguousPOST(t *testing.T) {
 			if status := send(http.MethodGet, "/v1/models", ""); status != http.StatusNoContent {
 				t.Fatalf("warm-up HTTP=%d", status)
 			}
-			status := send(http.MethodPost, "/v1/responses", `{"model":"test"}`)
+			status := send(http.MethodPost, "/v1/responses", fixturePost)
 			if !reused.Load() || posts.Load() != 1 || status != http.StatusBadGateway {
 				t.Fatalf("ambiguous POST: reused connection=%t, upstream sends=%d, HTTP=%d", reused.Load(), posts.Load(), status)
 			}

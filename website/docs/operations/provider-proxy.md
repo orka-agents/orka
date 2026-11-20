@@ -56,10 +56,11 @@ request succeeds through it before connecting Orka.
 proxy can resend a direct, streaming Codex inference POST to the exact `/v1/responses`
 endpoint if the auth proxy confirms **HTTP 429** from that route before
 anything is relayed to Codex. Unqualified requests still report the failure;
-they are not replayed. The original send counts toward a maximum
-of three. Once a 429 is observed, backoff, retry response headers, and reading
-the final HTTP error body share a 30-second budget from the first send. If a
-retry returns 503 and its body stalls, for example, the proxy keeps the 503
+they are not replayed or subject to the retry timeout. The original send
+counts toward a maximum of three. Once a qualified 429 is observed, backoff,
+retry response headers, and reading the final HTTP error body share a
+30-second budget from the first send. If a retry returns 503 and its body
+stalls, for example, the proxy keeps the 503
 and the bounded detail received so far; it does not send again. It allows up
 to one additional second to write the known error to Codex, even if the
 initial 429 headers arrived after the window. This does not extend upstream
@@ -73,8 +74,10 @@ deadline or active prompt lease returns the last 429 without retrying early.
 On exhaustion, the final status and sanitized provider detail still reach
 prompt failure accounting.
 
-Retries share the original inference turn. Cancelling during backoff stops
-the next send; it does not erase the 429 already received. If that rejection
+Retries share the original inference turn. Closing prompt admission stops
+backoff and cancels any retry still waiting for response headers. A response
+already being relayed can drain. This does not undo a POST the gateway already
+received or erase the 429 already observed. If that rejection
 settles the prompt before Codex acknowledges cancellation, the result is
 `Failed`, not `Cancelled`. A lost connection, a 503, or an error inside a
 200 stream is **not** a rejection that permits replay. Other routes (including

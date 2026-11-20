@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -205,7 +206,11 @@ func (s pinnedNativeSession) terminal(t *testing.T, result *httptest.ResponseRec
 
 func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, reply, previousReply string, intent harnessv2.WorkspaceIntent, model, effort string, fault pinnedInferenceFault) (harnessv2.NativeSessionSnapshot, []pinnedNativeRequest) {
 	t.Helper()
-	upstream, capturedRequests := newPinnedNativeUpstream(t, freshCredential, reply, intent, fault)
+	initialPosts := 1
+	if intent == harnessv2.WorkspaceIntentWrite {
+		initialPosts = 2
+	}
+	upstream, capturedRequests := newPinnedNativeUpstream(t, freshCredential, reply, intent, initialPosts, fault)
 	defer upstream.Close()
 	s := preparePinnedNativeSession(t, data, threadID, freshCredential, reply, intent, model, effort, upstream.URL)
 	server, cfg, create, prompt := s.server, s.cfg, s.create, s.prompt
@@ -305,7 +310,21 @@ type pinnedNativeRequest struct {
 	body []byte
 }
 
-func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent harnessv2.WorkspaceIntent, fault pinnedInferenceFault) (*httptest.Server, func() []pinnedNativeRequest) {
+var scriptedChallenge = regexp.MustCompile(`^[a-f0-9]{32}\.[a-f0-9]{32}$`)
+
+func validPinnedNativeAuthorization(h http.Header, credential string, wantRetry bool) bool {
+	auth, retry, challenge := h.Values("Authorization"), h.Values(testReplayHeader), h.Values(testRouteHeader)
+	if len(auth) != 1 {
+		return false
+	}
+	if !wantRetry {
+		return len(retry) == 0 && auth[0] == "Bearer "+credential
+	}
+	return len(retry) == 1 && retry[0] == "1" && len(challenge) == 1 &&
+		scriptedChallenge.MatchString(challenge[0]) && auth[0] == "Orka-Codex-429 "+credential
+}
+
+func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent harnessv2.WorkspaceIntent, initialPosts int, fault pinnedInferenceFault) (*httptest.Server, func() []pinnedNativeRequest) {
 	t.Helper()
 	var mu sync.Mutex
 	var providerRequests []pinnedNativeRequest
@@ -321,7 +340,8 @@ func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent
 			return
 		}
 		mu.Lock()
-		wrongCredential = wrongCredential || !validPinnedNativeAuthorization(r.Header, freshCredential, len(providerRequests) == 0)
+		wantRetry := len(providerRequests) >= initialPosts
+		wrongCredential = wrongCredential || !validPinnedNativeAuthorization(r.Header, freshCredential, wantRetry)
 		providerRequests = append(providerRequests, pinnedNativeRequest{time.Now(), bytes.Clone(body)})
 		requestNumber := len(providerRequests)
 		mu.Unlock()
@@ -369,7 +389,7 @@ func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent
 		credentialFailed := wrongCredential
 		mu.Unlock()
 		if credentialFailed || len(requests) == 0 {
-			t.Fatal("resumed provider did not use the newly supplied credential")
+			t.Fatal("resumed provider did not use the expected credential and authorization scheme")
 		}
 		return requests
 	}

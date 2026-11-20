@@ -4,18 +4,15 @@ package supervisor
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -97,7 +94,6 @@ func testPinnedCodexInferenceFailures(t *testing.T, data []byte, threadID string
 	t.Run("stalled_503_after_429", func(t *testing.T) {
 		testPinnedCodexStalledRetryError(t, data, threadID, http.StatusServiceUnavailable, 2)
 	})
-	t.Run("cancel_receives_end_turn_first", testCodexCancelReceivesEndTurnFirst)
 	const fixtureCredential = "only-for-local-rejection-fixture"
 	rateLimit := func(w http.ResponseWriter, header, value string) {
 		w.Header().Set(header, value)
@@ -160,7 +156,7 @@ func testPinnedCodexInferenceFailures(t *testing.T, data []byte, threadID string
 		}, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			upstream, captured := newPinnedNativeUpstream(t, fixtureCredential, "UNEXPECTED_RECOVERY", harnessv2.WorkspaceIntentRead, func(w http.ResponseWriter, n int) bool {
+			upstream, captured := newPinnedNativeUpstream(t, fixtureCredential, "UNEXPECTED_RECOVERY", harnessv2.WorkspaceIntentRead, 1, func(w http.ResponseWriter, n int) bool {
 				if tc.rejections != 0 && n > tc.rejections {
 					return false // Any unrequested replay would succeed.
 				}
@@ -215,7 +211,7 @@ func testPinnedCodexStalledRetryError(t *testing.T, data []byte, threadID string
 	const credential = "only-for-local-stall-fixture"
 	detail := "final " + http.StatusText(finalStatus)
 	first, release := make(chan struct{}), make(chan struct{})
-	upstream, captured := newPinnedNativeUpstream(t, credential, "UNEXPECTED_RECOVERY", harnessv2.WorkspaceIntentRead, func(w http.ResponseWriter, n int) bool {
+	upstream, captured := newPinnedNativeUpstream(t, credential, "UNEXPECTED_RECOVERY", harnessv2.WorkspaceIntentRead, 1, func(w http.ResponseWriter, n int) bool {
 		if n == 1 {
 			close(first)
 		}
@@ -260,75 +256,12 @@ func testPinnedCodexStalledRetryError(t *testing.T, data []byte, threadID string
 	}
 }
 
-// Keep the original ACP prompt outstanding so the cancel handler gets the
-// child's end_turn first. A 429 has already been returned to the caller.
-func testCodexCancelReceivesEndTurnFirst(t *testing.T) {
-	const path = "/v2/runtime-sessions/session-1/prompts/prompt-1"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Retry-After", "45")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, `{"error":{"message":"independent quota window"}}`)
-	}))
-	defer upstream.Close()
-	server, cfg, profile := newTestServerWithUpstream(t, "wait", upstream.URL, testUpstreamToken)
-	create := testCreateSessionRequest(t, cfg, profile)
-	if resp := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg); resp.Code != http.StatusCreated {
-		t.Fatalf("create HTTP=%d", resp.Code)
-	}
-	prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
-	server.mu.Lock()
-	state := server.sessions[create.RuntimeSessionID]
-	mutator := newBlockingPromptMutator()
-	mutator.cancelResult = acp.PromptResult{Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn, Accepted: true, SettledAt: time.Now().UTC()}
-	close(mutator.cancelRelease)
-	state.promptMutations = mutator
-	binding := ProviderProxyBinding{BaseURL: state.providerProxy.baseURL, Credential: string(state.providerProxy.credential)}
-	server.mu.Unlock()
-	original := serveMutationAsync(server.Handler(), mutationHTTPRequest(t, http.MethodPut, path, prompt, cfg))
-	awaitProviderCancellationPromptRunning(t, server, state)
-	provider := awaitProviderCancellationResponse(t, startProviderCancellationRequest(t, binding))
-	if provider.err != nil || provider.status != http.StatusTooManyRequests {
-		t.Fatalf("expected an independently observed 429, got HTTP=%d err=%v", provider.status, provider.err)
-	}
-	cancel := testLateCancellation(t, create.Metadata.Fence)
-	cancelling := serveMutationAsync(server.Handler(), mutationHTTPRequest(t, http.MethodPut, path+"/cancel", cancel, cfg))
-	awaitSignal(t, mutator.cancelEntered, "courtesy cancellation did not reach ACP")
-	var receipt *httptest.ResponseRecorder
-	select {
-	case receipt = <-cancelling:
-	case <-time.After(500 * time.Millisecond):
-		// An implementation may wait for the primary stream to settle instead.
-	}
-	ctx, stop := context.WithTimeout(t.Context(), 5*time.Second)
-	defer stop()
-	_, _ = state.runtime.CancelPrompt(ctx, string(prompt.Metadata.PromptID))
-	cancelWon := receipt != nil
-	if !cancelWon {
-		receipt = awaitRecorder(t, cancelling, "cancel did not settle")
-	}
-	var proof harnessv2.CancelPromptResponse
-	decodeResponse(t, receipt, &proof)
-	s := pinnedNativeSession{cfg: cfg, prompt: prompt}
-	event := s.terminal(t, awaitRecorder(t, original, "original prompt did not settle"))
-	if err := proof.Validate(); err != nil || !proof.SettlementProven || proof.Settlement.TerminalEvent != event.Type {
-		t.Fatalf("invalid cancellation proof: receipt=%s stream=%s err=%v", proof.Settlement.TerminalEvent, event.Type, err)
-	}
-	if !cancelWon && event.Cancelled != nil {
-		return // the real child acknowledged cancellation before proof
-	}
-	if f := event.Failed; f == nil || f.Code != providerUpstreamErrorCode || f.StopReason != harnessv2.ACPStopReasonRefusal ||
-		f.Retryable || !strings.Contains(f.Message, "HTTP 429") || !strings.Contains(f.Message, "independent quota window") {
-		t.Fatalf("ACP end_turn overrode an independent HTTP 429: cancelWon=%t receipt=%s stream=%s", cancelWon, proof.Settlement.TerminalEvent, event.Type)
-	}
-}
-
 func testPinnedCodexCancelAfterRejection(t *testing.T, data []byte, threadID string) {
 	const credential = "local-cancel-fixture"
 	const promptPath = "/v2/runtime-sessions/session-1/prompts/prompt-1"
 	rejected := make(chan struct{})
 	replayed := make(chan struct{}, 1)
-	upstream, captured := newPinnedNativeUpstream(t, credential, "UNEXPECTED_RECOVERY", harnessv2.WorkspaceIntentRead, func(w http.ResponseWriter, n int) bool {
+	upstream, captured := newPinnedNativeUpstream(t, credential, "UNEXPECTED_RECOVERY", harnessv2.WorkspaceIntentRead, 1, func(w http.ResponseWriter, n int) bool {
 		if n != 1 {
 			select {
 			case replayed <- struct{}{}:

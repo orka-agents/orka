@@ -164,13 +164,14 @@ type providerProxySession struct {
 	lastCodexRejectionSeq           uint64
 	lastUpstreamStatus              int
 	lastUpstreamDetail              string
-	// Closing admission wakes pending retries without cancelling an already
-	// dispatched request or a response still draining to the child.
-	admissionDone chan struct{} // nil once closed
-	inflight      int
-	drained       chan struct{}
-	closed        bool
-	requestSlots  chan struct{}
+	// Closing admission wakes pending retries without cancelling a response
+	// still draining to the child.
+	admissionDone       chan struct{} // nil once closed
+	pendingCodexRetries map[*codexRetryDispatch]struct{}
+	inflight            int
+	drained             chan struct{}
+	closed              bool
+	requestSlots        chan struct{}
 	// telemetry is the GenAI recorder of telemetryPromptID; chats holds its
 	// in-flight model calls by issuance sequence so accounted outcomes reach
 	// their chat spans. Both are nil when GenAI telemetry is disabled.
@@ -450,11 +451,21 @@ func (s *providerProxySession) renew(promptID string, expiresAt, now time.Time) 
 func (s *providerProxySession) closeAdmission(promptID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.activePromptID != strings.TrimSpace(promptID) || s.admissionDone == nil {
+	if s.activePromptID != strings.TrimSpace(promptID) {
 		return
 	}
-	close(s.admissionDone)
-	s.admissionDone = nil
+	s.closeAdmissionLocked()
+}
+
+func (s *providerProxySession) closeAdmissionLocked() {
+	if s.admissionDone != nil {
+		close(s.admissionDone)
+		s.admissionDone = nil
+	}
+	for dispatch := range s.pendingCodexRetries {
+		dispatch.cancel()
+	}
+	clear(s.pendingCodexRetries)
 }
 
 func (s *providerProxySession) deactivate(promptID string) {
@@ -495,6 +506,7 @@ func (s *providerProxySession) revokeLocked() {
 		s.gateCancel(nil)
 		s.gateCancel = nil
 	}
+	s.closeAdmissionLocked()
 	s.gateContext = nil
 	s.activePromptID = ""
 	s.leaseExpiresAt = time.Time{}
@@ -1126,41 +1138,38 @@ func (s *providerProxySession) forwardProviderRequest(
 	ctx := req.Context()
 	codexResponsesPost := s.proxy.providerKind == providerKindCodex && class == providerRequestInference &&
 		req.Method == http.MethodPost && req.URL.RawQuery == "" && (suffix == providerResponsesPath || suffix == providerOpenAIResponsesV1Path)
-	var retryDeadline time.Time
-	var cancel context.CancelFunc
+	var response *http.Response
+	var err error
 	if codexResponsesPost {
 		// A rewindable POST with a caller's (X-)Idempotency-Key can be
 		// retried by net/http on a reused connection without a response.
-		var requestCtx context.Context
-		requestCtx, cancel = context.WithCancel(ctx)
-		defer cancel()
-		req = req.WithContext(requestCtx)
 		req.GetBody = nil
-		retryDeadline = time.Now().Add(codexInferenceRetryWindow)
-	}
-	response, err := s.proxy.client.Do(req)
-	if codexResponsesPost && err == nil && response.StatusCode == http.StatusTooManyRequests {
-		defer s.retainUnrecoveredCodexRejection(auth)
-		// Arm the budget only after a rejection, but on the context that
-		// owns the original body too: that 429 may itself stall mid-body.
-		timer := time.AfterFunc(time.Until(retryDeadline), cancel)
-		defer timer.Stop()
-		response, err = s.retryRejectedCodexInference(req, body, response, auth.gateContext, retryDeadline)
-		if err == nil && response.StatusCode >= http.StatusBadRequest {
-			// A deadline can shorten the error body, never its HTTP status.
-			// Don't promise the child bytes the upstream may never provide.
-			response.Header.Del("Content-Length")
-			response.Body = codexRetryErrorBody{response.Body, req.Context()}
-			// Initial headers can arrive after the retry window. Give the
-			// child a bounded write to receive the known status even then;
-			// this never extends upstream reads or authorizes another send.
-			writer := http.NewResponseController(w)
-			writeBudget := max(0, time.Until(retryDeadline)) + codexErrorWriteGrace
-			_ = writer.SetWriteDeadline(time.Now().Add(writeBudget))
-			defer func() { _ = writer.SetWriteDeadline(time.Time{}) }()
-		} else {
-			timer.Stop() // don't cut off a newly established successful stream
+		deadline := time.Now().Add(codexInferenceRetryWindow)
+		var result *codexInferenceResponse
+		result, err = s.sendCodexInference(req, nil, time.Time{})
+		if err == nil && result.StatusCode == http.StatusTooManyRequests {
+			defer s.retainUnrecoveredCodexRejection(auth)
+			if s.confirmedCodexRejection(req, result.Response) {
+				result, err = s.retryRejectedCodexInference(req, body, result, auth.gateContext, deadline)
+				if err == nil && result.StatusCode >= http.StatusBadRequest {
+					timer := time.AfterFunc(time.Until(deadline), result.cancel)
+					defer timer.Stop()
+					// A deadline can shorten the error body, never its HTTP status.
+					result.Header.Del("Content-Length")
+					result.Body = codexRetryErrorBody{result.Body, result.ctx}
+					writer := http.NewResponseController(w)
+					writeBudget := max(0, time.Until(deadline)) + codexErrorWriteGrace
+					_ = writer.SetWriteDeadline(time.Now().Add(writeBudget))
+					defer func() { _ = writer.SetWriteDeadline(time.Time{}) }()
+				}
+			}
 		}
+		if err == nil {
+			defer result.cancel()
+			response = result.Response
+		}
+	} else {
+		response, err = s.proxy.client.Do(req)
 	}
 	if err != nil {
 		// Cancelling a transport before headers supplies no new upstream

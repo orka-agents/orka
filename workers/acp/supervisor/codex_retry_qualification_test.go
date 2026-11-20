@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,20 +74,6 @@ func newQualifiedNativeServer(t *testing.T, cfg Config) (*Server, error) {
 type scriptedQualificationWriter struct {
 	http.ResponseWriter
 	challenge string
-}
-
-var scriptedChallenge = regexp.MustCompile(`^[a-f0-9]{32}\.[a-f0-9]{32}$`)
-
-func validPinnedNativeAuthorization(h http.Header, credential string, first bool) bool {
-	auth, retry, challenge := h.Values("Authorization"), h.Values(testReplayHeader), h.Values(testRouteHeader)
-	if len(auth) != 1 {
-		return false
-	}
-	if len(retry) == 0 {
-		return auth[0] == "Bearer "+credential
-	}
-	return !first && len(retry) == 1 && retry[0] == "1" && len(challenge) == 1 &&
-		scriptedChallenge.MatchString(challenge[0]) && auth[0] == "Orka-Codex-429 "+credential
 }
 
 func (w scriptedQualificationWriter) WriteHeader(status int) {

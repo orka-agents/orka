@@ -44,17 +44,90 @@ func (b codexRetryErrorBody) Read(buf []byte) (int, error) {
 	return n, err
 }
 
+type codexInferenceResponse struct {
+	*http.Response
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+type codexRetryDispatch struct {
+	cancel context.CancelFunc
+}
+
+func (s *providerProxySession) beginCodexRetryDispatch(gate, ctx context.Context, deadline time.Time, dispatch *codexRetryDispatch) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.admissionDone == nil || s.gateContext != gate || ctx.Err() != nil || !now.Before(deadline) || !now.Before(s.leaseExpiresAt) {
+		return false
+	}
+	if s.pendingCodexRetries == nil {
+		s.pendingCodexRetries = make(map[*codexRetryDispatch]struct{})
+	}
+	s.pendingCodexRetries[dispatch] = struct{}{}
+	return true
+}
+
+func (s *providerProxySession) sendCodexInference(req *http.Request, gate context.Context, deadline time.Time) (*codexInferenceResponse, error) {
+	ctx, cancel := context.WithCancel(req.Context())
+	var timer *time.Timer
+	var dispatch *codexRetryDispatch
+	if gate != nil {
+		dispatch = &codexRetryDispatch{cancel: cancel}
+		timer = time.AfterFunc(time.Until(deadline), cancel)
+		if !s.beginCodexRetryDispatch(gate, ctx, deadline, dispatch) {
+			timer.Stop()
+			cancel()
+			return nil, nil
+		}
+	}
+	response, err := s.proxy.client.Do(req.WithContext(ctx))
+	if dispatch != nil {
+		inBudget := timer.Stop() && time.Now().Before(deadline)
+		s.mu.Lock()
+		_, admitted := s.pendingCodexRetries[dispatch]
+		delete(s.pendingCodexRetries, dispatch)
+		s.mu.Unlock()
+		if !admitted {
+			cancel()
+			if err == nil {
+				_ = response.Body.Close()
+			}
+			return nil, nil
+		}
+		if !inBudget {
+			cancel()
+			if err != nil {
+				return nil, context.DeadlineExceeded
+			}
+			if response.StatusCode < http.StatusBadRequest {
+				_ = response.Body.Close()
+				return nil, context.DeadlineExceeded
+			}
+		}
+	}
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return &codexInferenceResponse{Response: response, ctx: ctx, cancel: cancel}, nil
+}
+
+func (s *providerProxySession) confirmedCodexRejection(req *http.Request, response *http.Response) bool {
+	proof := providerproxy.Codex429Challenge(response.Header, s.proxy.codex429RouteID)
+	return proof != "" && proof == req.Header.Get(providerproxy.Codex429RouteHeader)
+}
+
 // The caller has admitted, normalized and charged one Codex Responses POST.
 // Keep its last 429 untouched until another send is authorized: on exhaustion
 // the normal relay retains the status, headers and bounded, sanitized detail.
-func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, body []byte, response *http.Response, gate context.Context, deadline time.Time) (*http.Response, error) {
+func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, body []byte, response *codexInferenceResponse, gate context.Context, deadline time.Time) (*codexInferenceResponse, error) {
 	ctx := req.Context()
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
 	for attempt := 1; attempt < codexInferenceMaxAttempts && response.StatusCode == http.StatusTooManyRequests; attempt++ {
-		proof := providerproxy.Codex429Challenge(response.Header, s.proxy.codex429RouteID)
-		if proof == "" || proof != req.Header.Get(providerproxy.Codex429RouteHeader) {
+		if !s.confirmedCodexRejection(req, response.Response) {
 			break // the first hop did not confirm the qualified route for this send
 		}
 		if providerproxy.HasDisallowedContentEncoding(response.Header) || response.ContentLength > s.proxy.maxResponseBytes {
@@ -78,21 +151,21 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 			return response, nil
 		case <-time.After(time.Until(due)):
 		}
-		now = time.Now()
-		if ctx.Err() != nil || !now.Before(deadline) || s.codexRetryAdmission(gate, now) == nil {
+		next := req.Clone(ctx)
+		next.Body = io.NopCloser(bytes.NewReader(body))
+		next.Header.Set(providerproxy.Codex429RouteHeader, providerproxy.NewCodex429Challenge(s.proxy.codex429RouteID))
+		next.Header.Set(providerproxy.Codex429RetryHeader, "1")
+		next.Header.Set(providerAuthorizationHeader, providerproxy.Codex429RetryAuthScheme+" "+string(s.proxy.upstreamToken))
+		retried, err := s.sendCodexInference(next, gate, deadline)
+		if retried == nil && err == nil {
 			break
 		}
+		response.cancel()
 		_ = response.Body.Close()
-		req = req.Clone(ctx)
-		req.Body = io.NopCloser(bytes.NewReader(body))
-		req.Header.Set(providerproxy.Codex429RouteHeader, providerproxy.NewCodex429Challenge(s.proxy.codex429RouteID))
-		req.Header.Set(providerproxy.Codex429RetryHeader, "1")
-		req.Header.Set(providerAuthorizationHeader, providerproxy.Codex429RetryAuthScheme+" "+string(s.proxy.upstreamToken))
-		var err error
-		response, err = s.proxy.client.Do(req)
 		if err != nil {
 			return nil, err // no status: delivery is ambiguous
 		}
+		req, response = next, retried
 	}
 	return response, nil
 }
@@ -128,7 +201,7 @@ func (s *providerProxySession) codexCancelFailure(ctx context.Context, promptID 
 	if drainErr != nil && s.inflightInference != 0 {
 		return &providerDrainTimeoutError{}
 	}
-	if s.lastSuccessSeq < s.lastCodexRejectionSeq && s.lastFailureSeq >= s.lastCodexRejectionSeq {
+	if s.lastCodexRejectionSeq > 0 && s.lastFailureSeq >= max(s.lastCodexRejectionSeq, s.lastSuccessSeq) {
 		return &providerUpstreamFailureError{Status: s.lastUpstreamStatus, Detail: s.lastUpstreamDetail}
 	}
 	return nil
