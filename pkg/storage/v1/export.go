@@ -449,7 +449,10 @@ func (r MigrationMarkerRequest) Validate() error {
 // A contract part holds at most one marker. While it is marked, every write
 // method of that contract part ([MethodWrite], with or without a
 // [WriteEnvelope]) returns [ErrDatasetMigrated]; reads, exports, the replay
-// of a committed operation and the other contract part are unaffected.
+// of a committed operation and the other contract part are unaffected. A
+// replay still checks a Task data fence carried in the context, so a replay
+// after the cleanup or Job revocation it guards returns
+// [ErrTaskDataCleanupChanged] or [ErrTaskJobRevoked].
 // AdvanceWriteWatermark, which every contract part serves, returns
 // ErrDatasetMigrated only once every contract part the provider serves is
 // marked. Writing or clearing a marker does not advance the write watermark.

@@ -1341,7 +1341,15 @@ capability, so it does not raise `ContractRevision`.
   names; other providers map their own layout to them. `sequence_heads` holds
   the last value each provider-assigned sequence issued, which can be higher
   than the largest value still stored after records were deleted, so an import
-  never issues a value a client may have seen. A test pins the families to
+  never issues a value a client may have seen. Two fields carry an order a
+  provider may keep implicitly, so a copy keeps it even when keys sort
+  differently. `security_scan_runs.admission_seq` is the order runs were
+  admitted in, which `ListScanRuns` and the newer-run guard of
+  `UpdateScanRun` follow; the embedded store keeps it as the rowid. An import
+  keeps that order, and a run admitted later is newer than every imported
+  run. `execution_events.session_seq` is the effective session sequence, so
+  an event stored before session sequences existed exports the sequence it
+  is listed under. A test pins the families to
   SQLite's layout: every table is a family with the same columns and primary
   key, or is excluded with a reason.
 - **What is not copied.** Operation receipts: writes are stopped and
@@ -1413,7 +1421,11 @@ capability, so it does not raise `ContractRevision`.
   (which matches `ErrNotReady`), with or without a write envelope; reads,
   exports, the replay of an operation that committed before the marker and
   the other contract part are unaffected, so a retry whose response was lost
-  still gets its committed outcome, and state can move while artifacts stay. `AdvanceWriteWatermark`, which both parts serve, is refused
+  still gets its committed outcome, and state can move while artifacts stay.
+  A marker does not block that replay, but a Task data fence carried in the
+  context is still checked first, so a replay after the cleanup or Job
+  revocation it guards returns `ErrTaskDataCleanupChanged` or
+  `ErrTaskJobRevoked`. `AdvanceWriteWatermark`, which both parts serve, is refused
   only once every part the provider serves is marked. Writing or clearing a
   marker does not advance the watermark. Only an explicit rollback clears a
   marker. `Describe` reports markers in `ProviderInfo.MigratedTo`, and the

@@ -32,6 +32,12 @@ var exportExcludedColumns = map[string]string{
 	"artifacts.write_seq":   "replacement order stamp; relative to the source's controller epochs, so an import stores zero",
 }
 
+// exportRowIDFields are family fields the embedded store keeps as a table's
+// implicit rowid rather than a column, each with the reason.
+var exportRowIDFields = map[string]string{
+	"security_scan_runs.admission_seq": "admission order; ListScanRuns and the newer-run guard of UpdateScanRun order by rowid",
+}
+
 // exportIntegerTimes are INTEGER columns that hold Unix nanoseconds, which
 // the export carries as times.
 var exportIntegerTimes = map[string]bool{
@@ -66,6 +72,7 @@ func TestExportFamiliesCoverEverySQLiteTable(t *testing.T) {
 		require.False(t, exported, "excluded table %s is not exported", table)
 	}
 	excludedColumns := map[string]bool{}
+	rowIDFields := map[string]bool{}
 	for _, schema := range storagev1.ExportSchemas() {
 		if schema.Name == "sequence_heads" {
 			continue
@@ -107,6 +114,18 @@ func TestExportFamiliesCoverEverySQLiteTable(t *testing.T) {
 		}
 		require.NoError(t, pragma.Err())
 		require.NoError(t, pragma.Close())
+		for field, reason := range exportRowIDFields {
+			table, name, _ := strings.Cut(field, ".")
+			if table != schema.Name {
+				continue
+			}
+			require.NotEmpty(t, reason)
+			_, err := s.db.ExecContext(t.Context(), `SELECT rowid FROM `+table+` LIMIT 0`)
+			require.NoError(t, err, "%s has a rowid", table)
+			require.NotContains(t, columns, name, "rowid field %s is not also a column", field)
+			columns[name] = column{kind: storagev1.ExportInt}
+			rowIDFields[field] = true
+		}
 		for i := 1; i <= len(keyOrder); i++ {
 			key = append(key, keyOrder[i])
 		}
@@ -127,6 +146,9 @@ func TestExportFamiliesCoverEverySQLiteTable(t *testing.T) {
 	}
 	for column := range exportExcludedColumns {
 		require.True(t, excludedColumns[column], "excluded column %s exists", column)
+	}
+	for field := range exportRowIDFields {
+		require.True(t, rowIDFields[field], "rowid field %s is a family field", field)
 	}
 	for table := range exportExcludedTables {
 		delete(tables, table)

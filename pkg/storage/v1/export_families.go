@@ -22,6 +22,21 @@ import "slices"
 // An import continues each sequence past both its head and the largest
 // imported value, so a value a client may have seen is never issued again.
 //
+// Two fields carry an order a provider may keep implicitly, so a copy keeps
+// it even when record keys sort differently:
+//
+//   - security_scan_runs.admission_seq is the order in which runs were
+//     admitted: positive and unique within a repository scan, higher for a
+//     later run. ListScanRuns lists newest first by it and UpdateScanRun
+//     refuses an active update to a run once a newer one was admitted. The embedded SQLite
+//     provider keeps it as the row's rowid rather than a column. An import
+//     keeps the relative order, and a run admitted after the import is newer
+//     than every imported run.
+//   - execution_events.session_seq is the event's effective session
+//     sequence. An event in a Session always exports a positive one; a
+//     provider that stored an event before it kept session sequences exports
+//     the sequence it lists that event under.
+//
 // These are not exported:
 //
 //   - Operation receipts. Writes are stopped before an export, so no
@@ -260,7 +275,7 @@ var exportSchemas = []ExportFamilySchema{
 		stringField("summary"), stringField("error_message"), optTime("started_at"), optTime("completed_at"),
 		stringField("repository_scan_uid"), intField("repository_scan_generation"), intField("cancellation_version"),
 		boolField("cancellation_pending"), stringField("scanner_policy_version"), stringField("policy_digest"),
-		stringField("idempotency_key"),
+		stringField("idempotency_key"), intField("admission_seq"),
 	),
 	stateFamily("security_findings",
 		key(stringField("id")), stringField("namespace"), stringField("repository_scan"), stringField("scan_run_id"),

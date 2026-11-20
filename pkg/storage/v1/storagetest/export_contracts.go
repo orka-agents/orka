@@ -202,6 +202,30 @@ func runStateExportImport(t *testing.T, newProvider StateFactory) {
 
 	runImportedWriteOrder(t, newProvider, resultOrder())
 
+	t.Run("an imported dataset keeps the admission order of scan runs", func(t *testing.T) {
+		source := newProvider(t)
+		ctx := t.Context()
+		// The IDs sort opposite to admission, so an import that ordered runs
+		// by key would reverse them. The older run is still active and the
+		// newer one finished, so only the admission order keeps the older
+		// run from updating as active.
+		require.NoError(t, source.CreateScanRun(ctx, workflowScanRun("run-z", "running")))
+		require.NoError(t, source.CreateScanRun(ctx, workflowScanRun("run-a", "succeeded")))
+		target := newProvider(t)
+		copyDataset(t, exporter(source), exporter(target))
+
+		listed, _, err := target.ListScanRuns(ctx, workflowNamespace, workflowScan, 10, "")
+		require.NoError(t, err)
+		require.Equal(t, []string{"run-a", "run-z"}, scanRunIDs(listed), "runs list newest first in their admission order")
+		require.ErrorIs(t, target.UpdateScanRun(ctx, workflowScanRun("run-z", "running")), storagev1.ErrConflict,
+			"an active run admitted before a newer one does not update as active")
+		require.NoError(t, target.UpdateScanRun(ctx, workflowScanRun("run-z", "failed")))
+		require.NoError(t, target.CreateScanRun(ctx, workflowScanRun("run-0", "succeeded")))
+		listed, _, err = target.ListScanRuns(ctx, workflowNamespace, workflowScan, 10, "")
+		require.NoError(t, err)
+		require.Equal(t, []string{"run-0", "run-a", "run-z"}, scanRunIDs(listed), "a run admitted after the import is newer than every imported run")
+	})
+
 	t.Run("an importing dataset refuses writes", func(t *testing.T) {
 		source := newProvider(t)
 		seedStateExport(t, source)

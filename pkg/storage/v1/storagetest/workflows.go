@@ -38,6 +38,14 @@ func workflowFinding(fingerprint, severity string) *storagev1.Finding {
 		Evidence: []storagev1.FindingEvidenceRef{{Kind: "code", Path: "api/handler.go", StartLine: 10, EndLine: 14, Role: "sink"}}}
 }
 
+func scanRunIDs(runs []storagev1.ScanRun) []string {
+	ids := make([]string, 0, len(runs))
+	for _, run := range runs {
+		ids = append(ids, run.ID)
+	}
+	return ids
+}
+
 func workflowFindingIDs(findings []storagev1.Finding) []string {
 	ids := make([]string, 0, len(findings))
 	for _, finding := range findings {
