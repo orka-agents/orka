@@ -1960,9 +1960,10 @@ func main() {
 			os.Exit(1)
 		}
 		jobBuilder.ContainerTaskSecretUse = controller.ContainerTaskSecretUsePolicy{
-			Enabled:    true,
-			PolicyName: containerTaskSecretUsePolicyName,
-			Reader:     mgr.GetAPIReader(),
+			Enabled:             true,
+			PolicyName:          containerTaskSecretUsePolicyName,
+			Reader:              mgr.GetAPIReader(),
+			ControllerNamespace: currentPodNamespace(),
 		}
 	}
 	if contextTokenTTSConfig.Enabled() {

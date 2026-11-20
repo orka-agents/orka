@@ -31,7 +31,12 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-const secretUseTestSecretValue = "s3cr3t-value-never-logged"
+const (
+	secretUseTestSecretValue = "s3cr3t-value-never-logged"
+	// secretUseControllerNS differs from the Tasks' namespace so the tests
+	// check the exempt ServiceAccount against the controller's namespace.
+	secretUseControllerNS = "orka-controller-ns"
+)
 
 func secretUseScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -53,6 +58,7 @@ func shippedSecretUsePolicy() (*admissionregistrationv1.ValidatingAdmissionPolic
 	if err != nil {
 		panic(err)
 	}
+	raw = []byte(strings.NewReplacer("ORKA_NAMESPACE", secretUseControllerNS, "CONTROLLER_SA", "orka-controller").Replace(string(raw)))
 	documents := strings.Split(string(raw), "\n---\n")
 	policy := &admissionregistrationv1.ValidatingAdmissionPolicy{}
 	binding := &admissionregistrationv1.ValidatingAdmissionPolicyBinding{}
@@ -85,7 +91,7 @@ func secretUseBuilder(t *testing.T, objects ...client.Object) *JobBuilder {
 	t.Setenv(directSecretMountsEnvVar, "false")
 	reader := fake.NewClientBuilder().WithScheme(secretUseScheme(t)).WithObjects(objects...).Build()
 	builder := setupJobBuilder()
-	builder.ContainerTaskSecretUse = ContainerTaskSecretUsePolicy{Enabled: true, Reader: reader}
+	builder.ContainerTaskSecretUse = ContainerTaskSecretUsePolicy{Enabled: true, Reader: reader, ControllerNamespace: secretUseControllerNS}
 	return builder
 }
 
@@ -439,6 +445,23 @@ func TestContainerTaskSecretUseRequiresThePolicyToCoverTheNamespace(t *testing.T
 		"a fail-open policy": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
 			p.Spec.FailurePolicy = &failOpen
 		},
+		"a policy that names no Secrets": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			p.Spec.Variables[0].Expression = "[]"
+		},
+		"a policy that checks only updates": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			p.Spec.MatchConditions = append(p.Spec.MatchConditions,
+				admissionregistrationv1.MatchCondition{Name: "updates", Expression: "request.operation == 'UPDATE'"})
+		},
+		"a cluster-only rule": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			cluster := admissionregistrationv1.ClusterScope
+			p.Spec.MatchConstraints.ResourceRules[0].Scope = &cluster
+		},
+		"an exempt ServiceAccount in another namespace": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			for i := range p.Spec.Variables {
+				p.Spec.Variables[i].Expression = strings.ReplaceAll(p.Spec.Variables[i].Expression,
+					"system:serviceaccount:"+secretUseControllerNS+":", "system:serviceaccount:elsewhere:")
+			}
+		},
 		"a policy that never checks use": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
 			p.Spec.Validations = []admissionregistrationv1.Validation{{Expression: "true"}}
 		},
@@ -473,4 +496,37 @@ func TestContainerTaskSecretUseScheduledRunWithCRDDefaults(t *testing.T) {
 	deadline := int64(100)
 	run.Spec.StartingDeadlineSeconds = &deadline
 	requireSecretDelivered(t, secretUseBuilder(t, append(secretUsePolicyObjects(), parent.DeepCopy())...), run)
+}
+
+func TestContainerTaskSecretUseAcceptsTheShippedPolicyAsTheAPIServerStoresIt(t *testing.T) {
+	objects := secretUsePolicyObjects()
+	policy := objects[0].(*admissionregistrationv1.ValidatingAdmissionPolicy)
+	// The API server fills in these defaults; they must not count as drift.
+	policy.Spec = normalizedPolicySpec(policy.Spec)
+	for i := range policy.Spec.Variables {
+		policy.Spec.Variables[i].Expression = strings.ReplaceAll(policy.Spec.Variables[i].Expression,
+			"system:serviceaccount:"+secretUseControllerNS+":orka-controller", "system:serviceaccount:"+secretUseControllerNS+":test-orka")
+	}
+	requireSecretDelivered(t, secretUseBuilder(t, objects...), secretUseContainerTask())
+}
+
+func TestEmbeddedSecretUsePolicyMatchesTheShippedOne(t *testing.T) {
+	shipped, err := os.ReadFile(filepath.Join("..", "..", "config", "container-task-secret-use-policy",
+		"container_task_secret_use_policy.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(shipped) != string(shippedContainerTaskSecretUsePolicy) {
+		t.Fatal("internal/controller/container_task_secret_use_policy.yaml must be a copy of " +
+			"config/container-task-secret-use-policy/container_task_secret_use_policy.yaml")
+	}
+}
+
+func TestLatestChangeWithoutManagedFieldsAfterASpecChange(t *testing.T) {
+	created := metav1.NewTime(time.Now().Add(-time.Hour))
+	reset := &metav1.ObjectMeta{UID: "reset-managed-fields", CreationTimestamp: created, Generation: 2}
+	before := time.Now()
+	if got := latestChange(reset); got.Before(before) {
+		t.Fatalf("latestChange() = %v, want no earlier than when it was first seen (%v)", got, before)
+	}
 }

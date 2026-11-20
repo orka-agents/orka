@@ -67,7 +67,8 @@ This binding matches every namespace. With more than one installation on a
 cluster, add a `matchResources.namespaceSelector` on
 `kubernetes.io/metadata.name` for this installation's watched namespace, as
 the Helm chart does. The controller delivers only while it can prove the
-policy checks every Task create and update in the Task's namespace: it must
-fail closed and check `use` on Secrets, and neither it nor the binding may use
-an object selector, an exclusion, parameters, or a namespace selector other
-than that name label.
+policy checks every Task create and update in the Task's namespace. The
+installed policy must be the one this release ships, apart from the
+controller ServiceAccount, which must be in the controller's namespace. The binding
+must not use an object selector, an exclusion, parameters, or a namespace
+selector other than that name label.

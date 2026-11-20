@@ -11,18 +11,24 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	_ "embed"
+
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -51,6 +57,10 @@ type ContainerTaskSecretUsePolicy struct {
 	PolicyName string
 	// Reader reads the policy, its binding, and scheduled parents uncached.
 	Reader client.Reader
+	// ControllerNamespace is the namespace of the controller's ServiceAccount,
+	// the one identity the policy exempts. Empty means the Task's namespace,
+	// which is the same in a standard installation.
+	ControllerNamespace string
 }
 
 func (p ContainerTaskSecretUsePolicy) policyName() string {
@@ -248,37 +258,28 @@ func (b *JobBuilder) checkContainerTaskSecretUseBinding(
 	if binding.Spec.PolicyName != name || !slices.Contains(binding.Spec.ValidationActions, admissionregistrationv1.Deny) {
 		return time.Time{}, fmt.Errorf("the container Task Secret use admission policy %q is not bound with Deny, so container Tasks cannot receive Secrets", name)
 	}
-	if reason := containerTaskSecretUseCoverageGap(policy, binding, namespace); reason != "" {
+	controllerNamespace := b.ContainerTaskSecretUse.ControllerNamespace
+	if controllerNamespace == "" {
+		controllerNamespace = namespace
+	}
+	if reason := containerTaskSecretUseCoverageGap(policy, binding, namespace, controllerNamespace); reason != "" {
 		return time.Time{}, fmt.Errorf("the container Task Secret use admission policy %q %s, so container Tasks cannot receive Secrets", name, reason)
 	}
 	return latestChange(&policy.ObjectMeta, &binding.ObjectMeta).Add(containerTaskSecretUsePropagation), nil
 }
 
 // containerTaskSecretUseCoverageGap returns why the policy and binding might
-// not check every Task write in namespace, or "". Anything it cannot prove
+// not check every Task write in namespace, or "". The policy must be the one
+// this release ships; anything about the binding the controller cannot prove
 // covers the namespace, such as an object selector, an exclusion, or a
 // namespace selector other than the namespace's own name, counts as a gap.
 func containerTaskSecretUseCoverageGap(
 	policy *admissionregistrationv1.ValidatingAdmissionPolicy,
 	binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding,
-	namespace string,
+	namespace, controllerNamespace string,
 ) string {
-	if policy.Spec.FailurePolicy != nil && *policy.Spec.FailurePolicy != admissionregistrationv1.Fail {
-		return "does not fail closed"
-	}
-	checksUse := false
-	for _, validation := range policy.Spec.Validations {
-		if strings.Contains(validation.Expression, "resource('secrets')") && strings.Contains(validation.Expression, "check('use')") {
-			checksUse = true
-		}
-	}
-	if !checksUse {
-		return "does not check use on Secrets"
-	}
-	constraints := policy.Spec.MatchConstraints
-	if constraints == nil || !selectorEmpty(constraints.NamespaceSelector) || !selectorEmpty(constraints.ObjectSelector) ||
-		len(constraints.ExcludeResourceRules) > 0 || !rulesCoverTaskWrites(constraints.ResourceRules) {
-		return "does not match every Task create and update"
+	if reason := containerTaskSecretUsePolicyDrift(policy, controllerNamespace); reason != "" {
+		return reason
 	}
 	if binding.Spec.ParamRef != nil {
 		return "is bound with parameters"
@@ -303,26 +304,6 @@ func selectorEmpty(selector *metav1.LabelSelector) bool {
 func selectorIsNamespace(selector *metav1.LabelSelector, namespace string) bool {
 	return len(selector.MatchExpressions) == 0 && len(selector.MatchLabels) == 1 &&
 		selector.MatchLabels[corev1.LabelMetadataName] == namespace
-}
-
-func rulesCoverTaskWrites(rules []admissionregistrationv1.NamedRuleWithOperations) bool {
-	covers := func(values []string, want string) bool {
-		return slices.Contains(values, want) || slices.Contains(values, "*")
-	}
-	for _, rule := range rules {
-		if len(rule.ResourceNames) > 0 || !covers(rule.APIGroups, corev1alpha1.GroupVersion.Group) ||
-			!covers(rule.APIVersions, corev1alpha1.GroupVersion.Version) || !covers(rule.Resources, "tasks") {
-			continue
-		}
-		operations := make([]string, 0, len(rule.Operations))
-		for _, operation := range rule.Operations {
-			operations = append(operations, string(operation))
-		}
-		if covers(operations, string(admissionregistrationv1.Create)) && covers(operations, string(admissionregistrationv1.Update)) {
-			return true
-		}
-	}
-	return false
 }
 
 // specChanges remembers, per object UID, the generation last seen and the
@@ -366,14 +347,98 @@ func generationSince(object *metav1.ObjectMeta) time.Time {
 	if seen, ok := specChanges.seen[object.UID]; ok && object.UID != "" && seen.generation == object.Generation {
 		return seen.since
 	}
-	since := object.CreationTimestamp.Time
-	for _, entry := range object.ManagedFields {
-		if entry.Time != nil && entry.Time.After(since) {
-			since = entry.Time.Time
-		}
+	// The latest managed-field update is no earlier than the spec change.
+	// Without one after creation the change time is unknown, so take now:
+	// the change happened no later than that.
+	since := latestManagedFieldTime(object)
+	if !since.After(object.CreationTimestamp.Time) {
+		since = time.Now()
 	}
 	if object.UID != "" {
 		specChanges.seen[object.UID] = specChange{generation: object.Generation, since: since}
 	}
 	return since
+}
+
+//go:embed container_task_secret_use_policy.yaml
+var shippedContainerTaskSecretUsePolicy []byte
+
+// controllerUsernameLiteral matches the one installation-specific value in
+// the shipped policy: the quoted username of the controller's ServiceAccount.
+var controllerUsernameLiteral = regexp.MustCompile(`'system:serviceaccount:([^':]+):[^']+'`)
+
+const controllerUsernamePlaceholder = "'system:serviceaccount:ORKA_NAMESPACE:CONTROLLER_SA'"
+
+var expectedSecretUsePolicySpec = sync.OnceValues(func() (admissionregistrationv1.ValidatingAdmissionPolicySpec, error) {
+	document, _, _ := strings.Cut(string(shippedContainerTaskSecretUsePolicy), "\n---\n")
+	policy := admissionregistrationv1.ValidatingAdmissionPolicy{}
+	if err := yaml.UnmarshalStrict([]byte(document), &policy); err != nil {
+		return admissionregistrationv1.ValidatingAdmissionPolicySpec{}, err
+	}
+	return normalizedPolicySpec(policy.Spec), nil
+})
+
+// containerTaskSecretUsePolicyDrift returns why an installed policy is not
+// the shipped one, or "". The only value an installation may change is the
+// controller's ServiceAccount, which must be in controllerNamespace. Fields the API
+// server defaults are compared after the same defaulting.
+func containerTaskSecretUsePolicyDrift(policy *admissionregistrationv1.ValidatingAdmissionPolicy, controllerNamespace string) string {
+	expected, err := expectedSecretUsePolicySpec()
+	if err != nil {
+		return "cannot be compared with the shipped policy"
+	}
+	installed := normalizedPolicySpec(*policy.Spec.DeepCopy())
+	usernames := 0
+	for i := range installed.Variables {
+		expression := installed.Variables[i].Expression
+		for _, match := range controllerUsernameLiteral.FindAllStringSubmatch(expression, -1) {
+			if match[1] != controllerNamespace {
+				return fmt.Sprintf("exempts a ServiceAccount outside the controller's namespace %q", controllerNamespace)
+			}
+			usernames++
+		}
+		installed.Variables[i].Expression = controllerUsernameLiteral.ReplaceAllString(expression, controllerUsernamePlaceholder)
+	}
+	if usernames != 1 || !equality.Semantic.DeepEqual(expected, installed) {
+		return "differs from the policy this release ships"
+	}
+	return ""
+}
+
+// normalizedPolicySpec applies the defaults the API server gives a policy.
+func normalizedPolicySpec(spec admissionregistrationv1.ValidatingAdmissionPolicySpec) admissionregistrationv1.ValidatingAdmissionPolicySpec {
+	if spec.FailurePolicy == nil {
+		spec.FailurePolicy = ptr.To(admissionregistrationv1.Fail)
+	}
+	if constraints := spec.MatchConstraints; constraints != nil {
+		if constraints.MatchPolicy == nil {
+			constraints.MatchPolicy = ptr.To(admissionregistrationv1.Equivalent)
+		}
+		if constraints.NamespaceSelector == nil {
+			constraints.NamespaceSelector = &metav1.LabelSelector{}
+		}
+		if constraints.ObjectSelector == nil {
+			constraints.ObjectSelector = &metav1.LabelSelector{}
+		}
+		for _, rules := range [][]admissionregistrationv1.NamedRuleWithOperations{
+			constraints.ResourceRules, constraints.ExcludeResourceRules,
+		} {
+			for i := range rules {
+				if rules[i].Scope == nil {
+					rules[i].Scope = ptr.To(admissionregistrationv1.AllScopes)
+				}
+			}
+		}
+	}
+	return spec
+}
+
+func latestManagedFieldTime(object *metav1.ObjectMeta) time.Time {
+	var latest time.Time
+	for _, entry := range object.ManagedFields {
+		if entry.Time != nil && entry.Time.After(latest) {
+			latest = entry.Time.Time
+		}
+	}
+	return latest
 }
