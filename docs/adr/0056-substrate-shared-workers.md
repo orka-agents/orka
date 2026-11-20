@@ -189,7 +189,11 @@ hold:
      never behind the native sweep (which has a one-minute deadline), and escalation
      never waits for provenance discovery: a pool due by its annotations' bound under
      the 24h ceiling, which provenance can only shorten, is escalated first;
-   - unreadable or inconsistent lifetime evidence retires the pool at once;
+   - unreadable or inconsistent lifetime evidence retires the pool at once. That is
+     lifetime doubt, not identity doubt: while the pool still proves each neighbour's
+     identity (its UID, specification digest, labels, a readable ledger of the frozen
+     scope, the neighbour's own entry and fenced worker), the neighbours are reported as
+     retiring, never stale, so Core evicts them as for any strong retirement;
    - the bound never exceeds the pool's server-set creation time plus the shortest
      lifetime frozen in the journals that recorded it, nor that creation time plus
      24h, so rewriting the pool's own annotations cannot extend it. A pool no journal
@@ -258,12 +262,19 @@ Core makes these unusable, asynchronously:
   Stop with its last checkpoint.
   - A shared Actor left `SUSPENDING` by a failed SuspendActor (for example a transient
     `FinalizeSuspended` error) is different. The provider continues that same upstream
-    suspension, a bounded number of times, before the deleted pool's worker Pod is gone.
-    Agent Substrate's workflow is re-entrant and lease-serialized: it reuses the
-    persisted snapshot, and atelet answers a checkpoint it already committed. So no new
-    checkpoint is taken and no Tag is invented. If the continuation loses that race, the
-    instance is lost as above. If every continuation ends without a result, the
-    suspension is doubt and takes the strong path.
+    suspension a bounded number of times. Agent Substrate's workflow is re-entrant and
+    lease-serialized: it reuses the persisted snapshot, and atelet answers a checkpoint
+    it already committed. So no new checkpoint is taken and no Tag is invented.
+  - The worker Pod's grace does not protect the continuation. A worker with no running
+    sandbox exits within seconds of its delete, and Agent Substrate's worker-delete then
+    reclaims the Actor's node state and crashes a `SUSPENDING` Actor. So a failure
+    inside an issued suspension is recorded as doubt, and the strong path's deletion is
+    held while the Actor stays `SUSPENDING`. Once it is `SUSPENDED` the strong path
+    starts, before the Tag capture; any other state starts it at once.
+  - The hold is bounded by the continuations and by a 120 s window from the suspend's
+    issue. It applies only to that suspension's own doubt; any other trigger deletes
+    the pool at once. A continuation that still loses the race leaves the instance lost
+    as above.
 - **What it does.** The provider closes the pool and deletes it. Core observes the
   terminating worker and drains each co-hosted Actor for data-only suspension inside
   its eviction window (ADR 0046). Every hosted instance then proves termination by exact
