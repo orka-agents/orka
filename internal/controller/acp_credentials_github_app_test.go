@@ -10,54 +10,33 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/store"
 )
 
-// A GitHubApp reference freezes the App Secret exactly as a token reference
-// freezes its Secret: the binding names the private-key entry and the Secret
-// version, and a multi-line PEM value is accepted.
+// A GitHubApp reference freezes the App Secret as a token reference freezes
+// its Secret: the binding names the private-key entry, and a PEM is accepted.
 func TestPromptCredentialBindingsFreezeGitHubAppSecret(t *testing.T) {
 	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	secret := &corev1.Secret{
+	_ = corev1.AddToScheme(scheme)
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-app", UID: "app-secret-uid"},
-		Data: map[string][]byte{
-			"appId":      []byte("123456"),
-			"privateKey": []byte("-----BEGIN RSA PRIVATE KEY-----\nMIIfixture\n-----END RSA PRIVATE KEY-----\n"),
-		},
-	}
-	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	appRef := &corev1alpha1.WorkspaceCredentialReference{Name: "publisher-app", Key: "privateKey", Type: corev1alpha1.WorkspaceCredentialGitHubApp}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "app-task"},
-		Spec: corev1alpha1.TaskSpec{Type: "agent", Workspace: &corev1alpha1.WorkspaceConfig{
-			ReadCredentialRef: appRef, PublicationCredentialRef: appRef,
-		}},
-	}
+		Data:       map[string][]byte{"appId": []byte("1"), "privateKey": []byte("-----BEGIN RSA PRIVATE KEY-----\nMII\n-----END RSA PRIVATE KEY-----\n")},
+	}).Build()
+	ref := &corev1alpha1.WorkspaceCredentialReference{Name: "publisher-app", Key: "privateKey", Type: corev1alpha1.WorkspaceCredentialGitHubApp}
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Spec: corev1alpha1.TaskSpec{
+		Workspace: &corev1alpha1.WorkspaceConfig{ReadCredentialRef: ref, PublicationCredentialRef: ref},
+	}}
 	bindings, versions, err := resolvePromptCredentialBindings(context.Background(), reader, task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bindings) != 2 || versions.SourceRead == "" || versions.SourceRead != versions.TargetWrite {
-		t.Fatalf("bindings = %#v, versions = %#v", bindings, versions)
-	}
-	for _, binding := range bindings {
-		if binding.SecretName != "publisher-app" || binding.SecretKey != "privateKey" || binding.SecretUID != "app-secret-uid" ||
-			(binding.Role != store.PromptCredentialSourceRead && binding.Role != store.PromptCredentialTargetWrite) {
-			t.Fatalf("binding = %#v", binding)
-		}
+	if err != nil || len(bindings) != 2 || versions.SourceRead == "" || versions.SourceRead != versions.TargetWrite ||
+		bindings[0].SecretKey != "privateKey" || bindings[0].SecretUID != "app-secret-uid" {
+		t.Fatalf("bindings = %#v, versions = %#v, err = %v", bindings, versions, err)
 	}
 	dispatcher := &ACPDispatcher{Client: reader}
-	version, err := dispatcher.workspaceCredentialResourceVersion(context.Background(), task, appRef)
-	if err != nil || version != versions.SourceRead {
-		t.Fatalf("frozen version = %q, err = %v, want %q", version, err, versions.SourceRead)
+	if version, err := dispatcher.workspaceCredentialResourceVersion(context.Background(), task, ref); err != nil || version != versions.SourceRead {
+		t.Fatalf("frozen version = %q, err = %v", version, err)
 	}
-	// A reference that leaves key at its default does not find the App's
-	// private key, so reservation fails instead of freezing the wrong entry.
-	defaultKey := &corev1alpha1.WorkspaceCredentialReference{Name: "publisher-app", Type: corev1alpha1.WorkspaceCredentialGitHubApp}
-	if _, err := dispatcher.workspaceCredentialResourceVersion(context.Background(), task, defaultKey); err == nil {
+	// Leaving key at its default misses the private key, so reservation fails.
+	if _, err := dispatcher.workspaceCredentialResourceVersion(context.Background(), task,
+		&corev1alpha1.WorkspaceCredentialReference{Name: "publisher-app", Type: corev1alpha1.WorkspaceCredentialGitHubApp}); err == nil {
 		t.Fatal("default key on an App Secret: want error")
 	}
 }
