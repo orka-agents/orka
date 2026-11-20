@@ -119,12 +119,19 @@ For takeover liveness under continuous writes:
   `FinalizeSessionTurn`, `ResumeSessionTurnFinalization`, the outbox, Session
   control, prompt attempt, publication, branch claim and external effect
   writes. Releasing the interlock cancels the context.
-- **A waiting successor stops new tokens.** Before every attempt to advance
-  the epoch, a successor records a takeover request: the epoch it waits to
-  replace, its holder ID and the time. Recording it before the attempt
-  matters. A successor that recorded it only after seeing a live token could
-  keep reading a gap and losing its update to the holder's next token, and
-  never ask. The request goes on a Lease of its own
+- **A waiting successor stops new tokens.** A successor records a takeover
+  request: the epoch it waits to replace, its holder ID and the time. It does
+  this before every attempt to advance the epoch, and in the epoch manager
+  before its first epoch read and before each read that recovers from a
+  conflict. It learns the epoch from a single read of the epoch Lease, which
+  cannot conflict.
+  - Recording it before the attempt matters. A successor that recorded it only
+    after seeing a live token could keep reading a gap, lose its update to the
+    holder's next token, and never ask.
+  - Recording it before those reads matters too. An epoch read or change
+    re-reads the Lease to check the `ControllerEpoch` mirror, and fails when
+    its `resourceVersion` changed in between. A busy holder's token rollovers
+    alone can change it every time. Those checks stay. The request goes on a Lease of its own
   (`controller-epoch-takeover-*`), which only successors write, so it never
   competes with the holder's writes to the epoch Lease. An attempt rewrites it
   once the successor's own last write of it is 10s old on its monotonic clock,
