@@ -3,6 +3,7 @@ package kube
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -592,4 +593,60 @@ func TestInterlockHoldRestartedStoreCannotAdoptItsPredecessorsToken(t *testing.T
 		require.False(t, called, "a write ran under the old fence after the restart's epoch change")
 	}
 	require.NoError(t, restarted.ReleaseHeldControllerEpochInterlock(ctx))
+}
+
+// A held token whose removal failed is never reused, since that removal may
+// still commit against the unchanged Lease: the next write removes it first
+// and fails if it cannot, and once the removal succeeds writes a new token.
+func TestInterlockHoldNeverReusesATokenWhoseRemovalFailed(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	var failures atomic.Int32
+	owner, err := New(failingRemovals(raw, &failures), testControlNamespace, WithAPIReader(raw),
+		WithControllerEpochInterlockHold(time.Hour, 5*time.Second))
+	require.NoError(t, err)
+	ctx := t.Context()
+	require.NoError(t, owner.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil }))
+	first := readEpochLease(t, raw, fence).Annotations[annotationMutationToken]
+	failures.Store(1000)
+	releaseCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	require.Error(t, owner.ReleaseHeldControllerEpochInterlock(releaseCtx))
+	cancel()
+
+	called := false
+	err = owner.WithControllerEpochMutation(ctx, fence, func(context.Context) error { called = true; return nil })
+	require.Error(t, err, "a write reused a token whose removal had failed")
+	require.False(t, called)
+	failures.Store(0)
+	require.NoError(t, owner.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil }))
+	second := readEpochLease(t, raw, fence).Annotations[annotationMutationToken]
+	require.NotEmpty(t, second)
+	require.NotEqual(t, first, second, "the token whose removal failed was reused")
+	require.NoError(t, owner.ReleaseHeldControllerEpochInterlock(ctx))
+}
+
+// A successor records its takeover request before it tries to advance, so a
+// holder write that races the epoch change, between the successor's read and
+// its update, writes no token and cannot make the change conflict.
+func TestInterlockHoldWriteRacingAnEpochChangeCannotWinIt(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	owner := holdingStore(t, raw, 20*time.Millisecond, 5*time.Second)
+	var raced atomic.Bool
+	var racingErr error
+	successorClient := interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+		Update: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.UpdateOption) error {
+			lease, ok := object.(*coordinationv1.Lease)
+			if ok && lease.Name == controllerEpochLeaseName(fence.Name) &&
+				lease.Annotations[annotationControllerEpoch] == strconv.FormatInt(fence.Epoch+1, 10) && raced.CompareAndSwap(false, true) {
+				// The holder writes between the successor's read and its update.
+				racingErr = owner.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil })
+			}
+			return delegate.Update(ctx, object, options...)
+		},
+	})
+	successor, err := New(successorClient, testControlNamespace, WithAPIReader(raw))
+	require.NoError(t, err)
+	_, err = successor.CompareAndSwapControllerEpoch(t.Context(), successorCAS(fence.Epoch))
+	require.True(t, raced.Load())
+	require.ErrorIs(t, racingErr, store.ErrControllerEpochMutationContention, "the racing holder wrote a token")
+	require.NoError(t, err, "the racing holder write made the epoch change conflict")
 }

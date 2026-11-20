@@ -73,6 +73,10 @@ type epochSnapshot struct {
 	TokenWrittenAt time.Time
 	// cancelWrite ends the context the write runs under.
 	cancelWrite context.CancelFunc
+	// removalPending marks a token whose removal failed and may still
+	// commit: it is never reused, because only a reuse leaves the Lease at
+	// the resourceVersion that removal was sent against (ADR 0058).
+	removalPending bool
 }
 
 func validateKubernetesNamespace(namespace string) error {

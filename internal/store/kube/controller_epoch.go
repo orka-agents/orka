@@ -212,13 +212,14 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	if change.NewEpoch != change.ExpectedEpoch+1 {
 		return nil, store.ValidationErrorf("controller epoch must advance exactly by one: expected new epoch %d", change.ExpectedEpoch+1)
 	}
+	// Before every attempt to advance, ask the token holder to stop writing
+	// new tokens, so the Lease is free within one of its holds. Recording it
+	// only after a refusal would miss a successor that reads a gap and loses
+	// its update to the holder's next token, every time (ADR 0058).
+	s.requestControllerEpochTakeover(ctx, change.Name, current.Epoch, change.HolderID, time.Now().UTC())
 	if active, expiresAt, lockErr := controllerEpochMutationLock(lease); lockErr != nil {
 		return nil, lockErr
-	} else if now := time.Now().UTC(); active && expiresAt.After(now) {
-		// Ask the holder to stop writing new tokens, so the Lease is free
-		// within one of its writes rather than whenever a retry happens to
-		// land between two of them (ADR 0058).
-		s.requestControllerEpochTakeover(ctx, change.Name, current.Epoch, change.HolderID, now)
+	} else if active && expiresAt.After(time.Now().UTC()) {
 		return nil, store.ConflictErrorf("controller epoch %q has an active control-store mutation until %s", change.Name, expiresAt.Format(time.RFC3339Nano))
 	}
 	object, err := s.getControllerEpochObject(ctx, change.Name)
@@ -998,9 +999,11 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 		switch {
 		case active && expiresAt.After(now):
 			lastConflict = store.ConflictErrorf("controller epoch %q is serializing another control-store mutation until %s", normalized.Name, expiresAt.Format(time.RFC3339Nano))
-		case waiting && by != normalized.HolderID:
+		case waiting:
 			// A successor is waiting to change the epoch: write no new token
-			// until it has, or its request lapses (ADR 0058).
+			// until it has, or its request lapses (ADR 0058). This holds for
+			// a successor with the same holder ID too, as a restart that
+			// keeps its identity is.
 			lastConflict = store.ConflictErrorf("controller epoch %q has a takeover by %q waiting", normalized.Name, by)
 		default:
 			updated := lease.DeepCopy()

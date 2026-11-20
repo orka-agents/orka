@@ -111,7 +111,7 @@ func (s *Store) interlockHoldEnabled() bool {
 // interlockReusable reports whether a token written at writtenAt may still
 // cover a new write.
 func (s *Store) interlockReusable(snapshot epochSnapshot) bool {
-	return snapshot.MutationToken != "" && snapshot.MutationLease != nil && !snapshot.TokenWrittenAt.IsZero() &&
+	return snapshot.MutationToken != "" && snapshot.MutationLease != nil && !snapshot.TokenWrittenAt.IsZero() && !snapshot.removalPending &&
 		time.Since(snapshot.TokenWrittenAt) < s.interlockMaxHold
 }
 
@@ -207,6 +207,7 @@ func (s *Store) retainForRemoval(snapshot epochSnapshot, previous time.Duration)
 		return
 	}
 	delay := max(min(2*previous, maxControllerEpochTokenRemovalDelay), 100*time.Millisecond)
+	snapshot.removalPending = true
 	s.parkInterlockFor(snapshot, delay, delay)
 }
 
