@@ -616,10 +616,29 @@ func normalizeCrossStoreFinalizationRequest(request store.FinalizeSessionTurnReq
 }
 
 func validateSessionTurnPromptBinding(attempt store.PromptAttempt, key store.SessionTurnKey) error {
-	if attempt.Key.TaskUID != key.TaskUID || attempt.Key.Attempt != key.Attempt || attempt.Key.PromptID != key.PromptID || attempt.SessionUID != key.SessionUID || attempt.SessionLeaseGeneration != key.LeaseGeneration {
+	if attempt.Key.TaskUID != key.TaskUID || attempt.Key.Attempt != key.Attempt || attempt.Key.PromptID != key.PromptID {
 		return store.ConflictErrorf("session turn prompt attempt does not match the fenced SessionTurn identity")
 	}
-	return nil
+	if attempt.SessionUID == key.SessionUID && attempt.SessionLeaseGeneration == key.LeaseGeneration {
+		return nil
+	}
+	if sessionTurnAttemptEndedUnboundBeforeSubmission(attempt) {
+		return nil
+	}
+	return store.ConflictErrorf("session turn prompt attempt does not match the fenced SessionTurn identity")
+}
+
+// sessionTurnAttemptEndedUnboundBeforeSubmission reports an attempt whose
+// Session binding a pre-submission recovery cleared and which then ended
+// Cancelled or Failed before it was bound again. That recovery is the only
+// write that clears the binding, and it applies only to a prompt proven never
+// accepted; the attempt keeps its exact mutation lease and open SessionTurn for
+// its retry. Its turn can therefore only be finalized with a terminal marker,
+// still under that exact lease, which the callers verify.
+func sessionTurnAttemptEndedUnboundBeforeSubmission(attempt store.PromptAttempt) bool {
+	return strings.TrimSpace(attempt.SessionUID) == "" && attempt.SessionLeaseGeneration == 0 &&
+		strings.TrimSpace(attempt.RuntimeInstanceID) == "" &&
+		(attempt.ExecutionState == store.PromptExecutionCancelled || attempt.ExecutionState == store.PromptExecutionFailed)
 }
 
 func validatePromptAttemptForCrossStoreFinalization(attempt store.PromptAttempt, request store.FinalizeSessionTurnRequest) error {

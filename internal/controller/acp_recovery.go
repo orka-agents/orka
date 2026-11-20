@@ -2276,19 +2276,23 @@ func (d *ACPDispatcher) recoveredTaskSession(ctx context.Context, task *corev1al
 	if attempt.Key.TaskUID != string(task.UID) || attempt.Key.Attempt != int64(task.Status.Execution.Attempt) || attempt.Key.PromptID != task.Status.Execution.PromptID {
 		return nil, fmt.Errorf("%w: recovered PromptAttempt does not match Task execution identity", store.ErrConflict)
 	}
-	if strings.TrimSpace(attempt.SessionUID) == "" || attempt.SessionLeaseGeneration < 1 {
+	unbound := strings.TrimSpace(attempt.SessionUID) == "" && attempt.SessionLeaseGeneration == 0
+	if !unbound && (strings.TrimSpace(attempt.SessionUID) == "" || attempt.SessionLeaseGeneration < 1) {
 		return nil, fmt.Errorf("%w: session-backed terminal PromptAttempt lacks its durable SessionTurn identity", store.ErrConflict)
 	}
 	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
 	if err != nil {
+		if unbound {
+			return nil, fmt.Errorf("%w: session-backed terminal PromptAttempt lacks its durable SessionTurn identity", store.ErrConflict)
+		}
 		return nil, err
 	}
-	if control.SessionUID != attempt.SessionUID {
+	key, ok := acpAttemptSessionTurnKey(control, attempt)
+	if !ok {
+		if unbound {
+			return nil, fmt.Errorf("%w: session-backed terminal PromptAttempt lacks its durable SessionTurn identity", store.ErrConflict)
+		}
 		return nil, fmt.Errorf("%w: recovered SessionControl UID does not match PromptAttempt", store.ErrConflict)
-	}
-	key := store.SessionTurnKey{
-		SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration,
-		TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID,
 	}
 	turnID, err := key.CanonicalID()
 	if err != nil {
@@ -2344,6 +2348,33 @@ func (d *ACPDispatcher) recoveredTaskSession(ctx context.Context, task *corev1al
 		Bootstrap:  bootstrap,
 		UserPrompt: userPrompt,
 	}, nil
+}
+
+// acpAttemptSessionTurnKey is the SessionTurn identity of an attempt. A bound
+// attempt names it. A pre-submission requeue clears that binding while the
+// attempt keeps its Session mutation lease and open SessionTurn for its retry,
+// so an unbound attempt's turn is the one its own exact lease names (Task UID,
+// attempt and prompt ID), and only that one.
+func acpAttemptSessionTurnKey(control *store.SessionControl, attempt *store.PromptAttempt) (store.SessionTurnKey, bool) {
+	if control == nil || attempt == nil {
+		return store.SessionTurnKey{}, false
+	}
+	sessionUID, leaseGeneration := strings.TrimSpace(attempt.SessionUID), attempt.SessionLeaseGeneration
+	if sessionUID == "" && leaseGeneration == 0 {
+		lease := control.Lease
+		if lease == nil || lease.Generation < 1 || lease.TaskUID != attempt.Key.TaskUID ||
+			lease.Attempt != attempt.Key.Attempt || lease.PromptID != attempt.Key.PromptID {
+			return store.SessionTurnKey{}, false
+		}
+		sessionUID, leaseGeneration = control.SessionUID, lease.Generation
+	}
+	if sessionUID == "" || leaseGeneration < 1 || control.SessionUID != sessionUID {
+		return store.SessionTurnKey{}, false
+	}
+	return store.SessionTurnKey{
+		SessionUID: sessionUID, LeaseGeneration: leaseGeneration,
+		TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID,
+	}, true
 }
 
 // recoveredRuntimeSessionBinding rebuilds the RuntimeSession binding of a

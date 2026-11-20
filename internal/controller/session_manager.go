@@ -25,6 +25,9 @@ type SessionManager struct {
 	gatewayEventStore store.GatewayEventStore
 	cleanupStore      store.SessionCleanupStore
 	epochs            *ControllerEpochManager
+	// leaseRecovery settles a Session mutation lease left by a terminal Task
+	// before deletion, so deletion finishes once no turn is running.
+	leaseRecovery func(ctx context.Context, namespace, name string) error
 }
 
 // NewSessionManager creates a new SessionManager backed by the given store.
@@ -45,6 +48,14 @@ func (m *SessionManager) SetACPSessionCleanup(cleanup store.SessionCleanupStore,
 	if m != nil {
 		m.cleanupStore = cleanup
 		m.epochs = epochs
+	}
+}
+
+// SetACPSessionLeaseRecovery lets Session deletion first settle a mutation
+// lease whose holder Task is already terminal.
+func (m *SessionManager) SetACPSessionLeaseRecovery(recover func(ctx context.Context, namespace, name string) error) {
+	if m != nil {
+		m.leaseRecovery = recover
 	}
 }
 
@@ -367,6 +378,11 @@ func (m *SessionManager) DeleteSession(ctx context.Context, namespace, name stri
 	}
 	if m.epochs == nil {
 		return fmt.Errorf("ACP session cleanup requires a controller epoch manager")
+	}
+	if m.leaseRecovery != nil {
+		if err := m.leaseRecovery(ctx, namespace, name); err != nil {
+			return err
+		}
 	}
 	fence, err := m.epochs.CurrentFence(ctx)
 	if err != nil {

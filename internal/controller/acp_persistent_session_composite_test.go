@@ -21,6 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
@@ -52,13 +54,21 @@ type persistentCompositeHarness struct {
 
 func newPersistentCompositeHarness(t *testing.T, tasks ...*corev1alpha1.Task) *persistentCompositeHarness {
 	t.Helper()
+	return newPersistentCompositeHarnessWithObjects(t, nil, tasks...)
+}
+
+// newPersistentCompositeHarnessWithObjects also seeds the fake API server with
+// extra objects, such as the Session's RuntimePool and ExecutionWorkspace.
+func newPersistentCompositeHarnessWithObjects(t *testing.T, extra []client.Object, tasks ...*corev1alpha1.Task) *persistentCompositeHarness {
+	t.Helper()
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{corev1alpha1.AddToScheme, corev1.AddToScheme, coordinationv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{corev1alpha1.AddToScheme, corev1.AddToScheme, coordinationv1.AddToScheme, workspacev1alpha1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}
 	}
-	objects := make([]client.Object, 0, 1+len(tasks))
+	objects := make([]client.Object, 0, 1+len(tasks)+len(extra))
+	objects = append(objects, extra...)
 	objects = append(objects, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: persistentCompositeNamespace, UID: types.UID(persistentCompositeNamespaceUID),
 	}})
@@ -66,7 +76,7 @@ func newPersistentCompositeHarness(t *testing.T, tasks ...*corev1alpha1.Task) *p
 		objects = append(objects, task.DeepCopy())
 	}
 	kubeClient := withControllerEpochLeaseUIDs(t, fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.ControllerEpoch{}, &corev1alpha1.PromptAttempt{}, &corev1alpha1.RuntimeSessionControl{}).
+		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.ControllerEpoch{}, &corev1alpha1.PromptAttempt{}, &corev1alpha1.RuntimeSessionControl{}, &corev1alpha1.RuntimePool{}).
 		WithObjects(objects...).Build())
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "persistent-session.db"))
 	if err != nil {

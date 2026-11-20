@@ -149,6 +149,10 @@ type ACPDispatcher struct {
 	// Session retries them.
 	parkedRuntimeReleases map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease
 	finalizedTurns        map[types.UID]string
+	// persistentReuseDecisions remembers each Task attempt's last logged ADR
+	// 0059 reuse decision, so pre-submission requeues of the same attempt do
+	// not log or count it again.
+	persistentReuseDecisions map[acpPersistentReuseAttemptKey]string
 	// settledDeliveryRecoveries caches, per Task, the exact Task version and
 	// controller epoch at which delivery recovery found nothing left to
 	// recover from settled durable state; see deliveryRecoverySettled.
@@ -1219,8 +1223,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if task.Spec.SessionRef != nil {
 		persistentScope = d.acpPersistentSessionScope(task, bound, target, nativeSessionsSupported, rebaseSupported)
 	}
-	persistentReuse := &acpPersistentSessionReuse{}
-	defer func() { persistentReuse.log(ctx, task) }()
+	persistentReuse := &acpPersistentSessionReuse{dispatcher: d}
+	defer func() {
+		persistentReuse.log(ctx, task)
+		// A requeued attempt comes back with the same decision; any other
+		// exit ends the attempt's decision.
+		if sessionExecution == nil || !sessionExecution.requeued {
+			d.forgetPersistentReuseDecision(task)
+		}
+	}()
 	persistentHandoff := strings.TrimSpace(task.Annotations[acpTaskPersistentSessionHandoffAnnotation])
 	var persistentClaim *acpPersistentSessionClaimInput
 	if d.PersistentSessionEnabled && task.Spec.SessionRef != nil {
@@ -1324,6 +1335,23 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		residentSlots := int32(0)
 		if !sessionExecution.Reused {
 			residentSlots = 1
+			// A fresh RuntimeSession on a Session's dedicated single-session
+			// pool needs the slot its own older resident session still fills,
+			// so retire that one first, as the planned-session reconciliation
+			// below would only after the slot was granted.
+			holdsSlot, retireErr := d.retireStaleSessionRuntimeBeforeCreate(ctx, runtimeClient, task, sessionExecution, runtimeFence)
+			if retireErr != nil {
+				if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+					ctx, task, attemptID, fence, retireErr, &sessionExecution.Binding,
+				); requeueErr != nil {
+					return errors.Join(retireErr, requeueErr)
+				}
+				sessionExecution.requeued = true
+				return nil
+			}
+			if holdsSlot {
+				residentSlots = 0
+			}
 		}
 		if err := reservationLease.setSlots(ctx, residentSlots); err != nil {
 			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
@@ -3396,6 +3424,61 @@ func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 	return true, nil
 }
 
+// retireStaleSessionRuntimeBeforeCreate deletes this Session's resident
+// RuntimeSession on the reserved instance when it is older than the one this
+// turn plans to create. The turn holds the Session mutation lease, so no other
+// turn can use or reuse that session, and the deletion is the same fenced
+// replace_stale_runtime_session the planned-session reconciliation performs.
+// It reports holdsSlot when the planned generation itself is already resident
+// (an earlier attempt of this turn created it): that session keeps its slot and
+// the reconciliation adopts it.
+func (d *ACPDispatcher) retireStaleSessionRuntimeBeforeCreate(
+	ctx context.Context,
+	runtimeClient *harnessv2.Client,
+	task *corev1alpha1.Task,
+	session *acpTaskSession,
+	runtimeFence harnessv2.Fence,
+) (bool, error) {
+	if session == nil || runtimeClient == nil || strings.TrimSpace(session.Binding.SessionUID) == "" {
+		return false, nil
+	}
+	sessionUID := harnessv2.RuntimeSessionUID(session.Binding.SessionUID)
+	status, observed, err := runtimeSessionStatusForUID(ctx, runtimeClient, sessionUID)
+	if err != nil {
+		return false, fmt.Errorf("read the Session's resident RuntimeSession before creating a fresh one: %w", err)
+	}
+	if observed == nil {
+		return false, nil
+	}
+	poolFence := runtimeFence
+	poolFence.RuntimeSessionUID = ""
+	poolFence.RuntimeSessionGeneration = 0
+	if mismatch := harnessv2.CompareFence(poolFence, status.Fence, false); mismatch != harnessv2.FenceMatch {
+		return false, fmt.Errorf("%w: RuntimeSession status fence mismatch: %s", store.ErrConflict, mismatch)
+	}
+	planned := session.Binding.Generation
+	if observed.Generation >= planned {
+		expected := runtimePoolFenceWithSession(poolFence, sessionUID, planned)
+		return observed.Generation == planned && observed.RuntimeSessionID == harnessv2.RuntimeSessionID(runtimeSessionID(expected)), nil
+	}
+	observedFence := runtimePoolFenceWithSession(poolFence, observed.RuntimeSessionUID, observed.Generation)
+	if err := d.deleteRuntimeSessionReconciled(
+		context.WithoutCancel(ctx), runtimeClient, observed.RuntimeSessionID, task, observedFence, "replace_stale_runtime_session",
+	); err != nil {
+		return false, fmt.Errorf("retire the Session's stale resident RuntimeSession before creating a fresh one: %w", err)
+	}
+	logf.FromContext(ctx).Info("ACP stale resident RuntimeSession retired before a fresh one",
+		"namespace", task.Namespace, "task", task.Name, "runtimeSessionGeneration", observed.Generation,
+		"plannedGeneration", planned)
+	return false, nil
+}
+
+func runtimePoolFenceWithSession(pool harnessv2.Fence, uid harnessv2.RuntimeSessionUID, generation uint64) harnessv2.Fence {
+	pool.RuntimeSessionUID = uid
+	pool.RuntimeSessionGeneration = generation
+	return pool
+}
+
 func (d *ACPDispatcher) reconcilePlannedTaskScopedRuntimeSession(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -4173,6 +4256,8 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 		}
 		operation, reason, message = "identity-unavailable-before-admission", taskExecutionReasonIdentityUnavailable, unavailable
 	}
+	// The attempt ends here, so its remembered reuse decision does too.
+	d.forgetPersistentReuseDecision(task)
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
 		return true, err
@@ -4805,7 +4890,15 @@ func (d *ACPDispatcher) failTaskBeforeRuntimeAdmission(
 		return err
 	}
 	if task.Spec.SessionRef != nil && !bound {
-		return d.failTaskBeforeSessionBinding(ctx, task, state, outcome, reason, message)
+		// An attempt requeued before submission is unbound but may still hold
+		// its open SessionTurn; its Session settlement projects the Task.
+		holds, holdErr := d.acpAttemptHoldsOpenSessionTurn(ctx, task, attempt)
+		if holdErr != nil {
+			return holdErr
+		}
+		if !holds {
+			return d.failTaskBeforeSessionBinding(ctx, task, state, outcome, reason, message)
+		}
 	}
 	return d.failTask(ctx, task, state, outcome, reason, message)
 }
@@ -6628,6 +6721,14 @@ func (d *ACPDispatcher) requeuePreSubmissionTaskWithRuntimeBinding(
 	cause error,
 	runtimeBinding *ACPRuntimeSessionBinding,
 ) error {
+	// Every pre-submission requeue names its cause, so a turn that keeps
+	// retrying before runtime admission is never silent.
+	diagnostic := "unspecified"
+	if cause != nil {
+		diagnostic = sanitizeStatusValue(cause.Error(), 512)
+	}
+	logf.FromContext(ctx).Info("ACP task requeued before prompt submission",
+		"namespace", task.Namespace, "task", task.Name, "reason", acpAdmissionRetryReason(cause), "diagnostic", diagnostic)
 	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
 		return err

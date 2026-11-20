@@ -412,6 +412,11 @@ func (d *ACPDispatcher) prepareTaskSessionWithClaim(
 		preparation.plan.Recreate = true
 		preparation.plan.BootstrapRequired = true
 		preparation.plan.Reason = "controller-restarted"
+		if claim != nil {
+			// ADR 0059 deliberately ignores the in-memory binding: the fresh
+			// session follows the reuse miss, not a restart.
+			preparation.plan.Reason = acpPersistentSessionMissPlanReason
+		}
 	}
 	if preparation.plan.Binding.Generation < uint64(lease.Session.LeaseGeneration) && preparation.plan.Recreate {
 		preparation.plan.Binding.Generation = uint64(lease.Session.LeaseGeneration)
@@ -870,7 +875,10 @@ func (d *ACPDispatcher) quiesceInterruptedTaskSessionPreparation(
 	if !bound {
 		switch attempt.ExecutionState {
 		case store.PromptExecutionReserved, store.PromptExecutionCancelled:
-			return nil, nil
+			// A pre-submission requeue unbinds the attempt but leaves its
+			// Session lease and open SessionTurn for the retry, which a
+			// terminal settlement must now finalize or release.
+			return d.recoverUnboundTaskSessionLease(cleanupCtx, task, attempt, fence)
 		case store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
 			if err := d.requeuePreSubmissionTask(cleanupCtx, task, attemptID, fence, context.DeadlineExceeded); err != nil {
 				return nil, err
@@ -918,6 +926,80 @@ func (d *ACPDispatcher) quiesceInterruptedTaskSessionPreparation(
 		return nil, errors.Join(err, requeueErr)
 	}
 	return nil, nil
+}
+
+// recoverUnboundTaskSessionLease returns the open SessionTurn that an unbound
+// attempt's own exact Session lease holds, for the caller to finalize once the
+// Task is terminal, or releases that lease when no SessionTurn was persisted.
+// An attempt holding no lease has nothing to recover.
+func (d *ACPDispatcher) recoverUnboundTaskSessionLease(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	fence store.ControllerEpochFence,
+) (*acpTaskSession, error) {
+	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	key, ok := acpAttemptSessionTurnKey(control, attempt)
+	if !ok {
+		return nil, nil
+	}
+	session, err := d.recoveredTaskSession(ctx, task, attempt)
+	if err == nil {
+		if session == nil || session.Turn == nil || session.Turn.Turn.State != store.SessionTurnOpen {
+			return nil, fmt.Errorf("%w: an unbound attempt's Session lease holds no open SessionTurn", store.ErrConflict)
+		}
+		return session, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	if validateErr := validateACPSessionLease(control, key); validateErr != nil {
+		return nil, errors.Join(err, validateErr)
+	}
+	if _, releaseErr := d.Sessions.ReleaseMutationLease(ctx, ACPReleaseSessionLeaseRequest{
+		Lease: ACPSessionLease{Session: *control, Key: key}, Fence: fence, ReleasedAt: time.Now().UTC(),
+	}); releaseErr != nil {
+		return nil, errors.Join(err, releaseErr)
+	}
+	return nil, nil
+}
+
+// acpAttemptHoldsOpenSessionTurn reports whether an attempt holds an open
+// SessionTurn, bound or through its own exact lease. Session settlement then
+// projects the Task, never the unbound-Task projection.
+func (d *ACPDispatcher) acpAttemptHoldsOpenSessionTurn(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt) (bool, error) {
+	if task == nil || task.Spec.SessionRef == nil || d.Sessions == nil {
+		return false, nil
+	}
+	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	key, ok := acpAttemptSessionTurnKey(control, attempt)
+	if !ok {
+		return false, nil
+	}
+	turnID, err := key.CanonicalID()
+	if err != nil {
+		return false, err
+	}
+	turn, err := d.Store.GetSessionTurn(ctx, turnID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return turn.State == store.SessionTurnOpen && turn.PromptAttemptID == attempt.ID, nil
 }
 
 func (d *ACPDispatcher) handleSessionTurnOpenFailure(

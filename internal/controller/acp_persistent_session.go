@@ -28,6 +28,8 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -63,6 +65,9 @@ const (
 
 	acpPersistentSessionReuseLogMessage    = "ACP persistent session reuse"
 	acpPersistentSessionRetainedLogMessage = "ACP persistent session retained"
+	// acpPersistentSessionMissPlanReason is the RuntimeSession plan reason of
+	// a fresh session that follows a reuse miss.
+	acpPersistentSessionMissPlanReason = "persistent-session-miss"
 
 	// acpPersistentSessionGateBudget bounds the pre-submission wait for the
 	// provider's epoch acknowledgement on the reuse path.
@@ -158,8 +163,10 @@ func logACPPersistentSessionRetained(ctx context.Context, task *corev1alpha1.Tas
 }
 
 // acpPersistentSessionReuse is turn N+1's reuse decision, logged once per
-// execution attempt.
+// decision of an execution attempt: pre-submission requeues of the same
+// attempt that reach the same decision are not logged or counted again.
 type acpPersistentSessionReuse struct {
+	dispatcher *ACPDispatcher
 	attempted  bool
 	logged     bool
 	hit        bool
@@ -190,6 +197,9 @@ func (r *acpPersistentSessionReuse) log(ctx context.Context, task *corev1alpha1.
 		result, reason = acpPersistentSessionDecisionHit, acpPersistentReasonReused
 	}
 	reason = boundedACPPersistentSessionReason(reason)
+	if !r.dispatcher.notePersistentReuseDecision(task, result+"/"+reason+"/"+r.stage) {
+		return
+	}
 	recordACPPersistentSessionDecision(result, reason)
 	var handoffAge time.Duration
 	if !r.keptAt.IsZero() {
@@ -199,6 +209,53 @@ func (r *acpPersistentSessionReuse) log(ctx context.Context, task *corev1alpha1.
 		"namespace", task.Namespace, "task", task.Name, "result", result, "reason", reason, "stage", r.stage,
 		"handoffAgeMs", handoffAge.Milliseconds(), "gateWaitMs", r.gateWait.Milliseconds(),
 		"runtimeSessionGeneration", r.generation)
+}
+
+// acpPersistentReuseAttemptKey names one execution attempt of one Task.
+type acpPersistentReuseAttemptKey struct {
+	taskUID types.UID
+	attempt int32
+}
+
+// acpPersistentReuseDecisionLimit bounds the remembered decisions of attempts
+// still requeueing; past it the memory is reset, which at worst logs one
+// decision again.
+const acpPersistentReuseDecisionLimit = 4096
+
+func persistentReuseAttemptKey(task *corev1alpha1.Task) (acpPersistentReuseAttemptKey, bool) {
+	if task == nil || task.UID == "" || task.Status.Execution == nil {
+		return acpPersistentReuseAttemptKey{}, false
+	}
+	return acpPersistentReuseAttemptKey{taskUID: task.UID, attempt: task.Status.Execution.Attempt}, true
+}
+
+// notePersistentReuseDecision records an attempt's decision and reports
+// whether it is new for that attempt.
+func (d *ACPDispatcher) notePersistentReuseDecision(task *corev1alpha1.Task, decision string) bool {
+	key, ok := persistentReuseAttemptKey(task)
+	if d == nil || !ok {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.persistentReuseDecisions[key] == decision {
+		return false
+	}
+	if d.persistentReuseDecisions == nil || len(d.persistentReuseDecisions) >= acpPersistentReuseDecisionLimit {
+		d.persistentReuseDecisions = make(map[acpPersistentReuseAttemptKey]string)
+	}
+	d.persistentReuseDecisions[key] = decision
+	return true
+}
+
+func (d *ACPDispatcher) forgetPersistentReuseDecision(task *corev1alpha1.Task) {
+	key, ok := persistentReuseAttemptKey(task)
+	if d == nil || !ok {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.persistentReuseDecisions, key)
 }
 
 // acpPersistentSessionStaticScope is the configuration part of ADR 0059
@@ -737,14 +794,14 @@ func (d *ACPDispatcher) acpPersistentSessionKeepTranscriptHead(ctx context.Conte
 }
 
 // acpRuntimePoolResidentRefusal checks the pool state that a resident runtime
-// depends on: Serving and Accepting, the exact active instance and boot, the
+// depends on: Serving and admitting its own resident session
+// (acpRuntimePoolServesItsResident), the exact active instance and boot, the
 // current controller epoch, and no requested retirement or eviction.
 func acpRuntimePoolResidentRefusal(pool *corev1alpha1.RuntimePool, instanceID, bootID string, fence store.ControllerEpochFence) string {
 	if pool == nil || !pool.DeletionTimestamp.IsZero() {
 		return acpPersistentReasonPoolReplaced
 	}
-	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing ||
-		pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+	if !acpRuntimePoolServesItsResident(pool) {
 		return acpPersistentReasonPoolNotAccepting
 	}
 	active := pool.Status.ActiveInstance
@@ -760,6 +817,39 @@ func acpRuntimePoolResidentRefusal(pool *corev1alpha1.RuntimePool, instanceID, b
 		return acpPersistentReasonWorkspaceNotWarm
 	}
 	return ""
+}
+
+// acpRuntimePoolServesItsResident reports whether a Serving pool may keep, or
+// let the next turn reuse, the RuntimeSession it already holds. Accepting
+// always qualifies. Closed qualifies only when the pool's one reason for
+// closing is its configured capacity, on the dedicated single-session pool of
+// a class-backed workspace: there the Session's own resident session is what
+// fills the only resident slot, from turn N's creation until turn N+1 reuses
+// it. That closure stops new RuntimeSessions, which reuse never creates.
+// Draining, Degraded, Starting, Stopping, Stopped, a closure for any other
+// reason, a status the pool controller has not observed for the current
+// generation, or more than one resident session all refuse.
+func acpRuntimePoolServesItsResident(pool *corev1alpha1.RuntimePool) bool {
+	if pool == nil || pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing {
+		return false
+	}
+	switch pool.Status.AdmissionState {
+	case corev1alpha1.RuntimePoolAdmissionAccepting:
+		return true
+	case corev1alpha1.RuntimePoolAdmissionClosed:
+	default:
+		return false
+	}
+	if pool.Spec.ExecutionWorkspace == nil || pool.Status.ObservedGeneration != pool.Generation {
+		return false
+	}
+	admission := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionAdmissionReady)
+	if admission == nil || admission.Status != metav1.ConditionFalse ||
+		admission.Reason != corev1alpha1.RuntimePoolReasonAtCapacity || admission.ObservedGeneration != pool.Generation {
+		return false
+	}
+	capacity := pool.Status.Capacity
+	return capacity.MaxResidentSessions == 1 && capacity.ResidentSessions <= 1 && runtimePoolAtCapacity(capacity)
 }
 
 // rebaseACPRuntimeSession folds turn N's exactly published delta into its

@@ -956,6 +956,18 @@ func sameSessionControlCreation(a, b store.SessionControl) bool {
 		a.RequestDigest == b.RequestDigest
 }
 
+// promptAttemptEndedUnboundBeforeSubmission reports an attempt whose Session
+// binding a pre-submission recovery cleared and which then ended Cancelled or
+// Failed before it was bound again. That recovery is the only write that
+// clears the binding, and only for a prompt proven never accepted, so its
+// still-open SessionTurn can only be finalized with a terminal marker under
+// the exact lease the caller verifies.
+func promptAttemptEndedUnboundBeforeSubmission(attempt store.PromptAttempt) bool {
+	return strings.TrimSpace(attempt.SessionUID) == "" && attempt.SessionLeaseGeneration == 0 &&
+		strings.TrimSpace(attempt.RuntimeInstanceID) == "" &&
+		(attempt.ExecutionState == store.PromptExecutionCancelled || attempt.ExecutionState == store.PromptExecutionFailed)
+}
+
 func sessionLeaseMatches(lease *store.SessionMutationLease, key store.SessionTurnKey) bool {
 	return lease != nil && lease.Generation == key.LeaseGeneration && lease.TaskUID == key.TaskUID &&
 		lease.Attempt == key.Attempt && lease.PromptID == key.PromptID
@@ -963,8 +975,11 @@ func sessionLeaseMatches(lease *store.SessionMutationLease, key store.SessionTur
 
 func validatePromptAttemptForFinalization(attempt store.PromptAttempt, request store.FinalizeSessionTurnRequest) error {
 	if attempt.Key.TaskUID != request.Key.TaskUID || attempt.Key.Attempt != request.Key.Attempt ||
-		attempt.Key.PromptID != request.Key.PromptID || attempt.SessionUID != request.Key.SessionUID ||
-		attempt.SessionLeaseGeneration != request.Key.LeaseGeneration {
+		attempt.Key.PromptID != request.Key.PromptID {
+		return store.ConflictErrorf("prompt attempt %q does not match the fenced session turn identity", attempt.ID)
+	}
+	if (attempt.SessionUID != request.Key.SessionUID || attempt.SessionLeaseGeneration != request.Key.LeaseGeneration) &&
+		!promptAttemptEndedUnboundBeforeSubmission(attempt) {
 		return store.ConflictErrorf("prompt attempt %q does not match the fenced session turn identity", attempt.ID)
 	}
 	if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) {

@@ -2137,6 +2137,8 @@ func main() {
 		setupLog.Error(err, "unable to add ACP dispatcher")
 		os.Exit(1)
 	}
+	// Session deletion first settles a mutation lease left by a terminal Task.
+	sessionManager.SetACPSessionLeaseRecovery(acpDispatcher.SettleAbandonedSessionLease)
 	if strings.TrimSpace(acpUpgradeDrainOptions.MarkerNamespace) == "" {
 		acpUpgradeDrainOptions.MarkerNamespace = controlNamespace
 	}
