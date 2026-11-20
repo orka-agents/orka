@@ -65,6 +65,10 @@ type ACPBootstrapTranscript struct {
 	TotalMessages    int
 	Truncated        bool
 	VerifiedBaseline *store.VerifiedBranchBaseline
+	// LastMessageID is the stable ID of the last canonical message the load
+	// returned, "" for an empty transcript. ADR 0059 anchors a kept
+	// process's history on it.
+	LastMessageID string
 }
 
 // ACPBootstrapMessage is the portable, provider-neutral transcript shape.
@@ -118,6 +122,9 @@ func (c *ACPSessionContinuity) buildBootstrapTranscript(
 	}
 	bootstrap.SessionUID = current.SessionUID
 	bootstrap.TotalMessages = len(messages)
+	if len(messages) > 0 {
+		bootstrap.LastMessageID = messages[len(messages)-1].ID
+	}
 	if current.VerifiedBaseline != nil {
 		baseline := *current.VerifiedBaseline
 		bootstrap.VerifiedBaseline = &baseline

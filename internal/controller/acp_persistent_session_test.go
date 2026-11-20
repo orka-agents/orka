@@ -314,7 +314,7 @@ func TestACPResidentRuntimeHistoryRefusalReasons(t *testing.T) {
 	control := &store.SessionControl{Namespace: persistentTestNamespace, SessionName: "session", Availability: store.SessionAvailable}
 	dispatcher := &ACPDispatcher{Sessions: &ACPSessionContinuity{transcripts: &historyTranscriptStore{messages: transcript}}}
 	ctx := context.Background()
-	if reason, err := dispatcher.acpResidentRuntimeHistoryRefusal(ctx, persistentTestTask(), control, record); err != nil || reason != "" {
+	if reason, _, err := dispatcher.acpResidentRuntimeHistoryRefusal(ctx, persistentTestTask(), control, record); err != nil || reason != "" {
 		t.Fatalf("unchanged history refused: %q, %v", reason, err)
 	}
 	cases := map[string]struct {
@@ -353,7 +353,10 @@ func TestACPResidentRuntimeHistoryRefusalReasons(t *testing.T) {
 				tc.control(&candidate)
 			}
 			d := &ACPDispatcher{Sessions: &ACPSessionContinuity{transcripts: &historyTranscriptStore{messages: messages}}}
-			reason, err := d.acpResidentRuntimeHistoryRefusal(ctx, task, &candidate, record)
+			reason, lastID, err := d.acpResidentRuntimeHistoryRefusal(ctx, task, &candidate, record)
+			if err == nil && reason == "" && lastID != "m2" {
+				t.Fatalf("reused process head = %q, want m2", lastID)
+			}
 			if err != nil || reason != tc.want {
 				t.Fatalf("history refusal = %q, %v; want %q", reason, err, tc.want)
 			}
@@ -764,7 +767,7 @@ func persistentKeepInput(t *testing.T, record *store.SessionResidentRuntime) acp
 	return acpPersistentSessionKeepInput{
 		task: task, bound: &verifiedAgentExecution{plan: persistentTestPlan()}, target: acpDispatchTarget{pool: persistentTestPool()},
 		fence: persistentTestFence(),
-		session: &acpTaskSession{Turn: &ACPSessionTurn{Turn: store.SessionTurn{
+		session: &acpTaskSession{Bootstrap: &ACPBootstrapTranscript{}, Turn: &ACPSessionTurn{Turn: store.SessionTurn{
 			ID: "turn-n", UserPrompt: "question n", Key: store.SessionTurnKey{SessionUID: record.RuntimeSessionUID, LeaseGeneration: 2, TaskUID: record.SourceTaskUID, Attempt: 1, PromptID: "prompt-n"},
 		}}},
 		attemptID: "attempt-n",
@@ -869,7 +872,7 @@ func TestACPPersistentSessionKeepLiveRefusalReasonsAndRecord(t *testing.T) {
 		}}
 		dispatcher := &ACPDispatcher{
 			Client: kubeClient, APIReader: kubeClient, Store: publications,
-			Sessions: &ACPSessionContinuity{transcripts: &historyTranscriptStore{}},
+			Sessions: &ACPSessionContinuity{transcripts: &historyTranscriptStore{messages: keepTranscript(input.session)}},
 		}
 		kept, reason, _ := dispatcher.prepareACPPersistentSessionKeep(ctx, input)
 		return kept, reason
@@ -901,6 +904,8 @@ func TestACPPersistentSessionKeepLiveRefusalReasonsAndRecord(t *testing.T) {
 	carried, reason := run(t, nil, nil, &fakePersistentSupervisor{}, func(in *acpPersistentSessionKeepInput) {
 		claimed := store.CloneSessionResidentRuntime(rebasedRecord)
 		in.session.ResidentClaimed = claimed
+		in.session.Reused = true
+		in.session.ClaimedTranscriptHeadID = "m-head"
 		in.session.VerifiedBaseline = claimed.VerifiedBaseline
 		in.intent = harnessv2.WorkspaceIntentWrite
 		in.delta = harnessv2.WorkspaceDeltaDescriptor{State: harnessv2.WorkspaceDeltaNoChange}
@@ -1130,5 +1135,33 @@ func TestACPPersistentSessionProcessHoldsFullHistory(t *testing.T) {
 				t.Fatalf("full history = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// keepTranscript is the canonical transcript a keep test's process observed.
+func keepTranscript(session *acpTaskSession) []store.SessionMessage {
+	if session != nil && session.Reused && session.ClaimedTranscriptHeadID != "" {
+		return []store.SessionMessage{{ID: session.ClaimedTranscriptHeadID, Role: acpSessionTurnAssistantRole, Content: "earlier"}}
+	}
+	return nil
+}
+
+func TestACPPersistentSessionKeepRefusesAnAppendTheProcessNeverSaw(t *testing.T) {
+	record := persistentTestRecord(t)
+	input := persistentKeepInput(t, record)
+	dispatcher := &ACPDispatcher{Sessions: &ACPSessionContinuity{transcripts: &historyTranscriptStore{
+		messages: []store.SessionMessage{{ID: "oob", Role: "user", Content: "appended during the turn"}},
+	}}}
+	// The process was bootstrapped from an empty transcript.
+	if _, err := dispatcher.acpPersistentSessionKeepTranscriptHead(context.Background(), input); err == nil {
+		t.Fatal("a message appended after the bootstrap must refuse the keep")
+	}
+	input.session.Bootstrap = &ACPBootstrapTranscript{LastMessageID: "oob"}
+	if head, err := dispatcher.acpPersistentSessionKeepTranscriptHead(context.Background(), input); err != nil || head == "" {
+		t.Fatalf("an unchanged head = %q, %v", head, err)
+	}
+	input.session.Reused = true
+	if _, err := dispatcher.acpPersistentSessionKeepTranscriptHead(context.Background(), input); err == nil {
+		t.Fatal("a reused process without a claimed head must refuse the keep")
 	}
 }

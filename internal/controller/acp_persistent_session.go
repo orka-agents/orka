@@ -441,39 +441,59 @@ func acpResidentRuntimeStaticRefusal(record *store.SessionResidentRuntime, input
 
 // acpResidentRuntimeHistoryRefusal refuses reuse unless a fresh session
 // would have bootstrapped the whole history through turn N.
+// It also returns the last canonical message ID the reused process holds.
 func (d *ACPDispatcher) acpResidentRuntimeHistoryRefusal(
 	ctx context.Context, task *corev1alpha1.Task, control *store.SessionControl, record *store.SessionResidentRuntime,
-) (string, error) {
+) (string, string, error) {
 	ref := task.Spec.SessionRef
 	if ref == nil || ref.PromptIncluded {
-		return acpPersistentReasonHistoryBoundary, nil
+		return acpPersistentReasonHistoryBoundary, "", nil
 	}
 	if d.Sessions == nil || d.Sessions.transcripts == nil {
-		return acpPersistentReasonHistoryBoundary, nil
+		return acpPersistentReasonHistoryBoundary, "", nil
 	}
 	if control.Availability != store.SessionAvailable {
-		return acpPersistentReasonSessionUnavailable, nil
+		return acpPersistentReasonSessionUnavailable, "", nil
 	}
 	lastID, matches, err := d.acpTranscriptHeadMatches(ctx, control.Namespace, control.SessionName, record.TranscriptHeadDigest)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if !matches {
-		return acpPersistentReasonTranscriptChanged, nil
+	if !matches || strings.TrimSpace(lastID) == "" {
+		return acpPersistentReasonTranscriptChanged, "", nil
 	}
 	if through := strings.TrimSpace(ref.ThroughMessageID); through != "" && through != lastID {
-		return acpPersistentReasonHistoryBoundary, nil
+		return acpPersistentReasonHistoryBoundary, "", nil
 	}
 	if ref.MaxMessages > 0 {
 		bounded, err := d.Sessions.transcripts.LoadTranscript(ctx, control.Namespace, control.SessionName, int(ref.MaxMessages)+1)
 		if err != nil {
-			return "", fmt.Errorf("load bounded ACP transcript for persistent session reuse: %w", err)
+			return "", "", fmt.Errorf("load bounded ACP transcript for persistent session reuse: %w", err)
 		}
 		if len(bounded) > int(ref.MaxMessages) {
-			return acpPersistentReasonHistoryBoundary, nil
+			return acpPersistentReasonHistoryBoundary, "", nil
 		}
 	}
-	return "", nil
+	return "", lastID, nil
+}
+
+// acpPersistentSessionObservedTranscriptHead is the last canonical message ID
+// turn N's provider process received: the claimed head on a reuse, or the
+// last message of the bootstrap it was created from.
+func acpPersistentSessionObservedTranscriptHead(session *acpTaskSession) (string, bool) {
+	if session == nil {
+		return "", false
+	}
+	if session.Reused {
+		if session.ResidentClaimed == nil || strings.TrimSpace(session.ClaimedTranscriptHeadID) == "" {
+			return "", false
+		}
+		return session.ClaimedTranscriptHeadID, true
+	}
+	if session.Bootstrap == nil {
+		return "", false
+	}
+	return session.Bootstrap.LastMessageID, true
 }
 
 // acpPersistentSessionKeepInput is everything turn N's settlement knows when
@@ -702,6 +722,11 @@ func (d *ACPDispatcher) acpPersistentSessionKeepTranscriptHead(ctx context.Conte
 		if strings.TrimSpace(preceding) == "" {
 			return "", errors.New("the transcript head has no stable message ID")
 		}
+	}
+	// Anything appended since the process received its history (out of band
+	// during this turn) is a message the process never saw.
+	if observed, ok := acpPersistentSessionObservedTranscriptHead(input.session); !ok || observed != preceding {
+		return "", errors.New("the transcript changed after the process received its history")
 	}
 	appended := make([]acpTranscriptHeadMessage, 0, 2)
 	if !input.session.Turn.SkipUserPromptAppend {

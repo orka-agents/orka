@@ -262,6 +262,9 @@ func TestPersistentSessionTurnClaimsTheKeptRuntimeAndSendsOnlyItsOwnPrompt(t *te
 	if session.Bootstrap != nil || session.Binding.Generation != uint64(kept.RuntimeSessionGeneration) || !session.Binding.PromptDelivered {
 		t.Fatalf("a reused process must get no bootstrap and keep its generation: %#v", session.Binding)
 	}
+	if session.ClaimedTranscriptHeadID == "" {
+		t.Fatal("a claimed reuse must record the last canonical message the process holds")
+	}
 	if session.UserPrompt != turnN1.Spec.Prompt {
 		t.Fatalf("turn N+1 sends %q, want only its own prompt %q", session.UserPrompt, turnN1.Spec.Prompt)
 	}

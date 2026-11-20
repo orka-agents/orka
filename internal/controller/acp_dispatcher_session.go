@@ -31,6 +31,9 @@ type acpTaskSession struct {
 	// ResidentClaimed is the ADR 0059 record this turn's lease acquisition
 	// claimed. Reuse still requires the gate before first runtime contact.
 	ResidentClaimed *store.SessionResidentRuntime
+	// ClaimedTranscriptHeadID is the last canonical message ID the claimed
+	// process holds, as matched against the record's transcript head.
+	ClaimedTranscriptHeadID string
 	// FallbackBootstrap is the canonical bootstrap resolved before the lease
 	// so a refused claim can recreate without another fallible read.
 	FallbackBootstrap *ACPBootstrapTranscript
@@ -239,6 +242,7 @@ type acpTaskSessionPreparation struct {
 	// claimHandoffID is the ADR 0059 record the lease acquisition claims;
 	// fallbackBootstrap recreates if the claim is lost.
 	claimHandoffID    string
+	claimHeadID       string
 	claimRecord       *store.SessionResidentRuntime
 	fallbackBootstrap *ACPBootstrapTranscript
 }
@@ -447,6 +451,7 @@ func (d *ACPDispatcher) prepareTaskSessionWithClaim(
 		VerifiedBaseline: preparation.verifiedBaseline, Reused: !preparation.plan.Recreate,
 		LeaseGeneration: lease.Key.LeaseGeneration,
 		ResidentClaimed: residentClaimed, FallbackBootstrap: preparation.fallbackBootstrap,
+		ClaimedTranscriptHeadID: preparation.claimHeadID,
 	}, nil
 }
 
@@ -542,7 +547,7 @@ func (d *ACPDispatcher) planTaskSessionWithClaim(
 	// the mutation Lease. Once the Lease is held, the only next durable action is
 	// opening the exact SessionTurn.
 	var current *ACPRuntimeSessionBinding
-	claimHandoffID := ""
+	claimHandoffID, claimHeadID := "", ""
 	var claimRecord *store.SessionResidentRuntime
 	if claim != nil && claim.forceFresh {
 		// ADR 0059: a class opt-out or a refused reuse always gets a fresh
@@ -558,12 +563,13 @@ func (d *ACPDispatcher) planTaskSessionWithClaim(
 			input.handoffID = record.HandoffID
 		}
 		stage, reason := acpResidentRuntimeStaticRefusal(record, input)
+		headID := ""
 		if reason == "" {
-			historyReason, historyErr := d.acpResidentRuntimeHistoryRefusal(ctx, task, control, record)
+			historyReason, lastID, historyErr := d.acpResidentRuntimeHistoryRefusal(ctx, task, control, record)
 			if historyErr != nil {
 				return nil, historyErr
 			}
-			stage, reason = acpPersistentSessionStagePlan, historyReason
+			stage, reason, headID = acpPersistentSessionStagePlan, historyReason, lastID
 		}
 		if reason != "" {
 			reuse.miss(stage, reason)
@@ -571,6 +577,7 @@ func (d *ACPDispatcher) planTaskSessionWithClaim(
 			binding := acpRuntimeSessionBindingFromResidentRuntime(record)
 			current = &binding
 			claimHandoffID = record.HandoffID
+			claimHeadID = headID
 			claimRecord = store.CloneSessionResidentRuntime(record)
 			if reuse != nil {
 				reuse.keptAt = record.KeptAt
@@ -615,7 +622,7 @@ func (d *ACPDispatcher) planTaskSessionWithClaim(
 	if claimHandoffID != "" && plan.Recreate {
 		// The record's identity is not reusable after all: never claim it.
 		reuse.miss(acpPersistentSessionStagePlan, acpPersistentReasonSnapshotMismatch)
-		claimHandoffID, claimRecord = "", nil
+		claimHandoffID, claimHeadID, claimRecord = "", "", nil
 	}
 	switch {
 	case plan.BootstrapRequired && native == nil:
@@ -638,7 +645,7 @@ func (d *ACPDispatcher) planTaskSessionWithClaim(
 	return &acpTaskSessionPreparation{
 		control: control, current: current, plan: plan, bootstrap: bootstrap, userPrompt: userPrompt,
 		verifiedBaseline: verifiedBaseline, nativeSession: native,
-		claimHandoffID: claimHandoffID, claimRecord: claimRecord, fallbackBootstrap: fallbackBootstrap,
+		claimHandoffID: claimHandoffID, claimHeadID: claimHeadID, claimRecord: claimRecord, fallbackBootstrap: fallbackBootstrap,
 	}, nil
 }
 
