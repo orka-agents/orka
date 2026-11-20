@@ -26,7 +26,7 @@ const (
 	annotationControllerEpochPredecessorDigest       = "core.orka.ai/controller-epoch-predecessor-digest"
 )
 
-var errControllerEpochLeaseSnapshotChanged = errors.New("controller epoch Lease snapshot changed")
+var errControllerEpochLeaseSnapshotChanged = store.ErrControllerEpochLeaseChanging
 
 // GetControllerEpoch reads the authoritative controller-epoch Lease.
 func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.ControllerEpoch, error) {

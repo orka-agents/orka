@@ -112,7 +112,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	acquisitionCtx, cancelAcquisition := context.WithTimeout(ctx, defaultEpochAcquisitionTimeout)
 	defer cancelAcquisition()
 	m.publishTakeoverIntent(acquisitionCtx, 0)
-	current, err := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
+	current, err := m.readControllerEpochForAcquisition(acquisitionCtx, 0)
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		// holder has replaced it since, this manager lost, and a request
 		// against the winner would hold off its writes.
 		m.publishTakeoverIntent(acquisitionCtx, pending.change.ExpectedEpoch)
-		observed, readErr := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
+		observed, readErr := m.readControllerEpochForAcquisition(acquisitionCtx, pending.change.ExpectedEpoch)
 		if readErr != nil {
 			return fmt.Errorf("reconcile controller epoch CAS conflict: %w", readErr)
 		}
@@ -445,6 +445,33 @@ func (m *ControllerEpochManager) WriteFence(ctx context.Context, contract string
 type controllerEpochCASIntent struct {
 	change      store.ControllerEpochCAS
 	predecessor *store.ControllerEpoch
+}
+
+// readControllerEpochForAcquisition reads the current epoch for acquisition,
+// retrying a read whose epoch Lease kept changing under it until the
+// acquisition context ends. A busy
+// holder changes the epoch Lease with every token write (ADR 0058), so the
+// store's own short retry of its Lease and mirror read can run out while the
+// holder is still writing; that is contention, not a reason to abort startup
+// before the acquisition window does. Each retry republishes the takeover
+// request against expectedEpoch (zero: the current epoch), so the holder
+// stops writing new tokens. Any other error, including a definitive
+// conflict such as a stale or mismatched status mirror, still ends
+// acquisition at once.
+func (m *ControllerEpochManager) readControllerEpochForAcquisition(ctx context.Context, expectedEpoch int64) (*store.ControllerEpoch, error) {
+	for attempt := 0; ; attempt++ {
+		current, err := readControllerEpoch(ctx, m.Store, m.Name)
+		if err == nil || !errors.Is(err, store.ErrControllerEpochLeaseChanging) {
+			return current, err
+		}
+		delay := min(time.Duration(attempt+1)*10*time.Millisecond, defaultEpochCASMaxRetryDelay)
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("controller epoch read did not converge: %w; last conflict: %w", ctx.Err(), err)
+		case <-time.After(delay):
+		}
+		m.publishTakeoverIntent(ctx, expectedEpoch)
+	}
 }
 
 func readControllerEpoch(ctx context.Context, epochStore store.ControllerEpochStore, name string) (*store.ControllerEpoch, error) {
