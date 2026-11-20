@@ -140,7 +140,13 @@ For takeover liveness under continuous writes:
     manager that lost to another holder leaves no request against the winner.
     Before its first read, the manager publishes against whatever epoch is
     current. It holds none yet, so that epoch is the one it replaces, even
-    when a restart kept its holder ID. The request goes on a Lease of its own
+    when a restart kept its holder ID.
+    A manager read whose epoch Lease kept changing between the reads that
+    check its status mirror, as a busy holder's token writes make it, is
+    retried within the acquisition window, republishing the request each
+    time, instead of ending startup after the store's few quick retries.
+    Any other read error, including a stale or mismatched mirror, still ends
+    acquisition at once. The request goes on a Lease of its own
   (`controller-epoch-takeover-*`), which only successors write, so it never
   competes with the holder's writes to the epoch Lease. The
   `acp-workspace-lease-protection` admission policy reserves that prefix for
