@@ -618,7 +618,7 @@ func TestMigrateImportRequiresNamespaceBeforeCapture(t *testing.T) {
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--server", "http://explicit.example", "--token", "test-only", "--kubeconfig", "/missing/config",
 		"session", "migrate", "import", "private",
-		"--codex-home", home, "--thread", "missing-thread", "--journal-dir", journal, "--source-stopped"})
+		"--agent", "codex", "--state-dir", home, "--session-id", "missing-thread", "--journal-dir", journal, "--source-stopped"})
 	require.ErrorContains(t, cmd.Execute(), "requires a namespace")
 	require.NoFileExists(t, filepath.Join(journal, "request.json"))
 }
