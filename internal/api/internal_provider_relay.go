@@ -39,10 +39,12 @@ const (
 	// providerRelayMaxConcurrent bounds the model requests the controller
 	// relays at once, across all Tasks.
 	providerRelayMaxConcurrent = 64
-	// providerRelayTimeout bounds one relayed request, including a streamed
-	// response.
-	providerRelayTimeout = 30 * time.Minute
 )
+
+// providerRelayTimeout bounds one relayed request, including a streamed
+// response, and how long a worker may take to read it. It is a variable only
+// so tests can shorten it.
+var providerRelayTimeout = 30 * time.Minute
 
 // providerRelayPaths are the Azure OpenAI requests the AI worker makes: chat
 // completions for a deployment and the Responses API. The worker's SDK
@@ -62,35 +64,14 @@ var providerRelayAPIVersion = regexp.MustCompile(`^[0-9A-Za-z.-]{1,64}$`)
 // forwards the request to the Provider's endpoint. The worker never sees
 // the token.
 func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
-	namespace := strings.Clone(strings.TrimSpace(c.Params("namespace")))
-	taskName := strings.Clone(strings.TrimSpace(c.Params("taskName")))
-	slot := strings.Clone(strings.TrimSpace(c.Params("slot")))
-	if namespace == "" || taskName == "" || !workerenv.IsProviderRelaySlot(slot) {
-		return fiber.NewError(fiber.StatusBadRequest, "namespace, taskName and a provider slot are required")
-	}
 	if h.providerIdentities == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "this controller has no Provider identities")
 	}
-	if c.Method() != fiber.MethodPost {
-		return fiber.NewError(fiber.StatusMethodNotAllowed, "only POST is relayed")
-	}
-	task, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName)
+	target, err := h.providerRelayTarget(c)
 	if err != nil {
 		return err
 	}
-	if task.Spec.Type != corev1alpha1.TaskTypeAI {
-		return fiber.NewError(fiber.StatusForbidden, "the provider relay serves type: ai tasks only")
-	}
-
-	prefix := "/internal/v1/tasks/" + namespace + "/" + taskName + "/providers/" + slot
-	suffix, ok := strings.CutPrefix(string(c.Request().URI().PathOriginal()), prefix)
-	if !ok || providerproxy.HasUnsafePathSegment(suffix) || !providerRelayPathAllowed(suffix) {
-		return fiber.NewError(fiber.StatusNotFound, "the provider relay does not serve this path")
-	}
-	query, err := providerRelayQuery(string(c.Request().URI().QueryString()))
-	if err != nil {
-		return err
-	}
+	namespace, taskName, slot, task, suffix, query := target.namespace, target.taskName, target.slot, target.task, target.suffix, target.query
 
 	reader := h.apiReader
 	if reader == nil {
@@ -159,6 +140,15 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadGateway, "the Provider request failed")
 	}
 
+	// The transport decodes the gzip it asked for and removes the header. Any
+	// other encoding would reach the worker with its header removed, and the
+	// size bound would apply to the encoded bytes.
+	if encoding := response.Header.Get("Content-Encoding"); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		_ = response.Body.Close()
+		cancel()
+		return fiber.NewError(fiber.StatusBadGateway, "the Provider answered with an unsupported content encoding")
+	}
+
 	responseHeader := http.Header{}
 	providerproxy.CopyResponseHeaders(responseHeader, response.Header)
 	responseHeader.Del("Content-Length")
@@ -170,16 +160,73 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	c.Status(response.StatusCode)
 	released = true // the stream writer releases the slot
 	slots := h.providerRelaySlots
+	conn := c.RequestCtx().Conn()
+	deadline, _ := ctx.Deadline()
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		defer providerproxy.ReleaseSlot(slots)
 		defer cancel()
 		defer func() { _ = response.Body.Close() }()
+		// The request deadline does not interrupt a write to a worker that
+		// stopped reading, so the connection gets the same deadline, and the
+		// slot is released when it passes. The server sets no write
+		// deadline of its own, so it is cleared for the next request.
+		if conn != nil {
+			_ = conn.SetWriteDeadline(deadline)
+			defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
+		}
 		if err := providerproxy.StreamBoundedResponse(w, response.Body, providerRelayMaxResponseBytes, bufioFlusher{w}); err != nil &&
 			!errors.Is(err, providerproxy.ErrDestinationWrite) {
 			log.Info("provider relay response ended early", "namespace", namespace, "task", taskName, "slot", slot, "reason", err.Error())
 		}
 		_ = w.Flush()
 	})
+}
+
+// providerRelayRequest is a relay request that passed the caller, Task, path
+// and query checks.
+type providerRelayRequest struct {
+	namespace, taskName, slot string
+	task                      *corev1alpha1.Task
+	suffix, query             string
+}
+
+// providerRelayTarget checks who is calling and what for: a POST from the
+// current worker of a running type: ai Task, on an allowed Azure OpenAI path
+// with only an api-version query.
+func (h *InternalHandlers) providerRelayTarget(c fiber.Ctx) (providerRelayRequest, error) {
+	request := providerRelayRequest{
+		namespace: strings.Clone(strings.TrimSpace(c.Params("namespace"))),
+		taskName:  strings.Clone(strings.TrimSpace(c.Params("taskName"))),
+		slot:      strings.Clone(strings.TrimSpace(c.Params("slot"))),
+	}
+	if request.namespace == "" || request.taskName == "" || !workerenv.IsProviderRelaySlot(request.slot) {
+		return request, fiber.NewError(fiber.StatusBadRequest, "namespace, taskName and a provider slot are required")
+	}
+	if c.Method() != fiber.MethodPost {
+		return request, fiber.NewError(fiber.StatusMethodNotAllowed, "only POST is relayed")
+	}
+	task, err := h.internalCallerAuthorizer().verifyTaskCaller(c, request.namespace, request.taskName)
+	if err != nil {
+		return request, err
+	}
+	if task.Spec.Type != corev1alpha1.TaskTypeAI {
+		return request, fiber.NewError(fiber.StatusForbidden, "the provider relay serves type: ai tasks only")
+	}
+	// The caller check also admits a worker that is still starting or
+	// finalizing; model calls belong to the running Task only.
+	if task.Status.Phase != corev1alpha1.TaskPhaseRunning {
+		return request, fiber.NewError(fiber.StatusForbidden, "the provider relay serves running tasks only")
+	}
+	request.task = task
+
+	prefix := "/internal/v1/tasks/" + request.namespace + "/" + request.taskName + "/providers/" + request.slot
+	suffix, ok := strings.CutPrefix(string(c.Request().URI().PathOriginal()), prefix)
+	if !ok || providerproxy.HasUnsafePathSegment(suffix) || !providerRelayPathAllowed(suffix) {
+		return request, fiber.NewError(fiber.StatusNotFound, "the provider relay does not serve this path")
+	}
+	request.suffix = suffix
+	request.query, err = providerRelayQuery(string(c.Request().URI().QueryString()))
+	return request, err
 }
 
 type bufioFlusher struct{ w *bufio.Writer }

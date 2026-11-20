@@ -9,7 +9,9 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -59,6 +61,8 @@ type providerRelayHarness struct {
 	upstream   *httptest.Server
 	mu         sync.Mutex
 	requests   []relayUpstreamRequest
+	// respond replaces the upstream's default answer when set.
+	respond http.HandlerFunc
 }
 
 func (h *providerRelayHarness) upstreamRequests() []relayUpstreamRequest {
@@ -84,7 +88,12 @@ func newProviderRelayHarness(t *testing.T, mutate func(*providerRelayFixture)) *
 		h.requests = append(h.requests, relayUpstreamRequest{
 			method: r.Method, path: r.URL.EscapedPath(), query: r.URL.RawQuery, header: r.Header.Clone(), body: string(body),
 		})
+		respond := h.respond
 		h.mu.Unlock()
+		if respond != nil {
+			respond(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Set-Cookie", "upstream=1")
 		w.Header().Set("X-Request-Id", "req-1")
@@ -230,6 +239,7 @@ func TestProviderRelayChecksTheProviderTheJobWasBuiltFor(t *testing.T) {
 		"container task":        {func(f *providerRelayFixture) { f.task.Spec.Type = corev1alpha1.TaskTypeContainer }, http.StatusForbidden},
 		"no identities":         {func(f *providerRelayFixture) { f.noIdentities = true }, http.StatusNotImplemented},
 		"task no longer active": {func(f *providerRelayFixture) { f.task.Status.Phase = corev1alpha1.TaskPhaseSucceeded }, http.StatusForbidden},
+		"task not running yet":  {func(f *providerRelayFixture) { f.task.Status.Phase = corev1alpha1.TaskPhasePending }, http.StatusForbidden},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newProviderRelayHarness(t, tc.mutate)
@@ -264,4 +274,60 @@ func TestProviderRelayBoundsConcurrentRequests(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.StatusCode, body)
 	// The finished request returned its slot.
 	require.Len(t, h.handlers.providerRelaySlots, providerRelayMaxConcurrent-1)
+}
+
+// The transport decodes only the gzip it asked for; any other encoding would
+// reach the worker without its header, so it is refused.
+func TestProviderRelayRefusesEncodedResponses(t *testing.T) {
+	h := newProviderRelayHarness(t, nil)
+	h.mu.Lock()
+	h.respond = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "br")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "compressed")
+	}
+	h.mu.Unlock()
+	response, body := h.do(t, http.MethodPost, relayChatPath, nil)
+	require.Equal(t, http.StatusBadGateway, response.StatusCode, body)
+	require.NotContains(t, body, "compressed")
+	require.Empty(t, h.handlers.providerRelaySlots, "the refused response kept its slot")
+}
+
+// A worker that stops reading a streamed answer loses it when the relay's
+// deadline passes, and the slot is returned.
+func TestProviderRelayReleasesTheSlotOfAWorkerThatStopsReading(t *testing.T) {
+	previous := providerRelayTimeout
+	providerRelayTimeout = time.Second
+	t.Cleanup(func() { providerRelayTimeout = previous })
+
+	h := newProviderRelayHarness(t, nil)
+	h.mu.Lock()
+	h.respond = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := []byte("data: " + strings.Repeat("x", 32<<10) + "\n\n")
+		for r.Context().Err() == nil {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}
+	h.mu.Unlock()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = h.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = h.app.Shutdown() })
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	body := `{"messages":[]}`
+	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: controller\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+		relayChatPath, len(body), body)
+	require.NoError(t, err)
+	// The worker never reads the answer.
+	require.Eventually(t, func() bool { return len(h.handlers.providerRelaySlots) == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the relay never started streaming")
+	require.Eventually(t, func() bool { return len(h.handlers.providerRelaySlots) == 0 }, 10*time.Second, 50*time.Millisecond,
+		"a worker that stopped reading kept its relay slot")
 }
