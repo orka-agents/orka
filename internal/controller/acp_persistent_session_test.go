@@ -714,8 +714,8 @@ func TestACPPersistentSessionRuntimeGateReasons(t *testing.T) {
 	dispatcher, task, fence := persistentGateFixture(t, record)
 	supervisor := &fakePersistentSupervisor{status: quiescentStatus(record, fence)}
 	runtimeClient := supervisor.client(t, profileDigest)
-	if reason, err := dispatcher.acpPersistentSessionRuntimeGate(ctx, task, record, runtimeClient, fence, persistentTestFence(), persistentTestPool()); err != nil || reason != "" {
-		t.Fatalf("matching runtime refused: %q, %v", reason, err)
+	if reason, detail, err := dispatcher.acpPersistentSessionRuntimeGate(ctx, task, record, runtimeClient, fence, persistentTestFence(), persistentTestPool()); err != nil || reason != "" || detail != "" {
+		t.Fatalf("matching runtime refused: %q (%q), %v", reason, detail, err)
 	}
 	if supervisor.headers.Get(harnessv2.RuntimeSessionRebaseHeader) != "1" {
 		t.Fatal("the gate's status read must opt into the quiescent field")
@@ -727,28 +727,29 @@ func TestACPPersistentSessionRuntimeGateReasons(t *testing.T) {
 		served  func(*harnessv2.Fence)
 		record  func(*store.SessionResidentRuntime)
 		want    string
+		detail  string
 	}{
-		"session missing":   {status: func(s *harnessv2.RuntimeSessionStatus) { *s = harnessv2.RuntimeSessionStatus{} }, want: acpPersistentReasonRuntimeSessionMissing},
-		"session recreated": {status: func(s *harnessv2.RuntimeSessionStatus) { s.Generation = 9 }, want: acpPersistentReasonRuntimeSessionMissing},
+		"session missing":   {status: func(s *harnessv2.RuntimeSessionStatus) { *s = harnessv2.RuntimeSessionStatus{} }, want: acpPersistentReasonRuntimeSessionMissing, detail: acpPersistentGateDetailSessionAbsent},
+		"session recreated": {status: func(s *harnessv2.RuntimeSessionStatus) { s.Generation = 9 }, want: acpPersistentReasonRuntimeSessionMissing, detail: acpPersistentGateDetailGeneration},
 		"another generation's session ID": {status: func(s *harnessv2.RuntimeSessionStatus) {
 			s.RuntimeSessionID = harnessv2.RuntimeSessionID(runtimeSessionID(runtimePoolFenceWithSession(fence, s.RuntimeSessionUID, 3)))
-		}, want: acpPersistentReasonRuntimeSessionMissing},
+		}, want: acpPersistentReasonRuntimeSessionMissing, detail: acpPersistentGateDetailSessionID},
 		"another session's ID": {status: func(s *harnessv2.RuntimeSessionStatus) {
 			s.RuntimeSessionID = harnessv2.RuntimeSessionID(runtimeSessionID(runtimePoolFenceWithSession(fence, "other-session-uid", s.Generation)))
-		}, want: acpPersistentReasonRuntimeSessionMissing},
+		}, want: acpPersistentReasonRuntimeSessionMissing, detail: acpPersistentGateDetailSessionID},
 		"the dispatcher's session-less ID": {status: func(s *harnessv2.RuntimeSessionStatus) {
 			s.RuntimeSessionID = harnessv2.RuntimeSessionID(runtimeSessionID(fence))
-		}, want: acpPersistentReasonRuntimeSessionMissing},
-		"supervisor reports another boot":     {served: func(f *harnessv2.Fence) { f.SupervisorBootID = "boot-2" }, want: acpPersistentReasonRuntimeReplaced},
-		"supervisor reports another instance": {served: func(f *harnessv2.Fence) { f.RuntimeInstanceID = "instance-2" }, want: acpPersistentReasonRuntimeReplaced},
-		"supervisor reports another epoch":    {served: func(f *harnessv2.Fence) { f.ControllerEpoch = 2 }, want: acpPersistentReasonRuntimeReplaced},
-		"turn reached another boot":           {reached: func(f *harnessv2.Fence) { f.SupervisorBootID = "boot-2" }, want: acpPersistentReasonRuntimeReplaced},
-		"turn reached another instance":       {reached: func(f *harnessv2.Fence) { f.RuntimeInstanceID = "instance-2" }, want: acpPersistentReasonRuntimeReplaced},
-		"record names no session generation":  {record: func(r *store.SessionResidentRuntime) { r.RuntimeSessionGeneration = 0 }, want: acpPersistentReasonRuntimeReplaced},
-		"session busy":                        {status: func(s *harnessv2.RuntimeSessionStatus) { s.Quiescent = false }, want: acpPersistentReasonRuntimeSessionNotIdle},
+		}, want: acpPersistentReasonRuntimeSessionMissing, detail: acpPersistentGateDetailSessionID},
+		"supervisor reports another boot":     {served: func(f *harnessv2.Fence) { f.SupervisorBootID = "boot-2" }, want: acpPersistentReasonRuntimeReplaced, detail: "status-fence-supervisor_boot"},
+		"supervisor reports another instance": {served: func(f *harnessv2.Fence) { f.RuntimeInstanceID = "instance-2" }, want: acpPersistentReasonRuntimeReplaced, detail: "status-fence-runtime_instance"},
+		"supervisor reports another epoch":    {served: func(f *harnessv2.Fence) { f.ControllerEpoch = 2 }, want: acpPersistentReasonRuntimeReplaced, detail: "status-fence-controller_epoch"},
+		"turn reached another boot":           {reached: func(f *harnessv2.Fence) { f.SupervisorBootID = "boot-2" }, want: acpPersistentReasonRuntimeReplaced, detail: acpPersistentGateDetailReachedBoot},
+		"turn reached another instance":       {reached: func(f *harnessv2.Fence) { f.RuntimeInstanceID = "instance-2" }, want: acpPersistentReasonRuntimeReplaced, detail: acpPersistentGateDetailReachedInstance},
+		"record names no session generation":  {record: func(r *store.SessionResidentRuntime) { r.RuntimeSessionGeneration = 0 }, want: acpPersistentReasonRuntimeReplaced, detail: acpPersistentGateDetailRecordIncomplete},
+		"session busy":                        {status: func(s *harnessv2.RuntimeSessionStatus) { s.Quiescent = false }, want: acpPersistentReasonRuntimeSessionNotIdle, detail: acpPersistentGateDetailNotQuiescent},
 		"session finalizing": {status: func(s *harnessv2.RuntimeSessionStatus) {
 			s.State, s.Quiescent, s.ReservedForFinalization = harnessv2.RuntimeSessionStateFinalizing, false, true
-		}, want: acpPersistentReasonRuntimeSessionNotIdle},
+		}, want: acpPersistentReasonRuntimeSessionNotIdle, detail: "state-finalizing"},
 		"served record moved": {pool: func(p *corev1alpha1.RuntimePool) {
 			p.Annotations[externalRuntimeServedAnnotation] = "sha256:spec 4 allocation-2 instance-1 rev-2 pod-uid boot-1"
 		}, want: acpPersistentReasonProviderEpochChanged},
@@ -778,9 +779,9 @@ func TestACPPersistentSessionRuntimeGateReasons(t *testing.T) {
 				tc.record(claimed)
 			}
 			client := (&fakePersistentSupervisor{status: status, fence: &served}).client(t, profileDigest)
-			reason, err := d.acpPersistentSessionRuntimeGate(ctx, task, claimed, client, reached, persistentTestFence(), persistentTestPool())
-			if err != nil || reason != tc.want {
-				t.Fatalf("gate = %q, %v; want %q", reason, err, tc.want)
+			reason, detail, err := d.acpPersistentSessionRuntimeGate(ctx, task, claimed, client, reached, persistentTestFence(), persistentTestPool())
+			if err != nil || reason != tc.want || detail != tc.detail {
+				t.Fatalf("gate = %q (%q), %v; want %q (%q)", reason, detail, err, tc.want, tc.detail)
 			}
 		})
 	}
@@ -1243,4 +1244,55 @@ func TestACPPersistentSessionGatesRefuseABindingOtherThanTheClaimedRecord(t *tes
 	require.False(t, requeued)
 	require.True(t, reuse.hit, "the exact claimed binding reuses: %s", reuse.reason)
 	require.True(t, session.Reused)
+}
+
+// The keep marker exempts a write Session Task's runtime from task-scoped
+// cleanup only for the exact attempt and RuntimeSession incarnation it names,
+// and only while the Task is not being deleted.
+func TestACPPersistentSessionKeptMarkerNamesOneExactRuntime(t *testing.T) {
+	kept := func() *corev1alpha1.Task {
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "write-turn", UID: "write-turn-uid", Annotations: map[string]string{}},
+			Spec: corev1alpha1.TaskSpec{
+				SessionRef: &corev1alpha1.SessionReference{Name: "session"},
+				Workspace:  &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentWrite},
+			},
+			Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+				State: corev1alpha1.TaskExecutionStateSucceeded, Attempt: 1, RuntimeInstanceID: "instance-1",
+				RuntimeSessionSupervisorBootID: "boot-1", RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 2,
+			}},
+		}
+		marker, err := acpPersistentSessionKeptDigest(task.UID, task.Status.Execution)
+		require.NoError(t, err)
+		task.Annotations[acpTaskPersistentSessionKeptAnnotation] = marker
+		return task
+	}
+	task := kept()
+	require.True(t, acpTaskWriteRuntimeSessionKept(task, task.UID))
+	require.True(t, taskScopedRuntimeSessionCleanupComplete(task), "the Session owns a kept write runtime")
+	for name, mutate := range map[string]func(*corev1alpha1.Task){
+		"no marker":          func(task *corev1alpha1.Task) { delete(task.Annotations, acpTaskPersistentSessionKeptAnnotation) },
+		"another attempt":    func(task *corev1alpha1.Task) { task.Status.Execution.Attempt = 2 },
+		"another generation": func(task *corev1alpha1.Task) { task.Status.Execution.RuntimeSessionGeneration = 3 },
+		"another instance":   func(task *corev1alpha1.Task) { task.Status.Execution.RuntimeInstanceID = "instance-2" },
+		"another boot":       func(task *corev1alpha1.Task) { task.Status.Execution.RuntimeSessionSupervisorBootID = "boot-2" },
+		"recreation pending": func(task *corev1alpha1.Task) { task.Status.Execution.RuntimeSessionRecreationPending = true },
+		"outcome unknown": func(task *corev1alpha1.Task) {
+			task.Status.Execution.State = corev1alpha1.TaskExecutionStateOutcomeUnknown
+		},
+		"deleting":              func(task *corev1alpha1.Task) { task.DeletionTimestamp = new(metav1.Now()) },
+		"standalone write Task": func(task *corev1alpha1.Task) { task.Spec.SessionRef = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			task := kept()
+			mutate(task)
+			require.False(t, taskScopedRuntimeSessionCleanupComplete(task), "the Task must still retire its runtime")
+		})
+	}
+	// A read Session Task never needs the marker.
+	read := kept()
+	read.Spec.Workspace.Intent = corev1alpha1.WorkspaceIntentRead
+	delete(read.Annotations, acpTaskPersistentSessionKeptAnnotation)
+	require.True(t, acpTaskSessionOwnsRuntimeSession(read, read.UID))
+	require.False(t, acpTaskWriteRuntimeSessionKept(read, read.UID))
 }

@@ -58,6 +58,13 @@ const (
 	// acpTaskPersistentSessionRefusedAnnotation records the bounded reason a
 	// Task's reuse was refused at the gate; later attempts never claim.
 	acpTaskPersistentSessionRefusedAnnotation = "acp.workspace.orka.ai/persistent-session-refused"
+	// acpTaskPersistentSessionKeptAnnotation is the digest of the exact
+	// write-intent RuntimeSession a Task's live settlement handed to its
+	// Session (ADR 0059 section 2). Read-intent Session Tasks never own their
+	// runtime; a write Task does unless this marker names its exact runtime.
+	// With it, the Task's terminal cleanup leaves the kept process to the
+	// Session, as for a resident read-intent session.
+	acpTaskPersistentSessionKeptAnnotation = "acp.workspace.orka.ai/persistent-session-kept"
 	// acpWorkspaceAttachedFromWarmAnnotation is written by the same optimistic
 	// attach patch that installs the attachment:
 	// "<taskUID> <epoch> <observed suspend-at> <last-settled-task-uid>".
@@ -118,6 +125,9 @@ const (
 	acpPersistentSessionDecisionHit          = "hit"
 	acpPersistentSessionDecisionMiss         = "miss"
 	acpPersistentSessionRefusedDeleteReason  = "persistent_session_refused"
+	// acpPersistentReasonKeepUnrecorded retires a kept write session whose
+	// Task could not record the keep marker the cleanup paths require.
+	acpPersistentReasonKeepUnrecorded = "keep-unrecorded"
 	// acpSessionTurnAssistantRole is the role of an assistant-result
 	// finalization's terminal transcript message.
 	acpSessionTurnAssistantRole = "assistant"
@@ -135,8 +145,27 @@ var acpPersistentSessionReasons = map[string]struct{}{
 	acpPersistentReasonPoolNotAccepting: {}, acpPersistentReasonRuntimeReplaced: {}, acpPersistentReasonProviderEpochChanged: {},
 	acpPersistentReasonWorkspaceNotWarm: {}, acpPersistentReasonWorkspaceIncarnation: {}, acpPersistentReasonHandshakeTimeout: {},
 	acpPersistentReasonRuntimeSessionMissing: {}, acpPersistentReasonRuntimeSessionNotIdle: {}, acpPersistentReasonTaskCancelled: {},
-	acpPersistentReasonTaskDeadline: {},
+	acpPersistentReasonTaskDeadline: {}, acpPersistentReasonKeepUnrecorded: {},
 }
+
+// Bounded gate details: which runtime check refused a claimed record. They
+// are log values only, never metric labels.
+const (
+	acpPersistentGateDetailRecordIncomplete  = "record-incomplete"
+	acpPersistentGateDetailReachedInstance   = "reached-instance-mismatch"
+	acpPersistentGateDetailReachedBoot       = "reached-boot-mismatch"
+	acpPersistentGateDetailStatusError       = "status-error"
+	acpPersistentGateDetailStatusFencePrefix = "status-fence-"
+	acpPersistentGateDetailSessionAbsent     = "session-absent"
+	acpPersistentGateDetailGeneration        = "session-generation-mismatch"
+	acpPersistentGateDetailSessionID         = "session-id-mismatch"
+	acpPersistentGateDetailBinding           = "planned-binding-mismatch"
+	acpPersistentGateDetailStatePrefix       = "state-"
+	acpPersistentGateDetailActivePrompt      = "active-prompt"
+	acpPersistentGateDetailPendingPermission = "pending-permission"
+	acpPersistentGateDetailFinalization      = "reserved-for-finalization"
+	acpPersistentGateDetailNotQuiescent      = "not-quiescent"
+)
 
 func boundedACPPersistentSessionReason(reason string) string {
 	if _, ok := acpPersistentSessionReasons[reason]; ok {
@@ -172,6 +201,8 @@ type acpPersistentSessionReuse struct {
 	hit        bool
 	reason     string
 	stage      string
+	// detail is the bounded gate detail of a gate miss, when any.
+	detail     string
 	keptAt     time.Time
 	gateWait   time.Duration
 	generation uint64
@@ -184,6 +215,17 @@ func (r *acpPersistentSessionReuse) miss(stage, reason string) {
 	r.hit = false
 	r.stage = stage
 	r.reason = boundedACPPersistentSessionReason(reason)
+	r.detail = ""
+}
+
+// missWithDetail is miss with the bounded gate detail that names which check
+// refused.
+func (r *acpPersistentSessionReuse) missWithDetail(stage, reason, detail string) {
+	if r == nil || r.logged {
+		return
+	}
+	r.miss(stage, reason)
+	r.detail = detail
 }
 
 func (r *acpPersistentSessionReuse) log(ctx context.Context, task *corev1alpha1.Task) {
@@ -208,7 +250,7 @@ func (r *acpPersistentSessionReuse) log(ctx context.Context, task *corev1alpha1.
 	logf.FromContext(ctx).Info(acpPersistentSessionReuseLogMessage,
 		"namespace", task.Namespace, "task", task.Name, "result", result, "reason", reason, "stage", r.stage,
 		"handoffAgeMs", handoffAge.Milliseconds(), "gateWaitMs", r.gateWait.Milliseconds(),
-		"runtimeSessionGeneration", r.generation)
+		"runtimeSessionGeneration", r.generation, "detail", r.detail)
 }
 
 // acpPersistentReuseAttemptKey names one execution attempt of one Task.
@@ -1013,7 +1055,11 @@ var errACPPersistentSessionHandshakeTimeout = errors.New("the attach handshake d
 
 // acpPersistentSessionRuntimeGate is the gate before first runtime contact for
 // a claimed record: pool, runtime, workspace evidence and the exact quiescent
-// RuntimeSession status. "" means reuse may proceed.
+// RuntimeSession status. An empty reason means reuse may proceed. detail
+// names which runtime check refused, from a bounded set, so a miss log says
+// whether status failed, the session was absent, or which identity differed.
+//
+//nolint:gocyclo // Every gate condition is one fail-closed check in a fixed order.
 func (d *ACPDispatcher) acpPersistentSessionRuntimeGate(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1022,55 +1068,75 @@ func (d *ACPDispatcher) acpPersistentSessionRuntimeGate(
 	runtimeFence harnessv2.Fence,
 	fence store.ControllerEpochFence,
 	pool *corev1alpha1.RuntimePool,
-) (string, error) {
+) (reason, detail string, err error) {
 	reader := uncachedReader(d.APIReader, d.Client)
 	currentPool := &corev1alpha1.RuntimePool{}
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), currentPool); err != nil {
 		if apierrors.IsNotFound(err) {
-			return acpPersistentReasonPoolReplaced, nil
+			return acpPersistentReasonPoolReplaced, "", nil
 		}
-		return "", err
+		return "", "", err
 	}
 	if string(currentPool.UID) != record.RuntimePoolUID || currentPool.Generation != record.RuntimePoolGeneration {
-		return acpPersistentReasonPoolReplaced, nil
+		return acpPersistentReasonPoolReplaced, "", nil
 	}
 	if refusal := acpRuntimePoolResidentRefusal(currentPool, record.RuntimeInstanceID, record.SupervisorBootID, fence); refusal != "" {
-		return refusal, nil
+		return refusal, "", nil
 	}
 	if acpRuntimePoolServedRecordDigest(currentPool) != record.ServedRecordDigest {
-		return acpPersistentReasonProviderEpochChanged, nil
+		return acpPersistentReasonProviderEpochChanged, "", nil
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: record.WorkspaceName}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
-			return acpPersistentReasonWorkspaceIncarnation, nil
+			return acpPersistentReasonWorkspaceIncarnation, "", nil
 		}
-		return "", err
+		return "", "", err
 	}
 	if refusal := acpPersistentSessionWorkspaceRefusal(workspace, task, record); refusal != "" {
-		return refusal, nil
+		return refusal, "", nil
 	}
-	expected, ok := acpPersistentSessionClaimedFence(record, runtimeFence)
+	expected, detail, ok := acpPersistentSessionClaimedFenceDetail(record, runtimeFence)
 	if !ok {
-		return acpPersistentReasonRuntimeReplaced, nil
+		return acpPersistentReasonRuntimeReplaced, detail, nil
 	}
 	status, observed, err := runtimeSessionStatusForUID(ctx, runtimeClient, expected.RuntimeSessionUID)
 	if err != nil {
-		return acpPersistentReasonRuntimeSessionMissing, nil
+		return acpPersistentReasonRuntimeSessionMissing, acpPersistentGateDetailStatusError, nil
 	}
-	if harnessv2.CompareFence(runtimePoolFenceWithSession(expected, "", 0), status.Fence, false) != harnessv2.FenceMatch {
-		return acpPersistentReasonRuntimeReplaced, nil
+	if mismatch := harnessv2.CompareFence(runtimePoolFenceWithSession(expected, "", 0), status.Fence, false); mismatch != harnessv2.FenceMatch {
+		return acpPersistentReasonRuntimeReplaced, acpPersistentGateDetailStatusFencePrefix + string(mismatch), nil
 	}
-	if observed == nil || observed.RuntimeSessionUID != expected.RuntimeSessionUID ||
-		observed.Generation != expected.RuntimeSessionGeneration ||
-		observed.RuntimeSessionID != harnessv2.RuntimeSessionID(runtimeSessionID(expected)) {
-		return acpPersistentReasonRuntimeSessionMissing, nil
+	switch {
+	case observed == nil:
+		return acpPersistentReasonRuntimeSessionMissing, acpPersistentGateDetailSessionAbsent, nil
+	case observed.Generation != expected.RuntimeSessionGeneration:
+		return acpPersistentReasonRuntimeSessionMissing, acpPersistentGateDetailGeneration, nil
+	case observed.RuntimeSessionID != harnessv2.RuntimeSessionID(runtimeSessionID(expected)):
+		return acpPersistentReasonRuntimeSessionMissing, acpPersistentGateDetailSessionID, nil
 	}
-	if observed.State != harnessv2.RuntimeSessionStateIdle || !observed.Quiescent || observed.ActivePromptID != "" ||
-		observed.PendingPermissionCount != 0 || observed.ReservedForFinalization {
-		return acpPersistentReasonRuntimeSessionNotIdle, nil
+	switch {
+	case observed.State != harnessv2.RuntimeSessionStateIdle:
+		return acpPersistentReasonRuntimeSessionNotIdle, acpPersistentGateDetailStatePrefix + boundedACPPersistentGateState(observed.State), nil
+	case observed.ActivePromptID != "":
+		return acpPersistentReasonRuntimeSessionNotIdle, acpPersistentGateDetailActivePrompt, nil
+	case observed.PendingPermissionCount != 0:
+		return acpPersistentReasonRuntimeSessionNotIdle, acpPersistentGateDetailPendingPermission, nil
+	case observed.ReservedForFinalization:
+		return acpPersistentReasonRuntimeSessionNotIdle, acpPersistentGateDetailFinalization, nil
+	case !observed.Quiescent:
+		return acpPersistentReasonRuntimeSessionNotIdle, acpPersistentGateDetailNotQuiescent, nil
 	}
-	return "", nil
+	return "", "", nil
+}
+
+// boundedACPPersistentGateState keeps a supervisor-reported state in the
+// gate detail only when it is a known RuntimeSession state.
+func boundedACPPersistentGateState(state harnessv2.RuntimeSessionState) string {
+	if !harnessv2.IsKnownRuntimeSessionState(state) {
+		return "unknown"
+	}
+	return string(state)
 }
 
 // acpPersistentSessionClaimedFence is the exact identity a claimed record
@@ -1080,15 +1146,25 @@ func (d *ACPDispatcher) acpPersistentSessionRuntimeGate(
 // expected session from it. It reports false when the record names another
 // instance or boot, or no valid session.
 func acpPersistentSessionClaimedFence(record *store.SessionResidentRuntime, runtimeFence harnessv2.Fence) (harnessv2.Fence, bool) {
-	if record == nil || strings.TrimSpace(record.RuntimeSessionUID) == "" || record.RuntimeSessionGeneration < 1 ||
-		strings.TrimSpace(record.RuntimeInstanceID) == "" || strings.TrimSpace(record.SupervisorBootID) == "" ||
-		record.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID) ||
-		record.SupervisorBootID != string(runtimeFence.SupervisorBootID) {
-		return harnessv2.Fence{}, false
+	expected, _, ok := acpPersistentSessionClaimedFenceDetail(record, runtimeFence)
+	return expected, ok
+}
+
+// acpPersistentSessionClaimedFenceDetail is acpPersistentSessionClaimedFence
+// with the bounded gate detail of a refusal.
+func acpPersistentSessionClaimedFenceDetail(record *store.SessionResidentRuntime, runtimeFence harnessv2.Fence) (harnessv2.Fence, string, bool) {
+	switch {
+	case record == nil || strings.TrimSpace(record.RuntimeSessionUID) == "" || record.RuntimeSessionGeneration < 1 ||
+		strings.TrimSpace(record.RuntimeInstanceID) == "" || strings.TrimSpace(record.SupervisorBootID) == "":
+		return harnessv2.Fence{}, acpPersistentGateDetailRecordIncomplete, false
+	case record.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID):
+		return harnessv2.Fence{}, acpPersistentGateDetailReachedInstance, false
+	case record.SupervisorBootID != string(runtimeFence.SupervisorBootID):
+		return harnessv2.Fence{}, acpPersistentGateDetailReachedBoot, false
 	}
 	return runtimePoolFenceWithSession(
 		runtimeFence, harnessv2.RuntimeSessionUID(record.RuntimeSessionUID), uint64(record.RuntimeSessionGeneration),
-	), true
+	), "", true
 }
 
 // acpPersistentSessionWorkspaceRefusal checks the warm-window evidence the
@@ -1310,7 +1386,7 @@ func (d *ACPDispatcher) runACPPersistentSessionGates(
 	if record == nil {
 		return false, nil
 	}
-	reason, err := d.acpPersistentSessionRuntimeGate(ctx, task, record, runtimeClient, runtimeFence, fence, target.pool)
+	reason, detail, err := d.acpPersistentSessionRuntimeGate(ctx, task, record, runtimeClient, runtimeFence, fence, target.pool)
 	if err != nil {
 		return requeue(acpPersistentReasonRuntimeSessionMissing, err)
 	}
@@ -1319,10 +1395,10 @@ func (d *ACPDispatcher) runACPPersistentSessionGates(
 		string(session.Binding.RuntimeInstanceID) != record.RuntimeInstanceID ||
 		string(session.Binding.SupervisorBootID) != record.SupervisorBootID) {
 		// The turn would address a session other than the one the gate proved.
-		reason = acpPersistentReasonRuntimeSessionMissing
+		reason, detail = acpPersistentReasonRuntimeSessionMissing, acpPersistentGateDetailBinding
 	}
 	if reason != "" {
-		reuse.miss(acpPersistentSessionStageGate, reason)
+		reuse.missWithDetail(acpPersistentSessionStageGate, reason, detail)
 		d.stampACPPersistentSessionRefused(ctx, task, reason)
 		if retired := d.retireACPResidentRuntime(ctx, task, fence, record); retired != nil && session.Turn != nil &&
 			validateACPSessionLease(retired, session.Turn.Lease.Key) == nil {
@@ -1391,4 +1467,87 @@ func (d *ACPDispatcher) retireACPResidentRuntime(
 		return nil
 	}
 	return control
+}
+
+// acpPersistentSessionKeptDigest binds the keep marker to one exact Task
+// attempt and RuntimeSession incarnation.
+func acpPersistentSessionKeptDigest(taskUID types.UID, execution *corev1alpha1.TaskExecutionStatus) (string, error) {
+	if taskUID == "" || execution == nil || execution.Attempt < 1 || strings.TrimSpace(execution.RuntimeInstanceID) == "" ||
+		strings.TrimSpace(execution.RuntimeSessionSupervisorBootID) == "" ||
+		strings.TrimSpace(execution.RuntimeSessionUID) == "" || execution.RuntimeSessionGeneration < 1 {
+		return "", fmt.Errorf("%w: persistent session keep identity is incomplete", store.ErrConflict)
+	}
+	return acpDomainDigest("acp-persistent-session-kept", map[string]any{
+		taskUIDField: string(taskUID), attemptField: execution.Attempt, "runtimeInstanceID": execution.RuntimeInstanceID,
+		"supervisorBootID": execution.RuntimeSessionSupervisorBootID, "runtimeSessionUID": execution.RuntimeSessionUID,
+		"runtimeSessionGeneration": execution.RuntimeSessionGeneration,
+	})
+}
+
+// acpTaskWriteRuntimeSessionKept reports whether a write-intent Session
+// Task's live settlement handed its exact current RuntimeSession to the
+// Session. A marker for another attempt or incarnation never matches.
+func acpTaskWriteRuntimeSessionKept(task *corev1alpha1.Task, taskUID types.UID) bool {
+	if task == nil || task.Spec.SessionRef == nil || task.Spec.Workspace == nil ||
+		task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite || task.Status.Execution == nil {
+		return false
+	}
+	marker := strings.TrimSpace(task.Annotations[acpTaskPersistentSessionKeptAnnotation])
+	if marker == "" {
+		return false
+	}
+	want, err := acpPersistentSessionKeptDigest(taskUID, task.Status.Execution)
+	return err == nil && marker == want
+}
+
+// acpTaskSessionOwnsRuntimeSession reports whether a Session Task's
+// RuntimeSession belongs to the Session rather than the Task: always for read
+// intent, and for write intent only once the Task's live settlement kept it.
+func acpTaskSessionOwnsRuntimeSession(task *corev1alpha1.Task, taskUID types.UID) bool {
+	if task == nil || task.Spec.SessionRef == nil {
+		return false
+	}
+	return task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite ||
+		acpTaskWriteRuntimeSessionKept(task, taskUID)
+}
+
+// stampACPPersistentSessionKept records the keep marker for the exact
+// RuntimeSession runtimeFence names. It runs after the record committed and
+// before the Task completes, while the live dispatch still owns the Task, so
+// no terminal cleanup can observe the kept Task without it. An error leaves
+// the Task without the marker; the caller then retires the session as today.
+func (d *ACPDispatcher) stampACPPersistentSessionKept(ctx context.Context, task *corev1alpha1.Task, runtimeFence harnessv2.Fence) error {
+	if task == nil || d.Client == nil {
+		return errors.New("persistent session keep marker requires the Task")
+	}
+	latest := &corev1alpha1.Task{}
+	if err := d.Client.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+		return err
+	}
+	execution := latest.Status.Execution
+	if latest.UID != task.UID || execution == nil || execution.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID) ||
+		execution.RuntimeSessionSupervisorBootID != string(runtimeFence.SupervisorBootID) ||
+		execution.RuntimeSessionUID != string(runtimeFence.RuntimeSessionUID) ||
+		execution.RuntimeSessionGeneration != int64(runtimeFence.RuntimeSessionGeneration) {
+		return fmt.Errorf("%w: Task RuntimeSession identity differs from the kept session", store.ErrConflict)
+	}
+	marker, err := acpPersistentSessionKeptDigest(latest.UID, execution)
+	if err != nil {
+		return err
+	}
+	base := latest.DeepCopy()
+	if latest.Annotations == nil {
+		latest.Annotations = map[string]string{}
+	}
+	latest.Annotations[acpTaskPersistentSessionKeptAnnotation] = marker
+	// The optimistic lock binds the marker to the exact status it was
+	// computed from.
+	if err := d.Client.Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return err
+	}
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[acpTaskPersistentSessionKeptAnnotation] = marker
+	return nil
 }

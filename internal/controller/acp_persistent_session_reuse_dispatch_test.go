@@ -30,6 +30,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -66,6 +67,30 @@ type persistentReuseDispatchFixture struct {
 	probeOnDelete atomic.Bool
 	// quiescent is what the supervisor reports for its resident session.
 	quiescent atomic.Bool
+	// write runs write-intent turns: each publishes through the clean-room
+	// publisher, finalizes, and is rebased before it is kept.
+	write      bool
+	credential *corev1.Secret
+	// resolvedOID is the branch head the clean-room publisher resolves.
+	resolvedOID atomic.Value
+	deltas      []harnessv2.CreateWorkspaceDeltaRequest
+	rebases     []harnessv2.RebaseRuntimeSessionRequest
+}
+
+const (
+	reuseDispatchBaselineOID = "1111111111111111111111111111111111111111"
+	reuseDispatchCommitOID   = "3333333333333333333333333333333333333333"
+)
+
+// reuseDispatchWriteWorkspace is the write-intent repository of a write
+// fixture's turns, with every credential the clean-room publisher needs.
+func reuseDispatchWriteWorkspace() *corev1alpha1.WorkspaceConfig {
+	ref := &corev1alpha1.WorkspaceCredentialReference{Name: "workspace-credential"}
+	return &corev1alpha1.WorkspaceConfig{
+		Intent: corev1alpha1.WorkspaceIntentWrite, GitRepo: "https://github.com/orka-agents/orka.git", Ref: defaultACPSourceBranch,
+		ReadCredentialRef: ref, PublicationGitRepo: "https://github.com/orka-agents/orka.git",
+		PublicationReadCredentialRef: ref, PublicationCredentialRef: ref, ForgeCredentialRef: ref,
+	}
 }
 
 func reuseDispatchTask(name string, uid types.UID) *corev1alpha1.Task {
@@ -88,7 +113,14 @@ func reuseDispatchTask(name string, uid types.UID) *corev1alpha1.Task {
 
 func newPersistentReuseDispatchFixture(t *testing.T, ctx context.Context) *persistentReuseDispatchFixture {
 	t.Helper()
-	f := &persistentReuseDispatchFixture{runtime: &warmClaudeRuntime{}}
+	return newPersistentReuseDispatchFixtureWithIntent(t, ctx, false)
+}
+
+//nolint:gocyclo // One fixture wires the store, pool, workspace, supervisor and publisher together.
+func newPersistentReuseDispatchFixtureWithIntent(t *testing.T, ctx context.Context, write bool) *persistentReuseDispatchFixture {
+	t.Helper()
+	f := &persistentReuseDispatchFixture{runtime: &warmClaudeRuntime{}, write: write}
+	f.resolvedOID.Store(reuseDispatchBaselineOID)
 	f.quiescent.Store(true)
 	f.probeOnDelete.Store(true)
 	f.scheme = runtime.NewScheme()
@@ -105,6 +137,9 @@ func newPersistentReuseDispatchFixture(t *testing.T, ctx context.Context) *persi
 	image := "docker.io/example/acp@sha256:" + strings.Repeat("a", 64)
 	f.images = ACPRuntimeImages{Codex: image, Claude: image}
 	probe := reuseDispatchTask("probe", "00000000-0000-0000-0000-000000000000")
+	if write {
+		probe.Spec.Workspace = reuseDispatchWriteWorkspace()
+	}
 	plan := frozenACPDispatcherPlanForTest(t, probe, f.agent, f.images)
 	binding, err := resolveTestACPWorkspaceBinding(t, probe, reuseDispatchSessionUID)
 	require.NoError(t, err)
@@ -118,7 +153,17 @@ func newPersistentReuseDispatchFixture(t *testing.T, ctx context.Context) *persi
 	f.instance = harnessv2.RuntimeInstanceID(runtimePoolRuntimeInstanceID(runtimeUID, "boot-id"))
 	var kube client.WithWatch
 	server := newDispatcherRuntimeServerWithOptions(t, plan.Profile, plan.Digest, dispatcherRuntimeServerOptions{
-		quiescent: f.quiescent.Load, supportsRebase: true, runtimeInstanceID: f.instance,
+		quiescent: f.quiescent.Load, supportsRebase: true, runtimeInstanceID: f.instance, writePublication: write,
+		onDelta: func(request harnessv2.CreateWorkspaceDeltaRequest) {
+			f.runtime.mu.Lock()
+			f.deltas = append(f.deltas, request)
+			f.runtime.mu.Unlock()
+		},
+		onRebase: func(request harnessv2.RebaseRuntimeSessionRequest) {
+			f.runtime.mu.Lock()
+			f.rebases = append(f.rebases, request)
+			f.runtime.mu.Unlock()
+		},
 		onPrompt: func(request harnessv2.StartPromptRequest) {
 			f.runtime.mu.Lock()
 			f.runtime.prompts = append(f.runtime.prompts, request)
@@ -180,10 +225,15 @@ func newPersistentReuseDispatchFixture(t *testing.T, ctx context.Context) *persi
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 	workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation] = "1"
 	worker := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "orka-runtimes", Name: "deadline-worker", UID: "deadline-worker-uid"}}
+	f.credential = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "workspace-credential", UID: "workspace-credential-uid", ResourceVersion: "1"},
+		Data:       map[string][]byte{defaultACPWorkspaceCredentialKey: []byte("test-token")},
+	}
 	kube = withControllerEpochLeaseUIDs(t, fake.NewClientBuilder().WithScheme(f.scheme).
 		WithStatusSubresource(&corev1alpha1.Task{}, &corev1alpha1.ControllerEpoch{}, &corev1alpha1.PromptAttempt{},
-			&corev1alpha1.RuntimeSessionControl{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{}).
-		WithObjects(f.pool, secret, f.agent, workspace, worker,
+			&corev1alpha1.RuntimeSessionControl{}, &corev1alpha1.RuntimePool{}, &workspacev1alpha1.ExecutionWorkspace{},
+			&corev1alpha1.ExternalEffect{}, &corev1alpha1.Publication{}, &corev1alpha1.BranchClaim{}).
+		WithObjects(f.pool, secret, f.agent, workspace, worker, f.credential,
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "default-namespace-uid"}}).Build())
 	f.kube = kube
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "reuse-dispatch.db"))
@@ -214,8 +264,42 @@ func newPersistentReuseDispatchFixture(t *testing.T, ctx context.Context) *persi
 	f.dispatcher = &ACPDispatcher{
 		Client: kube, APIReader: kube, Store: f.controlStore, ResultStore: f.sqlite, EventStore: f.sqlite, PlanStore: f.sqlite,
 		Snapshots: f.sqlite, Epochs: f.epochs, Sessions: continuity, PersistentSessionEnabled: true,
+		sem: make(chan struct{}, reuseDispatchRecoverySlots), active: map[types.UID]struct{}{},
+	}
+	if write {
+		publisherServer := newDispatcherPublisherServer(t, strings.Repeat("2", 40), reuseDispatchCommitOID, "sha256:"+strings.Repeat("4", 64),
+			dispatcherPublisherServerOptions{resolvedBaselineOID: func() string { return f.resolvedOID.Load().(string) }})
+		t.Cleanup(publisherServer.Close)
+		publisherClient, err := publisherservice.NewClient(publisherservice.ClientConfig{
+			BaseURL: publisherServer.URL, BearerToken: []byte(strings.Repeat("b", 32)),
+			CapabilitySecret: []byte(strings.Repeat("c", 32)), HTTPClient: publisherServer.Client(),
+		})
+		require.NoError(t, err)
+		f.dispatcher.Publisher = publisherClient
+		f.dispatcher.ArtifactCapabilitySecret = []byte(strings.Repeat("d", 32))
+		f.dispatcher.ArtifactReservations = acceptingArtifactReservations{}
 	}
 	return f
+}
+
+// reuseDispatchRecoverySlots bounds the fixture's delivery recovery scan.
+const reuseDispatchRecoverySlots = 4
+
+// runDeliveryRecoveryScan runs the dispatcher's terminal delivery recovery
+// scan over every Task, as the live dispatch loop does between turns, and
+// waits for each recovery it scheduled to finish.
+func (f *persistentReuseDispatchFixture) runDeliveryRecoveryScan(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, f.kube.List(ctx, &tasks))
+	require.NoError(t, f.dispatcher.scheduleACPDeliveryRecoveries(ctx, tasks.Items))
+	// Every scheduled recovery holds one slot until it returns.
+	for range reuseDispatchRecoverySlots {
+		f.dispatcher.sem <- struct{}{}
+	}
+	for range reuseDispatchRecoverySlots {
+		<-f.dispatcher.sem
+	}
 }
 
 func (f *persistentReuseDispatchFixture) currentPool(ctx context.Context, t *testing.T) *corev1alpha1.RuntimePool {
@@ -287,6 +371,14 @@ func (f *persistentReuseDispatchFixture) attach(ctx context.Context, t *testing.
 func (f *persistentReuseDispatchFixture) queueTurn(ctx context.Context, t *testing.T, name string, uid types.UID, epoch int64, handoff string) *corev1alpha1.Task {
 	t.Helper()
 	task := reuseDispatchTask(name, uid)
+	if f.write {
+		task.Spec.Workspace = reuseDispatchWriteWorkspace()
+		execution := task.Status.Execution
+		execution.ReadCredentialResourceVersion = f.credential.ResourceVersion
+		execution.PublicationReadCredentialResourceVersion = f.credential.ResourceVersion
+		execution.PublicationCredentialResourceVersion = f.credential.ResourceVersion
+		execution.ForgeCredentialResourceVersion = f.credential.ResourceVersion
+	}
 	task.Labels[acpRuntimeTaskPoolLabel] = f.plan.PoolName
 	task.Labels[acpExecutionWorkspaceLinkLabel] = reuseDispatchWorkspace
 	task.Annotations = map[string]string{
@@ -308,10 +400,21 @@ func (f *persistentReuseDispatchFixture) queueTurn(ctx context.Context, t *testi
 	require.NoError(t, err)
 	fence, err := f.epochs.CurrentFence(ctx)
 	require.NoError(t, err)
+	var bindings []store.PromptCredentialBinding
+	if f.write {
+		for _, role := range []store.PromptCredentialRole{
+			store.PromptCredentialSourceRead, store.PromptCredentialTargetRead, store.PromptCredentialTargetWrite, store.PromptCredentialForge,
+		} {
+			bindings = append(bindings, store.PromptCredentialBinding{
+				Role: role, Namespace: task.Namespace, SecretName: f.credential.Name, SecretKey: defaultACPWorkspaceCredentialKey,
+				SecretUID: string(f.credential.UID), ResourceVersion: f.credential.ResourceVersion,
+			})
+		}
+	}
 	_, err = f.controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
 		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
 		BindingDigest: task.Status.AgentExecutionBinding.BindingDigest, SnapshotDigest: task.Status.AgentExecutionBinding.Snapshot.Digest,
-		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+		CredentialBindings: bindings, ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
 	}), fence)
 	require.NoError(t, err)
 	return task
@@ -440,4 +543,100 @@ func TestACPPersistentSessionGateMissCreatesTheFreshSessionInTheSamePass(t *test
 	require.Greater(t, f.runtime.creates[1].Metadata.Fence.RuntimeSessionGeneration, uint64(record.RuntimeSessionGeneration))
 	require.Equal(t, f.runtime.creates[1].Metadata.Fence.RuntimeSessionGeneration, f.runtime.prompts[1].Metadata.Fence.RuntimeSessionGeneration)
 	require.Equal(t, string(turn2.UID), string(f.runtime.prompts[1].Metadata.TaskUID))
+}
+
+// The live round-10 defect: every warm write-intent turn missed with
+// runtime-session-missing at the gate. Turn 1 published, was rebased and
+// kept its session, but a write Session Task's RuntimeSession counted as
+// task-scoped, so the dispatcher's terminal delivery recovery found no
+// cleanup receipt on turn 1 and deleted the kept process before turn 2
+// claimed it. Turn 2 must instead reuse it: the same generation, no create,
+// its prompt on the existing session, and its delta frozen against turn 1's
+// rebased baseline.
+func TestACPPersistentSessionWriteTurnReusesTheRebasedSessionThroughDispatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	f := newPersistentReuseDispatchFixtureWithIntent(t, ctx, true)
+	turn1, record := f.keepFirstTurn(ctx, t)
+	require.Equal(t, corev1alpha1.TaskDeliveryOutcomeVerifiedExact, turn1.Status.Delivery.Outcome)
+	require.NotEmpty(t, record.RebasedTreeDigest, "turn 1 must keep a rebased write session")
+	require.NotNil(t, record.VerifiedBaseline)
+	require.Equal(t, reuseDispatchCommitOID, record.VerifiedBaseline.SHA)
+	f.runtime.mu.Lock()
+	require.Len(t, f.rebases, 1, "turn 1 must rebase its session before keeping it")
+	rebase := f.rebases[0]
+	f.runtime.mu.Unlock()
+	require.Equal(t, record.RebasedTreeDigest, rebase.NextBaseline.TreeDigest)
+	require.NotEmpty(t, turn1.Annotations[acpTaskPersistentSessionKeptAnnotation], "turn 1 must record that its Session owns the kept runtime")
+
+	// The dispatch loop's recovery scan runs between turns. Turn 1 is a
+	// settled write Task without a task-scoped cleanup receipt; the kept
+	// session belongs to the Session and must survive it.
+	f.runDeliveryRecoveryScan(ctx, t)
+	_, deletes, _ := f.runtime.counts()
+	require.Equal(t, 0, deletes, "terminal recovery must not retire the kept write session")
+
+	// The branch now sits at the commit turn 1 published.
+	f.resolvedOID.Store(reuseDispatchCommitOID)
+	turn2 := f.queueTurn(ctx, t, "reuse-turn-2", "12121212-0000-0000-0000-000000000002", 2, record.HandoffID)
+	f.attach(ctx, t, turn2, 2, turn1)
+	runQueuedTurn(t, ctx, f.dispatcher, turn2)
+
+	settled := f.task(ctx, t, turn2)
+	require.Equal(t, corev1alpha1.TaskPhaseSucceeded, settled.Status.Phase, "turn 2: %s", settled.Status.Message)
+	require.Empty(t, settled.Annotations[acpTaskPersistentSessionRefusedAnnotation], "turn 2's gate must not refuse the claimed record")
+	creates, deletes, prompts := f.runtime.counts()
+	require.Equal(t, 1, creates, "turn 2 must not create a RuntimeSession")
+	require.Equal(t, 0, deletes, "turn 2 must not retire the kept RuntimeSession")
+	require.Equal(t, 2, prompts)
+	require.Equal(t, record.RuntimeSessionGeneration, settled.Status.Execution.RuntimeSessionGeneration)
+	require.Equal(t, record.RuntimeSessionUID, settled.Status.Execution.RuntimeSessionUID)
+
+	f.runtime.mu.Lock()
+	defer f.runtime.mu.Unlock()
+	prompt := f.runtime.prompts[1]
+	require.Equal(t, string(turn2.UID), string(prompt.Metadata.TaskUID), "the prompt is turn 2's own")
+	require.Equal(t, harnessv2.RuntimeSessionUID(record.RuntimeSessionUID), prompt.Metadata.Fence.RuntimeSessionUID)
+	require.Equal(t, uint64(record.RuntimeSessionGeneration), prompt.Metadata.Fence.RuntimeSessionGeneration,
+		"the prompt goes to the existing session's generation")
+	require.Equal(t, f.runtime.creates[0].RuntimeSessionID, harnessv2.RuntimeSessionID(runtimeSessionID(prompt.Metadata.Fence)))
+	// Turn 2's delta is frozen against the baseline turn 1 rebased to, so
+	// anything turn 1 left unpublished is in it.
+	require.Len(t, f.deltas, 2)
+	require.Equal(t, rebase.NextBaseline, f.deltas[1].VerifiedBaseline)
+	// Turn 2 published and rebased again, and kept the same process.
+	require.Len(t, f.rebases, 2)
+	require.Equal(t, uint64(record.RuntimeSessionGeneration), f.rebases[1].Metadata.Fence.RuntimeSessionGeneration)
+}
+
+// A kept write session belongs to the Session, like a resident read-intent
+// one: deleting the Session retires its exact process and records the cleanup
+// receipt on the turn that kept it, instead of waiting forever for a
+// task-scoped receipt the keep deliberately never wrote.
+func TestACPPersistentSessionDeletingAWriteSessionRetiresItsKeptRuntime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	f := newPersistentReuseDispatchFixtureWithIntent(t, ctx, true)
+	turn1, record := f.keepFirstTurn(ctx, t)
+	f.runDeliveryRecoveryScan(ctx, t)
+	_, deletes, _ := f.runtime.counts()
+	require.Equal(t, 0, deletes)
+
+	projector := &ACPOutboxProjector{Client: f.kube, Store: f.controlStore, Epochs: f.epochs, WorkerID: "write-session-deletion-test"}
+	require.NoError(t, projector.projectOnce(ctx))
+	cleanupStore, err := storekube.NewComposite(f.kube, "default", f.sqlite,
+		storekube.WithAPIReader(f.kube), storekube.WithSessionRuntimeCleanup(f.dispatcher.CleanupSessionRuntime))
+	require.NoError(t, err)
+	manager := NewSessionManager(f.sqlite)
+	manager.SetACPSessionCleanup(cleanupStore, f.epochs)
+	require.NoError(t, manager.DeleteSession(ctx, "default", reuseDispatchSession))
+
+	f.runtime.mu.Lock()
+	require.Len(t, f.runtime.deletes, 1, "Session deletion must retire the kept write session")
+	deleted := f.runtime.deletes[0]
+	f.runtime.mu.Unlock()
+	require.Equal(t, harnessv2.RuntimeSessionUID(record.RuntimeSessionUID), deleted.Metadata.Fence.RuntimeSessionUID)
+	require.Equal(t, uint64(record.RuntimeSessionGeneration), deleted.Metadata.Fence.RuntimeSessionGeneration)
+	settled := f.task(ctx, t, turn1)
+	require.True(t, runtimeSessionCleanupCompleteForUID(settled, settled.UID), "the keeping turn records the exact cleanup receipt")
 }

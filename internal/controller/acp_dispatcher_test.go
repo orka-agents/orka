@@ -4024,6 +4024,13 @@ type dispatcherRuntimeServerOptions struct {
 	supportsRebase bool
 	// runtimeInstanceID overrides the status fence's runtime instance.
 	runtimeInstanceID harnessv2.RuntimeInstanceID
+	// writePublication makes the runtime a write-intent supervisor: it
+	// advertises publication finalization, prepares a publishable delta,
+	// finalizes the session, and (with supportsRebase) rebases it back to idle
+	// on the requested baseline, as the real supervisor does.
+	writePublication bool
+	onDelta          func(harnessv2.CreateWorkspaceDeltaRequest)
+	onRebase         func(harnessv2.RebaseRuntimeSessionRequest)
 }
 
 func newDispatcherRuntimeServerWithOptions(
@@ -4050,6 +4057,11 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 ) *httptest.Server {
 	t.Helper()
 	terminalEvents := options.terminalEvents
+	writeDeltaDigest := "sha256:" + strings.Repeat("5", 64)
+	writeDeltaArtifactID, err := artifactcap.ArtifactIDForDigest(writeDeltaDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mux := http.NewServeMux()
 	limits := harnessv2.DefaultProtocolLimits()
 	var descriptorMu sync.Mutex
@@ -4062,8 +4074,12 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		if options.nativeInstallUnresolved && len(response.Sessions) > 0 {
 			response.Sessions[0].NativeInstallUnresolved = true
 		}
-		if options.quiescent != nil && options.quiescent() && len(response.Sessions) > 0 {
+		if options.quiescent != nil && options.quiescent() && len(response.Sessions) > 0 &&
+			response.Sessions[0].State == harnessv2.RuntimeSessionStateIdle {
 			response.Sessions[0].Quiescent = true
+		}
+		if len(response.Sessions) > 0 && response.Sessions[0].State == harnessv2.RuntimeSessionStateFinalizing {
+			response.Sessions[0].ReservedForFinalization = true
 		}
 		if options.runtimeInstanceID != "" {
 			response.Fence.RuntimeInstanceID = options.runtimeInstanceID
@@ -4081,6 +4097,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			SupportsNativeSessions:            options.nativeSnapshot != nil,
 			SupportsAgentSessionConfiguration: !options.disableAgentSessionConfiguration,
 			SupportsRuntimeSessionRebase:      options.supportsRebase,
+			SupportsPublicationFinalization:   options.writePublication,
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
@@ -4237,8 +4254,28 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if options.onDelta != nil {
+			options.onDelta(request)
+		}
 		if options.workspaceDeltaFailure != nil {
 			writeDispatcherJSONStatus(w, http.StatusConflict, *options.workspaceDeltaFailure)
+			return
+		}
+		if options.writePublication {
+			writeDispatcherJSON(w, harnessv2.CreateWorkspaceDeltaResponse{
+				Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+				Delta: harnessv2.WorkspaceDeltaDescriptor{
+					DeltaID: request.DeltaID, RuntimeSessionUID: request.Metadata.Fence.RuntimeSessionUID,
+					SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration, State: harnessv2.WorkspaceDeltaPrepared,
+					Intent: request.Intent, VerifiedBaseline: request.VerifiedBaseline,
+					ManifestDigest: "sha256:" + strings.Repeat("6", 64),
+					Artifact: &harnessv2.ArtifactReference{
+						ArtifactID: harnessv2.ArtifactID(writeDeltaArtifactID), Digest: writeDeltaDigest,
+						SizeBytes: 128, MediaType: artifactcap.MediaTypeWorkspaceDelta,
+					},
+					EntryCount: 1, ChangedFileCount: 1, NoFollowVerified: true, PublicationSafe: true, FrozenAt: time.Now().UTC(),
+				},
+			})
 			return
 		}
 		deltaState := harnessv2.WorkspaceDeltaNoChange
@@ -4256,6 +4293,62 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration, State: deltaState,
 				EntryCount: entryCount, ChangedFileCount: entryCount,
 				Intent: request.Intent, VerifiedBaseline: request.VerifiedBaseline, NoFollowVerified: true, PublicationSafe: deltaState != harnessv2.WorkspaceDeltaReadOnlyModified, FrozenAt: time.Now().UTC(),
+			},
+		})
+	})
+	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.FinalizeRuntimeSessionPublicationRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || !options.writePublication {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		now := time.Now().UTC()
+		descriptorMu.Lock()
+		descriptor.State = harnessv2.RuntimeSessionStateFinalizing
+		descriptor.LastTransitionAt = now
+		finalized := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, harnessv2.FinalizeRuntimeSessionPublicationResponse{
+			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			Session: finalized,
+			Finalization: harnessv2.PublicationFinalizationReceipt{
+				WorkspaceDeltaID: request.WorkspaceDeltaID, PublicationID: request.PublicationID,
+				PublicationGeneration: request.PublicationGeneration, PublicationVersion: request.PublicationVersion,
+				TerminalState: request.TerminalState, TerminalReceiptDigest: request.TerminalReceiptDigest, AppliedAt: now,
+			},
+		})
+	})
+	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/rebase", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.RebaseRuntimeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || !options.supportsRebase {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if options.onRebase != nil {
+			options.onRebase(request)
+		}
+		now := time.Now().UTC()
+		descriptorMu.Lock()
+		if descriptor.State != harnessv2.RuntimeSessionStateFinalizing || descriptor.RuntimeSessionUID != request.Metadata.Fence.RuntimeSessionUID {
+			descriptorMu.Unlock()
+			writeDispatcherJSONStatus(w, http.StatusConflict, harnessv2.ErrorResponse{
+				Protocol: harnessv2.ProtocolVersion, Code: harnessv2.ErrorCodeSessionPoisoned, Message: "runtime session is not finalizing a write publication",
+			})
+			return
+		}
+		previousTree := descriptor.WorkspaceBaseline.TreeDigest
+		descriptor.State = harnessv2.RuntimeSessionStateIdle
+		descriptor.WorkspaceBaseline = request.NextBaseline
+		descriptor.LastTransitionAt = now
+		rebased := descriptor
+		descriptorMu.Unlock()
+		writeDispatcherJSON(w, harnessv2.RebaseRuntimeSessionResponse{
+			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			Session: rebased,
+			Rebase: harnessv2.RuntimeSessionRebaseReceipt{
+				WorkspaceDeltaID: request.WorkspaceDeltaID, PublicationID: request.PublicationID,
+				TerminalReceiptDigest: request.TerminalReceiptDigest, PublishedManifestDigest: request.PublishedManifestDigest,
+				PreviousTreeDigest: previousTree, NextBaseline: request.NextBaseline, AppliedAt: now,
 			},
 		})
 	})

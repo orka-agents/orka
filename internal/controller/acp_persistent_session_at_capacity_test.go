@@ -208,7 +208,7 @@ func TestPersistentSessionClaudeKeepsAndReusesThroughTheLiveAtCapacityPool(t *te
 	// what fills its only resident slot.
 	// The dispatcher's runtime fence carries no RuntimeSession at the gate.
 	gateFence := runtimePoolFenceWithSession(runtimeFence, "", 0)
-	refusal, err := h.dispatcher.acpPersistentSessionRuntimeGate(ctx, turn2, session2.ResidentClaimed, runtimeClient, gateFence, fence2, livePool)
+	refusal, _, err := h.dispatcher.acpPersistentSessionRuntimeGate(ctx, turn2, session2.ResidentClaimed, runtimeClient, gateFence, fence2, livePool)
 	require.NoError(t, err)
 	require.Equal(t, "", refusal, "turn 2 must reuse the session its own Session's pool still holds")
 }

@@ -340,3 +340,35 @@ func TestSupervisorAdvertisesRebaseAndQuiescenceOnlyOnRequest(t *testing.T) {
 		t.Fatal("an unsettled prompt is not quiescent")
 	}
 }
+
+// A file the agent wrote after turn N's delta froze was never published. The
+// rebase folds in only the published change set, so that file is in the next
+// turn's delta, as on a cold resume; and the rebased session keeps its exact
+// ID, UID and generation in the status the next turn's gate reads.
+func TestSupervisorRebaseLeavesUnpublishedWritesInTheNextDelta(t *testing.T) {
+	f := newRebaseFixture(t)
+	writeRebaseFile(t, f.root, "leftover.txt", "written after the delta froze\n")
+	if response := f.rebase(t, f.request); response.Code != http.StatusOK {
+		t.Fatalf("rebase status=%d body=%s", response.Code, response.Body.String())
+	}
+	f.server.mu.Lock()
+	baseline := f.state.baseline
+	f.server.mu.Unlock()
+	next, err := workspacedelta.BuildWithLimits(baseline, f.root, workspacedelta.IntentWrite, workspacedelta.BuildLimits{})
+	if err != nil || next.Classification != workspacedelta.ClassificationWriteDelta {
+		t.Fatalf("delta from the rebased baseline = %v, %v", next.Classification, err)
+	}
+	if len(next.Changes) != 1 || next.Changes[0].Path != "leftover.txt" || len(next.Deletions) != 0 {
+		t.Fatalf("next delta changes=%#v deletions=%#v, want only the unpublished leftover.txt", next.Changes, next.Deletions)
+	}
+	status := f.server.status()
+	if len(status.Sessions) != 1 {
+		t.Fatalf("status sessions = %#v", status.Sessions)
+	}
+	observed := status.Sessions[0]
+	if observed.RuntimeSessionID != f.create.RuntimeSessionID || observed.RuntimeSessionUID != f.create.Metadata.Fence.RuntimeSessionUID ||
+		observed.Generation != f.create.Metadata.Fence.RuntimeSessionGeneration || observed.State != harnessv2.RuntimeSessionStateIdle ||
+		observed.ReservedForFinalization {
+		t.Fatalf("rebased session status = %#v, want the same idle session", observed)
+	}
+}

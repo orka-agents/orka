@@ -237,10 +237,13 @@ func (d *ACPDispatcher) sessionRuntimeCleanupTarget(
 		sessionRuntimeCleanupIdentityForExecution(task.Status.Execution) == identity {
 		frozen.Status.Execution.RuntimeSessionCleanupDigest = task.Status.Execution.RuntimeSessionCleanupDigest
 	}
-	if frozen.Spec.Workspace != nil && frozen.Spec.Workspace.Intent == corev1alpha1.WorkspaceIntentWrite {
+	if frozen.Spec.Workspace != nil && frozen.Spec.Workspace.Intent == corev1alpha1.WorkspaceIntentWrite &&
+		!acpTaskWriteRuntimeSessionKept(frozen, types.UID(turn.Key.TaskUID)) {
 		// Write sessions are Task-scoped and already pass their runtime cleanup
 		// barrier independently of conversation deletion. Their Task finalizers
 		// retain the frozen authority until this Session cleanup completes.
+		// A write session the turn kept (ADR 0059) belongs to the Session and
+		// is retired below, like a resident read-intent session.
 		if !runtimeSessionCleanupCompleteForUID(frozen, types.UID(turn.Key.TaskUID)) {
 			return nil, fmt.Errorf("%w: write Task runtime cleanup is incomplete", store.ErrNotReady)
 		}

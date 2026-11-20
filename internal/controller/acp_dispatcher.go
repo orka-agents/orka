@@ -2758,6 +2758,19 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	turnTimings.mark(acpTurnStepSessionResult)
 	persistentKept := sessionExecution != nil && sessionExecution.kept
+	if persistentKept && workspace.Intent == harnessv2.WorkspaceIntentWrite {
+		// A write Session Task's RuntimeSession is task-scoped unless the Task
+		// records that this settlement handed it to the Session. Without the
+		// marker its terminal cleanup would delete the kept process before the
+		// next turn claims it, so retire the session and its record instead.
+		if markErr := d.stampACPPersistentSessionKept(context.WithoutCancel(ctx), task, runtimeFence); markErr != nil {
+			logf.FromContext(ctx).Info("ACP persistent session keep marker was not recorded; retiring the RuntimeSession",
+				"namespace", task.Namespace, "task", task.Name, "diagnostic", boundedRuntimeSessionServerMessage(markErr))
+			d.retireACPResidentRuntime(ctx, task, fence, sessionExecution.KeepRecord)
+			persistentKept = false
+			persistentKeepReason = acpPersistentReasonKeepUnrecorded
+		}
+	}
 	if persistentKeepAttempted {
 		if !persistentKept && persistentKeepReason == "" {
 			persistentKeepReason = acpPersistentReasonNoRecord
