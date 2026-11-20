@@ -126,13 +126,19 @@ For takeover liveness under continuous writes:
   keep reading a gap and losing its update to the holder's next token, and
   never ask. The request goes on a Lease of its own
   (`controller-epoch-takeover-*`), which only successors write, so it never
-  competes with the holder's writes to the epoch Lease. Each attempt refreshes
-  it after 10s, and it is deleted once the epoch change commits.
-- Before writing a token, a store reads that request. It writes no token while
-  an unexpired request (under 30s old) waits to replace its current epoch,
-  whoever made the request (a restart can keep its holder ID). It fails the
-  write with `ErrControllerEpochMutationContention` instead. Reusing a held
-  token does not read the request.
+  competes with the holder's writes to the epoch Lease. An attempt rewrites it
+  once the successor's own last write of it is 10s old on its monotonic clock,
+  which gives the request a new `resourceVersion`. It is deleted once the
+  epoch change commits.
+- Before writing a token, a store reads that request. A request version is in
+  force for 30s from when this store first saw it, on this store's own
+  monotonic clock. No store compares the time a requester wrote into the
+  request with its own clock, so neither side's skew can make a request last
+  forever or not at all. While a request that waits to replace its current
+  epoch is in force, the store writes no token, whoever made the request (a
+  restart can keep its holder ID). It fails the write with
+  `ErrControllerEpochMutationContention` instead. Reusing a held token does
+  not read the request.
 - A write that fails to acquire removes any held token it did not reuse or
   write over.
 - A token whose removal fails is not forgotten. It stays parked, and the idle
@@ -144,7 +150,9 @@ For takeover liveness under continuous writes:
   changes it, so the stale removal can no longer commit.
   `ReleaseHeldControllerEpochInterlock` tries five times with backoff. If the
   removal still fails, it returns the error and leaves the token parked for
-  the timer.
+  the timer. Each removal attempt runs under its caller's context, capped at
+  5s, so an explicit release never outlasts its caller's deadline. The idle
+  timer's retries, which have no caller, are capped at 5s each.
 - The held token is removed by any of these:
   - the idle timer, when the linger ends without a write. The timer only acts
     while it holds the slot, and if the slot is busy it checks again shortly;
@@ -218,7 +226,8 @@ before its compare-and-swap, so it, too, runs under a state it verified once.
   Its three-minute acquisition window covers both cases. Once the epoch has
   changed, the old process's next write reads a changed Lease. It does not
   reuse its token, fails the fence check, and fails closed. A request from a
-  successor that stopped trying lapses after 30s. Until then, the old holder's
+  successor that stopped trying lapses 30s after the holder first saw its last
+  version, whatever time the successor's clock wrote into it. Until then, the old holder's
   writes fail with contention, which is what an old holder should get.
 - **Epoch change mid-batch.** While the batch's token is live, an epoch change
   cannot commit. It can commit only after the token is gone (removed or
@@ -245,8 +254,11 @@ before its compare-and-swap, so it, too, runs under a state it verified once.
 - **Clock skew.** Other processes judge a token's expiry by their own clocks,
   as today. Every fenced write now has a uniform 60s margin for skew. Before
   this change, writes through `WithControllerEpochMutation` had about 100s,
-  and direct callers had no bound at all. Takeover requests are judged by the
-  holder's clock against a 30s life that the successor refreshes every 10s.
+  and direct callers had no bound at all. Takeover requests do not depend on
+  wall clocks. The holder times each request version on its own monotonic
+  clock from when it first saw that version. The successor renews the request
+  on its own monotonic clock, every 10s while it tries. A successor 40s ahead
+  or behind is neither starved nor able to stall the holder past the 30s.
 
 ## Measurement
 
@@ -282,7 +294,8 @@ takeover request, it is still waiting when the test gives up at 10s.
   default max hold. It waits two minutes after a crash, as before. A crash is
   now more likely to leave a token that the successor must wait out.
 - A successor's takeover request stops the old holder's new tokens for up to
-  30s after the successor stops refreshing it.
+  30s after the holder first sees its last version. That bound holds
+  whatever time the successor's clock wrote into the request.
 - Records written back to back under one held token share the Lease
   `resourceVersion` in their fence evidence. Nothing compares that field
   across records, and it remains a version under which the record's epoch held

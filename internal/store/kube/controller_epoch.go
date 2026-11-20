@@ -216,10 +216,10 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	// new tokens, so the Lease is free within one of its holds. Recording it
 	// only after a refusal would miss a successor that reads a gap and loses
 	// its update to the holder's next token, every time (ADR 0058).
-	s.requestControllerEpochTakeover(ctx, change.Name, current.Epoch, change.HolderID, time.Now().UTC())
+	s.requestControllerEpochTakeover(ctx, change.Name, current.Epoch, change.HolderID)
 	if active, expiresAt, lockErr := controllerEpochMutationLock(lease); lockErr != nil {
 		return nil, lockErr
-	} else if active && expiresAt.After(time.Now().UTC()) {
+	} else if active && expiresAt.After(s.wallNow().UTC()) {
 		return nil, store.ConflictErrorf("controller epoch %q has an active control-store mutation until %s", change.Name, expiresAt.Format(time.RFC3339Nano))
 	}
 	object, err := s.getControllerEpochObject(ctx, change.Name)
@@ -939,7 +939,7 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 			s.epochMutations.Release(1)
 		}
 	}()
-	held, err := s.heldInterlockFor(normalized)
+	held, err := s.heldInterlockFor(ctx, normalized)
 	if err != nil {
 		return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
 	}
@@ -949,7 +949,7 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 	heldSettled := held == nil
 	defer func() {
 		if !heldSettled {
-			_ = s.removeOrRetainInterlock(*held) // kept parked for retry on failure
+			_ = s.removeOrRetainInterlock(ctx, *held) // kept parked for retry on failure
 		}
 	}()
 	acquired := func(snapshot epochSnapshot) (context.Context, store.ControllerEpochFence, epochSnapshot, error) {
@@ -984,18 +984,20 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 		case heldInterlockRemove:
 			// Remove it first, then read and acquire as without a hold.
 			heldSettled = true
-			if err := s.removeOrRetainInterlock(*held); err != nil {
+			if err := s.removeOrRetainInterlock(ctx, *held); err != nil {
 				return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
 			}
 			held = nil
 			continue
 		}
+		// written carries the monotonic reading for age and deadlines; now
+		// is the wall time the expiry is written in, as others judge it.
 		written := time.Now()
-		now := written.UTC()
+		now := s.wallNow().UTC()
 		waiting, by := false, ""
 		if !active || !expiresAt.After(now) {
 			// Read only before writing a token, never on a reused one.
-			if waiting, by, err = s.controllerEpochTakeoverWaiting(ctx, normalized.Name, current.Epoch, now); err != nil {
+			if waiting, by, err = s.controllerEpochTakeoverWaiting(ctx, normalized.Name, current.Epoch); err != nil {
 				return ctx, store.ControllerEpochFence{}, epochSnapshot{}, err
 			}
 		}
@@ -1108,20 +1110,23 @@ func (s *Store) releaseControllerEpochMutation(snapshot epochSnapshot) {
 			s.parkInterlock(snapshot)
 			return
 		}
-		_ = s.removeOrRetainInterlock(snapshot)
+		// The write's context is cancelled by now; the removal gets its own.
+		_ = s.removeOrRetainInterlock(context.Background(), snapshot)
 		return
 	}
-	_ = s.removeMutationToken(snapshot)
+	_ = s.removeMutationToken(context.Background(), snapshot)
 }
 
 // removeMutationToken removes snapshot's token from the epoch Lease if it is
 // still there under the same holder and epoch. It reports a removal that did
 // not commit; a token already gone, or never this store's, is not an error.
-func (s *Store) removeMutationToken(snapshot epochSnapshot) error {
+// The attempt runs under parent, capped at controllerEpochTokenRemovalTimeout,
+// so it never outlasts its caller's deadline.
+func (s *Store) removeMutationToken(parent context.Context, snapshot epochSnapshot) error {
 	if snapshot.MutationToken == "" || snapshot.MutationLease == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, controllerEpochTokenRemovalTimeout)
 	defer cancel()
 	lease := snapshot.MutationLease.DeepCopy()
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {

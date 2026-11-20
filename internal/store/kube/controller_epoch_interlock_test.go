@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
@@ -670,4 +671,124 @@ func TestInterlockHoldRemovesATokenHeldForAnotherFence(t *testing.T) {
 	writer.interlockMu.Lock()
 	require.Nil(t, writer.heldInterlock)
 	writer.interlockMu.Unlock()
+}
+
+func skewedClock(skew time.Duration) func() time.Time {
+	return func() time.Time { return time.Now().Add(skew) }
+}
+
+// A successor is never starved by a holder writing continuously, whichever
+// side's wall clock is 40s ahead or behind: takeover requests are judged on
+// the holder's own monotonic clock, not by the time written into them.
+func TestTakeoverRequestsIgnoreClockSkew(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		holderSkew, successorSkew time.Duration
+	}{
+		{name: "successor 40s ahead", successorSkew: 40 * time.Second},
+		{name: "successor 40s behind", successorSkew: -40 * time.Second},
+		{name: "holder 40s ahead", holderSkew: 40 * time.Second},
+		{name: "holder 40s behind", holderSkew: -40 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, raw, fence := newTestStoreWithEpoch(t)
+			owner := holdingStore(t, raw, 20*time.Millisecond, 50*time.Millisecond)
+			owner.wallClock = skewedClock(tc.holderSkew)
+			slowReads := interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+					time.Sleep(20 * time.Millisecond)
+					return delegate.Get(ctx, key, object, options...)
+				},
+			})
+			successor, err := New(slowReads, testControlNamespace, WithAPIReader(slowReads))
+			require.NoError(t, err)
+			successor.wallClock = skewedClock(tc.successorSkew)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var wg sync.WaitGroup
+			var ownerWrites atomic.Int32
+			wg.Go(func() {
+				for ctx.Err() == nil {
+					if owner.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil }) == nil {
+						ownerWrites.Add(1)
+					}
+				}
+			})
+			require.Eventually(t, func() bool { return ownerWrites.Load() > 10 }, 5*time.Second, time.Millisecond)
+			started := time.Now()
+			var advanced *store.ControllerEpoch
+			for attempt := 0; advanced == nil; attempt++ {
+				require.Less(t, time.Since(started), 10*time.Second, "the successor was starved")
+				if advanced, err = successor.CompareAndSwapControllerEpoch(t.Context(), successorCAS(fence.Epoch)); err != nil {
+					require.ErrorIs(t, err, store.ErrConflict)
+					time.Sleep(min(time.Duration(attempt+1)*10*time.Millisecond, time.Second))
+				}
+			}
+			cancel()
+			wg.Wait()
+			require.NoError(t, owner.ReleaseHeldControllerEpochInterlock(t.Context()))
+		})
+	}
+}
+
+// A takeover request its successor stopped renewing loses its effect within
+// the request TTL from when the holder first saw it, whatever time the
+// requester's clock wrote into it: dated ahead it does not stall the holder
+// longer, dated behind it still holds the holder off at first.
+func TestStaleTakeoverRequestLapsesOnTheHoldersClock(t *testing.T) {
+	const ttl = 300 * time.Millisecond
+	for _, skew := range []time.Duration{40 * time.Second, -40 * time.Second, time.Hour, -time.Hour} {
+		t.Run(skew.String(), func(t *testing.T) {
+			_, raw, fence := newTestStoreWithEpoch(t)
+			owner := holdingStore(t, raw, time.Hour, 5*time.Second)
+			owner.interlockTakeoverRequestTTL = ttl
+			ctx := t.Context()
+			// A successor recorded its request once, by its clock, then stopped.
+			require.NoError(t, raw.Create(ctx, &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+				Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name),
+				Annotations: map[string]string{
+					annotationLogicalName:              fence.Name,
+					annotationEpochTakeoverRequestedBy: "successor",
+					annotationEpochTakeoverFromEpoch:   strconv.FormatInt(fence.Epoch, 10),
+					annotationEpochTakeoverRequestedAt: formatTime(time.Now().UTC().Add(skew)),
+				},
+			}}))
+
+			started := time.Now()
+			require.NoError(t, owner.WithControllerEpochMutation(ctx, fence, func(context.Context) error { return nil }),
+				"a request nobody renews kept stalling the holder")
+			elapsed := time.Since(started)
+			require.GreaterOrEqual(t, elapsed, ttl, "the holder ignored a fresh takeover request")
+			require.Less(t, elapsed, 2*time.Second)
+			require.NoError(t, owner.ReleaseHeldControllerEpochInterlock(ctx))
+		})
+	}
+}
+
+// An explicit release honours its caller's deadline even while the API
+// server does not answer the removal.
+func TestReleaseHeldInterlockHonoursTheCallersDeadline(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	var stall atomic.Bool
+	stalling := interceptor.NewClient(raw.(client.WithWatch), interceptor.Funcs{
+		Update: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.UpdateOption) error {
+			if lease, ok := object.(*coordinationv1.Lease); ok && lease.Annotations[annotationMutationToken] == "" && stall.Load() {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return delegate.Update(ctx, object, options...)
+		},
+	})
+	owner, err := New(stalling, testControlNamespace, WithAPIReader(raw), WithControllerEpochInterlockHold(time.Hour, 5*time.Second))
+	require.NoError(t, err)
+	require.NoError(t, owner.WithControllerEpochMutation(t.Context(), fence, func(context.Context) error { return nil }))
+	stall.Store(true)
+	releaseCtx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	require.Error(t, owner.ReleaseHeldControllerEpochInterlock(releaseCtx))
+	require.Less(t, time.Since(started), 500*time.Millisecond, "the release overran its caller's deadline")
+	stall.Store(false)
+	waitForNoMutationToken(t, raw, fence)
 }
