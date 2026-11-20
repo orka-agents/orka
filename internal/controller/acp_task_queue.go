@@ -123,6 +123,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	reader := uncachedReader(r.APIReader, r.Client)
 	var pool *corev1alpha1.RuntimePool
 	poolPreexisting := false
+	persistentHandoff := ""
 	if !externalDispatch {
 		workspaceName, workspaceReady, err := r.ensureACPClassWorkspace(ctx, task, plan)
 		if err != nil {
@@ -135,6 +136,19 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			return ctrl.Result{}, err
 		}
 		allowCreate, requiredUID, poolPolicyFailure := acpRuntimePoolDemandPolicy(task, attempt, delivery, plan)
+		if !workspaceReady && (task.Status.Execution == nil || taskExecutionStateTerminal(task.Status.Execution.State)) {
+			// ADR 0059: a Task that already holds its warm attachment and has a
+			// resident runtime kept for it queues before the provider
+			// acknowledges the epoch. The dispatcher runs the full handshake
+			// before the first runtime contact.
+			heldName, heldHandoff, heldErr := r.acpPersistentSessionHeldWorkspace(ctx, task, plan, bound.body.GatewayGrant != nil)
+			if heldErr != nil {
+				return ctrl.Result{}, heldErr
+			}
+			if heldHandoff != "" {
+				workspaceName, workspaceReady, persistentHandoff = heldName, true, heldHandoff
+			}
+		}
 		if !workspaceReady {
 			// The controller-first workspace is not yet admitted, attachable, or
 			// exclusively held by this Task. A Session continuation or first
@@ -146,15 +160,21 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		if workspaceName != "" {
-			acpPreDispatch.mark(task, acpPreDispatchWorkspaceReady)
+			if persistentHandoff != "" {
+				acpPreDispatch.mark(task, acpPreDispatchWorkspaceAttachHeld)
+			} else {
+				acpPreDispatch.mark(task, acpPreDispatchWorkspaceReady)
+			}
 		}
 		if poolPolicyFailure != "" {
 			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), poolPolicyFailure)
 		}
-		pool, poolPreexisting, err = r.ensureACPRuntimePoolWithPolicy(
+		// The held path keeps every pool identity check and skips only the
+		// post-attach handshake.
+		pool, poolPreexisting, err = r.ensureACPRuntimePoolDemand(
 			ctx, task.Namespace, plan, workspaceName,
 			task.Annotations[acpExecutionWorkspaceUIDAnnotation], string(task.UID),
-			allowCreate, requiredUID,
+			allowCreate, requiredUID, persistentHandoff == "",
 		)
 		if err != nil {
 			if errors.Is(err, store.ErrNotReady) {
@@ -166,7 +186,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			}
 			return ctrl.Result{}, err
 		}
-		acpPreDispatch.mark(task, acpPreDispatchRuntimePoolReady)
+		if persistentHandoff == "" {
+			acpPreDispatch.mark(task, acpPreDispatchRuntimePoolReady)
+		}
 	}
 	if task.Status.Execution != nil && !taskExecutionStateTerminal(task.Status.Execution.State) {
 		if !externalDispatch && (task.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
@@ -236,6 +258,14 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		delete(task.Annotations, acpExternalRuntimeTaskAnnotation)
 	}
 	task.Annotations[acpRuntimeQueuedAtAnnotation] = queuedAt.Format(time.RFC3339Nano)
+	// The handoff is stamped in the same metadata patch that labels the Task
+	// for its pool; a Task never queues on the held path without it.
+	delete(task.Annotations, acpTaskPersistentSessionRefusedAnnotation)
+	if persistentHandoff != "" {
+		task.Annotations[acpTaskPersistentSessionHandoffAnnotation] = persistentHandoff
+	} else {
+		delete(task.Annotations, acpTaskPersistentSessionHandoffAnnotation)
+	}
 	if err := r.Patch(ctx, task, client.MergeFrom(metadataBase)); err != nil {
 		return ctrl.Result{}, err
 	}

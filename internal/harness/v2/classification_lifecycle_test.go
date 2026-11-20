@@ -145,6 +145,8 @@ func TestRuntimeSessionLifecycleAndSafeDeletion(t *testing.T) {
 		{RuntimeSessionStateCancelling, RuntimeSessionStateValidating},
 		{RuntimeSessionStateValidating, RuntimeSessionStatePublicationPrepared},
 		{RuntimeSessionStateDeleting, RuntimeSessionStatePoisoned},
+		// ADR 0059: a verified-exact publication may be rebased back to idle.
+		{RuntimeSessionStateFinalizing, RuntimeSessionStateIdle},
 	}
 	for _, transition := range valid {
 		if err := ValidateRuntimeSessionTransition(transition[0], transition[1]); err != nil {
@@ -158,7 +160,6 @@ func TestRuntimeSessionLifecycleAndSafeDeletion(t *testing.T) {
 		{RuntimeSessionStateValidating, RuntimeSessionStateFinalizing},
 		{RuntimeSessionStatePublishing, RuntimeSessionStateCancelling},
 		{RuntimeSessionStateVerifying, RuntimeSessionStateFinalizing},
-		{RuntimeSessionStateFinalizing, RuntimeSessionStateIdle},
 		{RuntimeSessionStateDeleted, RuntimeSessionStateIdle},
 	} {
 		if err := ValidateRuntimeSessionTransition(transition[0], transition[1]); err == nil {

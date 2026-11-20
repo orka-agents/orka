@@ -371,6 +371,7 @@ func main() {
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
 	var acpWorkspaceAllowProviderTokenInSandbox bool
+	var acpWorkspacePersistentSession bool
 	var acpWorkspaceDefaultSuspendAfterDetach time.Duration
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
@@ -707,6 +708,11 @@ func main() {
 			"spec.retention.suspendAfterDetach (ADR 0057). Existing workspaces keep what they froze. 0 disables only the controller default; "+
 			"the ExecutionWorkspaceClass annotation "+controller.ACPWorkspaceClassDefaultSuspendAfterDetachAnnotation+
 			" still sets a per-class window, and \"disabled\" opts a class out.")
+	flag.BoolVar(&acpWorkspacePersistentSession, "acp-workspace-persistent-session", false,
+		"Keep an eligible Session's live ACP RuntimeSession across warm-window turns (ADR 0059). Off by default; "+
+			"requires --acp-workspace-dispatch-enabled and --enable-workspace-provider-api. Every refusal falls back to a fresh "+
+			"RuntimeSession. The ExecutionWorkspaceClass annotation "+controller.ACPWorkspaceClassPersistentSessionAnnotation+
+			": disabled opts a class out.")
 	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
 		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
@@ -1301,6 +1307,11 @@ func main() {
 		acpToolboxImagePullSecrets, acpToolboxNodeSelector, acpToolboxMountMethod)
 	if err != nil {
 		setupLog.Error(err, "invalid ACP toolbox configuration")
+		os.Exit(1)
+	}
+	if acpWorkspacePersistentSession && (!acpWorkspaceDispatchEnabled || !workspaceProviderAPIEnabled) {
+		setupLog.Error(errors.New("--acp-workspace-persistent-session requires --acp-workspace-dispatch-enabled and --enable-workspace-provider-api"),
+			"invalid ACP persistent session configuration")
 		os.Exit(1)
 	}
 	if acpSkillsEnabled && !acpToolboxesEnabled {
@@ -2050,6 +2061,7 @@ func main() {
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+		ACPPersistentSessionEnabled:  acpWorkspacePersistentSession,
 
 		ACPWorkspaceDefaultSuspendAfterDetach: acpWorkspaceDefaultSuspendAfterDetach,
 
@@ -2103,6 +2115,8 @@ func main() {
 		MaxConcurrent:        acpDispatchMaxConcurrentTasks,
 		MCPRegistry:          acpMCPRegistry,
 		PromptLeases:         acpPromptLeases,
+		// ADR 0059, default off.
+		PersistentSessionEnabled: acpWorkspacePersistentSession,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,

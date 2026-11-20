@@ -2139,6 +2139,12 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	state.deltas[request.DeltaID] = response
+	if descriptor.State == harnessv2.WorkspaceDeltaPrepared {
+		if state.preparedDeltas == nil {
+			state.preparedDeltas = make(map[harnessv2.WorkspaceDeltaID]preparedDeltaChanges)
+		}
+		state.preparedDeltas[request.DeltaID] = newPreparedDeltaChanges(result)
+	}
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", time.Now().UTC())
 	nextMCPState := harnessv2.RuntimeSessionStatePoisoned
 	switch descriptor.State {

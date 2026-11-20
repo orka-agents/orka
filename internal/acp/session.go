@@ -1410,6 +1410,16 @@ func (s *RuntimeSession) Freeze(ctx context.Context) error {
 	return process.Freeze(ctx)
 }
 
+// Frozen reports a workspace freeze that no proven thaw has ended yet.
+func (s *RuntimeSession) Frozen() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.frozen
+}
+
 // ChildIdentity returns the immutable UID/GID assigned to the provider process.
 func (s *RuntimeSession) ChildIdentity() (int, int) {
 	if s == nil {

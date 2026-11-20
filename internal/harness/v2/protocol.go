@@ -207,6 +207,10 @@ type CapabilitiesResponse struct {
 	// SupportsOperatorAccess advertises the operator exec and file routes.
 	// Callers must fail closed against supervisors that omit it.
 	SupportsOperatorAccess bool `json:"supportsOperatorAccess,omitempty"`
+	// SupportsRuntimeSessionRebase advertises the ADR 0059 rebase route and
+	// the quiescent session status. A controller keeps a RuntimeSession across
+	// turns only against a supervisor that advertises it.
+	SupportsRuntimeSessionRebase bool `json:"supportsRuntimeSessionRebase,omitempty"`
 }
 
 func (r CapabilitiesResponse) Validate() error {
@@ -305,7 +309,12 @@ type RuntimeSessionStatus struct {
 	PendingPermissionCount  uint32                    `json:"pendingPermissionCount"`
 	ReservedForFinalization bool                      `json:"reservedForFinalization"`
 	LiveDescendantCount     uint32                    `json:"liveDescendantCount"`
-	LastTransitionAt        time.Time                 `json:"lastTransitionAt"`
+	// Quiescent reports an idle session with no prompt, no pending
+	// permission, no running operator operation, an unfrozen workspace, and a
+	// live provider process: the state ADR 0059 requires before a turn
+	// boundary is crossed by the same process.
+	Quiescent        bool      `json:"quiescent,omitempty"`
+	LastTransitionAt time.Time `json:"lastTransitionAt"`
 }
 
 func (s RuntimeSessionStatus) Validate() error {
@@ -338,6 +347,10 @@ func (s RuntimeSessionStatus) Validate() error {
 	}
 	if s.State == RuntimeSessionStateFinalizing && !s.ReservedForFinalization {
 		return fmt.Errorf("finalizing runtime session must be reserved for finalization")
+	}
+	if s.Quiescent && (s.State != RuntimeSessionStateIdle || s.ActivePromptID != "" ||
+		s.PendingPermissionCount != 0 || s.ReservedForFinalization) {
+		return fmt.Errorf("a quiescent runtime session must be idle with no prompt or pending permission")
 	}
 	if s.ReservedForFinalization && s.State != RuntimeSessionStateFinalizing &&
 		s.State != RuntimeSessionStateDeleting && s.State != RuntimeSessionStatePoisoned {

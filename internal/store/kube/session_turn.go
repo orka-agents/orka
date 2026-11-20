@@ -95,7 +95,10 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 		if !sessionTurnRequestMatchesFinalized(*turn, normalized) {
 			return nil, store.ConflictErrorf("session turn %q was finalized with different terminal data or digest", turn.ID)
 		}
-		return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, nil)
+		if err := validateFinalizationResidentRuntime(normalized, turn.PromptAttemptID, fence); err != nil {
+			return nil, err
+		}
+		return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, nil, normalized.ResidentRuntime)
 	}
 	if turn.Version != normalized.ExpectedTurnVersion {
 		return nil, store.ConflictErrorf("session turn %q is version %d, expected %d", turn.ID, turn.Version, normalized.ExpectedTurnVersion)
@@ -123,6 +126,12 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	if err != nil {
 		return nil, err
 	}
+	if err := validateFinalizationResidentRuntime(normalized, turn.PromptAttemptID, fence); err != nil {
+		return nil, err
+	}
+	if normalized.ResidentRuntime != nil && (attempt.ExecutionState != store.PromptExecutionSucceeded || plan.availability != store.SessionAvailable) {
+		return nil, store.ValidationErrorf("a resident runtime is kept only by a succeeded turn that leaves the Session available")
+	}
 
 	turn, err = s.sessionTurns.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
 		Key:                  normalized.Key,
@@ -145,7 +154,19 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	if err != nil {
 		return nil, err
 	}
-	return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, &plan)
+	return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, &plan, normalized.ResidentRuntime)
+}
+
+// validateFinalizationResidentRuntime checks an ADR 0059 record kept by a
+// live finalization. Only assistant-result finalizations keep one.
+func validateFinalizationResidentRuntime(request store.FinalizeSessionTurnRequest, promptAttemptID string, fence store.ControllerEpochFence) error {
+	if request.ResidentRuntime == nil {
+		return nil
+	}
+	if request.TerminalKind != store.SessionTurnAssistantResult || request.SkipTranscriptAppend {
+		return store.ValidationErrorf("a resident runtime is kept only with an appended assistant result")
+	}
+	return store.ValidateResidentRuntimeForFinalization(*request.ResidentRuntime, request.Key, promptAttemptID, fence)
 }
 
 // ResumeSessionTurnFinalization completes only the Kubernetes and outbox tail
@@ -186,7 +207,8 @@ func (s *Store) ResumeSessionTurnFinalization(ctx context.Context, request store
 	if turn.State != store.SessionTurnFinalized || turn.Key != request.Key || turn.PromptAttemptID != request.PromptAttemptID || turn.FinalizationDigest != request.FinalizationDigest {
 		return nil, store.ConflictErrorf("session turn %q does not match the persisted finalization recovery identity", turnID)
 	}
-	return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, nil)
+	// Recovery never keeps a resident runtime (ADR 0059).
+	return s.completePersistedSessionTurnFinalization(ctx, *turn, fence, snapshot, nil, nil)
 }
 
 func (s *Store) completePersistedSessionTurnFinalization(
@@ -195,6 +217,7 @@ func (s *Store) completePersistedSessionTurnFinalization(
 	fence store.ControllerEpochFence,
 	snapshot epochSnapshot,
 	precomputedPlan *crossStoreFinalizationPlan,
+	residentRuntime *store.SessionResidentRuntime,
 ) (*store.SessionTurn, error) {
 	if turn.State != store.SessionTurnFinalized || turn.FinalizedAt == nil {
 		return nil, store.ConflictErrorf("session turn %q has no durable finalized receipt to resume", turn.ID)
@@ -272,7 +295,10 @@ func (s *Store) completePersistedSessionTurnFinalization(
 			return nil, err
 		}
 	}
-	updatedSession, err := s.finalizeSessionControlForTurn(ctx, sessionObject, control, turn, plan, request, fence, snapshot)
+	if residentRuntime != nil && plan.availability != store.SessionAvailable {
+		residentRuntime = nil
+	}
+	updatedSession, err := s.finalizeSessionControlForTurn(ctx, sessionObject, control, turn, plan, request, fence, snapshot, residentRuntime)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +467,7 @@ func (s *Store) finalizeBranchClaimForSessionTurn(ctx context.Context, publicati
 	return nil
 }
 
-func (s *Store) finalizeSessionControlForTurn(ctx context.Context, original *corev1alpha1.RuntimeSessionControl, control store.SessionControl, turn store.SessionTurn, plan crossStoreFinalizationPlan, request store.FinalizeSessionTurnRequest, fence store.ControllerEpochFence, snapshot epochSnapshot) (*corev1alpha1.RuntimeSessionControl, error) {
+func (s *Store) finalizeSessionControlForTurn(ctx context.Context, original *corev1alpha1.RuntimeSessionControl, control store.SessionControl, turn store.SessionTurn, plan crossStoreFinalizationPlan, request store.FinalizeSessionTurnRequest, fence store.ControllerEpochFence, snapshot epochSnapshot, residentRuntime *store.SessionResidentRuntime) (*corev1alpha1.RuntimeSessionControl, error) {
 	operationID := "finalize:" + turn.ID
 	if control.LastOperationID == operationID {
 		if sessionFinalizationTargetMatches(control, plan, request.FinalizationDigest, turn.PromptAttemptID, request.PublicationID) {
@@ -463,6 +489,11 @@ func (s *Store) finalizeSessionControlForTurn(ctx context.Context, original *cor
 		updated.Status.RelatedPublicationID = request.PublicationID
 	}
 	updated.Status.VerifiedBaseline = verifiedBaselineToAPI(plan.verifiedBaseline)
+	// ADR 0059: this write releases the lease, so it is also the only write
+	// that may keep the turn's live runtime for the next one. Every other
+	// finalization (recovery, a non-success turn) clears any older record: a
+	// record it claimed was consumed, and one it retired is never revived.
+	updated.Status.ResidentRuntime = residentRuntimeToAPI(residentRuntime)
 	setMutationStatus(&updated.Status.ControlRecordMutationStatus, fence, snapshot, control.Version+1, operationID, request.FinalizationDigest, control.CreatedAt, request.FinalizedAt)
 	if err := s.client.Status().Update(ctx, updated); err != nil {
 		return nil, mapKubernetesError("finalize SessionTurn SessionControl", err)

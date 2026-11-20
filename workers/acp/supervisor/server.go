@@ -34,6 +34,9 @@ type Server struct {
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
 	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
+	// thawRuntime thaws a rebased session's workspace; nil uses the
+	// RuntimeSession's own thaw. Tests replace it.
+	thawRuntime func(*acp.RuntimeSession) error
 
 	mu                 sync.Mutex
 	lifecycle          harnessv2.SupervisorLifecycle
@@ -346,8 +349,12 @@ type sessionState struct {
 	creating                bool
 	drainCleanupScheduled   bool
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
-	nativeCapture           *nativeSessionCapture
-	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
+	// preparedDeltas keeps each prepared write delta's change set for an
+	// ADR 0059 rebase; rebase is the last applied rebase receipt.
+	preparedDeltas        map[harnessv2.WorkspaceDeltaID]preparedDeltaChanges
+	rebase                *harnessv2.RuntimeSessionRebaseReceipt
+	nativeCapture         *nativeSessionCapture
+	nativeCaptureReceipts map[harnessv2.OperationID]*nativeSessionCapture
 	// operators registers admitted operator processes (nil while starting).
 	// Leaving an operator-admitting state revokes and kills all of them.
 	operators   map[uint64]*operatorRegistration
@@ -579,6 +586,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT "+harnessv2.FoundryBootRetirementPath, s.handleRetireFoundryBoot)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", s.handleCreateSession)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", s.handleFinalizeSessionPublication)
+	s.mux.HandleFunc("PUT "+harnessv2.RuntimeSessionRebasePathTemplate, s.handleRebaseSession)
 	s.mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", s.handleDeleteSession)
 	s.mux.HandleFunc("POST /v2/runtime-sessions/{sessionID}/native-session", s.handleCaptureNativeSession)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}", s.handleStartPrompt)
@@ -615,7 +623,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get(OperatorAccessCapabilityHeader) != "1" {
 		capabilities.SupportsOperatorAccess = false
 	}
-	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader+", "+OperatorAccessCapabilityHeader)
+	if r.Header.Get(harnessv2.RuntimeSessionRebaseHeader) != "1" {
+		capabilities.SupportsRuntimeSessionRebase = false
+	}
+	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader+", "+OperatorAccessCapabilityHeader+", "+harnessv2.RuntimeSessionRebaseHeader)
 	writeJSON(w, http.StatusOK, capabilities)
 }
 
@@ -645,6 +656,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := s.status()
+	if r.Header.Get(harnessv2.RuntimeSessionRebaseHeader) != "1" {
+		for i := range status.Sessions {
+			status.Sessions[i].Quiescent = false
+		}
+	}
 	status.FoundryBroker = identity
 	writeJSON(w, http.StatusOK, status)
 }
@@ -779,6 +795,7 @@ func (s *Server) status() harnessv2.StatusResponse {
 			LiveDescendantCount:     liveDescendantCount(state.runtime),
 			LastTransitionAt:        state.descriptor.LastTransitionAt,
 		}
+		status.Quiescent = sessionQuiescentLocked(state, status.LiveDescendantCount)
 		if state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning && state.prompt != nil && state.prompt.settlement == nil {
 			status.ActivePromptID = state.prompt.request.Metadata.PromptID
 			status.PendingPermissionCount = uint32(len(state.permissions))

@@ -95,6 +95,8 @@ const (
 	acpTurnStepRuntimeFinalize      = "runtimeSessionFinalization"
 	acpTurnStepSessionResult        = "sessionResult"
 	acpTurnStepRuntimeRetirement    = "runtimeSessionRetirement"
+	acpTurnStepResidentSessionGate  = "residentSessionGate"
+	acpTurnStepRuntimeSessionRebase = "runtimeSessionRebase"
 	acpTurnStepTaskCompletion       = "taskCompletion"
 	acpTurnTimingsLogMessage        = "ACP turn timings"
 	acpTurnTimingsDebugVerbosity    = 1

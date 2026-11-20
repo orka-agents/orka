@@ -116,6 +116,11 @@ type ACPWorkspaceClassBinding struct {
 	IdleTimeout     string
 	MaxLifetime     string
 	DeletionPolicy  ACPWorkspaceClassDeletionPolicy
+	// PersistentSessionDisabled freezes the class's ADR 0059 opt-out
+	// (acp.workspace.orka.ai/persistent-session: disabled) when the class is
+	// resolved. It is part of the execution snapshot, never of the RuntimePool
+	// binding digest, so toggling it never breaks a continuation's pool.
+	PersistentSessionDisabled bool
 }
 
 // Lifecycle rebuilds the exact class lifecycle frozen into this binding. The

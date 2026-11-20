@@ -476,6 +476,9 @@ func (c *Client) getJSONWithCapability(ctx context.Context, operation, relative 
 	if operation == "capabilities" {
 		req.Header.Set(NativeSessionLimitsHeader, "1")
 	}
+	if operation == "capabilities" || operation == "status" {
+		req.Header.Set(RuntimeSessionRebaseHeader, "1")
+	}
 	if authenticated {
 		req.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	}

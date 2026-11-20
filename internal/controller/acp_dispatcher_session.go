@@ -28,8 +28,18 @@ type acpTaskSession struct {
 	VerifiedBaseline *store.VerifiedBranchBaseline
 	Reused           bool
 	LeaseGeneration  int64
-	finalized        bool
-	requeued         bool
+	// ResidentClaimed is the ADR 0059 record this turn's lease acquisition
+	// claimed. Reuse still requires the gate before first runtime contact.
+	ResidentClaimed *store.SessionResidentRuntime
+	// FallbackBootstrap is the canonical bootstrap resolved before the lease
+	// so a refused claim can recreate without another fallible read.
+	FallbackBootstrap *ACPBootstrapTranscript
+	// KeepRecord is the record this turn's live settlement keeps; kept
+	// reports that the finalization write persisted it.
+	KeepRecord *store.SessionResidentRuntime
+	kept       bool
+	finalized  bool
+	requeued   bool
 }
 
 const acpPreSubmissionCleanupTimeout = 30 * time.Second
@@ -226,6 +236,11 @@ type acpTaskSessionPreparation struct {
 	nativeSession    *store.NativeSessionRecord
 	userPrompt       string
 	verifiedBaseline *store.VerifiedBranchBaseline
+	// claimHandoffID is the ADR 0059 record the lease acquisition claims;
+	// fallbackBootstrap recreates if the claim is lost.
+	claimHandoffID    string
+	claimRecord       *store.SessionResidentRuntime
+	fallbackBootstrap *ACPBootstrapTranscript
 }
 
 type acpSessionTranscriptAppendPolicy struct {
@@ -310,6 +325,28 @@ func (d *ACPDispatcher) prepareTaskSession(
 	lineage acpSessionLineageIdentity,
 	nativeSessionsSupported bool,
 ) (*acpTaskSession, error) {
+	return d.prepareTaskSessionWithClaim(
+		ctx, task, fence, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID, lineage,
+		nativeSessionsSupported, nil, nil,
+	)
+}
+
+// prepareTaskSessionWithClaim is prepareTaskSession with an optional ADR 0059
+// claim. A nil claim takes the ordinary path; any lease acquisition still
+// retires a resident record it does not claim.
+func (d *ACPDispatcher) prepareTaskSessionWithClaim(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	fence store.ControllerEpochFence,
+	profileDigest harnessv2.ProfileDigest,
+	mcpBindingDigest string,
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
+	supervisorBootID harnessv2.SupervisorBootID,
+	lineage acpSessionLineageIdentity,
+	nativeSessionsSupported bool,
+	claim *acpPersistentSessionClaimInput,
+	reuse *acpPersistentSessionReuse,
+) (*acpTaskSession, error) {
 	if task.Spec.SessionRef == nil {
 		return nil, nil
 	}
@@ -321,8 +358,9 @@ func (d *ACPDispatcher) prepareTaskSession(
 	}
 	steps := newACPDispatchScanTimer(time.Now, false)
 	ctx = withACPSteps(ctx, steps)
-	preparation, err := d.planTaskSession(
+	preparation, err := d.planTaskSessionWithClaim(
 		ctx, task, fence, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID, lineage.WorkspaceSessionUID,
+		claim, reuse,
 	)
 	if err != nil {
 		return nil, err
@@ -334,12 +372,33 @@ func (d *ACPDispatcher) prepareTaskSession(
 	if preparation.nativeSession != nil && !nativeRestoreHonorsHistoryBoundary(task.Spec.SessionRef, preparation.nativeSession) {
 		return nil, errNativeSessionHistoryBoundary
 	}
-	lease, turn, err := d.bindAndOpenTaskSessionTurn(
+	var claimRequest *store.ClaimSessionResidentRuntime
+	if preparation.claimHandoffID != "" {
+		claimRequest = &store.ClaimSessionResidentRuntime{HandoffID: preparation.claimHandoffID}
+	}
+	lease, turn, err := d.bindAndOpenTaskSessionTurnWithClaim(
 		ctx, task, fence, runtimeInstanceID, preparation.control, preparation.userPrompt,
-		acpSessionTranscriptAppendPolicyForTask(task), lineage,
+		acpSessionTranscriptAppendPolicyForTask(task), lineage, claimRequest,
 	)
 	if err != nil {
 		return nil, err
+	}
+	var residentClaimed *store.SessionResidentRuntime
+	if preparation.claimHandoffID != "" {
+		record := lease.Session.ResidentRuntime
+		switch {
+		case record == nil || record.HandoffID != preparation.claimHandoffID || !store.ResidentRuntimeClaimedBy(record, lease.Key):
+			reuse.miss(acpPersistentSessionStageClaim, acpPersistentReasonClaimLost)
+		case record.ControllerEpochName != fence.Name || record.ControllerEpoch != fence.Epoch:
+			// A retry of a claim made under an older epoch never reuses.
+			reuse.miss(acpPersistentSessionStageClaim, acpPersistentReasonEpochChanged)
+		default:
+			residentClaimed = store.CloneSessionResidentRuntime(record)
+		}
+		if residentClaimed == nil {
+			preparation.plan = acpPersistentSessionRecreatePlan(preparation.plan, preparation.claimRecord, lease.Key.LeaseGeneration)
+			preparation.bootstrap = preparation.fallbackBootstrap
+		}
 	}
 	if preparation.current == nil && lease.Session.LeaseGeneration > 1 {
 		preparation.plan.Binding.Generation = max(
@@ -387,7 +446,29 @@ func (d *ACPDispatcher) prepareTaskSession(
 		UserPrompt:       preparation.userPrompt,
 		VerifiedBaseline: preparation.verifiedBaseline, Reused: !preparation.plan.Recreate,
 		LeaseGeneration: lease.Key.LeaseGeneration,
+		ResidentClaimed: residentClaimed, FallbackBootstrap: preparation.fallbackBootstrap,
 	}, nil
+}
+
+// acpPersistentSessionRecreatePlan turns a planned reuse of a resident
+// runtime whose claim was refused into a fresh session above its generation.
+// The ordinary planned-session reconciliation then retires the resident one.
+func acpPersistentSessionRecreatePlan(plan ACPRuntimeSessionPlan, record *store.SessionResidentRuntime, leaseGeneration int64) ACPRuntimeSessionPlan {
+	if plan.Recreate {
+		return plan
+	}
+	generation := plan.Binding.Generation + 1
+	if record != nil {
+		generation = max(generation, uint64(record.RuntimeSessionGeneration)+1)
+	}
+	generation = max(generation, uint64(leaseGeneration))
+	plan.Binding.Generation = generation
+	plan.Binding.WorkspaceDigest = ""
+	plan.Binding.PromptDelivered = false
+	plan.Recreate = true
+	plan.BootstrapRequired = true
+	plan.Reason = "persistent-session-refused"
+	return plan
 }
 
 // rejectMissingTaskSession fails a Task whose sessionRef has create=false and
@@ -410,6 +491,24 @@ func (d *ACPDispatcher) planTaskSession(
 	runtimeInstanceID harnessv2.RuntimeInstanceID,
 	supervisorBootID harnessv2.SupervisorBootID,
 	expectedSessionUID string,
+) (*acpTaskSessionPreparation, error) {
+	return d.planTaskSessionWithClaim(
+		ctx, task, fence, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID, expectedSessionUID, nil, nil,
+	)
+}
+
+//nolint:gocyclo // The ordinary and ADR 0059 planning inputs are resolved before the lease in one place.
+func (d *ACPDispatcher) planTaskSessionWithClaim(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	fence store.ControllerEpochFence,
+	profileDigest harnessv2.ProfileDigest,
+	mcpBindingDigest string,
+	runtimeInstanceID harnessv2.RuntimeInstanceID,
+	supervisorBootID harnessv2.SupervisorBootID,
+	expectedSessionUID string,
+	claim *acpPersistentSessionClaimInput,
+	reuse *acpPersistentSessionReuse,
 ) (*acpTaskSessionPreparation, error) {
 	name := strings.TrimSpace(task.Spec.SessionRef.Name)
 	if name == "" {
@@ -442,13 +541,47 @@ func (d *ACPDispatcher) planTaskSession(
 	// Complete every fallible transcript/runtime planning read before acquiring
 	// the mutation Lease. Once the Lease is held, the only next durable action is
 	// opening the exact SessionTurn.
-	current := d.currentRuntimeSessionBinding(control.SessionUID)
-	if current == nil {
-		current, err = runtimeSessionBindingFromTaskStatus(
-			task, control.SessionUID, profileDigest, runtimeInstanceID, supervisorBootID,
-		)
-		if err != nil {
-			return nil, err
+	var current *ACPRuntimeSessionBinding
+	claimHandoffID := ""
+	var claimRecord *store.SessionResidentRuntime
+	if claim != nil {
+		// ADR 0059: on this path the in-memory binding is only a cache; the
+		// durable record alone may authorize reuse, and any refusal plans a
+		// fresh RuntimeSession instead of trusting the cache.
+		input := *claim
+		record := control.ResidentRuntime
+		if input.handoffID == "" && record != nil {
+			input.handoffID = record.HandoffID
+		}
+		stage, reason := acpResidentRuntimeStaticRefusal(record, input)
+		if reason == "" {
+			historyReason, historyErr := d.acpResidentRuntimeHistoryRefusal(ctx, task, control, record)
+			if historyErr != nil {
+				return nil, historyErr
+			}
+			stage, reason = acpPersistentSessionStagePlan, historyReason
+		}
+		if reason != "" {
+			reuse.miss(stage, reason)
+		} else {
+			binding := acpRuntimeSessionBindingFromResidentRuntime(record)
+			current = &binding
+			claimHandoffID = record.HandoffID
+			claimRecord = store.CloneSessionResidentRuntime(record)
+			if reuse != nil {
+				reuse.keptAt = record.KeptAt
+				reuse.generation = binding.Generation
+			}
+		}
+	} else {
+		current = d.currentRuntimeSessionBinding(control.SessionUID)
+		if current == nil {
+			current, err = runtimeSessionBindingFromTaskStatus(
+				task, control.SessionUID, profileDigest, runtimeInstanceID, supervisorBootID,
+			)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	if control.RuntimeSessionGeneration < 0 {
@@ -474,9 +607,20 @@ func (d *ACPDispatcher) planTaskSession(
 	}
 	var userPrompt string
 	var bootstrap *ACPBootstrapTranscript
-	if plan.BootstrapRequired && native == nil {
+	var fallbackBootstrap *ACPBootstrapTranscript
+	if claimHandoffID != "" && plan.Recreate {
+		// The record's identity is not reusable after all: never claim it.
+		reuse.miss(acpPersistentSessionStagePlan, acpPersistentReasonSnapshotMismatch)
+		claimHandoffID, claimRecord = "", nil
+	}
+	switch {
+	case plan.BootstrapRequired && native == nil:
 		bootstrap, userPrompt, err = d.resolveTaskSessionBootstrap(ctx, task, control)
-	} else {
+	case claimHandoffID != "":
+		// A lost claim must still recreate from the canonical transcript, so
+		// it is resolved now, before the lease.
+		fallbackBootstrap, userPrompt, err = d.resolveTaskSessionBootstrap(ctx, task, control)
+	default:
 		userPrompt, err = d.resolveTaskSessionPrompt(ctx, task, control)
 	}
 	if err != nil {
@@ -490,6 +634,7 @@ func (d *ACPDispatcher) planTaskSession(
 	return &acpTaskSessionPreparation{
 		control: control, current: current, plan: plan, bootstrap: bootstrap, userPrompt: userPrompt,
 		verifiedBaseline: verifiedBaseline, nativeSession: native,
+		claimHandoffID: claimHandoffID, claimRecord: claimRecord, fallbackBootstrap: fallbackBootstrap,
 	}, nil
 }
 
@@ -628,7 +773,7 @@ func runtimeSessionBindingFromTaskStatus(
 	}, nil
 }
 
-func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
+func (d *ACPDispatcher) bindAndOpenTaskSessionTurnWithClaim(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	fence store.ControllerEpochFence,
@@ -637,6 +782,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	userPrompt string,
 	appendPolicy acpSessionTranscriptAppendPolicy,
 	lineage acpSessionLineageIdentity,
+	claim *store.ClaimSessionResidentRuntime,
 ) (*ACPSessionLease, *ACPSessionTurn, error) {
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
@@ -660,7 +806,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	// Re-enter exact lease acquisition even when the Lease already exists. This
 	// is idempotent and completes a lineage payload projection that may have
 	// failed after the Kubernetes-authoritative status CAS.
-	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
+	lease, err := d.acquireTaskSessionLeaseWithClaim(ctx, task, fence, control, lineage, claim)
 	if err != nil {
 		return nil, nil, d.requeueSessionLeaseFailure(ctx, task, attemptID, fence, err)
 	}
@@ -833,6 +979,17 @@ func (d *ACPDispatcher) acquireTaskSessionLease(
 	control *store.SessionControl,
 	lineage acpSessionLineageIdentity,
 ) (*ACPSessionLease, error) {
+	return d.acquireTaskSessionLeaseWithClaim(ctx, task, fence, control, lineage, nil)
+}
+
+func (d *ACPDispatcher) acquireTaskSessionLeaseWithClaim(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	fence store.ControllerEpochFence,
+	control *store.SessionControl,
+	lineage acpSessionLineageIdentity,
+	claim *store.ClaimSessionResidentRuntime,
+) (*ACPSessionLease, error) {
 	expires := time.Now().UTC().Add(30 * time.Minute)
 	if task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0 {
 		expires = time.Now().UTC().Add(task.Spec.Timeout.Duration + time.Minute)
@@ -842,6 +999,7 @@ func (d *ACPDispatcher) acquireTaskSessionLease(
 		PromptID: task.Status.Execution.PromptID, PromptRequestDigest: task.Status.Execution.RequestDigest,
 		AcquiredAt: time.Now().UTC(), ExpiresAt: &expires,
 		NamespaceUID: lineage.NamespaceUID, RuntimeIdentity: lineage.RuntimeIdentity, ConfigDigest: lineage.ConfigDigest,
+		ClaimResidentRuntime: claim,
 	})
 }
 
@@ -928,12 +1086,29 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 	if err != nil {
 		return err
 	}
-	_, err = d.Sessions.FinalizeAssistantResult(ctx, ACPFinalizeAssistantRequest{
+	request := ACPFinalizeAssistantRequest{
 		SessionTurn: *session.Turn, Fence: fence, AssistantResult: result, NativeSession: session.NativeCapture,
 		PublicationID: publicationID,
 		Projection:    ACPFinalizationProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload, AvailableAt: time.Now().UTC()},
 		FinalizedAt:   time.Now().UTC(),
-	})
+	}
+	if phase == corev1alpha1.TaskPhaseSucceeded {
+		request.ResidentRuntime = session.KeepRecord
+	}
+	finalization, err := d.Sessions.FinalizeAssistantResult(ctx, request)
+	if err != nil && request.ResidentRuntime != nil && errors.Is(err, store.ErrValidation) {
+		// A record the store refuses never fails the turn: finalize without
+		// it, and the runtime is retired as today (ADR 0059).
+		logf.FromContext(ctx).Info("ACP persistent session record was refused by the control store; finalizing without it",
+			"namespace", task.Namespace, "task", task.Name)
+		request.ResidentRuntime = nil
+		finalization, err = d.Sessions.FinalizeAssistantResult(ctx, request)
+	}
+	if err == nil && request.ResidentRuntime != nil && finalization != nil {
+		persisted := finalization.Session.ResidentRuntime
+		session.kept = persisted != nil && persisted.HandoffID == request.ResidentRuntime.HandoffID &&
+			persisted.State == store.SessionResidentRuntimeResident
+	}
 	if err == nil {
 		d.markTaskSessionFinalized(task, session)
 		// Only a complete binding may replace the live one: a recovered

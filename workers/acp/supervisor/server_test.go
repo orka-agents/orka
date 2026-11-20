@@ -1252,6 +1252,13 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 			t.Skipf("non-root test environment cannot clear supplementary groups %v without weakening the production fence", groups)
 		}
 	}
+	return newTestConfigWithoutChildren(t, mode, upstreamURL, upstreamToken)
+}
+
+// newTestConfigWithoutChildren is the test configuration for tests that never
+// start an ACP child, so they need no identity-isolation privileges.
+func newTestConfigWithoutChildren(t *testing.T, mode, upstreamURL, upstreamToken string) (Config, harnessv2.RuntimeProfile) {
+	t.Helper()
 	policyConfiguration := testEmptyMCPPolicyConfiguration(t)
 	agentConfiguration := harnessv2.AgentSessionConfiguration{
 		AgentUID: testProjectionAgentUID, AgentGeneration: 1, ProviderKind: providerKindCodex, Model: "test-model", MaxTurns: 7,

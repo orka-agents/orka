@@ -174,6 +174,11 @@ type TaskReconciler struct {
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.
 	ACPWorkspaceDispatchEnabled bool
+	// ACPPersistentSessionEnabled lets a Task that already holds its warm
+	// attachment queue before the provider acknowledges the epoch when a
+	// resident RuntimeSession was kept for it (ADR 0059). The dispatcher then
+	// runs the full attach handshake before any runtime contact.
+	ACPPersistentSessionEnabled bool
 	// ACPWorkspaceDefaultSuspendAfterDetach is the warm-detach window frozen
 	// into each new session-reused Substrate workspace whose profile sets
 	// none (ADR 0057). Zero disables the default.

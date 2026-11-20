@@ -132,6 +132,16 @@ var (
 	// ACPWorkspaceRetentionActionsTotal counts retention enforcement actions on
 	// class-backed ACP execution workspaces. Labels stay bounded: no object
 	// names, class names, or session identifiers.
+	// ACPPersistentSessionTotal counts ADR 0059 persistent-session keep and
+	// reuse decisions. Reasons are a bounded enum; no names or UIDs.
+	ACPPersistentSessionTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_acp_persistent_session_total",
+			Help: "ACP persistent-session keep and reuse decisions by decision and bounded reason",
+		},
+		[]string{"decision", labelReason},
+	)
+
 	ACPWorkspaceRetentionActionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_acp_workspace_retention_actions_total",
@@ -391,6 +401,7 @@ var (
 func init() {
 	metrics.Registry.MustRegister(
 		ApprovalDecisionDuration,
+		ACPPersistentSessionTotal,
 		ACPWorkspaceRetentionActionsTotal,
 		ACPWorkspaceRuntimePhaseDuration,
 		APIRequestsTotal,

@@ -566,6 +566,16 @@ func (s *Store) completeSessionLeaseStatus(ctx context.Context, object *corev1al
 	updated.Status.MutationLeaseGeneration = state.Generation
 	updated.Status.MutationLease = sessionMutationLeaseToAPI(lease, state)
 	updated.Status.Lineage = sessionLineageToAPI(lineage)
+	// ADR 0059: the claim (or the retirement of an unclaimed record) commits in
+	// this exact status CAS that mirrors the newly acquired Lease generation,
+	// so a record is claimed at most once and only by a monotonic lease.
+	updated.Status.ResidentRuntime = residentRuntimeToAPI(store.ResolveResidentRuntimeOnAcquire(
+		freshControl.ResidentRuntime, request.ClaimResidentRuntime, fence,
+		store.SessionResidentRuntimeClaim{
+			TaskUID: request.TaskUID, Attempt: request.Attempt, PromptID: request.PromptID, LeaseGeneration: state.Generation,
+		},
+		request.AcquiredAt,
+	))
 	setMutationStatus(&updated.Status.ControlRecordMutationStatus, fence, snapshot, freshControl.Version+1, freshControl.LastOperationID, freshControl.LastOperationDigest, freshControl.CreatedAt, request.AcquiredAt)
 	if err := s.client.Status().Update(ctx, updated); err != nil {
 		return nil, mapKubernetesError("commit Session mutation Lease status", err)
@@ -943,6 +953,7 @@ func sessionControlFromObject(object *corev1alpha1.RuntimeSessionControl) store.
 		RelatedPublicationID:     object.Status.RelatedPublicationID,
 		VerifiedBaseline:         verifiedBaselineFromAPI(object.Status.VerifiedBaseline),
 		Lineage:                  sessionLineageFromAPI(object),
+		ResidentRuntime:          residentRuntimeFromAPI(object.Status.ResidentRuntime),
 		ControllerEpochName:      object.Status.ControllerEpochName,
 		ControllerEpoch:          object.Status.ControllerEpoch,
 		LastOperationID:          object.Status.LastOperationID,

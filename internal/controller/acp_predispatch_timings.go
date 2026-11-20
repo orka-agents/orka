@@ -48,6 +48,10 @@ const (
 	// acpPreDispatchWorkspaceReady is the first pass that finds the
 	// attachment admitted and acknowledged.
 	acpPreDispatchWorkspaceReady
+	// acpPreDispatchWorkspaceAttachHeld is the ADR 0059 reuse-path queue
+	// pass: the Task holds its warm attachment and queues before the
+	// provider acknowledges the epoch. The dispatcher runs the handshake.
+	acpPreDispatchWorkspaceAttachHeld
 	// acpPreDispatchRuntimePoolReady is the first queue pass whose RuntimePool
 	// is ensured and, for an execution workspace, whose post-attach handshake
 	// holds, including the provider observing the current workspace
@@ -76,6 +80,7 @@ var acpPreDispatchMilestoneNames = [acpPreDispatchMilestoneCount]string{
 	"speculativePoolActivated",
 	"workspaceAttachRequested",
 	"workspaceReady",
+	"workspaceAttachHeld",
 	"runtimePoolReady",
 	"promptAttemptPersisted",
 	"dispatchQueued",

@@ -304,6 +304,10 @@ type ACPAcquireSessionLeaseRequest struct {
 	LineageGeneration int64
 	RuntimeIdentity   string
 	ConfigDigest      string
+
+	// ClaimResidentRuntime claims the exact ADR 0059 resident runtime in the
+	// same write that acquires the lease.
+	ClaimResidentRuntime *store.ClaimSessionResidentRuntime
 }
 
 // ACPSessionLease is the exact mutation fence that must be used when opening
@@ -361,7 +365,7 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 		Fence: request.Fence, ExpectedVersion: request.Session.Version, ExpectedLeaseGeneration: request.Session.LeaseGeneration,
 		TaskUID: request.TaskUID, Attempt: request.Attempt, PromptID: request.PromptID,
 		RequestDigest: leaseDigest, AcquiredAt: acquiredAt, ExpiresAt: request.ExpiresAt,
-		Lineage: lineageClaim,
+		Lineage: lineageClaim, ClaimResidentRuntime: request.ClaimResidentRuntime,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("acquire ACP session mutation lease: %w", err)
@@ -637,6 +641,9 @@ type ACPFinalizeAssistantRequest struct {
 	PublicationID   string
 	Projection      ACPFinalizationProjection
 	FinalizedAt     time.Time
+	// ResidentRuntime is the ADR 0059 handoff record this live settlement
+	// keeps in the same write that releases its lease.
+	ResidentRuntime *store.SessionResidentRuntime
 }
 
 // ACPFinalizeOutcomeUnknownRequest records an explicit system outcome marker.
@@ -718,7 +725,8 @@ func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, requ
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnAssistantResult,
-		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
+		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession,
+		request.ResidentRuntime)
 }
 
 // FinalizeOutcomeUnknown atomically appends the user prompt and an explicit
@@ -736,7 +744,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeUnknown(ctx context.Context, reque
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		marker, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
+		marker, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession, nil)
 }
 
 func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, request ACPFinalizeOutcomeMarkerRequest) (*ACPSessionFinalization, error) {
@@ -755,7 +763,7 @@ func (c *ACPSessionContinuity) FinalizeOutcomeMarker(ctx context.Context, reques
 		return nil, err
 	}
 	return c.finalizeTurn(ctx, request.SessionTurn, request.Fence, store.SessionTurnOutcomeMarker,
-		string(markerBytes), "", request.Projection, request.FinalizedAt, request.NativeSession)
+		string(markerBytes), "", request.Projection, request.FinalizedAt, request.NativeSession, nil)
 }
 
 func (c *ACPSessionContinuity) finalizeTurn(
@@ -768,6 +776,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	projectionInput ACPFinalizationProjection,
 	finalizedAt time.Time,
 	native *store.NativeSessionRecord,
+	residentRuntime *store.SessionResidentRuntime,
 ) (*ACPSessionFinalization, error) {
 	if err := validateACPSessionLease(&sessionTurn.Lease.Session, sessionTurn.Lease.Key); err != nil {
 		return nil, err
@@ -824,6 +833,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		// VerifiedBaseline is deliberately omitted. The durable store may advance
 		// it only by deriving it from the independently verified Publication receipt.
 		BlockReason: blockReason, Projection: projection, FinalizedAt: when,
+		ResidentRuntime: residentRuntime,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finalize ACP session turn: %w", err)

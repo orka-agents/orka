@@ -410,13 +410,16 @@ type SessionControl struct {
 	RelatedPublicationID     string                  `json:"relatedPublicationId,omitempty"`
 	VerifiedBaseline         *VerifiedBranchBaseline `json:"verifiedBaseline,omitempty"`
 	Lineage                  *SessionLineage         `json:"lineage,omitempty"`
-	ControllerEpochName      string                  `json:"controllerEpochName"`
-	ControllerEpoch          int64                   `json:"controllerEpoch"`
-	LastOperationID          string                  `json:"lastOperationId,omitempty"`
-	LastOperationDigest      string                  `json:"lastOperationDigest,omitempty"`
-	Version                  int64                   `json:"version"`
-	CreatedAt                time.Time               `json:"createdAt"`
-	UpdatedAt                time.Time               `json:"updatedAt"`
+	// ResidentRuntime is the ADR 0059 handoff record of the one live
+	// RuntimeSession kept across a turn boundary, when any.
+	ResidentRuntime     *SessionResidentRuntime `json:"residentRuntime,omitempty"`
+	ControllerEpochName string                  `json:"controllerEpochName"`
+	ControllerEpoch     int64                   `json:"controllerEpoch"`
+	LastOperationID     string                  `json:"lastOperationId,omitempty"`
+	LastOperationDigest string                  `json:"lastOperationDigest,omitempty"`
+	Version             int64                   `json:"version"`
+	CreatedAt           time.Time               `json:"createdAt"`
+	UpdatedAt           time.Time               `json:"updatedAt"`
 }
 
 // CommitSessionRuntimeGenerationRequest records the newest provider
@@ -451,6 +454,10 @@ type AcquireSessionMutationLeaseRequest struct {
 	// RuntimeSessionControl status CAS that records the acquired Lease. It is
 	// required by the Kubernetes-authoritative store.
 	Lineage *ClaimSessionLineageRequest `json:"lineage,omitempty"`
+	// ClaimResidentRuntime claims the exact ADR 0059 resident runtime in the
+	// same write that acquires the lease. Any acquisition, with or without a
+	// claim, moves a Resident record it does not claim to Retiring.
+	ClaimResidentRuntime *ClaimSessionResidentRuntime `json:"claimResidentRuntime,omitempty"`
 }
 
 // ReleaseSessionMutationLeaseRequest aborts a pre-prompt lease only while the
@@ -517,6 +524,10 @@ type FinalizeSessionTurnRequest struct {
 	// NativeSessionCarried marks NativeSession as the Session's existing checkpoint
 	// carried across a non-success outcome marker, not a fresh capture.
 	NativeSessionCarried bool `json:"-"`
+	// ResidentRuntime is the ADR 0059 handoff record that turn's live
+	// settlement keeps in the same SessionControl write that releases its
+	// lease. It is never replayed by finalization recovery, which writes none.
+	ResidentRuntime *SessionResidentRuntime `json:"-"`
 }
 
 // ResumeSessionTurnFinalizationRequest resumes only the Kubernetes and outbox

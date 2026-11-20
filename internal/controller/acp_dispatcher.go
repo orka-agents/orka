@@ -125,6 +125,9 @@ type ACPDispatcher struct {
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
 	SubstrateRouter          *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
+	// PersistentSessionEnabled keeps an eligible Session's live RuntimeSession
+	// across warm-window turns (ADR 0059, --acp-workspace-persistent-session).
+	PersistentSessionEnabled bool
 	// Informers, when set, wake the dispatcher as soon as a Task is queued
 	// or a RuntimePool starts serving or accepting, or frees capacity,
 	// instead of only on the next Interval tick.
@@ -1140,12 +1143,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryRuntimeClient, authErr)
 	}
 	nativeSessionsSupported := false
+	rebaseSupported := false
 	if target.pool != nil {
 		capabilities, capabilityErr := runtimeClient.Capabilities(runtimeCtx)
 		if capabilityErr != nil {
 			return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, capabilityErr)
 		}
 		nativeSessionsSupported = capabilities.SupportsNativeSessions && profile.ProviderKind == runtimePoolProviderCodex && d.nativeSessionStore() != nil
+		rebaseSupported = capabilities.SupportsRuntimeSessionRebase
 		if !capabilities.SupportsAgentSessionConfiguration {
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
@@ -1208,9 +1213,43 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		sessionTrace.End(err)
 	}
 	defer func() { endSessionTrace(retErr) }()
-	sessionExecution, err = d.prepareTaskSession(
+	// ADR 0059: decide, before the lease, whether this turn may claim the
+	// Session's resident runtime. Every refusal plans a fresh RuntimeSession.
+	persistentScope := ""
+	if task.Spec.SessionRef != nil {
+		persistentScope = d.acpPersistentSessionScope(task, bound, target, nativeSessionsSupported, rebaseSupported)
+	}
+	persistentReuse := &acpPersistentSessionReuse{}
+	defer func() { persistentReuse.log(ctx, task) }()
+	persistentHandoff := strings.TrimSpace(task.Annotations[acpTaskPersistentSessionHandoffAnnotation])
+	var persistentClaim *acpPersistentSessionClaimInput
+	if d.PersistentSessionEnabled && task.Spec.SessionRef != nil {
+		persistentReuse.attempted = true
+		refused := strings.TrimSpace(task.Annotations[acpTaskPersistentSessionRefusedAnnotation])
+		switch {
+		case persistentScope != "":
+			persistentReuse.miss(acpPersistentSessionStagePlan, persistentScope)
+		case refused != "":
+			persistentReuse.miss(acpPersistentSessionStageGate, refused)
+		default:
+			reuseDigest, digestErr := acpPersistentSessionReuseDigest(
+				acpPersistentSessionReuseInputFor(bound, task, mcpBindingDigest, bound.promptAttempt),
+			)
+			if digestErr != nil {
+				persistentReuse.miss(acpPersistentSessionStagePlan, acpPersistentReasonSnapshotMismatch)
+				break
+			}
+			persistentReuse.miss(acpPersistentSessionStageClaim, acpPersistentReasonNoRecord)
+			persistentClaim = &acpPersistentSessionClaimInput{
+				handoffID: persistentHandoff, fence: fence, runtimeFence: runtimeFence, mcpDigest: mcpBindingDigest,
+				reuseDigest: reuseDigest, lineageDigest: lineage.ConfigDigest, pool: target.pool, now: time.Now().UTC(),
+			}
+		}
+	}
+	sessionExecution, err = d.prepareTaskSessionWithClaim(
 		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
 		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage, nativeSessionsSupported,
+		persistentClaim, persistentReuse,
 	)
 	if err != nil {
 		endSessionTrace(err)
@@ -1254,7 +1293,21 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}()
 	}
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
+		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
+			persistentReuse.miss(acpPersistentSessionStageGate, acpPersistentReasonTaskDeadline)
+		} else {
+			persistentReuse.miss(acpPersistentSessionStageGate, acpPersistentReasonTaskCancelled)
+		}
 		return deadlineErr
+	}
+	if sessionExecution != nil {
+		requeued, gateErr := d.runACPPersistentSessionGates(
+			ctx, runtimeCtx, task, attemptID, fence, target, runtimeClient, runtimeFence,
+			sessionExecution, persistentHandoff != "", persistentReuse, turnTimings,
+		)
+		if gateErr != nil || requeued {
+			return gateErr
+		}
 	}
 	if sessionExecution != nil && !sessionExecution.Reused {
 		// A parked turn whose release failed still holds a resident slot.
@@ -1338,6 +1391,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	requeued, reconcileErr := d.reconcilePlannedRuntimeSession(
 		ctx, runtimeClient, task, attemptID, fence, sessionExecution, &runtimeFence,
 	)
+	if sessionExecution != nil && sessionExecution.ResidentClaimed != nil && !sessionExecution.Reused {
+		persistentReuse.miss(acpPersistentSessionStagePlan, acpPersistentReasonRuntimeSessionMissing)
+	}
 	turnTimings.mark(acpTurnStepSessionPlan)
 	if runtimeContextError(runtimeCtx) != nil && sessionExecution != nil {
 		// Cancellation supersedes an admission requeue. Let the deferred Session
@@ -1417,6 +1473,25 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return err
 		}
 	}
+	if sessionExecution != nil && sessionExecution.Reused && sessionExecution.ResidentClaimed != nil {
+		// A rebased write session's baseline is the record's derived identity,
+		// valid only while the publisher resolves exactly the published commit.
+		rebased, applied, rebaseErr := acpRebasedRuntimeWorkspace(preparedWorkspace, sessionExecution.ResidentClaimed)
+		if rebaseErr != nil {
+			return rebaseErr
+		}
+		if applied {
+			preparedWorkspace = rebased
+			baseline = preparedWorkspace.baseline
+			workspace = preparedWorkspace.spec
+			workspace.ExpectDurableResume = expectDurableResume
+			if expectDurableResume {
+				workspace.ExpectDurableResumeFrom = preparedWorkspace.priorRepositoryIdentity
+				workspace.ExpectDurableResumeMinGeneration = resumeFloor
+			}
+			workspaceAuthorization = nil
+		}
+	}
 	if sessionExecution != nil {
 		previousRuntimeFence := runtimeFence
 		bound, workspaceChanged, bindErr := bindACPRuntimeSessionWorkspace(
@@ -1424,6 +1499,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		)
 		if bindErr != nil {
 			return bindErr
+		}
+		if workspaceChanged && sessionExecution.ResidentClaimed != nil {
+			persistentReuse.miss(acpPersistentSessionStagePlan, acpPersistentReasonSnapshotMismatch)
+			d.stampACPPersistentSessionRefused(ctx, task, acpPersistentReasonSnapshotMismatch)
 		}
 		if workspaceChanged {
 			bound.Generation = max(bound.Generation, uint64(sessionExecution.LeaseGeneration))
@@ -2585,11 +2664,47 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	// next turn. When this turn parked, release that capacity: mark the
 	// binding for recreation while the Session lease is still held, so no
 	// later turn can adopt the runtime this deletes.
-	releaseParkedRuntime := !runtimeSessionRetirementRequired && sessionExecution != nil &&
-		d.turnRequestedPark(ctx, task)
+	turnParked := sessionExecution != nil && d.turnRequestedPark(ctx, task)
+	releaseParkedRuntime := !runtimeSessionRetirementRequired && turnParked
 	if releaseParkedRuntime {
 		sessionExecution.Binding.RecreationRequired = true
 		d.setRuntimeSessionBinding(sessionExecution.Binding)
+	}
+	// ADR 0059: decide whether this turn keeps its live RuntimeSession for the
+	// next one. The record is written only by the finalization below, in the
+	// same write that releases the Session lease; anything else retires the
+	// session as today.
+	persistentKeepAttempted := d.PersistentSessionEnabled && sessionExecution != nil
+	persistentKeepReason := ""
+	var persistentRebaseDuration time.Duration
+	if persistentKeepAttempted {
+		publicationState := store.PublicationState("")
+		if publicationID != "" {
+			if publication, getErr := d.Store.GetPublication(ctx, publicationID); getErr == nil {
+				publicationState = publication.State
+			}
+		}
+		settledAttempt, attemptErr := d.Store.GetPromptAttempt(ctx, attemptID)
+		if attemptErr != nil {
+			settledAttempt = nil
+		}
+		appendPolicy := acpSessionTranscriptAppendPolicyForTask(task)
+		var record *store.SessionResidentRuntime
+		record, persistentKeepReason, persistentRebaseDuration = d.prepareACPPersistentSessionKeep(ctx, acpPersistentSessionKeepInput{
+			task: task, bound: bound, target: target, runtimeClient: runtimeClient, runtimeFence: runtimeFence,
+			fence: fence, session: sessionExecution, attemptID: attemptID, attempt: settledAttempt,
+			mcpDigest: mcpBindingDigest, lineageDigest: lineage.ConfigDigest,
+			workspaceDigest: sessionExecution.Binding.WorkspaceDigest, baseline: baseline, intent: workspace.Intent,
+			delta: delta.Delta, publicationID: publicationID, finalization: runtimePublicationFinalization,
+			resultText: resultText, scopeRefusal: persistentScope, parked: turnParked,
+			rebaseSupported: rebaseSupported, nativeCapture: nativeSessionsSupported,
+			transcriptSkip:   appendPolicy.skipTranscriptAppend,
+			publicationState: publicationState,
+		})
+		if persistentRebaseDuration > 0 {
+			turnTimings.mark(acpTurnStepRuntimeSessionRebase)
+		}
+		sessionExecution.KeepRecord = record
 	}
 	if err := d.finalizeTaskSessionResult(
 		ctx, task, fence, sessionExecution, resultText, publicationID, corev1alpha1.TaskPhaseSucceeded, deliveryStatus,
@@ -2597,7 +2712,32 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	turnTimings.mark(acpTurnStepSessionResult)
-	if runtimeSessionRetirementRequired {
+	persistentKept := sessionExecution != nil && sessionExecution.kept
+	if persistentKeepAttempted {
+		if !persistentKept && persistentKeepReason == "" {
+			persistentKeepReason = acpPersistentReasonNoRecord
+		}
+		if persistentKept {
+			persistentKeepReason = acpPersistentReasonKept
+		}
+		logACPPersistentSessionRetained(ctx, task, persistentKept, persistentKeepReason,
+			runtimeFence.RuntimeSessionGeneration, persistentRebaseDuration)
+	}
+	if persistentKept {
+		// The Session's newest finalized turn owns the kept process, exactly as
+		// for a resident read-intent session: no task-scoped cleanup receipt is
+		// recorded, so Session deletion and instance retirement still retire it.
+		runtimeSessionCleanupPending = false
+		if workspace.Intent == harnessv2.WorkspaceIntentWrite {
+			// Only the durable record may authorize reusing a write session.
+			d.forgetRuntimeSessionBinding(sessionExecution.Binding.SessionUID)
+		} else {
+			cached := sessionExecution.Binding
+			cached.WorkspaceDigest = sessionExecution.KeepRecord.WorkspaceDigest
+			cached.PromptDelivered = true
+			d.setRuntimeSessionBinding(cached)
+		}
+	} else if runtimeSessionRetirementRequired {
 		if cleanupErr := cleanupRuntimeSession("task_finalized"); cleanupErr != nil {
 			return cleanupErr
 		}
@@ -5750,6 +5890,10 @@ func canonicalExternalRuntimeCapabilities(capabilities *harnessv2.CapabilitiesRe
 		return nil, errors.New("external AgentRuntime capabilities are required")
 	}
 	normalized := *capabilities
+	// The ADR 0059 rebase capability is additive, opt-in per request, and
+	// never used for external dispatch; it must not make a frozen external
+	// binding drift across a controller upgrade.
+	normalized.SupportsRuntimeSessionRebase = false
 	normalized.Provider.ProviderKinds = slices.Clone(capabilities.Provider.ProviderKinds)
 	normalized.Provider.Models = slices.Clone(capabilities.Provider.Models)
 	slices.Sort(normalized.Provider.ProviderKinds)
@@ -7356,6 +7500,18 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 	terminal harnessv2.Event,
 	cancellationReason harnessv2.CancelReason,
 ) error {
+	if d.PersistentSessionEnabled && session != nil {
+		// ADR 0059: a turn that did not succeed writes no handoff record; its
+		// reason is reported here because the next turn only sees no-record.
+		reason := acpPersistentReasonPreviousNotSucceeded
+		if terminal.Type == harnessv2.EventCancelled {
+			reason = acpPersistentReasonPreviousCancelled
+			if cancellationReason == harnessv2.CancelReasonTaskTimeout {
+				reason = acpPersistentReasonPreviousTimedOut
+			}
+		}
+		logACPPersistentSessionRetained(ctx, task, false, reason, session.Binding.Generation, 0)
+	}
 	switch terminal.Type {
 	case harnessv2.EventCancelled:
 		operation := acpCancelledOperation

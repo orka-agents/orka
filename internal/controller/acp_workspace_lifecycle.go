@@ -414,6 +414,11 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, nil
 	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
+	if acpPersistentSessionStaticScope(r.ACPPersistentSessionEnabled, task, plan, false) == "" {
+		// ADR 0059: record, atomically with the attach, which warm window this
+		// attachment observed and which Task settled it.
+		manager.Annotate = acpWorkspaceAttachedFromWarmEvidence
+	}
 	attachment, err := manager.attach(ctx, workspace, task, map[string]string{
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
 	}, func(current *workspacev1alpha1.ExecutionWorkspace, candidate *corev1alpha1.Task, now time.Time) error {

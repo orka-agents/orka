@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
@@ -301,6 +302,10 @@ func (r *TaskReconciler) resolveExternalACPWorkspaceClass(ctx context.Context, r
 			AllowedOnDetach: onDetachActionsToStrings(class.Spec.Lifecycle.AllowedOnDetach), DetachTimeout: class.Spec.Lifecycle.DetachTimeout.Duration.String(),
 			DeletionPolicy: ACPWorkspaceClassDeletionPolicy{ProviderResources: string(class.Spec.Lifecycle.DeletionPolicy.ProviderResources), PersistentVolumes: string(class.Spec.Lifecycle.DeletionPolicy.PersistentVolumes), Checkpoints: string(class.Spec.Lifecycle.DeletionPolicy.Checkpoints)},
 		}}
+	// ADR 0059: the class opt-out is frozen with the rest of the class
+	// identity; a later edit to the live class never changes a frozen Task.
+	resolved.Binding.PersistentSessionDisabled = strings.TrimSpace(
+		class.Annotations[ACPWorkspaceClassPersistentSessionAnnotation]) == acpWorkspacePersistentSessionDisabled
 	if class.Spec.Lifecycle.IdleTimeout != nil {
 		resolved.Binding.IdleTimeout = class.Spec.Lifecycle.IdleTimeout.Duration.String()
 	}

@@ -199,7 +199,9 @@ type agentExecutionSnapshotWorkspaceClass struct {
 	DetachTimeout            string                                    `json:"detachTimeout"`
 	IdleTimeout              string                                    `json:"idleTimeout,omitempty"`
 	MaxLifetime              string                                    `json:"maxLifetime,omitempty"`
-	DeletionPolicy           struct {
+	// PersistentSession is "disabled" when the class opted out of ADR 0059.
+	PersistentSession string `json:"persistentSession,omitempty"`
+	DeletionPolicy    struct {
 		ProviderResources string `json:"providerResources"`
 		PersistentVolumes string `json:"persistentVolumes"`
 		Checkpoints       string `json:"checkpoints"`
@@ -1143,6 +1145,9 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		limit := *class.MaxSuspendedWorkspaces
 		frozen.MaxSuspended = &limit
 	}
+	if class.PersistentSessionDisabled {
+		frozen.PersistentSession = acpWorkspacePersistentSessionDisabled
+	}
 	frozen.DeletionPolicy.ProviderResources = class.DeletionPolicy.ProviderResources
 	frozen.DeletionPolicy.PersistentVolumes = class.DeletionPolicy.PersistentVolumes
 	frozen.DeletionPolicy.Checkpoints = class.DeletionPolicy.Checkpoints
@@ -1186,6 +1191,7 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 			limit := *class.MaxSuspended
 			return &limit
 		}(),
+		PersistentSessionDisabled: class.PersistentSession == acpWorkspacePersistentSessionDisabled,
 		DeletionPolicy: ACPWorkspaceClassDeletionPolicy{
 			ProviderResources: class.DeletionPolicy.ProviderResources,
 			PersistentVolumes: class.DeletionPolicy.PersistentVolumes,

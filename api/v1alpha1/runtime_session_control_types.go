@@ -129,6 +129,106 @@ type RuntimeSessionMutationLeaseStatus struct {
 	ExpiresAt *metav1.Time `json:"expiresAt,omitempty"`
 }
 
+// RuntimeSessionResidentRuntimeState is the lifecycle of an ADR 0059 handoff
+// record.
+// +kubebuilder:validation:Enum=Resident;Claimed;Retiring
+type RuntimeSessionResidentRuntimeState string
+
+// RuntimeSessionResidentRuntimeClaim names the turn whose lease acquisition
+// claimed a resident runtime.
+type RuntimeSessionResidentRuntimeClaim struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	TaskUID string `json:"taskUid"`
+
+	// +kubebuilder:validation:Minimum=1
+	Attempt int64 `json:"attempt"`
+
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	PromptID string `json:"promptId"`
+
+	// +kubebuilder:validation:Minimum=1
+	LeaseGeneration int64 `json:"leaseGeneration"`
+}
+
+// RuntimeSessionResidentRuntimeStatus is the ADR 0059 handoff record for the
+// one live ACP RuntimeSession a Session keeps across a turn boundary. It holds
+// identities and digests only, never a credential.
+type RuntimeSessionResidentRuntimeStatus struct {
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	HandoffID string `json:"handoffId"`
+
+	// +kubebuilder:validation:MaxLength=1024
+	SourceTaskUID string `json:"sourceTaskUid"`
+	// +kubebuilder:validation:Minimum=1
+	SourceAttempt int64 `json:"sourceAttempt"`
+	// +kubebuilder:validation:MaxLength=1024
+	SourcePromptAttemptID string `json:"sourcePromptAttemptId"`
+	// +kubebuilder:validation:MaxLength=1024
+	SourceTurnID string `json:"sourceTurnId"`
+	// +kubebuilder:validation:Minimum=1
+	SourceLeaseGeneration int64 `json:"sourceLeaseGeneration"`
+
+	// +kubebuilder:validation:MaxLength=253
+	ControllerEpochName string `json:"controllerEpochName"`
+	// +kubebuilder:validation:Minimum=1
+	ControllerEpoch int64 `json:"controllerEpoch"`
+
+	// +kubebuilder:validation:MaxLength=253
+	WorkspaceName string `json:"workspaceName"`
+	// +kubebuilder:validation:MaxLength=1024
+	WorkspaceUID string `json:"workspaceUid"`
+	// +kubebuilder:validation:Minimum=1
+	WorkspaceAttachmentEpoch int64 `json:"workspaceAttachmentEpoch"`
+
+	// +kubebuilder:validation:MaxLength=253
+	RuntimePoolName string `json:"runtimePoolName"`
+	// +kubebuilder:validation:MaxLength=1024
+	RuntimePoolUID string `json:"runtimePoolUid"`
+	// +kubebuilder:validation:Minimum=1
+	RuntimePoolGeneration int64 `json:"runtimePoolGeneration"`
+
+	// +kubebuilder:validation:MaxLength=1024
+	RuntimeInstanceID string `json:"runtimeInstanceId"`
+	// +kubebuilder:validation:MaxLength=1024
+	SupervisorBootID string `json:"supervisorBootId"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	ServedRecordDigest string `json:"servedRecordDigest"`
+
+	// +kubebuilder:validation:MaxLength=1024
+	RuntimeSessionUID string `json:"runtimeSessionUid"`
+	// +kubebuilder:validation:Minimum=1
+	RuntimeSessionGeneration int64 `json:"runtimeSessionGeneration"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	ProfileDigest string `json:"profileDigest"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	MCPDigest string `json:"mcpDigest"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	WorkspaceDigest string `json:"workspaceDigest"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	LineageConfigDigest string `json:"lineageConfigDigest"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	ReuseDigest string `json:"reuseDigest"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	TranscriptHeadDigest string `json:"transcriptHeadDigest"`
+
+	// +optional
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	RebasedTreeDigest string `json:"rebasedTreeDigest,omitempty"`
+	// +optional
+	VerifiedBaseline *ControlVerifiedBranchBaseline `json:"verifiedBaseline,omitempty"`
+	// +optional
+	PromptDelivered bool `json:"promptDelivered,omitempty"`
+
+	KeptAt    metav1.Time `json:"keptAt"`
+	ExpiresAt metav1.Time `json:"expiresAt"`
+
+	State RuntimeSessionResidentRuntimeState `json:"state"`
+	// +optional
+	Claim *RuntimeSessionResidentRuntimeClaim `json:"claim,omitempty"`
+}
+
 // RuntimeSessionControlStatus contains the lifecycle, generation, mutation
 // Lease, and independently verified recovery baseline.
 // +kubebuilder:validation:XValidation:rule="!has(self.availability) || self.availability != 'Available' || ((!has(self.blockedReason) || size(self.blockedReason) == 0) && (!has(self.relatedPromptAttemptId) || size(self.relatedPromptAttemptId) == 0) && (!has(self.relatedPublicationId) || size(self.relatedPublicationId) == 0))",message="available sessions must clear reconciliation block metadata"
@@ -173,6 +273,11 @@ type RuntimeSessionControlStatus struct {
 	// status CAS that mirrors the authoritative mutation Lease.
 	// +optional
 	Lineage *RuntimeSessionLineageStatus `json:"lineage,omitempty"`
+
+	// ResidentRuntime is the ADR 0059 handoff record, when one turn kept its
+	// live RuntimeSession for the next.
+	// +optional
+	ResidentRuntime *RuntimeSessionResidentRuntimeStatus `json:"residentRuntime,omitempty"`
 
 	ControlRecordMutationStatus `json:",inline"`
 }

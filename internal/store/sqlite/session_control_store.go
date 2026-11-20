@@ -654,6 +654,12 @@ func (s *Store) FinalizeSessionTurn(ctx context.Context, request store.FinalizeS
 	if request.SkipTranscriptAppend && request.SkipUserPromptAppend {
 		return nil, store.ValidationErrorf("session turn cannot combine full transcript suppression with user-prompt-only suppression")
 	}
+	if request.ResidentRuntime != nil {
+		// The legacy SQLite control store has no column for ADR 0059 handoff
+		// records and does not implement store.SessionResidentRuntimeSupport,
+		// so callers never keep a runtime here. Refuse rather than drop one.
+		return nil, store.ValidationErrorf("the SQLite control store does not persist resident runtimes")
+	}
 	if err := store.ValidateControlText("session turn terminal content", request.TerminalContent); err != nil {
 		return nil, err
 	}

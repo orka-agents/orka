@@ -53,6 +53,9 @@ type WorkspaceAttachmentManager struct {
 	APIReader client.Reader
 	LeaseTTL  time.Duration
 	Now       func() time.Time
+	// Annotate, when set, returns annotations derived from the exact object
+	// version an attach patch applies to, written in that same patch.
+	Annotate func(current *workspacev1alpha1.ExecutionWorkspace, task *corev1alpha1.Task, epoch int64) map[string]string
 }
 
 // WorkspaceAttachmentResult contains references safe to pass to a worker Job.
@@ -246,6 +249,16 @@ func (m WorkspaceAttachmentManager) attach(
 				current.Annotations = map[string]string{}
 			}
 			maps.Copy(current.Annotations, annotations)
+		}
+		// ADR 0059: evidence derived from this exact object version (the warm
+		// window it attaches into) binds in the same optimistic update.
+		if m.Annotate != nil {
+			if evidence := m.Annotate(before, task, epoch); len(evidence) > 0 {
+				if current.Annotations == nil {
+					current.Annotations = map[string]string{}
+				}
+				maps.Copy(current.Annotations, evidence)
+			}
 		}
 		return m.Client.Patch(ctx, current, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})

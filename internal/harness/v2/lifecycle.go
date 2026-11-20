@@ -64,6 +64,9 @@ var runtimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessionState]
 		RuntimeSessionStatePoisoned: {},
 	},
 	RuntimeSessionStateFinalizing: {
+		// ADR 0059: a verified-exact publication may be rebased into the
+		// session's trusted baseline, which returns it to idle.
+		RuntimeSessionStateIdle:     {},
 		RuntimeSessionStatePoisoned: {},
 		RuntimeSessionStateDeleting: {},
 	},

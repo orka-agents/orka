@@ -308,6 +308,189 @@ spec:
               relatedPublicationId:
                 maxLength: 1024
                 type: string
+              residentRuntime:
+                description: |-
+                  ResidentRuntime is the ADR 0059 handoff record, when one turn kept its
+                  live RuntimeSession for the next.
+                properties:
+                  claim:
+                    description: |-
+                      RuntimeSessionResidentRuntimeClaim names the turn whose lease acquisition
+                      claimed a resident runtime.
+                    properties:
+                      attempt:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      leaseGeneration:
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      promptId:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      taskUid:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                    required:
+                    - attempt
+                    - leaseGeneration
+                    - promptId
+                    - taskUid
+                    type: object
+                  controllerEpoch:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  controllerEpochName:
+                    maxLength: 253
+                    type: string
+                  expiresAt:
+                    format: date-time
+                    type: string
+                  handoffId:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  keptAt:
+                    format: date-time
+                    type: string
+                  lineageConfigDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  mcpDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  profileDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  promptDelivered:
+                    type: boolean
+                  rebasedTreeDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  reuseDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  runtimeInstanceId:
+                    maxLength: 1024
+                    type: string
+                  runtimePoolGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  runtimePoolName:
+                    maxLength: 253
+                    type: string
+                  runtimePoolUid:
+                    maxLength: 1024
+                    type: string
+                  runtimeSessionGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  runtimeSessionUid:
+                    maxLength: 1024
+                    type: string
+                  servedRecordDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  sourceAttempt:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  sourceLeaseGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  sourcePromptAttemptId:
+                    maxLength: 1024
+                    type: string
+                  sourceTaskUid:
+                    maxLength: 1024
+                    type: string
+                  sourceTurnId:
+                    maxLength: 1024
+                    type: string
+                  state:
+                    description: |-
+                      RuntimeSessionResidentRuntimeState is the lifecycle of an ADR 0059 handoff
+                      record.
+                    enum:
+                    - Resident
+                    - Claimed
+                    - Retiring
+                    type: string
+                  supervisorBootId:
+                    maxLength: 1024
+                    type: string
+                  transcriptHeadDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  verifiedBaseline:
+                    description: ControlVerifiedBranchBaseline is an independently
+                      verified branch baseline.
+                    properties:
+                      ref:
+                        maxLength: 1024
+                        pattern: ^refs/heads/.+$
+                        type: string
+                      repositoryId:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      sha:
+                        pattern: ^([a-f0-9]{40}|[a-f0-9]{64})$
+                        type: string
+                    required:
+                    - ref
+                    - repositoryId
+                    - sha
+                    type: object
+                  workspaceAttachmentEpoch:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  workspaceDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  workspaceName:
+                    maxLength: 253
+                    type: string
+                  workspaceUid:
+                    maxLength: 1024
+                    type: string
+                required:
+                - controllerEpoch
+                - controllerEpochName
+                - expiresAt
+                - handoffId
+                - keptAt
+                - lineageConfigDigest
+                - mcpDigest
+                - profileDigest
+                - reuseDigest
+                - runtimeInstanceId
+                - runtimePoolGeneration
+                - runtimePoolName
+                - runtimePoolUid
+                - runtimeSessionGeneration
+                - runtimeSessionUid
+                - servedRecordDigest
+                - sourceAttempt
+                - sourceLeaseGeneration
+                - sourcePromptAttemptId
+                - sourceTaskUid
+                - sourceTurnId
+                - state
+                - supervisorBootId
+                - transcriptHeadDigest
+                - workspaceAttachmentEpoch
+                - workspaceDigest
+                - workspaceName
+                - workspaceUid
+                type: object
               updatedAt:
                 description: UpdatedAt is the normalized logical mutation time.
                 format: date-time
