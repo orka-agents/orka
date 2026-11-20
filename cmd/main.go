@@ -73,6 +73,7 @@ import (
 	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/entraclient"
 	"github.com/orka-agents/orka/internal/envutil"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -84,6 +85,7 @@ import (
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/provideridentity"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/storageconfig"
 	"github.com/orka-agents/orka/internal/store"
@@ -302,6 +304,7 @@ func main() {
 	var providerUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var agentIdentityEntraAuthority, agentIdentityTokenFile string
+	var providerIdentitiesValue, providerIdentityTokenFile string
 	var agentIdentityMaxDelegationAge time.Duration
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
@@ -534,6 +537,14 @@ func main() {
 	flag.StringVar(&agentIdentityTokenFile, "agent-identity-token-file",
 		envStringDefault("ORKA_AGENT_IDENTITY_TOKEN_FILE", agentidentity.DefaultTokenFile),
 		"Projected ServiceAccount token, audienced to api://AzureADTokenExchange, that the controller presents as the blueprint's federated credential.")
+	flag.StringVar(&providerIdentitiesValue, "provider-identities",
+		os.Getenv("ORKA_PROVIDER_IDENTITIES"),
+		"JSON list of Entra workload identities that keyless Providers name in spec.auth.entra.identity: "+
+			`{"tokenAudience":"api://AzureADTokenExchange","identities":[{"name":"models","tenantID":"...","clientID":"...",`+
+			`"cloud":"AzurePublic","scope":"https://ai.azure.com/.default","allowedEndpoints":["https://<resource>.openai.azure.com"]}]}.`)
+	flag.StringVar(&providerIdentityTokenFile, "provider-identity-token-file",
+		envStringDefault("ORKA_PROVIDER_IDENTITY_TOKEN_FILE", provideridentity.DefaultTokenFile),
+		"Projected ServiceAccount token, audienced to the Provider identities' tokenAudience, that the controller presents as their federated credential.")
 	flag.DurationVar(&agentIdentityMaxDelegationAge, "agent-identity-max-delegation-age",
 		envDurationDefault("ORKA_AGENT_IDENTITY_MAX_DELEGATION_AGE", outboundaccess.DefaultMaxDelegationAgeCap),
 		"Longest maxDelegationAge any Delegated agentIdentity policy may use.")
@@ -975,6 +986,29 @@ func main() {
 	if controllerServiceAccountErr != nil && agentIdentityConfig.Entra != nil {
 		setupLog.Error(controllerServiceAccountErr, "agent identities require the controller to know its own ServiceAccount")
 		os.Exit(1)
+	}
+	providerIdentityConfig, err := provideridentity.Parse(providerIdentitiesValue)
+	if err != nil {
+		setupLog.Error(err, "invalid Provider identity configuration")
+		os.Exit(1)
+	}
+	// The identities' federated credentials trust the controller
+	// ServiceAccount too, so no OutboundAccessPolicy may mint its tokens.
+	if controllerServiceAccountErr != nil && len(providerIdentityConfig.Identities) > 0 {
+		setupLog.Error(controllerServiceAccountErr, "Provider identities require the controller to know its own ServiceAccount")
+		os.Exit(1)
+	}
+	providerIdentitySource, err := provideridentity.NewSource(providerIdentityConfig, entraclient.FileCredential(providerIdentityTokenFile))
+	if err != nil {
+		setupLog.Error(err, "invalid Provider identity configuration")
+		os.Exit(1)
+	}
+	// A nil *Source must not become a non-nil interface value.
+	var providerIdentityVerifier controller.ProviderIdentityVerifier
+	var providerIdentityTokens api.ProviderIdentityTokenSource
+	if providerIdentitySource != nil {
+		providerIdentityVerifier = providerIdentitySource
+		providerIdentityTokens = providerIdentitySource
 	}
 	var agentIdentitySource *agentidentity.Source
 	if agentIdentityConfig.Entra != nil {
@@ -2441,8 +2475,9 @@ func main() {
 	}
 
 	if err := (&controller.ProviderReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Identities: providerIdentityVerifier,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
@@ -2622,6 +2657,7 @@ func main() {
 			MaxSessionSize:         chatMaxSessionSize,
 			MaxPrematureEndRetries: chatMaxPrematureEndRetries,
 			RuntimeAvailability:    runtimeAvailability,
+			ProviderIdentities:     providerIdentityTokens,
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{

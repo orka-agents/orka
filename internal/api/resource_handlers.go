@@ -61,6 +61,12 @@ func rejectContextTokenResourceMutation(c fiber.Ctx, resource string) error {
 }
 
 func validateProviderRESTCreate(spec corev1alpha1.ProviderSpec) error {
+	if spec.Auth != nil {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.auth is not allowed through the REST API; create keyless providers with Kubernetes RBAC instead",
+		)
+	}
 	if spec.BaseURL != "" {
 		return fiber.NewError(
 			fiber.StatusBadRequest,
@@ -71,6 +77,12 @@ func validateProviderRESTCreate(spec corev1alpha1.ProviderSpec) error {
 }
 
 func validateProviderRESTUpdate(spec, existing corev1alpha1.ProviderSpec) error {
+	if spec.Auth != nil && !apiequality.Semantic.DeepEqual(spec.Auth, existing.Auth) {
+		return fiber.NewError(
+			fiber.StatusBadRequest,
+			"spec.auth cannot be changed through the REST API; update keyless providers with Kubernetes RBAC instead",
+		)
+	}
 	if spec.BaseURL != "" && spec.BaseURL != existing.BaseURL {
 		return fiber.NewError(
 			fiber.StatusBadRequest,
@@ -416,6 +428,7 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 		// not clear values that were created through the Kubernetes API/RBAC path.
 		desiredSpec := req.Spec.DeepCopy()
 		desiredSpec.BaseURL = current.Spec.BaseURL
+		desiredSpec.Auth = current.Spec.Auth
 		current.Spec = *desiredSpec
 		if err := h.client.Update(ctx, current); err != nil {
 			return err

@@ -365,7 +365,7 @@ func TestContextTokenTaskCreateAuthorizationDerivesOpenCodeProviderFromModelName
 		ObjectMeta: metav1.ObjectMeta{Name: "override-provider", Namespace: "team-a"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "override-secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "override-secret"},
 			DefaultModel: "claude-sonnet-4",
 		},
 	}
@@ -419,7 +419,7 @@ func TestContextTokenAuthorizationFailsClosedWhenFallbackProviderReadFails(t *te
 		ObjectMeta: metav1.ObjectMeta{Name: "fallback-provider", Namespace: "team-a"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "fallback-secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "fallback-secret"},
 			DefaultModel: "fallback-model",
 		},
 	}

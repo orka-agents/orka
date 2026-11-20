@@ -185,12 +185,12 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 		return nil, "", ProviderResolutionInfo{}, err
 	}
 
-	apiKey, err := r.ResolveAPIKey(ctx, providerCRD)
+	providerConfig, err := r.ProviderConfig(ctx, providerCRD)
 	if err != nil {
 		return nil, "", ProviderResolutionInfo{}, err
 	}
 
-	provider, resolvedModel, err := r.buildProvider(providerCRD, apiKey, model)
+	provider, resolvedModel, err := r.buildProvider(providerCRD, providerConfig, model)
 	if err != nil {
 		return nil, "", ProviderResolutionInfo{}, err
 	}
@@ -275,12 +275,12 @@ func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts Resolve
 		return nil, "", ProviderResolutionInfo{}, err
 	}
 
-	apiKey, err := r.ResolveAPIKey(ctx, providerCRD)
+	providerConfig, err := r.ProviderConfig(ctx, providerCRD)
 	if err != nil {
 		return nil, "", ProviderResolutionInfo{}, err
 	}
 
-	provider, resolvedModel, err := r.buildProvider(providerCRD, apiKey, model)
+	provider, resolvedModel, err := r.buildProvider(providerCRD, providerConfig, model)
 	if err != nil {
 		return nil, "", ProviderResolutionInfo{}, err
 	}
@@ -318,18 +318,9 @@ func providerResolutionInfo(providerCRD *corev1alpha1.Provider) ProviderResoluti
 	}
 }
 
-// buildProvider constructs an LLM provider from a Provider CRD, API key, and model.
-func (r *ProviderResolver) buildProvider(providerCRD *corev1alpha1.Provider, apiKey, model string) (llm.Provider, string, error) {
-	providerConfig := llm.ProviderConfig{
-		APIKey:       apiKey,
-		BaseURL:      providerCRD.Spec.BaseURL,
-		ProviderType: string(providerCRD.Spec.Type),
-	}
-	if providerCRD.Spec.Azure != nil {
-		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
-		providerConfig.AzureDeploymentName = providerCRD.Spec.Azure.DeploymentName
-	}
-
+// buildProvider constructs an LLM provider from a Provider CRD's client
+// configuration and a model.
+func (r *ProviderResolver) buildProvider(providerCRD *corev1alpha1.Provider, providerConfig llm.ProviderConfig, model string) (llm.Provider, string, error) {
 	provider, err := llm.NewProvider(string(providerCRD.Spec.Type), providerConfig)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create LLM provider: %w", err)
@@ -347,8 +338,47 @@ func (r *ProviderResolver) LookupProvider(ctx context.Context, name, namespace s
 	return p, nil
 }
 
+// ProviderConfig returns the client configuration for a Provider CRD: its
+// API key, or, for a keyless Provider, a token source that the controller
+// answers from the Provider identity it names. A token is obtained per
+// request and never stored.
+func (r *ProviderResolver) ProviderConfig(ctx context.Context, providerCRD *corev1alpha1.Provider) (llm.ProviderConfig, error) {
+	providerConfig := llm.ProviderConfig{
+		BaseURL:      providerCRD.Spec.BaseURL,
+		ProviderType: string(providerCRD.Spec.Type),
+	}
+	if providerCRD.Spec.Azure != nil {
+		providerConfig.AzureAPIVersion = providerCRD.Spec.Azure.APIVersion
+		providerConfig.AzureDeploymentName = providerCRD.Spec.Azure.DeploymentName
+	}
+	if providerCRD.UsesKeylessAuth() {
+		identity := providerCRD.EntraIdentity()
+		if identity == "" {
+			return llm.ProviderConfig{}, fmt.Errorf("provider %q uses an authentication issuer this controller does not support", providerCRD.Name)
+		}
+		identities := r.config.ProviderIdentities
+		if identities == nil {
+			return llm.ProviderConfig{}, fmt.Errorf("provider %q needs Provider identity %q, but no Provider identities are configured on this controller", providerCRD.Name, identity)
+		}
+		baseURL := providerCRD.Spec.BaseURL
+		providerConfig.BearerToken = func(ctx context.Context) (string, error) {
+			return identities.Token(ctx, identity, baseURL)
+		}
+		return providerConfig, nil
+	}
+	apiKey, err := r.ResolveAPIKey(ctx, providerCRD)
+	if err != nil {
+		return llm.ProviderConfig{}, err
+	}
+	providerConfig.APIKey = apiKey
+	return providerConfig, nil
+}
+
 // ResolveAPIKey extracts the API key from a Provider CRD's secret reference.
 func (r *ProviderResolver) ResolveAPIKey(ctx context.Context, providerCRD *corev1alpha1.Provider) (string, error) {
+	if providerCRD.Spec.SecretRef == nil {
+		return "", fmt.Errorf("provider %q has no secretRef", providerCRD.Name)
+	}
 	secretName := providerCRD.Spec.SecretRef.Name
 	secretKey := providerCRD.Spec.SecretRef.Key
 	if secretKey == "" {

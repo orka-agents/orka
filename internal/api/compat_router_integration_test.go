@@ -74,7 +74,7 @@ func newCompatRouterIntegration(t *testing.T) *compatRouterIntegration {
 			&corev1alpha1.Provider{
 				ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: namespace},
 				Spec: corev1alpha1.ProviderSpec{Type: corev1alpha1.ProviderTypeOpenAI, BaseURL: model.URL + "/v1", DefaultModel: namespace + "-catalog",
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "same-secret", Key: "api-key"}},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "same-secret", Key: "api-key"}},
 			},
 			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "same-secret", Namespace: namespace}, Data: map[string][]byte{"api-key": []byte("fixture-" + namespace)}},
 			&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "same-agent", Namespace: namespace}, Spec: corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai", Name: namespace + "-agent"}}},

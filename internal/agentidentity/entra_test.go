@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/entraclient"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
@@ -204,7 +204,7 @@ func TestEntraRefusalNamesOnlyKnownErrorCodes(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unknown_error") || strings.Contains(err.Error(), "eyJsecret") {
 		t.Fatalf("error = %v, want unknown_error and none of the response text", err)
 	}
-	if got := entraOAuthErrorCode(" invalid_grant "); got != "invalid_grant" {
+	if got := entraclient.OAuthErrorCode(" invalid_grant "); got != "invalid_grant" {
 		t.Fatalf("known code = %q", got)
 	}
 }
@@ -351,33 +351,6 @@ func TestEntraScopeKeepsTheResourceAsConfigured(t *testing.T) {
 	}
 	if got := fake.requests[1].Get("scope"); got != "https://database.windows.net//.default" {
 		t.Fatalf("scope = %q, want the trailing slash kept", got)
-	}
-}
-
-func TestEntraTokenCacheIsBounded(t *testing.T) {
-	now := time.Now()
-	issuer := &EntraIssuer{Now: func() time.Time { return now }}
-	fetch := func(context.Context) (string, time.Duration, error) { return "t", time.Hour, nil }
-	for i := range 10 {
-		if _, err := issuer.cached(context.Background(), fmt.Sprint("expiring-", i), fetch); err != nil {
-			t.Fatal(err)
-		}
-	}
-	now = now.Add(maxCachedTokenLifetime)
-	if _, err := issuer.cached(context.Background(), "fresh", fetch); err != nil {
-		t.Fatal(err)
-	}
-	if len(issuer.cache) != 1 {
-		t.Fatalf("cache holds %d entries, want expired entries reclaimed", len(issuer.cache))
-	}
-	for i := range maxCachedTokens + 10 {
-		now = now.Add(time.Millisecond)
-		if _, err := issuer.cached(context.Background(), fmt.Sprint("key-", i), fetch); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if len(issuer.cache) != maxCachedTokens {
-		t.Fatalf("cache holds %d entries, want at most %d", len(issuer.cache), maxCachedTokens)
 	}
 }
 

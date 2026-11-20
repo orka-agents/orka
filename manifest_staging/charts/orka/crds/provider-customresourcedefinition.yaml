@@ -52,6 +52,34 @@ spec:
           spec:
             description: ProviderSpec defines the desired state of Provider
             properties:
+              auth:
+                description: |-
+                  Auth selects keyless authentication. The controller obtains a
+                  short-lived token for each model request it sends; no credential is
+                  stored in a Secret or mounted into a Pod. Exactly one of secretRef and
+                  auth is set.
+                properties:
+                  entra:
+                    description: |-
+                      Entra authenticates with a Microsoft Entra ID workload identity that
+                      the operator configured on the controller.
+                    properties:
+                      identity:
+                        description: |-
+                          Identity is the name of a Provider identity configured on the
+                          controller (--provider-identities). The identity fixes the tenant,
+                          client, cloud, token scope, and the endpoints its tokens may reach.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - identity
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: spec.auth needs an issuer; set spec.auth.entra
+                  rule: has(self.entra)
               azure:
                 description: Azure contains Azure-specific configuration
                 properties:
@@ -74,7 +102,9 @@ spec:
                   in Task/Agent
                 type: string
               secretRef:
-                description: SecretRef references the Secret containing API credentials
+                description: |-
+                  SecretRef references the Secret containing the API key. Exactly one of
+                  secretRef and auth is set.
                 properties:
                   key:
                     default: api-key
@@ -95,9 +125,15 @@ spec:
                 - azure-openai
                 type: string
             required:
-            - secretRef
             - type
             type: object
+            x-kubernetes-validations:
+            - message: set exactly one of spec.secretRef or spec.auth
+              rule: has(self.secretRef) != has(self.auth)
+            - message: spec.auth is supported only for azure-openai Providers
+              rule: '!has(self.auth) || self.type == ''azure-openai'''
+            - message: spec.auth requires an https spec.baseURL
+              rule: '!has(self.auth) || (has(self.baseURL) && self.baseURL.startsWith(''https://''))'
           status:
             description: ProviderStatus defines the observed state of Provider
             properties:

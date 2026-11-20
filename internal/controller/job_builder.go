@@ -1514,7 +1514,9 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	allowDirectSecretMounts := b.directSecretMountsAllowed(task)
 
 	// Add provider secret (mounted as environment variable source)
-	if allowDirectProviderSecrets && provider != nil {
+	// A keyless Provider has no Secret; resolveProvider refuses it before a
+	// Job is built, and nothing is mounted for it here either.
+	if allowDirectProviderSecrets && provider != nil && provider.Spec.SecretRef != nil {
 		secretName := provider.Spec.SecretRef.Name
 		secretKey := provider.Spec.SecretRef.Key
 		if secretKey == "" {
@@ -1563,7 +1565,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 			if err := b.Get(ctx, client.ObjectKey{
 				Namespace: task.Namespace,
 				Name:      fb.ProviderRef,
-			}, fbProvider); err != nil {
+			}, fbProvider); err != nil || fbProvider.Spec.SecretRef == nil {
 				continue
 			}
 			secretName := fbProvider.Spec.SecretRef.Name

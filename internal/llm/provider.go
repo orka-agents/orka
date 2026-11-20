@@ -217,7 +217,11 @@ func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int 
 
 // ProviderConfig holds configuration for creating a provider
 type ProviderConfig struct {
-	APIKey              string
+	APIKey string
+	// BearerToken, when set, authenticates every request with a short-lived
+	// token instead of APIKey; see NewBearerHTTPClient. Exactly one of
+	// APIKey and BearerToken is set.
+	BearerToken         BearerTokenSource
 	BaseURL             string // Optional override for API URL
 	ProviderType        string // e.g. "openai", "azure-openai"
 	AzureAPIVersion     string // Azure OpenAI API version (e.g. "2024-02-15-preview")

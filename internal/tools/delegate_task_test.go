@@ -1234,7 +1234,7 @@ func TestDelegateTaskTool_Execute_FailsClosedWhenPolicyReaderCannotResolveFallba
 		ObjectMeta: metav1.ObjectMeta{Name: fallback.ProviderRef, Namespace: defaultNamespace},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "fallback-secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "fallback-secret"},
 			DefaultModel: fallback.Model,
 		},
 	}

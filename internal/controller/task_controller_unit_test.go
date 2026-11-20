@@ -4089,7 +4089,7 @@ func TestCreateTaskJob_WithProvider(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "prov1", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type: corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "prov-secret",
 			},
 		},
@@ -4567,7 +4567,7 @@ func TestResolveProvider_Found(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:      corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec1"},
+			SecretRef: &corev1alpha1.ProviderSecretRef{Name: "sec1"},
 		},
 		Status: corev1alpha1.ProviderStatus{Ready: true},
 	}
@@ -4596,7 +4596,7 @@ func TestResolveProvider_NotReady(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "p-notready", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:      corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec1"},
+			SecretRef: &corev1alpha1.ProviderSecretRef{Name: "sec1"},
 		},
 		Status: corev1alpha1.ProviderStatus{Ready: false, Message: "not configured"},
 	}
@@ -7342,7 +7342,7 @@ func TestResolveProvider_CrossNamespaceEnforced(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cross-prov", Namespace: "other-ns"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:      corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec"},
+			SecretRef: &corev1alpha1.ProviderSecretRef{Name: "sec"},
 		},
 		Status: corev1alpha1.ProviderStatus{Ready: true},
 	}
@@ -7373,7 +7373,7 @@ func TestResolveProvider_AgentFallback(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "agent-prov", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:      corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec"},
+			SecretRef: &corev1alpha1.ProviderSecretRef{Name: "sec"},
 		},
 		Status: corev1alpha1.ProviderStatus{Ready: true},
 	}

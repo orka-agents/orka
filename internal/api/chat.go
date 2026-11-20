@@ -89,6 +89,15 @@ type ChatConfig struct {
 	// person's chat turn; nil leaves built-in GitHub tools on their own
 	// credentials. The controller wires it when connectors are enabled.
 	LinkedAccounts LinkedAccountsFactory
+	// ProviderIdentities issues tokens for Providers that use
+	// spec.auth.entra; nil refuses those Providers.
+	ProviderIdentities ProviderIdentityTokenSource
+}
+
+// ProviderIdentityTokenSource issues a short-lived token for a configured
+// Provider identity, to be sent only to baseURL's origin.
+type ProviderIdentityTokenSource interface {
+	Token(ctx context.Context, identity, baseURL string) (string, error)
 }
 
 // LinkedAccountsFactory returns a resolver for a person's linked accounts
@@ -1695,19 +1704,9 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 			return resultProvider, err
 		}
 
-		fbAPIKey, err := ch.resolver.ResolveAPIKey(ctx, fbProviderCRD)
+		fbConfig, err := ch.resolver.ProviderConfig(ctx, fbProviderCRD)
 		if err != nil {
 			continue
-		}
-
-		fbConfig := llm.ProviderConfig{
-			APIKey:       fbAPIKey,
-			BaseURL:      fbProviderCRD.Spec.BaseURL,
-			ProviderType: string(fbProviderCRD.Spec.Type),
-		}
-		if fbProviderCRD.Spec.Azure != nil {
-			fbConfig.AzureAPIVersion = fbProviderCRD.Spec.Azure.APIVersion
-			fbConfig.AzureDeploymentName = fbProviderCRD.Spec.Azure.DeploymentName
 		}
 
 		fbProvider, err := llm.NewProvider(string(fbProviderCRD.Spec.Type), fbConfig)

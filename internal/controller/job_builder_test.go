@@ -1822,7 +1822,7 @@ func TestJobBuilder_Build_UntrustedContainerTask_DirectSecretsDisabledByDefault(
 	provider := &corev1alpha1.Provider{
 		Spec: corev1alpha1.ProviderSpec{
 			Type: corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: testProviderSecretName,
 				Key:  defaultSecretKey,
 			},
@@ -2128,7 +2128,7 @@ func TestAddSecretVolumes_ProviderOpenAI(t *testing.T) {
 	provider := &corev1alpha1.Provider{
 		Spec: corev1alpha1.ProviderSpec{
 			Type: corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "openai-secret",
 				Key:  "my-key",
 			},
@@ -2157,7 +2157,7 @@ func TestAddSecretVolumes_ProviderAnthropic(t *testing.T) {
 	provider := &corev1alpha1.Provider{
 		Spec: corev1alpha1.ProviderSpec{
 			Type: corev1alpha1.ProviderTypeAnthropic,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "anthropic-secret",
 			},
 		},
@@ -2275,7 +2275,7 @@ func TestAddSecretVolumes_FallbackProvider(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "fb-prov", Namespace: defaultNS},
 		Spec: corev1alpha1.ProviderSpec{
 			Type: corev1alpha1.ProviderTypeOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "fb-secret",
 				Key:  defaultSecretKey,
 			},
@@ -2374,7 +2374,7 @@ func TestAddSecretVolumes_ProviderAzureOpenAI(t *testing.T) {
 	provider := &corev1alpha1.Provider{
 		Spec: corev1alpha1.ProviderSpec{
 			Type: corev1alpha1.ProviderTypeAzureOpenAI,
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "azure-secret",
 			},
 		},
@@ -2409,7 +2409,7 @@ func TestAddAIEnvVars_FallbackProviders(t *testing.T) {
 		Spec: corev1alpha1.ProviderSpec{
 			Type:    corev1alpha1.ProviderTypeOpenAI,
 			BaseURL: "https://custom.api.com",
-			SecretRef: corev1alpha1.ProviderSecretRef{
+			SecretRef: &corev1alpha1.ProviderSecretRef{
 				Name: "fb-secret2",
 			},
 		},

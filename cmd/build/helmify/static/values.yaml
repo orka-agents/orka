@@ -286,6 +286,30 @@ controller:
       # blueprint a federated identity credential that trusts the controller
       # ServiceAccount's subject and the cluster's OIDC issuer.
 
+  # Entra workload identities for keyless Providers (Provider.spec.auth.entra).
+  # The controller obtains each identity's tokens with its own projected
+  # ServiceAccount token and attaches them only to requests it sends to the
+  # identity's allowedEndpoints; no key or token reaches a Pod. Setting any
+  # identity also installs the controller ServiceAccount protection policy.
+  # Give each identity a federated identity credential that trusts the
+  # controller ServiceAccount's subject, the cluster's OIDC issuer, and
+  # tokenAudience, and a data-plane role on the model resource.
+  providerIdentities:
+    # Audience of the projected token: api://AzureADTokenExchange in the
+    # public cloud, api://AzureADTokenExchangeUSGov in Azure Government.
+    tokenAudience: api://AzureADTokenExchange
+    # Each entry: name (a DNS label Providers refer to), tenantID, clientID,
+    # optional cloud (AzurePublic, AzureUSGovernment or AzureChina),
+    # authority, exchangeAudience and scope overrides, and allowedEndpoints,
+    # the exact https origins its tokens may reach. The public-cloud scope
+    # defaults to https://ai.azure.com/.default; other clouds need scope set.
+    # - name: models
+    #   tenantID: 00000000-0000-0000-0000-000000000000
+    #   clientID: 00000000-0000-0000-0000-000000000000
+    #   allowedEndpoints:
+    #     - https://example-resource.openai.azure.com
+    identities: []
+
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.
   agentHosts:
