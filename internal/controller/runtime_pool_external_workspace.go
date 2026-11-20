@@ -1037,7 +1037,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 		}
 		r.noteExternalRuntimeStopProven(pool, w)
-		return r.externalPoolStopped(ctx, pool, w)
+		// The Stopped report comes first and is unchanged. The rotation after
+		// it rests on the termination proof above, not on that record.
+		result, err := r.externalPoolStopped(ctx, pool, w)
+		if err == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+			r.rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx, pool)
+		}
+		return result, err
 	}
 	tainted, err := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), w)
 	if err != nil {
@@ -1155,6 +1161,60 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		}
 	}
 	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for identity-bound provider termination and disposition")
+}
+
+// rotateWorkspaceRuntimePoolAuthAfterProvenStop rotates the private
+// credentials a stopped instance consumed once its termination is proven and
+// the pool records Stopped, instead of when a later cold boot is published,
+// so a resume does not wait for the rotation.
+//
+// It runs the same steps, in the same order, as the rotation before
+// publication (rotateConsumedWorkspaceRuntimePoolAuthSecret), under the same
+// proof: the caller has just observed the exact instance terminated, and
+// ensureExternalPrivateAuthCredential re-checks that proof before it deletes
+// the consumed Secret, observes its absence, and only then creates the fresh
+// one. The fresh credentials therefore postdate the old instance's proven
+// termination and were never delivered to it; they reach a runtime only
+// through the sealed bootstrap to the instance bound at the next attested
+// startup. The bootstrap-instance binding is cleared last, while no
+// replacement request exists.
+//
+// It is best effort. A failure leaves the remaining steps to the rotation
+// before publication, which is unchanged and still fails closed.
+func (r *RuntimePoolReconciler) rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx context.Context, pool *corev1alpha1.RuntimePool) {
+	if r.CleanupOnly || r.WorkspaceCleanupOnly {
+		return
+	}
+	if r.Epochs != nil {
+		if current, ready := r.Epochs.Current(); !ready || current.Epoch <= 0 {
+			return
+		}
+	}
+	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil {
+		return
+	}
+	// Unpublish the consumed Secret, replace it, then clear the instance
+	// binding: one step per iteration, each on freshly read state.
+	for range 3 {
+		if binding, bindingErr := runtimePoolBootstrapInstanceBindingFromAnnotation(pool); bindingErr != nil || binding == nil {
+			return
+		}
+		auth, _, ensureErr := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
+		if ensureErr != nil {
+			err = ensureErr
+			break
+		}
+		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, auth)
+		if rotateErr != nil || !rotating {
+			err = rotateErr
+			break
+		}
+	}
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("Left private credential rotation to the next cold boot",
+			"runtimePool", pool.Name, "error", err.Error())
+	}
 }
 
 // externalPoolStopped records a stopped instance. An eviction outcome is
