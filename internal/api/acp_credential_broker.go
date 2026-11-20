@@ -22,6 +22,8 @@ import (
 const (
 	defaultWorkspaceCredentialKey = "token"
 	maxBrokeredCredentialBytes    = 32 << 10
+
+	apiErrorCredentialMaterialInvalid = "credential_material_invalid"
 )
 
 func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
@@ -64,13 +66,30 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{apiFieldError: "credential_version_changed"})
 	}
 	key := effectiveWorkspaceCredentialKey(reference)
+	if reference.Type == corev1alpha1.WorkspaceCredentialGitHubApp {
+		privateKey := secret.Data[key]
+		if len(privateKey) > maxBrokeredCredentialBytes {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "github_app_secret_invalid"})
+		}
+		token, err := s.mintGitHubAppCredential(c.Context(), task.Spec.Workspace, publisherservice.CredentialRole(credentialRole),
+			secret.Data[corev1alpha1.GitHubAppIDSecretKey], privateKey)
+		if err != nil {
+			status, code := githubAppErrorResponse(err)
+			return c.Status(status).JSON(fiber.Map{apiFieldError: code})
+		}
+		material, err := formatPublisherCredential(request.Reference.Kind, []byte(token))
+		if err != nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
+		}
+		return c.JSON(publisherservice.CredentialMaterialResponse{Material: material, ResourceVersion: secret.ResourceVersion})
+	}
 	value := bytes.TrimSpace(secret.Data[key])
 	if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\r\n\x00") {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "credential_material_invalid"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
 	}
 	material, err := formatPublisherCredential(request.Reference.Kind, value)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "credential_material_invalid"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
 	}
 	return c.JSON(publisherservice.CredentialMaterialResponse{Material: material, ResourceVersion: secret.ResourceVersion})
 }
