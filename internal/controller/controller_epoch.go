@@ -111,6 +111,7 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	}
 	acquisitionCtx, cancelAcquisition := context.WithTimeout(ctx, defaultEpochAcquisitionTimeout)
 	defer cancelAcquisition()
+	m.publishTakeoverIntent(acquisitionCtx, 0)
 	current, err := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 	if err != nil {
 		return err
@@ -136,6 +137,10 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		if !errors.Is(err, store.ErrConflict) {
 			return fmt.Errorf("advance controller epoch: %w", err)
 		}
+		// Only against the epoch the failed attempt replaces: if another
+		// holder has replaced it since, this manager lost, and a request
+		// against the winner would hold off its writes.
+		m.publishTakeoverIntent(acquisitionCtx, pending.change.ExpectedEpoch)
 		observed, readErr := readControllerEpoch(acquisitionCtx, m.Store, m.Name)
 		if readErr != nil {
 			return fmt.Errorf("reconcile controller epoch CAS conflict: %w", readErr)
@@ -170,6 +175,25 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	err = m.openStorage(ctx, *acquired)
 	m.releaseHeldInterlock(ctx)
 	return err
+}
+
+// takeoverIntentPublisher is a control store whose token holder stops writing
+// new interlock tokens once a successor asks (ADR 0058).
+type takeoverIntentPublisher interface {
+	PublishControllerEpochTakeoverIntent(ctx context.Context, name, holder string, expectedEpoch int64)
+}
+
+// publishTakeoverIntent asks the current token holder to let this manager
+// change the epoch, before a read whose mirror checks a busy holder's token
+// can keep failing: an epoch read that keeps conflicting must not stop the
+// request from being made.
+// expectedEpoch is the epoch the manager is replacing, or zero before its
+// first read: whatever epoch is current, which this process does not hold
+// yet, even when a predecessor shares its holder ID.
+func (m *ControllerEpochManager) publishTakeoverIntent(ctx context.Context, expectedEpoch int64) {
+	if publisher, ok := m.Store.(takeoverIntentPublisher); ok {
+		publisher.PublishControllerEpochTakeoverIntent(ctx, m.Name, m.HolderID, expectedEpoch)
+	}
 }
 
 // heldInterlockReleaser is a control store that can hold its controller-epoch

@@ -150,6 +150,12 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	if err := s.ReleaseHeldControllerEpochInterlock(ctx); err != nil {
 		return nil, err
 	}
+	// Ask the token holder to stop writing new tokens before any read below
+	// that a token rollover can make conflict, so asking never depends on
+	// winning this attempt (ADR 0058).
+	if change.ExpectedEpoch > 0 {
+		s.PublishControllerEpochTakeoverIntent(ctx, change.Name, change.HolderID, change.ExpectedEpoch)
+	}
 
 	key := types.NamespacedName{Namespace: s.controlNamespace, Name: controllerEpochLeaseName(change.Name)}
 	lease := &coordinationv1.Lease{}
@@ -203,7 +209,7 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 		if current.HolderID != change.HolderID || current.RequestDigest != change.RequestDigest {
 			return nil, store.ConflictErrorf("controller epoch %q target %d already exists with different holder or digest", change.Name, change.NewEpoch)
 		}
-		s.clearControllerEpochTakeover(ctx, change.Name, change.HolderID)
+		s.clearControllerEpochTakeover(ctx, change.Name, change.HolderID, change.NewEpoch-1)
 		return &current, nil
 	}
 	if current.Version != change.ExpectedVersion || current.Epoch != change.ExpectedEpoch {
@@ -252,7 +258,7 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	if err := s.syncControllerEpochStatus(ctx, result, updated, preCASMirrorDigest); err != nil {
 		return nil, err
 	}
-	s.clearControllerEpochTakeover(ctx, change.Name, change.HolderID)
+	s.clearControllerEpochTakeover(ctx, change.Name, change.HolderID, change.NewEpoch-1)
 	return &result, nil
 }
 
