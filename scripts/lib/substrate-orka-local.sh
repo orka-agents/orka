@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Orka deployment used by native Substrate MCP tool conformance.
+# Orka deployment used by native Substrate conformance. The controller exports
+# traces to the run's OTLP collector and resolves egress credentials through the
+# gateway's Kubernetes Secret provider.
 
 deploy_orka() {
   local controller_image="$1"
@@ -109,6 +111,7 @@ deploy_orka() {
   patch="$(jq -cn \
     --arg bootstrap_secret_name "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME}" \
     --arg bootstrap_secret_key "${SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY}" \
+    --arg otel_collector "${OTEL_COLLECTOR_NAME}" \
     '{
       spec: {
         template: {
@@ -124,7 +127,10 @@ deploy_orka() {
                   {
                     name: "ORKA_WORKSPACE_PUBLISHER_URL",
                     "$patch": "delete"
-                  }
+                  },
+                  { name: "OTEL_EXPORTER_OTLP_ENDPOINT", value: ("http://" + $otel_collector + ".orka-system.svc.cluster.local:4317") },
+                  { name: "OTEL_EXPORTER_OTLP_PROTOCOL", value: "grpc" },
+                  { name: "OTEL_EXPORTER_OTLP_INSECURE", value: "true" }
                 ],
                 imagePullPolicy: "IfNotPresent",
                 resources: {
@@ -167,6 +173,8 @@ deploy_orka() {
                   "--substrate-claim-timeout=2m",
                   "--substrate-command-timeout=10m",
                   "--substrate-cleanup-policy=delete",
+                  "--substrate-egress-credential-provider=k8s.io",
+                  "--enable-telemetry",
                   "--acp-workspace-dispatch-enabled=false",
                   # RuntimePool reconciliation and prompt execution use the
                   # authenticated provider-proxy boundary deployed above; the

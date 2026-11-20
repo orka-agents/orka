@@ -61,18 +61,26 @@ PY
 # Install the pinned control plane with ate-setup. Authorization is always
 # enforced in v1: only the shared ate-client test identity is a bootstrap
 # owner, and Orka receives least-privilege access policies afterwards. Only
-# Orka's controller identity may reach Actors through the router. Egress
-# credential injection is off; Actors get no egress unless an EgressPolicy
-# allows it (v1 has no direct egress).
+# Orka's controller identity may reach Actors through the router. Actors get no
+# egress unless an EgressPolicy allows it (v1 has no direct egress). The egress
+# gateway injects credentials from the Kubernetes Secret provider, which is
+# default-deny until an Atespace is granted a namespace.
 substrate_install_ate_system() {
   local orka_spiffe_id="spiffe://cluster.local/ns/${ORKA_NAMESPACE:-orka-system}/sa/${ORKA_CONTROLLER_SERVICE_ACCOUNT:-orka-controller-manager}"
   (cd "${SUBSTRATE_DIR}" && go run ./cmd/ate-setup --kind --kind-cluster-name="${KIND_CLUSTER_NAME}" \
     --kubeconfig="${KUBECONFIG}" --context="${KUBECTL_CONTEXT}" --no-dev-env --rollout-timeout=5m \
     deploy ate-system \
-    --credential-provider='{"enabled":false}' \
+    --credential-provider='{"name":"k8s.io"}' \
     --ateapi-authz-bootstrap-owners="system:serviceaccount:ate-system:ate-client" \
     --ingress-allowed-spiffe-ids="${orka_spiffe_id}") || return 1
-  kubectl -n ate-system rollout status deployment/ate-api-server --timeout=5m
+  kubectl -n ate-system rollout status deployment/ate-api-server --timeout=5m || return 1
+  # Test-only: v1.0.0's atenet-router gives Envoy only a root RandomSampling
+  # ratio (1% by default), which replaces a caller's sampled decision, so a
+  # sampled Orka trace reaches the Actor unsampled and the ACP supervisor drops
+  # its spans. Root-sample every routed request so trace assertions see the
+  # sampled parent. Operators need the same setting for end-to-end traces.
+  kubectl -n ate-system set env deployment/atenet-router OTEL_TRACES_SAMPLER=parentbased_always_on || return 1
+  kubectl -n ate-system rollout status deployment/atenet-router --timeout=5m
 }
 
 substrate_require_clean_upstream() {

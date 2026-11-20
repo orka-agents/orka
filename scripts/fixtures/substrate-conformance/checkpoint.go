@@ -66,12 +66,8 @@ func exerciseDataRestore(
 		if snapshot.GetDurableSnapshot().GetState() != ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED {
 			return false, nil
 		}
-		// v1 Tags keep only the source Actor name; bind the exact lifetime
-		// through its unchanged UID and the captured template identity.
-		if !completedDataSnapshot(snapshot) || tag.GetSourceActor().GetName() != source.GetName() ||
-			tag.GetStatus().GetActorTemplateUid() == "" ||
-			tag.GetStatus().GetActorTemplateUid() != captured.GetActorTemplateUid() {
-			return false, fmt.Errorf("native direct checkpoint provenance differs from its source")
+		if err := verifyTagProvenance(tag, source, captured); err != nil {
+			return false, err
 		}
 		return true, nil
 	}); err != nil {
@@ -143,10 +139,32 @@ func latestSnapshot(snapshots []*ateapipb.Snapshot) *ateapipb.Snapshot {
 	return latest
 }
 
+// completedDataSnapshot reports a durable data-only snapshot an Actor took
+// under a known template.
 func completedDataSnapshot(snapshot *ateapipb.Snapshot) bool {
+	return completedVolumesSnapshot(snapshot) && snapshot.GetActorTemplateUid() != ""
+}
+
+func completedVolumesSnapshot(snapshot *ateapipb.Snapshot) bool {
 	return snapshot.GetFidelity() == ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES &&
-		snapshot.GetDurableSnapshot().GetState() == ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED &&
-		snapshot.GetActorTemplateUid() != ""
+		snapshot.GetDurableSnapshot().GetState() == ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
+}
+
+// verifyTagProvenance binds a completed Tag to the suspended source snapshot.
+// v1 Tags keep only the source Actor name, and record the template the data
+// was captured under in TagStatus, not on the Tag's own snapshot copy; the
+// caller binds the exact Actor lifetime through its unchanged UID.
+func verifyTagProvenance(tag *ateapipb.Tag, source *ateapipb.ObjectRef, captured *ateapipb.Snapshot) error {
+	snapshot := tag.GetStatus().GetSnapshot()
+	template := tag.GetStatus().GetActorTemplateUid()
+	if !completedVolumesSnapshot(snapshot) || tag.GetSourceActor().GetName() != source.GetName() ||
+		template == "" || template != captured.GetActorTemplateUid() {
+		return fmt.Errorf("native direct checkpoint provenance differs from its source: "+
+			"fidelity=%s state=%s tagTemplate=%q capturedTemplate=%q tagSource=%q source=%q",
+			snapshot.GetFidelity(), snapshot.GetDurableSnapshot().GetState(),
+			template, captured.GetActorTemplateUid(), tag.GetSourceActor().GetName(), source.GetName())
+	}
+	return nil
 }
 
 func pollNative(ctx context.Context, ready func() (bool, error)) error {
