@@ -106,7 +106,9 @@ workers, but gives no per-Actor proof of sandbox exit:
   check (hosted workspaces, workers and assignments) runs on a budget of its own; a pool
   whose checks do not complete, including on a timeout or a credential rejection, is
   unverified: admission refuses it at once and it is retired at 60 s (5 minutes only
-  while native looks down from the provider). Isolation wins, and
+  while native looks down from the provider). These outages are stamped durably on the
+  pool as they are decided, and the Kubernetes-only bounds loop also enforces the stamps,
+  so neither a long scan nor a restart extends them. Isolation wins, and
   the provider reports the rejection as a Warning Event on its ExecutionWorkspaceProvider.
 - **Residual risk.** A foreign template or Actor created between two checks can reach a
   shared worker until the next check, the ledger's assignment check, or observation
