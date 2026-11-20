@@ -230,10 +230,16 @@ ordinary path.
    `controller-restarted`. Before the fresh turn asks for the pool's resident slot, it deletes
    the Session's older resident session on the reserved instance (fenced `DeleteRuntimeSession`,
    reason `replace_stale_runtime_session`), because on the dedicated single-session pool that
-   session fills the only slot. The turn holds the Session lease, so no other turn can use it. A
-   pool status that has not yet observed the deletion refuses the slot, and the turn requeues
-   pre-submission with a logged reason until the pool controller's next probe reopens admission.
-   A missing or replaced instance is cleanup proof (ADR 0024).
+   session fills the only slot. The turn holds the Session lease, so no other turn can use it. The
+   pool status still counts the deleted session until the pool controller's next probe. So the
+   turn re-reads the exact fenced runtime, and when it is ready, not draining and holds no
+   RuntimeSession, it credits that one slot in the same reservation write. The credit applies
+   only where the pool may serve its resident (section 6, "Admission"), on the reservation's
+   exact instance, boot and epoch; every other admission check runs unchanged. Otherwise the turn
+   requeues pre-submission with a logged reason. A gate refusal that retires the claimed record
+   also carries the resulting SessionControl version into the turn's lease, so the fresh
+   session's generation commit in the same pass does not conflict. A missing or replaced instance
+   is cleanup proof (ADR 0024).
 6. **Gate before first contact.** The new turn step `residentSessionGate` runs before any runtime
    mutation:
    - **The ADR 0057 handshake.** `verifyACPWorkspaceReadyForPool` must hold. It requires current
@@ -247,8 +253,13 @@ ordinary path.
    - **Workspace.** `attached-from-warm` names this Task and epoch. Its `last-settled-task-uid`
      equals the record's source Task. Its observed `suspend-at` is later than `keptAt`. No
      `warm-window-drained-at`, `suspend-pending` or retirement is set.
-   - **Session status.** The authenticated, capability-bound status `GET` must return the exact
-     UID and generation in state `idle`, `quiescent`, with no prompt, no pending permission and no
+   - **Session status.** The expected identity is the claimed record's: its RuntimeSession UID
+     and generation, on the record's instance and boot, which must be the instance and boot this
+     turn reached. The turn's runtime fence gains its RuntimeSession only after the gate, so the
+     gate never derives the expected session from it. The status fence must match that runtime,
+     and the planned binding must name the same session, generation, instance and boot. The
+     authenticated, capability-bound status `GET` must return that exact session ID, UID and
+     generation in state `idle`, `quiescent`, with no prompt, no pending permission and no
      finalization reservation. The supervisor reports `quiescent` per session (opt-in through the
      `X-Orka-Runtime-Session-Rebase` header, so older strict clients never see it): idle, no
      unsettled prompt, no pending permission, no registered operator operation, an unfrozen
@@ -672,8 +683,8 @@ The maintainer answered the open questions of the proposal on 2026-11-20:
 
 ### Live run corrections
 
-The first live kind run (Substrate on gVisor, a Claude fixture Agent, flag on) found four defects,
-corrected above:
+The first live kind runs (Substrate on gVisor, a Claude fixture Agent, flag on) found these
+defects, corrected above:
 
 1. **No first turn was kept.** The retention check required `Accepting`, but a single-session
    workspace pool closes admission at capacity as soon as the Session's own session is resident,
@@ -693,6 +704,16 @@ corrected above:
    unbound `Cancelled` or `Failed` attempt for that finalization because a pre-submission
    recovery is the only write that clears the binding, and only for a prompt proven never
    accepted.
+5. **No warm turn reused (second run).** The gate built the expected session ID from the turn's
+   runtime fence, which carries no RuntimeSession until after the gate, so it expected
+   `runtime--g0` and every claim missed with `runtime-session-missing`. The gate now compares
+   against the claimed record's exact identity (section 3, step 6).
+6. **A miss cost an extra requeue.** After deleting the older session, the fresh path asked for
+   the resident slot while the pool still published it as filled, and requeued until the next
+   probe. A gate refusal's record retirement also advanced the SessionControl version behind the
+   turn's lease, so the generation commit would have conflicted next. The fresh path now credits
+   the slot the runtime shows free and carries the retired version into its lease (section 3,
+   step 5), so a miss completes in one pass.
 
 ### Fallback rule
 
