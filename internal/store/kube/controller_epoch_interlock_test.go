@@ -927,3 +927,23 @@ func TestCommittedEpochChangeKeepsANewerSameHolderRequest(t *testing.T) {
 	require.NoError(t, raw.Get(ctx, requestKey, request), "the replay deleted the restart's newer request")
 	require.Equal(t, strconv.FormatInt(fence.Epoch+1, 10), request.Annotations[annotationEpochTakeoverFromEpoch])
 }
+
+// A publisher that read an older epoch, delayed past another change and a
+// newer successor's request, does not overwrite that newer request.
+func TestDelayedTakeoverRequestDoesNotDowngradeANewerOne(t *testing.T) {
+	_, raw, fence := newTestStoreWithEpoch(t)
+	ctx := t.Context()
+	requestKey := client.ObjectKey{Namespace: testControlNamespace, Name: controllerEpochTakeoverLeaseName(fence.Name)}
+	newer := holdingStore(t, raw, time.Hour, 5*time.Second)
+	newer.requestControllerEpochTakeover(ctx, fence.Name, fence.Epoch+1, "newer")
+	delayed := holdingStore(t, raw, time.Hour, 5*time.Second)
+	delayed.requestControllerEpochTakeover(ctx, fence.Name, fence.Epoch, "delayed")
+	request := &coordinationv1.Lease{}
+	require.NoError(t, raw.Get(ctx, requestKey, request))
+	require.Equal(t, strconv.FormatInt(fence.Epoch+1, 10), request.Annotations[annotationEpochTakeoverFromEpoch], "the delayed publisher downgraded the newer request")
+	require.Equal(t, "newer", request.Annotations[annotationEpochTakeoverRequestedBy])
+	// A request against the same epoch from another successor still replaces it.
+	delayed.requestControllerEpochTakeover(ctx, fence.Name, fence.Epoch+1, "delayed")
+	require.NoError(t, raw.Get(ctx, requestKey, request))
+	require.Equal(t, "delayed", request.Annotations[annotationEpochTakeoverRequestedBy])
+}

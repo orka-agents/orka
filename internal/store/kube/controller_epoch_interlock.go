@@ -374,6 +374,14 @@ func (s *Store) requestControllerEpochTakeover(ctx context.Context, name string,
 		return
 	}
 	exists := err == nil
+	if exists {
+		// Never downgrade a newer request: a publisher that read an older
+		// epoch before another change committed must not replace a request
+		// against the epoch that change created.
+		if newer, parseErr := strconv.ParseInt(request.Annotations[annotationEpochTakeoverFromEpoch], 10, 64); parseErr == nil && newer > epoch {
+			return
+		}
+	}
 	s.interlockMu.Lock()
 	written := s.takeoverWritten
 	s.interlockMu.Unlock()
