@@ -194,6 +194,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return ctrl.Result{}, err
 	}
 	if w.Spec.Workload == nil || (w.Status.Allocation != nil && w.Status.Allocation.State == workspacev1alpha1.AllocationStopped) {
+		if externalPublishedSuccessorAwaitsProvider(w) {
+			// The provider has not reported the published request's allocation
+			// yet. Nothing is republished or rotated while it catches up.
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting,
+				"public workload request published; waiting for provider materialization")
+		}
 		if w.Spec.Workload != nil {
 			a := w.Status.Allocation
 			if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || a.Key != w.Spec.Workload.Key || a.Sequence != w.Spec.Workload.Sequence || a.Identity.RequestRevision != w.Spec.Workload.Revision || !a.Identity.Valid() || a.Startup != nil || w.Status.ObservedGeneration != w.Generation {
@@ -319,6 +325,20 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		acpRuntimeAdmission.served(ctx, uncachedReader(r.APIReader, r.Client), pool, request.Sequence)
 	}
 	return result, err
+}
+
+// externalPublishedSuccessorAwaitsProvider reports a workspace whose
+// published request is the cold boot that follows the stopped allocation the
+// provider still reports: same allocation key, the next sequence, naming that
+// exact instance as its predecessor. That is the window between publication
+// (and its core re-admission) and the provider's first report of the new
+// allocation, not a stopped allocation that fails to prove the current
+// runtime terminated.
+func externalPublishedSuccessorAwaitsProvider(w *workspacev1alpha1.ExecutionWorkspace) bool {
+	request, a := w.Spec.Workload, w.Status.Allocation
+	return request != nil && a != nil && a.State == workspacev1alpha1.AllocationStopped &&
+		a.Key == request.Key && a.Sequence+1 == request.Sequence && a.Identity.Valid() &&
+		request.PreviousInstance != nil && *request.PreviousInstance == a.Identity
 }
 
 func allocationOrEmpty(w *workspacev1alpha1.ExecutionWorkspace) workspacev1alpha1.AllocationObservation {

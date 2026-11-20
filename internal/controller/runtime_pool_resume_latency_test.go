@@ -235,3 +235,73 @@ func TestExternalRuntimePoolDoesNotRotateCredentialsForCleanupOnlyController(t *
 		t.Fatal("a cleanup-only controller minted fresh runtime credentials")
 	}
 }
+
+// A published cold boot is a wait, not a failure, until the provider reports
+// the new allocation. Core re-admits the publication's generation before the
+// provider's next status write lands, so passes in between still see the
+// predecessor's stopped allocation. They used to report Degraded ("stopped
+// allocation does not prove the current runtime terminated"), which is the
+// reopenedFrom=Degraded of spare and shared resumes in round 9c: those
+// providers report the new allocation only with its startup evidence, so the
+// label lasted until admission. The wait still never publishes again.
+func TestExternalRuntimePoolPublishedResumeWaitsForProviderWithoutDegrading(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	_, pod := f.serve(t)
+	stopExternalRuntime(t, f)
+	if err := f.r.Delete(context.Background(), &pod); err != nil {
+		t.Fatal(err)
+	}
+	pool := reconcileExternalRuntimeUntilStopped(t, f)
+	pool.Spec.DesiredReplicas = 1
+	if err := f.r.Update(context.Background(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	stopped := f.currentWorkspace(t).Status.Allocation.DeepCopy()
+	runtimePoolReconcile(t, f.r, f.pool)
+	workspace := f.currentWorkspace(t)
+	request := workspace.Spec.Workload.DeepCopy()
+	if request.Sequence != stopped.Sequence+1 || request.PreviousInstance == nil || *request.PreviousInstance != stopped.Identity {
+		t.Fatalf("cold boot did not publish the successor request: %#v", request)
+	}
+
+	// Core re-admits the published generation (the fake client keeps the
+	// generation, so that is the admitted one); the provider has not yet
+	// reported the new allocation.
+	if workspace.Spec.CoreAdmission.AdmittedGeneration != workspace.Generation {
+		workspace.Spec.CoreAdmission.AdmittedGeneration = workspace.Generation
+		if err := f.r.Update(context.Background(), workspace); err != nil {
+			t.Fatal(err)
+		}
+		workspace = f.currentWorkspace(t)
+	}
+	if !workspaceCurrentlyAdmittedByCore(workspace) {
+		t.Fatalf("fixture did not re-admit generation %d: %#v", workspace.Generation, workspace.Spec.CoreAdmission)
+	}
+	for _, observed := range []int64{workspace.Status.ObservedGeneration, workspace.Generation} {
+		workspace.Status.ObservedGeneration = observed
+		if err := f.r.Status().Update(context.Background(), workspace); err != nil {
+			t.Fatal(err)
+		}
+		runtimePoolReconcile(t, f.r, f.pool)
+		pool = runtimePoolTestGetPool(t, f.r, f.pool)
+		if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+			t.Fatalf("observed generation %d: status = %s/%s: %s, want Starting/Closed", observed, pool.Status.Lifecycle, pool.Status.AdmissionState, pool.Status.Message)
+		}
+		workspace = f.currentWorkspace(t)
+		if workspace.Spec.Workload.Sequence != request.Sequence || workspace.Spec.Workload.Revision != request.Revision {
+			t.Fatalf("the wait republished: sequence %d, want %d", workspace.Spec.Workload.Sequence, request.Sequence)
+		}
+	}
+
+	// A stopped allocation that does not continue the published request is
+	// still a failure.
+	workspace.Status.Allocation.Sequence = request.Sequence
+	if err := f.r.Status().Update(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	runtimePoolReconcile(t, f.r, f.pool)
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(pool.Status.Message, "does not prove the current runtime terminated") {
+		t.Fatalf("inconsistent stopped allocation: status = %s: %s, want Degraded", pool.Status.Lifecycle, pool.Status.Message)
+	}
+}
