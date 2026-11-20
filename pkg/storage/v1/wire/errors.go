@@ -63,6 +63,9 @@ const (
 	// ReasonUnsupportedField refuses a request that carries a field the server
 	// does not know, so an older server never ignores a newer precondition.
 	ReasonUnsupportedField = "UNSUPPORTED_FIELD"
+	// ReasonOverloaded refuses a call over the server's concurrency limit for
+	// its class, before the provider runs.
+	ReasonOverloaded = "OVERLOADED"
 	// ReasonProviderError reports a provider error that is not a contract
 	// error, or a provider panic. A write that fails this way may have
 	// committed.
@@ -273,8 +276,8 @@ func storageErrorInfo(st *status.Status) *errdetails.ErrorInfo {
 
 // refusedBeforeDataset holds the reasons a server can send before its
 // dataset check, or without knowing its dataset: authentication, the contract
-// and request checks, the dataset check itself, and a provider that cannot
-// describe its dataset.
+// and request checks, admission, the dataset check itself, and a provider
+// that cannot describe its dataset.
 var refusedBeforeDataset = map[string]bool{
 	ReasonUnauthenticated:  true,
 	ReasonContractMismatch: true,
@@ -282,6 +285,7 @@ var refusedBeforeDataset = map[string]bool{
 	ReasonDatasetMismatch:  true,
 	ReasonUnavailable:      true,
 	ReasonIncompatible:     true,
+	ReasonOverloaded:       true,
 }
 
 // answersForDataset reports whether err is a storage status that answers for
@@ -334,6 +338,8 @@ func decodeReason(m *method, st *status.Status, info *errdetails.ErrorInfo) erro
 			return remoteError{sentinel: storagev1.ErrTooLarge}
 		}
 		return storagev1.TooLargeError{What: sanitizeText(metadata["what"], messageLimit), Size: size, Limit: limit}
+	case ReasonOverloaded:
+		return fmt.Errorf("%w: the storage server is overloaded", storagev1.ErrUnavailable)
 	case ReasonContractMismatch, ReasonUnsupportedField:
 		return fmt.Errorf("%w: storage server refused %s: %s", storagev1.ErrIncompatible, m.name, info.GetReason())
 	}

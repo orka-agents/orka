@@ -22,13 +22,33 @@ type model struct {
 	records  []*record
 }
 
+// Contracts a service serves: one contract part, or both for the Dataset
+// service every provider serves.
+const (
+	contractState     = "state"
+	contractArtifacts = "artifacts"
+	contractBoth      = "both"
+)
+
 type service struct {
 	desc       protoreflect.ServiceDescriptor
 	name       string
 	interfaces []*types.TypeName
-	contract   string // "state" or "both"
+	contract   string
 	methods    []*rpcMethod
 }
+
+// streamShape is how an RPC carries its request and response.
+type streamShape int
+
+const (
+	// streamNone is a unary RPC.
+	streamNone streamShape = iota
+	// streamUpload is a client-streaming RPC whose request carries a blob.
+	streamUpload
+	// streamDownload is a server-streaming RPC whose response carries a blob.
+	streamDownload
+)
 
 type rpcMethod struct {
 	service *service
@@ -36,7 +56,9 @@ type rpcMethod struct {
 	name    string
 	sig     *types.Signature
 	kind    storagev1.MethodKind
+	class   storagev1.CallClass
 	since   int
+	stream  streamShape
 	params  []*binding
 	// request is set when the method's only parameter is the record the
 	// request message carries whole, such as ConsumeMessagesRequest.
@@ -121,6 +143,7 @@ func buildModel(contract *types.Package, catalog lookupMethod, files []protorefl
 
 	m := &model{revision: revision}
 	methodMessages := map[protoreflect.FullName]bool{}
+	streamed := map[protoreflect.FullName]bool{}
 	mapped := map[string]string{}
 	for _, desc := range b.services {
 		svc := b.buildService(desc, mapped)
@@ -131,6 +154,13 @@ func buildModel(contract *types.Package, catalog lookupMethod, files []protorefl
 		for _, method := range svc.methods {
 			methodMessages[method.desc.Input().FullName()] = true
 			methodMessages[method.desc.Output().FullName()] = true
+			if method.stream != streamNone {
+				for _, message := range []protoreflect.MessageDescriptor{method.desc.Input(), method.desc.Output()} {
+					for _, path := range blobPaths(message, nil, map[protoreflect.FullName]bool{}) {
+						streamed[path.fields[len(path.fields)-1].FullName()] = true
+					}
+				}
+			}
 		}
 	}
 
@@ -141,6 +171,11 @@ func buildModel(contract *types.Package, catalog lookupMethod, files []protorefl
 	sort.Strings(names)
 	for _, name := range names {
 		message := b.messages[protoreflect.FullName(name)]
+		for index := 0; index < message.Fields().Len(); index++ {
+			if field := message.Fields().Get(index); blobField(field) && !streamed[field.FullName()] {
+				b.problemf("blob field %s is not the blob of a streaming RPC", field.FullName())
+			}
+		}
 		if methodMessages[message.FullName()] || wireOnly(message) {
 			continue
 		}
@@ -181,6 +216,11 @@ func writeBackField(field protoreflect.FieldDescriptor) bool {
 	return value
 }
 
+func blobField(field protoreflect.FieldDescriptor) bool {
+	value, _ := proto.GetExtension(field.Options(), storagepb.E_Blob).(bool)
+	return value
+}
+
 func fieldGoName(field protoreflect.FieldDescriptor) string {
 	value, _ := proto.GetExtension(field.Options(), storagepb.E_GoName).(string)
 	return value
@@ -217,11 +257,13 @@ func (b *builder) buildService(desc protoreflect.ServiceDescriptor, mapped map[s
 	}
 	switch {
 	case inState && inArtifacts:
-		svc.contract = "both"
+		svc.contract = contractBoth
 	case inState:
-		svc.contract = "state"
+		svc.contract = contractState
+	case inArtifacts:
+		svc.contract = contractArtifacts
 	default:
-		b.problemf("service %s serves interfaces outside state.v1, which the server library does not serve yet", desc.Name())
+		b.problemf("service %s mixes state.v1 and artifacts.v1 interfaces; a service serves one contract part or both", desc.Name())
 	}
 
 	rpcs := map[string]protoreflect.MethodDescriptor{}
@@ -270,9 +312,14 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 	sig := goMethod.Type().(*types.Signature)
 	method := &rpcMethod{service: svc, desc: rpc, name: goMethod.Name(), sig: sig}
 	where := string(rpc.FullName())
-	if rpc.IsStreamingClient() || rpc.IsStreamingServer() {
-		b.problemf("%s streams, which the generator does not support yet", where)
+	switch {
+	case rpc.IsStreamingClient() && rpc.IsStreamingServer():
+		b.problemf("%s streams in both directions, which the wire does not use", where)
 		return nil
+	case rpc.IsStreamingClient():
+		method.stream = streamUpload
+	case rpc.IsStreamingServer():
+		method.stream = streamDownload
 	}
 	if rpc.Input().Name() != protoreflect.Name(method.name+"Request") ||
 		rpc.Output().Name() != protoreflect.Name(method.name+"Response") {
@@ -280,6 +327,12 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 		return nil
 	}
 	b.checkCatalog(method, rpc)
+	if method.stream == streamUpload && method.kind != storagev1.MethodWrite {
+		b.problemf("%s streams its request, so it must be a write", where)
+	}
+	if method.stream == streamDownload && method.kind != storagev1.MethodRead {
+		b.problemf("%s streams its response, so it must be a read", where)
+	}
 	since, _ := proto.GetExtension(rpc.Options(), storagepb.E_RpcSince).(int32)
 	method.since = int(since)
 	if method.since < 1 || method.since > b.revision {
@@ -290,6 +343,7 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 		return nil
 	}
 
+	b.checkBlobs(method)
 	if !b.bindParams(method) || !b.bindResults(method) {
 		return nil
 	}
@@ -297,7 +351,9 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 }
 
 // checkCatalog sets the method's kind from its wire annotation and requires
-// the contract's method catalog to give the same kind and contract part.
+// the contract's method catalog to give the same kind and contract part. It
+// takes the method's call class from the catalog, and requires a streaming
+// RPC to be a bulk call.
 func (b *builder) checkCatalog(method *rpcMethod, rpc protoreflect.MethodDescriptor) {
 	where := string(rpc.FullName())
 	wireKind, _ := proto.GetExtension(rpc.Options(), storagepb.E_Kind).(storagepb.MethodKind)
@@ -314,14 +370,81 @@ func (b *builder) checkCatalog(method *rpcMethod, rpc protoreflect.MethodDescrip
 	if declared && info.Kind != kind {
 		b.problemf("%s declares kind %s but the method catalog gives %s", where, kind, info.Kind)
 	}
-	part := storagev1.StateContract
-	if method.service.contract == "both" {
-		part = ""
+	method.class = info.Class
+	if method.stream != streamNone && info.Class != storagev1.CallBulk {
+		b.problemf("%s streams, but the method catalog gives class %s rather than bulk", where, info.Class)
 	}
+	part := map[string]string{contractState: storagev1.StateContract, contractArtifacts: storagev1.ArtifactsContract}[method.service.contract]
 	if info.Contract != part {
 		b.problemf("the method catalog gives %s contract part %q, but service %s serves %q",
 			method.name, info.Contract, method.service.name, part)
 	}
+}
+
+// checkBlobs requires a streaming RPC to carry exactly one blob field in the
+// direction it streams and none in the other, and a unary RPC to carry none.
+func (b *builder) checkBlobs(method *rpcMethod) {
+	where := string(method.desc.FullName())
+	request := blobPaths(method.desc.Input(), nil, map[protoreflect.FullName]bool{})
+	response := blobPaths(method.desc.Output(), nil, map[protoreflect.FullName]bool{})
+	for _, path := range append(append([]blobPath(nil), request...), response...) {
+		if path.problem != "" {
+			b.problemf("%s: %s", where, path.problem)
+		}
+	}
+	want := map[streamShape][2]int{streamNone: {0, 0}, streamUpload: {1, 0}, streamDownload: {0, 1}}[method.stream]
+	if len(request) != want[0] || len(response) != want[1] {
+		b.problemf("%s has %d blob fields in its request and %d in its response; a unary RPC has none, "+
+			"and a streaming RPC exactly one, in the direction it streams", where, len(request), len(response))
+	}
+}
+
+// blobPath is the chain of fields from a request or response message to one
+// blob field, and any problem with that blob field.
+type blobPath struct {
+	fields  []protoreflect.FieldDescriptor
+	problem string
+}
+
+// blobPaths finds the blob fields in message and in the messages it holds.
+// A blob is a singular bytes field outside any oneof, reached through
+// singular message fields, so a framed message names exactly one place for
+// its blob.
+func blobPaths(message protoreflect.MessageDescriptor, prefix []protoreflect.FieldDescriptor,
+	visiting map[protoreflect.FullName]bool) []blobPath {
+	if visiting[message.FullName()] {
+		return nil
+	}
+	visiting[message.FullName()] = true
+	defer delete(visiting, message.FullName())
+	var paths []blobPath
+	for index := 0; index < message.Fields().Len(); index++ {
+		field := message.Fields().Get(index)
+		path := append(append([]protoreflect.FieldDescriptor(nil), prefix...), field)
+		if blobField(field) {
+			found := blobPath{fields: path}
+			if field.Kind() != protoreflect.BytesKind || field.IsList() || field.IsMap() || field.ContainingOneof() != nil {
+				found.problem = fmt.Sprintf("blob field %s must be a singular bytes field outside any oneof", field.FullName())
+			}
+			paths = append(paths, found)
+			continue
+		}
+		nested := field.Message()
+		if field.IsMap() {
+			nested = field.MapValue().Message()
+		}
+		if nested == nil {
+			continue
+		}
+		for _, inner := range blobPaths(nested, path, visiting) {
+			if inner.problem == "" && (field.IsList() || field.IsMap() || field.ContainingOneof() != nil) {
+				inner.problem = fmt.Sprintf("blob field %s is inside list, map or oneof field %s",
+					inner.fields[len(inner.fields)-1].FullName(), field.FullName())
+			}
+			paths = append(paths, inner)
+		}
+	}
+	return paths
 }
 
 // bindParams maps every Go parameter after the context, by name, to a

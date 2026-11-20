@@ -61,4 +61,9 @@ extend google.protobuf.FieldOptions {
   // into, such as the ID SendMessage assigns. After a successful call the
   // client stores it into the caller's record.
   bool write_back = 51034;
+  // blob marks the bytes field a streaming RPC carries in chunks. A
+  // client-streaming RPC has exactly one blob field in its request, and a
+  // server-streaming RPC exactly one in its response, either at the top level
+  // or inside singular message fields. A unary RPC has none.
+  bool blob = 51035;
 }

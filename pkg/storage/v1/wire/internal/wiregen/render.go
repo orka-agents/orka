@@ -248,7 +248,12 @@ func fromWire(f *goFile, target, source string, c *conversion, label, exact, onE
 		value := f.fresh("v")
 		elem := f.typeString(c.goType.(*types.Pointer).Elem())
 		f.printf("if %s != nil {\n%s := %s(*%s)\n%s = &%s\n}\n", source, value, elem, source, target, value)
-	case convBytes, convStringMap:
+	case convBytes:
+		// Protobuf decodes empty bytes as nil. A decoded bytes value is never
+		// nil, so a present record keeps an empty value a provider may
+		// require, as it would receive in process.
+		f.printf("%s = %s(%s)\nif %s == nil {\n%s = %s{}\n}\n", target, goType(), source, target, target, goType())
+	case convStringMap:
 		f.printf("%s = %s(%s)\n", target, goType(), source)
 	case convTime:
 		f.printf("if %s, err = timeFromWire(%s, %q); err != nil {\n%s\n}\n", target, source, label, onErr)
@@ -314,6 +319,39 @@ func kindName(f *goFile, kind storagev1.MethodKind) string {
 	return f.use(contractPath, "storagev1") + "." + name
 }
 
+func streamName(stream streamShape) string {
+	switch stream {
+	case streamUpload:
+		return "streamUpload"
+	case streamDownload:
+		return "streamDownload"
+	default:
+		return "streamNone"
+	}
+}
+
+func contractName(f *goFile, contract string) string {
+	switch contract {
+	case contractState:
+		return f.use(contractPath, "storagev1") + ".StateContract"
+	case contractArtifacts:
+		return f.use(contractPath, "storagev1") + ".ArtifactsContract"
+	default:
+		return `""`
+	}
+}
+
+func className(f *goFile, class storagev1.CallClass) string {
+	name := map[storagev1.CallClass]string{
+		storagev1.CallControl:     "CallControl",
+		storagev1.CallInteractive: "CallInteractive",
+		storagev1.CallBackground:  "CallBackground",
+		storagev1.CallStream:      "CallStream",
+		storagev1.CallBulk:        "CallBulk",
+	}[class]
+	return f.use(contractPath, "storagev1") + "." + name
+}
+
 // responseVar names the decoded or built response in generated methods.
 const responseVar = "wireResponse"
 
@@ -335,11 +373,13 @@ func paramName(name string) string {
 // handlers.
 func renderService(f *goFile, m *model) {
 	grpc := f.use("google.golang.org/grpc", "grpc")
+	f.use(contractPath, "storagev1")
 	f.printf("var (\n")
 	for _, svc := range m.services {
 		for _, method := range svc.methods {
-			f.printf("method%s = method{name: %q, fullName: %q, kind: %s, since: %d}\n", method.name, method.name,
-				"/"+string(svc.desc.FullName())+"/"+method.name, kindName(f, method.kind), method.since)
+			f.printf("method%s = method{name: %q, fullName: %q, kind: %s, class: %s, since: %d, stream: %s, contract: %s}\n",
+				method.name, method.name, "/"+string(svc.desc.FullName())+"/"+method.name, kindName(f, method.kind),
+				className(f, method.class), method.since, streamName(method.stream), contractName(f, svc.contract))
 		}
 	}
 	f.printf(")\n\nvar methodsByFullName = map[string]*method{\n")
@@ -375,8 +415,26 @@ func renderService(f *goFile, m *model) {
 	}
 
 	f.printf("func (s *Server) registerServices(registrar %s.ServiceRegistrar) {\n", grpc)
-	for _, svc := range m.services {
-		f.printf("storagepb.Register%sServer(registrar, &%sService{server: s, provider: s.state})\n", svc.name, lowerFirst(svc.name))
+	for _, contract := range []string{contractBoth, contractState, contractArtifacts} {
+		var registered []*service
+		for _, svc := range m.services {
+			if svc.contract == contract {
+				registered = append(registered, svc)
+			}
+		}
+		if len(registered) == 0 {
+			continue
+		}
+		provider := map[string]string{contractBoth: "s.dataset", contractState: "s.state", contractArtifacts: "s.artifacts"}[contract]
+		if contract != contractBoth {
+			f.printf("if %s != nil {\n", provider)
+		}
+		for _, svc := range registered {
+			f.printf("storagepb.Register%sServer(registrar, &%sService{server: s, provider: %s})\n", svc.name, lowerFirst(svc.name), provider)
+		}
+		if contract != contractBoth {
+			f.printf("}\n")
+		}
 	}
 	f.printf("}\n\n")
 	for _, svc := range m.services {
@@ -445,18 +503,30 @@ func renderClientMethod(f *goFile, method *rpcMethod) {
 		}
 	}
 	f.printf("_ = err\n")
-	callTarget := "_"
-	if len(method.results) > 0 || len(method.writeBacks) > 0 {
-		f.printf("var wireResponse *%s\n", wireMessage(f, method.desc.Output()))
-		callTarget = responseVar
+	switch method.stream {
+	case streamUpload, streamDownload:
+		helper, open := "upload", fmt.Sprintf("client.bulk.%s.%s(ctx, opts...)", stub, method.name)
+		if method.stream == streamDownload {
+			helper, open = "download", fmt.Sprintf("client.bulk.%s.%s(ctx, wireRequest, opts...)", stub, method.name)
+		}
+		f.printf("wireResponse := &%s{}\n", wireMessage(f, method.desc.Output()))
+		f.printf("if err := client.%s(ctx, &method%s, wireRequest, wireResponse, "+
+			"func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {\nreturn %s\n}); err != nil {\nreturn %s\n}\n",
+			helper, method.name, open, zeroResults(f, method, "err"))
+	default:
+		callTarget := "_"
+		if len(method.results) > 0 || len(method.writeBacks) > 0 {
+			f.printf("var wireResponse *%s\n", wireMessage(f, method.desc.Output()))
+			callTarget = responseVar
+		}
+		f.printf("if err := client.invoke(ctx, &method%s, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {\n", method.name)
+		if callTarget == "_" {
+			f.printf("_, callErr := client.stubs.%s.%s(ctx, wireRequest, opts...)\nreturn callErr\n", stub, method.name)
+		} else {
+			f.printf("var callErr error\nwireResponse, callErr = client.stubs.%s.%s(ctx, wireRequest, opts...)\nreturn callErr\n", stub, method.name)
+		}
+		f.printf("}); err != nil {\nreturn %s\n}\n", zeroResults(f, method, "err"))
 	}
-	f.printf("if err := client.invoke(ctx, &method%s, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {\n", method.name)
-	if callTarget == "_" {
-		f.printf("_, callErr := client.stubs.%s.%s(ctx, wireRequest, opts...)\nreturn callErr\n", stub, method.name)
-	} else {
-		f.printf("var callErr error\nwireResponse, callErr = client.stubs.%s.%s(ctx, wireRequest, opts...)\nreturn callErr\n", stub, method.name)
-	}
-	f.printf("}); err != nil {\nreturn %s\n}\n", zeroResults(f, method, "err"))
 	responseErr := "return " + zeroResults(f, method, fmt.Sprintf("client.responseError(&method%s, err)", method.name))
 	names := make([]string, 0, len(method.results)+1)
 	for _, result := range method.results {
@@ -489,8 +559,25 @@ func renderServer(f *goFile, svc *service) {
 	for _, method := range svc.methods {
 		request := wireMessage(f, method.desc.Input())
 		response := wireMessage(f, method.desc.Output())
-		f.printf("func (service *%sService) %s(ctx context.Context, wireRequest *%s) (*%s, error) {\n",
-			lowerFirst(svc.name), method.name, request, response)
+		// fail returns an error from the handler: unary handlers also return
+		// a nil response.
+		fail := "return nil, %s"
+		switch method.stream {
+		case streamUpload:
+			fail = "return %s"
+			f.printf("func (service *%sService) %s(stream grpc.ClientStreamingServer[%s, %s]) error {\n",
+				lowerFirst(svc.name), method.name, request, response)
+			f.printf("ctx := stream.Context()\nwireRequest := &%s{}\n", request)
+			f.printf("if err := service.server.receiveUpload(stream, &method%s, wireRequest); err != nil {\nreturn err\n}\n", method.name)
+		case streamDownload:
+			fail = "return %s"
+			f.printf("func (service *%sService) %s(wireRequest *%s, stream grpc.ServerStreamingServer[%s]) error {\n",
+				lowerFirst(svc.name), method.name, request, response)
+			f.printf("ctx := stream.Context()\n")
+		default:
+			f.printf("func (service *%sService) %s(ctx context.Context, wireRequest *%s) (*%s, error) {\n",
+				lowerFirst(svc.name), method.name, request, response)
+		}
 		f.printf("var err error\n")
 		args := []string{"ctx"}
 		argNames := map[*binding]string{}
@@ -502,12 +589,12 @@ func renderServer(f *goFile, svc *service) {
 			if method.request == nil {
 				source += "." + wireField(param.field)
 			}
-			fromWire(f, name, source, param.conv, method.name+"."+param.goName, "true", "return nil, requestStatus(err)")
+			fromWire(f, name, source, param.conv, method.name+"."+param.goName, "true", fmt.Sprintf(fail, "requestStatus(err)"))
 			args = append(args, name)
 		}
 		if method.kind == storagev1.MethodWrite {
-			f.printf("if err := service.server.checkDigest(%s); err != nil {\nreturn nil, err\n}\n",
-				strings.Join(append([]string{"ctx", "&method" + method.name}, args[1:]...), ", "))
+			f.printf("if err := service.server.checkDigest(%s); err != nil {\n%s\n}\n",
+				strings.Join(append([]string{"ctx", "&method" + method.name}, args[1:]...), ", "), fmt.Sprintf(fail, "err"))
 		}
 		var results []string
 		for _, result := range method.results {
@@ -515,9 +602,9 @@ func renderServer(f *goFile, svc *service) {
 			results = append(results, result.goName)
 		}
 		f.printf("%s = service.provider.%s(%s)\n", strings.Join(append(results, "err"), ", "), method.name, strings.Join(args, ", "))
-		f.printf("if err != nil {\nreturn nil, service.server.providerError(ctx, &method%s, err)\n}\n", method.name)
+		f.printf("if err != nil {\n%s\n}\n", fmt.Sprintf(fail, fmt.Sprintf("service.server.providerError(ctx, &method%s, err)", method.name)))
 		f.printf("wireResponse := &%s{}\n", response)
-		encodeErr := fmt.Sprintf("return nil, service.server.encodeError(ctx, &method%s, err)", method.name)
+		encodeErr := fmt.Sprintf(fail, fmt.Sprintf("service.server.encodeError(ctx, &method%s, err)", method.name))
 		for _, result := range method.results {
 			toWire(f, responseVar+"."+wireField(result.field), result.goName, result.conv, method.name+" result", encodeErr)
 		}
@@ -527,33 +614,54 @@ func renderServer(f *goFile, svc *service) {
 		if len(method.library) > 0 {
 			f.printf("service.server.library%s(%s)\n", method.name, strings.Join(append([]string{responseVar}, results...), ", "))
 		}
-		f.printf("return wireResponse, nil\n}\n\n")
+		switch method.stream {
+		case streamUpload:
+			f.printf("return stream.SendAndClose(wireResponse)\n}\n\n")
+		case streamDownload:
+			f.printf("return service.server.sendDownload(stream, &method%s, wireResponse)\n}\n\n", method.name)
+		default:
+			f.printf("return wireResponse, nil\n}\n\n")
+		}
 	}
 }
 
 // renderOverlay writes the wiretest overlay: a state provider that sends
-// every method with a wire RPC through the client and serves the rest in
-// process.
+// every state.v1 method with a wire RPC through the client and serves the
+// rest in process.
 func renderOverlay(f *goFile, m *model) {
 	contract := f.use(contractPath, "storagev1")
 	wire := f.use(wirePath, "wire")
-	f.printf("// stateOverlay serves the contract families that have wire RPCs through the\n")
-	f.printf("// client, and every other family from the in-process provider.\n")
-	f.printf("type stateOverlay struct {\n%s.StateProvider\nclient *%s.Client\n}\n\n", contract, wire)
-	f.printf("// overlayMethods names the contract methods stateOverlay sends through the\n")
-	f.printf("// client.\n")
-	f.printf("var overlayMethods = []string{\n")
-	for _, svc := range m.services {
-		for _, method := range svc.methods {
-			f.printf("%q,\n", method.name)
-		}
+	overlays := []struct {
+		name, provider, methods, part string
+	}{
+		{"stateOverlay", "StateProvider", "overlayMethods", contractState},
+		{"artifactsOverlay", "ArtifactProvider", "artifactsOverlayMethods", contractArtifacts},
 	}
-	f.printf("}\n\n")
-	for _, svc := range m.services {
-		for _, method := range svc.methods {
-			params, args, results := signature(f, method)
-			f.printf("func (overlay stateOverlay) %s(%s) %s {\nreturn overlay.client.%s(%s)\n}\n\n",
-				method.name, params, results, method.name, args)
+	for _, overlay := range overlays {
+		f.printf("// %s serves the %s families that have wire RPCs through the\n", overlay.name, overlay.part)
+		f.printf("// client, and every other family from the in-process provider.\n")
+		f.printf("type %s struct {\n%s.%s\nclient *%s.Client\n}\n\n", overlay.name, contract, overlay.provider, wire)
+		f.printf("// %s names the contract methods %s sends through the\n", overlay.methods, overlay.name)
+		f.printf("// client.\n")
+		f.printf("var %s = []string{\n", overlay.methods)
+		for _, svc := range m.services {
+			if svc.contract != overlay.part && svc.contract != contractBoth {
+				continue
+			}
+			for _, method := range svc.methods {
+				f.printf("%q,\n", method.name)
+			}
+		}
+		f.printf("}\n\n")
+		for _, svc := range m.services {
+			if svc.contract != overlay.part && svc.contract != contractBoth {
+				continue
+			}
+			for _, method := range svc.methods {
+				params, args, results := signature(f, method)
+				f.printf("func (overlay %s) %s(%s) %s {\nreturn overlay.client.%s(%s)\n}\n\n",
+					overlay.name, method.name, params, results, method.name, args)
+			}
 		}
 	}
 }
