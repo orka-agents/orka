@@ -42,9 +42,21 @@ const (
 )
 
 // providerRelayTimeout bounds one relayed request, including a streamed
-// response, and how long a worker may take to read it. It is a variable only
-// so tests can shorten it.
-var providerRelayTimeout = 30 * time.Minute
+// response, and how long a worker may take to read it; providerRelayReadTimeout
+// bounds the worker's upload. They are variables only so tests can shorten
+// them.
+var (
+	providerRelayTimeout     = 30 * time.Minute
+	providerRelayReadTimeout = 30 * time.Second
+)
+
+// providerRelayRoute matches the relay route before Fiber routes the request,
+// so the server can bound its reads and writes.
+var providerRelayRoute = regexp.MustCompile(`^/internal/v1/tasks/[^/]+/[^/]+/providers/[^/]+/`)
+
+func isProviderRelayPath(path string) bool {
+	return providerRelayRoute.MatchString(path)
+}
 
 // providerRelayPaths are the Azure OpenAI requests the AI worker makes: chat
 // completions for a deployment and the Responses API. The worker's SDK
@@ -160,20 +172,12 @@ func (h *InternalHandlers) RelayProviderRequest(c fiber.Ctx) error {
 	c.Status(response.StatusCode)
 	released = true // the stream writer releases the slot
 	slots := h.providerRelaySlots
-	conn := c.RequestCtx().Conn()
-	deadline, _ := ctx.Deadline()
+	// The server's write timeout for this route ends a write to a worker
+	// that stopped reading, which the request deadline cannot interrupt.
 	return c.SendStreamWriter(func(w *bufio.Writer) {
 		defer providerproxy.ReleaseSlot(slots)
 		defer cancel()
 		defer func() { _ = response.Body.Close() }()
-		// The request deadline does not interrupt a write to a worker that
-		// stopped reading, so the connection gets the same deadline, and the
-		// slot is released when it passes. The server sets no write
-		// deadline of its own, so it is cleared for the next request.
-		if conn != nil {
-			_ = conn.SetWriteDeadline(deadline)
-			defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
-		}
 		if err := providerproxy.StreamBoundedResponse(w, response.Body, providerRelayMaxResponseBytes, bufioFlusher{w}); err != nil &&
 			!errors.Is(err, providerproxy.ErrDestinationWrite) {
 			log.Info("provider relay response ended early", "namespace", namespace, "task", taskName, "slot", slot, "reason", err.Error())

@@ -302,6 +302,16 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
+	// The provider relay reads the worker's body before taking a relay slot,
+	// and streams the Provider's answer back. Bound both the upload and the
+	// worker's read of the answer, which a context deadline cannot interrupt.
+	if isProviderRelayPath(path) {
+		return fasthttp.RequestConfig{
+			MaxRequestBodySize: providerRelayMaxRequestBytes,
+			ReadTimeout:        providerRelayReadTimeout,
+			WriteTimeout:       providerRelayTimeout,
+		}
+	}
 	// The MCP handler reads its body before taking a concurrency permit;
 	// bound that read so stalled uploads only cost their own connection.
 	var mcpURI fasthttp.URI

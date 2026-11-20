@@ -21,6 +21,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -136,12 +137,17 @@ func newProviderRelayHarness(t *testing.T, mutate func(*providerRelayFixture)) *
 		config.ProviderIdentities = h.identities
 	}
 	handlers := NewInternalHandlers(nil, nil, nil, nil, nil, config)
-	app := fiber.New()
+	// As NewServer configures it.
+	app := fiber.New(fiber.Config{BodyLimit: defaultAPIRequestBodyLimit, StreamRequestBody: true})
 	app.Use(func(ctx fiber.Ctx) error {
 		ctx.Locals(UserInfoContextKey, internalCallerAuthWorkerUser("pod-a", "pod-uid"))
 		return ctx.Next()
 	})
 	app.All("/internal/v1/tasks/:namespace/:taskName/providers/:slot/*", handlers.RelayProviderRequest)
+	// The server's per-route read and write bounds, as NewServer installs them.
+	app.Server().HeaderReceived = func(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+		return requestBodyConfigWithNativeSessionLimit(header, 0)
+	}
 	h.app, h.handlers = app, handlers
 	return h
 }
@@ -330,4 +336,44 @@ func TestProviderRelayReleasesTheSlotOfAWorkerThatStopsReading(t *testing.T) {
 		"the relay never started streaming")
 	require.Eventually(t, func() bool { return len(h.handlers.providerRelaySlots) == 0 }, 10*time.Second, 50*time.Millisecond,
 		"a worker that stopped reading kept its relay slot")
+}
+
+// A worker that stops sending its request body loses the connection when the
+// relay's read timeout passes, before it takes a slot or reaches the Provider.
+func TestProviderRelayDropsAStalledUpload(t *testing.T) {
+	previous := providerRelayReadTimeout
+	providerRelayReadTimeout = time.Second
+	t.Cleanup(func() { providerRelayReadTimeout = previous })
+
+	h := newProviderRelayHarness(t, nil)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = h.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = h.app.Shutdown() })
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	// Announce a body and send only part of it.
+	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: controller\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"messages\"",
+		relayChatPath)
+	require.NoError(t, err)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	_, err = io.ReadAll(conn)
+	var timeout net.Error
+	require.False(t, errors.As(err, &timeout) && timeout.Timeout(), "the controller kept a stalled upload open")
+	require.Empty(t, h.upstreamRequests())
+	require.Empty(t, h.handlers.providerRelaySlots)
+}
+
+func TestProviderRelayRouteMatchesOnlyTheRelay(t *testing.T) {
+	require.True(t, isProviderRelayPath("/internal/v1/tasks/default/task-a/providers/primary/openai/responses"))
+	for _, path := range []string{
+		"/internal/v1/tasks/default/task-a/providers/primary",
+		"/internal/v1/tasks/default/task-a/result",
+		"/api/v1/tasks/default/task-a/providers/primary/openai/responses",
+	} {
+		require.False(t, isProviderRelayPath(path), path)
+	}
 }
