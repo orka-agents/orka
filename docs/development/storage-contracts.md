@@ -1411,8 +1411,9 @@ capability, so it does not raise `ContractRevision`.
   `MigrationMarker` for each moved contract part, naming the dataset it moved
   to. While a contract part is marked, its writes return `ErrDatasetMigrated`
   (which matches `ErrNotReady`), with or without a write envelope; reads,
-  exports and the other contract part are unaffected, so state can move while
-  artifacts stay. `AdvanceWriteWatermark`, which both parts serve, is refused
+  exports, the replay of an operation that committed before the marker and
+  the other contract part are unaffected, so a retry whose response was lost
+  still gets its committed outcome, and state can move while artifacts stay. `AdvanceWriteWatermark`, which both parts serve, is refused
   only once every part the provider serves is marked. Writing or clearing a
   marker does not advance the watermark. Only an explicit rollback clears a
   marker. `Describe` reports markers in `ProviderInfo.MigratedTo`, and the

@@ -162,6 +162,9 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		_, err = target.BeginImport(t.Context(), invalid)
 		require.ErrorIs(t, err, storagev1.ErrValidation, "a manifest that misses a family")
 
+		fresh := describe(t, target)
+		require.True(t, fresh.Bootstrap.Empty, "a dataset that accepts an import reports itself empty")
+		require.False(t, fresh.Bootstrap.Complete)
 		_, err = target.BeginImport(t.Context(), request)
 		require.NoError(t, err)
 		other := request
@@ -350,8 +353,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 
 		complete := storagev1.CompleteImportRequest{SessionID: session.SessionID, ManifestDigest: request.Source.ManifestDigest}
 		_, err = target.CompleteImport(t.Context(), complete)
-		var verification storagev1.ImportVerificationError
-		require.ErrorAs(t, err, &verification)
+		verification := importVerification(t, err)
 		require.ErrorIs(t, err, storagev1.ErrConflict)
 		require.Equal(t, family, verification.Expected.Family)
 		require.Equal(t, verification.Expected.Count-1, verification.Actual.Count)
@@ -390,6 +392,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		require.Equal(t, storagev1.DatasetReady, aborted.State)
 		require.Nil(t, aborted.Source)
 		require.Nil(t, aborted.Binding)
+		require.True(t, aborted.Bootstrap.Empty, "an aborted import leaves a dataset that reports itself empty")
 		require.NotEqual(t, session.DatasetID, aborted.DatasetID, "an aborted import's dataset ID is not reused")
 		require.NotEqual(t, empty.DatasetID, aborted.DatasetID)
 		copied, _ := exportDataset(t, target)
@@ -619,12 +622,32 @@ func changedExportValue(field storagev1.ExportField, value any) any {
 	case bool:
 		return !typed
 	case []byte:
-		return append(slices.Clone(typed), 'x')
+		// A changed byte keeps the size, so a value at the target's limit
+		// stays within it and the change is the only difference.
+		if len(typed) == 0 {
+			return []byte{'x'}
+		}
+		changed := slices.Clone(typed)
+		changed[0]++
+		return changed
 	case time.Time:
 		return typed.Add(time.Nanosecond)
 	default:
 		return exampleExportValue(field.Kind, 1)
 	}
+}
+
+// importVerification returns the ImportVerificationError in err, which a
+// provider may return as a value or a pointer.
+func importVerification(t *testing.T, err error) storagev1.ImportVerificationError {
+	t.Helper()
+	if value, ok := errors.AsType[storagev1.ImportVerificationError](err); ok {
+		return value
+	}
+	pointer, ok := errors.AsType[*storagev1.ImportVerificationError](err)
+	require.True(t, ok, "CompleteImport returns an ImportVerificationError: %v", err)
+	require.NotNil(t, pointer)
+	return *pointer
 }
 
 // exportExampleTime is a time with nanoseconds, in a zone other than UTC.

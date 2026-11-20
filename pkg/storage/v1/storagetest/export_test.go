@@ -36,6 +36,16 @@ func TestRunExportImportSplitsBatchesAProviderRefuses(t *testing.T) {
 	}, seedMemoryExport)
 }
 
+// The reference provider refuses a cursor it could not have issued, even
+// one with its own prefix.
+func TestReferenceProviderRefusesCursorsItDidNotIssue(t *testing.T) {
+	provider := newMemoryExport()
+	for _, cursor := range []string{memoryCursorPrefix, memoryCursorPrefix + "!", "before:a2V5"} {
+		_, err := provider.ExportRecords(t.Context(), storagev1.ExportRequest{Family: "results", Cursor: cursor, Limit: 1})
+		require.ErrorIs(t, err, storagev1.ErrValidation, cursor)
+	}
+}
+
 // seedMemoryExport stores four records of every family, each field holding
 // a value of its kind, with every third nullable field absent.
 func seedMemoryExport(t *testing.T, provider ExportProvider) {
@@ -114,6 +124,7 @@ func (m *memoryExport) describeLocked() storagev1.ProviderInfo {
 		DatasetID: m.datasetID, DatasetOrigin: m.origin, SchemaVersion: "memory-1",
 		Capabilities: []string{storagev1.ExportCapability}, Durability: storagev1.DurabilityLocalBuffered,
 		State: m.state, ObservedAt: time.Now().UTC(), Limits: storagev1.ProviderLimits{MaxResultBytes: storagev1.MaxResultBytes},
+		Bootstrap: storagev1.DatasetBootstrap{Empty: !m.holdsRecordsLocked()},
 	}
 	if m.source != nil {
 		source := *m.source
@@ -149,7 +160,9 @@ func (m *memoryExport) ExportRecords(_ context.Context, request storagev1.Export
 	if request.Cursor != "" {
 		encoded, ok := strings.CutPrefix(request.Cursor, memoryCursorPrefix)
 		decoded, err := base64.RawURLEncoding.DecodeString(encoded)
-		if !ok || err != nil {
+		// The provider never issues a cursor without a key: a page that
+		// returns no record returns no cursor.
+		if !ok || err != nil || len(decoded) == 0 {
 			return storagev1.ExportPage{}, storagev1.ValidationErrorf("export cursor %q is not valid", request.Cursor)
 		}
 		after = string(decoded)
