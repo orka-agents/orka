@@ -32,10 +32,12 @@ func CaptureContext(ctx context.Context, root string, options Options) (*Snapsho
 	if err != nil {
 		return nil, fmt.Errorf("workspace delta options: %w", err)
 	}
-	return capture(ctx, root, normalized, false)
+	return capture(ctx, root, normalized, false, nil)
 }
 
-func capture(ctx context.Context, root string, options normalizedOptions, retainContent bool) (*Snapshot, error) {
+// capture walks root. Without a baseline it records the tree's ignore rules;
+// with one it skips new paths those baseline rules ignore.
+func capture(ctx context.Context, root string, options normalizedOptions, retainContent bool, baseline *Snapshot) (*Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -55,6 +57,7 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 		optionsDigest: optionsDigest,
 	}
 	seenFiles := make(map[fileIdentity]string)
+	ignore := newIgnoreFilter(baseline)
 	var policy *contentPolicyPool
 	if options.contentFlagger != nil || options.contentFingerprinter != nil {
 		policy = newContentPolicyPool(ctx, options)
@@ -78,6 +81,9 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 		if err != nil {
 			return err
 		}
+		if skip, walkResult := ignore.skipEntry(relative, protected, dirEntry); skip {
+			return walkResult
+		}
 		if snapshot.entryCount >= options.limits.MaxEntries {
 			return pathError("capture", relative, fmt.Errorf("%w: entry count exceeds %d", ErrLimitExceeded, options.limits.MaxEntries))
 		}
@@ -93,7 +99,8 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 			current.mode = normalizedMode(EntryDirectory, mode)
 			current.sourceMode = uint32(mode.Perm())
 		case mode.IsRegular():
-			current, err = captureRegular(ctx, filePath, relative, info, protected, options, retainContent, snapshot.totalBytes, seenFiles, policy)
+			retain := retainForCapture(retainContent, baseline, relative, protected)
+			current, err = captureRegular(ctx, filePath, relative, info, protected, options, retain, snapshot.totalBytes, seenFiles, policy)
 			if err != nil {
 				return err
 			}
@@ -131,6 +138,7 @@ func capture(ctx context.Context, root string, options normalizedOptions, retain
 	if err := validateSymlinkGraph(ctx, snapshot.entries, options); err != nil {
 		return nil, err
 	}
+	snapshot.ignore = collectIgnoreRules(baseline, snapshot.entries, retainContent)
 	rootAfter, err := os.Lstat(absolute)
 	if err != nil || rootAfter.Mode()&os.ModeSymlink != 0 || !rootAfter.IsDir() || !os.SameFile(rootInfo, rootAfter) {
 		return nil, pathError("revalidate root", "", ErrInvalidRoot)
