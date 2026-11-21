@@ -105,9 +105,15 @@ func TestOversizedIgnoreRulesFallBackToFullCapture(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			writeTestFile(t, root, ".gitignore", test.content, 0o644)
+			writeTestFile(t, root, "pkg/.gitignore", test.content, 0o644)
 			baseline := captureTestBaseline(t, root, Options{})
 			if baseline.ignore != nil {
 				t.Fatal("oversized ignore files produced rules")
+			}
+			for _, source := range []string{".gitignore", "pkg/.gitignore"} {
+				if content := baseline.entries[source].content; content != nil {
+					t.Fatalf("baseline kept %s content after exceeding the bound", source)
+				}
 			}
 			writeTestFile(t, root, "dist/a.js", "a\n", 0o644)
 			result, err := Build(baseline, root, IntentWrite)

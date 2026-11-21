@@ -74,15 +74,13 @@ func collectIgnoreRules(baseline *Snapshot, entries map[string]entry, retained b
 			current.content = nil
 			entries[relative] = current
 		}
+		// Past either bound, keep looping only to release retained content.
 		sourceBytes += len(content)
-		if sourceBytes > maxIgnoreSourceBytes {
-			return nil
+		if sourceBytes > maxIgnoreSourceBytes || patternCount > maxIgnorePatterns {
+			continue
 		}
 		patterns := parseIgnorePatterns(content)
 		patternCount += len(patterns)
-		if patternCount > maxIgnorePatterns {
-			return nil
-		}
 		if len(patterns) == 0 {
 			continue
 		}
@@ -96,7 +94,7 @@ func collectIgnoreRules(baseline *Snapshot, entries map[string]entry, retained b
 		}
 		rules.byDir[dir] = patterns
 	}
-	if patternCount == 0 {
+	if patternCount == 0 || sourceBytes > maxIgnoreSourceBytes || patternCount > maxIgnorePatterns {
 		return nil
 	}
 	return rules
