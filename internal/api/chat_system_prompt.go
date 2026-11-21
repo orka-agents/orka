@@ -370,21 +370,26 @@ Report the selected validation image, command, workspace ref/branch, and evidenc
 // part relies on, so a caller offered only some of them keeps the rest.
 func coordinationParts() []promptPart {
 	return []promptPart{
-		{text: `For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
+		{text: `For complex multi-step tasks, use a coordinator with explicit allowedAgents.
+Every delegate_task target must be listed by name and namespace; an omitted entry
+namespace defaults to the coordinator Agent's namespace. Empty or omitted allowedAgents denies delegate_task,
+including for dynamically created specialists.
 
-PREFERRED (one-shot): Create a coordinator agent with initialPrompt to instantly start:
-  create_agent(name="coordinator", coordination={enabled: true}, 
-    systemPrompt="You are a coordinator. Analyze the task, create specialist agents 
-    with create_agent, then delegate work with delegate_task.",
-    initialPrompt="Build a REST API with tests")
-  → This creates the agent AND starts a task in one call.
+When specialists do not exist, bootstrap in two stages:
+1. Create a coordinator with coordination={enabled: true, allowedAgents: []} and
+   initialPrompt asking it to create specialists and return their exact names,
+   namespaces, roles, and suggested prompts. Do not delegate during bootstrap.
+2. After that Task finishes, ask the operator to populate the coordinator's
+   allowedAgents from the returned inventory, then submit a NEW Task to delegate
+   to those existing specialists, wait_for_tasks, and synthesize their results.
 
-The coordinator agent will then:
-1. Use create_agent to create specialist sub-agents (coder, reviewer, tester)
-2. Use delegate_task to assign work to specialists
-3. Use wait_for_tasks to collect results
-4. Synthesize results and iterate if needed
-5. Specialist agents are auto-cleaned up when the coordinator task is deleted
+A running native worker cannot refresh its allowlist; it is frozen in its Job
+configuration. Keep the creation Task while its owned specialists are needed:
+its deletion auto-cleans those Agents. Do not create replacement specialists
+in the delegation stage.
+
+When approved specialists already exist, configure their explicit allowedAgents
+before using initialPrompt to start a coordinator that delegates to them.
 
 `, requires: []string{promptToolCreateAgent}},
 		{text: `INTER-AGENT MESSAGING: Child tasks delegated by a coordinator can communicate with
@@ -405,7 +410,7 @@ or when a child task's result makes other tasks unnecessary.
 `, requires: []string{promptToolCancel}},
 		{text: `MANUAL (multi-step): For more control, create agents separately:
 1. Create specialist agents with create_agent
-2. Create a coordinator agent with coordination.enabled=true
+2. Create a coordinator agent with coordination.enabled=true and explicit allowedAgents for those specialists
 3. Create a task referencing the coordinator: use create_agent_task only when the
    coordinator has runtime listed; otherwise use create_ai_task with agentRef; omit providerRef unless the user explicitly requests another provider.
 
@@ -417,7 +422,7 @@ const coordinationFallbackHeader = `When no agents exist and the user needs comp
 `
 
 // coordinationFallbackParts says what to use when no agents exist. The last
-// item points to the one-shot pattern, which needs create_agent.
+// item points to the two-stage bootstrap, which needs create_agent.
 func coordinationFallbackParts() []promptPart {
 	return []promptPart{
 		{text: `- For simple commands (e.g., "list pods", "check disk"): use create_container_task
@@ -425,7 +430,7 @@ func coordinationFallbackParts() []promptPart {
 `, requires: []string{promptToolContainerTask}},
 		{text: `- For questions needing reasoning (e.g., "explain this error"): use create_ai_task.
 `, requires: []string{chatCreateAITaskTool}},
-		{text: `- For complex workflows: use the one-shot coordinator pattern above.
+		{text: `- For complex workflows: use existing allowlisted specialists, or the two-stage bootstrap above.
 `, requires: []string{promptToolCreateAgent}},
 	}
 }

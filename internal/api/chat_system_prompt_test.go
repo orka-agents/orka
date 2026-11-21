@@ -207,6 +207,24 @@ func TestBuildCoordinationSection(t *testing.T) {
 	}
 }
 
+func TestBuildCoordinationSectionRequiresExplicitDelegationPolicy(t *testing.T) {
+	s := buildCoordinationSection()
+	for _, want := range []string{
+		"allowedAgents",
+		"Empty or omitted allowedAgents denies delegate_task",
+		"Do not delegate during bootstrap",
+		"NEW Task",
+		"Keep the creation Task",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing delegation-policy guidance %q", want)
+		}
+	}
+	if strings.Contains(s, "PREFERRED (one-shot)") {
+		t.Error("prompt still prescribes unlisted one-shot bootstrap delegation")
+	}
+}
+
 func TestBuildSchedulingSection(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1034,13 +1052,13 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 	}
 	// Coordination guidance for create_agent survives without the other task tools.
 	coordinator := build("create_agent", "create_ai_task")
-	for _, want := range []string{"PREFERRED (one-shot)", "initialPrompt=", "use create_ai_task.", "use the one-shot coordinator pattern above"} {
+	for _, want := range []string{"bootstrap in two stages", "initialPrompt asking", "use create_ai_task.", "use existing allowlisted specialists, or the two-stage bootstrap above"} {
 		if !strings.Contains(coordinator, want) {
 			t.Errorf("create_agent prompt is missing %q", want)
 		}
 	}
-	if aiOnly := build("create_ai_task"); !strings.Contains(aiOnly, "use create_ai_task.") || strings.Contains(aiOnly, "one-shot coordinator") {
-		t.Error("prompt without create_agent must keep the create_ai_task fallback and drop the one-shot pattern")
+	if aiOnly := build("create_ai_task"); !strings.Contains(aiOnly, "use create_ai_task.") || strings.Contains(aiOnly, "two-stage bootstrap") {
+		t.Error("prompt without create_agent must keep the create_ai_task fallback and drop the bootstrap pattern")
 	}
 	// Without a task creation tool, the model must not be told to create tasks.
 	for _, prompt := range []string{build("wait_for_task", "fetch_task_output"), build("list_agents"), build()} {
