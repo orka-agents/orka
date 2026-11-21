@@ -464,7 +464,7 @@ spec:
   timeout: 40m
 ```
 
-The ACP child may edit the materialized checkout, but its Git configuration, refs, hooks, filters, remotes, and history are never trusted for publication. After prompt settlement, the supervisor freezes the session process tree and produces a bounded, content-addressed workspace delta. The separate Workspace/Publisher then:
+The ACP child may edit the materialized checkout, but its Git configuration, refs, hooks, filters, remotes, and history are never trusted for publication. After prompt settlement, the supervisor freezes the session process tree and produces a bounded, content-addressed workspace delta. New files that the repository's `.gitignore` files or `.git/info/exclude` ignore, as they stood before the prompt, are left out of the delta, so build output such as `node_modules/` or Cargo's `target/` is never published; files the repository tracks are always included. The separate Workspace/Publisher then:
 
 1. creates a clean clone at the persisted baseline with the source-read credential;
 2. applies the validated delta;
