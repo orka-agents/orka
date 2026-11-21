@@ -343,6 +343,9 @@ func openCodeInstalled(record string, data []byte, bundle openCodeBundle, destin
 	return err == nil && dataDigest(database) == recorded.Database && holdsFiles(toolOutputDir, bundle.toolOutput)
 }
 
+// sqliteSideFileSuffixes name the files SQLite keeps beside a database.
+var sqliteSideFileSuffixes = []string{"-wal", "-shm", "-journal"}
+
 // writeOpenCodeToolOutput writes the bundled spills into dir, reusing any
 // that already hold exactly their output, and appends what it creates. Each
 // spill is written under a staging name, which no spill name can take since
@@ -431,6 +434,14 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string,
 		}
 		return errors.New("OpenCode state directory already holds a database")
 	}
+	// SQLite applies a write-ahead log or journal it finds beside a database
+	// when it first opens it, so one left from an earlier database would
+	// overwrite the restored conversation.
+	for _, suffix := range sqliteSideFileSuffixes {
+		if _, statErr := os.Lstat(destination + suffix); !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("OpenCode state directory holds %s without a database", filepath.Base(destination+suffix))
+		}
+	}
 	// Installs into this destination run one at a time, so what an install
 	// killed before publishing left behind belongs to no running install. A
 	// retry reuses spills that hold exactly the bundled output and replaces
@@ -441,12 +452,16 @@ func installOpenCode(ctx context.Context, data []byte, dirs Dirs, record string,
 			return err
 		}
 	}
+	// The staging database and its side files are the installer's own, so
+	// a retry replaces what an install killed during relocation left.
 	staged := filepath.Join(root, ".opencode.db.restore")
-	if err = requireRealPathIfPresent(staged, false); err != nil {
-		return err
-	}
-	if err = os.Remove(staged); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	for _, suffix := range append([]string{""}, sqliteSideFileSuffixes...) {
+		if err = requireRealPathIfPresent(staged+suffix, false); err != nil {
+			return err
+		}
+		if err = os.Remove(staged + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	if err = writeNewFile(staged, bundle.database); err != nil {
 		return err

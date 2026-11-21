@@ -849,3 +849,42 @@ func TestOpenCodeInstallRecoversAnInstallKilledBeforePublishing(t *testing.T) {
 		t.Fatal("a refused install changed existing output")
 	}
 }
+
+// A log or journal beside a missing database would be applied to the
+// restored one, so install refuses it; the staging copy's own side files are
+// the installer's and a retry replaces them.
+func TestOpenCodeInstallRefusesAnOrphanedSQLiteLog(t *testing.T) {
+	format, _ := For("opencode")
+	source := newOpenCodeFixture(t)
+	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range sqliteSideFileSuffixes {
+		destination := freshOpenCodeDirs(t)
+		root := filepath.Join(destination.State, "opencode")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeForTest(t, filepath.Join(root, "opencode.db"+suffix), "orphan")
+		if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err == nil {
+			t.Fatalf("install must refuse an orphaned opencode.db%s", suffix)
+		}
+	}
+	destination := freshOpenCodeDirs(t)
+	root := filepath.Join(destination.State, "opencode")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range sqliteSideFileSuffixes {
+		writeForTest(t, filepath.Join(root, ".opencode.db.restore"+suffix), "left by a killed relocation")
+	}
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
+		t.Fatalf("a retry must replace the staging copy's side files: %v", err)
+	}
+	for _, suffix := range sqliteSideFileSuffixes {
+		if _, err := os.Lstat(filepath.Join(root, ".opencode.db.restore"+suffix)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("staging side file %s left behind: %v", suffix, err)
+		}
+	}
+}
