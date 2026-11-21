@@ -156,11 +156,21 @@ func parseIgnoreLine(line string) (ignorePattern, bool) {
 	return pattern, true
 }
 
+// trimUnescapedTrailingSpaces drops trailing spaces unless a backslash quotes
+// them, reading left to right as git does: `foo\\ ` (an escaped backslash
+// and a space) still loses its space.
 func trimUnescapedTrailingSpaces(line string) string {
-	for strings.HasSuffix(line, " ") && !strings.HasSuffix(line, `\ `) {
-		line = line[:len(line)-1]
+	keep := 0
+	for i := 0; i < len(line); i++ {
+		if line[i] == ' ' {
+			continue
+		}
+		if line[i] == '\\' {
+			i++
+		}
+		keep = min(i+1, len(line))
 	}
-	return line
+	return line[:keep]
 }
 
 // matches reports whether relative, a path inside the workspace, is ignored by
