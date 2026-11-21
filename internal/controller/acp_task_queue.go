@@ -1740,9 +1740,13 @@ func (r *TaskReconciler) recordACPRuntimePoolImageProvenance(
 		if expectedUID != "" && current.UID != expectedUID {
 			return store.ValidationErrorf("RuntimePool %s was replaced before image provenance could be recorded", pool.Name)
 		}
-		condition := meta.FindStatusCondition(current.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
-		if condition != nil && condition.Status == metav1.ConditionTrue &&
-			condition.ObservedGeneration == current.Generation && condition.Reason == acpRuntimePoolImageProvenanceReason {
+		// A replica change (each suspend and resume) advances the generation
+		// without touching the immutable image and profile this proves, so a
+		// proof from an earlier generation still holds. Re-stamping it would
+		// write the pool's status at the moment the provider's Ready report
+		// also wakes the pool to admit the resumed runtime, and the pool's
+		// optimistic Serving write would then lose a whole admission pass.
+		if runtimePoolImageProvenanceRecorded(current) {
 			*pool = *current.DeepCopy()
 			return nil
 		}
