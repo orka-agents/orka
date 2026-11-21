@@ -234,6 +234,92 @@ func TestOpenCodeInstallRelocatesEachPathOnceAsJSON(t *testing.T) {
 	}
 }
 
+// Relocation moves only path references: a spill directory that stays put
+// keeps its prefix inside a moved workspace, an absolute path never matches a
+// longer name it prefixes, and the worktree-relative form moves only in tool
+// titles, so a short one never rewrites a record type or a spill name.
+func TestOpenCodeInstallRelocatesOnlyPathReferences(t *testing.T) {
+	format, _ := For("opencode")
+	root := realDir(t)
+	// The source workspace is /<root>/tool and its XDG data directory lives
+	// inside it, as in a container whose state shares the workspace volume.
+	workspace := filepath.Join(root, "tool")
+	state := filepath.Join(workspace, "xdg")
+	spillDir := filepath.Join(state, "opencode", "tool-output")
+	for _, dir := range []string{spillDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeForTest(t, filepath.Join(spillDir, "tool_e5f1b2c3d4"), "spilled")
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(state, "opencode", "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	relative := strings.TrimPrefix(workspace, "/")
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{openCodeSchemaSQL, nil},
+		{`INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('global', '/', 1, 1, '[]')`, nil},
+		{`INSERT INTO session (id, project_id, slug, directory, path, title, version, time_created, time_updated)
+ VALUES (?, 'global', 'crisp-panda', ?, ?, 'Read', '1.19.0', 1, 1)`, []any{openCodeFixtureSession, workspace, relative}},
+		{`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg_assistant', ?, 1, 1, ?)`,
+			[]any{openCodeFixtureSession, `{"role":"assistant","path":{"cwd":"` + workspace + `","root":"/"},"note":"` + workspace + `dir/other"}`}},
+		{`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES ('prt_tool', 'msg_assistant', ?, 1, 1, ?)`,
+			[]any{openCodeFixtureSession, `{"type":"tool","tool":"read","state":{"input":{"filePath":"` + workspace + `/LICENSE"},"metadata":{"outputPath":"` + spillDir + `/tool_e5f1b2c3d4"},"title":"` + relative + `/LICENSE"}}`}},
+	} {
+		if _, err := db.ExecContext(t.Context(), statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := format.Capture(t.Context(), Dirs{State: state, Workspace: workspace}, openCodeFixtureSession, openCodeFixtureLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Install into the same state directory's path on a fresh machine, with
+	// the workspace elsewhere: the spill directory does not move.
+	if err := os.RemoveAll(workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := Dirs{State: state, Workspace: filepath.Join(root, "work")}
+	if err := os.Mkdir(destination.Workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := format.Install(t.Context(), data, destination, realDir(t), openCodeFixtureLimit); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := sql.Open("sqlite", "file:"+filepath.Join(state, "opencode", "opencode.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restored.Close() }()
+	var message, tool string
+	if err := restored.QueryRow(`SELECT data FROM message WHERE id = 'msg_assistant'`).Scan(&message); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.QueryRow(`SELECT data FROM part WHERE id = 'prt_tool'`).Scan(&tool); err != nil {
+		t.Fatal(err)
+	}
+	newRelative := strings.TrimPrefix(destination.Workspace, "/")
+	for _, want := range []string{
+		`"type":"tool"`, `"tool":"read"`, `"filePath":"` + destination.Workspace + `/LICENSE"`,
+		`"outputPath":"` + spillDir + `/tool_e5f1b2c3d4"`, `"title":"` + newRelative + `/LICENSE"`,
+	} {
+		if !strings.Contains(tool, want) {
+			t.Errorf("relocated part lacks %s: %s", want, tool)
+		}
+	}
+	if !strings.Contains(message, `"cwd":"`+destination.Workspace+`"`) || !strings.Contains(message, `"note":"`+workspace+`dir/other"`) {
+		t.Errorf("relocated message moved the wrong paths: %s", message)
+	}
+}
+
 // A developer's database holds every session they ran in every project, and
 // their tool-output directory every session's spills.
 func TestOpenCodeCaptureKeepsOnlyTheSessionFromADeveloperDatabase(t *testing.T) {
@@ -494,7 +580,7 @@ func TestOpenCodeInstallBoundsRelocationGrowth(t *testing.T) {
 	source := newOpenCodeFixture(t)
 	// Many references to the old workspace, each of which grows when the
 	// new workspace path is much longer.
-	source.exec(t, `UPDATE part SET data = ?`, strings.Repeat(source.dirs.Workspace+" ", 6000))
+	source.exec(t, `UPDATE part SET data = ?`, strings.Repeat(source.dirs.Workspace+"/x ", 6000))
 	const limit = 128 << 10
 	data, err := format.Capture(t.Context(), source.dirs, openCodeFixtureSession, limit)
 	if err != nil {
@@ -779,11 +865,16 @@ func TestBoundedBufferStopsAReplacementAtItsLimit(t *testing.T) {
 // Entry names that could leave a directory are refused while reading, even
 // when the format would accept them.
 func TestReadBundleRefusesTraversingEntryNames(t *testing.T) {
-	for _, name := range []string{"../escape", "tool-output/../../escape", `tool-output\escape`, "a..b"} {
+	for _, name := range []string{"../escape", "tool-output/../../escape", `tool-output\escape`, "/absolute", ""} {
 		data := tarGzipForTest(t, map[string][]byte{bundleManifestEntry: []byte("{}"), name: []byte("x")})
 		if _, _, err := readBundle(data, 1<<20, func(string) bool { return true }); err == nil {
 			t.Errorf("%q: entry name must be refused", name)
 		}
+	}
+	// A name merely holding two dots is left to the format to judge.
+	data := tarGzipForTest(t, map[string][]byte{bundleManifestEntry: []byte("{}"), "tool-results/toolu_a..b.txt": []byte("x")})
+	if _, _, err := readBundle(data, 1<<20, func(string) bool { return true }); err != nil {
+		t.Errorf("a name holding two dots must be read: %v", err)
 	}
 }
 
@@ -886,5 +977,49 @@ func TestOpenCodeInstallRefusesAnOrphanedSQLiteLog(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(root, ".opencode.db.restore"+suffix)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("staging side file %s left behind: %v", suffix, err)
 		}
+	}
+}
+
+// A short worktree-relative path, such as "tool" for /tool, moves only in
+// tool titles: a record type or a spill name holding it stays the same.
+func TestRelocateOpenCodeSessionMovesTheRelativePathOnlyInTitles(t *testing.T) {
+	path := filepath.Join(realDir(t), "opencode.db")
+	db, err := openSQLite(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{openCodeSchemaSQL, nil},
+		{`INSERT INTO project (id, worktree, time_created, time_updated, sandboxes) VALUES ('global', '/', 1, 1, '[]')`, nil},
+		{`INSERT INTO session (id, project_id, slug, directory, path, title, version, time_created, time_updated)
+ VALUES (?, 'global', 'crisp-panda', '/tool', 'tool', 'Read', '1.19.0', 1, 1)`, []any{openCodeFixtureSession}},
+		{`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg_a', ?, 1, 1, '{"role":"assistant"}')`, []any{openCodeFixtureSession}},
+		{`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES ('prt_tool', 'msg_a', ?, 1, 1, ?)`,
+			[]any{openCodeFixtureSession, `{"type":"tool","state":{"input":{"filePath":"/tool/LICENSE"},"metadata":{"outputPath":"/data/opencode/tool-output/tool_123"},"title":"tool/LICENSE"}}`}},
+	} {
+		if _, err := db.ExecContext(t.Context(), statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	manifest := openCodeManifest{SessionID: openCodeFixtureSession, Workspace: "/tool", ToolOutputDir: "/data/opencode/tool-output"}
+	if err := relocateOpenCodeSession(t.Context(), path, manifest, "/work", "/state/opencode/tool-output", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openSQLite(path, "mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var data string
+	if err := db.QueryRowContext(t.Context(), `SELECT data FROM part WHERE id = 'prt_tool'`).Scan(&data); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"type":"tool","state":{"input":{"filePath":"/work/LICENSE"},"metadata":{"outputPath":"/state/opencode/tool-output/tool_123"},"title":"work/LICENSE"}}`
+	if data != want {
+		t.Fatalf("relocated part = %s, want %s", data, want)
 	}
 }

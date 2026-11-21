@@ -208,7 +208,10 @@ starts the next turn in a fresh RuntimeSession when the controller keeps native
 Sessions, so the idle-adapter restart below applies only when it does not. A
 failed or cancelled turn saves nothing: the Session carries its previous
 checkpoint forward, so the next turn resumes without the unfinished turn's
-partial history.
+partial history. If a Session's first capture is unsupported or exceeds the
+size limit, Orka saves no checkpoint, records a `NativeSessionCaptureSkipped`
+warning, and continues from the canonical transcript. Once a Session has a
+checkpoint, such a capture blocks settlement instead.
 
 When the agent advertises `sessionCapabilities.close`, Orka sends
 `session/close` before the bounded process stop on deletion. When an adapter

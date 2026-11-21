@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -112,9 +113,9 @@ func readBundleArchive(compressed io.Reader, budget int64, accept func(name stri
 		if err != nil {
 			return nil, errors.New("native session bundle archive is invalid")
 		}
-		// Accepted names are single path elements; refuse traversal here as
-		// well, before any name reaches a caller that joins it to a directory.
-		if strings.Contains(header.Name, "..") || strings.ContainsRune(header.Name, '\\') {
+		// Refuse traversal before any name reaches a caller that joins it to
+		// a directory. Each format then validates the names it accepts.
+		if !filepath.IsLocal(header.Name) || strings.ContainsRune(header.Name, '\\') {
 			return nil, errors.New("native session bundle entry is invalid")
 		}
 		if _, seen := files[header.Name]; seen || header.Typeflag != tar.TypeReg || header.Size < 0 || read+header.Size > budget {

@@ -966,20 +966,29 @@ func relocateOpenCodeSession(ctx context.Context, path string, manifest openCode
 		}
 	}
 	// Each path moves in one pass over its JSON-encoded form, so a moved path
-	// is never matched again and a path holding a quote stays valid JSON.
-	// Absolute paths come first, the longer one first, so where two match the
-	// more specific one wins; the worktree-relative form OpenCode uses in tool
-	// titles matches only where no absolute path does.
-	moves := [][2]string{{directory, workspace}, {manifest.ToolOutputDir, toolOutputDir}, {previousPath, sessionPath.String}}
+	// is never matched again and a path holding a quote stays valid JSON. An
+	// absolute path matches only where a path ends or continues, so /src never
+	// rewrites /srcdir, and the longer one comes first, so where two overlap
+	// the more specific one wins; one that stays put maps to itself, so a
+	// spill directory inside the old workspace keeps its prefix. The
+	// worktree-relative form OpenCode uses in tool titles moves only there,
+	// so a short one never rewrites a record type or a spill name.
+	absolute := [][2]string{{directory, workspace}, {manifest.ToolOutputDir, toolOutputDir}}
 	if len(manifest.ToolOutputDir) > len(directory) {
-		moves[0], moves[1] = moves[1], moves[0]
+		absolute[0], absolute[1] = absolute[1], absolute[0]
 	}
 	var replacements []string
-	for _, move := range moves {
-		if move[0] == "" || move[0] == move[1] {
-			continue
+	for _, move := range absolute {
+		from, to := string(jsonStringContent(move[0])), string(jsonStringContent(move[1]))
+		for _, end := range []string{"/", `"`} {
+			replacements = append(replacements, from+end, to+end)
 		}
-		replacements = append(replacements, string(jsonStringContent(move[0])), string(jsonStringContent(move[1])))
+	}
+	if previousPath != "" && previousPath != sessionPath.String {
+		from, to := `"title":"`+string(jsonStringContent(previousPath)), `"title":"`+string(jsonStringContent(sessionPath.String))
+		for _, end := range []string{"/", `"`} {
+			replacements = append(replacements, from+end, to+end)
+		}
 	}
 	if len(replacements) > 0 {
 		if err := relocateOpenCodeRows(ctx, tx, strings.NewReplacer(replacements...), int64(budget)); err != nil {
