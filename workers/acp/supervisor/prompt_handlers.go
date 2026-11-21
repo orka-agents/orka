@@ -1083,9 +1083,15 @@ func (s *Server) handleCancelPrompt(w http.ResponseWriter, r *http.Request) {
 			"errorClass", promptStreamErrorClass(cancelErr), "deadlineExceeded", errors.Is(cancelErr, context.DeadlineExceeded))
 	}
 	settlement := settlementFromResult(result, time.Now().UTC())
+	inferenceFailure := providerProxy.codexCancelFailure(cancelCtx, string(request.Metadata.PromptID), settlement)
 	forced := cancelErr != nil && result.Outcome == acp.PromptOutcomeOutcomeUnknown
 
 	s.mu.Lock()
+	if inferenceFailure != nil && prompt.settlement == nil {
+		result.Outcome, result.StopReason = acp.PromptOutcomeFailed, acp.StopReasonRefusal
+		settlement = settlementFromResult(result, settlement.SettledAt)
+		prompt.cancelInferenceFailure = inferenceFailure
+	}
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)
 	if settlement.TerminalEvent != harnessv2.EventOutcomeUnknown {
 		forced = false
@@ -2349,6 +2355,7 @@ func (s *Server) terminalEvent(
 	effective := result
 	if prompt.settlement != nil {
 		effective = promptResultFromSettlement(*prompt.settlement)
+		effective.Err = prompt.cancelInferenceFailure
 	} else {
 		effective = providerTurnLimitResult(state, prompt, effective)
 		// Drain-timeout is checked before recorded upstream failures: when a

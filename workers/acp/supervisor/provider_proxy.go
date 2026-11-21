@@ -71,6 +71,9 @@ type ProviderProxyConfig struct {
 	UpstreamBearerToken   string
 	ProviderKind          string
 	Model                 string
+	Codex429RetryBaseURL  string
+	Codex429RetryModel    string
+	codex429RouteID       string
 	MaxRequestBytes       int64
 	MaxResponseBytes      int64
 	ResponseHeaderTimeout time.Duration
@@ -99,6 +102,7 @@ type providerProxy struct {
 	upstreamToken    []byte
 	providerKind     string
 	model            string
+	codex429RouteID  string
 	maxRequestBytes  int64
 	maxResponseBytes int64
 	modelOutputLimit int64
@@ -157,16 +161,17 @@ type providerProxySession struct {
 	firstInferenceResponseStartedAt time.Time
 	lastSuccessSeq                  uint64
 	lastFailureSeq                  uint64
+	lastCodexRejectionSeq           uint64
 	lastUpstreamStatus              int
 	lastUpstreamDetail              string
-	// admissionClosed rejects new requests for the active prompt once the
-	// ACP child has settled its turn, while in-flight relays keep their
-	// gate context and drain normally.
-	admissionClosed bool
-	inflight        int
-	drained         chan struct{}
-	closed          bool
-	requestSlots    chan struct{}
+	// Closing admission wakes pending retries without cancelling a response
+	// still draining to the child.
+	admissionDone       chan struct{} // nil once closed
+	pendingCodexRetries map[*codexRetryDispatch]struct{}
+	inflight            int
+	drained             chan struct{}
+	closed              bool
+	requestSlots        chan struct{}
 	// telemetry is the GenAI recorder of telemetryPromptID; chats holds its
 	// in-flight model calls by issuance sequence so accounted outcomes reach
 	// their chat spans. Both are nil when GenAI telemetry is disabled.
@@ -215,6 +220,12 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy kind and model are required")
 	}
 	c.UpstreamBaseURL = parsed.String()
+	if c.ProviderKind == providerKindCodex {
+		c.codex429RouteID, err = providerproxy.Codex429FrontendID(c.UpstreamBaseURL, c.Model, c.Codex429RetryBaseURL, c.Codex429RetryModel)
+		if err != nil {
+			return ProviderProxyConfig{}, nil, err
+		}
+	}
 	c.UpstreamBearerToken = normalizeBearerToken(c.UpstreamBearerToken)
 	if c.UpstreamBearerToken == "" || strings.IndexFunc(c.UpstreamBearerToken, func(value rune) bool { return value <= ' ' || value == 0x7f }) >= 0 {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream bearer token is required")
@@ -287,6 +298,7 @@ func newProviderProxy(cfg ProviderProxyConfig) (*providerProxy, error) {
 		upstreamToken:    []byte(normalized.UpstreamBearerToken),
 		providerKind:     normalized.ProviderKind,
 		model:            normalized.Model,
+		codex429RouteID:  normalized.codex429RouteID,
 		maxRequestBytes:  normalized.MaxRequestBytes,
 		maxResponseBytes: normalized.MaxResponseBytes,
 		modelOutputLimit: normalized.ModelOutputLimit,
@@ -387,13 +399,14 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.maxTurns = maxTurns
 	s.inferenceRequests = 0
 	s.turnLimitExceeded = false
-	s.admissionClosed = false
+	s.admissionDone = make(chan struct{})
 	s.inferenceSuccesses = 0
 	s.inferenceFailures = 0
 	s.issuedInference = 0
 	s.firstInferenceResponseStartedAt = time.Time{}
 	s.lastSuccessSeq = 0
 	s.lastFailureSeq = 0
+	s.lastCodexRejectionSeq = 0
 	s.lastUpstreamStatus = 0
 	s.lastUpstreamDetail = ""
 	// Issuance sequences restart per prompt; a previous prompt's late chat
@@ -441,7 +454,18 @@ func (s *providerProxySession) closeAdmission(promptID string) {
 	if s.activePromptID != strings.TrimSpace(promptID) {
 		return
 	}
-	s.admissionClosed = true
+	s.closeAdmissionLocked()
+}
+
+func (s *providerProxySession) closeAdmissionLocked() {
+	if s.admissionDone != nil {
+		close(s.admissionDone)
+		s.admissionDone = nil
+	}
+	for dispatch := range s.pendingCodexRetries {
+		dispatch.cancel()
+	}
+	clear(s.pendingCodexRetries)
 }
 
 func (s *providerProxySession) deactivate(promptID string) {
@@ -482,6 +506,7 @@ func (s *providerProxySession) revokeLocked() {
 		s.gateCancel(nil)
 		s.gateCancel = nil
 	}
+	s.closeAdmissionLocked()
 	s.gateContext = nil
 	s.activePromptID = ""
 	s.leaseExpiresAt = time.Time{}
@@ -567,7 +592,7 @@ func (s *providerProxySession) authorize(r *http.Request, class providerRequestC
 		}
 		return providerProxyAuthorization{gateContext: s.revokedGate}, false
 	}
-	if s.admissionClosed {
+	if s.admissionDone == nil {
 		return providerProxyAuthorization{}, false
 	}
 	if s.inflight == 0 {
@@ -653,11 +678,18 @@ func (s *providerProxySession) releaseInferenceRequest(class providerRequestClas
 // classification, so they must not convert a completed prompt into a
 // provider failure.
 func (s *providerProxySession) waitInference(ctx context.Context) error {
+	return s.waitPromptInference(ctx, "")
+}
+
+func (s *providerProxySession) waitPromptInference(ctx context.Context, promptID string) error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	drained := s.drainedInference
+	if promptID != "" && s.turnPromptID != promptID {
+		drained = nil
+	}
 	s.mu.Unlock()
 	if drained == nil {
 		return nil
@@ -1041,6 +1073,9 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(http.StatusForbidden, "provider request is outside the immutable profile")
 		return
 	}
+	// Normalization can collapse duplicate model/stream keys. Qualification
+	// must check what the child submitted, not only the rewritten request.
+	originalBody := body
 	body, err = normalizeProviderRequestBody(p.providerKind, p.model, suffix, p.modelOutputLimit, body)
 	if err != nil {
 		reject(http.StatusForbidden, "provider request is outside the immutable profile")
@@ -1078,6 +1113,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providerproxy.CopyRequestHeaders(upstreamRequest.Header, r.Header)
+	p.setCodex429Challenge(upstreamRequest, r, originalBody)
 	upstreamRequest.Header.Set(providerAuthorizationHeader, "Bearer "+string(p.upstreamToken))
 	upstreamRequest.Header.Set("Accept-Encoding", "identity")
 	if session.foundry != nil {
@@ -1092,22 +1128,61 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		upstreamRequest.Header.Set(foundryContextHeader, trustedContext)
 	}
 
-	response, err := p.client.Do(upstreamRequest)
+	session.forwardProviderRequest(w, upstreamRequest, suffix, body, requestClass, authorization, waitForCancellation)
+}
+
+func (s *providerProxySession) forwardProviderRequest(
+	w http.ResponseWriter, req *http.Request, suffix string, body []byte,
+	class providerRequestClass, auth providerProxyAuthorization, waitForCancellation func(error),
+) {
+	ctx := req.Context()
+	codexResponsesPost := s.proxy.providerKind == providerKindCodex && class == providerRequestInference &&
+		req.Method == http.MethodPost && req.URL.RawQuery == "" && (suffix == providerResponsesPath || suffix == providerOpenAIResponsesV1Path)
+	var response *http.Response
+	var err error
+	if codexResponsesPost {
+		// A rewindable POST with a caller's (X-)Idempotency-Key can be
+		// retried by net/http on a reused connection without a response.
+		req.GetBody = nil
+		deadline := time.Now().Add(codexInferenceRetryWindow)
+		var result *codexInferenceResponse
+		result, err = s.sendCodexInference(req, nil, time.Time{})
+		if err == nil && result.StatusCode == http.StatusTooManyRequests {
+			defer s.retainUnrecoveredCodexRejection(auth)
+			if s.confirmedCodexRejection(req, result.Response) {
+				result, err = s.retryRejectedCodexInference(req, body, result, auth.gateContext, deadline)
+				if err == nil && result.StatusCode >= http.StatusBadRequest {
+					timer := time.AfterFunc(time.Until(deadline), result.cancel)
+					defer timer.Stop()
+					// A deadline can shorten the error body, never its HTTP status.
+					result.Header.Del("Content-Length")
+					result.Body = codexRetryErrorBody{result.Body, result.ctx}
+					writer := http.NewResponseController(w)
+					writeBudget := max(0, time.Until(deadline)) + codexErrorWriteGrace
+					_ = writer.SetWriteDeadline(time.Now().Add(writeBudget))
+					defer func() { _ = writer.SetWriteDeadline(time.Time{}) }()
+				}
+			}
+		}
+		if err == nil {
+			defer result.cancel()
+			response = result.Response
+		}
+	} else {
+		response, err = s.proxy.client.Do(req)
+	}
 	if err != nil {
-		// A transport failure is upstream evidence only while the child's
-		// request is still wanted. When the child (or the prompt gate)
-		// cancelled before headers arrived, nothing about the upstream was
-		// learned, so the sequence is left unaccounted rather than turning a
-		// speculative request the child abandoned into a prompt failure.
-		if requestContext.Err() == nil {
-			session.recordInferenceOutcome(authorization.promptID, requestClass, inferenceSeq, http.StatusBadGateway, providerUpstreamTransportFailure)
+		// Cancelling a transport before headers supplies no new upstream
+		// evidence. Only a live request accounts a transport failure.
+		if ctx.Err() == nil {
+			s.recordInferenceOutcome(auth.promptID, class, auth.inferenceSeq, http.StatusBadGateway, providerUpstreamTransportFailure)
 		}
 		waitForCancellation(err)
 		providerproxy.WriteError(w, http.StatusBadGateway, providerUpstreamTransportFailure)
 		return
 	}
 	defer response.Body.Close() //nolint:errcheck
-	p.relayUpstreamResponseWithCancellation(requestContext, w, session, authorization.promptID, requestClass, inferenceSeq, response, waitForCancellation)
+	s.proxy.relayUpstreamResponseWithCancellation(ctx, w, s, auth.promptID, class, auth.inferenceSeq, response, waitForCancellation)
 }
 
 // newProviderProxyRequestContext revokes the upstream transport immediately.

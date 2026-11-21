@@ -378,6 +378,9 @@ type promptState struct {
 	untaggedOverflow bool
 	settlement       *harnessv2.PromptSettlement
 	settlementDigest string
+	// Only the bounded supervisor classification, never a raw child error.
+	// PromptSettlement does not carry the terminal event's failure detail.
+	cancelInferenceFailure error
 	// providerDrainTimedOut records that an admitted inference request was
 	// still in flight when the child settled and did not finish within the
 	// cancel grace, so the prompt's inference accounting is incomplete.
