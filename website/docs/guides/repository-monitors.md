@@ -441,6 +441,33 @@ Evidence limits:
 
 The repair Task's prompt freezes the evidence for that attempt. If Orka retries the handoff after the Task was created, it reuses the evidence in the Task's prompt rather than reading GitHub again. The repair work action's metadata records `ciEvidenceDigest`, `ciEvidenceIDs`, and `ciEvidenceAvailability`, and so does the `repair_task_created` monitor event. Reading check runs and annotations uses the `forgeCredentialRef` token and needs Checks read access.
 
+#### GitHub Actions log excerpts
+
+Set `spec.repair.ciEvidence.logs: true` to also add an excerpt of each failed GitHub Actions job's log to the check's `log` field. It is off by default, and independent of `text`: the excerpt is stored in the repair Task's `spec.prompt`, which anyone who can read Tasks in the monitor's namespace can see, and it is sent to the model provider of the repairer agent. Opting in can expose credentials that GitHub does not mask. Orka redacts the credential shapes it recognizes, with the same known limits as check text, so turn it on only where Task readers and the model provider may see your CI output.
+
+```yaml
+spec:
+  repair:
+    enabled: true
+    ciEvidence:
+      logs: true
+```
+
+Only check runs from the `github-actions` app get a log. Orka reads the job to confirm it ran on the exact head and to name its failed step (`failedStep`), then reads the job log. GitHub answers with a redirect to a signed download URL; Orka follows it once, by hand, without the GitHub token or any other credentials, refuses a further redirect, and connects only to public addresses. The signed URL is never logged or stored.
+
+Orka keeps the window around the last `##[error]` line before post-job cleanup (`excerptKind: last_error`), or the last lines before cleanup when there is none (`tail`). Timestamps, ANSI escapes, and `##[group]`/`##[endgroup]` markers are removed, a line that progress output rewrote with carriage returns keeps only its final text, and the excerpt is sanitized like the rest of the evidence. A credential's multi-line value, such as a YAML block, a quoted value, or a PEM block, is followed as the log streams, so its lines stay withheld even when its key line falls outside the excerpt's window. Where the end of a value is uncertain, the excerpt fails closed: a quoted value still open after 64 lines, or a PEM block or quoted value the log or read ends in, withholds every later line, and the excerpt is `truncated` with reason `log_credential_value_withheld`. A line longer than the raw line limit is shown only up to its head, but its whole text is followed for these values, and the lines indented deeper than it are withheld as the value of a key its dropped tail may hold. When the log is longer than the read limit, or the read fails before the end of the log is confirmed, `readTruncated` is set and the kind becomes `error_in_read_portion` or `tail_of_read_portion`: the excerpt is not necessarily the job's last error. A log with no lines to excerpt is `unavailable` with reason `log_empty`.
+
+Reading logs needs Actions read access for `forgeCredentialRef` (fine-grained tokens: Actions read; classic tokens: `repo`). Without it, the log's `availability` is `unavailable` with a reason such as `github_api_status_403`, and the repair still runs with the rest of the evidence.
+
+| Log limit | Value |
+| --- | --- |
+| Checks with a log | 3 (later checks name `log_check_limit`) |
+| Log read | 8 MiB |
+| Raw line | 4 KiB; a longer line keeps its head |
+| Excerpt | 40 lines and 3 KiB; each line at most 320 bytes |
+| All excerpts | 8 KiB |
+| Time | 10 seconds per request, 20 seconds for all logs |
+
 ### Pull requests from forks
 
 By default, repairs only push to branches in the monitored repository, and a PR from a fork is blocked with `fork_pr_repair_not_writable`. Set `spec.repair.allowForkPullRequests: true` to also repair fork PRs whose authors [allow edits from maintainers](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/allowing-changes-to-a-pull-request-branch-created-from-a-fork). The repair Task then clones the fork and publishes to the fork's head branch, with the same exact-head and `VerifiedExact` checks. If the author turns maintainer edits off, the repair is blocked with `fork_pr_maintainer_edits_disabled`.

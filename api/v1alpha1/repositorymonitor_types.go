@@ -525,7 +525,8 @@ type RepositoryMonitorRepairSpec struct {
 // repair prompts carry. By default, evidence is structured only: check
 // names, apps, statuses, conclusions, and IDs; annotation paths, lines, and
 // levels; commit status contexts and states; and links to the monitored
-// repository's GitHub check runs and Actions jobs.
+// repository's GitHub check runs and Actions jobs. Text and Logs add CI
+// output independently of each other.
 type RepositoryMonitorRepairCIEvidenceSpec struct {
 	// Text adds the free text of failing checks to fix_ci repair prompts:
 	// check run output titles and summaries, annotation titles and messages,
@@ -537,6 +538,16 @@ type RepositoryMonitorRepairCIEvidenceSpec struct {
 	// +kubebuilder:default=false
 	// +optional
 	Text bool `json:"text,omitempty"`
+	// Logs adds bounded, redacted excerpts of failed GitHub Actions job logs
+	// to fix_ci repair prompts. Redaction cannot recognize every credential,
+	// and excerpts are stored in the repair Task's spec.prompt, which anyone
+	// who can read Tasks in the monitor namespace can see, and sent to the
+	// model provider, so they are off by default. Reading logs needs Actions
+	// read access for forgeCredentialRef; without it, evidence names the
+	// reason.
+	// +kubebuilder:default=false
+	// +optional
+	Logs bool `json:"logs,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.
