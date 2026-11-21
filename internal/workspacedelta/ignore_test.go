@@ -42,8 +42,19 @@ func TestIgnoreRulesMatchGitignoreSemantics(t *testing.T) {
 		{name: "trailing spaces trimmed", rules: map[string]string{"": "dist   \n"}, path: "dist", isDir: true, ignore: true},
 		{name: "crlf", rules: map[string]string{"": "dist\r\n"}, path: "dist", isDir: true, ignore: true},
 		{name: "bom", rules: map[string]string{"": utf8ByteOrderMk + "dist\n"}, path: "dist", isDir: true, ignore: true},
-		{name: "posix class dropped", rules: map[string]string{"": "[[:alpha:]]\n"}, path: "a]"},
-		{name: "bad pattern dropped", rules: map[string]string{"": "[\n"}, path: "["},
+		{name: "posix class", rules: map[string]string{"": "[[:digit:]].log\n"}, path: "1.log", ignore: true},
+		{name: "posix class no match", rules: map[string]string{"": "[[:digit:]].log\n"}, path: "a.log"},
+		{name: "posix class negated", rules: map[string]string{"": "[![:upper:]]x\n"}, path: "ax", ignore: true},
+		{name: "unknown posix class dropped", rules: map[string]string{"": "[[:nope:]]\n"}, path: "n"},
+		{name: "unclosed bracket dropped", rules: map[string]string{"": "[\n"}, path: "["},
+		{name: "dangling backslash dropped", rules: map[string]string{"": "a\\\n"}, path: "a"},
+		{name: "bracket range", rules: map[string]string{"": "v[0-3].bin\n"}, path: "v2.bin", ignore: true},
+		{name: "bracket leading close", rules: map[string]string{"": "[]x]y\n"}, path: "]y", ignore: true},
+		{name: "escaped star literal", rules: map[string]string{"": "a\\*b\n"}, path: "axb"},
+		{name: "star backtracks", rules: map[string]string{"": "a*b*c\n"}, path: "aXbYbZc", ignore: true},
+		{name: "question mark is one byte", rules: map[string]string{"": "?.txt\n"}, path: "\u00e9.txt"},
+		{name: "two question marks match a two byte rune", rules: map[string]string{"": "??.txt\n"}, path: "\u00e9.txt", ignore: true},
+		{name: "bracket is one byte", rules: map[string]string{"": "[\u00e9].txt\n"}, path: "\u00e9.txt"},
 		{name: "nested gitignore scoped", rules: map[string]string{"pkg": "gen/\n"}, path: "gen", isDir: true},
 		{name: "nested gitignore applies below", rules: map[string]string{"pkg": "gen/\n"}, path: "pkg/a/gen", isDir: true, ignore: true},
 		{name: "nested anchored relative to its dir", rules: map[string]string{"pkg": "/gen\n"}, path: "pkg/gen", isDir: true, ignore: true},
@@ -76,6 +87,31 @@ func TestMatchIgnoreSegmentsStaysLinearOnManyDoubleStars(t *testing.T) {
 	parts := strings.Split(strings.Repeat("a/", 1500)+"c", "/")
 	if matchIgnoreSegments(pattern[0].segments, parts) {
 		t.Fatal("pattern unexpectedly matched")
+	}
+}
+
+func TestOversizedIgnoreRulesFallBackToFullCapture(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content string
+	}{
+		{name: "too many patterns", content: strings.Repeat("x\n", maxIgnorePatterns) + "dist/\n"},
+		{name: "too many bytes", content: "dist/\n#" + strings.Repeat("x", maxIgnoreSourceBytes)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, root, ".gitignore", test.content, 0o644)
+			baseline := captureTestBaseline(t, root, Options{})
+			if baseline.ignore != nil {
+				t.Fatal("oversized ignore files produced rules")
+			}
+			writeTestFile(t, root, "dist/a.js", "a\n", 0o644)
+			result, err := Build(baseline, root, IntentWrite)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			assertChangedPaths(t, result, "dist", "dist/a.js")
+		})
 	}
 }
 

@@ -18,10 +18,17 @@ const (
 	gitignoreName   = ".gitignore"
 	gitInfoExclude  = ".git/info/exclude"
 	utf8ByteOrderMk = "\xef\xbb\xbf"
+
+	// A baseline whose ignore files exceed these bounds gets no ignore rules,
+	// so the capture keeps today's full walk instead of spending unbounded
+	// time matching every path against them.
+	maxIgnoreSourceBytes = 1 << 20
+	maxIgnorePatterns    = 10_000
 )
 
-// ignorePattern is one parsed gitignore(5) line. segments are path.Match
-// patterns, with "**" standing for any number of whole path components.
+// ignorePattern is one parsed gitignore(5) line. segments are git wildmatch
+// patterns for single path components (see globMatch), with "**" standing
+// for any number of whole components.
 type ignorePattern struct {
 	segments []string
 	negate   bool
@@ -57,20 +64,28 @@ func collectIgnoreRules(baseline *Snapshot, entries map[string]entry, retained b
 		return nil
 	}
 	rules := &ignoreRules{byDir: make(map[string][]ignorePattern)}
-	found := false
+	var sourceBytes, patternCount int
 	for relative, current := range entries {
 		if current.kind != EntryFile || !isIgnoreSource(relative, current.protected) {
 			continue
 		}
-		patterns := parseIgnorePatterns(current.content)
+		content := current.content
 		if !retained {
 			current.content = nil
 			entries[relative] = current
 		}
+		sourceBytes += len(content)
+		if sourceBytes > maxIgnoreSourceBytes {
+			return nil
+		}
+		patterns := parseIgnorePatterns(content)
+		patternCount += len(patterns)
+		if patternCount > maxIgnorePatterns {
+			return nil
+		}
 		if len(patterns) == 0 {
 			continue
 		}
-		found = true
 		if relative == gitInfoExclude {
 			rules.exclude = patterns
 			continue
@@ -81,7 +96,7 @@ func collectIgnoreRules(baseline *Snapshot, entries map[string]entry, retained b
 		}
 		rules.byDir[dir] = patterns
 	}
-	if !found {
+	if patternCount == 0 {
 		return nil
 	}
 	return rules
@@ -122,7 +137,7 @@ func parseIgnoreLine(line string) (ignorePattern, bool) {
 		line = "**/" + line
 	}
 	line = strings.TrimPrefix(line, "/")
-	if line == "" || line == "**/" || strings.Contains(line, "[:") {
+	if line == "" || line == "**/" {
 		return ignorePattern{}, false
 	}
 	for segment := range strings.SplitSeq(line, "/") {
@@ -133,11 +148,7 @@ func parseIgnoreLine(line string) (ignorePattern, bool) {
 			pattern.segments = append(pattern.segments, segment)
 			continue
 		}
-		segment = strings.ReplaceAll(segment, "[!", "[^")
-		if segment == "" {
-			return ignorePattern{}, false
-		}
-		if _, err := path.Match(segment, ""); err != nil {
+		if segment == "" || !validGlob(segment) {
 			return ignorePattern{}, false
 		}
 		pattern.segments = append(pattern.segments, segment)
@@ -184,9 +195,10 @@ func matchIgnoreSegments(pattern, parts []string) bool {
 	// reach[j] reports whether the pattern prefix consumed so far can end
 	// right before parts[j].
 	reach := make([]bool, len(parts)+1)
+	next := make([]bool, len(parts)+1)
 	reach[0] = true
 	for i, segment := range pattern {
-		next := make([]bool, len(parts)+1)
+		clear(next)
 		if segment == "**" {
 			trailing := i == len(pattern)-1
 			seen := false
@@ -201,14 +213,174 @@ func matchIgnoreSegments(pattern, parts []string) bool {
 		} else {
 			for j := 1; j <= len(parts); j++ {
 				if reach[j-1] {
-					ok, err := path.Match(segment, parts[j-1])
-					next[j] = ok && err == nil
+					next[j] = globMatch(segment, parts[j-1])
 				}
 			}
 		}
-		reach = next
+		reach, next = next, reach
 	}
 	return reach[len(parts)]
+}
+
+// globMatch matches one path component against one pattern component byte by
+// byte, as git's wildmatch does: '*' matches any run of bytes, '?' one byte,
+// '[...]' one byte from a set (ranges, '!' or '^' negation, POSIX classes),
+// and '\' makes the next byte literal. Patterns are checked by validGlob when
+// parsed.
+func globMatch(pattern, name string) bool {
+	p, n := 0, 0
+	starP, starN := -1, 0
+	for n < len(name) {
+		if p < len(pattern) {
+			switch c := pattern[p]; c {
+			case '*':
+				for p < len(pattern) && pattern[p] == '*' {
+					p++
+				}
+				starP, starN = p, n
+				continue
+			case '?':
+				p++
+				n++
+				continue
+			case '[':
+				if matched, width, ok := matchBracket(pattern[p:], name[n]); ok && matched {
+					p += width
+					n++
+					continue
+				}
+			case '\\':
+				if p+1 < len(pattern) && pattern[p+1] == name[n] {
+					p += 2
+					n++
+					continue
+				}
+			default:
+				if c == name[n] {
+					p++
+					n++
+					continue
+				}
+			}
+		}
+		if starP < 0 {
+			return false
+		}
+		starN++
+		p, n = starP, starN
+	}
+	for p < len(pattern) && pattern[p] == '*' {
+		p++
+	}
+	return p == len(pattern)
+}
+
+// validGlob reports whether every bracket expression in pattern is closed and
+// uses known classes, and no backslash is left dangling. Git matches nothing
+// for such patterns, so they are dropped.
+func validGlob(pattern string) bool {
+	for p := 0; p < len(pattern); p++ {
+		switch pattern[p] {
+		case '\\':
+			if p+1 == len(pattern) {
+				return false
+			}
+			p++
+		case '[':
+			_, width, ok := matchBracket(pattern[p:], 0)
+			if !ok {
+				return false
+			}
+			p += width - 1
+		}
+	}
+	return true
+}
+
+// matchBracket matches b against the bracket expression at the start of
+// pattern and returns the expression's width; ok is false when it is malformed.
+func matchBracket(pattern string, b byte) (matched bool, width int, ok bool) {
+	i := 1
+	negate := false
+	if i < len(pattern) && (pattern[i] == '!' || pattern[i] == '^') {
+		negate = true
+		i++
+	}
+	for first := true; ; first = false {
+		if i >= len(pattern) {
+			return false, 0, false
+		}
+		c := pattern[i]
+		if c == ']' && !first {
+			return matched != negate, i + 1, true
+		}
+		if c == '[' && i+1 < len(pattern) && pattern[i+1] == ':' {
+			end := strings.Index(pattern[i+2:], ":]")
+			if end < 0 {
+				return false, 0, false
+			}
+			in, known := posixClass(pattern[i+2:i+2+end], b)
+			if !known {
+				return false, 0, false
+			}
+			matched = matched || in
+			i += end + 4
+			continue
+		}
+		lo, next, ok := bracketByte(pattern, i)
+		if !ok {
+			return false, 0, false
+		}
+		hi := lo
+		if next+1 < len(pattern) && pattern[next] == '-' && pattern[next+1] != ']' {
+			if hi, next, ok = bracketByte(pattern, next+1); !ok {
+				return false, 0, false
+			}
+		}
+		matched = matched || (lo <= b && b <= hi)
+		i = next
+	}
+}
+
+func bracketByte(pattern string, i int) (value byte, next int, ok bool) {
+	if pattern[i] != '\\' {
+		return pattern[i], i + 1, true
+	}
+	if i+1 >= len(pattern) {
+		return 0, 0, false
+	}
+	return pattern[i+1], i + 2, true
+}
+
+func isUpperByte(b byte) bool { return 'A' <= b && b <= 'Z' }
+func isLowerByte(b byte) bool { return 'a' <= b && b <= 'z' }
+func isDigitByte(b byte) bool { return '0' <= b && b <= '9' }
+func isGraphByte(b byte) bool { return 0x21 <= b && b <= 0x7e }
+func isAlphaByte(b byte) bool { return isUpperByte(b) || isLowerByte(b) }
+func isAlnumByte(b byte) bool { return isAlphaByte(b) || isDigitByte(b) }
+
+// posixClasses are the bracket classes git's wildmatch supports, over ASCII.
+var posixClasses = map[string]func(byte) bool{
+	"alnum":  isAlnumByte,
+	"alpha":  isAlphaByte,
+	"blank":  func(b byte) bool { return b == ' ' || b == '\t' },
+	"cntrl":  func(b byte) bool { return b < 0x20 || b == 0x7f },
+	"digit":  isDigitByte,
+	"graph":  isGraphByte,
+	"lower":  isLowerByte,
+	"print":  func(b byte) bool { return isGraphByte(b) || b == ' ' },
+	"punct":  func(b byte) bool { return isGraphByte(b) && !isAlnumByte(b) },
+	"space":  func(b byte) bool { return b == ' ' || ('\t' <= b && b <= '\r') },
+	"upper":  isUpperByte,
+	"xdigit": func(b byte) bool { return isDigitByte(b) || ('a' <= b && b <= 'f') || ('A' <= b && b <= 'F') },
+}
+
+func posixClass(name string, b byte) (in, known bool) {
+	class, known := posixClasses[name]
+	if !known {
+		return false, false
+	}
+	return class(b), true
 }
 
 // ignoreFilter decides, during the post-prompt walk, which paths to skip.
@@ -248,8 +420,12 @@ func (f *ignoreFilter) skip(relative string, isDir bool) bool {
 	if parent == "." {
 		parent = ""
 	}
+	_, tracked := f.baseline[relative]
+	if tracked && !isDir {
+		return false
+	}
 	ignored := f.ignoredDirs[parent] || f.rules.matches(relative, isDir)
-	if _, tracked := f.baseline[relative]; tracked {
+	if tracked {
 		if isDir && ignored {
 			f.ignoredDirs[relative] = true
 		}
