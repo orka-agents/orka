@@ -103,6 +103,10 @@ type ACPWorkspaceClassBinding struct {
 	// MaxSuspendedWorkspaces freezes the class retention cap. Nil means
 	// per-workspace age must be bounded by idleTimeout or maxLifetime.
 	MaxSuspendedWorkspaces *int32
+	// SuspendAfterDetach freezes the profile warm-detach window (ADR 0055)
+	// as a Go duration string. Empty means the frozen Suspend applies at
+	// detach.
+	SuspendAfterDetach string
 	// DefaultOnDetach and AllowedOnDetach freeze the class lifecycle policy in
 	// class order so the materialized ExecutionWorkspace carries the exact
 	// class lifecycle and never drifts from it.
@@ -750,6 +754,15 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 	if class.MaxSuspendedWorkspaces != nil && *class.MaxSuspendedWorkspaces < 0 {
 		return fmt.Errorf("frozen execution workspace class binding retention cap is negative")
 	}
+	if class.SuspendAfterDetach != "" {
+		if _, err := parseACPWorkspaceSuspendAfterDetach(class.SuspendAfterDetach); err != nil {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window is invalid: %w", err)
+		}
+		if class.SuspendMode != acpWorkspaceSuspendDataOnly ||
+			!slices.Contains(class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window requires a DataOnly Suspend policy")
+		}
+	}
 	// Retention bounds gate new class resolution. Frozen snapshots admitted by
 	// older controllers remain executable so an upgrade cannot wedge a Task
 	// whose immutable binding predates that requirement.
@@ -834,6 +847,15 @@ func validateACPWorkspaceClassTimeouts(class *ACPWorkspaceClassBinding) error {
 	}
 	if class.IdleTimeout != "" && class.MaxLifetime != "" && maxLifetime < idleTimeout {
 		return fmt.Errorf("frozen execution workspace class binding maximum lifetime must be greater than or equal to idle timeout")
+	}
+	if class.SuspendAfterDetach != "" {
+		window, err := parseACPWorkspaceSuspendAfterDetach(class.SuspendAfterDetach)
+		if err != nil {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window is invalid: %w", err)
+		}
+		if err := validateACPWorkspaceSuspendAfterDetachBounds(window, idleTimeout, maxLifetime); err != nil {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window is invalid: %w", err)
+		}
 	}
 	return nil
 }

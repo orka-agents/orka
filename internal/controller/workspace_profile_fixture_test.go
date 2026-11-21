@@ -81,6 +81,7 @@ type AgentSandboxSuspendPolicy struct {
 
 type RetentionPolicy struct {
 	MaxSuspendedWorkspaces *int32 `json:"maxSuspendedWorkspaces,omitempty"`
+	SuspendAfterDetach     string `json:"suspendAfterDetach,omitempty"`
 }
 
 type AgentSandboxProfileSpec struct {

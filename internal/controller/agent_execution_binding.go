@@ -193,6 +193,7 @@ type agentExecutionSnapshotWorkspaceClass struct {
 	SuspendMode              string                                    `json:"suspendMode,omitempty"`
 	SandboxVolume            *agentExecutionSnapshotSandboxVolume      `json:"sandboxVolume,omitempty"`
 	MaxSuspended             *int32                                    `json:"maxSuspended,omitempty"`
+	SuspendAfterDetach       string                                    `json:"suspendAfterDetach,omitempty"`
 	DefaultOnDetach          string                                    `json:"defaultOnDetach"`
 	AllowedOnDetach          []string                                  `json:"allowedOnDetach"`
 	DetachTimeout            string                                    `json:"detachTimeout"`
@@ -1140,6 +1141,7 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		ParametersBinding:        class.ParametersBinding.DeepCopy(),
 		EffectiveOnDetach:        class.EffectiveOnDetach,
 		SuspendMode:              class.SuspendMode,
+		SuspendAfterDetach:       class.SuspendAfterDetach,
 		DefaultOnDetach:          class.DefaultOnDetach,
 		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
 		DetachTimeout:            class.DetachTimeout,
@@ -1187,6 +1189,7 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 		ParametersBinding:        class.ParametersBinding.DeepCopy(),
 		EffectiveOnDetach:        class.EffectiveOnDetach,
 		SuspendMode:              class.SuspendMode,
+		SuspendAfterDetach:       class.SuspendAfterDetach,
 		DefaultOnDetach:          class.DefaultOnDetach,
 		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
 		DetachTimeout:            class.DetachTimeout,

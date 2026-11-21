@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
 const (
@@ -167,9 +168,13 @@ func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time,
 	return signaledAt, deadline, evicting
 }
 
+// externalWorkspaceSuspendable reports whether an eviction of the workspace's
+// current instance may drain for a data-only suspension. Operator access
+// forfeits retention (ADR 0044), so a tainted workspace never announces one.
 func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace) bool {
 	return w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+		!operatoraccess.Tainted(w.Annotations) &&
 		slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
@@ -185,14 +190,35 @@ func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting 
 	// A failed instance has no new data to capture; its last verified
 	// checkpoint stays with the provider for explicit recovery.
 	failed := w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+	// Operator access forfeits retention (ADR 0044): a tainted workspace is
+	// never captured into a data checkpoint, so it never earns a new Suspend
+	// authorization either. Task settlement and retention delete it; until
+	// then, scale-down retires its instance with Stop.
+	tainted := operatoraccess.Tainted(w.Annotations)
 	switch {
 	case deleting:
 		return workspacev1alpha1.WorkloadRetirementDelete
-	case !quarantined && !failed && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)):
+	case tainted && !quarantined && !failed && externalSuspendRetirementAuthorized(w):
+		// A Suspend authorized for this exact instance before the taint
+		// landed may already be capturing. Rewriting it to Stop mid-capture
+		// would abort a provider operation in an unspecified state, and it
+		// would not remove data already captured; the workspace's Delete
+		// disposition is what removes it. Keep the authorization stable.
+		return workspacev1alpha1.WorkloadRetirementSuspend
+	case !quarantined && !failed && !tainted && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)):
 		return workspacev1alpha1.WorkloadRetirementSuspend
 	default:
 		return workspacev1alpha1.WorkloadRetirementStop
 	}
+}
+
+// externalSuspendRetirementAuthorized reports a Suspend retirement already
+// authorized for the exact current instance.
+func externalSuspendRetirementAuthorized(w *workspacev1alpha1.ExecutionWorkspace) bool {
+	retirement, workload, allocation := w.Spec.Retirement, w.Spec.Workload, w.Status.Allocation
+	return retirement != nil && workload != nil && allocation != nil &&
+		retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend &&
+		retirement.Sequence == workload.Sequence && retirement.Identity == allocation.Identity
 }
 
 func externalRetirementDrainReason(action workspacev1alpha1.WorkloadRetirementAction) string {

@@ -58,7 +58,11 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || w.Spec.Attachment == nil {
+	// A detached workspace inside its warm-detach window (ADR 0055) keeps the
+	// runtime it already has. The deadline is never evaluated here: a drain
+	// cannot be undone, so only retention ends the window.
+	if (w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || w.Spec.Attachment == nil) &&
+		!acpWorkspaceWarmWindowHoldsPool(w) {
 		if pool.Spec.DesiredReplicas != 0 {
 			before := pool.DeepCopy()
 			pool.Spec.DesiredReplicas = 0
