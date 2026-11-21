@@ -87,6 +87,7 @@ func TestNativeSessionMigrationAPIImportExportAndConflict(t *testing.T) {
 	var export nativeSessionExportResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&export))
 	_ = resp.Body.Close()
+	require.Equal(t, "codex", export.ProviderKind)
 	require.Equal(t, snapshot.Data, export.Data)
 	require.Equal(t, snapshot.DataDigest, export.DataDigest)
 	request.Data = storetest.NativeSessionSnapshot(t, "changed private history").Data
@@ -248,6 +249,23 @@ func TestNativeSessionMigrationAPIRejectsMalformedBundles(t *testing.T) {
 	sessions, err := s.ListSessions(t.Context(), "default")
 	require.NoError(t, err)
 	require.Empty(t, sessions)
+}
+
+func TestNativeSessionMigrationAPIValidatesTheNamedProviderFormat(t *testing.T) {
+	s := nativeAPIStore(t)
+	app := nativeAPIApp(t, HandlersConfig{SessionStore: s}, nil)
+	codex := storetest.NativeSessionSnapshot(t, "private history").Data
+	for _, kind := range []string{"claude", "Codex", "opencode"} {
+		resp := nativeAPIRequest(t, app, http.MethodPost, "/sessions/imported/native", nativeSessionImportRequest{OperationID: "operation", ProviderKind: kind, Data: codex})
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, kind)
+		_ = resp.Body.Close()
+	}
+	sessions, err := s.ListSessions(t.Context(), "default")
+	require.NoError(t, err)
+	require.Empty(t, sessions)
+	resp := nativeAPIRequest(t, app, http.MethodPost, "/sessions/imported/native", nativeSessionImportRequest{OperationID: "operation", ProviderKind: "codex", Data: codex})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	_ = resp.Body.Close()
 }
 
 type nativeSessionCountingReader struct {

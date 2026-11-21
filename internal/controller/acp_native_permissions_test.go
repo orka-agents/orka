@@ -163,7 +163,7 @@ func TestSessionTurnWithAnotherLaunchModeRecreatesTheRuntimeSession(t *testing.T
 		RuntimeInstanceID: "runtime", SupervisorBootID: "boot",
 	})
 	session, err := dispatcher.prepareTaskSession(
-		ctx, task, fence, profileDigest, askDigest, "runtime", "boot", acpSessionLineageIdentity{}, false,
+		ctx, task, fence, profileDigest, askDigest, "runtime", "boot", acpSessionLineageIdentity{}, "",
 	)
 	require.NoError(t, err)
 	require.NotNil(t, session)

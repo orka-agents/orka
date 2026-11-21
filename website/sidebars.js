@@ -40,7 +40,7 @@ const sidebars = {
             'guides/container-tasks',
             'guides/scheduled-tasks',
             'guides/task-webhooks',
-            'guides/codex-session-migration',
+            'guides/native-session-migration',
           ],
         },
         {

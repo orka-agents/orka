@@ -101,3 +101,34 @@ func TestClientCaptureNativeSessionAuthenticatesAndValidatesOwner(t *testing.T) 
 		t.Fatal("native capture accepted a foreign snapshot owner")
 	}
 }
+
+func TestNativeSnapshotProviderSessionIDs(t *testing.T) {
+	base := testNativeSnapshot(Fence{RuntimeSessionUID: "owner", RuntimeProfileDigest: ProfileDigest(testSHA256("policy"))})
+	for _, test := range []struct {
+		kind, id string
+		valid    bool
+	}{
+		{kind: "codex", id: "01970b26-25ad-71ef-bd22-9374ec0b741b", valid: true},
+		{kind: "codex", id: "ses_7Hq2xK", valid: false},
+		{kind: "other-agent", id: "ses_7Hq2xK", valid: true},
+		{kind: "other-agent", id: "01970b26-25ad-71ef-bd22-9374ec0b741b", valid: true},
+		{kind: "other-agent", id: "../ses_7Hq2xK", valid: false},
+		{kind: "other-agent", id: "ses/7Hq2xK", valid: false},
+		{kind: "other-agent", id: "", valid: false},
+		{kind: "", id: "ses_7Hq2xK", valid: false},
+	} {
+		snapshot := base
+		snapshot.ProviderKind, snapshot.ProviderSessionID = test.kind, test.id
+		if err := snapshot.Validate(); (err == nil) != test.valid {
+			t.Errorf("provider %q session %q: valid=%t, err=%v", test.kind, test.id, test.valid, err)
+		}
+	}
+	restoration := NativeSessionRestoration{DataDigest: base.DataDigest, ProviderSessionID: "ses_7Hq2xK", Loaded: true}
+	if err := restoration.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	restoration.ProviderSessionID = "../ses_7Hq2xK"
+	if err := restoration.Validate(); err == nil {
+		t.Fatal("a path-like provider session ID must be rejected")
+	}
+}

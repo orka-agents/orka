@@ -59,7 +59,7 @@ func TestMigrationBundleLimitConfiguration(t *testing.T) {
 func TestMigrationJournalAboveOldLimitAndRetryPolicy(t *testing.T) {
 	const limit = 2 << 20
 	journal := t.TempDir()
-	expected := migrationState{Direction: "import", Server: "http://fixture", Namespace: "team", Session: "imported", Home: "/fixture/home", Thread: "fixture-uuid"}
+	expected := migrationState{Direction: "import", Server: "http://fixture", Namespace: "team", Session: "imported", Agent: "codex", StateDir: "/fixture/home", ProviderSessionID: "fixture-uuid"}
 	saved := expected
 	saved.OperationID = "native-test"
 	saved.Data = bytes.Repeat([]byte("x"), limit)
@@ -72,7 +72,7 @@ func TestMigrationJournalAboveOldLimitAndRetryPolicy(t *testing.T) {
 	require.Equal(t, saved, *actual)
 	_, err = readMigrationState(journal, expected, limit-1)
 	require.Error(t, err)
-	expected.Home = "/another/home"
+	expected.StateDir = "/another/home"
 	_, err = readMigrationState(journal, expected, limit)
 	require.Error(t, err)
 }

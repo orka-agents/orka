@@ -132,12 +132,13 @@ var _ = Describe("Native Codex Session migration", Label("agent-runtime"), func(
 		Expect(err).NotTo(HaveOccurred())
 		importJournal := filepath.Join(root, "import-journal")
 		importArgs := []string{"--server", apiURL, "--namespace", namespace, "session", "migrate", "import", session,
-			"--codex-home", sourceHome, "--thread", nativeMigrationThread, "--journal-dir", importJournal, "--source-stopped"}
+			"--agent", "codex", "--state-dir", sourceHome, "--session-id", nativeMigrationThread,
+			"--journal-dir", importJournal, "--source-stopped"}
 		Expect(nativeMigrationRun(orka, root, localEnv, "", importArgs...)).To(
-			ContainSubstring("Staged thread " + nativeMigrationThread))
+			ContainSubstring("Staged codex session " + nativeMigrationThread))
 		// Exact public retries must reuse the staged import, not duplicate it.
 		Expect(nativeMigrationRun(orka, root, localEnv, "", importArgs...)).To(
-			ContainSubstring("Staged thread " + nativeMigrationThread))
+			ContainSubstring("Staged codex session " + nativeMigrationThread))
 
 		By("continuing the imported native thread on the deployed Codex RuntimePool")
 		agentManifest := agentRuntimeAgentManifest(agent, "codex", nativeMigrationModel, session, 4, false, nil)
@@ -160,11 +161,11 @@ var _ = Describe("Native Codex Session migration", Label("agent-runtime"), func(
 		Expect(os.Mkdir(cwd, 0o700)).To(Succeed())
 		exportJournal := filepath.Join(root, "export-journal")
 		exportArgs := []string{"--server", apiURL, "--namespace", namespace, "session", "migrate", "export", session,
-			"--codex-home", destination, "--cwd", cwd, "--journal-dir", exportJournal, "--codex-bin", codex}
+			"--agent", "codex", "--state-dir", destination, "--cwd", cwd, "--journal-dir", exportJournal, "--agent-bin", codex}
 		Expect(nativeMigrationRun(orka, root, localEnv, "", exportArgs...)).To(
-			ContainSubstring("Installed thread " + nativeMigrationThread))
+			ContainSubstring("Installed codex session " + nativeMigrationThread))
 		Expect(nativeMigrationRun(orka, root, localEnv, "", exportArgs...)).To(
-			ContainSubstring("Installed thread " + nativeMigrationThread))
+			ContainSubstring("Installed codex session " + nativeMigrationThread))
 		for _, name := range []string{"auth.json", "config.toml"} {
 			_, err := os.Stat(filepath.Join(destination, name))
 			Expect(os.IsNotExist(err)).To(BeTrue(), "source %s must not be copied", name)

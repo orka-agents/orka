@@ -164,7 +164,7 @@ func TestACPDispatcherToolboxUnavailableFinalizesRecoveredSessionTurn(t *testing
 		ctx, task, fence, harnessv2.ProfileDigest(testControlDigestForDispatcher("profile-toolbox-turn")),
 		testControlDigestForDispatcher("mcp-toolbox-turn"),
 		harnessv2.RuntimeInstanceID("runtime-instance"), harnessv2.SupervisorBootID("boot-id"),
-		acpSessionLineageIdentity{}, false,
+		acpSessionLineageIdentity{}, "",
 	)
 	require.NoError(t, err)
 	require.NotNil(t, opened)

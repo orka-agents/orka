@@ -12,6 +12,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/nativesession"
 	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -23,7 +24,7 @@ const nativeCaptureIntentAnnotation = "orka.ai/native-session-capture"
 const nativeInstallUnresolvedAnnotation = "orka.ai/native-session-install-unresolved"
 
 var errNativeSessionInstallUnresolved = fmt.Errorf("%w: native Session installation outcome is unresolved; original runtime home and frozen plan require receipt reconciliation", store.ErrNotReady)
-var errNativeSessionRuntimeUnsupported = fmt.Errorf("%w: staged native Session requires a Codex runtime advertising native sessions", store.ErrConflict)
+var errNativeSessionRuntimeUnsupported = fmt.Errorf("%w: native Session checkpoint requires a runtime of its provider that advertises native sessions", store.ErrConflict)
 var errNativeSessionHistoryBoundary = fmt.Errorf("%w: native Session restore loads the whole saved conversation, so sessionRef.throughMessageId must be empty or name the latest message", store.ErrConflict)
 var errNativeSessionCheckpointRequired = fmt.Errorf("%w: native Session continuity requires a checkpoint before canonical settlement; exact lease and runtime evidence retained", store.ErrNotReady)
 
@@ -142,33 +143,48 @@ func (d *ACPDispatcher) loadTaskNativeSession(ctx context.Context, task *corev1a
 // Reject an incompatible Task without binding a staged import to a new Session
 // control or acquiring its mutation lease. The preparation path checks again
 // before opening a turn in case an import was staged after this read.
-func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, supported bool) error {
+// nativeProvider is the provider kind whose checkpoints the runtime restores,
+// or empty when it restores none. A staged import has no Session control, so
+// only this check can see its provider before binding; prepareTaskSession
+// checks a bound checkpoint's provider before the lease.
+func (d *ACPDispatcher) validateTaskNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, nativeProvider string) error {
 	if task.Spec.SessionRef == nil || d.nativeSessionStore() == nil {
 		return nil
 	}
-	if supported && strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) == "" {
+	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		control = &store.SessionControl{SessionName: task.Spec.SessionRef.Name}
+	case err != nil:
+		return err
+	case nativeProvider != "" && strings.TrimSpace(task.Spec.SessionRef.ThroughMessageID) == "":
 		return nil
 	}
-	control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
-	if errors.Is(err, store.ErrNotFound) {
-		control = &store.SessionControl{SessionName: task.Spec.SessionRef.Name}
-	} else if err != nil {
-		return err
-	}
 	native, err := d.loadTaskNativeSession(ctx, task, control)
+	if nativeProvider != "" && errors.Is(err, store.ErrConflict) {
+		// The checkpoint has an owner, so it is not a staged import;
+		// prepareTaskSession loads it under that owner.
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	if native == nil {
 		return nil
 	}
-	if !supported {
+	if !nativeCheckpointRestorable(nativeProvider, native) {
 		return errNativeSessionRuntimeUnsupported
 	}
 	if !nativeRestoreHonorsHistoryBoundary(task.Spec.SessionRef, native) {
 		return errNativeSessionHistoryBoundary
 	}
 	return nil
+}
+
+// nativeCheckpointRestorable reports whether a runtime that restores
+// nativeProvider's checkpoints can load checkpoint.
+func nativeCheckpointRestorable(nativeProvider string, checkpoint *store.NativeSessionRecord) bool {
+	return nativeProvider != "" && checkpoint.Snapshot.ProviderKind == nativeProvider
 }
 
 // nativeRestoreHonorsHistoryBoundary reports whether restoring checkpoint keeps
@@ -194,11 +210,11 @@ func (d *ACPDispatcher) rejectNativeSessionRuntime(ctx context.Context, task *co
 	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
 }
 
-func nativeRestoreForTask(session *acpTaskSession, request harnessv2.CreateRuntimeSessionRequest, supported bool) (*harnessv2.NativeSessionRestore, error) {
+func nativeRestoreForTask(session *acpTaskSession, request harnessv2.CreateRuntimeSessionRequest, nativeProvider string) (*harnessv2.NativeSessionRestore, error) {
 	if session == nil || session.NativeSession == nil {
 		return nil, nil
 	}
-	if !supported || request.Profile.ProviderKind != runtimePoolProviderCodex {
+	if !nativeCheckpointRestorable(nativeProvider, session.NativeSession) || request.Profile.ProviderKind != nativeProvider {
 		return nil, errNativeSessionRuntimeUnsupported
 	}
 	snapshot := session.NativeSession.Snapshot
@@ -484,7 +500,7 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 		return nil
 	}
 	if !nativeRequired && task.Status.AgentExecutionBinding != nil &&
-		task.Status.AgentExecutionBinding.RuntimeType != corev1alpha1.AgentRuntimeCodex {
+		!nativesession.Supported(string(task.Status.AgentExecutionBinding.RuntimeType)) {
 		return nil
 	}
 	if !pending {
@@ -501,7 +517,7 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 	if err != nil || pool == nil {
 		return err
 	}
-	if pool.Spec.Runtime.Profile.ProviderKind != runtimePoolProviderCodex {
+	if !nativesession.Supported(pool.Spec.Runtime.Profile.ProviderKind) {
 		if nativeRequired {
 			return errNativeSessionRuntimeUnsupported
 		}

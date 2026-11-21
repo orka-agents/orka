@@ -10,11 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/orka-agents/sessionkit"
-
 	"github.com/orka-agents/orka/internal/acp"
-	"github.com/orka-agents/orka/internal/codexstate"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/nativesession"
 )
 
 type nativeSessionCapture struct {
@@ -31,7 +29,7 @@ type nativeSessionCapture struct {
 type nativeCaptureUnsupportedError struct{}
 
 func (*nativeCaptureUnsupportedError) Error() string {
-	return "native Codex context is unsupported, unavailable, or exceeds the transport budget; stopped private home retained"
+	return "native agent context is unsupported, unavailable, or exceeds the transport budget; stopped private home retained"
 }
 
 // A retry is safe only after the writer and all descendants are proven gone.
@@ -93,7 +91,7 @@ func (s *Server) handleCaptureNativeSession(w http.ResponseWriter, r *http.Reque
 	// must not authorize exporting another Task's private conversation state.
 	if !matchesTerminalNativeTask(state, request.Metadata) {
 		s.mu.Unlock()
-		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "native capture requires the current terminal Codex Task", nil, false)
+		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "native capture requires the current terminal Task", nil, false)
 		return
 	}
 	if request.OriginalOperationID != "" {
@@ -222,7 +220,7 @@ func canStartNativeCapture(state *sessionState, classification harnessv2.Classif
 }
 
 func matchesTerminalNativeTask(state *sessionState, metadata harnessv2.MutationMetadata) bool {
-	return state.supportsNativeSessions && !state.creating && state.runtime != nil && state.profile.ProviderKind == providerKindCodex &&
+	return state.supportsNativeSessions && !state.creating && state.runtime != nil &&
 		state.prompt != nil && state.prompt.settlement != nil &&
 		state.prompt.settlement.TerminalEvent == harnessv2.EventCompleted &&
 		state.prompt.settlement.Outcome == harnessv2.PromptOutcomeSucceeded &&
@@ -237,7 +235,7 @@ func retainsNativeCaptureEvidence(state *sessionState) bool {
 	if state.descriptor.NativeRestoration != nil || state.nativeCapture != nil || state.nativeInstallUnresolved != nil {
 		return true
 	}
-	if !state.supportsNativeSessions || state.profile.ProviderKind != providerKindCodex || state.prompt == nil || state.prompt.settlement == nil ||
+	if !state.supportsNativeSessions || state.prompt == nil || state.prompt.settlement == nil ||
 		state.prompt.settlement.TerminalEvent != harnessv2.EventCompleted || state.prompt.settlement.Outcome != harnessv2.PromptOutcomeSucceeded {
 		return false
 	}
@@ -275,8 +273,7 @@ func cleanupFailedNativeCreate(paths acp.SessionPaths, journalDir string, ownsJo
 }
 
 func isNativeInstallUnknown(err error) bool {
-	_, unknown := errors.AsType[*sessionkit.UnknownOutcomeError](err)
-	return unknown
+	return errors.Is(err, nativesession.ErrInstallOutcomeUnknown)
 }
 
 func (s *Server) retainUnresolvedCreate(state *sessionState, request harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, runtime *acp.RuntimeSession, message string, now time.Time) {
@@ -359,23 +356,27 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, 
 	if err := reclaimStoppedSessionOwnership(state.paths); err != nil {
 		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native capture could not reclaim stopped session ownership"}
 	}
-	data, err := codexstate.Capture(ctx, filepath.Join(state.paths.Home, ".codex"), state.descriptor.ProviderSessionID, limit)
+	format, ok := nativesession.For(s.cfg.Provider.Kind)
+	if !ok {
+		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
+	}
+	data, err := format.Capture(ctx, nativeSessionDirs(format, state.paths), state.descriptor.ProviderSessionID, limit)
 	if err != nil {
-		if errors.Is(err, codexstate.ErrUnsupported) {
+		if errors.Is(err, nativesession.ErrUnsupported) {
 			return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
 		}
-		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native Codex session capture failed; private home retained"}
+		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native session capture failed; private home retained"}
 	}
-	summary, err := codexstate.Inspect(ctx, data, limit)
-	if err != nil || summary.ThreadID != state.descriptor.ProviderSessionID {
-		if errors.Is(err, codexstate.ErrUnsupported) {
+	summary, err := format.Inspect(ctx, data, limit)
+	if err != nil || summary.ProviderSessionID != state.descriptor.ProviderSessionID {
+		if errors.Is(err, nativesession.ErrUnsupported) {
 			return harnessv2.NativeSessionSnapshot{}, &nativeCaptureUnsupportedError{}
 		}
 		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native captured bundle validation failed; private home retained"}
 	}
 	snapshot := harnessv2.NativeSessionSnapshot{
-		Data: data, DataDigest: summary.DataDigest, ProviderSessionID: summary.ThreadID,
-		ProviderKind: providerKindCodex, ProviderVersion: acp.CodexCLIVersion,
+		Data: data, DataDigest: summary.DataDigest, ProviderSessionID: summary.ProviderSessionID,
+		ProviderKind: s.cfg.Provider.Kind, ProviderVersion: summary.ProviderVersion,
 		RuntimeSessionUID: state.descriptor.RuntimeSessionUID, RuntimeProfileDigest: state.descriptor.RuntimeProfileDigest,
 		WorkingDirectory: state.paths.Workspace,
 	}
@@ -392,6 +393,10 @@ func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, 
 		return harnessv2.NativeSessionSnapshot{}, &nativeCaptureRetryableError{message: "native captured snapshot persistence failed; private home retained"}
 	}
 	return snapshot, nil
+}
+
+func nativeSessionDirs(format nativesession.Format, paths acp.SessionPaths) nativesession.Dirs {
+	return nativesession.RuntimeDirs(format, paths.Home, paths.Data, paths.Workspace)
 }
 
 func persistNativeSnapshot(root string, body []byte) error {

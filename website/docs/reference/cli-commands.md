@@ -4373,7 +4373,7 @@ Available Commands:
   follow      Follow session execution events
   get         Get a session resource
   list        List session resources
-  migrate     Move Codex 0.160.0 paginated conversation state
+  migrate     Move agent conversations between local Claude Code, Codex, Copilot CLI, or OpenCode and Orka Sessions
 
 Flags:
   -h, --help   help for session
@@ -4587,14 +4587,14 @@ Global Flags:
 ## `orka session migrate`
 
 ```text
-Move Codex 0.160.0 paginated conversation state
+Move agent conversations between local Claude Code, Codex, Copilot CLI, or OpenCode and Orka Sessions
 
 Usage:
   orka session migrate [command]
 
 Available Commands:
-  export      Install a saved Orka checkpoint into a fresh local Codex home
-  import      Stage a stopped local Codex thread for its first Orka Task
+  export      Install a saved Orka checkpoint into a fresh local agent state directory
+  import      Stage a stopped local agent conversation for its first Orka Task
 
 Flags:
   -h, --help                   help for migrate
@@ -4615,17 +4615,18 @@ Use "orka session migrate [command] --help" for more information about a command
 ## `orka session migrate export`
 
 ```text
-Install a saved Orka checkpoint into a fresh local Codex home
+Install a saved Orka checkpoint into a fresh local agent state directory
 
 Usage:
   orka session migrate export <session-name> [flags]
 
 Flags:
-      --codex-bin string     Codex 0.160.0 executable (default "codex")
-      --codex-home string    Fresh isolated destination CODEX_HOME
-      --cwd string           Existing destination working directory
+      --agent string         Local agent: one of claude, codex, copilot, opencode
+      --agent-bin string     Local agent executable, which must report the release Orka carries (default: the agent's name)
+      --cwd string           Existing destination working directory (default: the current directory)
   -h, --help                 help for export
-      --journal-dir string   Private directory outside CODEX_HOME, retained for retries
+      --journal-dir string   Private directory outside the state directory, retained for retries (default: under ~/.orka/migrations, removed once the export completes)
+      --state-dir string     Fresh private destination agent state directory: CLAUDE_CONFIG_DIR for claude, CODEX_HOME for codex, COPILOT_HOME for copilot, XDG_DATA_HOME for opencode (default: ~/.orka/sessions/<namespace>/<session>/<agent>)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -4641,17 +4642,19 @@ Global Flags:
 ## `orka session migrate import`
 
 ```text
-Stage a stopped local Codex thread for its first Orka Task
+Stage a stopped local agent conversation for its first Orka Task
 
 Usage:
   orka session migrate import <new-session-name> [flags]
 
 Flags:
-      --codex-home string    Source CODEX_HOME (must already exist)
+      --agent string         Local agent: one of claude, codex, copilot, opencode
+      --cwd string           Directory the source session ran in (default: the directory the agent recorded)
   -h, --help                 help for import
-      --journal-dir string   Private directory retained for exact retries
-      --source-stopped       Confirm every source Codex writer has stopped
-      --thread string        Native thread UUID
+      --journal-dir string   Private directory retained for exact retries (default: under ~/.orka/migrations, removed once the import completes)
+      --session-id string    The agent's own session ID: a Claude Code, Codex, or Copilot CLI session UUID, or an OpenCode ses_ ID
+      --source-stopped       Confirm every local agent process using the state directory has stopped
+      --state-dir string     Source agent state directory: CLAUDE_CONFIG_DIR for claude, CODEX_HOME for codex, COPILOT_HOME for copilot, XDG_DATA_HOME for opencode (default: the agent's own, from that variable or under HOME)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

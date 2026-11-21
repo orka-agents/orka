@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -424,7 +425,7 @@ const (
 // while the runtime session is created, instead of after an idle adapter exit.
 func helperCreationResumeMode(mode string) bool {
 	switch mode {
-	case "resume-success", "resume-error", "resume-wrong-id", "resume-unsupported":
+	case "resume-success", "resume-error", "resume-wrong-id", "resume-unsupported", "load-success", "load-error", "load-wrong-id", "load-over-budget", "load-silent", "load-silent-then-update":
 		return true
 	default:
 		return false
@@ -504,7 +505,8 @@ func TestACPHelperProcess(t *testing.T) {
 			if err := json.Unmarshal(message.Params, &initialize); err == nil {
 				writeHelperState(helperClientCapabilities, string(initialize.ClientCapabilities))
 			}
-			capabilities := map[string]any{"loadSession": true, "mcpCapabilities": map[string]bool{"http": true}}
+			// Like Copilot, an agent can load a session without resuming it.
+			capabilities := map[string]any{"loadSession": mode != "resume-unsupported", "mcpCapabilities": map[string]bool{"http": true}}
 			if sessionCapabilities := helperSessionCapabilities(mode); sessionCapabilities != nil {
 				capabilities["sessionCapabilities"] = sessionCapabilities
 			}
@@ -579,6 +581,37 @@ func TestACPHelperProcess(t *testing.T) {
 				})
 			}
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
+		case MethodSessionLoad:
+			var request LoadSessionRequest
+			cwd, _ := os.Getwd()
+			if !slices.Contains([]string{"load-success", "load-wrong-id", "load-over-budget", "load-silent", "load-silent-then-update"}, mode) || json.Unmarshal(message.Params, &request) != nil ||
+				request.CWD != cwd || len(request.MCPServers) != 1 || request.MCPServers[0].Name != "current-mcp" {
+				writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "error": map[string]any{"code": -32602, "message": "load rejected"}})
+				continue
+			}
+			providerSession = request.SessionID
+			replayed := providerSession
+			if mode == "load-wrong-id" {
+				replayed = "another-provider-session"
+			}
+			// session/load replays the history before it answers.
+			for _, kind := range []string{"user_message_chunk", "agent_message_chunk"} {
+				if strings.HasPrefix(mode, "load-silent") {
+					break
+				}
+				writeACPHelper(writer, map[string]any{
+					"jsonrpc": "2.0", "method": MethodSessionUpdate,
+					"params": map[string]any{"sessionId": replayed, "update": map[string]any{"sessionUpdate": kind, "content": map[string]any{"type": "text", "text": "imported history"}}},
+				})
+			}
+			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
+			if mode == "load-silent-then-update" {
+				// An update right after the answer is not part of the replay.
+				writeACPHelper(writer, map[string]any{
+					"jsonrpc": "2.0", "method": MethodSessionUpdate,
+					"params": map[string]any{"sessionId": providerSession, "update": map[string]any{"sessionUpdate": "available_commands_update", "availableCommands": []any{}}},
+				})
+			}
 		case MethodSessionClose:
 			writeHelperState(helperClosedStateFile, "1")
 			writeACPHelper(writer, map[string]any{"jsonrpc": "2.0", "id": rawIDValue(message.ID), "result": map[string]any{}})
@@ -603,7 +636,7 @@ func TestACPHelperProcess(t *testing.T) {
 					"jsonrpc": "2.0", "id": 50, "method": MethodRequestPermission,
 					"params": map[string]any{"sessionId": providerSession, "toolCall": map[string]any{"toolCallId": "tool-1", "title": "test"}, "options": []map[string]any{{"optionId": "allow", "name": "Allow", "kind": "allow_once"}}},
 				})
-			case "immediate", "delayed-complete", "resume-success":
+			case "immediate", "delayed-complete", "resume-success", "load-success":
 				if mode == "delayed-complete" {
 					time.Sleep(100 * time.Millisecond)
 				}

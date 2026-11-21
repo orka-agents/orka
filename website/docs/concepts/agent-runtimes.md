@@ -528,12 +528,20 @@ spec:
 ```
 
 A RuntimeSession is ephemeral. If its Pod is replaced, Orka creates a fresh
-provider process from the verified workspace baseline. Codex runtimes advertising
-native Session support can restore a private SessionKit checkpoint into an
-isolated home, then load its original UUID with current credentials and policy.
-Other sessions use the canonical transcript. Neither path replays an accepted
-prompt. See [Codex session migration](../guides/codex-session-migration.md) for
-the supported format and import/export commands.
+provider process from the verified workspace baseline. Codex, OpenCode, Claude, and Copilot
+runtimes advertising native Session support save the agent's own conversation
+after each successful turn and restore that private checkpoint into the next
+turn's isolated home, then resume the original session with current credentials,
+policy, and working directory. A checkpoint restores only into a runtime of the
+provider that saved it. If a Session has no checkpoint yet and its first
+conversation holds state Orka does not carry or exceeds the size limit, the next
+turn uses the canonical transcript instead and the Task records a
+`NativeSessionCaptureSkipped` warning. Once a Session has a checkpoint, an
+unsupported or oversized capture does not fall back: settlement stays blocked
+and Orka keeps the runtime evidence. Other runtimes use the canonical
+transcript. Neither path replays an accepted prompt. See
+[Native session migration](../guides/native-session-migration.md) for the
+formats and the commands that move a conversation to and from a local agent.
 
 ## Runtime and credential boundaries
 

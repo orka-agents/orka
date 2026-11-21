@@ -308,7 +308,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 	runtimeInstanceID harnessv2.RuntimeInstanceID,
 	supervisorBootID harnessv2.SupervisorBootID,
 	lineage acpSessionLineageIdentity,
-	nativeSessionsSupported bool,
+	nativeProvider string,
 ) (*acpTaskSession, error) {
 	if task.Spec.SessionRef == nil {
 		return nil, nil
@@ -325,7 +325,7 @@ func (d *ACPDispatcher) prepareTaskSession(
 	if err != nil {
 		return nil, err
 	}
-	if preparation.nativeSession != nil && !nativeSessionsSupported {
+	if preparation.nativeSession != nil && !nativeCheckpointRestorable(nativeProvider, preparation.nativeSession) {
 		return nil, errNativeSessionRuntimeUnsupported
 	}
 	if preparation.nativeSession != nil && !nativeRestoreHonorsHistoryBoundary(task.Spec.SessionRef, preparation.nativeSession) {

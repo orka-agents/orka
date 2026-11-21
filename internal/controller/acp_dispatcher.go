@@ -40,6 +40,7 @@ import (
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
+	"github.com/orka-agents/orka/internal/nativesession"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
@@ -1099,7 +1100,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if capabilityErr != nil {
 			return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, capabilityErr)
 		}
-		nativeSessionsSupported = capabilities.SupportsNativeSessions && profile.ProviderKind == runtimePoolProviderCodex && d.nativeSessionStore() != nil
+		nativeSessionsSupported = capabilities.SupportsNativeSessions && nativesession.Supported(profile.ProviderKind) && d.nativeSessionStore() != nil
 		nativePermissionAskSupported = capabilities.Provider.SupportsNativePermissionAsk
 		if !capabilities.SupportsAgentSessionConfiguration {
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
@@ -1114,7 +1115,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryProfile, errors.New("runtime profile does not match the immutable execution snapshot"))
 	}
 	profile = bound.plan.Profile
-	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
+	nativeProvider := ""
+	if nativeSessionsSupported {
+		nativeProvider = profile.ProviderKind
+	}
+	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeProvider); nativeErr != nil {
 		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) || errors.Is(nativeErr, errNativeSessionHistoryBoundary) {
 			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, nativeErr)
 		}
@@ -1164,7 +1169,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	defer func() { endSessionTrace(retErr) }()
 	sessionExecution, err = d.prepareTaskSession(
 		sessionCtx, task, fence, runtimeFence.RuntimeProfileDigest, mcpBindingDigest,
-		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage, nativeSessionsSupported,
+		runtimeFence.RuntimeInstanceID, runtimeFence.SupervisorBootID, lineage, nativeProvider,
 	)
 	if err != nil {
 		endSessionTrace(err)
@@ -1475,7 +1480,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		Profile:          profile, AgentConfiguration: agentConfigurationRef, MCPConfiguration: mcpConfiguration,
 		Workspace: workspace, WorkspaceArtifactAuthorization: workspaceAuthorization,
 	}
-	nativeRestore, nativeRestoreErr := nativeRestoreForTask(sessionExecution, createRequest, nativeSessionsSupported)
+	nativeRestore, nativeRestoreErr := nativeRestoreForTask(sessionExecution, createRequest, nativeProvider)
 	if nativeRestoreErr != nil {
 		return nativeRestoreErr
 	}
