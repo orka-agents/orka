@@ -1,0 +1,46 @@
+name: Orka Control
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tools/orka-control/**"
+      - ".github/workflows/orka-control.yml"
+  pull_request:
+    paths:
+      - "tools/orka-control/**"
+      - ".github/workflows/orka-control.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('orka-control-pr-{0}', github.event.pull_request.number) || format('orka-control-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Type checks, tests, and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/orka-control
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.13
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Audit dependencies
+        run: bun audit
+
+      - name: Run checks
+        run: bun run check

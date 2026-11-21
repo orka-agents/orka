@@ -1,0 +1,36 @@
+{
+  "name": "@orka/orka-control",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "bun run build && concurrently --kill-others --names gateway,web \"bun run dev:gateway\" \"bun run dev:web\"",
+    "dev:web": "vite build --watch",
+    "dev:gateway": "tsx watch server/index.ts",
+    "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
+    "test": "tsx --test server/*.test.ts",
+    "typecheck": "tsc -b --pretty false && tsc -p tsconfig.server.json --pretty false --noEmit",
+    "check": "bun run typecheck && bun run build && bun run test",
+    "start": "node server-dist/server/index.js"
+  },
+  "dependencies": {
+    "lucide-react": "0.563.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.1",
+    "concurrently": "10.0.7",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vite": "7.3.8"
+  }
+}
