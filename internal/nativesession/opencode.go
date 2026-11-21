@@ -874,6 +874,11 @@ func readOpenCodeSession(ctx context.Context, db *sql.DB, providerSessionID stri
 	case restricted:
 		return openCodeSession{}, fmt.Errorf("%w: OpenCode session carries child, workspace, or permission state", ErrUnsupported)
 	}
+	// Every absolute path lies under the filesystem root, so a session that
+	// ran there cannot tell its own paths from any other and is not carried.
+	if session.directory == "/" {
+		return openCodeSession{}, fmt.Errorf("%w: OpenCode session ran in the filesystem root", ErrUnsupported)
+	}
 	// The schema check compares only DDL, so a later release that kept the
 	// schema could still write rows Orka's release cannot read.
 	if order, ok := compareReleases(session.version, openCodeVersion); !ok || order > 0 {

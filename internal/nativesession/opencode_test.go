@@ -501,6 +501,9 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 		"session from an unknown release": {reason: "recorded the session", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `UPDATE session SET version = 'local'`)
 		}},
+		"session in the filesystem root": {reason: "ran in the filesystem root", mutate: func(t *testing.T, f openCodeFixture) {
+			f.exec(t, `UPDATE session SET directory = '/'`)
+		}},
 		"session without its project": {reason: "names a project the database does not hold", mutate: func(t *testing.T, f openCodeFixture) {
 			f.exec(t, `DELETE FROM project`)
 		}},
@@ -533,7 +536,7 @@ func TestOpenCodeCaptureFallsBackOnStateItDoesNotCarry(t *testing.T) {
 			}
 		}},
 		"directory outside the workspace": {reason: "outside the given workspace", mutate: func(t *testing.T, f openCodeFixture) {
-			f.exec(t, `UPDATE session SET directory = '/'`)
+			f.exec(t, `UPDATE session SET directory = '/elsewhere'`)
 		}},
 		"too many spilled outputs": {reason: "spilled more than 256 tool outputs", mutate: func(t *testing.T, f openCodeFixture) {
 			for i := range maxOpenCodeToolOutputs {
@@ -664,6 +667,9 @@ func TestOpenCodeInspectRejectsTamperedBundles(t *testing.T) {
 		// Capture refuses such a session, so a bundle holding one is invalid.
 		"session from a later release": rebuild(func(e map[string][]byte) {
 			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `UPDATE session SET version = '1.20.0'`)
+		}),
+		"session in the filesystem root": rebuild(func(e map[string][]byte) {
+			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `UPDATE session SET directory = '/'`)
 		}),
 		"session without its project": rebuild(func(e map[string][]byte) {
 			e["opencode.db"] = alterDatabaseForTest(t, e["opencode.db"], `DELETE FROM project`)
