@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Provider proxy | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/provider-proxy"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Provider proxy | Orka"><meta data-rh="true" name="description" content="Connect built-in coding agents to your model gateway."><meta data-rh="true" property="og:description" content="Connect built-in coding agents to your model gateway."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/provider-proxy"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/provider-proxy" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/provider-proxy" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Provider proxy","item":"https://orka-agents.github.io/orka/docs/provider-proxy"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.84a3497b.css">
-<script src="/orka/assets/js/runtime~main.ae64ee2f.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.4ebb79bf.js" defer="defer"></script>
 <script src="/orka/assets/js/main.e159c864.js" defer="defer"></script>
 </head>
 <body>
@@ -34,13 +34,128 @@ gateway. Coding agents receive only a session token and permission to use
 their configured model. The gateway supplies its own provider credentials.</p>
 <div class="theme-admonition theme-admonition-tip admonition_xJq3 alert alert--success"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 12 16"><path fill-rule="evenodd" d="M6.5 0C3.48 0 1 2.19 1 5c0 .92.55 2.25 1 3 1.34 2.25 1.78 2.78 2 4v1h5v-1c.22-1.22.66-1.75 2-4 .45-.75 1-2.08 1-3 0-2.81-2.48-5-5.5-5zm3.64 7.48c-.25.44-.47.8-.67 1.11-.86 1.41-1.25 2.06-1.45 3.23-.02.05-.02.11-.02.17H5c0-.06 0-.13-.02-.17-.2-1.17-.59-1.83-1.45-3.23-.2-.31-.42-.67-.67-1.11C2.44 6.78 2 5.65 2 5c0-2.2 2.02-4 4.5-4 1.22 0 2.36.42 3.22 1.19C10.55 2.94 11 3.94 11 5c0 .66-.44 1.78-.86 2.48zM4 14h5c-.23 1.14-1.3 2-2.5 2s-2.27-.86-2.5-2z"></path></svg></span>Video demo</div><div class="admonitionContent_BuS1"><p>Watch <a href="https://www.youtube.com/watch?v=L6W3IPuLmeQ" target="_blank" rel="noopener noreferrer" class="">Compare hosted and routed agents on the same workload</a>.</p></div></div>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="choose-a-model-gateway">Choose a model gateway<a href="#choose-a-model-gateway" class="hash-link" aria-label="Direct link to Choose a model gateway" title="Direct link to Choose a model gateway" translate="no">​</a></h2>
-<p>Any gateway that serves the APIs your agents need will work. Codex uses the
+<p>Choose a gateway that serves the APIs your agents need and preserves their
+retry semantics. Codex uses the
 OpenAI Responses API, Claude Code uses the Anthropic Messages API, and OpenCode
 uses Chat Completions. <a href="https://github.com/sozercan/vekil" target="_blank" rel="noopener noreferrer" class="">Vekil</a> is the gateway
 Orka&#x27;s own tests use, and the example below installs it.
 <a href="https://agentgateway.dev/" target="_blank" rel="noopener noreferrer" class="">agentgateway</a> is another option.</p>
 <p>Whatever you choose, configure its providers and models, and verify a model
 request succeeds through it before connecting Orka.</p>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="when-codex-is-rate-limited">When Codex is rate limited<a href="#when-codex-is-rate-limited" class="hash-link" aria-label="Direct link to When Codex is rate limited" title="Direct link to When Codex is rate limited" translate="no">​</a></h3>
+<p><strong>Retries are off by default.</strong> On an operator-qualified route, the session
+proxy can resend a direct, streaming Codex inference POST to the exact <code>/v1/responses</code>
+endpoint if the auth proxy confirms <strong>HTTP 429</strong> from that route before
+anything is relayed to Codex. Unqualified requests still report the failure;
+they are not replayed or subject to the retry timeout. The original send
+counts toward a maximum of three. Once a qualified 429 is observed, backoff,
+retry response headers, and reading the final HTTP error body share a
+30-second budget from the first send. If a retry returns 503 and its body
+stalls, for example, the proxy keeps the 503
+and the bounded detail received so far; it does not send again. It allows up
+to one additional second to write the known error to Codex, even if the
+initial 429 headers arrived after the window. This does not extend upstream
+reads. Neither an initial 503 nor a successful stream gets this retry timeout.</p>
+<p>The proxy uses the longest valid <code>Retry-After</code> (seconds or HTTP date),
+<code>retry-after-ms</code> or <code>x-ms-retry-after-ms</code> hint. Fractional milliseconds
+round up to the next whole millisecond. Without a valid hint
+it waits 250 ms, then 500 ms. A wait that cannot fit the budget, request
+deadline or active prompt lease returns the last 429 without retrying early.
+On exhaustion, the final status and sanitized provider detail still reach
+prompt failure accounting.</p>
+<p>Retries share the original inference turn. Closing prompt admission stops
+backoff and cancels any retry still waiting for response headers. A response
+already being relayed can drain. This does not undo a POST the gateway already
+received or erase the 429 already observed. If that rejection
+settles the prompt before Codex acknowledges cancellation, the result is
+<code>Failed</code>, not <code>Cancelled</code>. A lost connection, a 503, or an error inside a
+200 stream is <strong>not</strong> a rejection that permits replay. Other routes (including
+compaction, query-bearing requests and tools) and other runtimes do not use
+this policy. No Task, ACP prompt or tool is retried.</p>
+<p>The session proxy is the only retry owner in this Orka path. The Codex
+profile disables native HTTP retries, stream reconnects and unbounded
+connection retries; the ACP adapter submits the turn to Codex, and the Orka
+auth proxy forwards the nonempty inference POST without a rewindable body.
+Neither Orka hop lets an <code>Idempotency-Key</code> or <code>X-Idempotency-Key</code> trigger a
+Go transport retry of this POST on a reused connection. The limit counts sends
+<strong>to the configured gateway</strong>, not calls inside it. Orka cannot verify whether an
+external gateway or provider retries, fails over, or reports a 429 after doing
+work. For an end-to-end single retry owner, use a single-send gateway route
+that returns 429 only for rejected requests and verify at its upstream.</p>
+<h4 class="anchor anchorTargetStickyNavbar_Vzrq" id="qualifying-one-route">Qualifying one route<a href="#qualifying-one-route" class="hash-link" aria-label="Direct link to Qualifying one route" title="Direct link to Qualifying one route" translate="no">​</a></h4>
+<p>Qualify the entire chain, not a model name or the shared auth-proxy Service.
+Use a dedicated gateway DNS name whose first label ends in <code>-</code> and at least
+six lowercase hex digits identifying an immutable revision. Freeze its image,
+single-send route configuration, public model and physical deployment. An
+accepted provider response must never be translated into a replayable 429.
+Use a <strong>new name</strong> if any of these change; neither DNS nor a digest in a
+Service name verifies how an operator configured the backend.</p>
+<p>For example, a qualified gateway origin <code>http://gateway-a1b2c3.example.svc:1337</code>
+and public model <code>example-model</code> give frontend Service name
+<code>codex-429-24450096f2a7fa4adfb33fa6bca21e25</code>. Its suffix is the first 32
+lowercase hex digits of SHA-256 over these exact UTF-8 bytes:
+<code>orka-codex-429-v1\n&lt;gateway origin&gt;\n&lt;model&gt;\n</code> (<code>\n</code> denotes a newline).</p>
+<table><thead><tr><th>Operator-owned startup setting</th><th>Value for this example</th></tr></thead><tbody><tr><td>Auth proxy <code>--upstream-base-url</code> (env default <code>ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_BASE_URL</code>)</td><td><code>http://gateway-a1b2c3.example.svc:1337</code></td></tr><tr><td>Auth proxy <code>ORKA_PROVIDER_AUTH_PROXY_CODEX_429_RETRY_BASE_URL</code></td><td><code>http://gateway-a1b2c3.example.svc:1337</code></td></tr><tr><td>Auth proxy <code>ORKA_PROVIDER_AUTH_PROXY_CODEX_429_RETRY_MODEL</code></td><td><code>example-model</code></td></tr><tr><td>Runtime <code>ORKA_ACP_PROVIDER_PROXY_BASE_URL</code> (existing controller setting <code>--acp-provider-proxy-base-url</code>)</td><td><code>http://codex-429-24450096f2a7fa4adfb33fa6bca21e25.example.svc:8080</code></td></tr><tr><td>Runtime <code>ORKA_ACP_CODEX_429_RETRY_BASE_URL</code></td><td><code>http://codex-429-24450096f2a7fa4adfb33fa6bca21e25.example.svc:8080/v1</code></td></tr><tr><td>Runtime <code>ORKA_ACP_CODEX_429_RETRY_MODEL</code> (must match frozen <code>ORKA_ACP_MODEL</code>)</td><td><code>example-model</code></td></tr></tbody></table>
+<p>Set each qualification pair independently in reviewed, immutable startup
+configuration (for example the digest-pinned runtime image), <strong>not</strong> from
+the current request or by copying whatever destination is active. The auth
+proxy pin has no path; the supervisor pin includes the effective <code>/v1</code>.
+A partial or malformed opt-in fails startup. An unset pair or a valid pin
+that does not match the active route cannot authorize a retry. Neither
+component guesses qualifications from a provider response or client header.</p>
+<p>Both the original request (before normalization) and the forwarded body must
+contain one literal lowercase <code>model</code> matching the pin and one literal
+lowercase <code>stream</code> set to boolean <code>true</code>. Escaped selector names do not
+qualify; escaping inside text or tool data does not change qualification.
+Non-streaming, ambiguous, provider-state or compaction
+operations and routing overrides are not qualified. Ordinary messages, tool
+definitions and prior tool results do not authorize or prevent a retry.</p>
+<p>For each send the supervisor issues a fresh challenge. Only the auth proxy
+may confirm it, after checking its own egress pin, the bounded request body,
+and the upstream status. The auth proxy sends confirmed 429 headers promptly,
+then reads up to 4 KiB of rejection detail for up to 250 ms. It bounds writes
+to the supervisor as well, allowing one extra second. The supervisor
+waits for the body to finish before resending, so the auth proxy has closed
+the gateway response and released its slot. If the retry deadline arrives
+first, the supervisor keeps the known 429 and the detail received so far.
+Other responses keep streaming normally.
+A conditional resend uses a distinct HTTP
+authentication scheme with the existing proxy credential: an older,
+Bearer-only proxy rejects it instead of forwarding it unchecked. Neither
+the child nor the provider receives these internal headers. Use both upgraded components and
+keep the legacy Service separate for rollback. Remove the opt-ins to disable
+replay; native Codex retries remain disabled either way. No new controller
+field is required.</p>
+<h4 class="anchor anchorTargetStickyNavbar_Vzrq" id="vekil-and-azurefoundry">Vekil and Azure/Foundry<a href="#vekil-and-azurefoundry" class="hash-link" aria-label="Direct link to Vekil and Azure/Foundry" title="Direct link to Vekil and Azure/Foundry" translate="no">​</a></h4>
+<p><strong>Vekil v0.14.14 does not meet that Codex retry contract.</strong> Its Responses
+handler can turn an upstream HTTP 200 into an HTTP 429 if the first SSE event
+is <code>response.failed</code> with <code>rate_limit_exceeded</code>. This can happen without a
+<code>Retry-After</code> hint, or <a href="https://github.com/sozercan/vekil/blob/554f8e261f477a5b45eb08442b82f9cee485c38a/proxy/responses_failure_translate_test.go#L857-L885" target="_blank" rel="noopener noreferrer" class="">even when the failed response reports token usage</a>.
+Orka sees the gateway&#x27;s 429, not the original 200. Neither the error text nor
+the presence of a delay distinguishes it from a rejected POST. Do not use
+this route for automatic Codex retries until the gateway preserves accepted
+streams and is verified to make a single physical send per request.</p>
+<p>Once Vekil has sent HTTP 200, a later rate-limit event stays in the stream.
+In its <a href="https://github.com/sozercan/vekil/blob/554f8e261f477a5b45eb08442b82f9cee485c38a/server/server.go#L340-L385" target="_blank" rel="noopener noreferrer" class="">access log</a>,
+<code>status=200, stats_status=429</code> means the stream failed <strong>after</strong> headers were
+committed. It neither authorizes replay nor proves what Azure returned on
+the wire before that event.</p>
+<p>The <code>providers[].models</code> example below omits <code>schema_version</code>, selecting
+version 1: a persistent upstream HTTP 429 can cause three physical sends
+for one request to Vekil. A version 2 <strong>explicit</strong> <code>model_routes</code> entry with
+<code>routing.mode: primary_only</code>, <code>max_target_attempts: 1</code> and
+<code>max_upstream_sends: 1</code> caps each gateway operation at one send. It does
+<strong>not</strong> disable conversion of an early failed stream into HTTP 429.</p>
+<p>Vekil&#x27;s <a href="https://github.com/sozercan/vekil/blob/554f8e261f477a5b45eb08442b82f9cee485c38a/docs/troubleshooting.md#L66-L120" target="_blank" rel="noopener noreferrer" class="">Azure cooldown</a>
+applies to explicit <code>azure-openai</code> routes. It can delay <em>subsequent</em> requests
+after a throttle with valid reset information, or a successful response with
+an exhausted balance and reset. Aliases share the cooldown by resource origin
+and deployment within one Vekil process. It does not reserve TPM or RPM before
+every send or coordinate other replicas and callers. Neither completed token
+usage nor the model&#x27;s context window tells a session how much deployment
+capacity remains. Preventing a burst requires bounded, cancellable admission
+before each physical model send, against the same operator-allocated deployment
+budget across callers and replicas. This is not a feature of Vekil v0.14.14.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="example-vekil-on-the-same-cluster">Example: Vekil on the same cluster<a href="#example-vekil-on-the-same-cluster" class="hash-link" aria-label="Direct link to Example: Vekil on the same cluster" title="Direct link to Example: Vekil on the same cluster" translate="no">​</a></h2>
 <p><a href="https://github.com/sozercan/vekil" target="_blank" rel="noopener noreferrer" class="">Vekil</a> is a small reverse proxy that fronts
 GitHub Copilot, OpenAI, Azure OpenAI, Anthropic, and other providers behind one
@@ -130,6 +245,6 @@ file becomes unreadable or invalid, readiness and authenticated forwarding stop
 until the files are valid again.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="troubleshooting">Troubleshooting<a href="#troubleshooting" class="hash-link" aria-label="Direct link to Troubleshooting" title="Direct link to Troubleshooting" translate="no">​</a></h2>
 <table><thead><tr><th>Symptom</th><th>Check</th></tr></thead><tbody><tr><td>Chart rejects <code>upstreamBaseURL</code></td><td>Use an HTTP(S) URL without credentials, a query, or a fragment.</td></tr><tr><td>Chart says the upstream Service was not found</td><td>Install the gateway before enabling the proxy, or set <code>providerProxy.egress</code> explicitly; offline renders cannot look Services up.</td></tr><tr><td>Chart asks for <code>providerProxy.egress</code></td><td>The upstream is not an in-cluster <code>&lt;service&gt;.&lt;namespace&gt;.svc</code> address, or its Service uses a named target port. Write the egress rule by hand.</td></tr><tr><td>Agent Task fails with an authentication error</td><td>Check the gateway&#x27;s readiness endpoint and provider credentials first. It fails independently of Orka.</td></tr><tr><td>Model calls time out</td><td>Check gateway readiness, egress rules, and gateway ingress policy.</td></tr><tr><td>Model calls return 404</td><td>Check that the model ID is listed by the gateway and that the upstream URL has no extra path.</td></tr><tr><td>Requests fail after token rotation</td><td>Check the overlap token and its expiry.</td></tr></tbody></table>
-<p>See <a class="" href="/orka/docs/troubleshooting">Troubleshooting</a> for other installation and runtime errors.</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/orka-agents/orka/edit/main/website/docs/operations/provider-proxy.md" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/orka/docs/substrate"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Agent Substrate workspaces</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/orka/docs/operations/gateways"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Operating gateways</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#choose-a-model-gateway" class="table-of-contents__link toc-highlight">Choose a model gateway</a></li><li><a href="#example-vekil-on-the-same-cluster" class="table-of-contents__link toc-highlight">Example: Vekil on the same cluster</a><ul><li><a href="#with-provider-api-keys" class="table-of-contents__link toc-highlight">With provider API keys</a></li><li><a href="#with-an-openai-codex-subscription" class="table-of-contents__link toc-highlight">With an OpenAI Codex subscription</a></li><li><a href="#with-a-github-copilot-subscription" class="table-of-contents__link toc-highlight">With a GitHub Copilot subscription</a></li><li><a href="#verify-vekil" class="table-of-contents__link toc-highlight">Verify Vekil</a></li><li><a href="#allow-orka-to-reach-vekil" class="table-of-contents__link toc-highlight">Allow Orka to reach Vekil</a></li></ul></li><li><a href="#connect-the-gateway" class="table-of-contents__link toc-highlight">Connect the gateway</a></li><li><a href="#rotating-the-proxy-token" class="table-of-contents__link toc-highlight">Rotating the proxy token</a></li><li><a href="#troubleshooting" class="table-of-contents__link toc-highlight">Troubleshooting</a></li></ul></div></div></div></div></main></div></div></div><footer class="theme-layout-footer footer footer--dark"><div class="container container-fluid"><div class="row footer__links"><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Docs</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/orka/docs">What is Orka?</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/getting-started">Getting started</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/resources">Resource reference</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/api-reference">API reference</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Try it</div><ul class="footer__items clean-list"><li class="footer__item"><a href="/orka/demo/" target="_blank" rel="noopener noreferrer" class="footer__link-item">Interactive dashboard demo</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/demos">Demo videos</a></li><li class="footer__item"><a href="https://github.com/orka-agents/orka/tree/main/examples" target="_blank" rel="noopener noreferrer" class="footer__link-item">Examples<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Community</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://github.com/orka-agents/orka" target="_blank" rel="noopener noreferrer" class="footer__link-item">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li><li class="footer__item"><a href="https://github.com/orka-agents/orka/issues" target="_blank" rel="noopener noreferrer" class="footer__link-item">Issues<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li><li class="footer__item"><a href="https://github.com/orka-agents/orka/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer" class="footer__link-item">Contributing<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div></div><div class="footer__bottom text--center"><div class="margin-bottom--sm"><img src="/orka/img/orka-mark-dark.svg" alt="Orka" class="footer__logo themedComponent_mlkZ themedComponent--light_NVdE" width="44" height="44"><img src="/orka/img/orka-mark-dark.svg" alt="Orka" class="footer__logo themedComponent_mlkZ themedComponent--dark_xIcU" width="44" height="44"></div><div class="footer__copyright">Copyright © 2026 Orka contributors.</div></div></div></footer></div>
+<p>See <a class="" href="/orka/docs/troubleshooting">Troubleshooting</a> for other installation and runtime errors.</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/orka-agents/orka/edit/main/website/docs/operations/provider-proxy.md" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/orka/docs/substrate"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Agent Substrate workspaces</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/orka/docs/operations/gateways"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Operating gateways</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#choose-a-model-gateway" class="table-of-contents__link toc-highlight">Choose a model gateway</a><ul><li><a href="#when-codex-is-rate-limited" class="table-of-contents__link toc-highlight">When Codex is rate limited</a></li></ul></li><li><a href="#example-vekil-on-the-same-cluster" class="table-of-contents__link toc-highlight">Example: Vekil on the same cluster</a><ul><li><a href="#with-provider-api-keys" class="table-of-contents__link toc-highlight">With provider API keys</a></li><li><a href="#with-an-openai-codex-subscription" class="table-of-contents__link toc-highlight">With an OpenAI Codex subscription</a></li><li><a href="#with-a-github-copilot-subscription" class="table-of-contents__link toc-highlight">With a GitHub Copilot subscription</a></li><li><a href="#verify-vekil" class="table-of-contents__link toc-highlight">Verify Vekil</a></li><li><a href="#allow-orka-to-reach-vekil" class="table-of-contents__link toc-highlight">Allow Orka to reach Vekil</a></li></ul></li><li><a href="#connect-the-gateway" class="table-of-contents__link toc-highlight">Connect the gateway</a></li><li><a href="#rotating-the-proxy-token" class="table-of-contents__link toc-highlight">Rotating the proxy token</a></li><li><a href="#troubleshooting" class="table-of-contents__link toc-highlight">Troubleshooting</a></li></ul></div></div></div></div></main></div></div></div><footer class="theme-layout-footer footer footer--dark"><div class="container container-fluid"><div class="row footer__links"><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Docs</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/orka/docs">What is Orka?</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/getting-started">Getting started</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/resources">Resource reference</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/api-reference">API reference</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Try it</div><ul class="footer__items clean-list"><li class="footer__item"><a href="/orka/demo/" target="_blank" rel="noopener noreferrer" class="footer__link-item">Interactive dashboard demo</a></li><li class="footer__item"><a class="footer__link-item" href="/orka/docs/demos">Demo videos</a></li><li class="footer__item"><a href="https://github.com/orka-agents/orka/tree/main/examples" target="_blank" rel="noopener noreferrer" class="footer__link-item">Examples<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Community</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://github.com/orka-agents/orka" target="_blank" rel="noopener noreferrer" class="footer__link-item">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li><li class="footer__item"><a href="https://github.com/orka-agents/orka/issues" target="_blank" rel="noopener noreferrer" class="footer__link-item">Issues<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li><li class="footer__item"><a href="https://github.com/orka-agents/orka/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer" class="footer__link-item">Contributing<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li></ul></div></div><div class="footer__bottom text--center"><div class="margin-bottom--sm"><img src="/orka/img/orka-mark-dark.svg" alt="Orka" class="footer__logo themedComponent_mlkZ themedComponent--light_NVdE" width="44" height="44"><img src="/orka/img/orka-mark-dark.svg" alt="Orka" class="footer__logo themedComponent_mlkZ themedComponent--dark_xIcU" width="44" height="44"></div><div class="footer__copyright">Copyright © 2026 Orka contributors.</div></div></div></footer></div>
 </body>
 </html>
