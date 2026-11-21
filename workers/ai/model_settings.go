@@ -17,11 +17,14 @@ import (
 type modelSettings struct {
 	temperature    float64
 	temperatureSet bool
-	maxTokens      int
+	// maxTokens is zero when the Agent sets no output limit, which leaves the
+	// limit to each provider. Fallbacks can switch provider and model within a
+	// Task, so the worker cannot choose one value for all of them.
+	maxTokens int
 }
 
 func parseModelSettings(workerEnv workerenv.AIWorkerEnv) (modelSettings, error) {
-	settings := modelSettings{maxTokens: 4096}
+	settings := modelSettings{}
 	if workerEnv.Temperature != "" {
 		temperature, err := strconv.ParseFloat(workerEnv.Temperature, 64)
 		if err != nil || math.IsNaN(temperature) || math.IsInf(temperature, 0) || temperature < 0 || temperature > 2 {
@@ -36,7 +39,7 @@ func parseModelSettings(workerEnv workerenv.AIWorkerEnv) (modelSettings, error) 
 		if err != nil {
 			return modelSettings{}, fmt.Errorf("%s must be a signed 32-bit integer", workerenv.AIMaxTokens)
 		}
-		// Preserve the legacy default for omitted and non-positive Agent output caps.
+		// A non-positive output cap counts as unset.
 		if maxTokens > 0 {
 			settings.maxTokens = int(maxTokens)
 		}
