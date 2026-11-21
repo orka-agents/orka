@@ -2294,6 +2294,42 @@ func TestCreateSecurityValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 	require.Equal(t, "pending", storedFinding.ValidationStatus)
 }
 
+// A manual validation examines the commit the finding's evidence was
+// recorded at, not whatever the scan's branch names when the Task starts.
+func TestCreateSecurityValidationTaskPinsTheFindingCommit(t *testing.T) {
+	const commit = "fedcba9876543210fedcba9876543210fedcba98"
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan-validation-pin", Namespace: "demo"},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: securityTestRepoURL, Branch: "release", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	analysisAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
+		scheme, scan.Spec.AnalysisAgentRef.Name, corev1alpha1.WorkspaceIntentRead, []string{},
+	)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: securityRuntimePolicySkewReader{Reader: fakeClient, policyReader: apiReader}, SecurityStore: securityStore})
+	finding := &store.Finding{
+		ID: "finding-validation-pin", Namespace: "demo", RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
+		CommitSHA: commit,
+	}
+
+	require.NoError(t, handlers.createSecurityValidationTask(context.Background(), nil, scan, finding))
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, fakeClient.List(context.Background(), &tasks, client.InNamespace("demo")))
+	require.Len(t, tasks.Items, 1)
+	workspace := tasks.Items[0].Spec.Workspace
+	require.NotNil(t, workspace)
+	require.Equal(t, corev1alpha1.WorkspaceIntentRead, workspace.Intent)
+	require.Equal(t, "release", workspace.Branch)
+	require.Equal(t, commit, workspace.Ref)
+}
+
 func TestCreateSecurityPatchTaskRejectsLegacyCredentialReuse(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

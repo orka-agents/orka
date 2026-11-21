@@ -111,8 +111,9 @@ const (
 	securityReviewInitialAttempt = 0
 	securityReviewRetryAttempt   = 1
 	securityReviewRetryPrompt    = "\n\nThis is the only automatic result retry. " +
-		"The prior review task failed or returned an invalid terminal result. " +
-		"Re-run the review from the trusted context above and return exactly one JSON object matching the required envelope. " +
+		"The prior review task failed, returned an invalid terminal result, or recorded no coverage of its trusted context. " +
+		"Re-run the review from the trusted context above, set scan.reviewedFiles to the repository files you actually read, " +
+		"and return exactly one JSON object matching the required envelope. " +
 		"Do not include prose, Markdown fences, or tool transcripts."
 )
 
@@ -1054,8 +1055,23 @@ func (r *RepositoryScanReconciler) repositoryScanWithFrozenRunTarget(ctx context
 	return repositoryScanWithFrozenWorkspaceTarget(scan, task.Spec.Workspace)
 }
 
+// reviewTaskTargetWorkspace returns the logical target of a review Task's
+// workspace. Review Tasks are pinned to the run's head commit, and their
+// target identity is still the scan's branch or ref. Only the generation that
+// admitted the run can say what that ref was; any other generation keeps the
+// pin, which then fails the target comparison closed.
+func reviewTaskTargetWorkspace(scan *corev1alpha1.RepositoryScan, run *store.ScanRun, task *corev1alpha1.Task) *corev1alpha1.WorkspaceConfig {
+	if task == nil {
+		return nil
+	}
+	if !security.ScanRunMatchesRepositoryScan(run, scan) {
+		return task.Spec.Workspace
+	}
+	return security.UnpinnedScanWorkspace(scan, task.Spec.Workspace, run.HeadCommit)
+}
+
 func trustedFindingsRepositoryForRunTask(scan *corev1alpha1.RepositoryScan, run *store.ScanRun, task *corev1alpha1.Task) (security.FindingsV2Repository, string) {
-	taskScan, err := repositoryScanWithFrozenWorkspaceTarget(scan, task.Spec.Workspace)
+	taskScan, err := repositoryScanWithFrozenWorkspaceTarget(scan, reviewTaskTargetWorkspace(scan, run, task))
 	if err != nil {
 		return security.FindingsV2Repository{}, err.Error()
 	}
@@ -1178,6 +1194,9 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 	}
 	timeout := metav1.Duration{Duration: 2 * time.Hour}
 	priority := int32(700)
+	// Review the commit the mapper sliced, not whatever the branch
+	// names when the Task starts.
+	workspace := security.PinScanWorkspace(repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead), run.HeadCommit)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -1201,7 +1220,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 			Prompt:    prompt,
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: workspace,
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -2563,6 +2582,8 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 		PolicyDigest:   policy.Digest,
 	}
 
+	// Validate the commit the finding's evidence was recorded at.
+	workspace := security.PinScanWorkspace(repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead), finding.CommitSHA)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -2583,7 +2604,7 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: workspace,
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -3361,10 +3382,17 @@ func (r *RepositoryScanReconciler) repositoryScanReviewedSlicesForResolution(ctx
 			if strings.TrimSpace(manifest.SliceID) != reviewSlice.ID {
 				return nil, fmt.Errorf("review slice %s trusted context has slice ID %s", reviewSlice.ID, manifest.SliceID)
 			}
+			// Only files the review corroborated it examined can show that a
+			// finding is gone. A slice reviewed before coverage was recorded
+			// has none, so it resolves nothing.
+			reviewedFiles := make(map[string]struct{}, len(reviewSlice.ReviewedFiles))
+			for _, file := range reviewSlice.ReviewedFiles {
+				reviewedFiles[normalizeRepoPath(file)] = struct{}{}
+			}
 			includedRanges := map[string][]security.ReviewContextLineRange{}
 			for _, file := range manifest.IncludedFiles {
 				path := normalizeRepoPath(file.Path)
-				if file.Readable && security.SafeRepoPath(path) {
+				if _, reviewed := reviewedFiles[path]; reviewed && file.Readable && security.SafeRepoPath(path) {
 					includedRanges[path] = append(includedRanges[path], file.IncludedLineRanges...)
 				}
 			}
@@ -3763,7 +3791,6 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		return r.failReviewTask(ctx, scan, task, run, sliceID, message)
 	}
 
-	clearReviewRunError(run, sliceID)
 	partition := security.ValidateFindingsV2(*findingsV2, *manifest, security.FindingValidationOptions{
 		Namespace:            scan.Namespace,
 		RepositoryScan:       scan.Name,
@@ -3772,6 +3799,22 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		TrustedRepository:    trustedRepository,
 		UseTrustedRepository: true,
 	})
+	coverage := security.AssessReviewCoverage(
+		reviewSlice.Kind, *manifest, findingsV2.Scan.ReviewedFiles, acceptedFindingEvidencePaths(partition.Accepted),
+		len(findingsV2.Scan.ResolvedQuestions),
+	)
+	// An empty result that corroborates none of its trusted context is
+	// indistinguishable from an echoed template or a review that never ran.
+	// Give it the one automatic retry; a retry that still shows nothing is
+	// recorded with no coverage, which supports no resolution. A slice with
+	// no readable context has nothing a retry could corroborate.
+	if coverage.Disposition == security.ReviewCoverageNone && coverage.TrustedFiles > 0 && len(findingsV2.Findings) == 0 {
+		retried, err := r.retryReviewSlice(ctx, scan, task, run, reviewSlice, sliceID, "a review result with no coverage evidence")
+		if err != nil || retried {
+			return err
+		}
+	}
+	clearReviewRunError(run, sliceID)
 	if err := r.ensureActiveScanRunPolicyCurrent(ctx, scan, run); err != nil {
 		return err
 	}
@@ -3792,6 +3835,14 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 			return nil
 		}
 		if err := tx.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, current.ID, reviewSliceStatusReviewed); err != nil {
+			return err
+		}
+		owned.Status = reviewSliceStatusReviewed
+		owned.Coverage = coverage.Disposition
+		owned.ReviewedFiles = coverage.ReviewedFiles
+		// Keep the review time the status update just stamped.
+		owned.LastReviewedAt = nil
+		if err := tx.SecurityStore.UpsertReviewSlice(ctx, owned); err != nil {
 			return err
 		}
 		kept, err := tx.runCanonicalFindings(ctx, scan, current.ID)
@@ -3887,6 +3938,24 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		ingestion.Completed = false
 		return nil
 	})
+}
+
+// acceptedFindingEvidencePaths lists the files that accepted findings cite.
+// Their evidence already passed the trusted-context checks, so each is a
+// file the review demonstrably read.
+func acceptedFindingEvidencePaths(findings []*store.Finding) []string {
+	var paths []string
+	for _, finding := range findings {
+		if finding == nil {
+			continue
+		}
+		for _, evidence := range finding.Evidence {
+			if path := normalizeRepoPath(evidence.Path); path != "" {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
 }
 
 // leaveReviewSliceUnreviewed records a slice whose retry prompt also failed
@@ -4020,7 +4089,7 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	default:
 		return false, err
 	}
-	targetScan, err := repositoryScanWithFrozenWorkspaceTarget(scan, sourceTask.Spec.Workspace)
+	targetScan, err := repositoryScanWithFrozenWorkspaceTarget(scan, reviewTaskTargetWorkspace(scan, run, sourceTask))
 	if err != nil {
 		return false, err
 	}

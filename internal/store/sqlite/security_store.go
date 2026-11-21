@@ -419,6 +419,10 @@ func (s *Store) upsertReviewSliceWrite(ctx context.Context, slice *store.ReviewS
 	if err != nil {
 		return err
 	}
+	reviewedFilesJSON, err := marshalSecurityJSON(slice.ReviewedFiles)
+	if err != nil {
+		return err
+	}
 
 	slice.CreatedAt = utcTime(slice.CreatedAt)
 	slice.LastReviewedAt = utcTimePtr(slice.LastReviewedAt)
@@ -433,8 +437,9 @@ func (s *Store) upsertReviewSliceWrite(ctx context.Context, slice *store.ReviewS
 		 (id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		  entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json,
 		  trust_boundaries_json, changed_files_json, changed_line_ranges_json, review_context_json,
-		  review_context_hash, last_scan_run_id, last_reviewed_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  review_context_hash, last_scan_run_id, last_reviewed_at, created_at, updated_at,
+		  coverage, reviewed_files_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(namespace, repository_scan, id) DO UPDATE SET
 		   source = excluded.source,
 		   title = excluded.title,
@@ -454,12 +459,14 @@ func (s *Store) upsertReviewSliceWrite(ctx context.Context, slice *store.ReviewS
 		   review_context_hash = excluded.review_context_hash,
 		   last_scan_run_id = excluded.last_scan_run_id,
 		   last_reviewed_at = COALESCE(excluded.last_reviewed_at, security_review_slices.last_reviewed_at),
-		   updated_at = excluded.updated_at`,
+		   updated_at = excluded.updated_at,
+		   coverage = excluded.coverage,
+		   reviewed_files_json = excluded.reviewed_files_json`,
 		slice.ID, slice.Namespace, slice.RepositoryScan, slice.Source, slice.Title, slice.Summary,
 		slice.Kind, slice.Confidence, slice.Status, entrypointsJSON, ownedFilesJSON, contextFilesJSON,
 		testsJSON, tagsJSON, trustBoundariesJSON, changedFilesJSON, changedLineRangesJSON,
 		slice.ReviewContextJSON, slice.ReviewContextHash, slice.LastScanRunID, slice.LastReviewedAt,
-		slice.CreatedAt, slice.UpdatedAt,
+		slice.CreatedAt, slice.UpdatedAt, slice.Coverage, reviewedFilesJSON,
 	)
 	return err
 }
@@ -477,6 +484,7 @@ func scanReviewSlice(scanner interface {
 		trustBoundariesJSON   string
 		changedFilesJSON      string
 		changedLineRangesJSON string
+		reviewedFilesJSON     string
 	)
 	err := scanner.Scan(
 		&slice.ID, &slice.Namespace, &slice.RepositoryScan, &slice.Source, &slice.Title,
@@ -484,6 +492,7 @@ func scanReviewSlice(scanner interface {
 		&ownedFilesJSON, &contextFilesJSON, &testsJSON, &tagsJSON, &trustBoundariesJSON,
 		&changedFilesJSON, &changedLineRangesJSON, &slice.ReviewContextJSON, &slice.ReviewContextHash,
 		&slice.LastScanRunID, &slice.LastReviewedAt, &slice.CreatedAt, &slice.UpdatedAt,
+		&slice.Coverage, &reviewedFilesJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -513,6 +522,9 @@ func scanReviewSlice(scanner interface {
 	if err := unmarshalSecurityJSON(changedLineRangesJSON, &slice.ChangedLineRanges); err != nil {
 		return nil, err
 	}
+	if err := unmarshalSecurityJSON(reviewedFilesJSON, &slice.ReviewedFiles); err != nil {
+		return nil, err
+	}
 	return &slice, nil
 }
 
@@ -530,7 +542,7 @@ func (s *Store) ListReviewSlices(ctx context.Context, filter store.ReviewSliceFi
 	query.WriteString(`SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json, trust_boundaries_json,
 		changed_files_json, changed_line_ranges_json, review_context_json, review_context_hash,
-		last_scan_run_id, last_reviewed_at, created_at, updated_at
+		last_scan_run_id, last_reviewed_at, created_at, updated_at, coverage, reviewed_files_json
 		FROM security_review_slices WHERE namespace = ? AND repository_scan = ?`)
 	args := []any{filter.Namespace, filter.RepositoryScan}
 	if filter.Status != "" {
@@ -570,7 +582,7 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 		`SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
 		        entrypoints_json, owned_files_json, context_files_json, tests_json, tags_json, trust_boundaries_json,
 		        changed_files_json, changed_line_ranges_json, review_context_json, review_context_hash,
-		        last_scan_run_id, last_reviewed_at, created_at, updated_at
+		        last_scan_run_id, last_reviewed_at, created_at, updated_at, coverage, reviewed_files_json
 		 FROM security_review_slices
 		 WHERE namespace = ? AND repository_scan = ? AND id = ?`,
 		namespace, repositoryScan, id,

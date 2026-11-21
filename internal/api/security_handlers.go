@@ -510,6 +510,8 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		PolicyDigest:   policy.Digest,
 	}
 
+	// Validate the commit the finding's evidence was recorded at.
+	workspace := security.PinScanWorkspace(repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead), finding.CommitSHA)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -531,7 +533,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: workspace,
 		},
 	}
 	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {

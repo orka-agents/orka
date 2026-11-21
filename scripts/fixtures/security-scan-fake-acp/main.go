@@ -550,6 +550,15 @@ func populateFindings(envelope map[string]any, prompt string) error {
 	if !ok {
 		return errors.New("findings scan identity is missing")
 	}
+	// Record coverage as the review prompt asks: every trusted context file
+	// this deterministic review read.
+	if candidates := reviewCandidates(prompt); len(candidates) > 0 {
+		reviewed := make([]any, 0, len(candidates))
+		for _, candidate := range candidates {
+			reviewed = append(reviewed, candidate.path)
+		}
+		scan["reviewedFiles"] = reviewed
+	}
 	path, line, ok := reviewEvidence(prompt)
 	if !ok {
 		scan["summary"] = "No bounded source evidence was available to the deterministic fixture."
@@ -590,16 +599,33 @@ func populateFindings(envelope map[string]any, prompt string) error {
 }
 
 func reviewEvidence(prompt string) (string, int, bool) {
+	candidates := reviewCandidates(prompt)
+	for _, preferred := range []bool{true, false} {
+		for _, candidate := range candidates {
+			if preferred != preferredEvidence(candidate) {
+				continue
+			}
+			if line, ok := firstIncludedLine(prompt, candidate); ok {
+				return candidate.path, line, true
+			}
+		}
+	}
+	return "", 0, false
+}
+
+// reviewCandidates lists the included files the review prompt names as valid
+// evidence paths.
+func reviewCandidates(prompt string) []evidenceCandidate {
 	const listStart = "Valid evidence paths for this review:\n"
 	const listEnd = "\nCite findings only from included file ranges below."
 	start := strings.Index(prompt, listStart)
 	if start < 0 {
-		return "", 0, false
+		return nil
 	}
 	start += len(listStart)
 	end := strings.Index(prompt[start:], listEnd)
 	if end < 0 {
-		return "", 0, false
+		return nil
 	}
 
 	section := prompt[start : start+end]
@@ -619,17 +645,7 @@ func reviewEvidence(prompt string) (string, int, bool) {
 			role: strings.TrimSuffix(line[roleStart+2:], ")"),
 		})
 	}
-	for _, preferred := range []bool{true, false} {
-		for _, candidate := range candidates {
-			if preferred != preferredEvidence(candidate) {
-				continue
-			}
-			if line, ok := firstIncludedLine(prompt, candidate); ok {
-				return candidate.path, line, true
-			}
-		}
-	}
-	return "", 0, false
+	return candidates
 }
 
 func preferredEvidence(candidate evidenceCandidate) bool {

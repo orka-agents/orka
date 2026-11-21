@@ -125,6 +125,7 @@ Notes:
 - `provider` defaults to `github`.
 - `branch` currently defaults to the literal `main` when omitted (`security.EffectiveBranch`); it is **not** resolved from the repository's actual default branch. Set `spec.branch` explicitly for repositories whose default branch is not `main` (e.g. `master`, `trunk`).
 - `ref` optionally pins scan Tasks to a tag, branch, or commit SHA. Ref-only scans leave `workspace.branch` empty so the clean-room source boundary resolves the ref directly; trusted finding metadata reports the branch as `ref:<ref>`.
+- Review Tasks set `workspace.ref` to the mapper's head commit and validation Tasks to the finding's commit (`security.PinScanWorkspace`), keeping `workspace.branch`. Target identity still comes from the scan's branch or ref: ingestion removes the pin before deriving it, and only for the scan generation that admitted the run.
 - `schedule` uses the same cron format as `Task.spec.schedule`.
 - `historyDays` is intentionally simpler than a custom `30d` duration parser.
 - `forkRepo` and `prBaseBranch` map directly to existing workspace/PR concepts.

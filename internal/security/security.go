@@ -599,6 +599,38 @@ func EffectiveWorkspaceBranch(scan *corev1alpha1.RepositoryScan) string {
 	return EffectiveBranch(scan)
 }
 
+// PinScanWorkspace checks a scan Task's workspace out at revision, the exact
+// commit its evidence is bound to: the mapper's head for a review, or the
+// finding's occurrence commit for a validation. The scan's branch or ref
+// can advance while a run is in flight, and an unpinned checkout would then
+// examine different code than the excerpts and line ranges describe. A
+// revision that is not a full Git object ID leaves the workspace unchanged.
+func PinScanWorkspace(workspace *corev1alpha1.WorkspaceConfig, revision string) *corev1alpha1.WorkspaceConfig {
+	revision = strings.TrimSpace(revision)
+	if workspace == nil || store.ValidateGitObjectID("scan revision", revision) != nil {
+		return workspace
+	}
+	workspace.Ref = revision
+	return workspace
+}
+
+// UnpinnedScanWorkspace returns the logical target of a workspace that
+// PinScanWorkspace pinned to revision, with the scan's configured ref in
+// place of the pin, so target identity stays the scan's branch or ref rather
+// than the commit. A workspace that is not pinned to revision is returned
+// unchanged. The caller must hold the scan generation that admitted the run,
+// since the configured ref is read from scan.
+func UnpinnedScanWorkspace(scan *corev1alpha1.RepositoryScan, workspace *corev1alpha1.WorkspaceConfig, revision string) *corev1alpha1.WorkspaceConfig {
+	revision = strings.TrimSpace(revision)
+	if scan == nil || workspace == nil || store.ValidateGitObjectID("scan revision", revision) != nil ||
+		strings.TrimSpace(workspace.Ref) != revision || EffectiveRef(scan) == revision {
+		return workspace
+	}
+	unpinned := *workspace
+	unpinned.Ref = EffectiveRef(scan)
+	return &unpinned
+}
+
 // ValidateRepositoryScanSource rejects a repository URL the scan's provider
 // cannot clone, so an unusable RepositoryScan never admits scan Tasks.
 // GitHub is the only supported provider; an empty provider defaults to it.
