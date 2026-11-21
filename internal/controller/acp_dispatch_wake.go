@@ -180,6 +180,13 @@ func acpRuntimePoolOpenedForDispatch(oldPool, newPool *corev1alpha1.RuntimePool)
 	if acpRuntimePoolAdmissionOpened(oldPool, newPool) {
 		return true
 	}
+	// Reopening to sessions is always a dispatch wake, even when it is only
+	// capacity turnover on a full pool, which the admission fast path leaves
+	// behind the minimum interval.
+	if newPool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
+		oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		return true
+	}
 	previous, current := oldPool.Status.Capacity, newPool.Status.Capacity
 	return current.RunningPrompts < previous.RunningPrompts ||
 		current.ReservedPrompts < previous.ReservedPrompts ||
@@ -190,9 +197,9 @@ func acpRuntimePoolOpenedForDispatch(oldPool, newPool *corev1alpha1.RuntimePool)
 
 // acpRuntimePoolAdmissionOpened reports the subset of
 // acpRuntimePoolOpenedForDispatch in which the pool itself began admitting:
-// it starts serving, starts accepting sessions, or serves a new active
-// instance. A Task waiting for a booting or resuming runtime is reservable
-// from this update on.
+// it starts serving, starts accepting sessions other than by freeing capacity
+// on a full pool, or serves a new active instance. A Task waiting for a
+// booting or resuming runtime is reservable from this update on.
 func acpRuntimePoolAdmissionOpened(oldPool, newPool *corev1alpha1.RuntimePool) bool {
 	if !runtimePoolServingForDispatch(newPool) {
 		return false
@@ -200,8 +207,12 @@ func acpRuntimePoolAdmissionOpened(oldPool, newPool *corev1alpha1.RuntimePool) b
 	if !runtimePoolServingForDispatch(oldPool) {
 		return true
 	}
+	// A full pool is Serving and Closed only because it is at capacity;
+	// freeing a slot reopens it during ordinary capacity turnover, which
+	// stays behind the minimum scan interval like any other capacity free.
 	if newPool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
-		oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting &&
+		(oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || !runtimePoolAtCapacity(oldPool.Status.Capacity)) {
 		return true
 	}
 	return !reflect.DeepEqual(activeInstanceIdentity(oldPool.Status.ActiveInstance), activeInstanceIdentity(newPool.Status.ActiveInstance))

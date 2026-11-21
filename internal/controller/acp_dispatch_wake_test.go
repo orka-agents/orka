@@ -143,7 +143,7 @@ func TestACPRuntimePoolAdmissionOpened(t *testing.T) {
 	serving := &corev1alpha1.RuntimePool{Status: corev1alpha1.RuntimePoolStatus{
 		Lifecycle: corev1alpha1.RuntimePoolLifecycleServing, AdmissionState: corev1alpha1.RuntimePoolAdmissionAccepting,
 		ActiveInstance: &corev1alpha1.RuntimePoolActiveInstanceStatus{RuntimeInstanceID: "instance-1", ControllerEpoch: 1},
-		Capacity:       corev1alpha1.RuntimePoolCapacityStatus{RunningPrompts: 1},
+		Capacity:       corev1alpha1.RuntimePoolCapacityStatus{RunningPrompts: 1, MaxRunningPrompts: 4, MaxResidentSessions: 1},
 	}}
 	starting := serving.DeepCopy()
 	starting.Status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStarting
@@ -153,22 +153,38 @@ func TestACPRuntimePoolAdmissionOpened(t *testing.T) {
 	replaced.Status.ActiveInstance.RuntimeInstanceID = "instance-2"
 	released := serving.DeepCopy()
 	released.Status.Capacity.RunningPrompts = 0
+	// A full pool: Serving and Closed only because it is at capacity.
+	full := serving.DeepCopy()
+	full.Status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
+	full.Status.Capacity = corev1alpha1.RuntimePoolCapacityStatus{
+		ResidentSessions: 1, MaxResidentSessions: 1, RunningPrompts: 1, MaxRunningPrompts: 4,
+	}
+	available := serving.DeepCopy()
+	available.Status.Capacity = corev1alpha1.RuntimePoolCapacityStatus{
+		ResidentSessions: 0, MaxResidentSessions: 1, RunningPrompts: 0, MaxRunningPrompts: 4,
+	}
+	fullReplaced := available.DeepCopy()
+	fullReplaced.Status.ActiveInstance.RuntimeInstanceID = "instance-2"
 	for _, tc := range []struct {
 		name     string
 		old, new *corev1alpha1.RuntimePool
 		want     bool
+		// dispatch: an ordinary dispatch wake without the admission fast path.
+		dispatch bool
 	}{
 		{name: "started serving", old: starting, new: serving, want: true},
 		{name: "started accepting", old: closed, new: serving, want: true},
 		{name: "new active instance", old: serving, new: replaced, want: true},
 		{name: "freed capacity only", old: serving, new: released},
+		{name: "full pool freed a slot", old: full, new: available, dispatch: true},
+		{name: "full pool serves a new instance", old: full, new: fullReplaced, want: true},
 		{name: "stopped serving", old: serving, new: starting},
 	} {
 		if got := acpRuntimePoolAdmissionOpened(tc.old, tc.new); got != tc.want {
 			t.Errorf("%s: acpRuntimePoolAdmissionOpened = %v, want %v", tc.name, got, tc.want)
 		}
-		if tc.want && !acpRuntimePoolOpenedForDispatch(tc.old, tc.new) {
-			t.Errorf("%s: an admission opening must also open the pool for dispatch", tc.name)
+		if (tc.want || tc.dispatch) && !acpRuntimePoolOpenedForDispatch(tc.old, tc.new) {
+			t.Errorf("%s: the update must still open the pool for dispatch", tc.name)
 		}
 	}
 }
