@@ -2179,7 +2179,7 @@ func (d *ACPDispatcher) validateExistingStandaloneTaskProjection(
 		return false, err
 	}
 	if task.Spec.SessionRef != nil && bound {
-		return false, nil
+		return d.validateExistingSessionTaskProjection(ctx, task, attempt)
 	}
 	projectionID := standaloneTaskTerminalProjectionID(task, int32(attempt.Key.Attempt))
 	projection, err := d.Store.GetOutboxProjection(ctx, projectionID)
@@ -2210,6 +2210,83 @@ func (d *ACPDispatcher) validateExistingStandaloneTaskProjection(
 		return false, fmt.Errorf("%w: standalone terminal projection %q delivery state does not match its PromptAttempt", store.ErrConflict, projectionID)
 	}
 	return true, nil
+}
+
+// validateExistingSessionTaskProjection is the Session counterpart of the
+// standalone check: a session-bound attempt's terminal record is the
+// projection its finalized SessionTurn carries, which the settlement that
+// finalized the turn also projects onto the Task. A recovery pass that finds
+// it must keep that settlement rather than rewrite the Task's message and
+// transition times as if the live settlement had been interrupted. Only a
+// Succeeded attempt is kept so: a Failed or Cancelled one still takes its
+// reason from the attempt. A projection whose states differ from the
+// attempt's is not taken as the settlement, and recovery rebuilds it.
+func (d *ACPDispatcher) validateExistingSessionTaskProjection(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+) (bool, error) {
+	if attempt.ExecutionState != store.PromptExecutionSucceeded {
+		return false, nil
+	}
+	key := store.SessionTurnKey{
+		SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration,
+		TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID,
+	}
+	turnID, err := key.CanonicalID()
+	if err != nil {
+		// No turn can be found for an attempt without a complete turn key.
+		return false, nil
+	}
+	turn, err := d.Store.GetSessionTurn(ctx, turnID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if turn.State != store.SessionTurnFinalized || turn.ProjectionID == "" {
+		return false, nil
+	}
+	if turn.PromptAttemptID != attempt.ID {
+		return false, fmt.Errorf("%w: SessionTurn %q belongs to another PromptAttempt", store.ErrConflict, turn.ID)
+	}
+	projection, err := d.Store.GetOutboxProjection(ctx, turn.ProjectionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if projection.AggregateKind != "SessionTurn" || projection.AggregateID != turn.ID ||
+		projection.ProjectionKind != taskTerminalProjectionKind || turn.ProjectionKind != projection.ProjectionKind ||
+		projection.PayloadDigest != turn.ProjectionDigest {
+		return false, fmt.Errorf("%w: Session terminal projection %q has mismatched identity", store.ErrConflict, turn.ProjectionID)
+	}
+	var payload taskTerminalProjection
+	if err := json.Unmarshal(projection.Payload, &payload); err != nil {
+		return false, fmt.Errorf("decode Session terminal projection %q: %w", turn.ProjectionID, err)
+	}
+	if payload.Namespace != task.Namespace || payload.Task != task.Name || payload.TaskUID != string(task.UID) || int64(payload.Attempt) != attempt.Key.Attempt {
+		return false, fmt.Errorf("%w: Session terminal projection %q payload identity does not match its Task", store.ErrConflict, turn.ProjectionID)
+	}
+	projectedDelivery := store.PromptDeliveryNotRequested
+	if payload.Delivery != nil {
+		projectedDelivery = store.PromptDeliveryState(payload.Delivery.State)
+	}
+	if string(payload.Execution.State) != string(attempt.ExecutionState) || projectedDelivery != attempt.DeliveryState {
+		return false, nil
+	}
+	// The settlement is kept only once the Task shows it. A Task the
+	// projection has not reached yet is settled from the attempt record, as
+	// before, rather than left waiting on the outbox.
+	latest := &corev1alpha1.Task{}
+	if err := d.Client.Get(ctx, clientObjectKey(task), latest); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return latest.UID == task.UID && latest.Status.Phase == payload.Phase &&
+		latest.Status.Execution != nil && latest.Status.Execution.State == payload.Execution.State &&
+		latest.Status.Delivery != nil && store.PromptDeliveryState(latest.Status.Delivery.State) == projectedDelivery, nil
 }
 
 func (d *ACPDispatcher) patchRecoveredTerminalEpoch(ctx context.Context, task *corev1alpha1.Task, epoch int64) error {
