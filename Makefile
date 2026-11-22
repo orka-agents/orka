@@ -248,8 +248,17 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 	$(KIND) load docker-image $(WORKSPACE_PUBLISHER_IMG) --name $(KIND_CLUSTER)
 
 .PHONY: lint
-lint: ensure-ui-embed golangci-lint ## Run golangci-lint linter
+lint: ensure-ui-embed golangci-lint lint-comments ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run --new
+
+.PHONY: lint-comments
+lint-comments: ## Fail when a Go, shell, or Python file's comment count differs from hack/commentlint/baseline.json
+	go run ./hack/commentlint check
+
+.PHONY: comment-baseline
+comment-baseline: ## Lower hack/commentlint/baseline.json and ui/eslint-suppressions.json after deleting comments; never raises them
+	go run ./hack/commentlint baseline
+	cd ui && bun run lint:prune-comment-baseline
 
 .PHONY: lint-fix
 lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform fixes

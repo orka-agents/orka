@@ -19,10 +19,8 @@ const (
 )
 
 const (
-	// Finalizer
 	TaskFinalizer = "orka.ai/cleanup"
 
-	// Labels
 	LabelTask              = "orka.ai/task"
 	LabelTaskType          = "orka.ai/task-type"
 	LabelAgentName         = "orka.ai/agent-name"
@@ -45,12 +43,7 @@ const (
 	LabelSecurityScope     = "orka.ai/security-scope"
 	LabelSecuritySliceID   = "orka.ai/security-slice-id"
 	LabelSecurityFindingID = "orka.ai/security-finding-id"
-	// LabelPlatformIdentity marks Orka's own ServiceAccounts. Their tokens
-	// carry platform authority, so OutboundAccessPolicies may not hand them to
-	// workers.
-	LabelPlatformIdentity = "orka.ai/platform-identity"
-	// PlatformIdentityValue is the LabelPlatformIdentity value that marks an
-	// Orka ServiceAccount.
+	LabelPlatformIdentity  = "orka.ai/platform-identity"
 	PlatformIdentityValue  = "true"
 	LabelGitHubEvent       = "orka.ai/github-event"
 	LabelGitHubAction      = "orka.ai/github-action"
@@ -62,7 +55,6 @@ const (
 	LabelTransactionID     = "orka.ai/transaction-id"
 	LabelAuthProfile       = "orka.ai/auth-profile"
 
-	// Annotations
 	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"
 	AnnotationTransactionID                 = "orka.ai/transaction-id"
 	AnnotationContextTokenProfile           = "orka.ai/context-token-profile"
@@ -81,24 +73,9 @@ const (
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
 	AnnotationParentTaskUID                 = "orka.ai/parent-task-uid"
-	// AnnotationParentTaskNamespace records the namespace of the Task a
-	// brokered child was delegated from, beside its UID, so a child in
-	// another namespace can still find the Task it was delegated from.
-	AnnotationParentTaskNamespace = "orka.ai/parent-task-namespace"
-	// AnnotationCancelRequested records a verified parent's cancel_task
-	// request; its value is the Task's terminal message. Only controller
-	// identities may set it, and the Task controller completes the
-	// cancellation through its normal terminal path.
-	AnnotationCancelRequested = "orka.ai/cancel-requested"
-	// AnnotationRequestedBySource records that spec.requestedBy was stamped
-	// by the API server from a verified identity. Only controller identities
-	// may set it; child Tasks inherit trust through their coordination parent.
-	AnnotationRequestedBySource = "orka.ai/requested-by-source"
-	// AnnotationRequestedByStamp is an HMAC over the Task UID and requester
-	// that the API server seals right after creating a Task it stamped.
-	// Only controller identities may write it, and admission is not
-	// retroactive, so the source annotation alone proves nothing: a Task
-	// planted while admission was disabled carries no valid stamp.
+	AnnotationParentTaskNamespace           = "orka.ai/parent-task-namespace"
+	AnnotationCancelRequested               = "orka.ai/cancel-requested"
+	AnnotationRequestedBySource             = "orka.ai/requested-by-source"
 	AnnotationRequestedByStamp              = "orka.ai/requested-by-stamp"
 	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
@@ -135,45 +112,22 @@ const (
 
 const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
 
-// Parked-turn continuation metadata. The parked Task's status.wait is the
-// authority for a continuation; these are informational and for selection.
 const (
-	// LabelContinuationOf selects the continuation Tasks of a parked Task.
-	LabelContinuationOf = "orka.ai/continuation-of"
-	// AnnotationContinuationOfName and AnnotationContinuationOfUID name the
-	// parked Task a continuation resumes.
-	AnnotationContinuationOfName = "orka.ai/continuation-of-name"
-	AnnotationContinuationOfUID  = "orka.ai/continuation-of-uid"
-	// AnnotationContinuationIndex is the number of continuations before this
-	// Task in its chain.
-	AnnotationContinuationIndex = "orka.ai/continuation-index"
-	// AnnotationContinuationChainDeadline is the absolute RFC 3339 deadline
-	// a continuation inherits from the first Task of its chain. It can only
-	// shorten the deadline derived from creation time and spec.timeout.
+	LabelContinuationOf                 = "orka.ai/continuation-of"
+	AnnotationContinuationOfName        = "orka.ai/continuation-of-name"
+	AnnotationContinuationOfUID         = "orka.ai/continuation-of-uid"
+	AnnotationContinuationIndex         = "orka.ai/continuation-index"
 	AnnotationContinuationChainDeadline = "orka.ai/continuation-chain-deadline"
-	// ContinuationLinkFinalizer keeps a continuation Task from disappearing
-	// before its parked predecessor durably records its UID. Without it, a
-	// continuation created and then deleted in that window would look as if
-	// it had never been created, and recovery would start the work again.
-	ContinuationLinkFinalizer = "orka.ai/continuation-link"
-	// AnnotationCancelWait asks the controller to cancel a parked wait without
-	// deleting the Task. Its value is a short reason.
-	AnnotationCancelWait = "orka.ai/cancel-wait"
+	ContinuationLinkFinalizer           = "orka.ai/continuation-link"
+	AnnotationCancelWait                = "orka.ai/cancel-wait"
 )
 
 const LabelWorkspaceAttachment = "workspace.orka.ai/attachment-for"
 
-// ACPSuspendQuotaLeaseNamePrefix reserves class-owned suspension quota Leases
-// for controller-only writes enforced by admission.
 const ACPSuspendQuotaLeaseNamePrefix = "acp-suspend-quota-"
 
-// ACPWorkspaceRetentionFenceLeaseNamePrefix reserves idle-expiry admission
-// fences for controller-only writes enforced by admission.
 const ACPWorkspaceRetentionFenceLeaseNamePrefix = "acp-retention-fence-"
 
-// SelectorValue returns a Kubernetes label-safe value derived from the input.
-// Short, already-valid values are preserved as-is; longer values keep a readable
-// prefix and add a stable hash suffix so selectors remain deterministic.
 func SelectorValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -203,9 +157,6 @@ func SelectorValue(value string) string {
 	return prefix + "-" + hash
 }
 
-// ParentTaskName returns the full parent task name for child Task/Agent objects.
-// New objects store the full name in an annotation, while older objects may only
-// have the label value.
 func ParentTaskName(labelSet, annotationSet map[string]string) string {
 	if annotationSet != nil {
 		if parentName := strings.TrimSpace(annotationSet[AnnotationParentTaskName]); parentName != "" {
@@ -280,33 +231,19 @@ func isAlphaNum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
-// RequestedBySourceAPI is the AnnotationRequestedBySource value for Tasks whose
-// requester was verified by the API server.
 const RequestedBySourceAPI = "api"
 
-// AHPNamePrefix starts the name of every Orka Session the Agent Host Protocol
-// creates, and so of every Task an AHP turn creates.
 const AHPNamePrefix = "ahp-"
 
-// LabelAHPTurn, set to LabelAHPTurnValue, marks a Task an Agent Host Protocol
-// turn created; the API shows it only to the person who sent the turn.
 const (
 	LabelAHPTurn      = "orka.ai/ahp-turn"
 	LabelAHPTurnValue = "true"
 )
 
-// LabelChatSessionEpoch pins the incarnation of the chat Session named by
-// LabelChatSession: its creation time as SessionEpoch formats it. A chat
-// deleted and recreated under its name gets another epoch.
 const LabelChatSessionEpoch = "orka.ai/chat-session-epoch"
 
-// LabelChatSessionNamespace names the namespace of the chat Session named by
-// LabelChatSession, which a chat may create Tasks outside of. A chat Task
-// without it belongs to a chat in its own namespace.
 const LabelChatSessionNamespace = "orka.ai/chat-session-namespace"
 
-// SessionEpoch formats a Session's creation time as the label value that
-// identifies that incarnation of the Session.
 func SessionEpoch(createdAt time.Time) string {
 	return strconv.FormatInt(createdAt.UTC().UnixNano(), 10)
 }

@@ -40,9 +40,6 @@ var (
 
 var waitForRemoteBranchVisibility = waitForRemoteBranchVisibilityWithGit
 
-// PrepareWorkspace applies the diff from a prior task's result to the working
-// directory. It is called after git clone and before the LLM agent starts.
-// If ORKA_PRIOR_TASK is not set the function is a no-op.
 func PrepareWorkspace(workDir string) error {
 	priorTask := os.Getenv(workerenv.PriorTask)
 	if priorTask == "" {
@@ -60,10 +57,8 @@ func PrepareWorkspace(workDir string) error {
 	}
 	controllerURL = strings.TrimRight(controllerURL, "/")
 
-	// Read SA token for authentication.
 	saToken := workerServiceAccountToken()
 
-	// Fetch the prior task's result.
 	resultURL := fmt.Sprintf("%s/api/v1/tasks/%s/result?namespace=%s", controllerURL, priorTask, ns)
 	req, err := http.NewRequest(http.MethodGet, resultURL, nil)
 	if err != nil {
@@ -100,7 +95,6 @@ func PrepareWorkspace(workDir string) error {
 		return nil
 	}
 
-	// Warn if HEAD doesn't match the base SHA of the prior result.
 	if sr.BaseSHA != "" {
 		headOut, err := execGit(workDir, "rev-parse", "HEAD")
 		if err == nil {
@@ -111,8 +105,6 @@ func PrepareWorkspace(workDir string) error {
 		}
 	}
 
-	// Feed the untrusted patch through stdin instead of materializing a
-	// caller-influenced path in the workspace.
 	if out, err := execGitInput(workDir, sr.Diff, "apply", "--check", "-"); err != nil {
 		if _, reverseErr := execGitInput(workDir, sr.Diff, "apply", "--reverse", "--check", "-"); reverseErr == nil {
 			fmt.Fprintf(os.Stderr, "prior task diff already present in workspace; skipping reapply\n")
@@ -121,7 +113,6 @@ func PrepareWorkspace(workDir string) error {
 		return fmt.Errorf("git apply --check failed: %s: %w", out, err)
 	}
 
-	// Apply the diff.
 	if out, err := execGitInput(workDir, sr.Diff, "apply", "-"); err != nil {
 		return fmt.Errorf("git apply failed: %s: %w", out, err)
 	}
@@ -130,8 +121,6 @@ func PrepareWorkspace(workDir string) error {
 	return nil
 }
 
-// PreparePullRequestReviewContext writes safe, read-only PR diff context into
-// the workspace for reviewer agents that cannot run git commands themselves.
 func PreparePullRequestReviewContext(workDir string, cfg *WorkspaceConfig) error {
 	if cfg == nil || strings.TrimSpace(cfg.PRBaseBranch) == "" {
 		return nil
@@ -367,10 +356,6 @@ func validatePriorTaskDiffDigest(diff string) error {
 	return nil
 }
 
-// FinalizeResult builds a structured result from the agent output and any
-// uncommitted changes in workDir. If workDir is empty, it returns the raw
-// agent output as plain text bytes.
-// When ORKA_PUSH_BRANCH is set, changes are committed and pushed to that branch.
 func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	if workDir == "" {
 		return []byte(agentOutput), nil
@@ -378,13 +363,11 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 
 	baseSHA, err := execGit(workDir, "rev-parse", "HEAD")
 	if err != nil {
-		// Not a git repo or git not available — fall back to plain text
 		fmt.Fprintf(os.Stderr, "warning: git rev-parse HEAD failed in %s, returning plain text result\n", workDir)
 		return []byte(agentOutput), nil
 	}
 	baseSHA = strings.TrimSpace(baseSHA)
 
-	// Stage any new untracked files so they appear in the diff
 	execGit(workDir, "add", "-A") //nolint:errcheck
 	resetReservedWorkspacePaths(workDir)
 
@@ -415,7 +398,6 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 		sr.Files = files
 	}
 
-	// Auto-push if ORKA_PUSH_BRANCH is set and there are changes.
 	pushBranch := os.Getenv(workerenv.PushBranch)
 	requirePushBranch := strings.EqualFold(os.Getenv(requirePushBranchEnvVar), "true")
 	allowEmptyPushBranch := strings.EqualFold(os.Getenv(workerenv.AllowEmptyPushBranch), "true")
@@ -471,25 +453,20 @@ func FinalizeResult(workDir string, agentOutput string) ([]byte, error) {
 	return FormatStructuredResult(sr)
 }
 
-// pushChanges commits all changes and pushes to the given remote branch.
 func pushChanges(workDir, branch string) error {
-	// Ensure everything is staged
 	if _, err := execGit(workDir, "add", "-A"); err != nil {
 		return fmt.Errorf("git add failed: %w", err)
 	}
 	resetReservedWorkspacePaths(workDir)
 
-	// Check if there's anything to commit
 	status, _ := execGit(workDir, "status", "--porcelain")
 	if strings.TrimSpace(status) == "" {
-		return nil // nothing to commit
+		return nil
 	}
 
-	// Configure committer identity
 	execGit(workDir, "config", "user.email", "orka@ai") //nolint:errcheck
 	execGit(workDir, "config", "user.name", "Orka AI")  //nolint:errcheck
 
-	// Commit
 	if out, err := execGit(workDir, "commit", "-m", "feat: changes from orka agent"); err != nil {
 		return fmt.Errorf("git commit failed: %s: %w", out, err)
 	}
@@ -497,9 +474,7 @@ func pushChanges(workDir, branch string) error {
 	return pushCurrentHEAD(workDir, branch)
 }
 
-// pushCurrentHEAD pushes the current commit without creating a new commit.
 func pushCurrentHEAD(workDir, branch string) error {
-	// Create/reset the branch locally (handles pre-existing local branch names)
 	if out, err := execGit(workDir, "checkout", "-B", branch); err != nil {
 		return fmt.Errorf("git checkout -B %s failed: %s: %w", branch, out, err)
 	}
@@ -691,14 +666,11 @@ func waitForRemoteBranchVisibilityWithGit(workDir, remote, branch string, timeou
 }
 
 func resetReservedWorkspacePaths(workDir string) {
-	// Runtime agents expose repo-local artifact links inside the workspace. Those
-	// links are infrastructure, not user-facing code changes.
 	_, _ = execGit(workDir, "reset", "-q", "--",
 		workspaceArtifactsDirName, ":(glob)**/"+workspaceArtifactsDirName,
 	)
 }
 
-// execGit runs a git command in the given directory and returns combined output.
 func execGit(dir string, args ...string) (string, error) {
 	cmd, err := newGitCommand(context.Background(), dir, args...)
 	if err != nil {
@@ -735,9 +707,6 @@ func execGitLimited(dir string, limit int64, args ...string) (string, bool, erro
 	return stdout.String(), stdout.truncated, nil
 }
 
-// newGitCommand is the single constructor for worker git invocations: it
-// validates the argument list, pins safe.directory and disables hooks, and
-// applies the platform process attributes. All exec helpers route through it.
 func newGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
 	if err := validateGitInvocation(args); err != nil {
 		return nil, err
@@ -822,9 +791,6 @@ func (b *limitedOutputBuffer) String() string {
 	return b.buf.String()
 }
 
-// parseDiffNameStatusPaths extracts every affected path from zero-delimited
-// `git diff --name-status -z` output. Rename/copy records contribute both the
-// source and destination so policy checks cannot miss a protected target path.
 func parseDiffNameStatusPaths(raw string) []string {
 	parts := strings.Split(raw, "\x00")
 	paths := make([]string, 0, len(parts))

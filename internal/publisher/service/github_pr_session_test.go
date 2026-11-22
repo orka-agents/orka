@@ -40,8 +40,6 @@ func TestGitHubPRReconcilerContinuesSessionAcrossPublicationsAndRetries(t *testi
 		if keyErr != nil || currentKey == key {
 			t.Fatalf("publication key did not change with its exact head: %q, %v", currentKey, keyErr)
 		}
-		// GitHub moves an open PR's head when its branch is published. Its
-		// original body remains untouched, including across client retries.
 		scenario.mu.Lock()
 		scenario.list = []githubPullRequest{
 			githubTestPullRequest(scenario.base, scenario.head, 42, publisher.PullRequestOpen, nextSHA, body),

@@ -23,7 +23,6 @@ var (
 	ErrVerificationUnknown     = errors.New("remote publication state could not be observed")
 )
 
-// Error attaches a stable classification to a publisher failure.
 type Error struct {
 	Kind      error
 	Operation string

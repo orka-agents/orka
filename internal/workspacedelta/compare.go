@@ -8,13 +8,10 @@ import (
 	"sort"
 )
 
-// BuildWithLimits compares a trusted baseline with a frozen post-prompt tree
-// while applying limits that may only narrow the baseline's captured limits.
 func BuildWithLimits(baseline *Snapshot, postRoot string, intent Intent, limits BuildLimits) (Result, error) {
 	return BuildWithLimitsContext(context.Background(), baseline, postRoot, intent, limits)
 }
 
-// BuildWithLimitsContext is BuildWithLimits with request cancellation.
 func BuildWithLimitsContext(ctx context.Context, baseline *Snapshot, postRoot string, intent Intent, limits BuildLimits) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
@@ -29,9 +26,6 @@ func BuildWithLimitsContext(ctx context.Context, baseline *Snapshot, postRoot st
 	if err != nil {
 		return Result{}, err
 	}
-	// Content flags and fingerprints describe the trusted baseline only;
-	// re-running those heuristics over every post-prompt file would cost a
-	// full secret scan of the workspace on each delta.
 	post, err := capture(ctx, postRoot, baseline.options.withoutContentPolicy(), false)
 	if err != nil {
 		return Result{}, err

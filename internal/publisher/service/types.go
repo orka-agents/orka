@@ -15,8 +15,6 @@ import (
 const (
 	ProtocolVersion = "orka.workspace-publisher.v1"
 
-	// PullRequestPresentationFeature is opt-in so legacy strict v1 clients do
-	// not receive an unknown field in their capabilities response.
 	PullRequestPresentationFeature = "pull-request-presentation.v1"
 
 	HealthPath                   = "/v1/health"
@@ -69,9 +67,6 @@ func (o Operation) Path() string {
 	}
 }
 
-// OperationMetadata is the durable caller identity bound by the operation
-// capability. Workspace preparation is Task-scoped; publication and PR
-// operations are Publication-scoped.
 type OperationMetadata struct {
 	Namespace     string `json:"namespace"`
 	OperationID   string `json:"operationId"`
@@ -93,9 +88,6 @@ const (
 	CredentialRoleForge       CredentialRole = "Forge"
 )
 
-// CredentialReference names a mounted file below the configured credential
-// root. Raw credentials are never accepted in API requests. Role binds brokered
-// requests to one frozen prompt-credential purpose.
 type CredentialReference struct {
 	Name string         `json:"name"`
 	Kind CredentialKind `json:"kind"`
@@ -166,7 +158,6 @@ type PublicationPrepareRequest struct {
 	Request             publisher.PrepareRequest    `json:"request"`
 }
 
-// PreparedPublication deliberately omits the publisher's local BundlePath.
 type PreparedPublication struct {
 	PublicationID         string                      `json:"publicationId"`
 	PublicationGeneration int64                       `json:"publicationGeneration"`
@@ -288,22 +279,14 @@ type CapabilitiesResponse struct {
 	Limits                    CapabilityLimits `json:"limits"`
 }
 
-// PRReconcilerFactory lets an SCM-specific adapter consume a short-lived,
-// operation-scoped credential file without expanding the public API to raw
-// credentials. The file is deleted immediately after reconciliation.
 type PRReconcilerFactory interface {
 	New(ctx context.Context, credentialPath string) (publisher.PullRequestReconciler, error)
 }
 
-// Config contains only already-resolved secrets. The command package loads
-// them from files and clears the corresponding environment variables.
 type Config struct {
-	ListenAddress             string
-	ControllerBearerToken     []byte
-	OperationCapabilitySecret []byte
-	// ArtifactCapabilitySecret is a development/test fallback. Supported
-	// deployments use ArtifactAuthorizationBrokerURL so the Publisher cannot
-	// mint arbitrary artifact capabilities.
+	ListenAddress                  string
+	ControllerBearerToken          []byte
+	OperationCapabilitySecret      []byte
 	ArtifactCapabilitySecret       []byte
 	ArtifactAuthorizationBrokerURL string
 	ArtifactAPIURL                 string
@@ -334,9 +317,7 @@ type Config struct {
 	PRFactory                      PRReconcilerFactory
 	HTTPClient                     *http.Client
 	Now                            func() time.Time
-	// Logger records each failed operation with only the public error fields
-	// returned to the controller. Nil discards.
-	Logger *slog.Logger
+	Logger                         *slog.Logger
 }
 
 func defaultWorkspaceLimits() WorkspaceLimits {

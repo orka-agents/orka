@@ -97,10 +97,6 @@ func TestValidateFinalizedSessionProjectionAcceptsPinnedLegacySparseExecution(t 
 }
 
 func TestValidateFinalizedSessionProjectionAcceptsContinuationLeaseGeneration(t *testing.T) {
-	// A session continuation prompt runs under a later mutation-lease
-	// generation than the RuntimeSession incarnation generation frozen in the
-	// Task execution identity. Reclamation must still validate, or every
-	// continuation Task becomes undeletable.
 	task, sourceUID, attempt, projection := restoredProjectionFixture()
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: false}
 	attempt.SessionLeaseGeneration = task.Status.Execution.RuntimeSessionGeneration + 1
@@ -113,11 +109,6 @@ func TestValidateFinalizedSessionProjectionAcceptsContinuationLeaseGeneration(t 
 }
 
 func TestValidateFinalizedSessionProjectionAcceptsStrippedNoWorkspaceRevision(t *testing.T) {
-	// A Task without a repository workspace freezes the protocol-only "empty"
-	// revision in its projected delivery evidence, while the outbox projector
-	// strips that value before the schema-validated Task status. Reclamation
-	// must compare through the same normalization, or every no-workspace Task
-	// with delivery evidence becomes undeletable.
 	for _, tt := range []struct {
 		name      string
 		workspace *corev1alpha1.WorkspaceConfig
@@ -172,8 +163,6 @@ func TestValidateFinalizedSessionProjectionRejectsLeaseGenerationDrift(t *testin
 	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "session-transcript", Create: false}
 	payload := marshalProjection(t, projection)
 	turn := finalizedSessionProjectionTurn(t, payload, attempt)
-	// Drift between the finalized turn and its attempt must stay fenced even
-	// though the Task's incarnation generation is no longer compared.
 	attempt.SessionLeaseGeneration++
 
 	if _, err := ValidateFinalizedSessionProjection(payload, task, sourceUID, attempt, turn); !errors.Is(err, store.ErrConflict) {
@@ -219,7 +208,6 @@ func TestValidateFinalizedSessionProjectionRejectsUnpinnedOrPartialLegacyPayload
 			tt.mutate(task, attempt, &projection, turn)
 			payload = marshalProjection(t, projection)
 			if tt.name != "partial request identity" {
-				// Mutations above target authoritative evidence, not the payload.
 				turn.ProjectionDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(payload))
 				if tt.name == "projection digest" {
 					turn.ProjectionDigest = digest("different-payload")

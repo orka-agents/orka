@@ -4,10 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package tokenexchange implements reusable RFC 8693 token exchange and RFC
-// 7523 JWT bearer grants. It deliberately knows nothing about transaction-token
-// governance or Kubernetes policy objects; callers supply already-resolved
-// inputs and choose the response validation class they require.
 package tokenexchange
 
 import (
@@ -67,44 +63,36 @@ const (
 )
 
 var reservedParameters = map[string]struct{}{
-	"grant_type":            {},
-	"subject_token":         {},
-	"subject_token_type":    {},
-	"actor_token":           {},
-	"actor_token_type":      {},
-	"assertion":             {},
-	"scope":                 {},
-	"audience":              {},
-	"resource":              {},
-	"requested_token_type":  {},
-	"client_id":             {},
-	"client_secret":         {},
-	"client_assertion":      {},
-	"client_assertion_type": {},
-	// Entra agent identity parameters select or impersonate an identity, so a
-	// direct policy author must never set them (ADR 0039).
+	"grant_type":                         {},
+	"subject_token":                      {},
+	"subject_token_type":                 {},
+	"actor_token":                        {},
+	"actor_token_type":                   {},
+	"assertion":                          {},
+	"scope":                              {},
+	"audience":                           {},
+	"resource":                           {},
+	"requested_token_type":               {},
+	"client_id":                          {},
+	"client_secret":                      {},
+	"client_assertion":                   {},
+	"client_assertion_type":              {},
 	"fmi_path":                           {},
 	"user_id":                            {},
 	"username":                           {},
 	"user_federated_identity_credential": {},
 }
 
-// IsReservedParameter reports whether name is owned by OAuth grant or client
-// authentication construction and therefore cannot be supplied statically.
 func IsReservedParameter(name string) bool {
 	_, reserved := reservedParameters[strings.ToLower(strings.TrimSpace(name))]
 	return reserved
 }
 
-// TLSConfig controls TLS verification for one exchange endpoint.
 type TLSConfig struct {
 	ServerName string
 	CAPEM      []byte
 }
 
-// ClientAuthentication describes OAuth client authentication. Secret and
-// signing-key values must be resolved before calling Exchange and are never
-// included verbatim in cache keys or errors.
 type ClientAuthentication struct {
 	Method        string
 	ClientID      string
@@ -115,7 +103,6 @@ type ClientAuthentication struct {
 	AssertionTTL  time.Duration
 }
 
-// Request is a fully resolved OAuth exchange request.
 type Request struct {
 	Adapter string
 
@@ -140,19 +127,12 @@ type Request struct {
 	AdditionalParameters map[string]string
 	ClientAuthentication ClientAuthentication
 
-	// ExpectedIssuedTokenType requires an exact issued_token_type match.
 	ExpectedIssuedTokenType string
-	// RequiredTokenType requires an exact, case-insensitive token_type match.
-	// Resource credentials normally set this to Bearer; transaction-token
-	// callers set it to N_A.
-	RequiredTokenType string
+	RequiredTokenType       string
 
-	// CacheNamespace should be a safe digest of the policy generation/config.
-	// The client combines it with digests of all exchange inputs.
 	CacheNamespace string
 }
 
-// Result is a validated OAuth token response.
 type Result struct {
 	AccessToken     string
 	IssuedTokenType string
@@ -161,9 +141,6 @@ type Result struct {
 	ExpiresAt       time.Time
 }
 
-// ExchangeError is a safe OAuth/HTTP failure. It retains only the HTTP
-// status and a fixed, low-cardinality OAuth error code; endpoint-controlled
-// descriptions and response bodies are never exposed.
 type ExchangeError struct {
 	StatusCode int
 	Code       string
@@ -182,13 +159,10 @@ func (e *ExchangeError) Error() string {
 	return "token exchange failed"
 }
 
-// Exchanger is the small shared exchange seam used by transaction-token and
-// resource-credential adapters.
 type Exchanger interface {
 	Exchange(context.Context, Request) (Result, error)
 }
 
-// ClientOptions configures a reusable exchange client.
 type ClientOptions struct {
 	HTTPClient       *http.Client
 	MaxResponseBytes int64
@@ -216,7 +190,6 @@ type exchangeFlight struct {
 	completed bool
 }
 
-// Client executes exchanges with bounded digest-keyed caching and singleflight.
 type Client struct {
 	httpClient       *http.Client
 	maxResponseBytes int64
@@ -231,7 +204,6 @@ type Client struct {
 	flights  map[string]*exchangeFlight
 }
 
-// NewClient creates an exchange client.
 func NewClient(opts ClientOptions) *Client {
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
@@ -260,8 +232,6 @@ func NewClient(opts ClientOptions) *Client {
 	}
 }
 
-// Exchange validates, executes, validates the response, and caches successful
-// exchanges. Cache and singleflight keys contain only SHA-256 digests.
 func (c *Client) Exchange(ctx context.Context, req Request) (Result, error) {
 	if c == nil {
 		return Result{}, errors.New("token exchange client is nil")
@@ -608,7 +578,6 @@ func buildForm(req Request) (url.Values, error) {
 			form.Set("client_id", auth.ClientID)
 		}
 	case ClientAuthSecretBasic:
-		// HTTP Basic header is applied after request creation.
 	case ClientAuthSecretPost:
 		form.Set("client_id", auth.ClientID)
 		form.Set("client_secret", auth.ClientSecret)
@@ -708,13 +677,10 @@ func disableHTTP2(transport *http.Transport) {
 	}
 }
 
-// PublicEndpointDialContext resolves and dials only globally routable addresses.
 func PublicEndpointDialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	return publicEndpointDialContext(ctx, network, address)
 }
 
-// ValidatePublicEndpointHost resolves host and rejects non-public or excessive address sets.
-// It is intended for execution-time validation when another trusted hop performs the dial.
 func ValidatePublicEndpointHost(ctx context.Context, host string) error {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -858,8 +824,6 @@ func validatePublicEndpointAddresses(addresses []net.IPAddr) error {
 	return nil
 }
 
-// IsPublicAddress reports whether ip is globally routable and not within an
-// IANA special-use range that must never receive outbound credentials.
 func IsPublicAddress(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -1231,9 +1195,6 @@ func metricGrantClass(grant string) string {
 	}
 }
 
-// UnverifiedJWTExpiry returns the exp claim of a compact JWT without verifying
-// its signature. It is a best-effort hint for cache and expiry bookkeeping and
-// must never be used as an authorization decision.
 func UnverifiedJWTExpiry(token string) time.Time {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {

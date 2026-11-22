@@ -19,16 +19,12 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
-// Standard-library wrapper types that add only message text.
 var transparentWrapperTypes = map[string]struct{}{
 	"*fmt.wrapError":    {},
 	"*fmt.wrapErrors":   {},
 	"*errors.joinError": {},
 }
 
-// RecordSpanError marks span as failed with ErrorType(err). It never reads
-// err.Error(), so error text cannot reach the trace backend. Use it instead of
-// span.RecordError, which exports the message as-is.
 func RecordSpanError(span trace.Span, err error) {
 	if err == nil || span == nil || !span.IsRecording() {
 		return
@@ -36,11 +32,6 @@ func RecordSpanError(span trace.Span, err error) {
 	RecordSpanErrorType(span, ErrorType(err))
 }
 
-// RecordSpanErrorType marks span as failed with a trusted, low-cardinality
-// error class, such as an HTTP status code or a fixed outcome name. The class
-// becomes the status description, the error.type attribute and the type of an
-// exception event that has no message. Never pass text taken from an error
-// message, a provider response or a tool result.
 func RecordSpanErrorType(span trace.Span, errorType string) {
 	if errorType == "" || span == nil || !span.IsRecording() {
 		return
@@ -50,11 +41,6 @@ func RecordSpanErrorType(span trace.Span, errorType string) {
 	span.AddEvent(semconv.ExceptionEventName, trace.WithAttributes(semconv.ExceptionType(errorType)))
 }
 
-// ErrorType classifies err without reading its message. Context cancellation
-// and deadlines get fixed names. Otherwise it returns the Go type of the error
-// beneath standard-library wrappers that hold exactly one error, such as
-// fmt.Errorf("...: %w", err) or errors.Join(err, nil), because a wrapper's type
-// says nothing about the failure.
 func ErrorType(err error) string {
 	switch {
 	case err == nil:

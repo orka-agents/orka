@@ -98,7 +98,6 @@ func run() (err error) {
 		return err
 	}
 
-	// Get command from arguments or environment
 	var command []string
 	if len(os.Args) > 1 {
 		command = os.Args[1:]
@@ -114,8 +113,6 @@ func run() (err error) {
 		return fmt.Errorf("command cannot be empty")
 	}
 
-	// Execute the command and print output to stdout/stderr.
-	// The controller captures pod logs and writes them to a result ConfigMap.
 	var stdout, stderr bytes.Buffer
 
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
@@ -173,7 +170,6 @@ func finishGeneralWorkerRun(
 	if runErr == nil {
 		runErr = ctx.Err()
 	}
-	// Settle the outcome before publishing; a lost response must not change it.
 	if runErr == nil {
 		common.RecordEventWithTimeout(recorder, "WorkerCompleted", 0,
 			common.WithEventTaskName(taskName),
@@ -346,8 +342,6 @@ func runSecurityMapper(ctx context.Context) error {
 	contextSlices := make([]store.ReviewSlice, len(slices))
 	for i := range slices {
 		contextSlices[i] = slices[i]
-		// BuildReviewContext only reads these; sharing keeps memory flat
-		// when many slices see a large diff.
 		contextSlices[i].ChangedFiles = changedFiles
 		contextSlices[i].ChangedLineRanges = changedLineRanges
 	}
@@ -366,14 +360,10 @@ func runSecurityMapper(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// The uploader skips a file over its per-file limit, which would leave
-	// the run without its slices.
 	if len(data) > common.MaxArtifactFileBytes {
 		return fmt.Errorf("security slices artifact is %d bytes, above the %d byte artifact limit",
 			len(data), common.MaxArtifactFileBytes)
 	}
-	// The contexts share the upload limit with the slices artifact; keep
-	// headroom for the run's other artifacts.
 	const otherArtifactsBytes = 2 << 20
 	encoded, err := security.BuildReviewContexts(workDir, contextSlices, references,
 		min(security.MaxReviewContextsBytes, common.MaxArtifactTotalBytes-otherArtifactsBytes-len(data)))

@@ -50,6 +50,7 @@ Run after every change:
 make manifests generate          # After *_types.go or marker edits
 make verify-generated            # Before pushing (clean tree): fails on stale generated files
 make lint-fix && make test       # After any *.go edits
+make lint-comments               # After deleting comments, run make comment-baseline first
 cd ui && bun run lint && bun run test  # After UI edits
 bash -n scripts/*.sh                  # After shell script edits
 go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/<workflow>.yml  # After workflow edits
@@ -70,6 +71,7 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 
 - Use `orka.ai` and its subdomains for Orka domains, Kubernetes API groups, and label/annotation prefixes. Use `ai.orka.*` for reverse-domain identifiers such as Docker labels.
 - Structured logging in `internal/` — checked by `forbidigo`.
+- No code comments ([ADR 0062](docs/adr/0062-code-carries-no-comments.md)): make names and structure explain *what*, record *why* in `docs/adr`, and file an issue for a known hack. Directives, license headers, `Deprecated:` notices, cgo preambles, and `api/` type and field docs (CRD descriptions) are exempt. A per-file ratchet keeps existing comments from growing: `make lint-comments`/`go test ./hack/repocheck` for Go, shell, and Python, and `bun run lint` for the UI. After deleting comments, run `make comment-baseline`. Use `$delete-comment` (`.agents/skills/delete-comment/SKILL.md`) for cleanup rounds.
 - `api/` and `pkg/` never import `internal/` — checked by `depguard`.
 - LLM tool args for nested objects arrive as `map[string]any`, not strings — always type-switch
 - Put model-readable tool constraints in JSON Schema (`maximum`, `minimum`, `enum`, `default`), then validate and enforce them again in `Execute`; schema is guidance, not a runtime trust boundary

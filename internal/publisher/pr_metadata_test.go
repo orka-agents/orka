@@ -79,7 +79,6 @@ func TestValidatePullRequestTextRejectsWhitespaceTitle(t *testing.T) {
 }
 
 func TestValidatePullRequestTextRejectsSecretLikeText(t *testing.T) {
-	// Build unmistakably fake values without storing or logging token-shaped literals.
 	fakeToken := "g" + "hp_" + strings.Repeat("NOTAREALSECRET", 3)
 	fakeAssignment := "password=" + strings.Repeat("FAKE_TEST_ONLY_", 3)
 	for _, test := range []struct {
@@ -95,7 +94,6 @@ func TestValidatePullRequestTextRejectsSecretLikeText(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			err := ValidatePullRequestText(test.title, test.body)
 			if !errors.Is(err, ErrInvalidRequest) || err.Error() != "validate "+test.field+": must not contain credentials or tokens" {
-				// Do not print the error: a regression could include the fake value.
 				t.Fatal("secret-like text did not return the expected non-sensitive validation error")
 			}
 		})

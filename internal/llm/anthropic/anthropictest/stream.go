@@ -4,8 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package anthropictest lets fake Anthropic servers in tests answer the
-// streaming requests the anthropic provider sends.
 package anthropictest
 
 import (
@@ -15,10 +13,6 @@ import (
 	"net/http"
 )
 
-// WriteMessage writes message, a complete Messages API response body, to w as
-// the server-sent event stream the API returns for the same message. The
-// anthropic provider streams every request, so a fake server that used to
-// answer with message as JSON calls this instead.
 func WriteMessage(w http.ResponseWriter, message string) error {
 	var msg map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(message), &msg); err != nil {

@@ -10,13 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// TaskTokens returns the input and output tokens attributed to one Task,
-// exactly as the usage report counts them: each cumulative counter
-// contributes its final value once, and a counter shared across a runtime
-// session's turns contributes only this Task's increase. observations are
-// the Task's counter observations in accounting order, as returned by
-// ListTaskCounterObservations. When attemptID is set, only that prompt
-// attempt's measurements count.
 func TaskTokens(observations []store.UsageObservation, namespace, taskUID, attemptID string, now time.Time) (int64, int64, error) {
 	if len(observations) == 0 {
 		return 0, 0, nil
@@ -52,8 +45,6 @@ func TaskTokens(observations []store.UsageObservation, namespace, taskUID, attem
 	return 0, 0, nil
 }
 
-// hasFieldFold reports whether fields holds name under any letter case, as
-// encoding/json matches a field name when it decodes into a struct.
 func hasFieldFold(fields map[string]json.RawMessage, name string) bool {
 	for key, value := range fields {
 		if value != nil && strings.EqualFold(key, name) {
@@ -63,12 +54,6 @@ func hasFieldFold(fields map[string]json.RawMessage, name string) bool {
 	return false
 }
 
-// ExecutionEventObservation derives the usage observation that an execution
-// event carries, or nil when the event reports no countable usage. Only the
-// normalized provider recorder and the controller's ACP journal are
-// accounting sources; arbitrary timeline text and context-window sizes are
-// not. A worker "usage" report counts only for the authenticated Task in
-// attribution. event must already be sanitized and carry its creation time.
 func ExecutionEventObservation(event store.ExecutionEvent, attribution store.UsageAttribution) (*store.ExecutionEventUsage, error) {
 	var content struct {
 		Usage   *store.UsageObservation `json:"usage"`
@@ -115,7 +100,6 @@ func ExecutionEventObservation(event store.ExecutionEvent, attribution store.Usa
 		observation.TaskUID = uid
 		observation.ID = uid + "/" + observation.ID
 		observation.CounterID = uid + "/" + observation.CounterID
-		// A worker cannot choose another Task/session's accounting counter.
 		observation.Scope = store.UsageScopeCall
 		observation.Source = store.UsageSourceProvider
 		observation.AttemptID = ""
@@ -128,8 +112,6 @@ func ExecutionEventObservation(event store.ExecutionEvent, attribution store.Usa
 			return nil, store.ValidationErrorf("unsupported worker usage status")
 		}
 		observation.Complete = observation.Complete && observation.Status == store.UsageStatusCompleted
-		// Use first receipt time, not a worker-selected accounting date. Replays
-		// retain that time so transport retries remain idempotent after cleanup.
 		observation.ObservedAt = event.CreatedAt
 		keepFirstObservedAt = true
 	case content.Harness != nil:
@@ -137,9 +119,6 @@ func ExecutionEventObservation(event store.ExecutionEvent, attribution store.Usa
 		if h.TaskUID == "" || h.PromptID == "" || h.Sequence == 0 {
 			return nil, nil
 		}
-		// The controller journal supplies the frozen profile model. Public
-		// event fields remain redacted, and the client redacts this identifier
-		// again before it is retained independently of the event stream.
 		model := content.Model
 		if attribution.Model != "" {
 			model = attribution.Model
@@ -182,9 +161,6 @@ func ExecutionEventObservation(event store.ExecutionEvent, attribution store.Usa
 		observation.ObservedAt = event.CreatedAt
 	}
 	if err := store.ValidateUsageObservation(observation); err != nil {
-		// Invalid runtime accounting must not abort the execution journal.
-		// Counts outside the reporting range are unavailable; provider worker
-		// events still receive validation errors.
 		if content.Usage == nil {
 			return nil, nil
 		}

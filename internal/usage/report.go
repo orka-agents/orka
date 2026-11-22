@@ -1,4 +1,3 @@
-// Package usage builds cohort reports from retained counts and verified links.
 package usage
 
 import (
@@ -145,14 +144,10 @@ func prKey(repository string, number int64) string {
 	return fmt.Sprintf("%s#%d", strings.ToLower(repository), number)
 }
 
-// Build selects requests by start date. Model filtering selects whole requests
-// that used a model; it never removes their other models from the numerator.
 func Build(data store.UsageData, filter store.UsageFilter) (Report, error) {
 	return build(data, filter, true, "*")
 }
 
-// BuildPage computes totals across the entire selection, then pages compact
-// work rows. Only a requested other-usage category includes Task details.
 func BuildPage(data store.UsageData, filter store.UsageFilter, page Page, otherCategory string) (Report, error) {
 	report, err := build(data, filter, false, otherCategory)
 	if err != nil {
@@ -187,8 +182,6 @@ func build(data store.UsageData, filter store.UsageFilter, workDetails bool, oth
 			links[link.WorkID] = append(links[link.WorkID], link)
 		}
 	}
-	// PR-targeted review/repair belongs to the original request when a trusted
-	// publication links it. Multiple requests can share the same Task.
 	byWork, byPR := map[string][]string{}, map[string][]string{}
 	for key, task := range tasks {
 		if task.WorkID != "" {
@@ -329,8 +322,6 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 		}
 	}
 	observations := slices.Clone(data.Observations)
-	// The store supplies durable accounting order for equal timestamps. Keep
-	// it when combining namespaces; runtime sequences restart per prompt.
 	sort.SliceStable(observations, func(i, j int) bool { return observations[i].ObservedAt.Before(observations[j].ObservedAt) })
 	counters := map[string]*counter{}
 	shared := sharedCounters(data, tasks, asOf)
@@ -354,17 +345,12 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 				SessionName: observation.SessionName, StartedAt: observation.ObservedAt, Role: unassociatedRole, Phase: unknownTaskPhase}, Measurements: []Measurement{}}
 		}
 		if shared[key] {
-			// A gain on it may be a hidden Task's: it is credited to no Task,
-			// and the counter has no baseline to show. A hidden Task's report
-			// changes nothing a visible Task shows.
 			if !data.HiddenTasks[tk] {
 				observedBy(current, observation, tk)
 				current.gap = sharedCounterGap
 			}
 			continue
 		}
-		// A baseline a hidden Task's report starts is its earlier usage, and
-		// one on a session whose earlier usage may not be shown is hidden too.
 		if baselineKey := addSessionBaseline(current, observation, tasks); baselineKey != "" &&
 			(data.HiddenTasks[tk] || data.HiddenSessionBaselines[taskKey(observation.Namespace, strings.TrimSpace(cmp.Or(observation.SessionName, tasks[tk].SessionName)))]) {
 			if data.HiddenTasks == nil {
@@ -403,32 +389,18 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 	return tasks
 }
 
-// observationTaskUID names the Task an observation counts toward: its own,
-// or, for usage with no Task such as a chat's, one per counter.
 func observationTaskUID(observation store.UsageObservation) string {
 	return cmp.Or(observation.TaskUID, "call-"+observation.CounterID)
 }
 
-// ObservationTaskKey is the key UsageData.HiddenTasks hides an observation's
-// usage by, also for usage with no Task.
 func ObservationTaskKey(observation store.UsageObservation) string {
 	return taskKey(observation.Namespace, observationTaskUID(observation))
 }
 
-// sharedCounterGap marks usage on a counter a hidden Task may share.
 const sharedCounterGap = "Shared with a Task this report does not show; usage on it is not attributed to a Task"
 
-// sharedCounters returns the counters that may hold a hidden Task's usage:
-// those a hidden Task reported on, and the session counters of a session a
-// hidden Task continued. A session counter spans the session's turns, so a
-// gain on such a counter may be the hidden Task's even when it never
-// reported; it is credited to no visible Task.
 func sharedCounters(data store.UsageData, tasks map[string]Task, asOf time.Time) map[string]bool {
 	hiddenSessions := map[string]bool{}
-	// A hidden reporter the report has no row for, as a Task whose row
-	// retention pruned while keeping its usage as counter history, shares
-	// no counter: its own usage stays hidden, and later Tasks' gains are
-	// theirs.
 	rows := map[string]bool{}
 	for _, task := range data.Tasks {
 		rows[taskKey(task.Namespace, task.TaskUID)] = true
@@ -458,8 +430,6 @@ func sharedCounters(data store.UsageData, tasks map[string]Task, asOf time.Time)
 	return shared
 }
 
-// The first session total may predate this Task. Keep it visible as
-// unassociated usage and attribute only subsequent deltas to Tasks.
 func addSessionBaseline(current *counter, observation store.UsageObservation, tasks map[string]Task) string {
 	if observation.Scope != store.UsageScopeSession {
 		return ""
@@ -493,8 +463,6 @@ func addSessionBaseline(current *counter, observation store.UsageObservation, ta
 }
 
 func finishTaskMeasurements(task Task, key string) Task {
-	// ACP lifecycle events describe the prompt attempt. A session counter
-	// for the same prompt replaces its empty lifecycle measurement.
 	sessionAttempts := map[string]bool{}
 	for _, m := range task.Measurements {
 		if m.Scope == store.UsageScopeSession && m.AttemptID != "" {
@@ -530,8 +498,6 @@ func finishTaskMeasurements(task Task, key string) Task {
 	return task
 }
 
-// observedBy returns the measurement of the observing Task's attempt on a
-// counter, brought up to the observation's time, provider, model and status.
 func observedBy(c *counter, observation store.UsageObservation, taskID string) *Measurement {
 	owner := measurementOwner{taskID: taskID, attemptID: observation.AttemptID}
 	m := c.byTask[owner]
@@ -636,8 +602,6 @@ func totalMeasurements(measurements []Measurement) (Totals, error) {
 				}
 			}
 		}
-		// A known subtotal is not an available aggregate breakdown when another
-		// measurement omits that field. Keep the known counts for drill-down.
 		total.CachedUsageReported = total.CachedUsageReported && m.CachedInputTokens != nil
 		total.CacheWriteUsageReported = total.CacheWriteUsageReported && m.CacheWriteInputTokens != nil
 	}

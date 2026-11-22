@@ -61,7 +61,7 @@ func TestSensitiveTextRedactsURLUserInfoWithoutPassword(t *testing.T) {
 func TestSensitiveTextRedactsSignedURLQueries(t *testing.T) {
 	cases := map[string]string{
 		"https://acct.blob.core.windows.net/c/b?sv=2024-05-04&se=2026-01-01&sig=abc%2Fdef123&sr=b":                     "https://acct.blob.core.windows.net/c/b?sv=2024-05-04&se=2026-01-01&sig=[REDACTED]&sr=b",
-		"https://bucket.s3.amazonaws.com/k?X-Amz-Credential=AKIA%2F20260101&X-Amz-Signature=0123abcd&X-Amz-Expires=60": "https://bucket.s3.amazonaws.com/k?X-Amz-Credential=[REDACTED]", // the generic credential= redactor already consumes the remaining query,
+		"https://bucket.s3.amazonaws.com/k?X-Amz-Credential=AKIA%2F20260101&X-Amz-Signature=0123abcd&X-Amz-Expires=60": "https://bucket.s3.amazonaws.com/k?X-Amz-Credential=[REDACTED]",
 		"see https://storage.googleapis.com/b/o?X-Goog-Signature=deadbeef for details":                                 "see https://storage.googleapis.com/b/o?X-Goog-Signature=[REDACTED] for details",
 		"plain https://example.com/path?page=2&sort=asc stays":                                                         "plain https://example.com/path?page=2&sort=asc stays",
 		"fetch https://h.example/o?sig=abc123#download, then https://h.example/p?signature=xyz; done":                  "fetch https://h.example/o?sig=[REDACTED]#download, then https://h.example/p?signature=[REDACTED]; done",
@@ -111,9 +111,7 @@ func TestSensitiveTextRedactsSerializedAuthorizationHeaders(t *testing.T) {
 		`{"Authorization":"Token token=\"` + value + `\""}`:                       `{"Authorization":"[REDACTED]"}`,
 		`{"m":"{\"Authorization\":\"Basic ` + value + `\"}"}`:                     `{"m":"{\"Authorization\":\"[REDACTED]\"}"}`,
 		`Authorization: Digest username="ci", response="` + value + `", qop=auth`: `Authorization: [REDACTED]`,
-		// A quoted value may hold backslash-escaped quotes; the parameters
-		// after it are redacted too.
-		`Authorization: Digest username="ci\"bot", response="` + value + `"`: `Authorization: [REDACTED]`,
+		`Authorization: Digest username="ci\"bot", response="` + value + `"`:      `Authorization: [REDACTED]`,
 	} {
 		if got := SensitiveText(input); got != want || SensitiveText(got) != got {
 			t.Fatalf("SensitiveText(%q) = %q, want %q", input, got, want)
@@ -121,8 +119,6 @@ func TestSensitiveTextRedactsSerializedAuthorizationHeaders(t *testing.T) {
 	}
 }
 
-// An auth-param stays on its header's line: a token68 value's padding must
-// not read the next line's key as a parameter value.
 func TestSensitiveTextAuthorizationStaysOnItsLine(t *testing.T) {
 	value := "Vq7Rk2Lm" + "9Xw4Tz8Np3Hs"
 	input := "Authorization: Basic " + value + "=\npassword: \"violet meadow copper kettle\""

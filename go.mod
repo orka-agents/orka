@@ -58,6 +58,7 @@ require (
 	k8s.io/client-go v0.37.2
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	modernc.org/sqlite v1.60.1
+	mvdan.cc/sh/v3 v3.14.1
 	oras.land/oras-go/v2 v2.6.2
 	sigs.k8s.io/controller-runtime v0.25.2
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730
