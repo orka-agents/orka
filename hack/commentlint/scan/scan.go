@@ -65,8 +65,8 @@ type Target struct {
 	Category string `json:"category,omitempty"`
 }
 
-var goDirective = regexp.MustCompile(`^(?://(?:go:|\s*nolint|lint:|export |line |extern |\+|\s*\+[a-z]|revive:` +
-	`|\s*#nosec)|/\*line )`)
+var goDirective = regexp.MustCompile(`^(?://(?:go:|\s*nolint(?:$|[:\s])|lint:|export |line |extern |` +
+	`\+|\s*\+[a-z]|revive:|\s*#nosec)|/\*line )`)
 
 var deprecation = regexp.MustCompile(`(?m)^Deprecated: `)
 

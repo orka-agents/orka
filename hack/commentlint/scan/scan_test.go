@@ -565,3 +565,12 @@ func TestNoticeWordsAreWordBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestNolintDirectiveIsWordBounded(t *testing.T) {
+	src := "package main\n\n//nolint:gocyclo\nfunc f() {}\n\n// nolint\nfunc g() {}\n\n// nolintish rationale\nvar X = 1\n"
+	got, err := scanGo("main.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTexts(t, got, "// nolintish rationale")
+}
