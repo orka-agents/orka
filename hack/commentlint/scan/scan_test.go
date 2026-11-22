@@ -530,7 +530,7 @@ func TestOnlyKnownNoticeFormsAreExempt(t *testing.T) {
 		"//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n" +
 		"//  See the License for the specific language governing permissions and\n" +
 		"//  limitations under the License.\n\npackage main\n"
-	spdx := "// Copyright Orka Contributors.\n// SPDX-License-Identifier: Apache-2.0\n\npackage main\n"
+	spdx := "// Copyright Orka Contributors.\n// SPDX-License-Identifier: Apache-2.0 OR MIT\n\npackage main\n"
 	for name, src := range map[string]string{"apache.go": apache, "spdx.go": spdx} {
 		got, err := scanGo(name, []byte(src))
 		if err != nil || len(got) != 0 {
@@ -542,6 +542,7 @@ func TestOnlyKnownNoticeFormsAreExempt(t *testing.T) {
 			"Permission is hereby granted, free of charge, to any person.\n*/\n\npackage main\n",
 		"same-paragraph.go": "// Modified from example.com/upstream at abc1234. We skip retries because it was easier.\n" +
 			"package main\n",
+		"spdx-prose.go": "// SPDX-License-Identifier: MIT\n// We skip retries here because it was easier.\npackage main\n",
 	}
 	for name, src := range counted {
 		got, err := scanGo(name, []byte(src))

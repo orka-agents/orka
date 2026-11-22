@@ -71,7 +71,18 @@ export const noComments = {
             !directive.test(comment.value),
         );
         const header = new Set(
-          onlyNotices(leading.map(plainText).join("\n")) ? leading : [],
+          onlyNotices(
+            leading
+              .map((comment, index) => {
+                const previous = leading[index - 1];
+                const gap =
+                  previous && comment.loc.start.line - previous.loc.end.line > 1;
+                return (gap ? "\n" : "") + plainText(comment);
+              })
+              .join("\n"),
+          )
+            ? leading
+            : [],
         );
         for (const comment of comments) {
           if (

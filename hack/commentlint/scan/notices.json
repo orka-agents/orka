@@ -1,9 +1,10 @@
 {
   "paragraphs": [
-    "^copyright( \\(c\\)| ©)?( [0-9]{4}([-, ]+[0-9]{4})*)?\\.?( [^.]{1,80}\\.?)?( all rights reserved\\.)?$",
+    "^copyright( \\(c\\)| ©)?( [0-9]{4}([-, ]+[0-9]{4})*)?\\.?(( [a-z0-9][a-z0-9&,'.-]*){1,6})?( all rights reserved\\.)?$",
+    "^copyright( \\(c\\)| ©)?( [0-9]{4}([-, ]+[0-9]{4})*)?\\.?(( [a-z0-9][a-z0-9&,'.-]*){1,6})? [a-z0-9.+-]+( [a-z0-9.+-]+){0,3} license - see license file for details\\.$",
     "^all rights reserved\\.$",
-    "^spdx-license-identifier: [a-z0-9.+() -]+$",
-    "^copyright( \\(c\\)| ©)?( [0-9]{4}([-, ]+[0-9]{4})*)?\\.?( [^.]{1,80}\\.?)? spdx-license-identifier: [a-z0-9.+() -]+$",
+    "^spdx-license-identifier: \\(?[a-z0-9.+-]+\\)?( (and|or|with) \\(?[a-z0-9.+-]+\\)?)*$",
+    "^copyright( \\(c\\)| ©)?( [0-9]{4}([-, ]+[0-9]{4})*)?\\.?(( [a-z0-9][a-z0-9&,'.-]*){1,6})? spdx-license-identifier: \\(?[a-z0-9.+-]+\\)?( (and|or|with) \\(?[a-z0-9.+-]+\\)?)*$",
     "^[a-z0-9.+-]+( [a-z0-9.+-]+){0,3} license - see license file for details\\.$",
     "^licensed under the apache license, version 2\\.0 \\(the \"license\"\\); you may not use this file except in compliance with the license\\. you may obtain a copy of the license at$",
     "^https?://www\\.apache\\.org/licenses/license-2\\.0$",
