@@ -536,3 +536,10 @@ func TestFullLicenseTextsAreExempt(t *testing.T) {
 		}
 	}
 }
+
+func TestNoticeWordsAreWordBounded(t *testing.T) {
+	got, err := scanGo("r.go", []byte("// Retrying improves reliability.\npackage main\n"))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got %q, %v", texts(got), err)
+	}
+}
