@@ -1013,6 +1013,9 @@ grouped by package and ordered by source position as of round 2.
 
 - These decisions are still in force. A change that breaks one must supersede that
   entry in a new ADR.
+- Entries were recovered from comments in bulk, and a few original comments were stale or
+  overstated. If an entry disagrees with the code, treat that as a bug in the entry: confirm the
+  intended behavior, then fix the code or supersede the entry in a new ADR.
 - Symbols get renamed. When an entry's symbol no longer exists, search for the behavior it
   describes.
 - Entries recovered from test comments record why a test is shaped the way it is, so the test
