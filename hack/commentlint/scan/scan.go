@@ -77,9 +77,11 @@ var pythonDirective = regexp.MustCompile(`^#\s*(nosec|noqa|type:|pylint:|pyright
 
 var shellAliases = regexp.MustCompile(`\balias\b|expand_aliases`)
 
-var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|\blicen[cs]ed?\b|` +
-	`all rights reserved|permission is hereby granted|\bwarrant(y|ies)\b|\bliabilit(y|ies)\b|\bredistributions?\b|` +
-	`modified from|derived from|code generated .*do not edit`)
+var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|licensed under|` +
+	`all rights reserved|permission is hereby granted|modified from|derived from|code generated .*do not edit`)
+
+var licenseContinuation = regexp.MustCompile(`(?i)\blicen[cs]e[ds]?\b|\bwarrant(y|ies)\b|\bliabilit(y|ies)\b|` +
+	`\bredistributions?\b`)
 
 var pythonInterpreter = regexp.MustCompile(`^python(3(\.\d+)?)?$`)
 
@@ -378,10 +380,11 @@ func onlyNotices(text string) bool {
 		if strings.TrimSpace(paragraph) == "" {
 			continue
 		}
-		if !licenseNotice.MatchString(paragraph) {
+		marker := licenseNotice.MatchString(paragraph)
+		if !marker && !licenseContinuation.MatchString(paragraph) {
 			return false
 		}
-		found = true
+		found = found || marker
 	}
 	return found
 }
