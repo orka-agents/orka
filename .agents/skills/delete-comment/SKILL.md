@@ -20,10 +20,12 @@ Exempt, never counted: compiler and tool directives (`//go:`, `//nolint`, `// +k
 and other `// +` markers, `#nosec`, `# shellcheck`, `# noqa`, `eslint-disable`, `@ts-expect-error`,
 `/// <reference>`), license headers, `Deprecated:` notices, cgo preambles, Go example `Output:` blocks, generated files, `testdata/`, the vendored `.agents/skills/autoreview`, and doc
 comments on types and fields under `api/`, because controller-gen turns those into CRD
-descriptions that `kubectl explain` shows users. A leading header counts as a licence notice only when it has a notice
-marker (copyright, SPDX, "Licensed under", a permission grant, attribution, or a generated-file
-marker) and every paragraph is legal text the matcher recognizes. Put long third-party licence
-texts in `NOTICE.md`, not in source headers.
+descriptions that `kubectl explain` shows users. A leading header counts as a notice only when every paragraph matches
+one of the complete forms in `hack/commentlint/scan/notices.json`, which the Go scanner and the
+ESLint rule both read. Those forms are a copyright line, an SPDX line, the repository boilerplate,
+the Apache-2.0 short header, a one-line "Modified from <source> at <sha>." attribution, and a
+"Code generated … DO NOT EDIT." marker. Put any other licence text in `NOTICE.md`, not in source
+headers.
 
 ## 1. Pick a scope
 

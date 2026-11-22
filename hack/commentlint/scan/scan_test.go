@@ -494,7 +494,7 @@ func TestSourcedAliasesBlockDeletion(t *testing.T) {
 }
 
 func TestSpacedNolintAndAttributionHeadersAreExempt(t *testing.T) {
-	src := "// Modified from example.com/upstream at abc123.\npackage main\n\n" +
+	src := "// Modified from example.com/upstream at abc1234.\npackage main\n\n" +
 		"// nolint:gocyclo\nfunc f() {}\n\n// real\nvar X = 1\n"
 	got, err := scanGo("main.go", []byte(src))
 	if err != nil {
@@ -504,7 +504,7 @@ func TestSpacedNolintAndAttributionHeadersAreExempt(t *testing.T) {
 }
 
 func TestNoticeHeadersCannotCarryOtherProse(t *testing.T) {
-	mixed := "// Modified from example.com/upstream at abc123.\n//\n" +
+	mixed := "// Modified from example.com/upstream at abc1234.\n//\n" +
 		"// We skip retries here because it was easier.\npackage main\n"
 	got, err := scanGo("main.go", []byte(mixed))
 	if err != nil || len(got) != 1 {
@@ -519,25 +519,34 @@ func TestNoticeHeadersCannotCarryOtherProse(t *testing.T) {
 		"# Copyright (c) 2026.\n#\n# Retries are skipped.")
 }
 
-func TestFullLicenseTextsAreExempt(t *testing.T) {
-	mit := "/*\nCopyright (c) 2026 Example\n\n" +
-		"Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software.\n\n" +
-		"The above copyright notice and this permission notice shall be included in all\ncopies.\n\n" +
-		"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND.\n*/\n\npackage main\n"
-	apache := "// Copyright 2026 Example\n//\n// Licensed under the Apache License, Version 2.0 (the \"License\");\n" +
-		"// you may not use this file except in compliance with the License.\n//\n" +
-		"// Unless required by applicable law or agreed to in writing, software\n" +
-		"// distributed under the License is distributed on an \"AS IS\" BASIS,\n" +
-		"// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.\n\npackage main\n"
-	zeroBSD := "// Copyright (C) 2026 Example\n//\n" +
-		"// Permission to use, copy, modify, and/or distribute this software for any\n" +
-		"// purpose with or without fee is hereby granted.\n//\n" +
-		"// THE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES.\n\npackage main\n"
-	cases := map[string]string{"mit.go": mit, "apache.go": apache, "0bsd.go": zeroBSD}
-	for name, src := range cases {
+func TestOnlyKnownNoticeFormsAreExempt(t *testing.T) {
+	apache := "//  Copyright 2026 Example LLC\n//\n" +
+		"//  Licensed under the Apache License, Version 2.0 (the \"License\");\n" +
+		"//  you may not use this file except in compliance with the License.\n" +
+		"//  You may obtain a copy of the License at\n//\n" +
+		"//      http://www.apache.org/licenses/LICENSE-2.0\n//\n" +
+		"//  Unless required by applicable law or agreed to in writing, software\n" +
+		"//  distributed under the License is distributed on an \"AS IS\" BASIS,\n" +
+		"//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n" +
+		"//  See the License for the specific language governing permissions and\n" +
+		"//  limitations under the License.\n\npackage main\n"
+	spdx := "// Copyright Orka Contributors.\n// SPDX-License-Identifier: Apache-2.0\n\npackage main\n"
+	for name, src := range map[string]string{"apache.go": apache, "spdx.go": spdx} {
 		got, err := scanGo(name, []byte(src))
 		if err != nil || len(got) != 0 {
 			t.Errorf("%s: %q, %v", name, texts(got), err)
+		}
+	}
+	counted := map[string]string{
+		"mit.go": "/*\nCopyright (c) 2026 Example\n\n" +
+			"Permission is hereby granted, free of charge, to any person.\n*/\n\npackage main\n",
+		"same-paragraph.go": "// Modified from example.com/upstream at abc1234. We skip retries because it was easier.\n" +
+			"package main\n",
+	}
+	for name, src := range counted {
+		got, err := scanGo(name, []byte(src))
+		if err != nil || len(got) != 1 {
+			t.Errorf("%s should be counted: %q, %v", name, texts(got), err)
 		}
 	}
 }

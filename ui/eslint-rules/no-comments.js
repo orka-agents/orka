@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 const directive = new RegExp(
   "^[\\s*]*(?:" +
     [
@@ -15,25 +17,31 @@ const directive = new RegExp(
     ")(?=[\\s:]|$)",
 );
 
-const notice =
-  /copyright|spdx-license-identifier|licensed under|all rights reserved|permission is hereby granted|modified from|derived from|code generated[\s\S]*do not edit/i;
+const noticeParagraphs = JSON.parse(
+  readFileSync(
+    new URL("../../hack/commentlint/scan/notices.json", import.meta.url),
+    "utf8",
+  ),
+).paragraphs.map((pattern) => new RegExp(pattern, "iu"));
 
-const noticeContinuation =
-  /\blicen[cs]e[ds]?\b|\bwarrant(?:y|ies)\b|\bliabilit(?:y|ies)\b|\bredistributions?\b|\bhereby granted\b/i;
-
-function onlyNotices(value) {
-  const paragraphs = value
-    .split("\n")
-    .map((line) => line.replace(/^\s*\*?\s?/, ""))
-    .join("\n")
+function onlyNotices(text) {
+  const paragraphs = text
     .split(/\n\s*\n/)
-    .filter((paragraph) => paragraph.trim() !== "");
+    .map((paragraph) => paragraph.split(/\s+/).filter(Boolean).join(" "))
+    .filter((paragraph) => paragraph !== "");
   return (
-    paragraphs.some((paragraph) => notice.test(paragraph)) &&
-    paragraphs.every(
-      (paragraph) => notice.test(paragraph) || noticeContinuation.test(paragraph),
+    paragraphs.length > 0 &&
+    paragraphs.every((paragraph) =>
+      noticeParagraphs.some((pattern) => pattern.test(paragraph)),
     )
   );
+}
+
+function plainText(comment) {
+  return comment.value
+    .split("\n")
+    .map((line) => line.replace(/^\s*\*?\s?/, ""))
+    .join("\n");
 }
 
 export const noComments = {
@@ -55,13 +63,21 @@ export const noComments = {
       Program() {
         const firstToken = sourceCode.ast.tokens[0];
         const codeStart = firstToken ? firstToken.range[0] : Infinity;
-        for (const comment of sourceCode.getAllComments()) {
-          const licenseHeader =
-            comment.range[1] <= codeStart && onlyNotices(comment.value);
+        const comments = sourceCode.getAllComments();
+        const leading = comments.filter(
+          (comment) =>
+            comment.type !== "Shebang" &&
+            comment.range[1] <= codeStart &&
+            !directive.test(comment.value),
+        );
+        const header = new Set(
+          onlyNotices(leading.map(plainText).join("\n")) ? leading : [],
+        );
+        for (const comment of comments) {
           if (
             comment.type === "Shebang" ||
             directive.test(comment.value) ||
-            licenseHeader
+            header.has(comment)
           ) {
             continue;
           }

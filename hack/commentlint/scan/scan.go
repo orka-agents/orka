@@ -8,6 +8,7 @@ package scan
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,11 +78,22 @@ var pythonDirective = regexp.MustCompile(`^#\s*(nosec|noqa|type:|pylint:|pyright
 
 var shellAliases = regexp.MustCompile(`\balias\b|expand_aliases`)
 
-var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|licensed under|` +
-	`all rights reserved|permission is hereby granted|modified from|derived from|code generated .*do not edit`)
+//go:embed notices.json
+var noticesJSON []byte
 
-var licenseContinuation = regexp.MustCompile(`(?i)\blicen[cs]e[ds]?\b|\bwarrant(y|ies)\b|\bliabilit(y|ies)\b|` +
-	`\bredistributions?\b|\bhereby granted\b`)
+var noticeParagraphs = func() []*regexp.Regexp {
+	var spec struct {
+		Paragraphs []string `json:"paragraphs"`
+	}
+	if err := json.Unmarshal(noticesJSON, &spec); err != nil {
+		panic(err)
+	}
+	out := make([]*regexp.Regexp, 0, len(spec.Paragraphs))
+	for _, pattern := range spec.Paragraphs {
+		out = append(out, regexp.MustCompile("(?i)"+pattern))
+	}
+	return out
+}()
 
 var pythonInterpreter = regexp.MustCompile(`^python(3(\.\d+)?)?$`)
 
@@ -377,14 +389,14 @@ func licenseHeader(src []byte, c Comment) bool {
 func onlyNotices(text string) bool {
 	found := false
 	for paragraph := range strings.SplitSeq(text, "\n\n") {
-		if strings.TrimSpace(paragraph) == "" {
+		normalized := strings.Join(strings.Fields(paragraph), " ")
+		if normalized == "" {
 			continue
 		}
-		marker := licenseNotice.MatchString(paragraph)
-		if !marker && !licenseContinuation.MatchString(paragraph) {
+		if !slices.ContainsFunc(noticeParagraphs, func(re *regexp.Regexp) bool { return re.MatchString(normalized) }) {
 			return false
 		}
-		found = found || marker
+		found = true
 	}
 	return found
 }

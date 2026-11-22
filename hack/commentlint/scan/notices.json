@@ -1,0 +1,14 @@
+{
+  "paragraphs": [
+    "^copyright( \\(c\\)| ©)?( [0-9]{4}([-, ]+[0-9]{4})*)?\\.?( [^.]{1,80}\\.?)?( all rights reserved\\.)?$",
+    "^all rights reserved\\.$",
+    "^spdx-license-identifier: [a-z0-9.+() -]+$",
+    "^copyright( \\(c\\)| ©)?( [0-9]{4}([-, ]+[0-9]{4})*)?\\.?( [^.]{1,80}\\.?)? spdx-license-identifier: [a-z0-9.+() -]+$",
+    "^[a-z0-9.+-]+( [a-z0-9.+-]+){0,3} license - see license file for details\\.$",
+    "^licensed under the apache license, version 2\\.0 \\(the \"license\"\\); you may not use this file except in compliance with the license\\. you may obtain a copy of the license at$",
+    "^https?://www\\.apache\\.org/licenses/license-2\\.0$",
+    "^unless required by applicable law or agreed to in writing, software distributed under the license is distributed on an \"as is\" basis, without warranties or conditions of any kind, either express or implied\\. see the license for the specific language governing permissions and limitations under the license\\.$",
+    "^(modified|derived) from [^ ]+( [^ ]+)? at [0-9a-f]{7,40}\\.$",
+    "^code generated .* do not edit\\.$"
+  ]
+}
