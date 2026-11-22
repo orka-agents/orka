@@ -128,6 +128,22 @@ func TestAssessReviewCoverage(t *testing.T) {
 	}
 }
 
+// A path included as both owned and a test input, as the Node mapper does
+// for package.json, stays owned: a review that skips it is partial.
+func TestAssessReviewCoverageKeepsAnOwnedRoleOverALaterRole(t *testing.T) {
+	manifest := ReviewContextManifest{IncludedFiles: []ReviewContextIncludedFile{
+		{Path: "package.json", Role: "owned", Readable: true},
+		{Path: "server.js", Role: "owned", Readable: true},
+		{Path: "package.json", Role: "test", Readable: true},
+	}}
+	if got := AssessReviewCoverage("node", manifest, []string{"server.js"}, nil, nil); got.Disposition != ReviewCoveragePartial {
+		t.Fatalf("Disposition without package.json = %q, want partial", got.Disposition)
+	}
+	if got := AssessReviewCoverage("node", manifest, []string{"server.js", "package.json"}, nil, nil); got.Disposition != ReviewCoverageComplete {
+		t.Fatalf("Disposition with every owned file = %q, want complete", got.Disposition)
+	}
+}
+
 // A component slice that owns no readable file falls back to the
 // cross-component rule rather than calling any corroborated read complete.
 func TestAssessReviewCoverageWithoutOwnedFiles(t *testing.T) {

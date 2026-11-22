@@ -58,9 +58,12 @@ func AssessReviewCoverage(sliceKind string, manifest ReviewContextManifest, clai
 			readable[path] = "reference"
 		}
 	}
+	// One path can be included under several roles, such as a package
+	// manifest that is both owned and a test input; owned always wins, so
+	// every readable owned file stays required.
 	for _, file := range manifest.IncludedFiles {
 		path := strings.TrimSpace(file.Path)
-		if file.Readable && SafeRepoPath(path) {
+		if file.Readable && SafeRepoPath(path) && readable[path] != "owned" {
 			readable[path] = file.Role
 		}
 	}
