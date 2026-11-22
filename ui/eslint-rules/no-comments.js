@@ -22,7 +22,7 @@ const noticeParagraphs = JSON.parse(
     new URL("../../hack/commentlint/scan/notices.json", import.meta.url),
     "utf8",
   ),
-).paragraphs.map((pattern) => new RegExp(pattern, "iu"));
+).paragraphs.map((pattern) => new RegExp(pattern, "u"));
 
 function onlyNotices(text) {
   const paragraphs = text

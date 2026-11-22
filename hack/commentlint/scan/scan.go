@@ -90,7 +90,7 @@ var noticeParagraphs = func() []*regexp.Regexp {
 	}
 	out := make([]*regexp.Regexp, 0, len(spec.Paragraphs))
 	for _, pattern := range spec.Paragraphs {
-		out = append(out, regexp.MustCompile("(?i)"+pattern))
+		out = append(out, regexp.MustCompile(pattern))
 	}
 	return out
 }()

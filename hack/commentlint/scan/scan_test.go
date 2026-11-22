@@ -543,7 +543,8 @@ func TestOnlyKnownNoticeFormsAreExempt(t *testing.T) {
 			"Permission is hereby granted, free of charge, to any person.\n*/\n\npackage main\n",
 		"same-paragraph.go": "// Modified from example.com/upstream at abc1234. We skip retries because it was easier.\n" +
 			"package main\n",
-		"spdx-prose.go": "// SPDX-License-Identifier: MIT\n// We skip retries here because it was easier.\npackage main\n",
+		"spdx-prose.go":   "// SPDX-License-Identifier: MIT\n// We skip retries here because it was easier.\npackage main\n",
+		"holder-prose.go": "// Copyright 2026 we skip retries here.\npackage main\n",
 	}
 	for name, src := range counted {
 		got, err := scanGo(name, []byte(src))
