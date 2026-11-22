@@ -3801,7 +3801,7 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 	})
 	coverage := security.AssessReviewCoverage(
 		reviewSlice.Kind, *manifest, findingsV2.Scan.ReviewedFiles, acceptedFindingEvidencePaths(partition.Accepted),
-		len(findingsV2.Scan.ResolvedQuestions),
+		findingsV2.Scan.ResolvedQuestions,
 	)
 	// An empty result that corroborates none of its trusted context is
 	// indistinguishable from an echoed template or a review that never ran.

@@ -15,6 +15,19 @@ func coverageTestManifest() ReviewContextManifest {
 	}}
 }
 
+// coverageTestQuestions returns settled questions with a resolution followed
+// by unanswered ones without, as the lenient result decoder can produce.
+func coverageTestQuestions(settled, unanswered int) []FindingsV2ResolvedQuestion {
+	var questions []FindingsV2ResolvedQuestion
+	for range settled {
+		questions = append(questions, FindingsV2ResolvedQuestion{Question: "Is this operation authorized?", Resolution: "Yes: the handler calls requireOwner first."})
+	}
+	for range unanswered {
+		questions = append(questions, FindingsV2ResolvedQuestion{Question: "Is this operation authorized?", Resolution: " "})
+	}
+	return questions
+}
+
 func TestAssessReviewCoverage(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -22,6 +35,7 @@ func TestAssessReviewCoverage(t *testing.T) {
 		claimed      []string
 		evidence     []string
 		questions    int
+		unanswered   int
 		wantCoverage string
 		wantFiles    []string
 	}{
@@ -74,6 +88,11 @@ func TestAssessReviewCoverage(t *testing.T) {
 			wantCoverage: ReviewCoveragePartial, wantFiles: []string{"api/auth.go", "api/handler.go"},
 		},
 		{
+			name: "an investigation that only lists questions is partial", kind: SliceKindInvestigation,
+			claimed: []string{"api/types.go"}, unanswered: 2,
+			wantCoverage: ReviewCoveragePartial, wantFiles: []string{"api/types.go"},
+		},
+		{
 			name: "a baseline that settles a question is complete", kind: SliceKindBaseline,
 			claimed: []string{"api/handler.go"}, questions: 1,
 			wantCoverage: ReviewCoverageComplete, wantFiles: []string{"api/handler.go"},
@@ -85,7 +104,7 @@ func TestAssessReviewCoverage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := AssessReviewCoverage(tt.kind, coverageTestManifest(), tt.claimed, tt.evidence, tt.questions)
+			got := AssessReviewCoverage(tt.kind, coverageTestManifest(), tt.claimed, tt.evidence, coverageTestQuestions(tt.questions, tt.unanswered))
 			if got.Disposition != tt.wantCoverage {
 				t.Fatalf("Disposition = %q, want %q", got.Disposition, tt.wantCoverage)
 			}
@@ -102,10 +121,10 @@ func TestAssessReviewCoverageWithoutOwnedFiles(t *testing.T) {
 	manifest := ReviewContextManifest{IncludedFiles: []ReviewContextIncludedFile{
 		{Path: "deploy/values.yaml", Role: "context", Readable: true},
 	}}
-	if got := AssessReviewCoverage("config", manifest, []string{"deploy/values.yaml"}, nil, 0); got.Disposition != ReviewCoveragePartial {
+	if got := AssessReviewCoverage("config", manifest, []string{"deploy/values.yaml"}, nil, nil); got.Disposition != ReviewCoveragePartial {
 		t.Fatalf("Disposition without a settled question = %q, want partial", got.Disposition)
 	}
-	if got := AssessReviewCoverage("config", manifest, []string{"deploy/values.yaml"}, nil, 1); got.Disposition != ReviewCoverageComplete {
+	if got := AssessReviewCoverage("config", manifest, []string{"deploy/values.yaml"}, nil, coverageTestQuestions(1, 0)); got.Disposition != ReviewCoverageComplete {
 		t.Fatalf("Disposition with a settled question = %q, want complete", got.Disposition)
 	}
 }

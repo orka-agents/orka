@@ -39,8 +39,15 @@ type ReviewCoverage struct {
 // Component slices must corroborate every owned file to be complete.
 // Investigation and baseline slices reach across components, so a review of
 // one is complete once it corroborates trusted context and settles a
-// question or reports a finding.
-func AssessReviewCoverage(sliceKind string, manifest ReviewContextManifest, claimed, evidencePaths []string, resolvedQuestions int) ReviewCoverage {
+// question or reports a finding. A question settles only with a resolution:
+// listing it is not checking it.
+func AssessReviewCoverage(sliceKind string, manifest ReviewContextManifest, claimed, evidencePaths []string, questions []FindingsV2ResolvedQuestion) ReviewCoverage {
+	settled := 0
+	for _, question := range questions {
+		if strings.TrimSpace(question.Question) != "" && strings.TrimSpace(question.Resolution) != "" {
+			settled++
+		}
+	}
 	readable := map[string]string{}
 	for _, file := range manifest.IncludedFiles {
 		path := strings.TrimSpace(file.Path)
@@ -81,7 +88,7 @@ func AssessReviewCoverage(sliceKind string, manifest ReviewContextManifest, clai
 		coverage.Disposition = ReviewCoverageComplete
 	case !crossComponent && owned > 0:
 		coverage.Disposition = ReviewCoveragePartial
-	case resolvedQuestions > 0 || len(evidencePaths) > 0:
+	case settled > 0 || len(evidencePaths) > 0:
 		coverage.Disposition = ReviewCoverageComplete
 	default:
 		coverage.Disposition = ReviewCoveragePartial
