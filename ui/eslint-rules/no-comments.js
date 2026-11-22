@@ -19,7 +19,7 @@ const notice =
   /copyright|spdx-license-identifier|licensed under|all rights reserved|permission is hereby granted|modified from|derived from|code generated[\s\S]*do not edit/i;
 
 const noticeContinuation =
-  /\blicen[cs]e[ds]?\b|\bwarrant(?:y|ies)\b|\bliabilit(?:y|ies)\b|\bredistributions?\b/i;
+  /\blicen[cs]e[ds]?\b|\bwarrant(?:y|ies)\b|\bliabilit(?:y|ies)\b|\bredistributions?\b|\bhereby granted\b/i;
 
 function onlyNotices(value) {
   const paragraphs = value

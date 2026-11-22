@@ -81,7 +81,7 @@ var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|l
 	`all rights reserved|permission is hereby granted|modified from|derived from|code generated .*do not edit`)
 
 var licenseContinuation = regexp.MustCompile(`(?i)\blicen[cs]e[ds]?\b|\bwarrant(y|ies)\b|\bliabilit(y|ies)\b|` +
-	`\bredistributions?\b`)
+	`\bredistributions?\b|\bhereby granted\b`)
 
 var pythonInterpreter = regexp.MustCompile(`^python(3(\.\d+)?)?$`)
 
