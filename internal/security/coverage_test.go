@@ -18,7 +18,7 @@ func coverageTestManifest() ReviewContextManifest {
 // coverageTestQuestions returns settled questions with a resolution followed
 // by unanswered ones without, as the lenient result decoder can produce.
 func coverageTestQuestions(settled, unanswered int) []FindingsV2ResolvedQuestion {
-	var questions []FindingsV2ResolvedQuestion
+	questions := make([]FindingsV2ResolvedQuestion, 0, settled+unanswered)
 	for range settled {
 		questions = append(questions, FindingsV2ResolvedQuestion{Question: "Is this operation authorized?", Resolution: "Yes: the handler calls requireOwner first."})
 	}
