@@ -204,3 +204,24 @@ func TestIngestReviewTaskDoesNotRetryASliceWithoutReadableContext(t *testing.T) 
 		t.Fatalf("slice = %q/%q, want reviewed with no coverage", reviewSlice.Status, reviewSlice.Coverage)
 	}
 }
+
+// A result whose every reported finding is rejected, with no listed file in
+// its trusted context, corroborated nothing: it gets the retry too.
+func TestIngestReviewTaskRetriesWhenEveryReportedFindingIsRejected(t *testing.T) {
+	fixture := newReviewResultRetryFixture(t)
+	review := fixture.emptyReview()
+	review.Findings = []security.FindingsV2Finding{{
+		Title: "Cites a file outside the trusted context", Category: "authorization", Severity: "high", Confidence: "high",
+		Summary: "An untrusted request reaches a privileged operation.", RootCause: "Missing authorization.",
+		Remediation: "Authorize the request.",
+		Evidence:    []security.FindingsV2EvidenceRef{{Path: "outside-mapper-context.go", StartLine: 1, EndLine: 1}},
+	}}
+	fixture.completeTask(t, fixture.sourceTask, review)
+	if err := fixture.reconciler.ingestScanTask(fixture.ctx, fixture.scan, fixture.sourceTask); err != nil {
+		t.Fatalf("ingestScanTask(source) error = %v", err)
+	}
+	fixture.getRetryTask(t)
+	if run := fixture.storedRun(t); run.Phase != scanRunPhaseRunning || !strings.Contains(run.Summary, "no coverage evidence") {
+		t.Fatalf("run = %#v, want running with the coverage retry", run)
+	}
+}

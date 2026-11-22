@@ -480,6 +480,23 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	return run, nil
 }
 
+// securityValidationWorkspace checks a manual validation out at the commit the
+// finding's evidence was recorded at. A context token that scopes the
+// workspace branch or ref names the source it allows and rejects any ref it
+// did not name, so a validation it requests keeps that source unpinned rather
+// than widening what the token accepts.
+func securityValidationWorkspace(ui *UserInfo, scan *corev1alpha1.RepositoryScan, finding *store.Finding) *corev1alpha1.WorkspaceConfig {
+	workspace := repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
+	if token := contextTokenFromUserInfo(ui); token != nil {
+		_, scopesBranch := contextString(token.TransactionContext, "branch")
+		_, scopesRef := contextString(token.TransactionContext, "ref")
+		if scopesBranch || scopesRef {
+			return workspace
+		}
+	}
+	return security.PinScanWorkspace(workspace, finding.CommitSHA)
+}
+
 func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInfo, scan *corev1alpha1.RepositoryScan, finding *store.Finding) error {
 	if err := authorizeContextTokenRepositoryScanPolicyRefsForUser(ui, h.contextTokenAuthorization, "createSecurityValidationTaskPolicy", scan.Namespace, scan.Spec); err != nil {
 		return err
@@ -510,8 +527,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		PolicyDigest:   policy.Digest,
 	}
 
-	// Validate the commit the finding's evidence was recorded at.
-	workspace := security.PinScanWorkspace(repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead), finding.CommitSHA)
+	workspace := securityValidationWorkspace(ui, scan, finding)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,

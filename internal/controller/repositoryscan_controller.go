@@ -2628,12 +2628,25 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 			}
 		}
 	}
-	if existing != nil && !matchingRepositoryScanTask(existing, task) {
+	if existing != nil && !matchingRepositoryScanTask(existing, task) && !matchingUnpinnedValidationTask(scan, existing, task) {
 		return fmt.Errorf("%w: validation Task does not match the recorded scan finding", store.ErrConflict)
 	}
 
 	finding.ValidationStatus = findingValidationStatusPending
 	return r.SecurityStore.UpsertFinding(ctx, finding)
+}
+
+// matchingUnpinnedValidationTask accepts an existing validation Task that
+// differs from desired only by the finding-commit pin: one an earlier release
+// created, or a manual validation a branch- or ref-scoped context token
+// requested. It is the same validation of the same occurrence.
+func matchingUnpinnedValidationTask(scan *corev1alpha1.RepositoryScan, existing, desired *corev1alpha1.Task) bool {
+	if desired == nil || desired.Spec.Workspace == nil {
+		return false
+	}
+	unpinned := desired.DeepCopy()
+	unpinned.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
+	return matchingRepositoryScanTask(existing, unpinned)
 }
 
 func (r *RepositoryScanReconciler) ensureActiveScanRunPolicyCurrent(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) error {
@@ -3803,12 +3816,13 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		reviewSlice.Kind, *manifest, findingsV2.Scan.ReviewedFiles, acceptedFindingEvidencePaths(partition.Accepted),
 		findingsV2.Scan.ResolvedQuestions,
 	)
-	// An empty result that corroborates none of its trusted context is
-	// indistinguishable from an echoed template or a review that never ran.
+	// A result with no accepted finding that corroborates none of its trusted
+	// context is indistinguishable from an echoed template, a review that
+	// never ran, or one whose every citation fell outside its context.
 	// Give it the one automatic retry; a retry that still shows nothing is
 	// recorded with no coverage, which supports no resolution. A slice with
 	// no readable context has nothing a retry could corroborate.
-	if coverage.Disposition == security.ReviewCoverageNone && coverage.TrustedFiles > 0 && len(findingsV2.Findings) == 0 {
+	if coverage.Disposition == security.ReviewCoverageNone && coverage.TrustedFiles > 0 && len(partition.Accepted) == 0 {
 		retried, err := r.retryReviewSlice(ctx, scan, task, run, reviewSlice, sliceID, "a review result with no coverage evidence")
 		if err != nil || retried {
 			return err

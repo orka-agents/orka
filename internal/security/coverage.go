@@ -23,12 +23,13 @@ const (
 // its trusted context, corroborates nothing.
 type ReviewCoverage struct {
 	Disposition string
-	// TrustedFiles counts the slice's readable included files: what a review
-	// could have corroborated at all.
+	// TrustedFiles counts the slice's readable included and reference files:
+	// what a review could have corroborated at all.
 	TrustedFiles int
-	// ReviewedFiles are the slice's readable included files the review
-	// listed in scan.reviewedFiles or cited in accepted evidence, sorted.
-	// Only these support resolving a finding the review did not observe.
+	// ReviewedFiles are the slice's readable included and reference files the
+	// review listed in scan.reviewedFiles or cited in accepted evidence,
+	// sorted. Only the included ranges of these support resolving a finding
+	// the review did not observe.
 	ReviewedFiles []string
 }
 
@@ -49,6 +50,14 @@ func AssessReviewCoverage(sliceKind string, manifest ReviewContextManifest, clai
 		}
 	}
 	readable := map[string]string{}
+	// Reference files are trusted context the reviewer may read and cite.
+	// They count as corroborated reads, though no included range of theirs
+	// can support resolution, and they own nothing.
+	for _, file := range manifest.ReferenceFiles {
+		if path := strings.TrimSpace(file.Path); SafeRepoPath(path) {
+			readable[path] = "reference"
+		}
+	}
 	for _, file := range manifest.IncludedFiles {
 		path := strings.TrimSpace(file.Path)
 		if file.Readable && SafeRepoPath(path) {

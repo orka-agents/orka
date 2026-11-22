@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -155,5 +156,55 @@ func TestRepositoryScanValidationTaskPinsTheFindingCommit(t *testing.T) {
 				t.Fatalf("validation workspace = %#v, want read workspace on main with ref %q", workspace, tt.wantRef)
 			}
 		})
+	}
+}
+
+// A validation Task an earlier release created without the finding-commit
+// pin is the same validation of the same occurrence: recovering it must not
+// conflict. A Task that differs in anything else still does.
+func TestRepositoryScanValidationTaskRecoversAnUnpinnedTask(t *testing.T) {
+	ctx := context.Background()
+	securityStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "validation-legacy", Namespace: defaultNS, UID: types.UID("validation-legacy-uid")},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: pinnedScanRepository, AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"},
+		},
+	}
+	analysisAgent, analysisRuntime := repositoryScanExternalRuntimeFixtures(scan.Spec.AnalysisAgentRef.Name, []string{})
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, analysisAgent, analysisRuntime)...).Build()
+	reconciler := &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: securityStore}
+	finding := &storepkg.Finding{
+		ID: "finding-legacy", Namespace: defaultNS, RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
+		CommitSHA: pinnedFindingCommit,
+	}
+	if err := reconciler.ensureValidationTask(ctx, scan, finding, nil); err != nil {
+		t.Fatalf("ensureValidationTask() error = %v", err)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := cl.List(ctx, &tasks, client.InNamespace(defaultNS)); err != nil || len(tasks.Items) != 1 {
+		t.Fatalf("List(Task) = %d, %v; want one Task", len(tasks.Items), err)
+	}
+	// An earlier release created the same Task without the pin.
+	existing := tasks.Items[0].DeepCopy()
+	existing.Spec.Workspace.Ref = ""
+
+	finding.ValidationStatus = ""
+	if err := reconciler.ensureValidationTask(ctx, scan, finding, existing); err != nil {
+		t.Fatalf("ensureValidationTask(recover unpinned) error = %v", err)
+	}
+	stored, err := securityStore.GetFinding(ctx, defaultNS, finding.ID)
+	if err != nil || stored.ValidationStatus != findingValidationStatusPending {
+		t.Fatalf("finding after recovery = %#v, %v; want pending", stored, err)
+	}
+
+	existing.Spec.Prompt += "\nchanged"
+	if err := reconciler.ensureValidationTask(ctx, scan, finding, existing); !errors.Is(err, storepkg.ErrConflict) {
+		t.Fatalf("ensureValidationTask(changed prompt) error = %v, want conflict", err)
 	}
 }

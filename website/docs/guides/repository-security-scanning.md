@@ -203,7 +203,7 @@ and all scans together keep at most four per dispatch place. More start as earli
 finish, so queued slices do not spend their Task deadline waiting for a runtime.
 
 A review slice is retried once when its prompt fails, returns an invalid result, or returns
-no findings without covering any of its context (see coverage below). If the
+no accepted finding without covering any of its context (see coverage below). If the
 retry prompt also fails, for example because the model provider stopped the response, the
 slice is marked `failed` and the run continues; the run summary reports how many slices
 could not be reviewed, and the run fails only when none could. A result that still fails
@@ -212,7 +212,9 @@ validation after the retry fails the run.
 Review and validation Tasks check out an exact commit. A review uses the commit the mapper
 sliced, and a validation uses the commit its finding's evidence was recorded at, so a branch
 that advances during a run cannot change the code a reviewer or validator examines. Findings
-keep the scan's branch or `ref:<ref>` as their target.
+keep the scan's branch or `ref:<ref>` as their target. A manual validation requested with a
+context token that scopes the workspace branch or ref keeps that branch or ref, since the
+token rejects any ref it did not name.
 
 Each review also records coverage: `scan.reviewedFiles` lists the files it read and
 `scan.resolvedQuestions` lists the questions it checked and ruled out. Both appear in the
@@ -223,9 +225,10 @@ or `none`:
 - A component slice is `complete` when the review covered every readable file it owns.
 - An investigation or independent audit slice is `complete` when the review read trusted
   context and ruled out a question or reported a finding.
-- Files outside the slice's trusted context do not count.
+- The slice's reference files count as context the review read, but only included files can
+  resolve a finding. Files outside the slice's trusted context do not count.
 
-A review that reports no findings and covers none of its context, such as one that echoes
+A review with no accepted finding that covers none of its context, such as one that echoes
 the empty result template, gets the slice's one retry. A retry that still covers nothing
 leaves the slice reviewed with `none` coverage. Only files a review covered can resolve a
 finding whose remediation PR merged and that the review no longer reports. Finding evidence

@@ -12,6 +12,9 @@ func coverageTestManifest() ReviewContextManifest {
 		{Path: "api/types.go", Role: "context", Readable: true},
 		{Path: "api/handler_test.go", Role: "test", Readable: true},
 		{Path: "api/generated.go", Role: "owned", Readable: false},
+	}, ReferenceFiles: []ReviewContextReferenceFile{
+		{Path: "api/router.go", Lines: 200, Relation: ReferenceRelationImportedBy},
+		{Path: "../outside.go", Lines: 10, Relation: ReferenceRelationRepository},
 	}}
 }
 
@@ -71,6 +74,16 @@ func TestAssessReviewCoverage(t *testing.T) {
 			name: "context files alone do not cover what a component slice owns", kind: "package",
 			claimed: []string{"api/types.go", "api/handler_test.go"}, questions: 3,
 			wantCoverage: ReviewCoveragePartial, wantFiles: []string{"api/handler_test.go", "api/types.go"},
+		},
+		{
+			name: "a reference file the review read is partial coverage", kind: "package",
+			claimed:      []string{"api/router.go", "../outside.go"},
+			wantCoverage: ReviewCoveragePartial, wantFiles: []string{"api/router.go"},
+		},
+		{
+			name: "an investigation that settles a question from a reference file is complete", kind: SliceKindInvestigation,
+			claimed: []string{"api/router.go"}, questions: 1,
+			wantCoverage: ReviewCoverageComplete, wantFiles: []string{"api/router.go"},
 		},
 		{
 			name: "an investigation that settles a question is complete", kind: SliceKindInvestigation,
