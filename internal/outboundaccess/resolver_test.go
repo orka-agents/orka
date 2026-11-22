@@ -414,9 +414,6 @@ func TestKubernetesResolverEnforcesGatewayTLSCredentialAuthority(t *testing.T) {
 	}
 }
 
-// The policy a caller checked against the dispatched configuration is the
-// only one resolution may inject under; any other object or generation is
-// refused rather than executed under a configuration never checked.
 func TestKubernetesResolverRefusesPolicyChangedAfterCheck(t *testing.T) {
 	scheme := resolverScheme(t)
 	policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
@@ -455,8 +452,6 @@ func TestKubernetesResolverRefusesPolicyChangedAfterCheck(t *testing.T) {
 	}
 }
 
-// Tool execution revalidates references with the worker's own resolver: the
-// AI worker may exchange its own platform-marked ServiceAccount, but no other.
 func TestKubernetesResolverTokenRequesterMayUseOnlyItsOwnPlatformAccount(t *testing.T) {
 	for _, tc := range []struct {
 		account string

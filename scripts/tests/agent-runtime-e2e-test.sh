@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
-# which macOS's stock bash 3.2 does not honor; failures would be silently
-# masked there. Require a modern bash (for example: brew install bash).
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
   exit 1
@@ -853,7 +850,6 @@ printf '%s\n' 'ok - Task terminal waits require execution and phase projection f
   repo_url=https://github.com/orka-agents/orka.git
   repo_ref=0123456789abcdef0123456789abcdef01234567
   namespace=test
-  # No canary settings or credentials are available in the required path.
   unset write_source_repo write_publication_repo write_publication_slug write_source_commit write_credential_target
   die() { printf '%s\n' "$*" >&2; exit 1; }
   log() { :; }

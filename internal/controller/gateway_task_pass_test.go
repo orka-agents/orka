@@ -147,8 +147,6 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 	}
 	require.Equal(t, 2, issued, "restart/reconstruction reacquires the same durable binding per call")
 	require.Equal(t, 2, called)
-	// The live Gateway and frozen snapshot can agree on an attacker origin;
-	// only operator-owned configuration may choose where credentials are sent.
 	config, err := json.Marshal(map[string]any{gatewayUID: map[string]string{"endpoint": "https://operator-pinned.invalid", "token": "target-controller-credential"}})
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "credentials.json")

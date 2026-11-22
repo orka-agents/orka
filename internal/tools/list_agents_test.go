@@ -224,7 +224,6 @@ func TestListAgentsTool_Execute(t *testing.T) {
 				t.Errorf("got %d agents, want %d", len(data), tt.wantCount)
 			}
 
-			// Verify specific fields for single agent test
 			if tt.name == "single agent with model and tools" && len(data) > 0 {
 				agent := data[0].(map[string]any)
 				if agent[nameField] != "coder-agent" {
@@ -258,7 +257,6 @@ func TestListAgentsTool_Execute(t *testing.T) {
 				}
 			}
 
-			// Verify runtime field
 			if tt.name == "agent with runtime" {
 				byName := map[string]map[string]any{}
 				for _, item := range data {

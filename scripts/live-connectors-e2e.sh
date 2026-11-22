@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Live connectors E2E: a person links an account through a fake OAuth provider,
-# a native AI Task uses the linked token to read, a write waits for approval
-# and then runs, the second read is served by a refreshed token, and
-# disconnecting revokes the tokens. Everything outside Orka is the in-cluster
-# fixture under test/fixtures/connectors; no model provider or real OAuth app
-# is involved. The controller runs with the fixture-only
-# --connectors-allow-private-endpoints flag so the provider may live in the
-# cluster; production never sets it.
 set -Eeuo pipefail
 
 log() { printf '==> %s\n' "$*" >&2; }
@@ -17,16 +9,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/redact.sh"
 
-# The shared redactor knows nothing of the fixture's own token format, and
-# the literal OIDC/model credentials this run minted must never reach a
-# log either: every diagnostic below goes through redact_all.
 ORKA_REDACT_SECRET_VARS=(token other_token model_credential client_secret client_basic completion)
 redact_all() {
   redact | sed -E 's/fx-(access|refresh)-[A-Za-z0-9._~+\/=-]+/fx-\1-[REDACTED]/g'
 }
 
-# controller_pod_names prints the controller Deployment's live pods, sorted,
-# one per line; pods already terminating are left out.
 controller_pod_names() {
   local selector
   selector="$(kubectl -n "${namespace}" get deployment/"${deployment}" -o json \
@@ -49,16 +36,9 @@ fixture_image="${ORKA_CONNECTORS_FIXTURE_IMAGE:-orka-connectors-fixture:live-con
 api_port="${ORKA_API_LOCAL_PORT:-18080}"
 fixture_port="${ORKA_FIXTURE_LOCAL_PORT:-18081}"
 fixture_tls_port="${ORKA_FIXTURE_LOCAL_TLS_PORT:-18443}"
-# Whole seconds only (an optional trailing "s"): the script sleeps past it.
-# The credential source refreshes a token with 60s or less left, so the
-# fixture TTL leaves the first read a full minute to happen on the token
-# consent issued, before the lane waits that token out.
 access_ttl_seconds="${ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS:-120}"
 access_ttl_seconds="${access_ttl_seconds%s}"
 [[ "${access_ttl_seconds}" =~ ^[1-9][0-9]*$ ]] || { printf 'error: ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS must be whole seconds, got %q\n' "${access_ttl_seconds}" >&2; exit 1; }
-# The credential source refreshes a token with 60s or less left, and the
-# first read must run on the consent-issued token (refreshes == 0), so the
-# TTL needs the refresh horizon plus room for Task startup.
 (( access_ttl_seconds >= 90 )) || { printf 'error: ORKA_CONNECTORS_E2E_ACCESS_TTL_SECONDS must be at least 90 (60s refresh horizon plus Task startup), got %s\n' "${access_ttl_seconds}" >&2; exit 1; }
 access_ttl="${access_ttl_seconds}s"
 subject="alice"
@@ -68,16 +48,11 @@ fixture_host="connectors-fixture.${namespace}.svc"
 issuer="http://${fixture_host}:8080/oidc"
 client_id="orka-e2e-client"
 client_secret="$(openssl rand -hex 24)"
-# The provider defaults to HTTP Basic client authentication, so the wire
-# form of the client credential is this value, not the raw secret.
 client_basic="$(printf '%s:%s' "${client_id}" "${client_secret}" | base64 | tr -d '\n')"
 model_credential="fixture-$(openssl rand -hex 12)"
 callback_base="http://localhost:${api_port}"
 workdir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/orka-connectors-e2e.XXXXXX")"
 chmod 700 "${workdir}"
-# The lane's cluster lives in its own kubeconfig: kind writes it there and
-# every kubectl below reads it, so the developer's current-context is never
-# switched to a cluster this script later deletes.
 export KUBECONFIG="${workdir}/kubeconfig"
 kustomization="${repo_root}/config/manager/kustomization.yaml"
 backup="${workdir}/kustomization.yaml"
@@ -88,8 +63,6 @@ pf_log="${workdir}/port-forward.log"
 
 cleanup() {
   status=$?
-  # Teardown must run to the end whatever a diagnostic below returns:
-  # errexit stays active inside an EXIT trap, so it is switched off here.
   set +e
   for pid in "${api_pf_pid}" "${fixture_pf_pid}" "${fixture_tls_pf_pid}"; do
     if [[ -n "${pid}" ]]; then kill "${pid}" >/dev/null 2>&1 || true; wait "${pid}" 2>/dev/null || true; fi
@@ -104,7 +77,6 @@ cleanup() {
       if [[ -f "${pf_log}" ]]; then printf '%s\n' '--- port-forward log ---'; cat "${pf_log}"; fi
     } | redact_all >&2
   fi
-  # Only a registry and a cluster this run created are torn down.
   if [[ "${created_kind_registry}" == "1" ]]; then orka_kind_registry_stop; fi
   if [[ "${created_kind_cluster}" == "1" ]]; then kind delete cluster --name "${cluster}" >/dev/null 2>&1 || true; fi
   rm -rf "${workdir}"
@@ -112,9 +84,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# local_curl reaches the port-forwards on loopback directly: a proxy from
-# the environment must never see the bearer tokens, OAuth code and state,
-# or completion token these calls carry.
 local_curl() { curl --noproxy '*' "$@"; }
 
 request() {
@@ -122,12 +91,10 @@ request() {
   local_curl -sS -o "${output}" -w '%{http_code}' -X "${method}" "${url}" "$@"
 }
 
-# url_shape prints a URL without its query values and fragment: the
-# authorization code, state, and completion token never reach the log.
 url_shape() {
   local raw="$1" base query keys=""
   base="${raw%%\?*}"
-  base="${base%%#*}" # a fragment without a query would otherwise ride along in base
+  base="${base%%#*}"
   query="${raw#*\?}"; query="${query%%#*}"
   if [[ "${raw}" == *"?"* ]]; then
     keys="$(printf '%s' "${query}" | tr '&' '\n' | sed 's/=.*//' | paste -sd, -)"
@@ -182,33 +149,19 @@ for cmd in make go docker kind kubectl curl jq openssl; do require_cmd "${cmd}";
 cd "${repo_root}"
 cp "${kustomization}" "${backup}"
 
-# A cluster of this name that already exists belongs to somebody else:
-# it would not be in this run's kubeconfig, and it is never deleted here.
 if kind get clusters 2>/dev/null | grep -qx "${cluster}"; then
   die "kind cluster ${cluster} already exists; delete it or set KIND_CLUSTER to an unused name"
 fi
 log "Creating kind cluster ${cluster}"
-# Created directly with the e2e Kind config: the Makefile's setup target
-# treats any cluster whose name merely contains this one as "already
-# exists", which would leave this run's kubeconfig without a context.
-# Ownership is recorded before the fallible create: the preflight proved
-# the name free, so a cluster that fails mid-bootstrap is still this run's
-# to delete.
 created_kind_cluster="1"
 kind create cluster --name "${cluster}" --config "${repo_root}/test/e2e/kind-config.yaml"
 kubectl config use-context "kind-${cluster}" >/dev/null
 log "Installing current Orka CRDs"
 make install
 kubectl create namespace vekil-system --dry-run=client -o yaml | kubectl apply -f -
-# The registry helper reuses a running container of this name; one that
-# exists already belongs to another invocation and is neither reused nor
-# removed here.
 if [[ -n "$(docker container ls --all --filter "name=^/$(orka_kind_registry_name "${cluster}")$" --format '{{.ID}}')" ]]; then
   die "kind registry $(orka_kind_registry_name "${cluster}") already exists; remove it or set KIND_CLUSTER to an unused name"
 fi
-# Ownership is recorded before the helper runs: the check above proved the
-# name free, so whatever the helper creates (even partially) is this run's
-# to remove.
 created_kind_registry="1"
 orka_kind_registry_start "${cluster}"
 
@@ -219,9 +172,6 @@ docker build -f test/fixtures/connectors/Dockerfile -t "${fixture_image}" .
 kind load docker-image "${manager_image}" "${worker_image}" "${fixture_image}" --name "${cluster}"
 manager_ref="$(orka_kind_registry_push "${manager_image}" "orka/controller")"
 worker_ref="$(orka_kind_registry_push "${worker_image}" "orka/ai-worker")"
-# The canonical deploy path waits for the workspace publisher to roll out
-# (apply-acp-production.sh wait_for_workload_dependencies), so an inert
-# reference cannot stand in for it: the real image is built like the manager's.
 make docker-build-workspace-publisher WORKSPACE_PUBLISHER_IMG="${publisher_image}"
 publisher_ref="$(orka_kind_registry_push "${publisher_image}" "orka/workspace-publisher")"
 placeholder_digest="sha256:$(printf '0%.0s' {1..64})"
@@ -331,8 +281,6 @@ kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_OIDC_JWKS_URL- ORKA_CONTEXT_TOKEN_PROFILE- ORKA_CONTEXT_TOKEN_ISSUER- ORKA_CONTEXT_TOKEN_AUDIENCE-
 rollout_timeout="$(deployment_rollout_timeout kubectl -n "${namespace}" "${deployment}")"
 kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout="${rollout_timeout}"
-# The leak check at the end reads these pods' logs. A pod replaced mid-lane
-# would take its logs with it, so the set is recorded now and must not change.
 controller_pods="$(controller_pod_names)"
 [[ -n "${controller_pods}" ]] || die "no running controller pods after the rollout"
 start_port_forwards
@@ -449,16 +397,12 @@ api="http://127.0.0.1:${api_port}/api/v1"
 log "Link: start consent as ${subject} (readWrite)"
 status="$(request POST "${api}/connections" "${workdir}/start.json" "${auth[@]}" -H 'Content-Type: application/json' -d '{"provider":"fixture","mode":"readWrite"}')"
 [[ "${status}" == 200 || "${status}" == 201 ]] || {
-  # Keys and the URL's shape only: the authorize URL carries the live OAuth state.
   { jq -r 'keys | join(",")' "${workdir}/start.json"; url_shape "$(jq -r '.authorizeURL // ""' "${workdir}/start.json")"; } >&2 2>/dev/null || true
   die "start consent returned HTTP ${status}"
 }
 connection="$(jq -er '.connection.name' "${workdir}/start.json")"
 authorize_url="$(jq -er '.authorizeURL' "${workdir}/start.json")"
 [[ "${authorize_url}" == "https://${fixture_host}:8443/oauth/authorize?"* ]] || die "unexpected authorize URL host"
-# The browser step, done by hand: the provider consents and redirects to the
-# controller callback; the callback redirects to the settings page with the
-# completion token in the fragment.
 local_authorize="https://127.0.0.1:${fixture_tls_port}${authorize_url#https://${fixture_host}:8443}"
 callback_location="$(local_curl -sS --cacert "${tls_dir}/ca.crt" --resolve "${fixture_host}:${fixture_tls_port}:127.0.0.1" -o /dev/null -w '%{redirect_url}' "${local_authorize}")"
 [[ "${callback_location}" == "${callback_base}/api/v1/connections/callback?"* ]] || die "provider redirected elsewhere: $(url_shape "${callback_location}")"
@@ -476,8 +420,6 @@ status="$(request POST "${api}/connections/${connection}/complete" "${workdir}/c
 jq -e '.ready == true and .mode == "readWrite" and .state == "Ready"' "${workdir}/complete.json" >/dev/null || die "connection is not Ready after completion"
 jq -e 'tostring | test("fx-access|fx-refresh") | not' "${workdir}/complete.json" >/dev/null || die "connection response leaked token material"
 wait_for_state '.codeExchanges == 1 and .tokensIssued == 1' "one code exchange" 5
-# A readWrite consent asks for exactly the provider's read and write
-# scopes; the fixture refuses unknown scopes, and this pins the set.
 fixture_state | jq -e '.lastAuthorizedScope == "items:read items:write"' >/dev/null \
   || { fixture_state | jq -c '{lastAuthorizedScope}' >&2; die "the readWrite consent did not ask for exactly items:read and items:write"; }
 
@@ -491,19 +433,13 @@ status="$(request POST "${api}/tasks" "${workdir}/task.json" "${auth[@]}" -H 'Co
   -d "$(jq -n --arg name "${task}" --arg ns "${namespace}" '{name:$name,namespace:$ns,type:"ai",agentRef:{name:"linked-agent"},prompt:"Exercise the linked account: read, write, read.",timeout:"20m"}')")"
 [[ "${status}" == 201 ]] || { cat "${workdir}/task.json" | redact_all >&2; die "task creation returned HTTP ${status}"; }
 jq -e --arg issuer "${issuer}" --arg subject "${subject}" '.spec.requestedBy.issuer == $issuer and .spec.requestedBy.subject == $subject' "${workdir}/task.json" >/dev/null
-# The first read must run on the token consent issued: no refresh yet and a
-# single issued token, so the later refresh assertions test expiry, not a
-# proactive refresh that happened before the Task ever called.
 wait_for_state '.reads == 1 and .writes == 0 and .distinctBearers == 1 and .refreshes == 0 and .tokensIssued == 1' "the first read with the consent-issued token" 150
 first_read_at="$(date +%s)"
-# The native autonomous path parks by writing the pending approval into status.message; it does not set a condition.
 wait_for_task_condition "${task}" '.status.phase == "Running" and (.status.message | startswith("waiting for approval ")) and (.status.message | test(" for itemswrite "))' "parked on the itemswrite approval" 90
 kubectl -n "${namespace}" get task "${task}" -o json | jq -e '.status.connectionBindings[0].provider == "fixture" and .status.connectionBindings[0].uid != ""' >/dev/null \
   || die "the Task did not freeze the requester's Connection"
 
 log "Refresh: let the access token the first read used expire before approving"
-# The first read proved it used the token consent issued (one bearer), so
-# waiting a full TTL past that read leaves that token expired for certain.
 elapsed="$(( $(date +%s) - first_read_at ))"
 if (( elapsed < access_ttl_seconds + 5 )); then sleep "$(( access_ttl_seconds + 5 - elapsed ))"; fi
 
@@ -543,24 +479,11 @@ done
 [[ "${status}" == 404 ]] || die "connection still readable after disconnect (HTTP ${status})"
 
 log "Terminal fixture counters: exactly one read, one approved write, one more read"
-# The earlier waits pass as soon as a counter is reached; only the terminal
-# state proves nothing ran twice (a duplicate write after approval, say).
-# The approved write refreshes the expired token once; the read right
-# after it reuses the refreshed token, which has the full TTL (at least
-# 90s) against the 60s refresh horizon, so exactly one refresh and two
-# bearers (the consent-issued and the refreshed token) are expected, and
-# refresh churn fails here.
 fixture_state | jq -e '.reads == 2 and .writes == 1 and .codeExchanges == 1 and .refreshes == 1 and .distinctBearers == 2 and .revocations >= 1 and .rejected == 0' >/dev/null \
   || { fixture_state | redact_all >&2; die "terminal fixture counters do not match the single read/write/read and single refresh the lane expects"; }
 fixture_state | jq '{codeExchanges, refreshes, revocations, reads, writes, distinctBearers, rejected, modelTurns, lastAuthorizedScope}' >&2
 
 log "No token material in controller logs"
-# The logs are captured first, so an unreadable log can never pass as "no match".
-# Every controller container is read, including the previous instance of
-# one that restarted, and the pods must be the ones the lane started with:
-# a replaced or restarted container's earlier output is part of the check.
-# The kubelet keeps only the immediately previous instance's logs, so a
-# container that restarted more than once fails the check outright.
 current_pods="$(controller_pod_names)"
 [[ "${current_pods}" == "${controller_pods}" ]] \
   || die "the controller pods changed during the lane (${controller_pods} -> ${current_pods}); their earlier logs cannot be checked for leaks"
@@ -586,14 +509,9 @@ fi
 if grep -Fq -e "${token}" -e "${other_token}" "${workdir}/controller.log"; then
   die "an OIDC token appeared in controller logs"
 fi
-# The controller reads the provider's OAuth client secret for every code
-# exchange, refresh, and revocation; it must never reach a log either, raw
-# or in the Basic form it is sent in.
 if grep -Fq -e "${client_secret}" -e "${client_basic}" "${workdir}/controller.log"; then
   die "the OAuth client credential appeared in controller logs"
 fi
-# The one-time completion token and the model credential the worker uses
-# are credential material too.
 if grep -Fq -e "${completion}" "${workdir}/controller.log"; then
   die "the consent completion token appeared in controller logs"
 fi

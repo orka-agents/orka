@@ -11,11 +11,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Execution snapshot bodies are sealed with AES-256-GCM under the snapshot
-// key. The associated data binds the Task UID, digest and schema version, so
-// a sealed body copied to another identity fails to open. The format matches
-// the records earlier releases stored, so existing datasets open unchanged.
-
 func snapshotAdditionalData(taskUID, digest string, schemaVersion int32) []byte {
 	return fmt.Appendf(nil, "orka.agent-execution-snapshot\x00%s\x00%s\x00%d", taskUID, digest, schemaVersion)
 }
@@ -25,9 +20,6 @@ func openSnapshotBody(custody *keyCustody, sealed storagev1.SealedAgentExecution
 		snapshotAdditionalData(sealed.Key.TaskUID, sealed.Key.Digest, sealed.SchemaVersion))
 }
 
-// PersistAgentExecutionSnapshot seals the snapshot body and stores it once.
-// An existing identical snapshot succeeds; an existing snapshot with the same
-// key but different content returns ErrDuplicateMismatch.
 func (c *Client) PersistAgentExecutionSnapshot(ctx context.Context, snapshot store.AgentExecutionSnapshot) error {
 	custody, err := c.activeCustody()
 	if err != nil {
@@ -63,16 +55,12 @@ func (c *Client) PersistAgentExecutionSnapshot(ctx context.Context, snapshot sto
 	if !errors.Is(err, store.ErrConflict) {
 		return err
 	}
-	// Another caller stored the key first. Its content decides the outcome.
 	if done, err := c.matchStoredSnapshot(ctx, snapshot); done || err != nil {
 		return err
 	}
 	return fmt.Errorf("persist agent execution snapshot %s: %w", key.ID(), store.ErrConflict)
 }
 
-// matchStoredSnapshot compares a request with the stored snapshot for its
-// key. It reports done when one exists: with a nil error when the stored
-// snapshot is identical and ErrDuplicateMismatch when it differs.
 func (c *Client) matchStoredSnapshot(ctx context.Context, snapshot store.AgentExecutionSnapshot) (bool, error) {
 	key := store.AgentExecutionSnapshotKey{TaskUID: snapshot.TaskUID, Digest: snapshot.Digest}
 	existing, err := c.GetAgentExecutionSnapshot(ctx, key)
@@ -89,8 +77,6 @@ func (c *Client) matchStoredSnapshot(ctx context.Context, snapshot store.AgentEx
 	}
 }
 
-// GetAgentExecutionSnapshot opens one sealed snapshot and verifies its body
-// against the digest in its key.
 func (c *Client) GetAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) (*store.AgentExecutionSnapshot, error) {
 	custody, err := c.activeCustody()
 	if err != nil {

@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// severityRank orders findings critical-first; unknown severities sort last.
 func severityRank(value string) int {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "critical":
@@ -34,8 +33,6 @@ func severityRank(value string) int {
 	}
 }
 
-// validatedLabel collapses the validation status to what a reader needs:
-// whether Orka reproduced the finding. Unknown statuses print as-is.
 func validatedLabel(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "validated":
@@ -49,8 +46,6 @@ func validatedLabel(status string) string {
 	}
 }
 
-// sortFindings orders rows critical-first, validated before unvalidated,
-// then by id, matching what --recommended implies.
 func sortFindings(items []map[string]any) {
 	sort.SliceStable(items, func(i, j int) bool {
 		si, sj := severityRank(firstString(items[i], "severity")), severityRank(firstString(items[j], "severity"))
@@ -79,9 +74,6 @@ func printFindingsTable(cmd *cobra.Command, value any) error {
 		return nil
 	}
 	sortFindings(items)
-	// Reserve room for the fixed columns so a long title never wraps the
-	// row: severity and validation labels are short, ids are 16 characters,
-	// and file locations vary.
 	fixedRows := make([][]string, 0, len(items))
 	for _, item := range items {
 		fixedRows = append(fixedRows, []string{firstString(item, "severity"), validatedLabel(firstString(item, "validationStatus")), firstString(item, "id"), findingLocation(item)})
@@ -131,7 +123,6 @@ func scanStartedSuffix(item map[string]any) string {
 	return " ago"
 }
 
-// scanSliceProgress renders "reviewed/total" slices, noting skipped ones.
 func scanSliceProgress(item map[string]any) string {
 	total := anyString(item["sliceCount"])
 	reviewed := anyString(item["reviewedSliceCount"])
@@ -201,8 +192,6 @@ func printPatchProposalsTable(cmd *cobra.Command, value any) error {
 	return w.Flush()
 }
 
-// printThreatModel prints the Markdown threat model as text under a short
-// header, so a person can read it without pulling `.content` out of JSON.
 func printThreatModel(cmd *cobra.Command, value any) error {
 	model := toGenericMap(value)
 	header := []describeRow{

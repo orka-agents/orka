@@ -91,8 +91,6 @@ func TestControllerSQLiteBootstrapBothKeyModes(t *testing.T) {
 				require.NoError(t, err)
 				identity = info.ID
 				body := []byte(`{"prompt":"retained encrypted prompt"}`)
-				// An earlier release sealed this snapshot; the storage client
-				// opens it unchanged.
 				snapshot, err := appStorage.GetAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{
 					TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body),
 				})
@@ -129,7 +127,7 @@ func TestControllerSQLiteBootstrapRealProcessLockAndCrash(t *testing.T) {
 			require.NoError(t, err, "%s", out)
 		}
 	}
-	command("crash") // Schema+identity committed, key loading interrupted without cleanup.
+	command("crash")
 	var identity string
 	s, _, _, err := openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
 		identity = info.ID
@@ -137,7 +135,7 @@ func TestControllerSQLiteBootstrapRealProcessLockAndCrash(t *testing.T) {
 		return bytes.Repeat([]byte{0x42}, 32), nil
 	})
 	require.NoError(t, err)
-	command("locked") // An actual second process must not enter its key loader.
+	command("locked")
 	require.NoError(t, s.Close())
 	s, _, _, err = openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
 		require.Equal(t, identity, info.ID)

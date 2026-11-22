@@ -60,9 +60,6 @@ func TestValidateToolLoopCompletionAcceptsMaxTokensTextResponse(t *testing.T) {
 	}
 }
 
-// A text-only response truncated by the output token budget must terminate
-// the loop and reach the client verbatim: the premature-end safety net must
-// not discard the partial text and issue more model calls.
 func TestRunToolLoop_MaxTokensTextIsReturnedBeforePrematureEndRetry(t *testing.T) {
 	t.Parallel()
 	for _, stopReason := range []string{oaiParamMaxTokens, oaiStopReasonLength} {
@@ -71,8 +68,6 @@ func TestRunToolLoop_MaxTokensTextIsReturnedBeforePrematureEndRetry(t *testing.T
 			mock := &mockAnthropicProvider{
 				responses: []*llm.CompletionResponse{
 					{Content: incompleteTestPartialContent, StopReason: stopReason},
-					// A second call means the loop treated the truncation as a
-					// premature end of turn and re-prompted.
 					{Content: goalStateSentinel + "\nunexpected", StopReason: oaiStopReasonEndTurn},
 				},
 			}
@@ -105,8 +100,6 @@ func TestRunToolLoop_MaxTokensTextIsReturnedBeforePrematureEndRetry(t *testing.T
 	}
 }
 
-// Other incomplete outcomes still fail the loop instead of being returned as
-// if the turn completed.
 func TestRunToolLoop_NonBudgetIncompleteStillFails(t *testing.T) {
 	t.Parallel()
 	for _, stopReason := range []string{incompleteTestPauseTurn, incompleteTestResponseIncomp, incompleteTestBareIncomplete, ""} {

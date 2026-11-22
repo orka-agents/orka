@@ -61,9 +61,6 @@ type oidcDiscoveryDocument struct {
 
 var errOIDCAuthorization = errors.New("OIDC authorization failed")
 
-// oidcSubjectNotAllowedError marks a token that passed verification but whose
-// subject is not on the allow-list. The caller proved it holds that subject,
-// so the API may name it back to them.
 type oidcSubjectNotAllowedError struct {
 	Subject string
 }
@@ -127,8 +124,6 @@ func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 }
 
 func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
-	// An empty list allows no one, yet a verified caller is still told its
-	// subject, which is how an installation learns the first subjects to add.
 	for _, allowed := range cfg.AllowedSubjects {
 		allowed = strings.TrimSpace(allowed)
 		if allowed == "" {

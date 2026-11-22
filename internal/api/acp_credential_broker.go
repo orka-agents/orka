@@ -25,9 +25,6 @@ const (
 )
 
 func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
-	// Authenticate from headers before consuming the body: runtime Pods can
-	// reach this endpoint, so unauthenticated peers must be rejected without
-	// being allowed to stream request bodies.
 	expectedBearer, err := readSecretAtEnvPath(envWorkspacePublisherControllerTokenFile, 16)
 	if err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{apiFieldError: "credential_broker_unavailable"})
@@ -140,11 +137,6 @@ func (s *Server) authorizePublicationCredential(
 		return nil, nil, "", "", fmt.Errorf("publication credential request is not bound to the settled task")
 	}
 	if request.ParentOperation == publisherservice.OperationPublicationPublish {
-		// Backstop for the controller's pre-publishing gate: a session tainted
-		// by operator access never receives forge write credentials. The taint
-		// may sit on the Task, on its linked workspace incarnation, or on
-		// another Task that shared that incarnation, so check all three, and
-		// fail closed when they cannot be read.
 		tainted := operatoraccess.Tainted(task.Annotations)
 		if !tainted {
 			if tainted, err = controller.ACPTaskOperatorTainted(ctx, s.authorizationReader(), task); err != nil {

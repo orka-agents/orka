@@ -18,9 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// A request rejected before its handler reads the streamed body must not
-// leave body bytes on a keep-alive connection, where the server would parse
-// them as the next request.
 func TestUnreadRequestBodyCannotDesyncKeepAliveConnection(t *testing.T) {
 	server := NewServer(fake.NewClientBuilder().Build(), nil, ServerConfig{
 		WatchNamespace: "orka-system", EnforceNamespaceIsolation: true, Clientset: kubefake.NewClientset(),
@@ -30,12 +27,8 @@ func TestUnreadRequestBodyCannotDesyncKeepAliveConnection(t *testing.T) {
 	for _, size := range []int{1 << 10, 12 << 10, 16 << 10, 64 << 10, 300 << 10, 2 << 20} {
 		t.Run(fmt.Sprintf("%dB", size), func(t *testing.T) {
 			conn := dialTestServer(t, addr)
-			// The leftover body is itself a request line, so a desync would
-			// surface as a response to it rather than to the health check.
 			smuggled := "GET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n"
 			body := strings.Repeat("x", size-len(smuggled)) + smuggled
-			// Write in the background: the server may answer and close
-			// before a large body has been sent.
 			go func() {
 				_, _ = fmt.Fprintf(conn, "PUT /api/v1/security/repositories/r/threat-model HTTP/1.1\r\nHost: x\r\n"+
 					"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
@@ -44,7 +37,6 @@ func TestUnreadRequestBodyCannotDesyncKeepAliveConnection(t *testing.T) {
 			reader := bufio.NewReader(conn)
 			first, err := http.ReadResponse(reader, nil)
 			if err != nil && size > maxDrainedRequestBodyBytes {
-				// Closed mid-upload: the remainder can no longer be parsed.
 				require.True(t, errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET), "unexpected read error: %v", err)
 				return
 			}
@@ -122,8 +114,6 @@ func TestDrainUnreadRequestBodyGivesUpOnAStalledClient(t *testing.T) {
 	addr := strings.TrimPrefix(serveCompatTestApp(t, app), "http://")
 	conn := dialTestServer(t, addr)
 
-	// Announce far more than is sent, then stall: the response must still
-	// arrive, and the connection must not wait for the rest.
 	_, err := fmt.Fprintf(conn, "POST /ignore HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n%s", 64<<10, strings.Repeat("y", 16<<10))
 	require.NoError(t, err)
 	start := time.Now()
@@ -156,8 +146,6 @@ func requireNextRequestServed(t *testing.T, conn net.Conn, reader *bufio.Reader,
 	require.False(t, next.Close, "a request without a body must keep the connection")
 }
 
-// A request the server cannot parse must not have its headers (credentials
-// included) reflected in the error body.
 func TestMalformedRequestErrorDoesNotEchoHeaders(t *testing.T) {
 	server := NewServer(fake.NewClientBuilder().Build(), nil, ServerConfig{
 		WatchNamespace: "orka-system", EnforceNamespaceIsolation: true, Clientset: kubefake.NewClientset(),

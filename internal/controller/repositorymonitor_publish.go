@@ -33,29 +33,26 @@ const (
 
 	repositoryMonitorPublishEventComment = "COMMENT"
 
-	repositoryMonitorPublishModeSummaryOnly               = "summary_only"
-	repositoryMonitorPublishModeSummaryWithInlineFindings = "summary_with_inline_findings"
-	repositoryMonitorPublishSameHeadPolicySkip            = "skip"
-	repositoryMonitorPublishSameHeadPolicyUpdate          = "update"
-	// repositoryMonitorPublishReviewReason is the audit reason of review writes.
-	repositoryMonitorPublishReviewReason                   = "publish_review"
-	repositoryMonitorPublishDefaultInlineMinPriority       = "P2"
-	repositoryMonitorPublishDefaultInlineMaxComments int32 = 10
+	repositoryMonitorPublishModeSummaryOnly                     = "summary_only"
+	repositoryMonitorPublishModeSummaryWithInlineFindings       = "summary_with_inline_findings"
+	repositoryMonitorPublishSameHeadPolicySkip                  = "skip"
+	repositoryMonitorPublishSameHeadPolicyUpdate                = "update"
+	repositoryMonitorPublishReviewReason                        = "publish_review"
+	repositoryMonitorPublishDefaultInlineMinPriority            = "P2"
+	repositoryMonitorPublishDefaultInlineMaxComments      int32 = 10
 
-	repositoryMonitorPublishSkipDisabled            = "publish_disabled"
-	repositoryMonitorPublishSkipMissingGitSecret    = "missing_git_secret"
-	repositoryMonitorPublishSkipInvalidReviewResult = "invalid_review_result"
-	repositoryMonitorPublishSkipRepoMismatch        = "repo_mismatch"
-	repositoryMonitorPublishSkipPRNumberMismatch    = "pr_number_mismatch"
-	repositoryMonitorPublishSkipHeadSHAChanged      = "head_sha_changed"
-	repositoryMonitorPublishSkipPRClosed            = "pr_closed"
-	repositoryMonitorPublishSkipBaseBranchMismatch  = "base_branch_mismatch"
-	repositoryMonitorPublishSkipDraftPR             = "draft_pr"
-	repositoryMonitorPublishSkipBlockedLabel        = "blocked_label"
-	repositoryMonitorPublishSkipNotIncluded         = "not_included"
-	repositoryMonitorPublishSkipDuplicateSameHead   = "duplicate_same_head"
-	// repositoryMonitorPublishSkipUpdatedPublishedReview marks a review that
-	// was applied by rewriting the review already published for its head.
+	repositoryMonitorPublishSkipDisabled                   = "publish_disabled"
+	repositoryMonitorPublishSkipMissingGitSecret           = "missing_git_secret"
+	repositoryMonitorPublishSkipInvalidReviewResult        = "invalid_review_result"
+	repositoryMonitorPublishSkipRepoMismatch               = "repo_mismatch"
+	repositoryMonitorPublishSkipPRNumberMismatch           = "pr_number_mismatch"
+	repositoryMonitorPublishSkipHeadSHAChanged             = "head_sha_changed"
+	repositoryMonitorPublishSkipPRClosed                   = "pr_closed"
+	repositoryMonitorPublishSkipBaseBranchMismatch         = "base_branch_mismatch"
+	repositoryMonitorPublishSkipDraftPR                    = "draft_pr"
+	repositoryMonitorPublishSkipBlockedLabel               = "blocked_label"
+	repositoryMonitorPublishSkipNotIncluded                = "not_included"
+	repositoryMonitorPublishSkipDuplicateSameHead          = "duplicate_same_head"
 	repositoryMonitorPublishSkipUpdatedPublishedReview     = "updated_published_review"
 	repositoryMonitorPublishSkipSecuritySensitiveNotPublic = "security_sensitive_not_public"
 	repositoryMonitorPublishSkipBodyTooLarge               = "body_too_large"
@@ -69,9 +66,7 @@ const (
 	repositoryMonitorPublishFailureGitHubPermanent        = "github_permanent_error"
 	repositoryMonitorPublishFailureGitHubAPI              = "github_api_error"
 
-	repositoryMonitorReviewBodyMaxBytes = 60000
-	// repositoryMonitorReviewFindingsBudgetBytes caps the body through its
-	// findings lists, leaving room for the tests section and marker.
+	repositoryMonitorReviewBodyMaxBytes        = 60000
 	repositoryMonitorReviewFindingsBudgetBytes = 40000
 	repositoryMonitorReviewInlineMaxRunes      = 4000
 	repositoryMonitorReviewTextMaxRunes        = 4000
@@ -289,8 +284,6 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 			if err := r.Store.UpdateReviewPublishRecord(ctx, existingPublish); err != nil {
 				return err
 			}
-			// The recovered review is the head's publication, so the update
-			// policy applies to it as it would to a recorded one.
 			if sameHeadPolicy == repositoryMonitorPublishSameHeadPolicyUpdate && existingPublish.ReviewRecordID != record.ID {
 				updated, err := r.updatePublishedRepositoryMonitorReview(ctx, monitor, item, task, record, existingPublish, token, owner, repository)
 				if err != nil {
@@ -402,8 +395,6 @@ func (r *RepositoryMonitorReconciler) publishPendingRepositoryMonitorReviewRecor
 		}
 		for i := range items {
 			item := items[i]
-			// A retired item gets no publication retries until inventory
-			// brings it back into scope.
 			if strings.TrimSpace(item.LastReviewID) == "" || item.LastVerdict == repositoryMonitorRunPhaseQueued || item.State == repositoryMonitorItemStateOutOfScope {
 				continue
 			}
@@ -755,11 +746,6 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 			open = append(open, finding)
 		}
 	}
-	// Many findings, as a final exhaustive pass can combine, could push the
-	// body past GitHub's limit; past the budget, findings shrink to their
-	// titles and then are only counted. The record keeps every finding.
-	// Room is reserved for every later finding's title, so detail goes to
-	// the first findings without crowding out the rest.
 	reserved := 0
 	for _, list := range [][]repositoryMonitorReviewFinding{open, fixed, outside} {
 		for _, finding := range list {
@@ -831,9 +817,6 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 	return b.String()
 }
 
-// repositoryMonitorNewInlineFindings returns the open findings first
-// reported at record's head inside the reviewed changes. Earlier findings
-// already have their inline threads.
 func repositoryMonitorNewInlineFindings(record *store.ReviewRecord, findings []repositoryMonitorReviewFinding) []repositoryMonitorReviewFinding {
 	inline := make([]repositoryMonitorReviewFinding, 0, len(findings))
 	for _, finding := range findings {
@@ -954,7 +937,6 @@ func parseRepositoryMonitorPatchRightLines(patch string) map[int64]struct{} {
 		case ' ':
 			newLine++
 		case '-':
-			// Removed lines are LEFT-side lines and are not commentable in V1.
 		default:
 			newLine++
 		}
@@ -1009,19 +991,7 @@ func repositoryMonitorPriorityRank(priority string) (int, bool) {
 }
 
 func sanitizeRepositoryMonitorReviewText(value string, maxRunes int) string {
-	// Agent-produced text (research summaries, review verdicts, plan
-	// excerpts) is published on GitHub; strip control/format runes and
-	// redact credential shapes before bounding, so a secret an agent found
-	// in the repository never reaches a public comment — and bounding
-	// cannot split a token past the redactor.
 	value = strings.TrimSpace(value)
-	// A model can wrap one credential across lines. Check a joined shadow
-	// before preserving the original formatting; if the joined value is
-	// credential-shaped, withhold the field because line-by-line redaction
-	// cannot safely reconstruct which fragments belong to the secret.
-	// The shadow is taken from the original text as well as the sanitized
-	// one: line-level sanitization may withhold the fragment that made the
-	// wrapped credential recognizable and leave a tail fragment behind.
 	sanitized := repositoryMonitorReviewContextSanitize(value)
 	unwrap := strings.NewReplacer("\r", "", "\n", "")
 	if security.LooksLikeSecret(unwrap.Replace(value)) || security.LooksLikeSecret(unwrap.Replace(sanitized)) {
@@ -1133,9 +1103,6 @@ func repositoryMonitorGitHubPublishFailureReason(err error) string {
 		}
 		return repositoryMonitorPublishFailureGitHubPermissionDenied
 	case http.StatusUnauthorized:
-		// Installation tokens can expire between review completion and publication.
-		// Retry with the current forge Secret after the normal publish cooldown;
-		// the full PR safety and duplicate checks still run before another POST.
 		return repositoryMonitorPublishFailureGitHubAuthentication
 	case http.StatusNotFound:
 		return repositoryMonitorPublishFailureGitHubPermissionDenied
@@ -1161,13 +1128,6 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorPullRequestFiles(ctx 
 	return files, nil
 }
 
-// listRepositoryMonitorCompareFiles lists the changed files with patches for
-// the exact base...head commit range through the compare endpoint, so the
-// returned file set is bound to immutable SHAs rather than to whatever the
-// pull request branch points at when the request is served. GitHub does not
-// paginate the compare "files" array: it is returned on the first page only
-// and capped at repositoryMonitorGitHubCompareMaxFiles entries, so the caller
-// must reconcile the result against the pull request's changed-file total.
 func (r *RepositoryMonitorReconciler) listRepositoryMonitorCompareFiles(ctx context.Context, owner, repository, token, baseSHA, headSHA string) ([]repositoryMonitorPullRequestFileResponse, error) {
 	baseSHA, headSHA = strings.TrimSpace(baseSHA), strings.TrimSpace(headSHA)
 	if baseSHA == "" || headSHA == "" {
@@ -1181,8 +1141,6 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompareFilesPage(ctx
 	return compare.Files, err
 }
 
-// repositoryMonitorCompareResponse is GitHub's comparison of two commits.
-// Status is ahead when head builds on base.
 type repositoryMonitorCompareResponse struct {
 	Status string                                     `json:"status"`
 	Files  []repositoryMonitorPullRequestFileResponse `json:"files"`

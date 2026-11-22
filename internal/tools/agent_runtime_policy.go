@@ -49,9 +49,6 @@ func resolveRuntimeRefPolicy(
 	}, nil
 }
 
-// materializeRuntimeRefAllowedTools copies the registered harness-v2 allowlist
-// into a generated Task. The AgentRuntime remains the policy authority; the
-// Task copy makes the exact requested broker exposure explicit for binding.
 func materializeRuntimeRefAllowedTools(
 	ctx context.Context,
 	reader client.Reader,

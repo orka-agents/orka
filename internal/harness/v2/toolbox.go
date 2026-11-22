@@ -11,49 +11,32 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-// Toolbox limits are part of the immutable runtime profile contract: every
-// profile builder (controller planning, RuntimePool projection, the deployed
-// template, the dispatcher, and the supervisor) enforces the same shape.
 const (
 	MaxRuntimeToolboxes          = 4
 	MaxRuntimeToolboxPathEntries = 8
 	MaxRuntimeToolboxPathBytes   = 256
 	MaxRuntimeToolboxImageBytes  = 512
 
-	// RuntimeToolboxHomebrewMountPath is the only non-/opt mount path, so
-	// dalec-homebrew prefixes land where Homebrew expects them.
 	RuntimeToolboxHomebrewMountPath = "/home/linuxbrew/.linuxbrew"
 	runtimeToolboxOptPrefix         = "/opt/"
 )
 
-// RuntimeToolboxReservedOptNames are the /opt/<name> folders the built-in
-// runtime images already populate, plus the skill mount root. A toolbox may
-// never shadow them.
 var RuntimeToolboxReservedOptNames = []string{
 	"codex", "codex-acp", "claude", "claude-agent-acp", "copilot", "opencode", "ripgrep", "yarn-v1.22.22",
-	// The skill mount root is controller-owned and never a toolbox.
 	RuntimeSkillMountRootName,
 }
 
 var (
-	runtimeToolboxOptNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	// runtimeToolboxPathEntryPattern keeps path entries to characters that are
-	// safe in PATH, in the copier's comma-separated flag, and in the generated
-	// login profile (no shell metacharacters or whitespace).
+	runtimeToolboxOptNamePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	runtimeToolboxPathEntryPattern = regexp.MustCompile(`^[A-Za-z0-9._-][A-Za-z0-9._/-]*$`)
 )
 
-// RuntimeToolbox is one read-only tool image bound into a runtime Pod. The
-// declared order is significant: it decides PATH precedence between toolboxes
-// and must never be sorted.
 type RuntimeToolbox struct {
 	Image       string   `json:"image"`
 	MountPath   string   `json:"mountPath"`
 	PathEntries []string `json:"pathEntries,omitempty"`
 }
 
-// PathDirs returns the absolute PATH folders this toolbox contributes, in
-// declared order.
 func (t RuntimeToolbox) PathDirs() []string {
 	dirs := make([]string, 0, len(t.PathEntries))
 	for _, entry := range t.PathEntries {
@@ -62,8 +45,6 @@ func (t RuntimeToolbox) PathDirs() []string {
 	return dirs
 }
 
-// Validate checks one toolbox's shape. Registry allowlisting and feature gating
-// are controller policy and live outside the profile contract.
 func (t RuntimeToolbox) Validate() error {
 	if err := ValidateRuntimeToolboxImage(t.Image); err != nil {
 		return err
@@ -87,8 +68,6 @@ func (t RuntimeToolbox) Validate() error {
 	return nil
 }
 
-// ValidateRuntimeToolboxes validates each toolbox and rejects overlapping
-// mount paths. A nil or empty list is valid and means no toolboxes.
 func ValidateRuntimeToolboxes(toolboxes []RuntimeToolbox) error {
 	if len(toolboxes) > MaxRuntimeToolboxes {
 		return fmt.Errorf("%d toolboxes declared; at most %d are allowed", len(toolboxes), MaxRuntimeToolboxes)
@@ -106,15 +85,10 @@ func ValidateRuntimeToolboxes(toolboxes []RuntimeToolbox) error {
 	return nil
 }
 
-// ValidateRuntimeToolboxImage requires a fully qualified digest-pinned image
-// in the canonical form Kubernetes' container-image parser accepts: an
-// explicit registry host, a lowercase repository, no tag, and a sha256 digest.
 func ValidateRuntimeToolboxImage(image string) error {
 	return validateRuntimeImageReference("toolbox", image)
 }
 
-// validateRuntimeImageReference applies the digest-pinned image rules shared
-// by toolboxes and skills; kind names the input in error messages.
 func validateRuntimeImageReference(kind, image string) error {
 	if image == "" {
 		return fmt.Errorf("%s image is required", kind)
@@ -123,8 +97,6 @@ func validateRuntimeImageReference(kind, image string) error {
 		return fmt.Errorf("%s image exceeds %d bytes", kind, MaxRuntimeToolboxImageBytes)
 	}
 	shape := fmt.Errorf("%s image %q must be a fully qualified registry reference pinned by digest (<registry>/<repository>@sha256:<64 hex>) without a tag", kind, image)
-	// ParseNamed accepts only the canonical form, so docker.io shorthand such
-	// as "yq@sha256:..." or "library/yq@sha256:..." is rejected.
 	named, err := reference.ParseNamed(image)
 	if err != nil {
 		return shape
@@ -143,9 +115,6 @@ func validateRuntimeImageReference(kind, image string) error {
 	return nil
 }
 
-// ValidateRuntimeToolboxMountPath accepts exactly /home/linuxbrew/.linuxbrew
-// or /opt/<name> where <name> is a single clean component that no built-in
-// runtime image already uses.
 func ValidateRuntimeToolboxMountPath(mountPath string) error {
 	if err := validateRuntimeToolboxPathText("mountPath", mountPath); err != nil {
 		return err
@@ -198,8 +167,6 @@ func validateRuntimeToolboxPathText(field, value string) error {
 	if strings.Contains(value, "//") || (len(value) > 1 && strings.HasSuffix(value, "/")) {
 		return fmt.Errorf("toolbox %s %q must be a clean path without empty components or a trailing slash", field, value)
 	}
-	// ':' would split PATH and ',' would split the copier's --path-entries
-	// list, so neither may appear anywhere in a toolbox path.
 	for _, r := range value {
 		if r == ':' || r == ',' || r == 0 || r < 0x20 || r == 0x7f {
 			return fmt.Errorf("toolbox %s %q contains a character that is not allowed in PATH", field, value)
@@ -212,8 +179,6 @@ func runtimeToolboxMountPathsOverlap(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-// RuntimeToolboxChildPath appends every toolbox PATH folder, in declared order,
-// after the base PATH so toolbox tools never shadow system commands.
 func RuntimeToolboxChildPath(base string, toolboxes []RuntimeToolbox) string {
 	parts := []string{base}
 	for i := range toolboxes {
@@ -222,7 +187,6 @@ func RuntimeToolboxChildPath(base string, toolboxes []RuntimeToolbox) string {
 	return strings.Join(parts, ":")
 }
 
-// CloneRuntimeToolboxes deep-copies a toolbox list, preserving nil.
 func CloneRuntimeToolboxes(toolboxes []RuntimeToolbox) []RuntimeToolbox {
 	if toolboxes == nil {
 		return nil

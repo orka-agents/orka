@@ -128,9 +128,6 @@ func TestForwardingDescriptorMustBeAReadOnlyCustomTool(t *testing.T) {
 	}
 }
 
-// TestForwardRequestsGoToTheToolForTheirMethod covers the split between a
-// forwarding Tool, which carries reads, and its write tool, which carries
-// writes: neither accepts the other's methods.
 func TestForwardRequestsGoToTheToolForTheirMethod(t *testing.T) {
 	read := MCPToolForward{Protocol: MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com"}
 	write := read
@@ -155,8 +152,6 @@ func TestForwardRequestsGoToTheToolForTheirMethod(t *testing.T) {
 	}
 }
 
-// TestForwardingWriteDescriptorMustBeConsequential covers a write tool's
-// descriptor: consequential, named after its Tool, with the write schema.
 func TestForwardingWriteDescriptorMustBeConsequential(t *testing.T) {
 	forward := &MCPToolForward{Protocol: MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com", Write: true}
 	descriptor := MCPToolDescriptor{
@@ -185,9 +180,6 @@ func TestForwardingWriteDescriptorMustBeConsequential(t *testing.T) {
 	}
 }
 
-// TestOnlyForwardingWritesSkipRuntimeApprovals covers which approval-required
-// tools need a runtime that waits for brokered approvals: every tool but a
-// forwarding write tool, whose client forwarder waits instead.
 func TestOnlyForwardingWritesSkipRuntimeApprovals(t *testing.T) {
 	write := MCPToolDescriptor{Name: "azure_arm:write", Forward: &MCPToolForward{Write: true}}
 	read := MCPToolDescriptor{Name: "azure_arm", Forward: &MCPToolForward{}}
@@ -209,9 +201,6 @@ func TestOnlyForwardingWritesSkipRuntimeApprovals(t *testing.T) {
 	}
 }
 
-// TestMCPToolPolicyDeniesAWriteToolWithItsTool covers a policy that allows a
-// forwarding Tool's write tool by name, as a registered external runtime
-// does, and denies the Tool: the write tool is denied with it.
 func TestMCPToolPolicyDeniesAWriteToolWithItsTool(t *testing.T) {
 	write := MCPForwardWriteToolName("azurearm")
 	policy := MCPToolPolicy{AllowedToolNames: []string{"azurearm", write, "other"}, AllowBash: true}

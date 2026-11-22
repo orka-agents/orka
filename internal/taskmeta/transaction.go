@@ -13,8 +13,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// ApplyTransactionMetadata copies safe transaction metadata to a Kubernetes object's
-// labels and annotations so Tasks, Jobs, and Pods can be correlated by transaction.
 func ApplyTransactionMetadata(meta *metav1.ObjectMeta, tx *corev1alpha1.TaskTransaction) {
 	if meta == nil || tx == nil {
 		return

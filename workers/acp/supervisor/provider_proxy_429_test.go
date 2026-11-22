@@ -87,7 +87,6 @@ func TestProviderProxy429CannotOutliveLease(t *testing.T) {
 	if elapsed := time.Since(now); elapsed >= 2*time.Second || resp.StatusCode != http.StatusTooManyRequests || readErr != nil || string(detail) != "scripted rejection\n" {
 		t.Errorf("lease shorter than Retry-After: want original 429 and detail, got HTTP=%d after %s (read error=%v)", resp.StatusCode, elapsed, readErr)
 	}
-	// Leave the upstream open until a detached retry would have become eligible.
 	time.Sleep(time.Until(now.Add(2250 * time.Millisecond)))
 	if sends.Load() != 1 {
 		t.Errorf("short lease: upstream sends=%d, want 1", sends.Load())

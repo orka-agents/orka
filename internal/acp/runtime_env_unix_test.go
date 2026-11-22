@@ -24,8 +24,6 @@ func TestSessionDirectoriesWithPrivateUmask(t *testing.T) {
 		}
 		return
 	}
-	// The production supervisor hardens its process before creating directories.
-	// Keep that process-wide setting out of the main test process.
 	previous := unix.Umask(0o077)
 	defer unix.Umask(previous)
 	for _, tc := range []struct {
@@ -39,8 +37,6 @@ func TestSessionDirectoriesWithPrivateUmask(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			base := filepath.Join(t.TempDir(), "sessions")
 			if tc.mode != 0 {
-				// Identity-state initialization creates this directory before
-				// the first session; an existing volume may instead be writable.
 				if err := os.Mkdir(base, tc.mode); err != nil {
 					t.Fatal(err)
 				}

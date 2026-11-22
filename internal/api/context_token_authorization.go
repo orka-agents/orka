@@ -39,65 +39,36 @@ const (
 const (
 	defaultTaskUpdateScope = "orka:tasks:update"
 
-	// ContextTokenAuthorizationModeOff disables context-token authorization checks.
-	ContextTokenAuthorizationModeOff = "off"
-	// ContextTokenAuthorizationModeAudit logs context-token authorization failures but allows the request.
-	ContextTokenAuthorizationModeAudit = "audit"
-	// ContextTokenAuthorizationModeEnforce rejects requests that fail context-token authorization.
+	ContextTokenAuthorizationModeOff     = "off"
+	ContextTokenAuthorizationModeAudit   = "audit"
 	ContextTokenAuthorizationModeEnforce = "enforce"
 
-	// ContextTokenScopeTaskCreate authorizes context-token callers to create Orka Tasks.
-	ContextTokenScopeTaskCreate = "orka:tasks:create"
-	// ContextTokenScopeTaskGet authorizes context-token callers to read a Task and its related data.
-	ContextTokenScopeTaskGet = "orka:tasks:get"
-	// ContextTokenScopeTaskList authorizes context-token callers to list Tasks.
-	ContextTokenScopeTaskList = "orka:tasks:list"
-	// ContextTokenScopeTaskDelete authorizes context-token callers to delete Tasks.
-	ContextTokenScopeTaskDelete = "orka:tasks:delete"
-	// ContextTokenScopeConnectorsRead lists and reads a person's Connections.
-	ContextTokenScopeConnectorsRead = "orka:connectors:read"
-	// ContextTokenScopeConnectorsManage links, changes, and disconnects them.
-	ContextTokenScopeConnectorsManage = "orka:connectors:manage"
-	// ContextTokenScopeToolsRead authorizes context-token callers to read Tool definitions.
-	ContextTokenScopeToolsRead = "orka:tools:read"
-	// ContextTokenScopeToolsUse authorizes context-token callers to execute Orka-managed tools.
-	ContextTokenScopeToolsUse = "orka:tools:use"
-	// ContextTokenScopeProvidersUse authorizes context-token callers to use configured model providers.
-	ContextTokenScopeProvidersUse = "orka:providers:use"
-	// ContextTokenScopeSecretsRead authorizes context-token callers to read Secret metadata.
-	ContextTokenScopeSecretsRead = "orka:secrets:read"
-	// ContextTokenScopeSecretsCredentialsRead authorizes use of cluster-managed outbound credential material, including Secret data and ServiceAccount tokens.
+	ContextTokenScopeTaskCreate             = "orka:tasks:create"
+	ContextTokenScopeTaskGet                = "orka:tasks:get"
+	ContextTokenScopeTaskList               = "orka:tasks:list"
+	ContextTokenScopeTaskDelete             = "orka:tasks:delete"
+	ContextTokenScopeConnectorsRead         = "orka:connectors:read"
+	ContextTokenScopeConnectorsManage       = "orka:connectors:manage"
+	ContextTokenScopeToolsRead              = "orka:tools:read"
+	ContextTokenScopeToolsUse               = "orka:tools:use"
+	ContextTokenScopeProvidersUse           = "orka:providers:use"
+	ContextTokenScopeSecretsRead            = "orka:secrets:read"
 	ContextTokenScopeSecretsCredentialsRead = "orka:secrets:credentials:read"
-	// ContextTokenScopeAgentsRead authorizes context-token callers to read Agent definitions.
-	ContextTokenScopeAgentsRead = "orka:agents:read"
-	// ContextTokenScopeAgentsWrite authorizes context-token callers to mutate Agent definitions.
-	ContextTokenScopeAgentsWrite = "orka:agents:write"
-	// ContextTokenScopeMemoryRead authorizes context-token callers to read memory resources.
-	ContextTokenScopeMemoryRead = "orka:memory:read"
-	// ContextTokenScopeMemoryWrite authorizes context-token callers to mutate memory resources.
-	ContextTokenScopeMemoryWrite = "orka:memory:write"
-	// ContextTokenScopeSessionsRead authorizes context-token callers to read sessions.
-	ContextTokenScopeSessionsRead = "orka:sessions:read"
-	// ContextTokenScopeSessionsWrite authorizes context-token callers to delete or mutate sessions.
-	ContextTokenScopeSessionsWrite = "orka:sessions:write"
-	// ContextTokenScopeSecurityRead authorizes context-token callers to read security scan resources.
-	ContextTokenScopeSecurityRead = "orka:security:read"
-	// ContextTokenScopeSecurityWrite authorizes context-token callers to mutate security scan resources.
-	ContextTokenScopeSecurityWrite = "orka:security:write"
-	// ContextTokenScopeMonitorsRead authorizes context-token callers to read repository monitor resources.
-	ContextTokenScopeMonitorsRead = "orka:monitors:read"
-	// ContextTokenScopeMonitorsWrite authorizes context-token callers to mutate repository monitor resources.
-	ContextTokenScopeMonitorsWrite = "orka:monitors:write"
-	// ContextTokenScopeMonitorsOperate authorizes context-token callers to enqueue repository monitor operations.
-	ContextTokenScopeMonitorsOperate = "orka:monitors:operate"
-	// ContextTokenScopeSkillsRead authorizes context-token callers to read Skills.
-	ContextTokenScopeSkillsRead = "orka:skills:read"
-	// ContextTokenScopeSkillsWrite authorizes context-token callers to mutate Skills.
-	ContextTokenScopeSkillsWrite = "orka:skills:write"
+	ContextTokenScopeAgentsRead             = "orka:agents:read"
+	ContextTokenScopeAgentsWrite            = "orka:agents:write"
+	ContextTokenScopeMemoryRead             = "orka:memory:read"
+	ContextTokenScopeMemoryWrite            = "orka:memory:write"
+	ContextTokenScopeSessionsRead           = "orka:sessions:read"
+	ContextTokenScopeSessionsWrite          = "orka:sessions:write"
+	ContextTokenScopeSecurityRead           = "orka:security:read"
+	ContextTokenScopeSecurityWrite          = "orka:security:write"
+	ContextTokenScopeMonitorsRead           = "orka:monitors:read"
+	ContextTokenScopeMonitorsWrite          = "orka:monitors:write"
+	ContextTokenScopeMonitorsOperate        = "orka:monitors:operate"
+	ContextTokenScopeSkillsRead             = "orka:skills:read"
+	ContextTokenScopeSkillsWrite            = "orka:skills:write"
 )
 
-// ContextTokenAuthorizationConfig controls optional authorization checks derived
-// from verified context-token scope and transaction context claims.
 type ContextTokenAuthorizationConfig struct {
 	Mode                          string
 	TaskCreateScopes              []string
@@ -126,14 +97,10 @@ type ContextTokenAuthorizationConfig struct {
 	GatewayReadScopes             []string
 	GatewayOperateScopes          []string
 	ConfigMapReadScopeList        []string
-	// ConnectorReadScopes and ConnectorManageScopes gate a delegated
-	// context token's access to a person's linked accounts.
-	ConnectorReadScopes   []string
-	ConnectorManageScopes []string
+	ConnectorReadScopes           []string
+	ConnectorManageScopes         []string
 }
 
-// ContextTokenAuthorizationConfigOptions names the inputs used to build
-// context-token authorization config.
 type ContextTokenAuthorizationConfigOptions struct {
 	Mode                       string
 	TaskCreateScopes           string
@@ -166,7 +133,6 @@ type ContextTokenAuthorizationConfigOptions struct {
 	ConnectorManageScopes      string
 }
 
-// NewContextTokenAuthorizationConfig builds context-token authorization config.
 func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOptions) (ContextTokenAuthorizationConfig, error) {
 	mode := strings.ToLower(strings.TrimSpace(opts.Mode))
 	if mode == "" {
@@ -239,7 +205,6 @@ func NewContextTokenAuthorizationConfig(opts ContextTokenAuthorizationConfigOpti
 	}, nil
 }
 
-// Enabled reports whether context-token authorization is configured.
 func (c ContextTokenAuthorizationConfig) Enabled() bool {
 	return c.Mode == ContextTokenAuthorizationModeAudit || c.Mode == ContextTokenAuthorizationModeEnforce
 }
@@ -441,10 +406,6 @@ func authorizeContextTokenTaskContextObject(ctx context.Context, reader client.R
 	return handleContextTokenAuthorizationFailures(cfg, token, action, failures)
 }
 
-// contextTokenMemoryConsolidationFailures requires, for a Task that runs
-// memory consolidation, the scopes its run's access needs: it reads every
-// Session and memory in its namespace, and in Propose mode it creates memory
-// proposals. Kubernetes permissions are checked separately.
 func contextTokenMemoryConsolidationFailures(token *ContextToken, cfg ContextTokenAuthorizationConfig, req CreateTaskRequest) []string {
 	consolidation := (*corev1alpha1.MemoryConsolidationSpec)(nil)
 	for _, ai := range []*corev1alpha1.AISpec{req.AI, taskRequestSpecAI(req)} {
@@ -1214,9 +1175,6 @@ func contextTokenAgentSpecToolFailures(token *ContextToken, authzCtx contextToke
 	return failures
 }
 
-// uncachedReaderOr returns apiReader when configured, otherwise the cached
-// client, so authorization decisions can bypass the informer cache when a
-// direct API reader is available.
 func uncachedReaderOr(apiReader client.Reader, fallback client.Client) client.Reader {
 	if apiReader != nil {
 		return apiReader
@@ -1430,9 +1388,6 @@ func contextTokenTaskCreateEffectiveProviderModel(req CreateTaskRequest, agent *
 		}
 	}
 
-	// Built-in OpenCode executes the immutable Agent model identity. Task AI
-	// fields are not part of that runtime profile and must not authorize a
-	// different provider/model than the one that will execute.
 	if req.AI != nil && !openCodeAgentTask {
 		if strings.TrimSpace(req.AI.Provider) != "" {
 			providerInfo = ProviderResolutionInfo{Type: req.AI.Provider}
@@ -1442,8 +1397,6 @@ func contextTokenTaskCreateEffectiveProviderModel(req CreateTaskRequest, agent *
 		}
 	}
 
-	// Provider CRD type is authoritative for provider-backed execution. OpenCode
-	// instead derives its immutable provider identity from the qualified model ID.
 	if provider != nil && !openCodeAgent {
 		providerInfo = providerResolutionInfo(provider)
 	}
@@ -1594,9 +1547,6 @@ func contextTokenSortedUniqueToolNames(values []string) []string {
 	return normalized
 }
 
-// collectSubstrateMCPEgressCredentialSecrets adds the Secrets the Substrate
-// egress gateway injects into the Tool actor's requests; invoking the Tool
-// uses them, so any collected Secret requires the credential-read scope.
 func collectSubstrateMCPEgressCredentialSecrets(secrets map[string]struct{}, tool *corev1alpha1.Tool) {
 	for _, name := range aitools.SubstrateMCPEgressCredentialSecretNames(tool) {
 		secrets[name] = struct{}{}
@@ -1772,8 +1722,6 @@ func contextTokenTaskCreateFailures(token *ContextToken, cfg ContextTokenAuthori
 	return failures
 }
 
-// authorizeContextTokenAgentTaskReference checks only request-supplied identity
-// and creation scope. Runtime policy validation belongs to the completed Task.
 func authorizeContextTokenAgentTaskReference(token *ContextToken, cfg ContextTokenAuthorizationConfig, namespace, name string) error {
 	if !cfg.Enabled() || token == nil {
 		return nil
@@ -1910,9 +1858,6 @@ func contextTokenWorkspaceFailures(token *ContextToken, workspace *corev1alpha1.
 		if !refOnlyWorkspaceMatches && gotBranch != want {
 			failures = append(failures, fmt.Sprintf("workspace branch %q does not match token context %q", gotBranch, want))
 		}
-		// Execution gives workspace.ref precedence over branch, so a
-		// branch-only token constraint must not be bypassed by submitting the
-		// allowed branch together with an unconstrained ref selector.
 		if !hasWantRef && gotRef != "" {
 			failures = append(failures, fmt.Sprintf("workspace ref %q overrides the branch constrained by token context", gotRef))
 		}
@@ -1995,8 +1940,6 @@ func contextTokenNativeRuntimeToolName(authzCtx contextTokenTaskCreateAuthorizat
 		return true
 	}
 	if runtime != nil && runtime.Type != "" {
-		// The broker serves its built-ins ahead of any Tool of the same
-		// name, so they have no Tool credential policy to resolve.
 		return slices.Contains(toolspkg.BrokeredBuiltInToolNames(), base) ||
 			contextTokenBuiltInRuntimeNativeToolName(runtime.Type, base)
 	}
@@ -2011,7 +1954,6 @@ func contextTokenNativeRuntimeToolName(authzCtx contextTokenTaskCreateAuthorizat
 	}
 }
 
-// Use the shared built-in runtime policy so credential authorization and MCP projection cannot drift.
 func contextTokenBuiltInRuntimeNativeToolName(runtimeType corev1alpha1.AgentRuntimeType, name string) bool {
 	return acp.IsBuiltInRuntimeNativeTool(string(runtimeType), name)
 }
@@ -2075,9 +2017,6 @@ func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthoriza
 		return tools
 	}
 
-	// list_connections shows the person's linked accounts, which the
-	// connector routes guard with the connector-read scope; a delegated
-	// token narrowed away from that boundary does not see the tool at all.
 	if !hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes) {
 		tools = filterCompletionToolsExcluding(tools, toolspkg.ListConnectionsToolName)
 	}
@@ -2088,8 +2027,6 @@ func filterCompletionToolsForContextToken(c fiber.Ctx, cfg ContextTokenAuthoriza
 	return filterCompletionToolsByName(tools, allowed)
 }
 
-// contextTokenAllowsConnectorRead reports whether a context-token caller
-// may read the person's linked accounts; every other caller may.
 func contextTokenAllowsConnectorRead(ui *UserInfo, cfg ContextTokenAuthorizationConfig) bool {
 	if !cfg.Enabled() || !cfg.enforcing() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
 		return true
@@ -2097,9 +2034,6 @@ func contextTokenAllowsConnectorRead(ui *UserInfo, cfg ContextTokenAuthorization
 	return hasAnyScope(ui.ContextToken.Scopes, cfg.ConnectorReadScopes)
 }
 
-// connectorReadToolAuthorizer is the execution-time twin of the exposure
-// filter for list_connections: connectors disabled on the controller, or a
-// delegated token without the connector-read scope, refuse the call.
 func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConfig, connectorsEnabled bool) func() *toolspkg.ChatToolError {
 	if !connectorsEnabled {
 		return func() *toolspkg.ChatToolError {
@@ -2114,8 +2048,6 @@ func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConf
 	}
 	failures := []string{fmt.Sprintf("missing one of required scopes %q", strings.Join(cfg.ConnectorReadScopes, ","))}
 	return func() *toolspkg.ChatToolError {
-		// Audit mode allows the call but records the failure, as the
-		// connector routes do for the same scope.
 		if err := handleContextTokenAuthorizationFailures(cfg, ui.ContextToken, string(connectorActionRead), failures); err == nil {
 			return nil
 		}

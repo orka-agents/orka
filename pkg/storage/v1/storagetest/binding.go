@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// bindingProvider is what the dataset binding checks need from a provider.
 type bindingProvider interface {
 	storagev1.ProviderDescriber
 	storagev1.ControllerEpochAdvancer
@@ -19,7 +18,6 @@ type bindingProvider interface {
 	storagev1.DatasetBindingStore
 }
 
-// Installations, records and key fingerprints the binding checks use.
 const (
 	bindingInstallation = "installation-a"
 	otherInstallation   = "installation-b"
@@ -42,8 +40,6 @@ func detachRequest(dataset string, generation int64) storagev1.DetachDatasetRequ
 	}
 }
 
-// requireBindingConflict checks a binding refusal: it matches ErrConflict and
-// carries the dataset's stored binding, which the refusal left unchanged.
 func requireBindingConflict(t *testing.T, provider bindingProvider, dataset string, err error) {
 	t.Helper()
 	require.ErrorIs(t, err, storagev1.ErrConflict)
@@ -60,10 +56,6 @@ func requireBindingConflict(t *testing.T, provider bindingProvider, dataset stri
 	require.Equal(t, stored, *conflict.Binding, "the refusal carries the stored binding")
 }
 
-// requireBindRefused checks that the dataset's binding does not admit request:
-// it returns a BindingConflictError and leaves the binding unchanged. A
-// provider that does not serve the embedded mode refuses that mode with
-// ErrValidation instead.
 func requireBindRefused(t *testing.T, provider bindingProvider, request storagev1.BindDatasetRequest) {
 	t.Helper()
 	_, err := provider.BindDataset(t.Context(), request)
@@ -74,12 +66,10 @@ func requireBindRefused(t *testing.T, provider bindingProvider, request storagev
 	requireBindingConflict(t, provider, request.DatasetID, err)
 }
 
-// allBindModes lists every bind mode.
 var allBindModes = []storagev1.BindMode{
 	storagev1.BindFresh, storagev1.BindEmbedded, storagev1.BindMigrated, storagev1.BindAdopt, storagev1.BindRebind,
 }
 
-// requireUnbound checks that the dataset belongs to no installation.
 func requireUnbound(t *testing.T, provider bindingProvider, dataset string) {
 	t.Helper()
 	_, err := provider.GetDatasetBinding(t.Context(), dataset)
@@ -89,11 +79,6 @@ func requireUnbound(t *testing.T, provider bindingProvider, dataset string) {
 	require.Nil(t, info.Binding)
 }
 
-// requireUnclaimed checks that no installation has bound the dataset itself.
-// It is unbound, or, when the suite gave an artifacts-only provider its first
-// epoch through an advance to store a record, it holds only the binding that
-// advance records: the suite's installation at generation 0, without a
-// record.
 func requireUnclaimed(t *testing.T, provider bindingProvider, dataset string) {
 	t.Helper()
 	if !suiteAdvanced(provider) {
@@ -108,8 +93,6 @@ func requireUnclaimed(t *testing.T, provider bindingProvider, dataset string) {
 	requireStoredBinding(t, provider, dataset, recorded)
 }
 
-// requireStoredBinding checks that GetDatasetBinding and Describe both report
-// want.
 func requireStoredBinding(t *testing.T, provider bindingProvider, dataset string, want storagev1.DatasetBinding) {
 	t.Helper()
 	stored, err := provider.GetDatasetBinding(t.Context(), dataset)
@@ -121,9 +104,6 @@ func requireStoredBinding(t *testing.T, provider bindingProvider, dataset string
 	require.Equal(t, want, *info.Binding)
 }
 
-// runDatasetBinding checks that a dataset is bound to one installation, once,
-// under the mode rules, and that a detached dataset refuses writes until its
-// installation binds it again. populate stores one application record.
 func runDatasetBinding[P bindingProvider](t *testing.T, newProvider func(*testing.T) P, populate func(*testing.T, P)) {
 	t.Run("binds once and replays the binding", func(t *testing.T) {
 		provider := newProvider(t)

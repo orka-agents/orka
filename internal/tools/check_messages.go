@@ -17,32 +17,26 @@ import (
 	"time"
 )
 
-// CheckMessagesTool implements checking for inter-agent messages
 type CheckMessagesTool struct{}
 
-// CheckMessagesArgs are the arguments for the check_messages tool
 type CheckMessagesArgs struct {
 	MarkRead *bool `json:"mark_read,omitempty"`
 }
 
-// NewCheckMessagesTool creates a new check messages tool
 func NewCheckMessagesTool() *CheckMessagesTool {
 	return &CheckMessagesTool{}
 }
 
-// Name returns the tool name
 func (t *CheckMessagesTool) Name() string {
 	return checkMessagesToolName
 }
 
-// Description returns the tool description
 func (t *CheckMessagesTool) Description() string {
 	return "Check for messages from sibling tasks. Returns all unread messages sent to you or broadcast to all siblings. " +
 		"Call this periodically during long-running tasks to stay coordinated with your siblings. " +
 		"Messages are marked as read by default so you won't see them again."
 }
 
-// Parameters returns the JSON Schema for the tool parameters
 func (t *CheckMessagesTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -55,7 +49,6 @@ func (t *CheckMessagesTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute checks for messages from sibling tasks via the controller's internal API
 func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a CheckMessagesArgs
 	if len(args) > 0 {
@@ -122,7 +115,7 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
@@ -131,7 +124,6 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 		return "", fmt.Errorf("failed to check messages: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse to count messages
 	var messages []json.RawMessage
 	if err := json.Unmarshal(body, &messages); err != nil {
 		return string(body), nil

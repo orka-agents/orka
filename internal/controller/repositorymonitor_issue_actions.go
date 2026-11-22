@@ -143,7 +143,6 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	}
 	if item.WorkflowPhase == repositoryMonitorIssuePhaseBlocked && repositoryMonitorIssueBlockStopsCommands(item.SkipReason) {
 		if item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand && command.Intent == repositoryMonitorCommandIntentResume {
-			// Explicit resume clears only an explicit maintainer stop.
 		} else {
 			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorCommandActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, repositoryMonitorIssuePhaseBlocked, "", item.SkipReason); err != nil {
 				return 0, err
@@ -186,9 +185,6 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		return 0, nil
 	}
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorIssueImplementationInProgress(item.WorkflowPhase) {
-		// Planning already queued the implementation; a maintainer's
-		// explicit implement label arriving now must not restart planning
-		// (which would discard the ready plan) or start a second job.
 		reason := "implementation_already_active:" + item.WorkflowPhase
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusSucceeded, item.WorkflowPhase, "", reason); err != nil {
 			return 0, err
@@ -198,9 +194,6 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequirePlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhasePlanned {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
 	}
-	// A halted command (cancelled, or coalesced into another action) must not
-	// block or emit events for the shared issue, which the action that still
-	// owns the work is driving.
 	if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, actionKind); err != nil || halted {
 		return 0, err
 	}
@@ -328,9 +321,6 @@ func repositoryMonitorIssueActionForIntent(monitor *corev1alpha1.RepositoryMonit
 
 const repositoryMonitorEventActionKindKey = "actionKind"
 
-// repositoryMonitorIssueImplementationInProgress reports whether the issue
-// already has an implementation queued, running, or being turned into a pull
-// request, so a repeated implement command is a no-op rather than a restart.
 func repositoryMonitorIssueImplementationInProgress(phase string) bool {
 	switch phase {
 	case repositoryMonitorIssuePhaseImplementationQueued, repositoryMonitorIssuePhaseImplementing,
@@ -723,8 +713,6 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorPausedIssue(ctx con
 	if existing == nil || existing.WorkflowPhase != repositoryMonitorIssuePhasePaused || existing.LastActionID == "" {
 		return nil
 	}
-	// Paused items retain a completed ActionRecord. Settle its attempt before
-	// inventory retires it; failures leave that identity available to retry.
 	record, err := r.Store.GetActionRecord(ctx, monitor.Namespace, existing.LastActionID)
 	if err != nil {
 		return err
@@ -752,7 +740,6 @@ func (r *RepositoryMonitorReconciler) settleRepositoryMonitorPausedIssue(ctx con
 		return err
 	}
 	if store.RepositoryMonitorDesiredActionForActionKind(record.ActionKind) != store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorCommandActionKind(command.Intent)) {
-		// An implement command can be waiting on its completed plan action.
 		actionID := store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForActionKind(record.ActionKind))
 		action, lookupErr := r.Store.GetWorkAction(ctx, monitor.Namespace, actionID)
 		if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
@@ -797,8 +784,6 @@ func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx con
 		if !apierrors.IsNotFound(err) || item.LastActionID == "" {
 			return client.IgnoreNotFound(err)
 		}
-		// The retained result cannot advance without its Task receipt. Release
-		// the completed attempt, retaining its audit identity on the blocked item.
 		if err := r.settleRepositoryMonitorPausedIssue(ctx, monitor, item, repositoryMonitorIssuePausedTaskMissing); err != nil {
 			return err
 		}
@@ -810,7 +795,6 @@ func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx con
 	if !task.Status.Phase.IsTerminal() {
 		return nil
 	}
-	// Apply the retained result before a new command can restart its workflow.
 	_, err := r.ingestCompletedRepositoryMonitorIssueTask(ctx, monitor, item, &task)
 	return err
 }
@@ -985,8 +969,6 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 			if _, awaiting := awaitingTasks[taskName]; awaiting {
 				continue
 			}
-			// A settled result no longer needs this credential. Sweep it again
-			// after transient cleanup failures even while its Task is retained.
 			if err := r.cleanupRepositoryMonitorRuntimeAuthSnapshotReference(ctx, monitor, snapshot.Namespace, snapshot.Name); err != nil {
 				return err
 			}
@@ -1112,10 +1094,6 @@ func repositoryMonitorIssueFailedTaskSummary(actionKind string, task *corev1alph
 	return fmt.Sprintf("Task `%s` ended in phase %s without producing a valid result.", name, phase)
 }
 
-// repositoryMonitorWorkspaceValidationGuidance turns a workspace content
-// policy rejection into public, actionable guidance. Only the policy class is
-// surfaced; the Task status message (which names the file) stays private to
-// the namespace.
 func repositoryMonitorWorkspaceValidationGuidance(task *corev1alpha1.Task) string {
 	if task == nil || task.Status.Delivery == nil || task.Status.Delivery.Reason != corev1alpha1.TaskDeliveryReason(corev1alpha1.ExecutionWorkspaceReasonValidationFailed) {
 		return ""
@@ -1337,9 +1315,6 @@ func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context
 	commandIntent := r.repositoryMonitorCommandIntentForID(ctx, monitor, record.CommandEventID, item.LastCommandIntent)
 	command := &store.CommandEvent{ID: record.CommandEventID, Intent: commandIntent}
 	if record.ActionKind == repositoryMonitorIssueActionPlan {
-		// Persist the completed plan action before changing the item's active task.
-		// If implementation handoff fails before it becomes durable, the item still
-		// points at the completed plan task and ingestion can retry safely.
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, nil, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, record.ActionKind, workStatus, item.WorkflowPhase, record.TaskName, item.SkipReason); err != nil {
 			return false, err
 		}
@@ -1364,8 +1339,6 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorLinkedPullRequest(ct
 	if !repositoryMonitorPullRequestsEnabled(monitor.Spec) || number <= 0 {
 		return nil
 	}
-	// Continue accepted implementation work independently of opened webhooks or
-	// schedules. Targeted inventory verifies current PR scope and head itself.
 	id := "issue-pr-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, number))
 	err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
@@ -1525,11 +1498,6 @@ func repositoryMonitorImplementationMaxChangedFiles(monitor *corev1alpha1.Reposi
 	return 12
 }
 
-// repositoryMonitorApplyPatchPathLimits bounds which repository paths a
-// monitor write Task may publish. Implementation and repair Tasks share one
-// policy: spec.issueWorkflow.implementation.allowedPaths, when set, and
-// repository control paths are always denied. The runtime enforces both before
-// any publication.
 func repositoryMonitorApplyPatchPathLimits(monitor *corev1alpha1.RepositoryMonitor, workspace *corev1alpha1.WorkspaceConfig) {
 	if monitor == nil || workspace == nil {
 		return
@@ -1538,9 +1506,6 @@ func repositoryMonitorApplyPatchPathLimits(monitor *corev1alpha1.RepositoryMonit
 	workspace.DenyRepositoryControlPaths = true
 }
 
-// repositoryMonitorWorkspacePathRejectionReason reports the patch path reason
-// for a write Task whose runtime rejected its workspace delta under the path
-// limits, so nothing was published. It returns "" for any other outcome.
 func repositoryMonitorWorkspacePathRejectionReason(task *corev1alpha1.Task) string {
 	if task == nil || task.Status.Delivery == nil || task.Status.Delivery.Reason != acpWorkspaceValidationFailedReason {
 		return ""
@@ -1666,8 +1631,6 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 			"allowedPaths":      task.Spec.Workspace.AllowedPaths,
 		})
 		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: patchArtifact, ContentType: artifactContentTypeJSON, Data: deliverySummary}); err != nil {
-			// A store that has not accepted the write yet is retried, not
-			// recorded as a blocked implementation.
 			if store.IsTemporaryStorageError(err) {
 				return "", "", "", err
 			}
@@ -1906,9 +1869,6 @@ func (r *RepositoryMonitorReconciler) finishIssueMutation(ctx context.Context, m
 			return "", 0, "", err
 		}
 	}
-	// Persist the confirmed creation outcome before the separately fallible
-	// usage projection. A retry reuses this receipt without reclassifying an
-	// Orka-created PR as assistance when its usage link was not stored.
 	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		return "", 0, "", err
@@ -2596,9 +2556,6 @@ func repositoryMonitorIssueActionUpdatesStatusComment(actionKind, workflowPhase 
 	switch actionKind {
 	case repositoryMonitorIssueActionPlan, repositoryMonitorIssueActionMutateToPR, repositoryMonitorIssueActionDecompose,
 		repositoryMonitorIssueActionResearch:
-		// Research is requested through the API; without a status-comment
-		// update its result would be stored only as internal planning context
-		// and the requester would see nothing on the issue.
 		return true
 	case repositoryMonitorIssueActionImplementation:
 		return workflowPhase == repositoryMonitorIssuePhaseBlocked || workflowPhase == repositoryMonitorIssuePhasePROpened

@@ -374,8 +374,6 @@ func TestExternalCoreCleanupAcceptsAPIDefaultsAndObservesReplacementUID(t *testi
 	if err := c.Update(context.Background(), service); err != nil {
 		t.Fatal(err)
 	}
-	// The actual deleted UID disappears; a same-name replacement is foreign
-	// and cannot be deleted or hold up this Core allocation's finalizer.
 	c.replaceAfterDelete = true
 	remaining, err := f.r.deleteExternalCoreDiscoveryResources(context.Background(), &pool, cfg)
 	if err != nil || remaining {
@@ -600,8 +598,6 @@ func TestExternalCredentialLegacyExactAuthUIDCleanupLeavesUnknownProvider(t *tes
 				delete(pool.Annotations, runtimePoolPrivateAuthSecretBindingAnnotation(7))
 				encoded, _ := json.Marshal(runtimePoolBootstrapInstanceBinding{AuthSecretUID: auth.UID, WorkloadUID: "never-current-runtime"})
 				pool.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] = string(encoded)
-				// Public no-allocation closeout rightly rejects consumed bootstrap;
-				// this exact authorized resource cleanup seam proves legacy UID recovery.
 				if err := c.Update(context.Background(), &pool); err != nil {
 					t.Fatal(err)
 				}

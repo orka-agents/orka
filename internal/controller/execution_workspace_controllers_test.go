@@ -294,11 +294,6 @@ func TestExecutionWorkspaceClassReconcilerResolvesReadyProvider(t *testing.T) {
 	}
 }
 
-// rejectClassSpecUpdates simulates the API server's functional-spec
-// immutability rule: any full-object class Update is rejected the way a
-// round-tripped spec (e.g. a "2m" duration re-serialized as "2m0s") is
-// rejected in a real cluster. Finalizer management must therefore go through
-// metadata-only patches.
 func rejectClassSpecUpdates() interceptor.Funcs {
 	return interceptor.Funcs{
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
@@ -841,11 +836,6 @@ func preparePooledClassProfileForTest(
 	return mapper, parameters
 }
 
-// Cleanup-only recovery installs the core finalizer only on ACP-owned
-// workspaces: adapters registered solely under the enabled provider API (the
-// development fake provider) are not running in cleanup-only mode, and a
-// finalizer no adapter can settle with StateDeleted would make the object
-// undeletable.
 func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
 	t.Parallel()
 	const cleanupTestNamespace = "cleanup-ns"
@@ -886,21 +876,3 @@ func TestExecutionWorkspaceCleanupOnlyFinalizerIsACPScoped(t *testing.T) {
 		t.Fatal("a non-ACP workspace must not gain a finalizer no running adapter can ever settle")
 	}
 }
-
-// A substrate-backend Suspend class must not advertise readiness when its
-// profile also carries agent-sandbox inputs: resolution rejects that profile,
-// so every Task selecting the class would fail after admission.
-
-// A StorageClass change re-enqueues every class so a created or corrected
-// storage class lifts a stale NotReady without an unrelated class edit.
-
-// The reserved ACP adapter advertises suspend per provider, but a class that
-// permits Suspend goes Ready only when it allows Session reuse and its
-// RuntimeWorkspaceProfile opts into a backend DataOnly suspend policy;
-// otherwise every Task relying on the advertised lifecycle would fail later
-// at binding or detach-action resolution.
-
-// A sandbox-backend Suspend class goes Ready only when its profile passes the
-// SAME validators Task resolution runs: the frozen durable-volume shape and
-// the pinned Delete-reclaim storage class - and never while the profile also
-// carries substrate inputs.

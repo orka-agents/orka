@@ -511,7 +511,6 @@ func TestRemoteMCPSSETerminalResponseLineEndings(t *testing.T) {
 		{"LF", "\n", "\n\n"},
 		{"CR", "\r", "\r\r"},
 		{"CRLF", "\r\n", "\r\n\r\n"},
-		// A CR is a complete line ending even when its optional LF never arrives.
 		{"CRLF terminal CR", "\r\n", "\r\n\r"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -16,21 +16,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ListPullRequestsTool lists open pull requests in a GitHub repository.
 type ListPullRequestsTool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// ListPullRequestsArgs are the arguments for the list_pull_requests tool.
 type ListPullRequestsArgs struct {
-	TaskName string `json:"task_name"` // optional: resolve repo from a task's workspace
-	RepoURL  string `json:"repo_url"`  // optional: direct repo URL; with task context it must match that task's repository scope
-	PerPage  int    `json:"per_page"`  // results per page (default: 30, max: 100)
-	Page     int    `json:"page"`      // page number (default: 1)
+	TaskName string `json:"task_name"`
+	RepoURL  string `json:"repo_url"`
+	PerPage  int    `json:"per_page"`
+	Page     int    `json:"page"`
 }
 
-// PRSummary represents a single pull request in the listing.
 type PRSummary struct {
 	Number     int      `json:"number"`
 	Title      string   `json:"title"`
@@ -44,46 +41,39 @@ type PRSummary struct {
 	Draft      bool     `json:"draft"`
 }
 
-// ListPullRequestsResult is the result of listing pull requests.
 type ListPullRequestsResult struct {
 	PullRequests []PRSummary `json:"pull_requests"`
 	TotalCount   int         `json:"total_count"`
 }
 
-// NewListPullRequestsTool creates a new list_pull_requests tool.
 func NewListPullRequestsTool(k8sClient client.Client) *ListPullRequestsTool {
 	return &ListPullRequestsTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *ListPullRequestsTool) Name() string {
 	return "list_pull_requests"
 }
 
-// Description returns the tool description.
 func (t *ListPullRequestsTool) Description() string {
 	return "List open pull requests in a GitHub repository. " +
 		"Returns PR numbers, titles, authors, branches, labels, and URLs. " +
 		"Use this to scan a repo for PRs that need review or to find specific pull requests."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *ListPullRequestsTool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Name of the task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "GitHub repository URL (for example, https://github.com/owner/repo). Requires task_name or current task context and must match that task's repository scope."}, perPageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Number of results per page", jsonSchemaDefaultField: 30, jsonSchemaMinimumField: 1, jsonSchemaMaximumField: 100}, pageField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Page number for pagination (default: 1)"}}}
 	data, _ := json.Marshal(schema)
 	return data
 }
 
-// Execute lists open pull requests from GitHub.
 func (t *ListPullRequestsTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args ListPullRequestsArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
 		return "", fmt.Errorf("failed to parse arguments: %w", err)
 	}
 
-	// Apply defaults and caps
 	if args.PerPage <= 0 {
 		args.PerPage = 30
 	}

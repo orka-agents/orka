@@ -35,26 +35,14 @@ const workspaceRepositoryProviderGitHub = "github"
 var errWorkspaceRepositoryHTTPSPort = errors.New("repository HTTPS URL must use port 443")
 
 type preparedACPRuntimeWorkspace struct {
-	baseline       harnessv2.WorkspaceBaseline
-	spec           harnessv2.WorkspaceSpec
-	authorization  *harnessv2.ArtifactAuthorization
-	bindingDigest  string
-	createIssuedAt time.Time
-	// priorRepositoryIdentity records the canonical repository identity the
-	// session ran on BEFORE a verified publication transition moved its
-	// continuation to a new repository. Under an expected durable resume it
-	// authorizes the supervisor to wipe a checkpoint bound to exactly this
-	// identity and re-materialize from the new baseline.
+	baseline                harnessv2.WorkspaceBaseline
+	spec                    harnessv2.WorkspaceSpec
+	authorization           *harnessv2.ArtifactAuthorization
+	bindingDigest           string
+	createIssuedAt          time.Time
 	priorRepositoryIdentity string
 }
 
-// taskExpectsDurableResume reports whether the Task's linked execution
-// workspace carries a resumed lineage: every session on it must find a
-// committed durable checkpoint, and the runtime fails creation when the
-// preserved data is missing instead of silently materializing fresh. The
-// returned floor is the newest committed checkpoint generation the
-// controller ever recorded; a same-identity checkpoint older than it is a
-// stale provider restore.
 func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *corev1alpha1.Task) (bool, uint64, error) {
 	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
 	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
@@ -67,23 +55,11 @@ func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *core
 	}
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
-		// Fail closed: silently omitting the resume expectation on a read
-		// failure would let a lost checkpoint be silently replaced by a
-		// fresh materialization. The dispatch aborts and retries instead.
 		return false, 0, fmt.Errorf("resolve the linked workspace's resume lineage: %w", err)
 	}
-	// The lineage asserts a committed checkpoint only when a RuntimeSession
-	// was actually created (and therefore committed its durable marker) on
-	// this workspace before the suspension: a first Task cancelled before
-	// session creation validly suspends a volume that never held a
-	// checkpoint, and its continuation must materialize fresh instead of
-	// failing closed forever over data that never existed.
 	if string(workspace.UID) != uid {
 		return false, 0, nil
 	}
-	// A fresh checkpoint restore has no destination lineage yet, but must
-	// still find committed data. Otherwise it could report success from an
-	// empty newly materialized directory instead of the requested checkpoint.
 	restoring := task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil &&
 		task.Spec.Execution.Workspace.RestoreFrom != nil
 	if workspace.Annotations[acpWorkspaceResumedLineageAnnotation] != booleanTrueValue {
@@ -99,10 +75,6 @@ func (d *ACPDispatcher) taskExpectsDurableResume(ctx context.Context, task *core
 	return true, floor, nil
 }
 
-// taskRuntimeSessionGenerationFloor returns the newest RuntimeSession
-// generation committed on the linked workspace. Session planning uses this
-// durable high-water mark when its controller-local binding cache cannot prove
-// that reusing a generation is safe.
 func (d *ACPDispatcher) taskRuntimeSessionGenerationFloor(ctx context.Context, task *corev1alpha1.Task) (uint64, error) {
 	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
 	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
@@ -130,24 +102,15 @@ func workspaceDurableSessionGeneration(workspace *workspacev1alpha1.ExecutionWor
 		return 0, false, nil
 	}
 	if recorded == booleanTrueValue {
-		// A record stamped before generations were tracked asserts the
-		// checkpoint's existence without a generation floor.
 		return 0, true, nil
 	}
 	floor, parseErr := strconv.ParseUint(recorded, 10, 64)
 	if parseErr != nil || floor == 0 {
-		// A corrupt controller-owned record must not disable the stale-snapshot
-		// fence. Keep the raw annotation out of the error because metadata can be
-		// modified outside this controller.
 		return 0, false, fmt.Errorf("linked workspace %s has an invalid durable checkpoint generation record", workspace.Name)
 	}
 	return floor, true, nil
 }
 
-// markLinkedWorkspaceDurableSessionCommitted durably records on the linked
-// execution workspace that a RuntimeSession creation completed - and with it
-// the supervisor's durable checkpoint commit - so a later resumed lineage can
-// assert the committed checkpoint's existence.
 func (d *ACPDispatcher) markLinkedWorkspaceDurableSessionCommitted(ctx context.Context, task *corev1alpha1.Task, generation uint64) error {
 	name := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
 	uid := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
@@ -161,9 +124,6 @@ func (d *ACPDispatcher) markLinkedWorkspaceDurableSessionCommitted(ctx context.C
 	if string(workspace.UID) != uid {
 		return nil
 	}
-	// The record carries the NEWEST committed checkpoint generation and only
-	// advances: a stale provider restore then presents an older recorded
-	// generation than this floor and the resume assertion rejects it.
 	recorded := strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation])
 	if current, parseErr := strconv.ParseUint(recorded, 10, 64); parseErr == nil && current >= generation {
 		return nil
@@ -201,10 +161,6 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		}
 		if workspace != nil && continuationWorkspace != nil &&
 			!sameCanonicalWorkspaceRepository(workspace.GitRepo, continuationWorkspace.GitRepo) {
-			// The verified publication transition moved the session to a new
-			// repository (for example the fork a PR publishes to); the prior
-			// canonical identity authorizes the durable-resume checkpoint
-			// transition below.
 			if prior, priorErr := workspaceRepository(workspace); priorErr == nil {
 				priorRepositoryIdentity = prior.ID
 			}
@@ -212,11 +168,6 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		workspace = continuationWorkspace
 	}
 	if workspace == nil || strings.TrimSpace(workspace.GitRepo) == "" {
-		// The protocol baseline must be identical for every turn of one
-		// logical Session: the supervisor compares the delta request's
-		// VerifiedBaseline against the baseline the session was created with,
-		// so a task-scoped identity would fail every repo-less continuation
-		// with a digest conflict.
 		scope := string(task.UID)
 		if session != nil && strings.TrimSpace(session.Binding.SessionUID) != "" {
 			scope = session.Binding.SessionUID
@@ -225,10 +176,6 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
 		}
-		// Keep the stable Session-scoped baseline in the binding digest. Older
-		// controllers erased the task-scoped identity here; making the Session
-		// identity explicit forces those live sessions through one generation
-		// rotation instead of reusing a supervisor with a different baseline.
 		bindingDigest, err := acpRuntimeWorkspaceBindingDigest("", spec)
 		if err != nil {
 			return preparedACPRuntimeWorkspace{}, err
@@ -324,12 +271,6 @@ func (d *ACPDispatcher) prepareRuntimeWorkspace(
 		return result, nil
 	}
 
-	// The operation ID must be unique per session creation attempt: a
-	// RuntimeSession recreated after a completed or ambiguously-failed first
-	// download (capacity loss, post-download creation failure) needs a fresh
-	// ledger operation, or the replacement session hits ErrReplay and can
-	// never materialize its workspace. Bind the ID to the execution attempt
-	// and session generation, which advance across recreations.
 	binding := artifactcap.OperationRequest{
 		Operation: artifactcap.OperationDownload, ObjectDigest: prepared.Artifact.Digest,
 		Identity:      artifactcap.Identity{Namespace: task.Namespace, TaskID: string(task.UID)},
@@ -397,8 +338,6 @@ func runtimeWorkspaceSourceRef(workspace *corev1alpha1.WorkspaceConfig) (string,
 	}
 	branch := strings.TrimSpace(workspace.Branch)
 	if branch == "" {
-		// Empty is an explicit request for the Publisher to resolve and freeze
-		// the repository's advertised HEAD/default branch before execution.
 		return "", nil
 	}
 	if !strings.HasPrefix(branch, "refs/") {
@@ -501,9 +440,6 @@ func canonicalWorkspaceRepositoryURL(rawURL string) (*url.URL, string, error) {
 	if port := parsed.Port(); port != "" && port != "443" {
 		return nil, "", errWorkspaceRepositoryHTTPSPort
 	}
-	// Mirror the Publisher's validateRepository IP-literal rule so a Task the
-	// Publisher would unconditionally reject fails preflight instead of
-	// settling as WorkspaceUnsupported after creation.
 	if ip := net.ParseIP(strings.ToLower(parsed.Hostname())); ip != nil &&
 		(ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
 		return nil, "", fmt.Errorf("repository URL uses a forbidden IP literal")

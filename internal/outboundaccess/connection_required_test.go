@@ -43,9 +43,6 @@ func TestConnectionRequiredErrorTellsTheAgentWhatThePersonMustDo(t *testing.T) {
 	}
 }
 
-// The resolver names the provider, its display name, and the namespace in a
-// refusal, whether the Task carries no link or the credential source refused
-// the one it carries.
 func TestKubernetesResolverNamesTheProviderInAConnectionRefusal(t *testing.T) {
 	f := newConnectionModeFixture(t)
 	provider := acceptedProvider()

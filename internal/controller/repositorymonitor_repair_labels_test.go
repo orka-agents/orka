@@ -101,37 +101,23 @@ func TestRepositoryMonitorRepairLabelsRejectIssueImplementation(t *testing.T) {
 	}
 }
 
-// repositoryMonitorRepairLabelsGitHub serves per-commit check runs and
-// commit statuses, the pull request's issue events, and collaborator roles.
 type repositoryMonitorRepairLabelsGitHub struct {
-	checks   map[string]map[string]string // commit SHA -> check name -> conclusion
-	statuses map[string]map[string]string // commit SHA -> status context -> state
-	events   []map[string]any
-	roles    map[string]string
-	// heldRuns lists, per commit SHA, workflow runs waiting for approval.
-	heldRuns map[string][]string
-	// partial reports one more check run than it returns for these commits.
-	partial map[string]bool
-	// partialStatuses reports one more commit status than it returns.
-	partialStatuses map[string]bool
-	// checkReads counts check-run reads per commit SHA.
-	checkReads map[string]int
-	// runs replaces checks for a commit with full check run objects.
-	runs map[string][]map[string]any
-	// statusObjects replaces statuses for a commit with full status objects.
-	statusObjects map[string][]map[string]any
-	// annotations serves check run annotations by check run ID; a check run
-	// in annotationFailures answers with that status code instead.
+	checks             map[string]map[string]string
+	statuses           map[string]map[string]string
+	events             []map[string]any
+	roles              map[string]string
+	heldRuns           map[string][]string
+	partial            map[string]bool
+	partialStatuses    map[string]bool
+	checkReads         map[string]int
+	runs               map[string][]map[string]any
+	statusObjects      map[string][]map[string]any
 	annotations        map[int64][]map[string]any
 	annotationFailures map[int64]int
-	// annotationReads records each annotation page read as "id:page".
-	annotationReads []string
-	// checkRunFailure answers every check-run read with this status code.
-	checkRunFailure int
+	annotationReads    []string
+	checkRunFailure    int
 }
 
-// repositoryMonitorRepairLabelsGitHubFailure writes a GitHub error.
-// repositoryMonitorRepairLabelsRateLimited writes GitHub's 403 rate limit.
 func repositoryMonitorRepairLabelsGitHubFailure(w http.ResponseWriter, status int) {
 	switch status {
 	case repositoryMonitorRepairLabelsRateLimited:
@@ -146,7 +132,6 @@ func repositoryMonitorRepairLabelsGitHubFailure(w http.ResponseWriter, status in
 	}
 }
 
-// repositoryMonitorRepairLabelsRateLimited marks a fake 403 rate limit.
 const repositoryMonitorRepairLabelsRateLimited = 1403
 
 func (g *repositoryMonitorRepairLabelsGitHub) labeled(actor, label string) *repositoryMonitorRepairLabelsGitHub {
@@ -247,9 +232,9 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 		labels      []string
 		mergeable   string
 		github      *repositoryMonitorRepairLabelsGitHub
-		review      string // verdict of a stored review for the head, if any
+		review      string
 		mutate      func(*corev1alpha1.RepositoryMonitor)
-		greenCI     bool // spec.review.requireGreenCI
+		greenCI     bool
 		wantHandled bool
 		wantIntent  string
 		wantSkip    string
@@ -260,9 +245,8 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			github: (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}}).labeled("maintainer", "orka:fix"),
 		},
 		{
-			name:   "fix label fixes findings before CI",
-			labels: []string{"orka:fix"},
-			// A triage account's earlier label does not taint the current one.
+			name:        "fix label fixes findings before CI",
+			labels:      []string{"orka:fix"},
 			github:      (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}}).labeled("triager", "orka:fix").unlabeled("triager", "orka:fix").labeled("maintainer", "orka:fix"),
 			review:      repositoryMonitorReviewVerdictNeedsChanges,
 			wantHandled: true,
@@ -474,7 +458,6 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 				t.Fatalf("item skip reason = %q, want %q", item.SkipReason, tt.wantSkip)
 			}
 			if tt.wantSkip != "" {
-				// The refusal is kept as one event even when it repeats.
 				if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, run, "orka-agents", "orka", pr, item); err != nil {
 					t.Fatal(err)
 				}
@@ -487,8 +470,6 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 	}
 }
 
-// withoutRepositoryMonitorRepairLabelsAndBudget makes every pull request
-// repairable and leaves no repair budget.
 func withoutRepositoryMonitorRepairLabelsAndBudget(m *corev1alpha1.RepositoryMonitor) {
 	m.Spec.Targets.PullRequests.IncludeLabels = nil
 	m.Spec.Repair.IncludeLabels = nil
@@ -575,8 +556,6 @@ func TestRepositoryMonitorInventoryReviewsHeadAfterRepairRefusal(t *testing.T) {
 		}
 	})
 	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
-	// The head broke CI but the repair budget is spent. The refusal must not
-	// keep the head from ever being reviewed.
 	if _, created, _, err := r.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: "poll", TargetKind: repositoryMonitorPullRequestKind}, "orka-agents", "orka"); err != nil || created != 1 {
 		t.Fatalf("refused repair starved review: created=%d err=%v", created, err)
 	}
@@ -639,7 +618,6 @@ func TestRepositoryMonitorCheckCIReportsHeldWorkflowRuns(t *testing.T) {
 			t.Fatalf("%s: CI = %+v err=%v, want %+v", tc.name, got, err, tc.want)
 		}
 	}
-	// A rate-limited lookup cannot establish that nothing is held.
 	actionsStatus, actionsRateLimited = http.StatusForbidden, true
 	if got, err := r.repositoryMonitorCheckCI(ctx, monitor, "head1"); err == nil {
 		t.Fatalf("rate-limited approval lookup: CI = %+v, want an error", got)
@@ -683,8 +661,6 @@ func TestRepositoryMonitorCIRepairPromptNamesTheChecksThePullRequestBroke(t *tes
 	if !strings.Contains(prompt, "Fix only the checks in failingChecks") {
 		t.Fatalf("prompt does not limit the repair to failingChecks: %s", prompt)
 	}
-	// Evidence describes only the checks the pull request broke, and the
-	// prompt marks CI output as its own untrusted source.
 	evidence := repositoryMonitorRepairPromptPayload(t, prompt)
 	names := make([]string, 0, len(evidence.FailingCheckEvidence.Checks))
 	for _, check := range evidence.FailingCheckEvidence.Checks {
@@ -707,7 +683,6 @@ func TestRepositoryMonitorReadinessRepairEligibilityFollowsRepairLabels(t *testi
 	monitor.Spec.Repair.Enabled = true
 	for _, labels := range [][]string{{"orka:review"}, {"orka:review", "orka:fix-ci"}} {
 		pr := repositoryMonitorPullRequest{Number: 31, State: "open", BaseBranch: "main", HeadSHA: "head31", Labels: labels}
-		// No repair is selected, so eligibility is decided before any lookup.
 		eligible, err := (&RepositoryMonitorReconciler{}).repositoryMonitorNeedsChangesRepairEligible(context.Background(), monitor, pr, &store.MonitorItem{})
 		if err != nil || eligible {
 			t.Fatalf("labels %v: eligible = %t err=%v, want no automatic repair of findings", labels, eligible, err)
@@ -769,7 +744,7 @@ func TestRepositoryMonitorQueuedPolicyRepairRechecksItsGrantBeforeRunning(t *tes
 	tests := []struct {
 		name     string
 		change   func(github *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest)
-		jobOnly  bool // a RepairJob survives an earlier failed Task create
+		jobOnly  bool
 		wantSkip string
 		wantErr  bool
 	}{
@@ -892,7 +867,6 @@ func TestRepositoryMonitorPolicyRepairRecheckLeavesExplicitCommandsAlone(t *test
 	monitor := &corev1alpha1.RepositoryMonitor{Spec: repositoryMonitorRepairLabelsTestSpec()}
 	pr := repositoryMonitorPullRequest{Number: 31, State: "open", BaseBranch: "main", HeadSHA: "head31", Labels: []string{"orka:review"}}
 	command := &store.CommandEvent{Source: "api", Intent: repositoryMonitorCommandIntentFixCI}
-	// No repair label and no GitHub server: an explicit command needs neither.
 	reason, err := (&RepositoryMonitorReconciler{}).repositoryMonitorPolicyRepairWithdrawnReason(context.Background(), monitor, command, "orka-agents", "orka", pr)
 	if err != nil || reason != "" {
 		t.Fatalf("reason = %q err=%v, want explicit commands unaffected", reason, err)
@@ -976,7 +950,6 @@ func TestRepositoryMonitorCIFailuresWaitForCompleteResultsAndShareBaseLookups(t 
 	if github.checkReads["base4"] != 1 {
 		t.Fatalf("base check reads = %d, want one per inventory run", github.checkReads["base4"])
 	}
-	// A partial base result could hide the inherited failure.
 	github.partial = map[string]bool{"base5": true}
 	github.checks["base5"] = map[string]string{}
 	failures, err := reconciler.repositoryMonitorPullRequestCIFailures(context.Background(), monitor, repositoryMonitorPullRequest{BaseSHA: "base5", HeadSHA: "head41"})
@@ -986,8 +959,6 @@ func TestRepositoryMonitorCIFailuresWaitForCompleteResultsAndShareBaseLookups(t 
 }
 
 func TestRepositoryMonitorCIFailuresDeferOnPartialFailingBaseStatuses(t *testing.T) {
-	// The base's status page lists a failing lint but omits a failing tests
-	// status, so tests failing on the head must not count as introduced.
 	github := &repositoryMonitorRepairLabelsGitHub{
 		statuses:        map[string]map[string]string{"head43": {"tests": "failure"}, "base43": {"lint": "failure"}},
 		partialStatuses: map[string]bool{"base43": true},

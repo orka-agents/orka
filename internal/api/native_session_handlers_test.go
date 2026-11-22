@@ -30,8 +30,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// nativeAPIStore returns the storage client over an in-memory SQLite store,
-// with the snapshot key active, as production wires the API.
 func nativeAPIStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
@@ -338,7 +336,6 @@ func TestNativeSessionMigrationAPIRejectsUnfinishedOversizedChunk(t *testing.T) 
 	require.NoError(t, err)
 	_, err = connection.Write(bytes.Repeat([]byte{' '}, oversized))
 	require.NoError(t, err)
-	// Do not finish the chunk or request. The route must return at its limit.
 	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusRequestEntityTooLarge, response.StatusCode)

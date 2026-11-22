@@ -16,13 +16,10 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// agentBuiltinToolNames are the worker built-in tools an Agent or Task enables
-// by name (see RegisterBuiltinTools), without the gateway-only reply tool.
 var agentBuiltinToolNames = []string{
 	webSearchToolName, codeExecToolName, fileReadToolName, webFetchToolName, fileWriteToolName, requestApprovalToolName,
 }
 
-// ListToolsTool lists the built-in tools and the namespace's Tool CRDs.
 type ListToolsTool struct{}
 
 func (t *ListToolsTool) Name() string { return listToolsToolName }

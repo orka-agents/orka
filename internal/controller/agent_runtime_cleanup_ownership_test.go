@@ -15,9 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// An API timeout does not prove a submitted write stopped. Keep the exact
-// serialized request so the test can apply it after another controller has
-// completed cleanup and a new object owns the same name.
 type delayedAgentRuntimeCleanupClient struct {
 	client.Client
 	pending func(context.Context) error
@@ -89,7 +86,6 @@ func TestAgentRuntimeCleanupDelayedWritePreservesReplacementOwner(t *testing.T) 
 				t.Fatalf("old cleanup did not return an ambiguous submitted write: %v", err)
 			}
 
-			// The successor finishes deletion while the old request is pending.
 			current := target.DeepCopyObject().(client.Object)
 			if err := server.Get(t.Context(), client.ObjectKeyFromObject(target), current); err != nil {
 				t.Fatal(err)

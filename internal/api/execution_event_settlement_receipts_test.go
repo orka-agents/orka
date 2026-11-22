@@ -47,8 +47,6 @@ func TestExecutionEventSettlementHistoryAfterDuplicateOrReconciledAppend(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Acceptance is already durable before this State opens. Its first
-			// store duplicate is the terminal, whose winning payload differs.
 			winnerWrites := 0
 			intercepted.publishWinner = func() {
 				row, isNew, err := winner.AppendPromptStreamFailureIfNew(ctx, modelHistoryEvent(2).Identity.Timestamp, "pw")
@@ -96,8 +94,6 @@ func TestExecutionEventSettlementHistoryAfterDuplicateOrReconciledAppend(t *test
 	}
 }
 
-// Inject a competing durable write and a lost append receipt while keeping
-// persistence, deduplication, and reconciliation reads backed by SQLite.
 type settlementReceiptStore struct {
 	store.DeduplicatingExecutionEventStore
 	publishWinner   func()

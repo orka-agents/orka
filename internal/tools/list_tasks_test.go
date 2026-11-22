@@ -202,7 +202,6 @@ func TestListTasksTool_Execute_Limits(t *testing.T) {
 			var result string
 			var err error
 			if tt.viaRegistry {
-				// Numeric strings reach Execute as numbers through the registry.
 				result, err = registry.Execute(ctx, tool.Name(), json.RawMessage(tt.args))
 			} else {
 				result, err = tool.Execute(ctx, json.RawMessage(tt.args))

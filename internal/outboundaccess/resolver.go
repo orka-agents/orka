@@ -42,26 +42,18 @@ import (
 )
 
 const (
-	AdapterDirect  = "direct"
-	AdapterGateway = "gateway"
-	// AdapterConnection injects a person's linked-account credential; the
-	// executor applies it exactly like a direct credential.
-	AdapterConnection = "connection"
-	// AdapterAgentIdentity injects a credential issued for the Task's frozen
-	// Agent identity; the executor applies it exactly like a direct credential.
+	AdapterDirect        = "direct"
+	AdapterGateway       = "gateway"
+	AdapterConnection    = "connection"
 	AdapterAgentIdentity = "agentIdentity"
 	schemeHTTP           = "http"
 	schemeHTTPS          = "https"
 
-	// defaultCredentialPrefix precedes an injected bearer credential.
 	defaultCredentialPrefix = "Bearer "
 
-	// DefaultCredentialReadScope authorizes use of cluster-managed credential material.
 	DefaultCredentialReadScope = "orka:secrets:credentials:read"
 )
 
-// ResolveRequest contains trusted execution-time context that is not stored in
-// the policy object.
 type ResolveRequest struct {
 	Namespace                   string
 	PolicyName                  string
@@ -74,42 +66,16 @@ type ResolveRequest struct {
 	CredentialScopeAllowed      bool
 	CredentialSecret            string
 
-	// Requester is the Task's verified human identity. Connection-mode
-	// policies resolve the credential of this person and nobody else.
-	Requester *corev1alpha1.RequestedBy
-	// FrozenConnections maps policy name to the Connection identity frozen
-	// into the Task's execution snapshot at dispatch. Connection-mode
-	// resolution requires an entry and fails closed when the live Connection
-	// differs from it.
+	Requester         *corev1alpha1.RequestedBy
 	FrozenConnections map[string]FrozenConnection
-	// CheckedPolicy, when set, is the policy the caller validated against
-	// the dispatched configuration; resolution refuses a policy object that
-	// changed after that check rather than injecting under a different one.
-	CheckedPolicy *PolicyIdentity
-	// Tool identifies the executing Tool. Connection-mode resolution releases
-	// a credential only to a Tool the ConnectorProvider declares, with the
-	// same URL, method, and class, so a policy cannot be attached to an
-	// arbitrary endpoint to exfiltrate a person's token.
-	Tool ToolBinding
-	// Arguments are the call's arguments. Connection-mode resolution judges
-	// them against the provider's curated schema before any credential is
-	// resolved, so a rejected call never refreshes or shreds custody.
-	Arguments json.RawMessage
-	// MCPBacked marks a Tool whose requests go to an MCP actor endpoint
-	// rather than its declared URL; connection mode refuses it before any
-	// credential work.
-	MCPBacked bool
-	// TaskUID is the executing Task's UID as the caller authenticated it. It
-	// only attributes identity use records, including refusals for a Task
-	// that has no identity binding.
-	TaskUID string
-	// AgentIdentity is the identity frozen into the executing Task's binding.
-	// agentIdentity-mode policies act as this identity and no other; nil
-	// fails them closed.
-	AgentIdentity *AgentIdentityBinding
+	CheckedPolicy     *PolicyIdentity
+	Tool              ToolBinding
+	Arguments         json.RawMessage
+	MCPBacked         bool
+	TaskUID           string
+	AgentIdentity     *AgentIdentityBinding
 }
 
-// AgentIdentityBinding is the executing Task's frozen Agent identity.
 type AgentIdentityBinding struct {
 	Identity        corev1alpha1.AgentExecutionIdentityRef
 	AgentNamespace  string
@@ -119,46 +85,24 @@ type AgentIdentityBinding struct {
 	TaskNamespace   string
 	TaskName        string
 	TaskUID         string
-	// TaskCreated is the Task's creation time. Only a Task created after the
-	// claim was granted was checked for Agent use while the Agent named the
-	// identity.
-	TaskCreated time.Time
-	// DelegationStart is the root requester's last authenticated action in
-	// the Task chain; Delegated mode refuses calls past the delegation age.
+	TaskCreated     time.Time
 	DelegationStart time.Time
-	// ManagedEgress reports that the Task runs on a built-in RuntimePool,
-	// whose Pods can reach the network only through Orka. Delegated mode
-	// refuses every other runtime.
-	ManagedEgress bool
+	ManagedEgress   bool
 }
 
-// AgentIdentityTokenRequest asks the issuer for a credential for one frozen
-// identity, mode, and target.
 type AgentIdentityTokenRequest struct {
-	Identity corev1alpha1.AgentExecutionIdentityRef
-	Mode     string
-	// Resource is the issuer-typed target, for Entra the resource whose
-	// /.default scope is requested.
-	Resource string
-	Policy   PolicyIdentity
-	// UserAssertion is the requester's token, for Delegated mode only.
+	Identity      corev1alpha1.AgentExecutionIdentityRef
+	Mode          string
+	Resource      string
+	Policy        PolicyIdentity
 	UserAssertion string
 }
 
-// AgentConditionIdentityVerified is the Agent condition reporting whether its
-// issuer proved the identity, and AgentReasonIdentityVerificationFailed the
-// reason for a definitive refusal, as opposed to an issuer that could not
-// answer or an identity not verified yet.
 const (
 	AgentConditionIdentityVerified        = "IdentityVerified"
 	AgentReasonIdentityVerificationFailed = "VerificationFailed"
 )
 
-// issuerRefusedIdentity fails closed once the issuer has definitively refused
-// the Agent's identity, for example because it was disabled or deleted, so a
-// policy token still cached from before is not served for new calls. An
-// issuer that could not answer, or an identity not verified yet, does not
-// refuse here; the issuer's own answer decides those calls.
 func issuerRefusedIdentity(agent *corev1alpha1.Agent) error {
 	condition := meta.FindStatusCondition(agent.Status.Conditions, AgentConditionIdentityVerified)
 	if condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == AgentReasonIdentityVerificationFailed {
@@ -167,50 +111,25 @@ func issuerRefusedIdentity(agent *corev1alpha1.Agent) error {
 	return nil
 }
 
-// AgentIdentityTokenSource issues Agent identity credentials. It exists only
-// in the controller; worker Pods have no implementation and therefore fail
-// closed on agentIdentity-mode policies.
 type AgentIdentityTokenSource interface {
 	AgentIdentityToken(context.Context, AgentIdentityTokenRequest) (string, error)
 }
 
-// ToolBinding is the executing Tool's identity for connector checks.
 type ToolBinding struct {
-	Name   string
-	URL    string
-	Method string
-	Class  corev1alpha1.AgentRuntimeBrokeredToolClass
-	// Forward is the forwarding protocol of a forwarding Tool, or empty. A
-	// forwarding Tool matches only a forwarding declaration of the same
-	// protocol; its request method comes from the call, so the declared
-	// method is not compared.
-	Forward corev1alpha1.HTTPForwardProtocol
-	// Builtin marks an Orka built-in tool the controller executes itself.
-	// It matches only a Builtin declaration of the same name and class; a
-	// built-in carries no destination, headers, schema, or timeout to compare.
-	Builtin bool
-	// Headers are the Tool's static headers; the provider's declared set
-	// must match exactly, or a header the provider never declared could
-	// change what the credential authorizes.
-	Headers map[string]string
-	// Parameters is the Tool's JSON Schema; it must equal the provider's
-	// curated schema so no weaker Tool schema admits arguments the
-	// provider excluded.
+	Name       string
+	URL        string
+	Method     string
+	Class      corev1alpha1.AgentRuntimeBrokeredToolClass
+	Forward    corev1alpha1.HTTPForwardProtocol
+	Builtin    bool
+	Headers    map[string]string
 	Parameters *apiextensionsv1.JSON
-	// Timeout is the Tool's request timeout; it must equal the provider's
-	// curated bound so a Tool cannot keep a credential-bearing request open
-	// longer than the provider allows. An omitted timeout (TimeoutSet false)
-	// means the 30s default; an explicit nonpositive one is refused, because
-	// the executor would run such a request without any deadline.
 	Timeout    time.Duration
 	TimeoutSet bool
 }
 
-// connectorDefaultTimeout is the request timeout both a Tool CR and a
-// ConnectorProvider tool declaration mean when they declare none.
 const connectorDefaultTimeout = 30 * time.Second
 
-// NormalizedConnectorTimeout applies the shared default.
 func NormalizedConnectorTimeout(timeout time.Duration) time.Duration {
 	if timeout <= 0 {
 		return connectorDefaultTimeout
@@ -218,62 +137,36 @@ func NormalizedConnectorTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
-// PolicyIdentity pins the OutboundAccessPolicy a caller checked before
-// asking for resolution.
 type PolicyIdentity struct {
 	UID        string
 	Generation int64
 }
 
-// FrozenConnection is the dispatch-time identity of a person's Connection.
 type FrozenConnection struct {
-	// Name is the Connection object's name when known. A person's link
-	// may live under a non-canonical name (created outside the API and
-	// adopted), so the credential source loads by this name, not by the
-	// canonical one, when it is set.
-	Name       string
-	UID        string
-	Generation int64
-	// GrantSequence is the consent count frozen with the identity. The live
-	// Connection must carry exactly this grant: a re-link of the same
-	// object is a new grant the snapshot never bound.
-	GrantSequence int64
-	// PolicyUID and PolicyGeneration, when set, pin the policy object the
-	// Connection was frozen under; a policy edited since (for example its
-	// credential output header or prefix) needs a re-dispatch.
+	Name             string
+	UID              string
+	Generation       int64
+	GrantSequence    int64
 	PolicyUID        string
 	PolicyGeneration int64
-	// Provider is the ConnectorProvider the Connection links. A binding
-	// frozen for a built-in tool carries it because no policy names one.
-	Provider string
+	Provider         string
 }
 
-// builtinConnectionKeyPrefix keys a built-in tool's frozen Connection in
-// the same map as policy bindings. Policy names are DNS labels, which never
-// contain a colon, so the two key spaces cannot collide.
 const builtinConnectionKeyPrefix = "builtin:"
 
-// BuiltinConnectionKey returns the FrozenConnections key under which the
-// requester's Connection for the named built-in tool is frozen.
 func BuiltinConnectionKey(toolName string) string {
 	return builtinConnectionKeyPrefix + strings.TrimSpace(toolName)
 }
 
-// ConnectionCredentialRequest asks the credential source for one person's
-// current access token for one provider.
 type ConnectionCredentialRequest struct {
 	Namespace string
 	Provider  string
 	Issuer    string
 	Subject   string
 	Frozen    FrozenConnection
-	// Tool is the executing Tool; the source verifies it against the same
-	// provider state it validates the returned credential with.
-	Tool ToolBinding
+	Tool      ToolBinding
 }
 
-// ConnectionCredential is a resolved, possibly just-refreshed access token
-// plus the non-secret identity of the Connection that supplied it.
 type ConnectionCredential struct {
 	AccessToken   string
 	TokenType     string
@@ -282,22 +175,14 @@ type ConnectionCredential struct {
 	Mode          string
 }
 
-// ConnectionCredentialSource resolves and refreshes per-person credentials.
-// It exists only in the controller; worker Pods have no implementation and
-// therefore fail closed on connection-mode policies.
 type ConnectionCredentialSource interface {
 	ResolveConnectionCredential(context.Context, ConnectionCredentialRequest) (ConnectionCredential, error)
 }
 
-// ConnectionLivenessChecker re-checks, without reading or refreshing custody,
-// that the requester's Connection is still exactly the one frozen for the
-// Task: present, not being deleted, Ready, and on the same UID, generation,
-// and grant. Delegated mode requires it of its ConnectionCredentialSource.
 type ConnectionLivenessChecker interface {
 	RequireLiveConnection(context.Context, ConnectionCredentialRequest) error
 }
 
-// Resolution describes how ToolExecutor should modify a prepared request.
 type Resolution struct {
 	Adapter string
 
@@ -310,70 +195,33 @@ type Resolution struct {
 
 	SensitiveValues []string
 
-	// ConnectionUID identifies the person's Connection for connection-mode
-	// resolutions, for audit records. Never the token.
 	ConnectionUID string
-	// Parameters is the provider-declared JSON Schema for the tool's
-	// arguments; the executor validates the call against it before the
-	// credential leaves the process.
-	Parameters *apiextensionsv1.JSON
+	Parameters    *apiextensionsv1.JSON
 }
 
-// Resolver resolves one same-namespace policy at execution time.
 type Resolver interface {
 	Resolve(context.Context, ResolveRequest) (Resolution, error)
 }
 
-// KubernetesResolver revalidates policy references and resolves credentials
-// through Kubernetes immediately before Tool execution.
 type KubernetesResolver struct {
-	Reader     client.Reader
-	KubeClient kubernetes.Interface
-	Trust      TrustConfig
-	Exchanger  tokenexchange.Exchanger
-	// Connections supplies per-person credentials for connection-mode
-	// policies. Nil means this process may not execute connector-backed
-	// tools.
-	Connections ConnectionCredentialSource
-	// AgentIdentities issues credentials for agentIdentity-mode policies. Nil
-	// means this process may not act as an Agent identity.
-	AgentIdentities AgentIdentityTokenSource
-	// MaxDelegationAge caps every delegated policy's maxDelegationAge.
-	// Zero means DefaultMaxDelegationAgeCap.
-	MaxDelegationAge time.Duration
-	// Now reports the current time; time.Now when nil.
-	Now func() time.Time
-	// AuditLog is the sink for identity use records, which are written on
-	// its agent-identity-audit child. When unset, records go to stderr as
-	// JSON lines, so a process that configures no logger still writes them.
-	// The controller passes a sink no diagnostic log level filters.
-	AuditLog logr.Logger
-	// AuditPseudonymKey keys the requester pseudonym in Delegated-mode
-	// records. Without it, records name no requester.
-	AuditPseudonymKey []byte
-	// DelegationLive checks, before every Delegated call, that the Task is
-	// still running and its Session still open, so cancelling the Task or
-	// closing the Session stops the Agent acting for the requester at once.
-	// Nil fails every Delegated call closed.
-	DelegationLive func(context.Context, AgentIdentityBinding) error
-	// ReservedServiceAccount is the controller's own ServiceAccount. No
-	// policy may request a token for it: the token would carry the
-	// controller's authority, and the Entra agent identity blueprint trusts
-	// it, to whatever endpoint the policy names.
-	ReservedServiceAccount ReservedServiceAccount
-	// IdentityEnforcementStart reports when the current period of Agent use
-	// enforcement began, or started=false while that is not known yet. A
-	// Task created before it may have been created while the check was off,
-	// so it gets no Agent identity credential even when the Agent's claim
-	// has not been granted again yet. Nil judges a Task by the claim's grant
-	// time alone.
+	Reader                   client.Reader
+	KubeClient               kubernetes.Interface
+	Trust                    TrustConfig
+	Exchanger                tokenexchange.Exchanger
+	Connections              ConnectionCredentialSource
+	AgentIdentities          AgentIdentityTokenSource
+	MaxDelegationAge         time.Duration
+	Now                      func() time.Time
+	AuditLog                 logr.Logger
+	AuditPseudonymKey        []byte
+	DelegationLive           func(context.Context, AgentIdentityBinding) error
+	ReservedServiceAccount   ReservedServiceAccount
 	IdentityEnforcementStart func() (since time.Time, started bool)
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
 }
 
-// Resolve returns a direct credential or trusted gateway dial target.
 func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (resolution Resolution, err error) {
 	if r == nil || r.Reader == nil {
 		return Resolution{}, errors.New("outbound access resolver is not configured")
@@ -387,8 +235,6 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (r
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: policyName}, policy); err != nil {
 		return Resolution{}, fmt.Errorf("resolve outbound access policy: %w", err)
 	}
-	// One record per identity-backed call, issued or refused, including
-	// refusals before the identity is considered (ADR 0039).
 	defer r.auditAgentIdentityUse(policy, &req, &err)
 	if issue := ValidateSpec(policy); issue != nil {
 		return Resolution{}, issue
@@ -400,8 +246,6 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (r
 	if req.CheckedPolicy != nil && (string(policy.UID) != req.CheckedPolicy.UID || policy.Generation != req.CheckedPolicy.Generation) {
 		return Resolution{}, errors.New("outbound access policy changed since it was checked; re-dispatch the task")
 	}
-	// Reference validation may read Secret data. Authorize the policy's exact
-	// selectors first, including when a policy changes between caller checks.
 	if err := validatePolicyCredentialAuthority(req, policy); err != nil {
 		return Resolution{}, err
 	}
@@ -431,9 +275,6 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (r
 		}
 	}
 	if _, frozen := req.FrozenConnections[policy.Name]; frozen && !connectionBacked(policy) {
-		// The Task was dispatched under a person's Connection for this
-		// policy; a policy moved to another adapter since must not hand it
-		// a service credential or route instead.
 		return Resolution{}, fmt.Errorf("outbound access policy %q was in connection mode when the task was dispatched and no longer is", policy.Name)
 	}
 	switch {
@@ -448,11 +289,6 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (r
 	return r.resolveGateway(ctx, policy)
 }
 
-// DeclaredConnectorTool returns the provider's curated HTTP definition that
-// exactly matches the executing Tool, or an error. Built-in declarations are
-// never matched by custom Tools. The credential source applies the same
-// check against the provider it validates the returned credential with, so
-// the tool and the credential are always judged against one provider state.
 func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBinding) (corev1alpha1.ConnectorTool, error) {
 	name := strings.TrimSpace(tool.Name)
 	if name == "" {
@@ -486,10 +322,6 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || (tool.Forward == "" && toolMethod != method) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the endpoint declared by provider %q", name, provider.Name)
 		}
-		// A forwarding Tool's writes run as class write, but the provider
-		// declares the forwarding tool as a read that also allows writes, so
-		// a write matches only a declaration that grants them, and is judged
-		// as a write from here on (a readWrite link, readWrite scopes).
 		if tool.Forward != "" && tool.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite {
 			if candidate.Class != corev1alpha1.ConnectorToolClassRead || candidate.HTTP.Forward.Writes == nil {
 				return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q writes, which provider %q does not declare for it", name, provider.Name)
@@ -519,10 +351,6 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 	return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q is not declared by provider %q", name, provider.Name)
 }
 
-// declaredBuiltinConnectorTool judges a built-in binding against the
-// provider's declaration of the same name: it must be a Builtin declaration
-// of the class the catalog fixes for the tool, and the binding must carry
-// nothing a built-in cannot have.
 func declaredBuiltinConnectorTool(provider *corev1alpha1.ConnectorProvider, candidate corev1alpha1.ConnectorTool, tool ToolBinding) (corev1alpha1.ConnectorTool, error) {
 	if candidate.Source != corev1alpha1.ConnectorToolSourceBuiltin {
 		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q is not declared as a built-in by provider %q", tool.Name, provider.Name)
@@ -540,8 +368,6 @@ func declaredBuiltinConnectorTool(provider *corev1alpha1.ConnectorProvider, cand
 	if string(tool.Class) != string(class) || candidate.Class != class {
 		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q class does not match the class declared by provider %q", tool.Name, provider.Name)
 	}
-	// The binding carries the catalog's bound for the call, so the
-	// credential is refreshed to cover all of it, never a caller's own.
 	timeout, _ := connectors.BuiltinConnectorToolTimeout(tool.Name)
 	if !tool.TimeoutSet || tool.Timeout != timeout {
 		return corev1alpha1.ConnectorTool{}, fmt.Errorf("built-in tool %q binding must carry the catalog timeout %s", tool.Name, timeout)
@@ -549,8 +375,6 @@ func declaredBuiltinConnectorTool(provider *corev1alpha1.ConnectorProvider, cand
 	return candidate, nil
 }
 
-// sameParameterSchema compares two JSON Schemas structurally; absent and
-// empty are the same.
 func sameParameterSchema(declared, actual *apiextensionsv1.JSON) bool {
 	canonical := func(schema *apiextensionsv1.JSON) (string, bool) {
 		if schema == nil || len(bytes.TrimSpace(schema.Raw)) == 0 {
@@ -571,16 +395,12 @@ func sameParameterSchema(declared, actual *apiextensionsv1.JSON) bool {
 	return okA && okB && a == b
 }
 
-// sameStaticHeaders compares two header sets by canonical name and exact
-// value; an empty and a nil set are the same.
 func sameStaticHeaders(declared, actual map[string]string) bool {
 	canonicalize := func(headers map[string]string) (map[string]string, bool) {
 		result := make(map[string]string, len(headers))
 		for name, value := range headers {
 			key := http.CanonicalHeaderKey(strings.TrimSpace(name))
 			if _, dup := result[key]; dup {
-				// Two spellings of one header would collapse into one field
-				// on the wire; the set is not the declared one.
 				return nil, false
 			}
 			result[key] = value
@@ -604,9 +424,6 @@ func sameStaticHeaders(declared, actual map[string]string) bool {
 	return true
 }
 
-// resolveConnection injects the requester's linked-account credential. Every
-// precondition fails closed: no source in this process, no verified
-// requester, no frozen binding, or a source error all mean no credential.
 func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
 	credential, declared, err := r.resolveRequesterConnection(ctx, policy, req)
 	if err != nil {
@@ -623,11 +440,6 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 	}, nil
 }
 
-// resolveRequesterConnection returns the Task requester's current credential
-// from their frozen Connection to the policy's ConnectorProvider, after
-// checking that the executing Tool is one the provider declares and that the
-// call's arguments fit its curated schema. Connection mode injects the
-// credential; agentIdentity in Delegated mode exchanges it.
 func (r *KubernetesResolver) resolveRequesterConnection(
 	ctx context.Context,
 	policy *corev1alpha1.OutboundAccessPolicy,
@@ -644,10 +456,6 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection outbound access requires a Task with a verified requester")
 	}
-	// The person's token is bound to the exact curated destination. A Tool
-	// that sends to an MCP actor endpoint, or whose URL is a template the
-	// call's arguments would rewrite, can never satisfy that, so it is
-	// refused before any credential work.
 	if req.MCPBacked {
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection outbound access policies are not supported on MCP-backed tools")
 	}
@@ -692,8 +500,6 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	})
 	if err != nil {
 		if refusal, ok := errors.AsType[*ConnectionRequiredError](err); ok {
-			// A shared refresh hands every waiter the same error, so describe
-			// a copy this caller owns.
 			described := *refusal
 			r.describeConnectionRefusal(ctx, &described, policy.Namespace, providerName, provider)
 			err = &described
@@ -709,12 +515,6 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	return credential, declared, nil
 }
 
-// unfrozenConnectionRefusal explains why the Task carries no Connection of
-// the requester's for a provider, from the state of their links now: none,
-// several, or one that is expired, not Ready, or Ready but not bound (for
-// example consent or granted scopes that did not match the provider when the
-// Task was bound). It reads only, and returns nil when it cannot tell, so the
-// caller keeps its generic refusal.
 func (r *KubernetesResolver) unfrozenConnectionRefusal(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) *ConnectionRequiredError {
 	if r.Reader == nil {
 		return nil
@@ -747,9 +547,6 @@ func (r *KubernetesResolver) unfrozenConnectionRefusal(ctx context.Context, name
 	}
 }
 
-// describeConnectionRefusal names the provider in a refusal so its message
-// gives the exact command. The display name is best effort: provider may be
-// nil, and a failed read leaves the resource name.
 func (r *KubernetesResolver) describeConnectionRefusal(
 	ctx context.Context, refusal *ConnectionRequiredError, namespace, providerName string, provider *corev1alpha1.ConnectorProvider,
 ) {
@@ -765,8 +562,6 @@ func (r *KubernetesResolver) describeConnectionRefusal(
 	}
 }
 
-// credentialOutput returns the header and prefix an output selects, with the
-// Authorization: Bearer default.
 func credentialOutput(output *corev1alpha1.OutboundCredentialOutput) (string, string) {
 	header := defaultCredentialHeader
 	prefix := defaultCredentialPrefix
@@ -786,8 +581,6 @@ func connectionBacked(policy *corev1alpha1.OutboundAccessPolicy) bool {
 	return ok
 }
 
-// injectsCredential reports whether the policy's adapter attaches a
-// credential to the Tool's own request, rather than routing it.
 func injectsCredential(policy *corev1alpha1.OutboundAccessPolicy) bool {
 	return policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil
 }
@@ -807,9 +600,6 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {
 		return Resolution{}, fmt.Errorf("agent identity outbound access policy %q targets an issuer the Task's identity is not from", policy.Name)
 	}
-	// The credential is for one fixed destination. A Tool whose requests go
-	// elsewhere, or whose URL the call's arguments rewrite, could send it to
-	// a host the policy author never chose.
 	if req.MCPBacked {
 		return Resolution{}, errors.New("agent identity outbound access policies are not supported on MCP-backed tools")
 	}
@@ -850,23 +640,11 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	}, nil
 }
 
-// requireLiveIdentityAgent checks that the Task's bound Agent may still use
-// its identity. It runs before a credential is requested and again before
-// one is released, since issuing it can take seconds.
 func (r *KubernetesResolver) requireLiveIdentityAgent(ctx context.Context, binding AgentIdentityBinding) error {
-	// The bound Agent must still exist, hold the identity, and name it:
-	// deleting the Agent, a claim that moved to another Agent, or the owner
-	// removing or changing the identity stops its Tasks' calls at once. The
-	// spec is checked as well as the claim because the claim is marked
-	// releasing only when the Agent next reconciles. A claim being released
-	// is still held, so no other Agent can take the identity while bound
-	// Tasks run, but it is no longer used.
 	live := &corev1alpha1.Agent{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
 		return fmt.Errorf("resolve the Task's bound Agent: %w", err)
 	}
-	// Deleting the Agent stops its Tasks' calls at once, even while a
-	// finalizer keeps the object readable.
 	if !live.DeletionTimestamp.IsZero() {
 		return errors.New("the Task's bound Agent is being deleted")
 	}
@@ -878,18 +656,10 @@ func (r *KubernetesResolver) requireLiveIdentityAgent(ctx context.Context, bindi
 	if live.Status.IdentityClaim.Releasing || !named || issuer != binding.Identity.Issuer || id != binding.Identity.ID {
 		return errors.New("the Task's bound Agent no longer names its identity")
 	}
-	// A claim granted again, for example after it was released or Agent use
-	// authorization was re-enabled, covers only Tasks created since; an
-	// older Task's creation was never checked for this grant. Both times
-	// have one-second precision, so a Task from the grant's own second may
-	// predate it and is refused too.
 	grantedAt := live.Status.IdentityClaim.GrantedAt
 	if grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
 		return errors.New("the Task was created before the Agent's current identity grant")
 	}
-	// The claim is granted again only when the Agent next reconciles, so a
-	// grant from before the current enforcement period counts from that
-	// period's start here too, as it does when a Task is bound.
 	if r.IdentityEnforcementStart != nil {
 		since, started := r.IdentityEnforcementStart()
 		if !started {
@@ -905,10 +675,6 @@ func (r *KubernetesResolver) requireLiveIdentityAgent(ctx context.Context, bindi
 	return nil
 }
 
-// issueAgentIdentityToken asks the issuer for the credential. In Delegated
-// mode it checks the delegation is still live again once the credential is
-// issued: refreshing the requester's token and the on-behalf-of exchange can
-// take many seconds, and a Task or Session ended meanwhile must not get it.
 func (r *KubernetesResolver) issueAgentIdentityToken(
 	ctx context.Context,
 	policy *corev1alpha1.OutboundAccessPolicy,
@@ -923,14 +689,9 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 		return "", refuseAgentIdentity(agentIdentityRefusalIssuer, errors.New("agent identity issuer returned an empty credential"))
 	}
 	binding := *req.AgentIdentity
-	// The Agent can lose its identity, or be deleted, while the issuer
-	// answers; the credential is released only while it still may be used.
 	if err := r.requireLiveIdentityAgent(ctx, binding); err != nil {
 		return "", fmt.Errorf("the Agent's identity changed while its credential was issued: %w", err)
 	}
-	// The policy can be revoked or narrowed meanwhile too, its delegation
-	// age shortened included; the checks below must judge the policy as it
-	// is now.
 	if err := r.requireUnchangedPolicy(ctx, policy); err != nil {
 		return "", refuseAgentIdentity(agentIdentityRefusalPolicy, err)
 	}
@@ -943,8 +704,6 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	if err := r.requireLiveRequesterConnection(ctx, policy, req); err != nil {
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("%w: %w", ErrRequesterLinkChanged, err))
 	}
-	// The Connection re-check reads custody and Kubernetes and can block, so
-	// the delegation's liveness and age are judged last, as of release.
 	if err := r.DelegationLive(ctx, binding); err != nil {
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("the delegation ended while its credential was issued: %w", err))
 	}
@@ -954,10 +713,6 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	return token, nil
 }
 
-// requireUnchangedPolicy re-reads the outbound access policy a credential was
-// issued under and refuses it unless the policy is the same object at the
-// same generation, still accepted with resolved references, and not being
-// deleted.
 func (r *KubernetesResolver) requireUnchangedPolicy(ctx context.Context, issued *corev1alpha1.OutboundAccessPolicy) error {
 	live := &corev1alpha1.OutboundAccessPolicy{}
 	if err := r.Reader.Get(ctx, client.ObjectKeyFromObject(issued), live); err != nil {
@@ -974,13 +729,8 @@ func (r *KubernetesResolver) requireUnchangedPolicy(ctx context.Context, issued 
 	return nil
 }
 
-// ErrRequesterLinkChanged refuses a delegated credential whose requester's
-// Connection was unlinked, deleted, re-linked, or stopped being Ready while
-// the credential was issued.
 var ErrRequesterLinkChanged = errors.New("the requester's link changed while the credential was issued")
 
-// requireLiveRequesterConnection re-checks the requester's Connection the
-// exchange used, with the source's own frozen-binding check.
 func (r *KubernetesResolver) requireLiveRequesterConnection(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) error {
 	checker, ok := r.Connections.(ConnectionLivenessChecker)
 	if !ok {
@@ -997,8 +747,6 @@ func (r *KubernetesResolver) requireLiveRequesterConnection(ctx context.Context,
 		Frozen: frozen, Tool: req.Tool,
 	})
 	if refusal, ok := errors.AsType[*ConnectionRequiredError](err); ok {
-		// Describe a copy, as the credential path does, so the agent is told
-		// how the person relinks.
 		described := *refusal
 		r.describeConnectionRefusal(ctx, &described, policy.Namespace, provider, nil)
 		return &described
@@ -1008,8 +756,6 @@ func (r *KubernetesResolver) requireLiveRequesterConnection(ctx context.Context,
 
 var errDelegationExpired = errors.New("the delegation has expired; the requester must act again for the Agent to act for them")
 
-// delegationExpired reports whether maxDelegationAge has passed since the
-// root requester's last action, or that action is unknown.
 func (r *KubernetesResolver) delegationExpired(policy *corev1alpha1.OutboundAccessPolicy, binding AgentIdentityBinding) bool {
 	age, _ := EffectiveMaxDelegationAge(policy, r.MaxDelegationAge)
 	now := time.Now()
@@ -1019,18 +765,11 @@ func (r *KubernetesResolver) delegationExpired(policy *corev1alpha1.OutboundAcce
 	return binding.DelegationStart.IsZero() || now.After(binding.DelegationStart.Add(age))
 }
 
-// DefaultMaxDelegationAge is a delegated policy's age when it sets none, and
-// DefaultMaxDelegationAgeCap the controller's cap when it sets none.
 const (
 	DefaultMaxDelegationAge    = time.Hour
 	DefaultMaxDelegationAgeCap = 24 * time.Hour
 )
 
-// EffectiveMaxDelegationAge returns how long a delegated policy lets an Agent
-// act for the requester under the controller's cap (DefaultMaxDelegationAgeCap
-// when limit is not positive), and the age the policy itself asks for
-// (DefaultMaxDelegationAge when it sets none). The cap applies when the first
-// is shorter than the second.
 func EffectiveMaxDelegationAge(policy *corev1alpha1.OutboundAccessPolicy, limit time.Duration) (effective, requested time.Duration) {
 	if limit <= 0 {
 		limit = DefaultMaxDelegationAgeCap
@@ -1042,8 +781,6 @@ func EffectiveMaxDelegationAge(policy *corev1alpha1.OutboundAccessPolicy, limit 
 	return min(requested, limit), requested
 }
 
-// resolveDelegation checks that the Agent may still act for the requester
-// and returns the requester's credential for the exchange.
 func (r *KubernetesResolver) resolveDelegation(
 	ctx context.Context,
 	policy *corev1alpha1.OutboundAccessPolicy,
@@ -1409,8 +1146,6 @@ func policyConditionCurrentTrue(policy *corev1alpha1.OutboundAccessPolicy, condi
 	return false
 }
 
-// ValidateCredentialAuthority enforces immutable transaction authorization for
-// Secret- and ServiceAccount-backed outbound credentials.
 func ValidateCredentialAuthority(enforced, scopeAllowed bool, constraint string, secretNames []string, usesServiceAccount bool) error {
 	if !enforced {
 		return nil

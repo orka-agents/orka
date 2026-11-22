@@ -41,9 +41,6 @@ const (
 	testDefaultNamespace = "default"
 )
 
-// --- test helpers ---
-
-// checkTaskLimit is a test helper for checking task limit logic.
 func (e *ToolExecutor) checkTaskLimit() *ToolResult {
 	if e.tasksCreated >= e.maxTasks {
 		r := toolError(testLimitReached, fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks), "Wait for existing tasks to complete before creating new ones")
@@ -52,7 +49,6 @@ func (e *ToolExecutor) checkTaskLimit() *ToolResult {
 	return nil
 }
 
-// checkNamespaceScope is a test helper for checking namespace scope logic.
 func (e *ToolExecutor) checkNamespaceScope(namespace string) *ToolResult {
 	if e.watchNamespace != "" && namespace != e.watchNamespace {
 		r := toolError("permission_denied", fmt.Sprintf("cannot create resources in namespace %q, restricted to %q", namespace, e.watchNamespace), "Use the allowed namespace")
@@ -65,7 +61,6 @@ func (e *ToolExecutor) checkNamespaceScope(namespace string) *ToolResult {
 	return nil
 }
 
-// executeTool is a test helper that executes a tool by name with map args.
 func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[string]any) ToolResult {
 	tc := &tools.ToolContext{
 		Client:                    e.client,
@@ -108,7 +103,6 @@ func (e *ToolExecutor) executeTool(ctx context.Context, name string, args map[st
 	return ToolResult{Success: true, Data: resultStr}
 }
 
-// classifyK8sError classifies Kubernetes API errors for test assertions.
 func classifyK8sError(err error) ToolResult {
 	if apierrors.IsNotFound(err) {
 		return toolError("not_found", err.Error(), "Check the resource name and namespace")
@@ -199,7 +193,6 @@ func newTestExecutor(objs ...runtime.Object) *ToolExecutor {
 	return executor
 }
 
-// fakeResultStore implements store.ResultStore for testing.
 type fakeResultStore struct {
 	data     map[string][]byte
 	errOnGet error
@@ -231,7 +224,6 @@ func (f *fakeResultStore) DeleteResult(_ context.Context, _, _ string) error {
 	return nil
 }
 
-// fakeSessionStore implements store.SessionStore for testing.
 type fakeSessionStore struct {
 	deleted  map[string]bool
 	errOnDel error
@@ -285,8 +277,6 @@ func mustJSON(v map[string]any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
 }
-
-// --- Tests: helper functions ---
 
 func TestGetStringArg(t *testing.T) {
 	tests := []struct {
@@ -468,8 +458,6 @@ func TestMarshalResult(t *testing.T) {
 	})
 }
 
-// --- Tests: ToolExecutor construction & basic methods ---
-
 func TestNewToolExecutor(t *testing.T) {
 	e := newTestExecutor()
 	if e == nil {
@@ -532,13 +520,10 @@ func TestExecute_RetriesTaskNameSeedAfterListFailure(t *testing.T) {
 	}
 
 	prefix := "chat-sess-12345678-" + e.taskNameHash() + "-"
-	// The failed lookup must not restart numbering at 1, which would collide
-	// with an earlier turn's Tasks; a random suffix is used instead.
 	first := create()
 	if !strings.HasPrefix(first, prefix+"r") || first == prefix+"1" {
 		t.Fatalf("first name = %q, want a random suffix after the failed lookup", first)
 	}
-	// The next name retries the lookup and continues the numbering.
 	if second := create(); second != prefix+"1" {
 		t.Fatalf("second name = %q, want %q once the lookup succeeds", second, prefix+"1")
 	}
@@ -547,7 +532,6 @@ func TestExecute_RetriesTaskNameSeedAfterListFailure(t *testing.T) {
 func TestExecute_CreatesTaskInEachTurnOfSession(t *testing.T) {
 	ctx := context.Background()
 	turn1 := newTestExecutor()
-	// A Task of another session must not advance this session's sequence.
 	other := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 		Name: "chat-other-00000000-7", Namespace: "other",
 		Labels: map[string]string{labels.LabelChatSession: "other"},
@@ -558,7 +542,6 @@ func TestExecute_CreatesTaskInEachTurnOfSession(t *testing.T) {
 
 	var names []string
 	for turn := range 3 {
-		// Each chat turn builds a fresh executor for the same session.
 		e := turn1
 		if turn > 0 {
 			e = newTestExecutor()
@@ -658,8 +641,6 @@ func TestTaskLabels(t *testing.T) {
 	}
 }
 
-// A chat Task pins the chat Session incarnation it was created in, so
-// delegated calls stop when that chat is deleted even if its name is reused.
 func TestTaskLabelsPinTheChatSessionIncarnation(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	if err != nil {
@@ -738,8 +719,6 @@ func TestCheckNamespaceScope(t *testing.T) {
 		})
 	}
 }
-
-// --- Tests: Execute dispatch ---
 
 func TestExecute_InvalidJSON(t *testing.T) {
 	e := newTestExecutor()
@@ -1086,8 +1065,6 @@ func TestExecute_Dispatch(t *testing.T) {
 	}
 }
 
-// --- Tests: executeCreateAITask ---
-
 func TestExecuteCreateAITask_Success(t *testing.T) {
 	e := newTestExecutor()
 	args := map[string]any{
@@ -1165,8 +1142,6 @@ func TestExecuteCreateAITask_WithOptionalFields(t *testing.T) {
 	}
 }
 
-// --- Tests: executeCreateContainerTask ---
-
 func TestExecuteCreateContainerTask_Success(t *testing.T) {
 	e := newTestExecutor()
 	args := map[string]any{
@@ -1220,8 +1195,6 @@ func TestExecuteCreateContainerTask_InvalidTimeout(t *testing.T) {
 		t.Fatal("expected failure for invalid timeout")
 	}
 }
-
-// --- Tests: executeCreateAgentTask ---
 
 func TestExecuteCreateAgentTask_Success(t *testing.T) {
 	e := newTestExecutor()
@@ -1321,8 +1294,6 @@ func TestExecuteCreateAgentTask_WithExplicitGitSecret(t *testing.T) {
 	}
 }
 
-// --- Tests: executeCheckTaskProgress ---
-
 func TestExecuteCheckTaskProgress_Success(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1384,8 +1355,6 @@ func TestExecuteCheckTaskProgress_WithConditions(t *testing.T) {
 		t.Error("expected conditions field")
 	}
 }
-
-// --- Tests: executeFetchTaskOutput ---
 
 func TestExecuteFetchTaskOutput_NoResult(t *testing.T) {
 	task := &corev1alpha1.Task{
@@ -1450,7 +1419,7 @@ func TestExecuteFetchTaskOutput_StoreNotFound(t *testing.T) {
 			},
 		},
 	}
-	rs := &fakeResultStore{} // empty store
+	rs := &fakeResultStore{}
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	sm := controller.NewSessionManager(&fakeSessionStore{})
@@ -1493,8 +1462,6 @@ func TestExecuteFetchTaskOutput_StoreError(t *testing.T) {
 	}
 }
 
-// --- Tests: executeWaitForTask ---
-
 func TestExecuteWaitForTask_AlreadyComplete(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1521,8 +1488,6 @@ func TestExecuteWaitForTask_NotFound(t *testing.T) {
 	}
 }
 
-// --- Tests: executeCancelTask ---
-
 func TestExecuteCancelTask_Success(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1548,8 +1513,6 @@ func TestExecuteCancelTask_NotFound(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 }
-
-// --- Tests: executeListAgents ---
 
 func TestExecuteListAgents_Empty(t *testing.T) {
 	e := newTestExecutor()
@@ -1599,8 +1562,6 @@ func TestExecuteListAgents_WithAgents(t *testing.T) {
 	}
 }
 
-// --- Tests: executeListTools ---
-
 func TestExecuteListTools_Empty(t *testing.T) {
 	e := newTestExecutor()
 	r := e.executeTool(context.Background(), "list_tools", map[string]any{})
@@ -1624,7 +1585,6 @@ func TestExecuteListTools_WithTools(t *testing.T) {
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
 	}
-	// list_tools also reports the built-in tools; count only the Tool CRDs.
 	toolsData := r.Data.([]any)
 	custom := 0
 	for _, item := range toolsData {
@@ -1636,8 +1596,6 @@ func TestExecuteListTools_WithTools(t *testing.T) {
 		t.Fatalf("expected 1 custom tool, got %d of %d tools", custom, len(toolsData))
 	}
 }
-
-// --- Tests: executeListTasks ---
 
 func TestExecuteListTasks_Empty(t *testing.T) {
 	e := newTestExecutor()
@@ -1663,7 +1621,6 @@ func TestExecuteListTasks_WithFilter(t *testing.T) {
 	}
 	e := newTestExecutor(task)
 
-	// Filter matching
 	r := e.executeTool(context.Background(), "list_tasks", map[string]any{"status": "Succeeded"})
 	if !r.Success {
 		t.Fatalf("expected success: %s", r.Error)
@@ -1673,7 +1630,6 @@ func TestExecuteListTasks_WithFilter(t *testing.T) {
 		t.Errorf("expected 1 task, got %d", len(tasks))
 	}
 
-	// Filter non-matching
 	r2 := e.executeTool(context.Background(), "list_tasks", map[string]any{"status": "Failed"})
 	if !r2.Success {
 		t.Fatalf("expected success: %s", r2.Error)
@@ -1683,8 +1639,6 @@ func TestExecuteListTasks_WithFilter(t *testing.T) {
 		t.Errorf("expected 0 tasks, got %d", len(tasks2))
 	}
 }
-
-// --- Tests: executeCreateAgent ---
 
 func TestExecuteCreateAgent_Success(t *testing.T) {
 	e := newTestExecutor()
@@ -1809,8 +1763,6 @@ func TestExecuteCreateAgent_WithInitialPrompt(t *testing.T) {
 	}
 }
 
-// --- Tests: executeUpdateAgent ---
-
 func TestExecuteUpdateAgent_Success(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1840,8 +1792,6 @@ func TestExecuteUpdateAgent_NotFound(t *testing.T) {
 	}
 }
 
-// --- Tests: executeDeleteAgent ---
-
 func TestExecuteDeleteAgent_Success(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1863,8 +1813,6 @@ func TestExecuteDeleteAgent_NotFound(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 }
-
-// --- Tests: executeCreateTool ---
 
 func TestExecuteCreateTool_Success(t *testing.T) {
 	e := newTestExecutor()
@@ -1908,8 +1856,6 @@ func TestExecuteCreateTool_NamespaceRestriction(t *testing.T) {
 	}
 }
 
-// --- Tests: executeDeleteTool ---
-
 func TestExecuteDeleteTool_Success(t *testing.T) {
 	tool := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1932,8 +1878,6 @@ func TestExecuteDeleteTool_NotFound(t *testing.T) {
 	}
 }
 
-// --- Tests: executeDeleteSession ---
-
 func TestExecuteDeleteSession_Success(t *testing.T) {
 	e := newTestExecutor()
 	r := e.executeTool(context.Background(), "delete_session", map[string]any{"sessionId": "sess-abc"})
@@ -1945,8 +1889,6 @@ func TestExecuteDeleteSession_Success(t *testing.T) {
 		t.Errorf("sessionId = %v", data["sessionId"])
 	}
 }
-
-// --- Tests: taskStatusResult & taskTimeoutResult ---
 
 func TestTaskStatusResult_WithTimes(t *testing.T) {
 	now := metav1.Now()
@@ -2055,8 +1997,6 @@ func TestTaskTimeoutResult_NoStartTime(t *testing.T) {
 	}
 }
 
-// --- Tests: executeWaitForTask additional cases ---
-
 func TestExecuteWaitForTask_ContextCancelled(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2069,9 +2009,8 @@ func TestExecuteWaitForTask_ContextCancelled(t *testing.T) {
 	}
 	e := newTestExecutor(task)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	cancel()
 	r := e.executeTool(ctx, "wait_for_task", map[string]any{"name": "running-task", "timeout": float64(1)})
-	// Should return timeout result since context is cancelled
 	if !r.Success {
 		t.Fatalf("expected success (timeout result), got error: %s", r.Error)
 	}
@@ -2103,8 +2042,6 @@ func TestExecuteWaitForTask_AlreadyFailed(t *testing.T) {
 	}
 }
 
-// --- Tests: handleInitialPrompt ---
-
 func TestHandleInitialPrompt_NoPrompt(t *testing.T) {
 	e := newTestExecutor()
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{"name": "a1"})
@@ -2119,7 +2056,7 @@ func TestHandleInitialPrompt_NoPrompt(t *testing.T) {
 
 func TestHandleInitialPrompt_TaskLimitReached(t *testing.T) {
 	e := newTestExecutor()
-	e.maxTasks = 0 // limit reached
+	e.maxTasks = 0
 	r := e.executeTool(context.Background(), "create_agent", map[string]any{"name": "a2", "initialPrompt": "do work"})
 	if !r.Success {
 		t.Fatal("expected success=true")
@@ -2168,8 +2105,6 @@ func TestHandleInitialPrompt_WithProviderRef(t *testing.T) {
 	}
 }
 
-// --- Tests: executeCreateContainerTask priority ---
-
 func TestExecuteCreateContainerTask_WithPriority(t *testing.T) {
 	e := newTestExecutor()
 	args := map[string]any{
@@ -2197,8 +2132,6 @@ func TestExecuteCreateContainerTask_NamespaceRestriction(t *testing.T) {
 		t.Errorf("ErrorType = %q", r.ErrorType)
 	}
 }
-
-// --- Tests: executeCreateAgentTask with schedule ---
 
 func TestExecuteCreateAgentTask_WithSchedule(t *testing.T) {
 	e := newTestExecutor()
@@ -2259,8 +2192,6 @@ func TestExecuteCreateAgentTask_TaskLimit(t *testing.T) {
 	}
 }
 
-// --- Tests: marshalResult error path ---
-
 func TestMarshalResult_WithComplexData(t *testing.T) {
 	r := ToolResult{
 		Success: true,
@@ -2278,8 +2209,6 @@ func TestMarshalResult_WithComplexData(t *testing.T) {
 	}
 }
 
-// --- Tests: executeDeleteSession with error ---
-
 func TestExecuteDeleteSession_StoreError(t *testing.T) {
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -2291,8 +2220,6 @@ func TestExecuteDeleteSession_StoreError(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 }
-
-// --- Tests: executeUpdateAgent with model-only update ---
 
 func TestExecuteUpdateAgent_ModelOnly(t *testing.T) {
 	agent := &corev1alpha1.Agent{
@@ -2311,8 +2238,6 @@ func TestExecuteUpdateAgent_ModelOnly(t *testing.T) {
 		t.Fatalf("expected success: %s", r.Error)
 	}
 }
-
-// --- Tests: Execute dispatch for list/discovery tools ---
 
 func TestExecute_ListAgents(t *testing.T) {
 	e := newTestExecutor()
@@ -2361,8 +2286,6 @@ func TestExecute_ListTasks(t *testing.T) {
 		t.Errorf("expected success, got: %s", result)
 	}
 }
-
-// --- Tests: executeListTasks with limit ---
 
 func TestExecuteListTasks_WithLimit(t *testing.T) {
 	tasks := make([]runtime.Object, 5)
@@ -2416,8 +2339,6 @@ func TestExecuteHonorsNumericStringsForNumberFields(t *testing.T) {
 	}
 }
 
-// A numeric string the registry converts must still be range-checked before it
-// is narrowed to int32, where 4294967296 would wrap to priority 0.
 func TestExecuteRejectsPriorityThatWouldWrap(t *testing.T) {
 	e := newTestExecutor()
 	result, err := e.Execute(context.Background(), llm.ToolCall{ID: "call-1", Name: "create_ai_task", Arguments: json.RawMessage(`{"prompt":"p","priority":"4294967296"}`)})
@@ -2448,8 +2369,6 @@ func (r *recordingChatTool) Execute(_ context.Context, args json.RawMessage) (st
 	return tools.ChatToolSuccess(map[string]any{})
 }
 
-// The chat executor passes arguments to the registry as sent, so an integer
-// beyond float64 precision is not rounded on the way.
 func TestExecutePreservesPreciseIntegers(t *testing.T) {
 	e := newTestExecutor()
 	recorder := &recordingChatTool{}

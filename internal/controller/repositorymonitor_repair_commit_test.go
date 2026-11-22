@@ -96,8 +96,6 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 		t.Fatal("a descriptive repair message must not look like a credential")
 	}
 
-	// Priorities are model output: an unknown one is dropped, and many long
-	// multi-byte titles still fit the publisher's byte limit.
 	untrusted := make([]repositoryMonitorReviewFinding, 0, 2+repositoryMonitorRepairCommitFindingLimit)
 	untrusted = append(untrusted, repositoryMonitorReviewFinding{Priority: "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\nSigned-off-by: x", Title: "Odd priority"}, repositoryMonitorReviewFinding{Priority: " p2 ", Title: "Lower-case priority"})
 	for range repositoryMonitorRepairCommitFindingLimit {
@@ -122,8 +120,6 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 		t.Fatalf("message of %d bytes fails publication validation: %v", len(bounded), validateTaskPullRequestText(repairTask))
 	}
 
-	// A security-sensitive review's findings stay out of the public commit
-	// unless the monitor posts security-sensitive reviews.
 	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "review-77", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 77, HeadSHA: "head77", Verdict: repositoryMonitorReviewVerdictNeedsChanges, SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: string(findingsJSON)}); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +133,6 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 	}
 	monitor.Spec.Review.Publish.PostSecuritySensitive = false
 
-	// A review of an older head describes nothing this repair fixes.
 	pr.HeadSHA = "newer"
 	if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, pr, item); err != nil || got != "fix: address review findings on #75\n\nOrka-Task: "+task+"\n" {
 		t.Fatalf("stale review message = %q err=%v", got, err)
@@ -158,7 +153,6 @@ func TestRepositoryMonitorRepairCommitMessageOmitsRestrictedFindings(t *testing.
 	monitor, _ := repositoryMonitorInventoryTestObjects("commit-message-restricted")
 	r := &RepositoryMonitorReconciler{Store: db}
 	const task = "monrepair-commit-message-78"
-	// A finding restricted as security-sensitive is not listed.
 	restrictedJSON, err := json.Marshal([]repositoryMonitorReviewFinding{
 		{Priority: "P1", Title: "Still open"},
 		{Priority: "P1", Title: "Restricted detail", SecuritySensitive: true},

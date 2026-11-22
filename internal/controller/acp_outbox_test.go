@@ -182,8 +182,6 @@ func TestACPNoWorkspaceTerminalProjectionSettlesStatusAndFinalizer(t *testing.T)
 		t.Fatal(err)
 	}
 
-	// Bypass any future projection encoding normalization so this remains a
-	// regression for rows persisted by the broken controller version.
 	type legacyTaskTerminalProjection taskTerminalProjection
 	payload, err := json.Marshal(legacyTaskTerminalProjection{
 		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), Attempt: 1,
@@ -330,10 +328,6 @@ func TestACPOutboxProjectorDeliveryFailureClassification(t *testing.T) {
 		wantState store.OutboxProjectionState
 	}{
 		{
-			// A Kubernetes control-plane outage must never dead-letter the
-			// terminal projection: recovery accepts any existing projection and
-			// Task deletion requires Delivered, so the projection has to stay
-			// retryable until the API server recovers.
 			name: "infrastructure-failure-stays-pending", payload: validPayload,
 			kubeError: apierrors.NewInternalError(context.DeadlineExceeded), wantState: store.OutboxProjectionPending,
 		},
@@ -342,10 +336,6 @@ func TestACPOutboxProjectorDeliveryFailureClassification(t *testing.T) {
 			wantState: store.OutboxProjectionDeadLetter,
 		},
 		{
-			// A Task name recreated with a different UID (and no restored
-			// source identity) can never satisfy this projection: after
-			// MaxAttempts it must dead-letter rather than being claimed and
-			// retried forever.
 			name: "identity-mismatch-dead-letters", payload: validPayload,
 			objects: []client.Object{&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "default", Name: "task", UID: "recreated-uid",

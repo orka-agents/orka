@@ -22,9 +22,6 @@ const (
 	acpPrePromptLeaseReleasePrefix = "release-pre-prompt:"
 )
 
-// ACPSessionContinuityConfig supplies the durable stores used by the ACP
-// session-continuity boundary. In production these interfaces are normally
-// implemented by the same SQLite-backed durable control store.
 type ACPSessionContinuityConfig struct {
 	SessionControls store.SessionControlStore
 	Transcripts     store.SessionStore
@@ -34,15 +31,9 @@ type ACPSessionContinuityConfig struct {
 	BootstrapLimits ACPBootstrapLimits
 	NewSessionUID   func() (string, error)
 
-	// Lineages receives an idempotent SQLite payload projection only after the
-	// Kubernetes SessionControl store has established or verified lineage in
-	// the same status CAS that records the mutation Lease.
 	Lineages store.SessionLineageStore
 }
 
-// ACPSessionContinuity is the controller-side integration boundary for durable
-// ACP Session identity, mutation fencing, canonical transcript bootstrap, and
-// atomic SessionTurn completion. It deliberately does not submit prompts.
 type ACPSessionContinuity struct {
 	controls        store.SessionControlStore
 	transcripts     store.SessionStore
@@ -54,14 +45,10 @@ type ACPSessionContinuity struct {
 	lineages        store.SessionLineageStore
 }
 
-// RecordsLineage reports whether Session lineage recording is configured.
 func (c *ACPSessionContinuity) RecordsLineage() bool {
 	return c != nil && c.lineages != nil
 }
 
-// NewACPSessionContinuity creates a continuity component. All stores are
-// required because publication ambiguity and blocked-session recovery must be
-// classified from durable receipts rather than caller assertions.
 func NewACPSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinuity, error) {
 	if config.SessionControls == nil || config.Transcripts == nil || config.Publications == nil || config.BranchClaims == nil {
 		return nil, fmt.Errorf("ACP session continuity requires session-control, transcript, publication, and branch-claim stores")
@@ -90,10 +77,6 @@ func newSessionContinuity(config ACPSessionContinuityConfig) (*ACPSessionContinu
 	}, nil
 }
 
-// ACPEnsureSessionRequest identifies one canonical transcript Session. An
-// optional ExpectedSessionUID turns loading into an exact immutable-identity
-// assertion; when omitted, creation reuses any already-bound durable identity
-// before generating a new UID.
 type ACPEnsureSessionRequest struct {
 	Namespace                 string
 	SessionName               string
@@ -104,9 +87,6 @@ type ACPEnsureSessionRequest struct {
 	CreatedAt                 time.Time
 }
 
-// EnsureSession creates or loads the transcript Session and its immutable
-// SessionControl UID record. Concurrent creators converge on the first durable
-// UID; an explicitly expected different UID is rejected.
 func (c *ACPSessionContinuity) EnsureSession(ctx context.Context, request ACPEnsureSessionRequest) (*store.SessionControl, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.SessionName = strings.TrimSpace(request.SessionName)
@@ -182,8 +162,6 @@ func (c *ACPSessionContinuity) EnsureSession(ctx context.Context, request ACPEns
 	if err == nil {
 		return created, nil
 	}
-	// A racing creator can win with a different generated UID. Load the winner
-	// and accept it only when the caller did not assert a specific UID.
 	winner, getErr := c.controls.GetSessionControl(ctx, request.Namespace, request.SessionName)
 	if getErr != nil {
 		return nil, fmt.Errorf("create ACP session control: %w", err)
@@ -198,9 +176,6 @@ func (c *ACPSessionContinuity) EnsureSession(ctx context.Context, request ACPEns
 	return winner, nil
 }
 
-// sessionUIDForCreate preserves the durable bind-before-control identity if a
-// prior Kubernetes create failed or its outcome was lost. Never unbind it: the
-// original create may have succeeded even when the caller received an error.
 func (c *ACPSessionContinuity) sessionUIDForCreate(ctx context.Context, request ACPEnsureSessionRequest) (string, error) {
 	if cleanup, ok := c.transcripts.(store.SessionCleanupPersistenceStore); ok {
 		boundUID, err := cleanup.GetSessionCleanupIdentity(ctx, request.Namespace, request.SessionName)
@@ -247,8 +222,6 @@ func (c *ACPSessionContinuity) ensureTranscriptSession(ctx context.Context, requ
 	if createErr == nil {
 		return nil
 	}
-	// SessionStore predates typed create conflicts. Read after any create error
-	// so concurrent creators can converge without depending on driver errors.
 	existing, getErr := c.transcripts.GetSession(ctx, request.Namespace, request.SessionName)
 	if getErr != nil {
 		return fmt.Errorf("create transcript session: %w", createErr)
@@ -282,9 +255,6 @@ func validateTranscriptSession(session *store.SessionRecord, expectedType string
 	return nil
 }
 
-// ACPAcquireSessionLeaseRequest acquires the next generation from an exact
-// SessionControl snapshot. PromptRequestDigest binds the lease to the immutable
-// prompt attempt input without allowing a different prompt to reuse it.
 type ACPAcquireSessionLeaseRequest struct {
 	Session             store.SessionControl
 	Fence               store.ControllerEpochFence
@@ -296,9 +266,6 @@ type ACPAcquireSessionLeaseRequest struct {
 	AcquiredAt          time.Time
 	ExpiresAt           *time.Time
 
-	// NamespaceUID, RuntimeIdentity, and ConfigDigest establish or verify the
-	// Kubernetes-authoritative Session protocol/runtime lineage atomically with
-	// the lease status CAS when lineage projection is configured.
 	NamespaceUID      string
 	ContractVersion   corev1alpha1.AgentRuntimeContractVersion
 	LineageGeneration int64
@@ -306,8 +273,6 @@ type ACPAcquireSessionLeaseRequest struct {
 	ConfigDigest      string
 }
 
-// ACPSessionLease is the exact mutation fence that must be used when opening
-// and finalizing the SessionTurn.
 type ACPSessionLease struct {
 	Session store.SessionControl
 	Key     store.SessionTurnKey
@@ -319,7 +284,6 @@ type ACPReleaseSessionLeaseRequest struct {
 	ReleasedAt time.Time
 }
 
-// AcquireMutationLease acquires one monotonic, non-reusable Session lease.
 func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request ACPAcquireSessionLeaseRequest) (*ACPSessionLease, error) {
 	request.TaskName = strings.TrimSpace(request.TaskName)
 	request.TaskUID = strings.TrimSpace(request.TaskUID)
@@ -379,17 +343,12 @@ func (c *ACPSessionContinuity) AcquireMutationLease(ctx context.Context, request
 			return nil, fmt.Errorf("kubernetes session lease committed without authoritative lineage")
 		}
 		if _, err := c.lineages.ProjectSessionLineage(ctx, *control.Lineage); err != nil {
-			// Retain the exact Kubernetes lease on projection failure. Releasing it
-			// would allow another owner to proceed before the payload projection is
-			// repaired; an idempotent retry completes the projection first.
 			return nil, fmt.Errorf("project Kubernetes-authoritative Session lineage: %w", err)
 		}
 	}
 	return lease, nil
 }
 
-// CommitRuntimeSessionGeneration records the newest provider RuntimeSession
-// generation proven live while this exact Session mutation lease is active.
 func (c *ACPSessionContinuity) CommitRuntimeSessionGeneration(
 	ctx context.Context,
 	lease ACPSessionLease,
@@ -421,10 +380,6 @@ func (c *ACPSessionContinuity) CommitRuntimeSessionGeneration(
 	return &lease, nil
 }
 
-// prepareSessionLineageClaim determines only whether an absent authoritative
-// lineage may be established. Kubernetes remains the decision point: a stale
-// caller that observes a nonempty transcript can still verify a lineage that a
-// concurrent first user already committed, but it cannot establish one.
 func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, request ACPAcquireSessionLeaseRequest) (*store.ClaimSessionLineageRequest, error) {
 	if c.lineages == nil {
 		return nil, nil
@@ -460,8 +415,6 @@ func (c *ACPSessionContinuity) prepareSessionLineageClaim(ctx context.Context, r
 			}
 			claim.EstablishIfAbsent = true
 		} else {
-			// Non-Gateway lineage can be established only before the transcript
-			// contains messages. Existing unclassified transcripts fail closed.
 			claim.EstablishIfAbsent = record.MessageCount == 0
 		}
 	}
@@ -523,8 +476,6 @@ func acpSessionMutationLeaseDigest(sessionUID string, leaseGeneration int64, tas
 	)
 }
 
-// ACPOpenSessionTurnRequest opens the durable turn after the PromptAttempt has
-// been bound to the returned lease, but before any prompt request is written.
 type ACPOpenSessionTurnRequest struct {
 	Lease                ACPSessionLease
 	Fence                store.ControllerEpochFence
@@ -536,8 +487,6 @@ type ACPOpenSessionTurnRequest struct {
 	OpenedAt             time.Time
 }
 
-// ACPSessionTurn is the exact session and turn snapshot used for terminal
-// finalization. A newer lease or Session version cannot finalize this turn.
 type ACPSessionTurn struct {
 	Lease                ACPSessionLease
 	Turn                 store.SessionTurn
@@ -545,8 +494,6 @@ type ACPSessionTurn struct {
 	SkipUserPromptAppend bool
 }
 
-// OpenTurn creates the SessionTurn durability barrier that prompt execution
-// must not cross before this method succeeds.
 func (c *ACPSessionContinuity) OpenTurn(ctx context.Context, request ACPOpenSessionTurnRequest) (*ACPSessionTurn, error) {
 	request.PromptAttemptID = strings.TrimSpace(request.PromptAttemptID)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", request.PromptAttemptID); err != nil {
@@ -616,9 +563,6 @@ func acpSessionTurnDigest(
 	return acpDomainDigest("session-turn", identity)
 }
 
-// ACPFinalizationProjection is the transactional-outbox projection committed
-// with the SessionTurn. The helper owns the aggregate identity and payload
-// digest so callers cannot accidentally project a different turn.
 type ACPFinalizationProjection struct {
 	ID             string
 	ProjectionKind string
@@ -626,9 +570,6 @@ type ACPFinalizationProjection struct {
 	AvailableAt    time.Time
 }
 
-// ACPFinalizeAssistantRequest finalizes a known prompt result. If publication
-// is terminally ambiguous, the assistant result remains canonical but the
-// Session and BranchClaim stay reconciliation-blocked.
 type ACPFinalizeAssistantRequest struct {
 	SessionTurn     ACPSessionTurn
 	Fence           store.ControllerEpochFence
@@ -639,9 +580,6 @@ type ACPFinalizeAssistantRequest struct {
 	FinalizedAt     time.Time
 }
 
-// ACPFinalizeOutcomeUnknownRequest records an explicit system outcome marker.
-// There is intentionally no assistant-result field, preventing invented output
-// when prompt acceptance or settlement cannot be established.
 type ACPFinalizeOutcomeUnknownRequest struct {
 	SessionTurn   ACPSessionTurn
 	Fence         store.ControllerEpochFence
@@ -649,40 +587,29 @@ type ACPFinalizeOutcomeUnknownRequest struct {
 	PublicationID string
 	Projection    ACPFinalizationProjection
 	FinalizedAt   time.Time
-	// NativeSession carries the Session's existing checkpoint across this marker.
 	NativeSession *store.NativeSessionRecord
 }
 
-// ACPFinalizeOutcomeMarkerRequest records a proven non-success terminal marker
-// such as Cancelled or Failed without misclassifying it as OutcomeUnknown.
 type ACPFinalizeOutcomeMarkerRequest struct {
-	SessionTurn ACPSessionTurn
-	Fence       store.ControllerEpochFence
-	Kind        string
-	Reason      string
-	Projection  ACPFinalizationProjection
-	FinalizedAt time.Time
-	// NativeSession carries the Session's existing checkpoint across this marker.
+	SessionTurn   ACPSessionTurn
+	Fence         store.ControllerEpochFence
+	Kind          string
+	Reason        string
+	Projection    ACPFinalizationProjection
+	FinalizedAt   time.Time
 	NativeSession *store.NativeSessionRecord
 }
 
-// ACPSessionFinalization is the committed turn plus its latest Session state.
 type ACPSessionFinalization struct {
 	Turn    store.SessionTurn
 	Session store.SessionControl
 }
 
-// ACPResumeSessionTurnFinalizationRequest identifies an already-finalized
-// durable SessionTurn whose Kubernetes and outbox activation tail may have
-// been interrupted by controller restart.
 type ACPResumeSessionTurnFinalizationRequest struct {
 	SessionTurn ACPSessionTurn
 	Fence       store.ControllerEpochFence
 }
 
-// ResumeSessionTurnFinalization reloads every finalization input from the
-// persisted SessionTurn/outbox records and idempotently completes the remaining
-// BranchClaim, SessionControl, coordination Lease, and outbox activation steps.
 func (c *ACPSessionContinuity) ResumeSessionTurnFinalization(ctx context.Context, request ACPResumeSessionTurnFinalizationRequest) (*ACPSessionFinalization, error) {
 	turn := request.SessionTurn.Turn
 	if turn.State != store.SessionTurnFinalized || turn.FinalizedAt == nil {
@@ -708,9 +635,6 @@ func (c *ACPSessionContinuity) ResumeSessionTurnFinalization(ctx context.Context
 	return &ACPSessionFinalization{Turn: *resumed, Session: *control}, nil
 }
 
-// FinalizeAssistantResult atomically appends the user prompt and known
-// assistant result, snapshots any durable publication receipt, releases only
-// the matching lease, and derives baseline advancement inside the store.
 func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, request ACPFinalizeAssistantRequest) (*ACPSessionFinalization, error) {
 	if err := store.ValidateControlText("assistant result", request.AssistantResult); err != nil {
 		return nil, err
@@ -719,8 +643,6 @@ func (c *ACPSessionContinuity) FinalizeAssistantResult(ctx context.Context, requ
 		request.AssistantResult, request.PublicationID, request.Projection, request.FinalizedAt, request.NativeSession)
 }
 
-// FinalizeOutcomeUnknown atomically appends the user prompt and an explicit
-// canonical outcome marker. It never accepts or synthesizes assistant content.
 func (c *ACPSessionContinuity) FinalizeOutcomeUnknown(ctx context.Context, request ACPFinalizeOutcomeUnknownRequest) (*ACPSessionFinalization, error) {
 	reason := strings.TrimSpace(request.Reason)
 	if reason == "" {
@@ -819,9 +741,7 @@ func (c *ACPSessionContinuity) finalizeTurn(
 		SkipTranscriptAppend: sessionTurn.SkipTranscriptAppend,
 		SkipUserPromptAppend: sessionTurn.SkipUserPromptAppend,
 		PublicationID:        publicationID,
-		// VerifiedBaseline is deliberately omitted. The durable store may advance
-		// it only by deriving it from the independently verified Publication receipt.
-		BlockReason: blockReason, Projection: projection, FinalizedAt: when,
+		BlockReason:          blockReason, Projection: projection, FinalizedAt: when,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finalize ACP session turn: %w", err)

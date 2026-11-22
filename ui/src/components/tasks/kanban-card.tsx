@@ -29,7 +29,6 @@ export function KanbanCard({ task }: { task: Task }) {
         className={cn('gap-0 py-3 border-l-4 transition-all cursor-pointer hover:shadow-md motion-safe:hover:-translate-y-0.5', phase.railClass)}
       >
         <CardContent className="px-3 py-0 space-y-1.5">
-          {/* Phase is encoded by the left-rail color; surface it to AT too. */}
           <span className="sr-only">Phase: {phase.label}</span>
           <div className="flex items-center justify-between gap-2">
             <span className="font-semibold text-sm truncate" title={task.metadata.name}>{task.metadata.name}</span>

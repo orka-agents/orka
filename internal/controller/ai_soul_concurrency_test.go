@@ -157,7 +157,6 @@ func TestAISoulFirstBindingRechecksCachedAgentRevision(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default", UID: "agent-uid", Generation: 2},
 		Spec:       corev1alpha1.AgentSpec{Soul: &corev1alpha1.SoulSource{Inline: "new persona"}},
 	}
-	// The cache can still hold the revision before the soul was added.
 	cached := stored.DeepCopy()
 	cached.Generation = 1
 	cached.Spec.Soul = nil

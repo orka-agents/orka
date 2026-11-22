@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// controlEpochName is the only controller epoch name orka.storage.v1 accepts.
 const controlEpochName = storagev1.DefaultControllerEpochName
 
 var controlBaseTime = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
@@ -39,16 +38,12 @@ func syncEpoch(t *testing.T, provider storagev1.StateProvider, epoch int64, hold
 	return controlFence(epoch, holder)
 }
 
-// requireFenced checks a stale-fence rejection. It also checks the
-// compatibility match on ErrConflict that existing Orka callers rely on.
 func requireFenced(t *testing.T, err error) {
 	t.Helper()
 	require.ErrorIs(t, err, storagev1.ErrFenced)
 	require.ErrorIs(t, err, storagev1.ErrConflict, "a fence rejection still matches ErrConflict")
 }
 
-// runControllerEpochMirror checks that the mirror accepts exact replays and
-// only moves forward.
 func runControllerEpochMirror(t *testing.T, newProvider StateFactory) {
 	provider := newProvider(t)
 	ctx := t.Context()
@@ -68,7 +63,6 @@ func runControllerEpochMirror(t *testing.T, newProvider StateFactory) {
 	conflicting.RequestDigest = controlDigest("other request")
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, conflicting), storagev1.ErrConflict)
 
-	// A mirror may move forward past epochs it never saw, but never rewinds.
 	syncEpoch(t, provider, 3, "owner-c")
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, mirroredEpoch(2, "owner-b")), storagev1.ErrConflict)
 	require.ErrorIs(t, provider.SyncControllerEpochMirror(ctx, mirroredEpoch(1, "owner-a")), storagev1.ErrConflict)
@@ -160,8 +154,6 @@ func runOutboxPersistence(t *testing.T, newProvider StateFactory) {
 	require.ErrorIs(t, err, storagev1.ErrConflict)
 	requireBacklog(t, provider, 1)
 
-	// An expired lease is reclaimed by another worker; retry and dead-letter
-	// completions settle it.
 	firstClaim, err := provider.ClaimOutboxProjectionRecords(ctx, storagev1.ClaimOutboxProjectionsRequest{
 		Fence: fence, WorkerID: "worker-a", Limit: 10, LeaseDuration: time.Minute, Now: later,
 	})

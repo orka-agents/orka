@@ -18,14 +18,6 @@ import (
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
-// bindVerifiedTaskTransactionAuthority initializes a per-request Tool executor
-// with the verified Task's transaction and credential authority, mirroring the
-// worker Job environment the controller stamps for per-Task execution
-// (setTransactionCredentialAuthorizationEnv/addTransactionEnvVars plus the
-// owner-referenced transaction-token Secret mount). Callers must authenticate
-// the Task identity before calling and must bind a fresh executor per request;
-// the raw token is handed only to that executor and is never logged,
-// persisted, or reused across Tasks.
 func bindVerifiedTaskTransactionAuthority(
 	ctx context.Context,
 	reader client.Reader,
@@ -39,13 +31,6 @@ func bindVerifiedTaskTransactionAuthority(
 	}
 	transaction := task.Spec.Transaction
 	if transaction == nil {
-		// Worker parity: Jobs stamp TransactionCredentialAuthorizationEnforced
-		// as (tx != nil && enforced) and mount no transaction token, so a Task
-		// without transaction context has no credential authority to enforce
-		// and no task-scoped token. Empty authority still disables any
-		// controller-process token-file fallback. An explicit disabled exchange
-		// also prevents controller-wide TTS settings from applying to this
-		// transactionless request.
 		executor.SetTransactionCredentialAuthority(false, false, "")
 		executor.SetTransactionAuthority("", nil)
 		executor.SetTransactionExchangeConfig(&workerexecutor.TransactionExchangeConfig{
@@ -82,9 +67,6 @@ func bindVerifiedTaskTransactionAuthority(
 	return nil
 }
 
-// readTaskOwnedTransactionToken loads the Task's delegated transaction token
-// from its owner-referenced Secret. The raw token is handed only to the
-// per-request executor and is never logged, persisted, or reused across Tasks.
 func readTaskOwnedTransactionToken(
 	ctx context.Context,
 	reader client.Reader,

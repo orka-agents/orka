@@ -23,7 +23,6 @@ func TestDeployedCompatibilityRouting(t *testing.T) {
 	f := newLiveEnvironment(t)
 	for _, namespace := range []string{"team-a", "team-b"} {
 		f.waitForTasks(t, namespace, 1)
-		// Only this namespace's controller is allowed to launch these Jobs.
 		for _, target := range []string{"team-a", "team-b"} {
 			review, err := f.clientset.AuthorizationV1().
 				SubjectAccessReviews().
@@ -131,8 +130,6 @@ func TestDeployedCompatibilityRouting(t *testing.T) {
 			require.Equal(t, http.StatusOK, status, body)
 			require.Contains(t, responseText(t, body, false), `"success":false`)
 		}
-		// One seed Task plus one per API/stream combination. Disabled tools,
-		// cross-namespace arguments and insufficient RBAC cannot add Tasks.
 		f.verifyExecutions(t, namespace, 5)
 	}
 }
@@ -147,7 +144,6 @@ func (f *liveEnvironment) request(
 	if strings.HasSuffix(path, "/models") {
 		method = http.MethodGet
 	}
-	// The body is identical for both namespaces. Only the credential changes.
 	data, err := json.Marshal(map[string]any{
 		"model":      "shared/model",
 		"messages":   []map[string]string{{"role": "user", "content": prompt}},
@@ -177,7 +173,6 @@ func (f *liveEnvironment) request(
 	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
-	// Do not print a leaked credential even when a response assertion fails.
 	for _, token := range f.tokens {
 		require.False(
 			t,

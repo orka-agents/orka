@@ -6,8 +6,6 @@ import {
   type StreamComplete,
 } from '@/schemas/execution-event'
 
-// Centralized URL builders for the execution-event surface so no component or
-// hook hardcodes backend path strings.
 export const executionEventApi = {
   taskEvents: (taskId: string) => `${API_BASE_URL}/tasks/${encodeURIComponent(taskId)}/events`,
   taskStream: (taskId: string) => `${API_BASE_URL}/tasks/${encodeURIComponent(taskId)}/stream`,
@@ -22,8 +20,6 @@ export const executionEventApi = {
     `${API_BASE_URL}/sessions/${encodeURIComponent(sessionId)}/stream`,
 } as const
 
-// Relative (non base-prefixed) versions used by the shared `api` client, which
-// prepends API_BASE_URL itself.
 export const executionEventApiPath = {
   taskEvents: (taskId: string) => `/tasks/${encodeURIComponent(taskId)}/events`,
   taskTrace: (taskId: string) => `/tasks/${encodeURIComponent(taskId)}/trace`,
@@ -34,9 +30,6 @@ export const executionEventApiPath = {
   sessionEvents: (sessionId: string) => `/sessions/${encodeURIComponent(sessionId)}/events`,
 } as const
 
-// Functional event categories, derived from the taxonomy in
-// internal/events/execution_event.go. Error highlighting is driven by severity,
-// not by category, so failures stay grouped with their functional area.
 export type ExecutionEventCategory =
   | 'lifecycle'
   | 'worker'
@@ -104,7 +97,6 @@ export const EXECUTION_EVENT_CATEGORY_LABELS: Record<ExecutionEventCategory, str
   other: 'Other',
 }
 
-// Stable category ordering for grouped display.
 export const EXECUTION_EVENT_CATEGORY_ORDER: ExecutionEventCategory[] = [
   'lifecycle',
   'worker',
@@ -123,7 +115,6 @@ export function executionEventCategory(type: string): ExecutionEventCategory {
 
 export type ExecutionEventSeverityLevel = 'debug' | 'info' | 'warning' | 'error'
 
-// Coerce arbitrary severity strings to a known level (API normalizes to info).
 export function normalizeSeverity(severity?: string): ExecutionEventSeverityLevel {
   switch ((severity ?? '').toLowerCase()) {
     case 'debug':
@@ -145,8 +136,6 @@ export function isTruncated(event: { truncation?: Record<string, unknown> | null
   )
 }
 
-// Merge two event lists deduped by seq and sorted ascending. Later sources win
-// on seq collisions, which lets live stream events supersede the initial replay.
 export function mergeEventsBySeq<T extends { seq: number }>(...sources: T[][]): T[] {
   const bySeq = new Map<number, T>()
   for (const source of sources) {
@@ -157,7 +146,6 @@ export function mergeEventsBySeq<T extends { seq: number }>(...sources: T[][]): 
   return Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq)
 }
 
-// Highest seq across a list, or fallback when empty.
 export function maxSeq(events: { seq: number }[], fallback = 0): number {
   let m = fallback
   for (const e of events) if (e.seq > m) m = e.seq
@@ -181,14 +169,7 @@ function hasModelTokenTelemetry(event: ExecutionEvent): boolean {
     event.cachedInputTokens !== undefined
 }
 
-// Harness v2 usage events are cumulative snapshots within one prompt. Keep the
-// newest event identity while carrying forward counters omitted by partial
-// updates, then sum prompts at the task level.
 export function latestModelUsageEvents(events: ExecutionEvent[]): ExecutionEvent[] {
-  // The native AI worker's per-call usage updates carry their counters nested
-  // in content, not as event fields; its ModelRequestCompleted events already
-  // report that model and those tokens, so an unscoped update with neither
-  // would only add an empty "unknown model" entry.
   const updates = events
     .filter((event) => event.type === 'ModelUsageUpdated' &&
       (harnessV2PromptKey(event) !== undefined || hasModelTokenTelemetry(event) || Boolean(event.model)))
@@ -225,10 +206,6 @@ export function latestModelContextEvent(events: ExecutionEvent[]): ExecutionEven
   return latest
 }
 
-// ---- SSE frame parsing ----
-
-// A single parsed SSE frame, classified by its `event:` field. The backend emits
-// `execution_event`, `stream_complete`, and bare `: heartbeat` comment frames.
 export type ExecutionEventFrame =
   | { kind: 'event'; seq: number; event: ExecutionEvent }
   | { kind: 'complete'; seq: number; complete: StreamComplete }
@@ -242,9 +219,6 @@ interface RawSSEFrame {
   isComment: boolean
 }
 
-// Parse one SSE block (the text between blank-line separators) into raw fields.
-// Returns null only for an entirely empty block. Comment-only blocks (lines
-// starting with ':') are returned with isComment=true.
 export function parseSSEBlock(block: string): RawSSEFrame | null {
   const lines = block.split('\n')
   let id: string | undefined
@@ -263,7 +237,6 @@ export function parseSSEBlock(block: string): RawSSEFrame | null {
     sawContent = true
     const colon = line.indexOf(':')
     const field = colon === -1 ? line : line.slice(0, colon)
-    // Per the SSE spec, a single space after the colon is stripped.
     let value = colon === -1 ? '' : line.slice(colon + 1)
     if (value.startsWith(' ')) value = value.slice(1)
     switch (field) {
@@ -287,9 +260,6 @@ export function parseSSEBlock(block: string): RawSSEFrame | null {
   return { id, event, data: dataLines.join('\n'), isComment: false }
 }
 
-// Parse and classify one SSE block into a typed execution-event frame. Invalid
-// JSON or schema-mismatched payloads classify as 'unknown' so the stream loop can
-// skip them without advancing its cursor.
 export function parseExecutionEventFrame(block: string): ExecutionEventFrame | null {
   const raw = parseSSEBlock(block)
   if (raw === null) return null
@@ -302,7 +272,6 @@ export function parseExecutionEventFrame(block: string): ExecutionEventFrame | n
         return { kind: 'complete', seq: parsed.data.lastSeq, complete: parsed.data }
       }
     } catch {
-      // fall through to unknown
     }
     return { kind: 'unknown' }
   }
@@ -314,7 +283,6 @@ export function parseExecutionEventFrame(block: string): ExecutionEventFrame | n
         return { kind: 'event', seq: parsed.data.seq, event: parsed.data }
       }
     } catch {
-      // fall through to unknown
     }
     return { kind: 'unknown' }
   }
@@ -322,8 +290,6 @@ export function parseExecutionEventFrame(block: string): ExecutionEventFrame | n
   return { kind: 'unknown' }
 }
 
-// Incremental SSE buffer: feed decoded chunks, yields complete typed frames as
-// blank-line-delimited blocks become available. Used by the streaming hook.
 export class SSEFrameBuffer {
   private buffer = ''
 
@@ -341,7 +307,6 @@ export class SSEFrameBuffer {
     return frames
   }
 
-  // Flush any trailing block (stream closed without a final blank line).
   flush(): ExecutionEventFrame[] {
     const remaining = this.buffer.trim()
     this.buffer = ''

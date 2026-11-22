@@ -64,7 +64,7 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 	tests := []struct {
 		name          string
 		tasks         []corev1alpha1.Task
-		resultMap     map[string]string // taskName -> result (served via HTTP)
+		resultMap     map[string]string
 		args          WaitForTasksArgs
 		wantCompleted bool
 		wantResults   []TaskResultInfo
@@ -178,16 +178,13 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(envOrkaTaskNamespace, testNamespace)
 
-			// Set up HTTP test server for result fetching
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Extract task name from path: /api/v1/tasks/{taskName}/result
 				parts := make([]string, 0)
 				for _, p := range splitPath(r.URL.Path) {
 					if p != "" {
 						parts = append(parts, p)
 					}
 				}
-				// path: api/v1/tasks/{taskName}/result
 				if len(parts) >= 5 && parts[3] != "" {
 					taskName := parts[3]
 					if result, ok := tt.resultMap[taskName]; ok {
@@ -255,7 +252,6 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 				if want.Result != "" && gotR.Result != want.Result {
 					t.Errorf("Results[%d].Result = %q, want %q", i, gotR.Result, want.Result)
 				}
-				// For error cases, just check result is non-empty
 				if want.Phase == taskPhaseErrorString && gotR.Result == "" {
 					t.Errorf("Results[%d].Result should contain error info", i)
 				}
@@ -264,7 +260,6 @@ func TestWaitForTasksTool_Execute(t *testing.T) {
 	}
 }
 
-// splitPath splits a URL path into non-empty segments.
 func splitPath(path string) []string {
 	var result []string
 	for s := range strings.SplitSeq(path, "/") {
@@ -755,7 +750,6 @@ func TestWaitForTasksTool_Execute_PublicationReceipt(t *testing.T) {
 }
 
 func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
-	// Create a structured result with diff (which should be stripped)
 	sr := common.StructuredResult{
 		Version:    1,
 		Summary:    "Implemented auth middleware",
@@ -769,7 +763,6 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	}
 	srJSON, _ := json.Marshal(sr)
 
-	// Mock server that returns the structured result
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{resultField: string(srJSON)}) //nolint:errcheck
@@ -830,7 +823,6 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 
 	r := waitResult.Results[0]
 
-	// Result should contain summary but NOT the diff
 	if r.Summary != "Implemented auth middleware" {
 		t.Errorf("expected summary, got %q", r.Summary)
 	}
@@ -849,7 +841,6 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 	if r.Iteration != "2" {
 		t.Errorf("expected iteration=2, got %q", r.Iteration)
 	}
-	// Most important: diff should NOT be in the result
 	if strings.Contains(r.Result, "diff --git") {
 		t.Error("result should NOT contain raw diff")
 	}
@@ -861,7 +852,6 @@ func TestWaitForTasksTool_Execute_StructuredResult(t *testing.T) {
 func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
-	// Create a failed task with auto-retry annotations
 	failedTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskFailRetry,
@@ -918,8 +908,6 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	// With auto-retry disabled in wait_for_tasks, the task should stay Failed
-	// (retry logic is now handled by the coordinator LLM)
 	var originalResult *TaskResultInfo
 	for i := range waitResult.Results {
 		if waitResult.Results[i].Task == taskFailRetry {
@@ -947,7 +935,6 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 		t.Errorf("expected maxRetries=2, got %d", originalResult.FailureDetails.MaxRetries)
 	}
 
-	// Verify no retry task was created (auto-retry is disabled)
 	taskList := &corev1alpha1.TaskList{}
 	if err := fakeClient.List(context.Background(), taskList); err != nil {
 		t.Fatalf("list tasks: %v", err)
@@ -960,7 +947,6 @@ func TestWaitForTasksTool_Execute_AutoRetry(t *testing.T) {
 func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
-	// Task with retries already exhausted
 	failedTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "task-exhausted",
@@ -1034,7 +1020,6 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 		t.Errorf("expected maxRetries=2, got %d", r.FailureDetails.MaxRetries)
 	}
 
-	// No retry task should have been created
 	taskList := &corev1alpha1.TaskList{}
 	if err := fakeClient.List(context.Background(), taskList); err != nil {
 		t.Fatalf("list tasks: %v", err)
@@ -1047,7 +1032,6 @@ func TestWaitForTasksTool_Execute_AutoRetryExhausted(t *testing.T) {
 func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
-	// Succeeded task with auto-retry — should NOT trigger retry
 	succeededTask := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "task-success",
@@ -1108,7 +1092,6 @@ func TestWaitForTasksTool_Execute_NoAutoRetryOnSuccess(t *testing.T) {
 func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
-	// Server returns 500 for result fetch
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("internal error"))
@@ -1157,7 +1140,6 @@ func TestWaitForTasksTool_Execute_FetchResultNon200(t *testing.T) {
 func TestWaitForTasksTool_Execute_FetchResultInvalidJSON(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, testNamespace)
 
-	// Server returns 200 but invalid JSON
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("not-valid-json"))
@@ -1212,7 +1194,6 @@ func TestWaitForTasksTool_Execute_FallbackToMessage(t *testing.T) {
 	defer srv.Close()
 	t.Setenv(envOrkaControllerURL, srv.URL)
 
-	// Task with no ResultRef but with a status message
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "task-msg", Namespace: testNamespace},
 		Spec: corev1alpha1.TaskSpec{
@@ -1367,8 +1348,6 @@ func TestWaitForTasksTool_Execute_ClampsToContextDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An enclosing execution budget shorter than the requested wait must
-	// still produce the tool's in-progress result rather than a cancellation.
 	ctx, cancel := context.WithTimeout(context.Background(), waitForTasksDeadlineGrace+3*time.Second)
 	defer cancel()
 	started := time.Now()

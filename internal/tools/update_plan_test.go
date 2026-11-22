@@ -195,7 +195,6 @@ func TestUpdatePlanTool_Execute(t *testing.T) {
 				defer srv.Close()
 				serverURL = srv.URL
 
-				// Verify auth header after execution
 				if tc.envToken != "" {
 					defer func() {
 						wantAuth := "Bearer " + tc.envToken

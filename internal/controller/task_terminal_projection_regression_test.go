@@ -300,7 +300,6 @@ func TestRecoveredTerminalSessionCanonicalMarkerMatchesProjection(t *testing.T) 
 				t.Fatal(err)
 			}
 			assertRecoveredTerminalMarker(t, finalizedTurn, transcript, string(test.wantState), test.wantMessage, userPrompt)
-			// Re-enter recovery with a new owner object. Immutable finalized bytes must not be rewritten.
 			dispatcher = &ACPDispatcher{Store: controlStore, Sessions: newACPSessionTestContinuity(t, controlStore, ACPBootstrapLimits{})}
 			if err := dispatcher.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
 				t.Fatal(err)

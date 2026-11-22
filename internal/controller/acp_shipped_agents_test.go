@@ -17,10 +17,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// TestShippedCodexAgentsHaveAnEnforceableToolPolicy dispatches every shipped
-// built-in codex Agent's default tool policy through the same normalization
-// and native-policy check a read-intent Task meets, so an example cannot ship
-// a policy that fails every Task at dispatch.
 func TestShippedCodexAgentsHaveAnEnforceableToolPolicy(t *testing.T) {
 	checked := 0
 	err := filepath.WalkDir(filepath.Join("..", "..", "examples"), func(path string, entry fs.DirEntry, err error) error {

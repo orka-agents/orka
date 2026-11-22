@@ -19,8 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
-// WorkspaceRuntimePoolReconciler owns the core-side link and demand. Provider
-// status and attachment acknowledgement remain exclusively provider-written.
 type WorkspaceRuntimePoolReconciler struct {
 	client.Client
 	APIReader client.Reader
@@ -47,9 +45,6 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, fmt.Errorf("workspace RuntimePool link identifies another incarnation")
 	}
 	deleting := !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	// The retention controller owns lifetime expiry and requests API deletion
-	// with the exact workspace UID. Setting desiredState here first would stop
-	// retention before it establishes the metadata deletion/finalizer path.
 	if deleting {
 		if pool.DeletionTimestamp.IsZero() {
 			if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil && !apierrors.IsNotFound(err) {
@@ -81,8 +76,6 @@ func (r *WorkspaceRuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		})).Named("workspace-runtime-pool").Complete(r)
 }
 
-// ValidateExternalWorkspaceUpgrade runs before dispatch controllers start.
-// Pool schema pruning is never authority to recreate a legacy allocation.
 func ValidateExternalWorkspaceUpgrade(ctx context.Context, reader client.Reader) error {
 	var blockers []string
 	pools := &corev1alpha1.RuntimePoolList{}

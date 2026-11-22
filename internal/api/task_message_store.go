@@ -16,9 +16,6 @@ type taskMessageStore struct {
 	messages store.MessageStore
 }
 
-// NewTaskMessageStore binds brokered messaging to the controller-authenticated
-// Task identity. Parent names alone never authorize coordination access.
-// guard must come from the authenticated MCP prompt context.
 func NewTaskMessageStore(reader client.Reader, messages store.MessageStore, taskKey client.ObjectKey, taskUID string, taskProvenanceProtected bool, guard func(context.Context, func(context.Context) error) error) tools.TaskMessageStore {
 	return &taskMessageStore{
 		access: brokeredTaskDataAccess{

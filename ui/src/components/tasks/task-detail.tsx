@@ -65,7 +65,6 @@ const SPEC_VIEWS = [
   { value: 'yaml', label: 'YAML' },
 ] as const
 
-// Tabs that were merged into others, so links and bookmarks to them still land.
 const MERGED_TABS: Record<string, string> = {
   runtime: 'overview',
   execution: 'overview',
@@ -74,8 +73,6 @@ const MERGED_TABS: Record<string, string> = {
   timeline: 'activity',
 }
 
-// Titled like the load-error pages: the header is the page's h1 and names
-// the browser tab.
 function TaskNotFound({ taskId }: { taskId: string }) {
   return (
     <div className="space-y-4">
@@ -100,9 +97,6 @@ function TaskNotFound({ taskId }: { taskId: string }) {
   )
 }
 
-// A forbidden task gets a titled page like the session, agent, and tool
-// detail views: the header names the browser tab, and the card says why and
-// links back to the list.
 function TaskAccessError({ message, forbidden = true }: { message: string; forbidden?: boolean }) {
   return (
     <div className="space-y-4">
@@ -135,11 +129,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const [following, setFollowing] = useState(true)
   const [specView, setSpecView] = useState<'summary' | 'yaml'>('summary')
   const { data: task, isLoading, error: queryTaskError, errorUpdatedAt } = useTask(taskId, following ? 5000 : false)
-  // A failed first load keeps its error page while polling retries it.
   const taskError = useStickyQueryError({ data: task, error: queryTaskError, errorUpdatedAt })
-  // Dependent queries (events, trace, approvals, artifacts) wait until the
-  // task has loaded, and stay off once the task query 404s or 403s, so a
-  // missing or forbidden task generates no hidden dependent traffic.
   const taskMissing = isNotFoundError(taskError)
   const taskForbidden = isForbiddenError(taskError)
   const taskUnavailable = taskMissing || taskForbidden || task === undefined
@@ -149,8 +139,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     task?.metadata.uid,
     !taskUnavailable,
   )
-  // Fork and the Overview's activity need execution-event storage; a 501 means it's off.
-  // While retries are pending, failureReason carries the current fetch failure.
   const taskEventsIssue = taskEventsError ?? taskEventsFailureReason
   const taskEventsUnsupported = taskEventsIssue instanceof ApiError && taskEventsIssue.status === 501
   const taskEventsFailed = Boolean(taskEventsIssue) && !taskEventsUnsupported
@@ -163,9 +151,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const search = useSearch({ from: '/tasks/$taskId' })
-  // Local override gives instant tab response; it is cleared whenever the URL
-  // search changes (deep link, back/forward, external link) so the URL stays the
-  // source of truth and the override can't permanently shadow it.
   const [tabState, setTabState] = useState<{ override: string | null; seen?: string }>({ override: null })
   if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
   const availableTabs = new Set(['overview', 'activity', 'approvals', 'result', 'logs', 'spec'])
@@ -178,22 +163,11 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     setTabState({ override: tab, seen: search.tab })
     navigate({ to: '/tasks/$taskId', params: { taskId }, search: { tab }, replace: true })
   }
-  // Holds the namespace/uid/name identity the dialog was opened for, like the
-  // armed delete, so a namespace switch or same-name recreation closes it.
   const [cancelFor, setCancelFor] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  // Scope the armed delete to the loaded task's namespace+uid+name; a namespace
-  // switch or same-name/new-uid recreation drops a stale confirm so it can't
-  // delete a different task than the one armed.
   const deleteIdentity = `${task?.metadata.namespace ?? ''}/${task?.metadata.uid ?? ''}/${taskId}`
   const deleteArmed = confirmDelete === deleteIdentity
-  // isPending lands a render later; a double click on Confirm must send a
-  // single DELETE.
   const deletingRef = useRef(false)
-  // Arming swaps Delete for Confirm/Cancel and disarming swaps them back, so
-  // the focused button unmounts either way: move focus to Confirm when armed,
-  // and back to Delete after Cancel, Esc, or a failed delete unless focus has
-  // moved elsewhere meanwhile.
   const deleteButtonRef = useRef<HTMLButtonElement>(null)
   const confirmDeleteButtonRef = useRef<HTMLButtonElement>(null)
   const wasDeleteArmedRef = useRef(false)
@@ -213,15 +187,12 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       toast.success(`Task ${name} deleted`)
       navigate({ to: '/tasks' })
     } catch (err) {
-      // Disarm so the header is usable again; the toast carries the reason.
       setConfirmDelete(null)
       toast.error(actionErrorMessage('Failed to delete task', err))
     } finally {
       deletingRef.current = false
     }
   }
-  // Overview data: fetched only when that tab is active so other tabs don't
-  // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
   const overviewActive = activeTab === 'overview' && !taskUnavailable
   const resultActive = activeTab === 'result' && !taskUnavailable
   const taskInFlight = isTaskInFlight(task?.status?.phase)
@@ -235,26 +206,17 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     task?.metadata.uid,
     traceRefetchInterval,
   )
-  // Poll approvals while live and until execution recovery settles after termination.
   const approvalRefetchInterval = following ? 5000 : undefined
-  // A task parked on an approval also loads approvals off the Overview so
-  // the Approvals tab can show how many are pending.
   const waitingForApproval = task !== undefined && !taskUnavailable && isWaitingForApproval(task)
-  // A parked turn's Task is terminal, but the sign-off it waits on stays
-  // decidable, so it is loaded and polled like a live approval.
   const parkedApprovalId = task !== undefined && !taskUnavailable ? activeParkedApprovalId(task) : undefined
   const { data: approvalsResp } = useTaskApprovals(
     taskId,
     overviewActive || waitingForApproval || parkedApprovalId !== undefined,
     approvalRefetchInterval,
-    // An empty or failed read shows no pending approval, so the parked
-    // sign-off itself keeps the poll going.
     taskInFlight || parkedApprovalId !== undefined,
     taskTerminal && !parkedApprovalId,
     task?.metadata.uid,
   )
-  // Terminal tasks reject decisions, so their leftovers are not "pending";
-  // only the sign-off a parked turn waits on still counts.
   const pendingApprovals = (approvalsResp?.approvals ?? []).filter(
     (a) => a.status === 'pending' && (!taskTerminal || a.id === parkedApprovalId),
   ).length
@@ -266,8 +228,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     task?.metadata.uid,
     artifactRefetchInterval,
   )
-  // Polling stops when the task finishes, so fetch once more for what it
-  // published at the end. Artifacts show on both the Overview and Result.
   useEffect(() => {
     if (!taskTerminal || !task?.metadata.uid) return
     const key = `${task.metadata.uid}/${task.status?.phase ?? ''}`
@@ -281,10 +241,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     }
   }, [refetchArtifacts, refetchTrace, overviewActive, resultActive, task?.metadata.uid, task?.status?.phase, taskTerminal])
 
-  // On narrow screens the tab bar scrolls sideways; keep the active tab in
-  // view when it changes (or first renders) without scrolling the page. The
-  // Approvals pending badge arrives with a later fetch and widens its tab and
-  // shifts the ones after it, so a count change re-checks too.
   const tabsScrollRef = useRef<HTMLDivElement>(null)
   const tabsShown = Boolean(task) && !taskMissing && !taskForbidden
   useEffect(() => {
@@ -307,30 +263,20 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     )
   }
 
-  // A 403 is an actionable permission failure, not a missing task; it must
-  // not fall through to "Task not found" just because `task` is undefined.
   if (taskForbidden) {
     return <TaskAccessError message={taskError.message} />
   }
 
-  // Any other failure before the task ever loaded is an error, not a
-  // missing task; a failed refetch keeps showing the task already loaded.
   if (taskError && !taskMissing && !task) {
     return <TaskAccessError forbidden={false} message={taskError instanceof Error ? taskError.message : ''} />
   }
 
-  // A 404 wins over cached data: React Query keeps the last successful `data`
-  // when a refetch fails, so a task deleted after it loaded would otherwise
-  // keep rendering as if it still existed.
   if (taskMissing || !task) {
     return <TaskNotFound taskId={taskId} />
   }
 
-  // The controller's parent annotation is authoritative; the label can be a
-  // hashed selector value for long names.
   const parentTaskName = task.metadata.annotations?.['orka.ai/parent-task-name']?.trim() ||
     task.metadata.labels?.['orka.ai/parent-task']?.trim()
-  // A fork is labeled as a child of its source; name the relation it has.
   const forkSourceName = task.metadata.annotations?.['orka.ai/fork-source-task']?.trim()
   const relatedTaskName = forkSourceName || parentTaskName
 
@@ -370,8 +316,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </Button>
           ) : null}
           <TaskCancelDialog
-            // Remount per Task identity so a reason or error typed for a
-            // replaced Task is not carried over to its successor.
             key={deleteIdentity}
             taskName={task.metadata.name}
             taskUID={task.metadata.uid}
@@ -379,7 +323,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             onOpenChange={(open) => setCancelFor((current) => nextCancelTarget(current, deleteIdentity, open))}
           />
           {isTaskDeleting(task) ? (
-            // The API accepted the delete; finalizers are still running.
             <Button variant="destructive" size="sm" disabled title="Deletion in progress">
               <Trash2 className="mr-2 h-4 w-4" /> Deleting…
             </Button>
@@ -466,7 +409,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="activity">
-          {/* Keyed by the view, so a link from ?tab=trace to ?tab=timeline switches it. */}
           <TaskActivity
             key={activityView}
             taskId={taskId}
@@ -582,9 +524,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                         {task.spec.agentRef.name}
                       </Link>
                     ) : (
-                      // The agent detail route resolves in the dashboard's
-                      // current namespace, so a cross-namespace reference is
-                      // shown qualified instead of linking to the wrong Agent.
                       <span className="font-mono">
                         {task.spec.agentRef.namespace}/{task.spec.agentRef.name}
                       </span>

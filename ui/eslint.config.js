@@ -22,6 +22,7 @@ export default tseslint.config(
     rules: {
       ...reactHooks.configs.recommended.rules,
       "orka/no-comments": "error",
+      "no-empty": ["error", { allowEmptyCatch: true }],
       "react-refresh/only-export-components": [
         "warn",
         { allowConstantExport: true },

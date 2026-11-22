@@ -13,10 +13,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// cancelReasonKey is both the --reason flag and the request body field.
 const cancelReasonKey = "reason"
 
-// newTaskCancelCmd stops a Pending or Running Task without deleting it.
 func newTaskCancelCmd() *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{
@@ -42,8 +40,6 @@ changes nothing.`,
 	return cmd
 }
 
-// newSessionCancelCmd stops a Session's current turn. The Session stays
-// usable for the next message.
 func newSessionCancelCmd() *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{

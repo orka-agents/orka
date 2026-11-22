@@ -170,7 +170,6 @@ func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
 				fixture.request.NativeRestore = nil
 				fixture.server.cfg.Provider.AuthMethodID = "unsupported-test-auth"
 				sealRequest(t, &fixture.request.Metadata.RequestDigest, fixture.request)
-				// An ordinary create must not claim or remove another native operation's journal.
 				unrelatedJournal = filepath.Join(fixture.journal, "unrelated-evidence")
 				if err := os.MkdirAll(fixture.journal, 0o700); err != nil {
 					t.Fatal(err)

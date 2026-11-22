@@ -50,7 +50,6 @@ func TestCommentOnIssueTool_Metadata(t *testing.T) {
 		}
 	}
 
-	// Verify all properties exist
 	props, ok := schema[jsonSchemaPropertiesField].(map[string]any)
 	if !ok {
 		t.Fatal("schema missing properties")
@@ -358,7 +357,6 @@ func TestCommentOnIssueTool_EmojiMarkdownContent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify the full markdown body was sent to GitHub
 	if receivedBody[githubBodyField] != markdownBody {
 		t.Errorf("expected markdown body to be preserved, got: %v", receivedBody[githubBodyField])
 	}

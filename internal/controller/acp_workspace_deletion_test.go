@@ -48,7 +48,6 @@ func TestDeletingSessionTaskSuspendsBeforeRetirementAndArchival(t *testing.T) {
 	require.Len(t, attempts.Items, 1)
 	require.Equal(t, control.attempt.ID, attempts.Items[0].Spec.ID)
 
-	// Physical retirement alone must not release the Task's archival authority.
 	digest, err := taskScopedRuntimeSessionCleanupDigest(task.UID, task.Status.Execution.Attempt,
 		task.Status.Execution.RuntimeInstanceID, task.Status.Execution.RuntimeSessionUID,
 		task.Status.Execution.RuntimeSessionGeneration)

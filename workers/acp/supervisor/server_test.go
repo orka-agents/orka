@@ -32,32 +32,20 @@ const linuxGOOS = "linux"
 
 const providerProxyCanaryMode = "provider-proxy-canary"
 
-// credentialEchoMode makes the fake agent echo its provider credential through
-// every update channel.
 const credentialEchoMode = "credential-echo"
 
-// genAITelemetryMode makes one model call through the provider proxy, runs a
-// tool call and reports turn usage, so GenAI spans follow the real prompt path.
 const genAITelemetryMode = "genai-telemetry"
 const providerProjectionCanaryMode = "provider-projection-canary"
 const providerProjectionCanaryValue = "projected"
 const assistantBurstMode = "assistant-burst"
 const toolBurstRPCErrorMode = "tool-burst-rpc-error"
 
-// adapterResumeMode exits after every prompt and advertises session/resume,
-// honoring a resume of the persisted provider session from a fresh process.
 const adapterResumeMode = "resume-after-exit"
 
-// adapterResumeFailureMode advertises resume but rejects the handshake.
 const adapterResumeFailureMode = "resume-fails-after-exit"
 
-// adapterExitAfterPromptMode exits after every prompt without advertising
-// session/resume, so an idle session loses its agent for good.
 const adapterExitAfterPromptMode = "exit-after-prompt"
 
-// adapterResumeModelCallMode is adapterResumeMode plus a model request from the
-// child during session/resume, as Claude Agent ACP sends; the provider proxy's
-// status code is recorded in helperResumeModelCallFile in the child's HOME.
 const adapterResumeModelCallMode = "resume-after-exit-model-call"
 const helperResumeModelCallFile = "acp-helper-resume-model-call"
 const helperProviderSessionFile = "acp-helper-provider-session"
@@ -272,8 +260,6 @@ func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.
 	create := testCreateSessionRequest(t, cfg, profile)
 	now := time.Now().UTC()
 
-	// Simulate a create that allocated its identity and then failed during
-	// session initialization.
 	server.mu.Lock()
 	server.sessions[create.RuntimeSessionID] = &sessionState{id: create.RuntimeSessionID, creating: true}
 	server.tombstoneFailedCreateLocked(create.RuntimeSessionID, create.Metadata, now, nil)
@@ -287,8 +273,6 @@ func TestSupervisorTombstonesFailedCreateToPreventIdentityExhaustion(t *testing.
 		t.Fatalf("failed create did not record a matching tombstone: %#v", tombstone)
 	}
 
-	// Replaying the same create must not allocate another identity; it is
-	// classified against the tombstone rather than recreated.
 	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
 	if replay.Code == http.StatusCreated {
 		t.Fatalf("replayed failed create allocated a new session: body=%s", replay.Body.String())
@@ -415,8 +399,6 @@ func TestSupervisorCreateAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode prompt events: %v\n%s", err, response.Body.String())
 	}
-	// Assistant text arrives in one or more updates: a suffix that could begin
-	// a session credential is held until the stream ends.
 	last := len(events) - 1
 	if len(events) < 3 || events[0].Type != harnessv2.EventAccepted || events[last].Type != harnessv2.EventCompleted {
 		t.Fatalf("unexpected event sequence: %#v", events)
@@ -926,7 +908,6 @@ func TestSupervisorUsesCodexFinalAnswerAsTerminalResult(t *testing.T) {
 		),
 	}
 	for _, event := range events {
-		// An oversized chunk is split into pieces within the per-event bound.
 		mapped, err := server.mapRuntimeEvents(state, prompt, event)
 		if err != nil {
 			t.Fatalf("map phased assistant event: %v", err)
@@ -960,8 +941,6 @@ func TestSupervisorUsesCodexFinalAnswerAsTerminalResult(t *testing.T) {
 	}
 }
 
-// codex-acp 2.x withholds message phases from non-AIR clients, so a Codex
-// session falls back to its last named message.
 func TestSupervisorUsesLastCodexMessageWithoutPhases(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -989,7 +968,6 @@ func TestSupervisorUsesLastCodexMessageWithoutPhases(t *testing.T) {
 			now := time.Now().UTC()
 			events := []acp.PromptEvent{
 				testAssistantMessagePromptEventWithPhase(t, 1, now, "commentary-message", "", "I'll inspect the repository.\n"),
-				// Adapter notices carry no messageId; a later message supersedes them.
 				testAssistantMessagePromptEventWithPhase(t, 2, now, "", "", "Warning: slow\n\n"),
 				testAssistantMessagePromptEventWithPhase(t, 3, now, "final-message", "", `{"schemaVersion":1,`),
 				testAssistantMessagePromptEventWithPhase(t, 4, now, "final-message", "", `"ok":true}`),
@@ -1161,9 +1139,6 @@ func TestSupervisorCreateRejectionHidesUnclassifiedValidationErrors(t *testing.T
 	}
 }
 
-// The controller acts on the harness client's view of the rejection, which
-// enforces its own status/code mapping: the rejection must arrive as a
-// definitive, non-retryable HTTP client error carrying the fixed message.
 func TestSupervisorCreateRejectionIsDefinitiveThroughHarnessClient(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	server.cfg.Provider.ValidateWorkspace = func(acp.SessionPaths) error {
@@ -1316,8 +1291,6 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 			return map[string]string{"CODEX_API_KEY": proxy.Credential, "CODEX_CONFIG": string(config)}, nil
 		}
 	}
-	// ACP children run as a distinct UID and need search permission on the
-	// two test-owned ancestors above the private session tree.
 	sessionTestDir := t.TempDir()
 	for _, dir := range []string{sessionTestDir, filepath.Dir(sessionTestDir)} {
 		if err := os.Chmod(dir, 0o711); err != nil {
@@ -1608,8 +1581,6 @@ func TestSupervisorACPHelper(t *testing.T) {
 				continue
 			}
 			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || mode == adapterExitAfterPromptMode {
-				// The child's HOME is the session home, which real agents use
-				// for the state a fresh adapter process resumes from.
 				_ = os.WriteFile(filepath.Join(os.Getenv("HOME"), helperProviderSessionFile), []byte(sessionID), 0o600)
 			}
 			if mode == providerProjectionCanaryMode && !validSupervisorProjection(message.Params) {
@@ -1694,7 +1665,6 @@ func TestSupervisorACPHelper(t *testing.T) {
 				promptID = nil
 			}
 			if mode == adapterResumeMode || mode == adapterResumeFailureMode || mode == adapterResumeModelCallMode || mode == adapterExitAfterPromptMode {
-				// Simulate an adapter crash while the session is idle.
 				os.Exit(0)
 			}
 		case acp.MethodSessionCancel:
@@ -1776,9 +1746,6 @@ func validateProviderProxyChildIsolation() error {
 	return nil
 }
 
-// recordProviderCallDuringResume sends a model request from the adapter child
-// while session/resume is in flight and records the provider proxy's status
-// code in the child's HOME.
 func recordProviderCallDuringResume() {
 	var status string
 	baseURL, err := providerProxyBaseURLFromChild()
@@ -2017,9 +1984,6 @@ func TestSupervisorFinalizesPreparedPublicationBeforeDeletion(t *testing.T) {
 		t.Fatalf("fresh delete after tombstone carried classification=%#v", freshError.Classification)
 	}
 
-	// Replaying the original still-valid create after deletion must not
-	// resurrect the session and re-run its prompt; the deletion tombstone
-	// classifies the create as a duplicate.
 	replayedCreate := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
 	if replayedCreate.Code == http.StatusOK {
 		t.Fatalf("replayed create after deletion recreated the session: body=%s", replayedCreate.Body.String())
@@ -2142,8 +2106,6 @@ func TestSupervisorDrainRetainsPublicationPreparedSessionBeforeSettlement(t *tes
 	}
 	server.mu.Lock()
 	defer server.mu.Unlock()
-	// Cleanup can already have observed the unsettled prompt and cleared its
-	// schedule. Either ordering must retain the session until settlement.
 	if server.sessions[sessionID] != state || state.descriptor.State != harnessv2.RuntimeSessionStatePublicationPrepared || state.prompt.settlement != nil {
 		t.Fatal("publication-prepared RuntimeSession changed before settlement")
 	}
@@ -2263,8 +2225,6 @@ func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
 		t.Fatal("in-window tombstone was dropped")
 	}
 
-	// Sustained churn within the capability window must not evict an older
-	// tombstone while its create operation can still be replayed.
 	const inWindowTombstones = 4352
 	for i := range inWindowTombstones {
 		uid := harnessv2.RuntimeSessionUID(fmt.Sprintf("session-%05d", i))
@@ -2281,11 +2241,6 @@ func TestPruneTombstonesLockedRetainsEveryUnexpiredReplay(t *testing.T) {
 	}
 }
 
-// A create request rebuilt by the controller for the same attempt (fresh
-// expiry, fresh workspace capability) reaches a supervisor that already created
-// the session from an earlier send. The supervisor must answer digest_conflict
-// with the recorded phase and keep the resident session in status so the
-// controller can adopt it.
 func TestCreateSessionRebuiltRequestConflictsWhileSessionStaysResident(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)

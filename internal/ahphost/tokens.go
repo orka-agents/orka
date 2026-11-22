@@ -4,9 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package ahphost serves the Agent Host Protocol: connection tokens, the
-// per-user host core and its journal, the WebSocket endpoint, and the session
-// backends that run sessions.
 package ahphost
 
 import (
@@ -27,31 +24,22 @@ import (
 )
 
 const (
-	// TokenPrefix marks AHP connection tokens so secret scanners can find them.
-	TokenPrefix = "orka_ahp_"
-	// DefaultTokenTTL is the lifetime of a token minted without one.
-	DefaultTokenTTL = 30 * 24 * time.Hour
-	// DefaultMaxTokenTTL caps any requested lifetime.
+	TokenPrefix        = "orka_ahp_"
+	DefaultTokenTTL    = 30 * 24 * time.Hour
 	DefaultMaxTokenTTL = 90 * 24 * time.Hour
 
 	maxTokenLength       = 256
 	maxDescriptionLength = 256
 )
 
-// ErrInvalidToken is returned for a missing, unknown, revoked or expired token.
 var ErrInvalidToken = errors.New("invalid AHP connection token")
 
-// ErrInvalidMintRequest is returned when a mint request is refused as asked.
 var ErrInvalidMintRequest = errors.New("invalid AHP token request")
 
-// ErrTooManyTokens is returned by Mint for a person who already holds
-// MaxActiveTokensPerUser tokens that are neither revoked nor expired.
 var ErrTooManyTokens = errors.New("too many active AHP tokens")
 
-// MaxActiveTokensPerUser bounds the live tokens one person holds.
 const MaxActiveTokensPerUser = 50
 
-// Principal is the user behind an AHP connection.
 type Principal struct {
 	UserKey   string
 	Issuer    string
@@ -64,7 +52,6 @@ type Principal struct {
 	tokenHash string
 }
 
-// UserKey derives the opaque key that scopes a user's AHP state.
 func UserKey(issuer, subject string) string {
 	sum := sha256.Sum256([]byte(issuer + "\x00" + subject))
 	return hex.EncodeToString(sum[:])
@@ -75,21 +62,15 @@ func hashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// MintRequest describes a token to mint for a person signed in themselves.
 type MintRequest struct {
-	Issuer    string
-	Subject   string
-	Username  string
-	Namespace string
-	// TTL is the requested lifetime; zero means DefaultTokenTTL, or the
-	// maximum when that is lower.
-	TTL time.Duration
-	// Description names the token for its owner, for example the device it
-	// was pasted into.
+	Issuer      string
+	Subject     string
+	Username    string
+	Namespace   string
+	TTL         time.Duration
 	Description string
 }
 
-// MintedToken is a new token. The secret is returned only once.
 type MintedToken struct {
 	ID          string
 	Token       string
@@ -97,7 +78,6 @@ type MintedToken struct {
 	ExpiresAt   time.Time
 }
 
-// TokenInfo describes a token without its secret.
 type TokenInfo struct {
 	ID          string
 	Description string
@@ -107,21 +87,13 @@ type TokenInfo struct {
 	RevokedAt   *time.Time
 }
 
-// TokenService mints, verifies and revokes AHP connection tokens.
 type TokenService struct {
-	Store  store.AHPStore
-	MaxTTL time.Duration
-	Now    func() time.Time
-	// OnRevoke is called after a token is revoked, to close its connections.
+	Store    store.AHPStore
+	MaxTTL   time.Duration
+	Now      func() time.Time
 	OnRevoke func(tokenID string)
-	// Admit, when set, decides whether a token's owner may still connect, for
-	// example whether the OIDC subject allowlist still admits them. Tokens of
-	// an owner it refuses are invalid, at the door and on every recheck.
-	Admit func(Principal) error
+	Admit    func(Principal) error
 
-	// minting serializes mints, so concurrent requests cannot all pass the
-	// active-token check before any is stored. The AHP host serves from one
-	// process at a time.
 	minting sync.Mutex
 }
 
@@ -139,7 +111,6 @@ func (s *TokenService) maxTTL() time.Duration {
 	return DefaultMaxTokenTTL
 }
 
-// Mint creates a token for an authenticated person.
 func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, error) {
 	if strings.TrimSpace(req.Issuer) == "" || strings.TrimSpace(req.Subject) == "" {
 		return MintedToken{}, fmt.Errorf("%w: an issuer and subject are required", ErrInvalidMintRequest)
@@ -153,7 +124,6 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 	}
 	ttl := req.TTL
 	if ttl == 0 {
-		// An omitted lifetime fits under a maximum set below the default.
 		ttl = min(DefaultTokenTTL, s.maxTTL())
 	}
 	if ttl < time.Minute || ttl > s.maxTTL() {
@@ -203,7 +173,6 @@ func (s *TokenService) Mint(ctx context.Context, req MintRequest) (MintedToken, 
 	return MintedToken{ID: id, Token: token, Description: description, ExpiresAt: expires}, nil
 }
 
-// Verify resolves a presented token to its principal.
 func (s *TokenService) Verify(ctx context.Context, token string) (Principal, error) {
 	token = strings.TrimSpace(token)
 	if !strings.HasPrefix(token, TokenPrefix) || len(token) > maxTokenLength {
@@ -212,7 +181,6 @@ func (s *TokenService) Verify(ctx context.Context, token string) (Principal, err
 	return s.verifyHash(ctx, hashToken(token))
 }
 
-// Recheck confirms that a connection's token is still valid.
 func (s *TokenService) Recheck(ctx context.Context, principal Principal) error {
 	current, err := s.verifyHash(ctx, principal.tokenHash)
 	if err != nil {
@@ -253,7 +221,6 @@ func (s *TokenService) verifyHash(ctx context.Context, hash string) (Principal, 
 	return principal, nil
 }
 
-// List returns a person's tokens without their secrets.
 func (s *TokenService) List(ctx context.Context, issuer, subject string) ([]TokenInfo, error) {
 	records, err := s.Store.ListAHPTokens(ctx, UserKey(issuer, subject))
 	if err != nil {
@@ -269,7 +236,6 @@ func (s *TokenService) List(ctx context.Context, issuer, subject string) ([]Toke
 	return infos, nil
 }
 
-// Revoke revokes one of a person's tokens and closes its connections.
 func (s *TokenService) Revoke(ctx context.Context, issuer, subject, id string) error {
 	if err := s.Store.RevokeAHPToken(ctx, UserKey(issuer, subject), id, s.now()); err != nil {
 		return err

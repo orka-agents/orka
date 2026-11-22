@@ -32,9 +32,6 @@ import (
 	"github.com/orka-agents/orka/workers/acp/supervisor"
 )
 
-// RunACPTraceBoundary is test-only glue for the external test package: API imports
-// controller, so task creation cannot be imported into controller's own tests.
-// It uses the existing production reserve/execute sequence and real supervisor.
 func RunACPTraceBoundary(t *testing.T, tasks []*corev1alpha1.Task, agent *corev1alpha1.Agent, tracer trace.Tracer, barrierURL string) {
 	t.Helper()
 	scheme := runtime.NewScheme()

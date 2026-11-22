@@ -46,8 +46,6 @@ func TestCancelPromptAfterDisconnectedSessionCleanup(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	// Reproduce the Task-deadline ordering: disconnect first, let the
-	// supervisor retire the child, then request the exact cancellation proof.
 	cancel()
 	awaitRecorder(t, done, "disconnected prompt did not settle")
 	awaitDeletedRuntimeSession(t, server, create.RuntimeSessionID)
@@ -72,8 +70,6 @@ func newCancellationRetentionFixture(t *testing.T, settlement harnessv2.PromptSe
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
 	prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
-	// Renewed prompts outlive their admission capability. The final proof
-	// must survive pruning that operation from the replay journal.
 	prompt.Metadata.ExpiresAt = time.Now().UTC().Add(-time.Minute)
 	sealRequest(t, &prompt.Metadata.RequestDigest, prompt)
 	state := &sessionState{
@@ -181,8 +177,6 @@ func TestRetiredCancellationRequiresExactIdentityAndAuthority(t *testing.T) {
 			path := fmt.Sprintf("/v2/runtime-sessions/session-1/prompts/%s/cancel", request.Metadata.PromptID)
 			var req *http.Request
 			if test.name == "profile schema" || test.name == "expired" {
-				// Invalid metadata cannot be signed; it must fail request
-				// validation before operation-capability authorization.
 				body, err := json.Marshal(request)
 				if err != nil {
 					t.Fatal(err)

@@ -26,9 +26,6 @@ const (
 
 var errFoundryCleanupUnproven = errors.New("remote Foundry execution cleanup could not be proven")
 
-// foundryBrokerContext is constructed solely from authenticated controller
-// requests. The ACP child cannot select an owner, target, lease, or operation.
-// Keep the wire contract in sync with agent-runtime-foundry/broker_protocol.go.
 type foundryBrokerContext struct {
 	Protocol                 string                  `json:"protocol"`
 	Owner                    harnessv2.Fence         `json:"owner"`
@@ -55,8 +52,6 @@ type foundryBrokerProof struct {
 	ActiveInvocations    uint64 `json:"activeInvocations"`
 	AmbiguousInvocations uint64 `json:"ambiguousInvocations"`
 	CreatePending        bool   `json:"createPending"`
-	// Historical creation evidence remains true after confirmed deletion. The
-	// broker's retired state and proof, not this flag, establish retirement.
 	RemoteSessionCreated bool   `json:"remoteSessionCreated"`
 	LeaseGeneration      uint64 `json:"leaseGeneration"`
 	LeaseExpiresAt       string `json:"leaseExpiresAt"`
@@ -178,8 +173,6 @@ func (s *foundryBrokerSession) inferenceContext(promptID string, sequence uint64
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
-// renew is called outside the supervisor mutex. The broker acknowledges the
-// remote lease before the supervisor publishes a successful local renewal.
 func (s *foundryBrokerSession) renew(ctx context.Context, promptID string, lease harnessv2.PromptLease) error {
 	s.mu.Lock()
 	prompt := s.prompt
@@ -214,8 +207,6 @@ func (s *foundryBrokerSession) renew(ctx context.Context, promptID string, lease
 	return nil
 }
 
-// startSettlement closes local admission synchronously; cleanup itself uses a
-// bounded independent context so an abandoned ACP connection cannot cancel it.
 func (s *foundryBrokerSession) startSettlement(promptID string) (*foundryBrokerPrompt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -230,8 +221,6 @@ func (s *foundryBrokerSession) startSettlement(promptID string) (*foundryBrokerP
 	if prompt.settleDone != nil {
 		select {
 		case <-prompt.settleDone:
-			// A failed observation is not a proof. A later cleanup request
-			// may retry the same idempotent control operation.
 			prompt.settleDone = nil
 		default:
 			return prompt, nil

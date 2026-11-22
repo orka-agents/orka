@@ -56,8 +56,6 @@ func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
 			}
 		}
 	}
-	// A non-default authority is part of the issuer instance; the record
-	// names it by digest, never as a URL.
 	sovereign := delegatedRequest(now.Add(-time.Minute))
 	instance := sovereign.AgentIdentity.Identity.Instance
 	sovereign.AgentIdentity.Identity.Instance = instance + "@https://proxy.example/Entra"
@@ -79,8 +77,6 @@ func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
 	}
 }
 
-// auditedResolver returns a Delegated-mode resolver whose identity use
-// records are captured in lines.
 func auditedResolver(t *testing.T, now time.Time, source AgentIdentityTokenSource, lines *[]string) *KubernetesResolver {
 	t.Helper()
 	reader := ctrlfake.NewClientBuilder().WithScheme(resolverScheme(t)).
@@ -257,8 +253,6 @@ func TestRequesterPseudonymKeepsOpaqueClaimsExact(t *testing.T) {
 	}
 }
 
-// A resolver built like an AI worker's (no AuditLog, no identity source, no
-// process logger) still writes exactly one record for a refused call.
 func TestAgentIdentityRefusalWithoutAuditLogIsRecorded(t *testing.T) {
 	var output bytes.Buffer
 	previous := agentIdentityAuditOutput
@@ -282,10 +276,6 @@ func TestAgentIdentityRefusalWithoutAuditLogIsRecorded(t *testing.T) {
 	}
 }
 
-// TestAgentIdentityPolicyChangedWhileIssuingIsAPolicyRefusal covers an
-// outbound access policy deleted while the issuer answers: the refusal is
-// recorded as the policy's, not the Task's binding, and carries no
-// credential.
 func TestAgentIdentityPolicyChangedWhileIssuingIsAPolicyRefusal(t *testing.T) {
 	now := time.Now()
 	var lines []string

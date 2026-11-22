@@ -18,42 +18,17 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// externalEffectLeaseSettlementMargin is the slack an effect lease keeps beyond
-// its bounded call duration so a response returned at the deadline can still be
-// committed under a valid lease.
 const externalEffectLeaseSettlementMargin = time.Minute
 
-// Field names inside external-effect request digests.
 const (
 	identityKey = "identity"
 	requestKey  = "request"
 )
 
-// maxACPExternalEffectCallDuration bounds one in-flight brokered custom-Tool
-// call so its outcome can always be committed while the ledger lease is still
-// valid. Without this bound, a call that outlives the lease plus the
-// reconciliation grace period is marked OutcomeUnknown by
-// reconcileExpiredExternalEffects, and a late upstream success can never be
-// settled. Publisher-backed effects instead honor the configured publish
-// timeout (envACPPublisherEffectTimeout) and size their lease from it, so the
-// invariant lease > call duration holds for every effect kind.
 const maxACPExternalEffectCallDuration = 4 * time.Minute
 
-// envACPPublisherEffectTimeout mirrors the Workspace/Publisher's
-// ORKA_PUBLISHER_PUBLISH_TIMEOUT on the controller. When the publisher is
-// configured with a publish timeout above the default external-effect call
-// bound, set the same value on the controller so publisher-backed effects and
-// their ledger leases are sized to the real operation deadline instead of
-// truncating it.
 const envACPPublisherEffectTimeout = "ORKA_PUBLISHER_PUBLISH_TIMEOUT"
 
-// externalEffectCallTimeout returns the bounded call duration for one external
-// effect. Brokered custom-Tool calls keep the fixed clamp their descriptors
-// were admitted under (customACPMCPToolDescriptor rejects longer HTTP
-// timeouts); publisher-backed effects honor the controller-visible publish
-// timeout so legitimately configured long publisher operations are not
-// truncated. The claimed lease is always sized as call timeout plus settlement
-// margin, so no effect can run past its own lease.
 func externalEffectCallTimeout(identity store.ExternalEffectIdentity) time.Duration {
 	if !publisherBackedExternalEffectKind(identity.Kind) {
 		return maxACPExternalEffectCallDuration
@@ -75,10 +50,6 @@ func publisherBackedExternalEffectKind(kind string) bool {
 
 var externalEffectLeaseSequence atomic.Uint64
 
-// runACPExternalEffect persists a canonical pre-execution identity before one
-// idempotent publisher/broker operation. A committed response is replayed from
-// the ledger; an in-flight identity is reclaimed only under the current epoch
-// and exact request digest.
 func runACPExternalEffect[T any](
 	ctx context.Context,
 	d *ACPDispatcher,
@@ -115,14 +86,8 @@ func runExternalEffectWithReplay[T any](
 	)
 }
 
-// errExternalEffectAlreadyStarted reports an effect a previous delivery
-// already claimed, which a run that never reclaims refuses to execute again.
 var errExternalEffectAlreadyStarted = errors.New("external effect was already started")
 
-// runExternalEffectOnceWithReplay is runExternalEffectWithReplay for an
-// effect that is not idempotent: an identity a previous delivery claimed is
-// never claimed again, even after its lease expires, so a request that may
-// have been delivered is never sent twice.
 func runExternalEffectOnceWithReplay[T any](
 	ctx context.Context,
 	effects store.ExternalEffectStore,
@@ -136,12 +101,6 @@ func runExternalEffectOnceWithReplay[T any](
 	)
 }
 
-// runExternalEffectWithReplayCallTimeout runs one external effect with an
-// explicit bounded call duration. Callers that know the operation's real
-// configured deadline (for example a brokered Tool's spec.http.timeout) use it
-// so the effect call and the ledger lease — always sized as call timeout plus
-// settlement margin — cover the full legitimate operation instead of the
-// per-kind default clamp.
 func runExternalEffectWithReplayCallTimeout[T any](
 	ctx context.Context,
 	effects store.ExternalEffectStore,
@@ -192,8 +151,6 @@ func runExternalEffectWithReplayMode[T any](
 		return response, true, nil
 	}
 	if !reclaim && effect.State == store.ExternalEffectFailed && len(effect.Response) > 0 {
-		// A run that never reclaims settles a definite failure with its
-		// answer, so a redelivery replays that answer.
 		var response T
 		if json.Unmarshal(effect.Response, &response) == nil {
 			return response, true, nil
@@ -205,9 +162,6 @@ func runExternalEffectWithReplayMode[T any](
 	if !reclaim && effect.State == store.ExternalEffectInFlight {
 		return zero, false, errExternalEffectAlreadyStarted
 	}
-	// Size the lease from this effect's bounded call duration so the outcome of
-	// a call that runs to its deadline can still be committed under a valid
-	// lease, regardless of the configured per-kind timeout.
 	leaseExpiry := now.Add(callTimeout + externalEffectLeaseSettlementMargin)
 	leaseOwner := externalEffectLeaseOwner(fence, identity, now)
 	claimed, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
@@ -218,34 +172,17 @@ func runExternalEffectWithReplayMode[T any](
 	if err != nil {
 		return zero, false, err
 	}
-	// Bound the call to the duration the claimed lease accounts for. A call
-	// that ran past the lease plus the reconciliation grace period would be
-	// classified OutcomeUnknown while still in flight, making a late success
-	// permanently unsettleable.
 	callCtx, cancelCall := context.WithTimeout(ctx, callTimeout)
 	response, callErr := call(callCtx)
-	// Capture the call context's error before cancelCall() so a deadline that
-	// elapsed during the call is still observable (cancelCall would otherwise
-	// overwrite it with context.Canceled).
 	callCtxErr := callCtx.Err()
 	cancelCall()
 	if callErr != nil {
-		// Leave the exact effect in-flight. The same identity/digest may be
-		// reclaimed and classified by a later reconciliation; a different request
-		// cannot reuse it.
 		return zero, false, callErr
 	}
 	if callCtxErr != nil {
-		// The effect implementation ignored cancellation and returned a result
-		// after its bounded call deadline had already elapsed. The configured
-		// tool/publisher timeout expired, so the response must not be committed
-		// as Succeeded; leave the effect in-flight for explicit reconciliation.
 		return zero, false, callCtxErr
 	}
 	if err := ctx.Err(); err != nil {
-		// The side effect may have crossed its external boundary, but prompt
-		// authority was revoked before a response could be committed. Leave the
-		// ledger in-flight for explicit reconciliation rather than claiming success.
 		return zero, false, err
 	}
 	encoded, err := json.Marshal(response)
@@ -276,11 +213,6 @@ func externalEffectLeaseOwner(fence store.ControllerEpochFence, identity store.E
 
 const defaultACPExternalEffectRetryDelay = 5 * time.Second
 
-// runACPExternalEffectWithRetry retries the same immutable external-effect
-// operation while retaining its controller-side lease until it commits, a
-// non-retryable response is proven, or the caller's bounded reconciliation
-// context expires. Publisher operations are idempotent by operation ID, and
-// prompt input is never replayed.
 func runACPExternalEffectWithRetry[T any](
 	ctx context.Context,
 	d *ACPDispatcher,
@@ -347,9 +279,6 @@ func retryableACPExternalEffectError(err error) bool {
 	if errors.Is(err, store.ErrConflict) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
-	// Transport failures intentionally do not expose a typed upstream response.
-	// Their side-effect outcome is ambiguous and must be reconciled with the same
-	// durable identity rather than classified as a deterministic request error.
 	return true
 }
 
@@ -469,12 +398,6 @@ func (d *ACPDispatcher) reconcileExpiredExternalEffects(ctx context.Context, tas
 	return d.reconcileMCPApprovalExecutions(ctx, fence, tasks, approvalEffects)
 }
 
-// RunExternalEffectWithReplayCallTimeout runs one idempotent external effect
-// from outside the ACP dispatcher, such as the controller's connector-tool
-// endpoint, with the same reservation, lease, and replay semantics the ACP
-// broker uses. callTimeout is the caller's real operation deadline, so the
-// effect call and its ledger lease cover a legitimately long tool timeout
-// instead of the per-kind clamp.
 func RunExternalEffectWithReplayCallTimeout[T any](
 	ctx context.Context,
 	effects store.ExternalEffectStore,
@@ -487,8 +410,6 @@ func RunExternalEffectWithReplayCallTimeout[T any](
 	return runExternalEffectWithReplayCallTimeout(ctx, effects, fence, identity, request, callTimeout, call)
 }
 
-// SettleExternalEffect records a terminal state for an effect whose call
-// returned an error, so the ledger never shows it as still in flight.
 func SettleExternalEffect(
 	ctx context.Context,
 	effects store.ExternalEffectStore,
@@ -499,14 +420,8 @@ func SettleExternalEffect(
 	return settleExternalEffectStore(ctx, effects, fence, identity, state, nil)
 }
 
-// ErrExternalEffectNotPending reports an effect another execution moved out
-// of Pending (it is in flight, or settled); only that execution settles it.
 var ErrExternalEffectNotPending = errors.New("external effect is no longer pending")
 
-// SettlePendingExternalEffect moves an effect that is still exactly Pending
-// (reserved, never started) to state. An effect already in state is left
-// as is; one in flight or settled otherwise belongs to another execution and
-// is reported with ErrExternalEffectNotPending, never transitioned.
 func SettlePendingExternalEffect(
 	ctx context.Context,
 	effects store.ExternalEffectStore,
@@ -531,8 +446,6 @@ func SettlePendingExternalEffect(
 	if effect.State != store.ExternalEffectPending {
 		return fmt.Errorf("%w: external effect %s is %s", ErrExternalEffectNotPending, effect.ID, effect.State)
 	}
-	// Pinned to the Pending state and version just read: an execution that
-	// claims the record meanwhile makes this transition fail instead.
 	if _, err := effects.TransitionExternalEffect(ctx, store.ExternalEffectTransition{
 		ID: effect.ID, Fence: fence, ExpectedVersion: effect.Version, ExpectedState: store.ExternalEffectPending,
 		NewState: state, RequestDigest: effect.RequestDigest, ExpectedLeaseOwner: effect.LeaseOwner, UpdatedAt: time.Now().UTC(),
@@ -545,9 +458,6 @@ func SettlePendingExternalEffect(
 	return nil
 }
 
-// ExternalEffectRequestDigest is the digest under which
-// RunExternalEffectWithReplayCallTimeout reserves an effect, so a caller can
-// recognize its own committed record.
 func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
 	return acpDomainDigest("external-effect-request", map[string]any{
 		identityKey: identity, requestKey: request,

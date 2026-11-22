@@ -22,18 +22,15 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// Client is an HTTP client for the Orka API.
 type Client struct {
-	BaseURL    string
-	Token      string
-	TxnToken   string
-	Namespace  string
-	HTTPClient *http.Client
-	// NativeSessionMaxBytes bounds migration bundles independently of ordinary API responses.
+	BaseURL               string
+	Token                 string
+	TxnToken              string
+	Namespace             string
+	HTTPClient            *http.Client
 	NativeSessionMaxBytes int
 }
 
-// NewWithNamespace creates a new Orka API client with a default namespace.
 func NewWithNamespace(baseURL, token, namespace string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
@@ -43,17 +40,14 @@ func NewWithNamespace(baseURL, token, namespace string) *Client {
 	}
 }
 
-// ListOptions contains options for list operations.
 type ListOptions struct {
 	Namespace string
 }
 
-// GetOptions contains options for get operations.
 type GetOptions struct {
 	Namespace string
 }
 
-// AgentSummary is a lightweight representation of an agent for list display.
 type AgentSummary struct {
 	Name    string `json:"name"`
 	Model   string `json:"model,omitempty"`
@@ -61,10 +55,8 @@ type AgentSummary struct {
 	Active  int    `json:"activeTasks"`
 }
 
-// AgentDetail is the full agent object returned by the API.
 type AgentDetail map[string]any
 
-// agentListResponse matches the API ListResponse shape.
 type agentListResponse struct {
 	Items    []AgentDetail `json:"items"`
 	Metadata struct {
@@ -73,7 +65,6 @@ type agentListResponse struct {
 	} `json:"metadata"`
 }
 
-// ListAgents returns all agents from the API.
 func (c *Client) ListAgents(ctx context.Context, opts ListOptions) ([]AgentSummary, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/agents")
 	if err != nil {
@@ -102,7 +93,6 @@ func (c *Client) ListAgents(ctx context.Context, opts ListOptions) ([]AgentSumma
 	return summaries, nil
 }
 
-// GetAgent returns full details for a single agent.
 func (c *Client) GetAgent(ctx context.Context, name string, opts GetOptions) (*AgentDetail, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/agents/" + url.PathEscape(name))
 	if err != nil {
@@ -126,7 +116,6 @@ func (c *Client) GetAgent(ctx context.Context, name string, opts GetOptions) (*A
 	return &detail, nil
 }
 
-// StreamChat sends a chat message and returns an SSE reader for streaming the response.
 func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *http.Response, error) {
 	if req.Namespace == "" && c.Namespace != "" {
 		req.Namespace = c.Namespace
@@ -169,7 +158,6 @@ func (c *Client) StreamChat(ctx context.Context, req ChatRequest) (*SSEReader, *
 	return NewSSEReader(resp.Body), resp, nil
 }
 
-// GetChatConfig fetches the chat configuration from the server.
 func (c *Client) GetChatConfig(ctx context.Context) (*ChatConfigResponse, error) {
 	body, err := c.doGet(ctx, c.BaseURL+"/api/v1/chat/config")
 	if err != nil {
@@ -254,7 +242,6 @@ func (c *Client) resourceURL(path string, query map[string]string) (string, erro
 	return u.String(), nil
 }
 
-// DoJSON sends an HTTP request with an optional JSON body and decodes the JSON response into a generic value.
 func (c *Client) DoJSON(ctx context.Context, method, path string, query map[string]string, body []byte) (any, error) {
 	reqURL, err := c.resourceURL(path, query)
 	if err != nil {
@@ -274,7 +261,6 @@ func (c *Client) DoJSON(ctx context.Context, method, path string, query map[stri
 	return out, nil
 }
 
-// Stream opens a streaming GET request for Server-Sent Events. The caller must close the returned body.
 func (c *Client) Stream(ctx context.Context, path string, query map[string]string) (io.ReadCloser, error) {
 	reqURL, err := c.resourceURL(path, query)
 	if err != nil {
@@ -296,7 +282,6 @@ func (c *Client) Stream(ctx context.Context, path string, query map[string]strin
 	return resp.Body, nil
 }
 
-// GetRaw gets a raw response body and content type.
 func (c *Client) GetRaw(ctx context.Context, path string, query map[string]string) ([]byte, string, error) {
 	reqURL, err := c.resourceURL(path, query)
 	if err != nil {
@@ -309,7 +294,6 @@ func (c *Client) GetRaw(ctx context.Context, path string, query map[string]strin
 	return body, headers.Get("Content-Type"), nil
 }
 
-// DeleteResource deletes a resource path.
 func (c *Client) DeleteResource(ctx context.Context, path string, query map[string]string) error {
 	reqURL, err := c.resourceURL(path, query)
 	if err != nil {
@@ -319,7 +303,6 @@ func (c *Client) DeleteResource(ctx context.Context, path string, query map[stri
 	return err
 }
 
-// HealthCheck calls GET /healthz and returns true if healthy.
 func (c *Client) HealthCheck(ctx context.Context) (bool, error) {
 	body, err := c.doGet(ctx, c.BaseURL+"/healthz")
 	if err != nil {
@@ -333,7 +316,6 @@ func (c *Client) HealthCheck(ctx context.Context) (bool, error) {
 	return status == "ok", nil
 }
 
-// ReadyCheck calls GET /readyz and returns true if ready.
 func (c *Client) ReadyCheck(ctx context.Context) (bool, error) {
 	body, err := c.doGet(ctx, c.BaseURL+"/readyz")
 	if err != nil {
@@ -347,7 +329,6 @@ func (c *Client) ReadyCheck(ctx context.Context) (bool, error) {
 	return status == "ok", nil
 }
 
-// extractAgentSummary pulls summary fields from the raw agent JSON.
 func extractAgentSummary(item AgentDetail) AgentSummary {
 	s := AgentSummary{
 		Name: StringField(item, "metadata", "name"),
@@ -373,7 +354,6 @@ func extractAgentSummary(item AgentDetail) AgentSummary {
 	return s
 }
 
-// StringField extracts a nested string value from a map.
 func StringField(m map[string]any, keys ...string) string {
 	current := m
 	for i, k := range keys {
@@ -394,7 +374,6 @@ func stringVal(v any) string {
 	return s
 }
 
-// CreateTaskRequest is the request body for creating a task.
 type CreateTaskRequest struct {
 	Name      string   `json:"name"`
 	Namespace string   `json:"namespace"`
@@ -425,27 +404,21 @@ type CreateTaskRequest struct {
 	} `json:"ai,omitempty"`
 }
 
-// TaskDetail is the full task object returned by the API.
 type TaskDetail map[string]any
 
-// TaskSummary is a lightweight representation of a task for list display.
 type TaskSummary struct {
-	Name      string `json:"name" yaml:"name"`
-	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	Type      string `json:"type,omitempty" yaml:"type,omitempty"`
-	Phase     string `json:"phase,omitempty" yaml:"phase,omitempty"`
-	Age       string `json:"age,omitempty" yaml:"age,omitempty"`
-	Agent     string `json:"agent,omitempty" yaml:"agent,omitempty"`
-	// Image feeds the table's AGENT column for container Tasks; it is not
-	// part of the structured list output, which gains only the agent
-	// reference.
+	Name          string `json:"name" yaml:"name"`
+	Namespace     string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Type          string `json:"type,omitempty" yaml:"type,omitempty"`
+	Phase         string `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Age           string `json:"age,omitempty" yaml:"age,omitempty"`
+	Agent         string `json:"agent,omitempty" yaml:"agent,omitempty"`
 	Image         string `json:"-" yaml:"-"`
 	Iteration     int    `json:"iteration,omitempty" yaml:"iteration,omitempty"`
 	TransactionID string `json:"transactionId,omitempty" yaml:"transactionId,omitempty"`
 	ParentTask    string `json:"parentTask,omitempty" yaml:"parentTask,omitempty"`
 }
 
-// taskListResponse matches the API ListResponse shape.
 type taskListResponse struct {
 	Items    []TaskDetail `json:"items"`
 	Metadata struct {
@@ -454,36 +427,30 @@ type taskListResponse struct {
 	} `json:"metadata"`
 }
 
-// ListTasksOptions contains options for listing tasks.
 type ListTasksOptions struct {
-	Namespace string
-	Limit     int
-	Continue  string
-	All       bool
-	// LabelSelector filters server-side with kubectl -l syntax.
+	Namespace     string
+	Limit         int
+	Continue      string
+	All           bool
 	LabelSelector string
 }
 
-// ListTasksResult contains a page of task summaries and pagination metadata.
 type ListTasksResult struct {
 	Items              []TaskSummary
 	Continue           string
 	RemainingItemCount *int64
 }
 
-// TaskLogsResponse is the response for getting task logs.
 type TaskLogsResponse struct {
 	Logs    string `json:"logs,omitempty"`
 	Message string `json:"message,omitempty"`
 	JobName string `json:"jobName,omitempty"`
 }
 
-// TaskResultResponse is the response for getting task results.
 type TaskResultResponse struct {
 	Result string `json:"result"`
 }
 
-// CreateTaskRaw creates a task from a JSON request body.
 func (c *Client) CreateTaskRaw(ctx context.Context, body []byte) (*TaskDetail, error) {
 	respBody, _, err := c.doRaw(ctx, http.MethodPost, c.BaseURL+"/api/v1/tasks", body)
 	if err != nil {
@@ -497,7 +464,6 @@ func (c *Client) CreateTaskRaw(ctx context.Context, body []byte) (*TaskDetail, e
 	return &detail, nil
 }
 
-// ListTasks returns tasks from the API.
 func (c *Client) ListTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSummary, error) {
 	result, err := c.ListTasksPage(ctx, opts)
 	if err != nil {
@@ -506,7 +472,6 @@ func (c *Client) ListTasks(ctx context.Context, opts ListTasksOptions) ([]TaskSu
 	return result.Items, nil
 }
 
-// ListTasksPage returns one task page from the API, including pagination metadata.
 func (c *Client) ListTasksPage(ctx context.Context, opts ListTasksOptions) (*ListTasksResult, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks")
 	if err != nil {
@@ -550,7 +515,6 @@ func (c *Client) ListTasksPage(ctx context.Context, opts ListTasksOptions) (*Lis
 	}, nil
 }
 
-// GetTask returns full details for a single task.
 func (c *Client) GetTask(ctx context.Context, name string, opts GetOptions) (*TaskDetail, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name))
 	if err != nil {
@@ -574,7 +538,6 @@ func (c *Client) GetTask(ctx context.Context, name string, opts GetOptions) (*Ta
 	return &detail, nil
 }
 
-// DeleteTask deletes a task by name.
 func (c *Client) DeleteTask(ctx context.Context, name string, opts GetOptions) error {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name))
 	if err != nil {
@@ -610,7 +573,6 @@ func (c *Client) DeleteTask(ctx context.Context, name string, opts GetOptions) e
 	return nil
 }
 
-// DeleteAgent deletes an agent by name.
 func (c *Client) DeleteAgent(ctx context.Context, name string, opts GetOptions) error {
 	u, err := url.Parse(c.BaseURL + "/api/v1/agents/" + url.PathEscape(name))
 	if err != nil {
@@ -646,7 +608,6 @@ func (c *Client) DeleteAgent(ctx context.Context, name string, opts GetOptions) 
 	return nil
 }
 
-// SkillSummary is a lightweight representation of a skill for list display.
 type SkillSummary struct {
 	Name        string   `json:"name"`
 	DisplayName string   `json:"displayName,omitempty"`
@@ -657,10 +618,8 @@ type SkillSummary struct {
 	Phase       string   `json:"phase,omitempty"`
 }
 
-// SkillDetail is the full skill object returned by the API.
 type SkillDetail map[string]any
 
-// skillListResponse matches the API ListResponse shape.
 type skillListResponse struct {
 	Items    []SkillSummary `json:"items"`
 	Metadata struct {
@@ -669,7 +628,6 @@ type skillListResponse struct {
 	} `json:"metadata"`
 }
 
-// ListSkills returns all skills from the API.
 func (c *Client) ListSkills(ctx context.Context, opts ListOptions) ([]SkillSummary, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/skills")
 	if err != nil {
@@ -694,7 +652,6 @@ func (c *Client) ListSkills(ctx context.Context, opts ListOptions) ([]SkillSumma
 	return resp.Items, nil
 }
 
-// GetSkill returns full details for a single skill.
 func (c *Client) GetSkill(ctx context.Context, name string, opts GetOptions) (*SkillDetail, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/skills/" + url.PathEscape(name))
 	if err != nil {
@@ -718,7 +675,6 @@ func (c *Client) GetSkill(ctx context.Context, name string, opts GetOptions) (*S
 	return &detail, nil
 }
 
-// DeleteSkill deletes a skill by name.
 func (c *Client) DeleteSkill(ctx context.Context, name string, opts GetOptions) error {
 	u, err := url.Parse(c.BaseURL + "/api/v1/skills/" + url.PathEscape(name))
 	if err != nil {
@@ -754,7 +710,6 @@ func (c *Client) DeleteSkill(ctx context.Context, name string, opts GetOptions) 
 	return nil
 }
 
-// CreateSkill creates a new skill via the API.
 func (c *Client) CreateSkill(ctx context.Context, body []byte) (*SkillDetail, error) {
 	u := c.BaseURL + "/api/v1/skills"
 
@@ -788,7 +743,6 @@ func (c *Client) CreateSkill(ctx context.Context, body []byte) (*SkillDetail, er
 	return &detail, nil
 }
 
-// GetTaskLogs gets logs for a task.
 func (c *Client) GetTaskLogs(ctx context.Context, name string, opts GetOptions) (*TaskLogsResponse, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name) + "/logs")
 	if err != nil {
@@ -812,13 +766,11 @@ func (c *Client) GetTaskLogs(ctx context.Context, name string, opts GetOptions) 
 	return &result, nil
 }
 
-// StreamLogsOptions contains options for streaming task logs.
 type StreamLogsOptions struct {
 	Namespace string
 	Writer    io.Writer
 }
 
-// StreamTaskLogs streams live logs for a running task via SSE.
 func (c *Client) StreamTaskLogs(ctx context.Context, name string, opts StreamLogsOptions) error {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name) + "/logs")
 	if err != nil {
@@ -870,7 +822,6 @@ func (c *Client) StreamTaskLogs(ctx context.Context, name string, opts StreamLog
 	return scanner.Err()
 }
 
-// GetTaskResult gets the result of a task.
 func (c *Client) GetTaskResult(ctx context.Context, name string, opts GetOptions) (*TaskResultResponse, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(name) + "/result")
 	if err != nil {
@@ -894,7 +845,6 @@ func (c *Client) GetTaskResult(ctx context.Context, name string, opts GetOptions
 	return &result, nil
 }
 
-// ArtifactMetadata describes a stored artifact.
 type ArtifactMetadata struct {
 	Filename    string `json:"filename"`
 	ContentType string `json:"contentType"`
@@ -902,7 +852,6 @@ type ArtifactMetadata struct {
 	CreatedAt   string `json:"createdAt"`
 }
 
-// ListArtifacts returns artifacts for a task.
 func (c *Client) ListArtifacts(ctx context.Context, taskName string, opts GetOptions) ([]ArtifactMetadata, error) {
 	u, err := url.Parse(c.BaseURL + "/api/v1/tasks/" + url.PathEscape(taskName) + "/artifacts")
 	if err != nil {
@@ -931,7 +880,6 @@ func (c *Client) ListArtifacts(ctx context.Context, taskName string, opts GetOpt
 	return resp.Artifacts, nil
 }
 
-// DownloadArtifact downloads a specific artifact and returns the raw bytes and content type.
 func (c *Client) DownloadArtifact(
 	ctx context.Context,
 	taskName, filename string,
@@ -980,7 +928,6 @@ func (c *Client) DownloadArtifact(
 	return body, contentType, nil
 }
 
-// extractTaskSummary pulls summary fields from the raw task JSON.
 func extractTaskSummary(item TaskDetail) TaskSummary {
 	s := TaskSummary{
 		Name:          StringField(item, "metadata", "name"),
@@ -1004,7 +951,6 @@ func extractTaskSummary(item TaskDetail) TaskSummary {
 	return s
 }
 
-// GetTaskPlan gets the plan for a task as a generic JSON value.
 func (c *Client) GetTaskPlan(ctx context.Context, name string, opts GetOptions) (any, error) {
 	query := map[string]string{}
 	if opts.Namespace != "" {
@@ -1013,7 +959,6 @@ func (c *Client) GetTaskPlan(ctx context.Context, name string, opts GetOptions) 
 	return c.DoJSON(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(name)+"/plan", query, nil)
 }
 
-// GetTaskChildren gets child tasks for a task as a generic list response.
 func (c *Client) GetTaskChildren(ctx context.Context, name string, opts GetOptions) (any, error) {
 	query := map[string]string{}
 	if opts.Namespace != "" {
@@ -1022,17 +967,14 @@ func (c *Client) GetTaskChildren(ctx context.Context, name string, opts GetOptio
 	return c.DoJSON(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(name)+"/children", query, nil)
 }
 
-// AuthValidate validates the current credentials.
 func (c *Client) AuthValidate(ctx context.Context) (any, error) {
 	return c.DoJSON(ctx, http.MethodGet, "/api/v1/auth/validate", nil, nil)
 }
 
-// AuthWhoAmI returns the sanitized authenticated identity.
 func (c *Client) AuthWhoAmI(ctx context.Context) (any, error) {
 	return c.DoJSON(ctx, http.MethodGet, "/api/v1/auth/whoami", nil, nil)
 }
 
-// ListModels lists compatibility models for the requested API compatibility surface.
 func (c *Client) ListModels(ctx context.Context, compat string) (any, error) {
 	path := "/openai/v1/models"
 	if compat == "anthropic" {

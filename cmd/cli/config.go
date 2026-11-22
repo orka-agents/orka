@@ -67,7 +67,6 @@ func newConfigSetTokenCmd() *cobra.Command {
 			}
 
 			if err := updateConfig(func(cfg *orkaConfig) error {
-				// A token set here is not a session from orka login.
 				cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer = value, "", nil, ""
 				return nil
 			}); err != nil {

@@ -15,22 +15,14 @@ import {
 import { api, apiError, DEMO_NAMESPACE, digest, inDemoNamespace, list, noContent, notFound, now, query, uid } from '../shared'
 import { monitorHandlers } from './monitors'
 
-// Security scanning API: RepositoryScans, scan runs, review slices, threat
-// models, findings, and patch proposals. Long-running work (scans, finding
-// validation, patch generation) is modelled with completion timestamps and
-// settled lazily on the next request, so the UI's polling sees it progress.
-
 const SEVERITY_RANK: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 }
 const VALIDATION_RANK: Record<string, number> = { validated: 3, unvalidated: 2, pending: 1 }
 
-/** Finding ID -> time its running validation finishes. */
 const validationsDue = new Map<string, number>()
-// Validations already running when the page loads finish a minute or so later.
 for (const finding of findings) {
   if (finding.validationStatus === 'pending') validationsDue.set(finding.id, Date.now() + 75_000)
 }
 
-/** Next PR number per repository for PRs opened from patch proposals. */
 const nextPRNumber: Record<string, number> = { 'checkout-service': 1490, 'inventory-api': 619, 'web-storefront': 879 }
 
 function settle(nowMs = Date.now()) {
@@ -72,7 +64,6 @@ function settle(nowMs = Date.now()) {
 const runsFor = (repo: string) =>
   scanRuns.filter((record) => record.run.repositoryScan === repo).sort((a, b) => b.startedMs - a.startedMs)
 
-/** A RepositoryScan with its status derived from runs, findings, and threat models. */
 function viewScan(resource: RepositoryScan): RepositoryScan {
   const name = resource.metadata.name
   const problem = scans.find((record) => record.resource === resource)?.problem
@@ -200,7 +191,6 @@ const securityRoutes: RequestHandler[] = [
       status: { threatModelVersion: 0 },
     }
     scans.push({ resource })
-    // The controller starts the first scan as soon as the repository is admitted.
     startScan(name, 'incremental', 45_000)
     return HttpResponse.json(viewScan(resource), { status: 201 })
   }),
@@ -367,5 +357,4 @@ const securityRoutes: RequestHandler[] = [
   }),
 ]
 
-/** Security scans, findings, patches, threat models, and repository monitors. */
 export const securityHandlers: RequestHandler[] = [...securityRoutes, ...monitorHandlers]

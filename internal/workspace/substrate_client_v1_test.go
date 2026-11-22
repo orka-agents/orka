@@ -16,13 +16,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// stubSubstrateControl answers only the RPCs a test configures; any other call
-// panics through the nil embedded interface.
 type stubSubstrateControl struct {
 	ateapipb.ControlClient
-	actor    *ateapipb.Actor
-	template *ateapipb.ActorTemplate
-	// templateErr, when set, fails every ActorTemplate lookup.
+	actor       *ateapipb.Actor
+	template    *ateapipb.ActorTemplate
 	templateErr error
 	resumes     int
 	deletes     []*ateapipb.DeleteActorRequest
@@ -162,9 +159,6 @@ func TestSubstrateBootedActorTemplateUIDComesFromImmutableTemplate(t *testing.T)
 	require.Equal(t, "template-uid", observed.TemplateUID, "a template older than the Actor is the one it booted from")
 	require.Equal(t, "10.0.0.7", observed.PodIP)
 
-	// The template was deleted and created again under the same name after the
-	// Actor was created. The Actor may still run the deleted one, so the
-	// replacement's UID is not its identity.
 	replacement := proto.CloneOf(template)
 	replacement.Metadata.Uid = "replacement-template-uid"
 	replacement.Metadata.CreateTime = timestamppb.New(templateCreated.Add(time.Hour))
@@ -183,7 +177,6 @@ func TestSubstrateBootedActorTemplateUIDComesFromImmutableTemplate(t *testing.T)
 	require.True(t, IsKind(err, ErrorKindFailedPrecondition), "WaitReady must not accept it either: %v", err)
 	require.Zero(t, stub.resumes, "nothing is resumed against an unproven template")
 
-	// Without both times nothing can be proven.
 	for name, clear := range map[string]func(){
 		"template": func() { stub.template.Metadata.CreateTime = nil },
 		"actor":    func() { stub.actor.Metadata.CreateTime = nil },
@@ -197,7 +190,6 @@ func TestSubstrateBootedActorTemplateUIDComesFromImmutableTemplate(t *testing.T)
 	}
 	stub.template, stub.actor = template, actor
 
-	// A never-placed Actor has no guest state and keeps an empty identity.
 	stub.actor = freshActor()
 	observed, err = client.GetActor(t.Context(), "actor-1")
 	require.NoError(t, err)
@@ -229,7 +221,6 @@ func TestSubstrateWorkerFitsExactlyOne(t *testing.T) {
 		return reported
 	}
 	fixed := &ateapipb.RuntimeOverhead{MemoryBytes: 64 << 20}
-	// 32MiB for each GiB of the limit: 32MiB for this template.
 	scaled := &ateapipb.RuntimeOverhead{MemoryBytesPerGib: 32 << 20}
 	for name, tc := range map[string]struct {
 		worker *ateapipb.WorkerStatus
@@ -242,16 +233,13 @@ func TestSubstrateWorkerFitsExactlyOne(t *testing.T) {
 		"too small":            {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 500, MemoryBytes: 1 << 30})},
 		"no actors":            {worker: worker(&ateapipb.WorkerResources{CpuMillicores: 1000, MemoryBytes: 1 << 30})},
 
-		// Placement books the runtime's overhead with every Actor.
-		"overhead leaves no room for one": {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}, fixed)},
-		"overhead makes one fit exactly":  {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (64 << 20)}, fixed), want: true},
-		"overhead keeps a second out":     {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: 2 << 30}, fixed), want: true},
-		"two fit with their overhead":     {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (2 << 30) + (128 << 20)}, fixed)},
-		"per-GiB overhead leaves no room": {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (32 << 20) - 1}, scaled)},
-		"per-GiB overhead fits exactly":   {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (32 << 20)}, scaled), want: true},
-		"per-GiB overhead keeps two out":  {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (2 << 30) + (64 << 20) - 1}, scaled), want: true},
-		// An Actor restored from a snapshot runs under the matching restorable
-		// runtime, so the worker must hold exactly one under that one too.
+		"overhead leaves no room for one":   {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}, fixed)},
+		"overhead makes one fit exactly":    {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (64 << 20)}, fixed), want: true},
+		"overhead keeps a second out":       {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: 2 << 30}, fixed), want: true},
+		"two fit with their overhead":       {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (2 << 30) + (128 << 20)}, fixed)},
+		"per-GiB overhead leaves no room":   {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (32 << 20) - 1}, scaled)},
+		"per-GiB overhead fits exactly":     {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (32 << 20)}, scaled), want: true},
+		"per-GiB overhead keeps two out":    {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (2 << 30) + (64 << 20) - 1}, scaled), want: true},
 		"restorable runtime leaves no room": {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}, nil, fixed)},
 		"lighter restorable admits two":     {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: 2 << 30}, fixed, nil)},
 		"overflowing overhead":              {worker: worker(&ateapipb.WorkerResources{Actors: 1, CpuMillicores: 1000, MemoryBytes: math.MaxInt64}, &ateapipb.RuntimeOverhead{MemoryBytes: math.MaxInt64})},
@@ -263,7 +251,6 @@ func TestSubstrateWorkerFitsExactlyOne(t *testing.T) {
 	require.False(t, substrateWorkerFitsExactlyOne(worker(&ateapipb.WorkerResources{Actors: 1, CpuMillicores: 1000, MemoryBytes: 1 << 30}), nil),
 		"a template without limits cannot be bounded")
 
-	// Half a GiB under a 1GiB-per-GiB rate adds half a GiB, rounded down to a byte.
 	booking, ok := substrateActorMemoryBooking((1<<29)+1, &ateapipb.RuntimeOverhead{MemoryBytes: 7, MemoryBytesPerGib: 1 << 30})
 	require.True(t, ok)
 	require.EqualValues(t, (1<<29)+1+7+(1<<29)+1, booking)
@@ -287,10 +274,6 @@ func TestSubstrateWorkerRunsGVisor(t *testing.T) {
 	require.False(t, substrateWorkerRunsGVisor([]*ateapipb.WorkerSandboxClass{gvisor, {SandboxClass: "microvm"}}))
 }
 
-// An Actor placed on a worker but never snapshotted takes its template identity
-// from a template lookup, and upstream lets a template be deleted while Actors
-// still name it. A missing template must not read as a missing Actor: Delete
-// would report a live Actor already deleted and Claim would try to create it.
 func TestSubstrateMissingTemplateIsNotAMissingActor(t *testing.T) {
 	placed := freshActor()
 	placed.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
@@ -305,15 +288,12 @@ func TestSubstrateMissingTemplateIsNotAMissingActor(t *testing.T) {
 	require.Empty(t, actor.TemplateUID, "a missing template leaves the Actor's identity unknown")
 	require.Equal(t, substrateStatusRunning, actor.Status)
 
-	// The identity is unknown, so a caller that pins a template UID is refused
-	// rather than reattached or handed a new Actor.
 	_, err = executor.Claim(t.Context(), ClaimRequest{
 		ClaimName: "actor-1", CreateIfMissing: true,
 		Template: TemplateRef{Namespace: "team-a", Name: "mcp", UID: "template-uid"},
 	})
 	require.True(t, IsKind(err, ErrorKindFailedPrecondition), "error = %v", err)
 
-	// Delete is fenced by the Actor UID and must still remove the Actor.
 	result, err := executor.Delete(t.Context(), DeleteRequest{Ref: ref, SkipScrub: true})
 	require.NoError(t, err)
 	require.True(t, result.Deleted)

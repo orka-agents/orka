@@ -35,7 +35,6 @@ func requireMemoryProposalStore(proposalStore store.MemoryProposalStore) error {
 	return nil
 }
 
-// ListMemories lists namespace-scoped memories.
 func (h *Handlers) ListMemories(c fiber.Ctx) error {
 	if err := requireMemoryStore(h.memoryStore); err != nil {
 		return err
@@ -54,7 +53,6 @@ func (h *Handlers) ListMemories(c fiber.Ctx) error {
 	return c.JSON(ListResponse{Items: memories, Metadata: ListMeta{}})
 }
 
-// CreateMemory creates a namespace-scoped memory.
 func (h *Handlers) CreateMemory(c fiber.Ctx) error {
 	if err := requireMemoryStore(h.memoryStore); err != nil {
 		return err
@@ -73,7 +71,6 @@ func (h *Handlers) CreateMemory(c fiber.Ctx) error {
 	return createNamespaceMemory(c, h.memoryStore, namespace, memory)
 }
 
-// GetMemory gets a memory by ID.
 func (h *Handlers) GetMemory(c fiber.Ctx) error {
 	if err := requireMemoryStore(h.memoryStore); err != nil {
 		return err
@@ -88,7 +85,6 @@ func (h *Handlers) GetMemory(c fiber.Ctx) error {
 	return getNamespaceMemory(c, h.memoryStore, namespace)
 }
 
-// UpdateMemory updates mutable fields on a memory.
 func (h *Handlers) UpdateMemory(c fiber.Ctx) error {
 	if err := requireMemoryStore(h.memoryStore); err != nil {
 		return err
@@ -111,7 +107,6 @@ func (h *Handlers) UpdateMemory(c fiber.Ctx) error {
 	return updateNamespaceMemory(c, h.memoryStore, namespace, req)
 }
 
-// DeleteMemory soft-deletes a memory.
 func (h *Handlers) DeleteMemory(c fiber.Ctx) error {
 	if err := requireMemoryStore(h.memoryStore); err != nil {
 		return err
@@ -126,12 +121,10 @@ func (h *Handlers) DeleteMemory(c fiber.Ctx) error {
 	return deleteNamespaceMemory(c, h.memoryStore, namespace)
 }
 
-// DisableMemory disables a memory for recall without deleting it.
 func (h *Handlers) DisableMemory(c fiber.Ctx) error {
 	return h.setMemoryDisabled(c, true)
 }
 
-// EnableMemory enables a previously disabled memory.
 func (h *Handlers) EnableMemory(c fiber.Ctx) error {
 	return h.setMemoryDisabled(c, false)
 }
@@ -150,7 +143,6 @@ func (h *Handlers) setMemoryDisabled(c fiber.Ctx, disabled bool) error {
 	return setNamespaceMemoryDisabled(c, h.memoryStore, namespace, disabled)
 }
 
-// ListMemoryProposals lists memory governance proposals.
 func (h *Handlers) ListMemoryProposals(c fiber.Ctx) error {
 	if err := requireMemoryProposalStore(h.memoryProposalStore); err != nil {
 		return err
@@ -169,7 +161,6 @@ func (h *Handlers) ListMemoryProposals(c fiber.Ctx) error {
 	return c.JSON(ListResponse{Items: proposals, Metadata: ListMeta{}})
 }
 
-// CreateMemoryProposal creates a governance proposal. It does not apply proposals automatically.
 func (h *Handlers) CreateMemoryProposal(c fiber.Ctx) error {
 	if err := requireMemoryProposalStore(h.memoryProposalStore); err != nil {
 		return err
@@ -188,7 +179,6 @@ func (h *Handlers) CreateMemoryProposal(c fiber.Ctx) error {
 	return createNamespaceMemoryProposal(c, h.memoryProposalStore, namespace, proposal)
 }
 
-// GetMemoryProposal gets a proposal by ID.
 func (h *Handlers) GetMemoryProposal(c fiber.Ctx) error {
 	if err := requireMemoryProposalStore(h.memoryProposalStore); err != nil {
 		return err
@@ -203,7 +193,6 @@ func (h *Handlers) GetMemoryProposal(c fiber.Ctx) error {
 	return getNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
-// ReviewMemoryProposal records a review decision without applying the proposal automatically.
 func (h *Handlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	if err := requireMemoryProposalStore(h.memoryProposalStore); err != nil {
 		return err
@@ -223,7 +212,6 @@ func (h *Handlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	return reviewNamespaceMemoryProposal(c, h.memoryProposalStore, review)
 }
 
-// ArchiveMemoryProposal archives a proposal without applying it.
 func (h *Handlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	if err := requireMemoryProposalStore(h.memoryProposalStore); err != nil {
 		return err
@@ -238,7 +226,6 @@ func (h *Handlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	return archiveNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
-// ApplyMemoryProposal applies an accepted memory proposal into durable memory.
 func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	if err := requireMemoryProposalStore(h.memoryProposalStore); err != nil {
 		return err
@@ -256,13 +243,10 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	}
 	apply.Namespace = namespace
 	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeTokenReview {
-		// The store may resolve either an applied ID or a source-proposal link.
-		// Authorize its final choice within the transaction, including retries.
 		apply.AuthorizeExistingMemory = func(ctx context.Context, namespace, id string) error {
 			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
 				namespace, "get", "core.orka.ai", "memories", id)
 		}
-		// A consolidation proposal changes the memories it targets.
 		apply.AuthorizeMemoryChange = func(ctx context.Context, namespace, id string) error {
 			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
 				namespace, "update", "core.orka.ai", "memories", id)
@@ -270,10 +254,6 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	}
 	return applyNamespaceMemoryProposal(c, h.memoryProposalStore, apply)
 }
-
-// The namespace-scoped helpers below are shared by the external API handlers
-// and the internal worker route. Callers resolve and authorize the namespace
-// first; the helpers validate the body, call the store, and write the response.
 
 func listNamespaceMemories(c fiber.Ctx, memoryStore store.MemoryStore, namespace string) ([]store.Memory, error) {
 	filter, err := parseMemoryFilter(c, namespace)
@@ -292,9 +272,6 @@ func createNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	if strings.TrimSpace(memory.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
-	// Only applying a proposal links a memory to it. A memory created with a
-	// proposal's ID would be returned as that proposal's application, or,
-	// for a consolidation proposal, would block it from ever applying.
 	if strings.TrimSpace(memory.SourceProposalID) != "" {
 		return fiber.NewError(fiber.StatusBadRequest, "sourceProposalId is set only by applying a memory proposal")
 	}
@@ -381,8 +358,6 @@ func getNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposalS
 	return c.JSON(proposal)
 }
 
-// memoryProposalReviewRecord is what a review returns: the stored decision and
-// who made it, without the proposal content the review verb does not grant.
 type memoryProposalReviewRecord struct {
 	ID         string     `json:"id"`
 	Namespace  string     `json:"namespace"`
@@ -401,8 +376,6 @@ func reviewNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryPropos
 	if err := proposalStore.ReviewMemoryProposal(c.Context(), review); err != nil {
 		return memoryStoreError("review memory proposal", "memory proposal", err)
 	}
-	// Read the record back so the caller sees what was stored, after the
-	// store's normalization and redaction.
 	proposal, err := proposalStore.GetMemoryProposal(c.Context(), strings.TrimSpace(review.Namespace), strings.TrimSpace(review.ID))
 	if err != nil {
 		return memoryStoreError("get memory proposal", "memory proposal", err)
@@ -432,8 +405,6 @@ func applyNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposa
 	apply.AppliedBy = appliedBy
 	memory, err := proposalStore.ApplyMemoryProposal(c.Context(), apply)
 	if err != nil {
-		// AuthorizeExistingMemory (external API only) surfaces its own 403;
-		// the internal route never sets the hook, so this never fires there.
 		if forbidden, ok := errors.AsType[*fiber.Error](err); ok && forbidden.Code == fiber.StatusForbidden {
 			return forbidden
 		}
@@ -442,9 +413,6 @@ func applyNamespaceMemoryProposal(c fiber.Ctx, proposalStore store.MemoryProposa
 	return c.JSON(memory)
 }
 
-// memoryProposalActor returns the signed-in identity that review and apply
-// record. Clients cannot name it, so a request without one is refused rather
-// than stored anonymously.
 func memoryProposalActor(c fiber.Ctx) (string, error) {
 	if actor := approvalDecisionActor(GetUserInfo(c)); actor != "" {
 		return actor, nil
@@ -600,11 +568,6 @@ func bindMemoryProposalApply(c fiber.Ctx, fallbackNamespace, id string) (store.M
 	}, nil
 }
 
-// rejectClientRecordedIdentity refuses a body that names who reviewed or
-// applied a proposal, the way Task creation refuses requestedBy: the server
-// records the signed-in identity instead. Keys match case-insensitively, as
-// JSON decoding does. An empty value names no one, so older clients that
-// always send the key keep working.
 func rejectClientRecordedIdentity(body []byte, field string) error {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil
@@ -626,10 +589,6 @@ func rejectClientRecordedIdentity(body []byte, field string) error {
 	return nil
 }
 
-// rejectClientProposalDecision keeps a new proposal pending: only the review
-// and apply endpoints record a decision and the identity that made it, so a
-// create request cannot skip review or name its own reviewer or applier.
-// Empty values are accepted because older clients send every key.
 func rejectClientProposalDecision(proposal store.MemoryProposal) error {
 	if status := strings.TrimSpace(proposal.Status); status != "" && !strings.EqualFold(status, "pending") {
 		return fiber.NewError(fiber.StatusBadRequest, "status cannot be set by clients; new proposals start pending")
@@ -641,7 +600,6 @@ func rejectClientProposalDecision(proposal store.MemoryProposal) error {
 		{"reviewer", strings.TrimSpace(proposal.Reviewer) != ""},
 		{"reviewNote", strings.TrimSpace(proposal.ReviewNote) != ""},
 		{"reviewedAt", proposal.ReviewedAt != nil},
-		// The store treats any nonempty ID, even whitespace, as applied.
 		{"appliedMemoryId", proposal.AppliedMemoryID != ""},
 		{"appliedBy", strings.TrimSpace(proposal.AppliedBy) != ""},
 		{"appliedAt", proposal.AppliedAt != nil},

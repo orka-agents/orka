@@ -106,8 +106,6 @@ func TestRepositoryMonitorUpdateBranchBudgetAndOutcome(t *testing.T) {
 			t.Fatalf("update outcome=%s err=%v, want %s", state, err, phase)
 		}
 		if i == 0 {
-			// A terminal failed update must receive a new bounded command, not
-			// resurrect its terminal action as permanently queued.
 			item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "head", RepairState: state}
 			if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{}, "orka-agents", "orka", pr, item); err != nil || !handled {
 				t.Fatalf("bounded retry handled=%v err=%v", handled, err)

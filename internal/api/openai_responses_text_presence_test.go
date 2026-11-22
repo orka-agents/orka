@@ -16,8 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The official SDK parameter types require text to be a string. Missing/null
-// text must not be mistaken for an explicitly supplied, valid empty string.
 func TestResponsesRejectsMissingTextParts(t *testing.T) {
 	for _, location := range []string{"user", "assistant", "tool_result"} {
 		for _, value := range []string{"missing", "null", "empty"} {

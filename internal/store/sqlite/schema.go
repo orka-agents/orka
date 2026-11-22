@@ -10,10 +10,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// SchemaVersion records the metadata layout. It never replaces validation of
-// every schema object; every upgrade, from an unversioned layout or from an
-// earlier version, requires the locked migration path. Version 8 adds the
-// Agent Host Protocol tables, and version 9 the GitHub sign-in sessions.
 const SchemaVersion = 9
 
 const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
@@ -29,9 +25,6 @@ const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  bound_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(bound_at_ns >= 0)
 )`
 
-// initializeSchema creates an empty database or checks the existing layout.
-// Callers without the controller lock only validate; OpenLockedStore can also
-// migrate exact known layouts after taking a consistent backup.
 func initializeSchema(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -88,8 +81,6 @@ type datasetInitializer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-// Called only within the fresh-schema or exact-upgrade transaction. No repair
-// path may regenerate a missing identity in an established dataset.
 func initializeDatasetRecord(q datasetInitializer, origin string) error {
 	id, err := uuid.NewRandom()
 	if err != nil {
@@ -129,8 +120,6 @@ func validateSchema(existing map[string]string, statements []string) error {
 		return fmt.Errorf("unsupported SQLite schema: #700 layout at b5265055 (161 objects) requires changes to existing connector tables; no rewrite path is supported; see website/docs/operations/upgrading.md (https://github.com/orka-agents/orka/blob/main/website/docs/operations/upgrading.md)")
 	}
 	for _, statement := range statements {
-		// Every definition uses CREATE ... IF NOT EXISTS <name>. SQLite omits
-		// IF NOT EXISTS when it stores the definition in sqlite_schema.
 		prefix, definition, ok := strings.Cut(statement, "IF NOT EXISTS ")
 		if !ok {
 			return fmt.Errorf("invalid current schema definition")
@@ -146,8 +135,6 @@ func validateSchema(existing map[string]string, statements []string) error {
 	return nil
 }
 
-// Compare SQL tokens so formatting does not affect reopening. Preserve string
-// literals and compare the whole definition, including defaults and constraints.
 var schemaSQLTokens = regexp.MustCompile("'([^']|'')*'|\"([^\"]|\"\")*\"|`[^`]*`|\\[[^]]*\\]|[a-zA-Z_0-9]+|[^\\s]")
 
 func normalizeSchemaSQL(statement string) string {
@@ -156,8 +143,6 @@ func normalizeSchemaSQL(statement string) string {
 		if token[0] == '\'' {
 			continue
 		}
-		// SQLite quotes object names after a rename. Only unwrap those names:
-		// quoted keywords elsewhere can be type names instead of constraints.
 		if i > 0 && len(token) > 1 {
 			switch tokens[i-1] {
 			case "TABLE", "INDEX", "ON", "REFERENCES":

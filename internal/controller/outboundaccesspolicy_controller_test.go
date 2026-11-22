@@ -831,8 +831,6 @@ func TestToolReconcilerRejectsOutboundAccessPolicyOnSubstrateMCPTool(t *testing.
 			MCP:  &corev1alpha1.MCPToolServer{SubstrateActor: &corev1alpha1.SubstrateMCPActor{}},
 		},
 	}
-	// Substrate MCP actors are reached only through the Orka MCP proxy, so a
-	// caller-resolved outbound credential or gateway route can never apply.
 	for _, endpoint := range []string{"", "https://actor.example.test/mcp", "/api/v1/tools/mcp/mcp?namespace=tenant"} {
 		tool.Status.Endpoint = endpoint
 		if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err == nil || !strings.Contains(err.Error(), "do not support outboundAccessPolicyRef") {

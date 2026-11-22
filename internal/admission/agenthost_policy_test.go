@@ -27,7 +27,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// fixedAuthorizer answers every check the same way.
 type fixedAuthorizer bool
 
 func (a fixedAuthorizer) Authorize(context.Context, authorizer.Attributes) (authorizer.Decision, string, error) {
@@ -37,9 +36,6 @@ func (a fixedAuthorizer) Authorize(context.Context, authorizer.Attributes) (auth
 	return authorizer.DecisionNoOpinion, "", nil
 }
 
-// The shipped AgentHost policy, evaluated as kube-apiserver does: only the
-// controller creates a host fed by a Connection, and such a host needs no
-// template use grant.
 func TestAgentHostPolicyReservesConnectionHostsToTheController(t *testing.T) {
 	documents, err := splitYAMLDocuments(filepath.Join("..", "..", "config", "policy", "workspace_class_use_policy.yaml"))
 	require.NoError(t, err)

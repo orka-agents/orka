@@ -11,7 +11,6 @@ vi.mock('@tanstack/react-router', async () => ({
 }))
 
 vi.mock('@/hooks/use-chat', () => ({ useSendMessage: () => mockSend }))
-// The UI store persists through zustand; keep it in memory here.
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 
 import { useChatStore } from '@/stores/chat'
@@ -23,7 +22,6 @@ import { TourLauncher, TourPanel } from './tour'
 const seenKey = 'orka-demo-tour-seen'
 const next = () => fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
-// The test environment has no usable localStorage.
 function memoryStorage() {
   const items = new Map<string, string>()
   return {
@@ -93,7 +91,6 @@ describe('demo tour', () => {
     expect(mockNavigate).toHaveBeenCalledWith(expect.objectContaining({ params: { taskId: INCIDENT_TASK } }))
     unmount()
 
-    // The prompt goes out only once the sample namespace is in place.
     useUIStore.setState({ namespace: 'orka-system' })
     useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.prompts) })
     const sentIn: string[] = []
@@ -105,7 +102,6 @@ describe('demo tour', () => {
   })
 
   it('holds a prompt until Chat has moved to the sample namespace, so its reset cannot wipe it', () => {
-    // Chat was last used in another namespace; opening it in the sample one clears its transcript.
     useChatStore.setState({ activeNamespace: 'orka-system' })
     useTourStore.setState({ step: TOUR_STEPS.findIndex((step) => step.prompts) })
     render(<TourPanel slot="bottom" />)
@@ -193,7 +189,6 @@ describe('demo tour', () => {
   })
 
   it('renders only in the slot for the current width', () => {
-    // jsdom has no matchMedia, so the viewport counts as narrow.
     render(<TourPanel slot="rail" />)
     expect(screen.queryByRole('complementary', { name: 'Demo tour' })).not.toBeInTheDocument()
   })

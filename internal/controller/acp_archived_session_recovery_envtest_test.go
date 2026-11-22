@@ -21,9 +21,6 @@ import (
 func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	apiClient := newArchivedSessionAPIClient(t)
 
-	// Obtain real Kubernetes Task UIDs before exercising the existing runtime
-	// fixture. Its public dispatch/finalization/deletion paths produce receipts
-	// for those exact UIDs; only the runtime and control API transport is fake.
 	fixture := newExternalACPDispatchFixture(t)
 	tasks := make([]*corev1alpha1.Task, 0, 2)
 	for i := range 2 {
@@ -58,8 +55,6 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	}
 	assertSessionRuntimeCleanupCompleted(t, fixture, cleanup, tasks)
 
-	// Restart with the real API server as the authoritative Task/attempt store.
-	// No deleted Session control or outbox object is imported or reconstructed.
 	for _, actual := range tasks {
 		completed := &corev1alpha1.Task{}
 		if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(actual), completed); err != nil {
@@ -95,9 +90,6 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	before := captureArchivedSessionEvidence(t, restarted, control, tasks)
 	_, stopInitial := startArchivedRecoveryEpoch(t, fixture.ctx, control, nil, "archive-api-initial")
 	stopInitial()
-	// The real API server stands in for the same installation restored with
-	// its identity: its ControllerEpoch object has a new UID, so the storage
-	// dataset's installation binding is carried over explicitly.
 	bound, err := fixture.persistence.GetControllerEpochMirror(fixture.ctx, store.DefaultControllerEpochName)
 	if err != nil {
 		t.Fatal(err)

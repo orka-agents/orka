@@ -18,9 +18,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// recoverAbandonedWorkspaceValidation always constructs the exact, epoch-guarded
-// cleanup transport, including when the runtime and owner epochs still match.
-// The ordinary admission client must never carry these recovery mutations.
 func (d *ACPDispatcher) recoverAbandonedWorkspaceValidation(ctx context.Context, task *corev1alpha1.Task, taskUID types.UID, pool *corev1alpha1.RuntimePool) error {
 	if d.Epochs == nil {
 		return fmt.Errorf("%w: abandoned validation requires current cleanup ownership", store.ErrConflict)
@@ -36,12 +33,6 @@ func (d *ACPDispatcher) recoverAbandonedWorkspaceValidation(ctx context.Context,
 	return d.finishAbandonedWorkspaceValidation(ctx, task, taskUID, runtimeClient, runtimeFence)
 }
 
-// finishAbandonedWorkspaceValidation finishes the existing validation barrier
-// when a native prompt completed after its controller lost the result. It never
-// upgrades that Task's durable terminal outcome, fetches/clones a repository,
-// publishes a delta, or invents runtime retirement evidence. Destructive cleanup
-// still requires the normal exact-session DELETE and its authenticated receipt.
-//
 //nolint:gocyclo // Keep the terminal-authority checks and ordered non-publishing recovery steps in one auditable path.
 func (d *ACPDispatcher) finishAbandonedWorkspaceValidation(
 	ctx context.Context, task *corev1alpha1.Task, taskUID types.UID,
@@ -132,9 +123,6 @@ func (d *ACPDispatcher) finishAbandonedWorkspaceValidation(
 		return fmt.Errorf("validate abandoned workspace: %w", err)
 	}
 	if delta.Delta.State == harnessv2.WorkspaceDeltaPrepared {
-		// Only local, unexported work is abandoned. A published/in-flight
-		// publication cannot reach this path: its durable delivery state is
-		// not NotRequested and its runtime is no longer Validating.
 		finalization, err := abandonedValidationFinalization(task, taskUID, delta.Delta.DeltaID)
 		if err != nil {
 			return err
@@ -149,9 +137,6 @@ func (d *ACPDispatcher) finishAbandonedWorkspaceValidation(
 	return requireAgentRuntimeRecoveryFence(ctx, d.Store, fence)
 }
 
-// recoveredValidationWorkspace reconstructs only a previously committed
-// workspace baseline. Its digest must equal the admitted runtime binding. A
-// deleted branch, changed Agent, or expired Git credential is not consulted.
 func (d *ACPDispatcher) recoveredValidationWorkspace(ctx context.Context, task *corev1alpha1.Task, taskUID types.UID) (harnessv2.WorkspaceBaseline, harnessv2.WorkspaceSpec, error) {
 	fail := func(err error) (harnessv2.WorkspaceBaseline, harnessv2.WorkspaceSpec, error) {
 		return harnessv2.WorkspaceBaseline{}, harnessv2.WorkspaceSpec{}, err
@@ -219,12 +204,6 @@ func (d *ACPDispatcher) recoveredValidationWorkspace(ctx context.Context, task *
 	}
 	frozenDigest := task.Status.Execution.RuntimeSessionWorkspaceDigest
 	if frozenDigest == "" && body.SessionRef == nil {
-		// Task-scoped Tasks dispatched by earlier controllers never recorded
-		// a workspace digest, so every recovery attempt for them failed and
-		// retried forever. Their baseline still comes only from committed
-		// evidence for this exact Task and prompt, the runtime rejects any
-		// VerifiedBaseline other than the one its session was created with,
-		// and this recovery never publishes.
 		return baseline, workspace, nil
 	}
 	if digest != frozenDigest {
@@ -258,10 +237,6 @@ func readCommittedWorkspacePreparation(ctx context.Context, effects store.Extern
 		return fmt.Errorf("%w: workspace preparation has trailing JSON", store.ErrConflict)
 	}
 	if effect.ResponseDigest != store.CanonicalBytesDigest(effect.Response) {
-		// The producer commits json.Marshal(WorkspacePrepareResponse), but
-		// Kubernetes stores this field as JSON and may reorder object keys.
-		// Reconstruct that exact, closed producer schema rather than dropping
-		// digest verification or accepting arbitrary semantic normalization.
 		original, err := json.Marshal(into)
 		if err != nil || effect.ResponseDigest != store.CanonicalBytesDigest(original) {
 			return fmt.Errorf("%w: workspace preparation evidence is missing or corrupt", store.ErrConflict)

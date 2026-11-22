@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Runs the fake-GitHub RepositoryMonitor integration scenarios that prove the
-# durable label-command issue-to-PR loop and retained usage reports without
-# requiring live GitHub secrets.
-# Keep this script secret-free: all GitHub payloads and credentials are synthetic.
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 

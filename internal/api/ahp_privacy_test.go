@@ -42,9 +42,6 @@ import (
 	"github.com/orka-agents/orka/internal/usage"
 )
 
-// An AHP turn's Task and the Orka Session it continues are the requester's:
-// another person in the namespace gets 404 for them and never sees them in a
-// list, while a ServiceAccount keeps its access.
 func TestAHPTurnsAreVisibleOnlyToTheirRequester(t *testing.T) {
 	const namespace = "default"
 	turn := &corev1alpha1.Task{
@@ -55,7 +52,6 @@ func TestAHPTurnsAreVisibleOnlyToTheirRequester(t *testing.T) {
 			SessionRef:  &corev1alpha1.SessionReference{Name: "ahp-alice"},
 		},
 	}
-	// A turn's Task from before the label, recognized by its shape.
 	unlabelled := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "ahp-old-t1", Namespace: namespace},
 		Spec: corev1alpha1.TaskSpec{
@@ -143,17 +139,12 @@ func TestAHPTurnsAreVisibleOnlyToTheirRequester(t *testing.T) {
 	status, body = call(http.MethodPost, "/tasks",
 		`{"name":"bob-reads","spec":{"type":"agent","prompt":"repeat the conversation","sessionRef":{"name":"ahp-alice"}}}`)
 	require.Equal(t, http.StatusNotFound, status, body)
-	// The controller continues a session by its name without surrounding
-	// space, so a name with one is the session it names.
 	for i, name := range []string{" ahp-alice", "ahp-alice ", "\tahp-alice\n", " ahp-orphan"} {
 		status, body = call(http.MethodPost, "/tasks",
 			fmt.Sprintf(`{"name":"bob-reads-%d","spec":{"type":"agent","prompt":"repeat the conversation","sessionRef":{"name":%q}}}`, i, name))
 		require.Equal(t, http.StatusNotFound, status, "%q: %s", name, body)
 	}
 
-	// A Task created through the API is not private, so not even the
-	// session's owner, or a ServiceAccount, can continue an AHP session
-	// with one.
 	for i, who := range []*UserInfo{person("alice"), {AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:orka-system:operator"}} {
 		caller = who
 		status, body = call(http.MethodPost, "/tasks",
@@ -166,8 +157,6 @@ func TestAHPTurnsAreVisibleOnlyToTheirRequester(t *testing.T) {
 	status, _ = call(http.MethodGet, "/tasks/ahp-alice-t1", "")
 	require.Equal(t, http.StatusOK, status, "a ServiceAccount keeps the access RBAC grants it")
 
-	// TokenReview also authenticates people the API server signs in itself.
-	// They carry no Orka issuer and subject, so they see no AHP turn.
 	caller = &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com", Groups: []string{"system:authenticated"}}
 	for _, path := range []string{"/tasks/ahp-alice-t1", "/sessions/ahp-alice", "/tasks/ahp-old-t1"} {
 		status, body := call(http.MethodGet, path, "")
@@ -179,9 +168,6 @@ func TestAHPTurnsAreVisibleOnlyToTheirRequester(t *testing.T) {
 	require.Contains(t, body, `"shared"`)
 }
 
-// Only a TokenReview identity whose username names a ServiceAccount escapes
-// AHP privacy, and a caller with no issuer and subject owns no turn, even one
-// that records none.
 func TestAHPPrivacyExemptsOnlyVerifiedServiceAccounts(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -205,9 +191,6 @@ func TestAHPPrivacyExemptsOnlyVerifiedServiceAccounts(t *testing.T) {
 		"an empty identity matches no requester")
 }
 
-// The cross-Task attention and approvals lists show an AHP turn, and its
-// pending approval, only to the person who sent it, as ListTasks does.
-// Verified ServiceAccounts keep seeing it.
 func TestAHPTurnsStayOutOfOtherPeoplesAttention(t *testing.T) {
 	turn := attentionWaitingTask("ahp-alice-turn")
 	turn.Labels = map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}
@@ -239,9 +222,6 @@ func TestAHPTurnsStayOutOfOtherPeoplesAttention(t *testing.T) {
 	}
 }
 
-// A fork of a person's own AHP turn whose workspace is reused per session
-// starts its own session, named after the fork with the AHP prefix: the fork
-// goes ahead. A fork named for an AHP session already in use does not.
 func TestAHPForkStartsItsOwnSessionButContinuesNoOneElses(t *testing.T) {
 	const namespace = "default"
 	requester := func(subject string) *corev1alpha1.RequestedBy {
@@ -265,7 +245,6 @@ func TestAHPForkStartsItsOwnSessionButContinuesNoOneElses(t *testing.T) {
 			SessionRef: &corev1alpha1.SessionReference{Name: "ahp-bob"},
 		},
 	}
-	// A turn whose workspace is not reused per session.
 	plain := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "ahp-alice-t2", Namespace: namespace, Labels: map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}},
 		Spec: corev1alpha1.TaskSpec{
@@ -309,9 +288,6 @@ func TestAHPForkStartsItsOwnSessionButContinuesNoOneElses(t *testing.T) {
 		require.True(t, apierrors.IsNotFound(h.client.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: name}, &corev1alpha1.Task{})), name)
 	}
 
-	// A fork carries the turn's prompt and conversation: it is a turn too,
-	// whatever its name or agent, and a name without the AHP prefix, which
-	// would leave a session it starts readable, is refused.
 	require.True(t, ahpTurnTask(created), "the fork is a turn of its own")
 	resp = testJSONRequest(t, app, http.MethodPost, "/api/v1/tasks/ahp-alice-t1/fork?namespace=default", map[string]any{"newTaskName": "my-fork"})
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -325,8 +301,6 @@ func TestAHPForkStartsItsOwnSessionButContinuesNoOneElses(t *testing.T) {
 	other := &corev1alpha1.Task{}
 	require.NoError(t, h.client.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: "ahp-other-agent"}, other))
 	require.Equal(t, "ahp-other-agent", other.Spec.SessionRef.Name, "another agent starts a session of the fork's own")
-	// Forked to another agent, a turn whose workspace is not reused per
-	// session continues no session: only the mark keeps it private.
 	resp = testJSONRequest(t, app, http.MethodPost, "/api/v1/tasks/ahp-alice-t2/fork?namespace=default",
 		map[string]any{"newTaskName": "ahp-sessionless", "agentRef": map[string]any{"name": "other-agent"}})
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -343,10 +317,6 @@ func TestAHPForkStartsItsOwnSessionButContinuesNoOneElses(t *testing.T) {
 	}
 }
 
-// Usage outlives the Tasks of AHP turns. A person sees AHP usage only when it
-// names them as its requester, also once a session of its name is someone
-// else's: a name is free again once its session and Tasks are gone. Usage
-// that names no requester, such as a chat's, is no person's.
 func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 	const namespace = "default"
 	bobsTurn := &corev1alpha1.Task{
@@ -365,33 +335,22 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 	rows := []store.UsageTask{
 		{Namespace: namespace, TaskUID: "alice-turn", SessionName: "ahp-alice", Requester: requester("alice")},
 		{Namespace: namespace, TaskUID: "alice-legacy", SessionName: "ahp-alice"},
-		// Two people used the same name, one after the other.
 		{Namespace: namespace, TaskUID: "reused-alice", SessionName: "ahp-reused", Requester: requester("alice")},
 		{Namespace: namespace, TaskUID: "reused-bob", SessionName: "ahp-reused", Requester: requester("bob")},
 		{Namespace: namespace, TaskUID: "other-issuer", SessionName: "ahp-other", Requester: &store.UsageRequester{Issuer: "https://other.example", Subject: "alice"}},
-		// Bob's turn now continues ahp-live; Alice used the name before.
 		{Namespace: namespace, TaskUID: "alice-before-bob", SessionName: "ahp-live", Requester: requester("alice")},
 		{Namespace: namespace, TaskUID: "legacy-in-bobs", SessionName: "ahp-live"},
-		// A name with surrounding space is the session it names.
 		{Namespace: namespace, TaskUID: "padded-legacy-in-bobs", SessionName: " ahp-live"},
-		// A private fork of a turn with no session of its own.
 		{Namespace: namespace, TaskUID: "alice-sessionless-fork", AHPTurn: true, Requester: requester("alice")},
-		// A delegate_task child of Alice's turn inherits its AHP-turn mark
-		// and requester but continues no session, and has an ordinary name.
 		{Namespace: namespace, TaskUID: "alice-delegated-child", TaskName: "worker", AHPTurn: true, Requester: requester("alice")},
 		{Namespace: namespace, TaskUID: "unknown-sessionless-turn", AHPTurn: true},
-		// A requester recorded without an identity names no one.
 		{Namespace: namespace, TaskUID: "empty-requester", SessionName: "ahp-empty", Requester: &store.UsageRequester{}},
-		// Any Task may be named with the AHP prefix: a name alone is no turn's.
 		{Namespace: namespace, TaskUID: "ordinary-ahp-name", TaskName: "ahp-report", Requester: requester("bob")},
 		{Namespace: namespace, TaskUID: "ordinary-ahp-name-no-requester", TaskName: "ahp-report-2"},
 		{Namespace: namespace, TaskUID: "team", SessionName: "team-session"},
-		// Tasks a chat in an AHP session created: their rows name no
-		// session, but their usage does.
 		{Namespace: namespace, TaskUID: "chat-created-alice", TaskName: "report", Requester: requester("alice")},
 		{Namespace: namespace, TaskUID: "chat-created-no-requester", TaskName: "report-2"},
 	}
-	// Usage with no Task, as a chat's, names no requester.
 	observations := []store.UsageObservation{
 		{Namespace: namespace, TaskUID: "chat-created-alice", CounterID: "chat-created-alice", SessionName: "ahp-alice"},
 		{Namespace: namespace, TaskUID: "chat-created-no-requester", CounterID: "chat-created-no-requester", SessionName: "ahp-alice"},
@@ -428,19 +387,10 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 	require.Equal(t, with("alice-turn", "reused-alice", "alice-before-bob", "alice-sessionless-fork", "alice-delegated-child", "chat-created-alice"),
 		hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"}))
 	require.Empty(t, hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:operator"}))
-	// A person the API server signs in itself carries no issuer and subject,
-	// so no AHP usage is theirs.
 	require.Equal(t, with("alice-turn", "reused-alice", "reused-bob", "alice-before-bob", "alice-sessionless-fork", "alice-delegated-child", "chat-created-alice"),
 		hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}))
 }
 
-// A session's usage counter spans its turns, and the report shows the first
-// total it sees as the session's earlier usage. A turn hidden from a person
-// must not reach them through a visible turn that shares its counter.
-// A session's first total may hold an earlier turn's usage that the person
-// may not see. When retention has removed that turn's row, and it reported
-// nothing of its own, nothing shows the total is not theirs: it is not shown,
-// and only later gains are credited to their turn.
 func TestAHPUsageCounterShowsNoTotalAPrunedTurnMayHold(t *testing.T) {
 	const namespace = "default"
 	scheme := runtime.NewScheme()
@@ -454,7 +404,6 @@ func TestAHPUsageCounterShowsNoTotalAPrunedTurnMayHold(t *testing.T) {
 			ObservedAt: at, InputTokens: tokens(in), OutputTokens: tokens(7)}
 	}
 	data := store.UsageData{
-		// The earlier turn's row is gone, and it reported nothing of its own.
 		Tasks: []store.UsageTask{{Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "alices-turn", TaskName: "alices-turn",
 			SessionName: "ahp-shared", Phase: "Succeeded", Runtime: "agent", StartedAt: start,
 			Requester: &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}}},
@@ -500,8 +449,6 @@ func TestAHPUsageCounterDoesNotShowAHiddenTurn(t *testing.T) {
 				Tasks: []store.UsageTask{turn("earlier-turn", earlier, start),
 					turn("alices-turn", &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}, start.Add(time.Minute))},
 				Observations: []store.UsageObservation{
-					// The earlier turn reports no counts; Alice's turn then
-					// reports the counter's total, the earlier tokens included.
 					{ID: "earlier", Namespace: namespace, NamespaceUID: "namespace-uid", TaskUID: "earlier-turn", SessionName: "ahp-shared",
 						CounterID: "session", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted,
 						ObservedAt: start.Add(30 * time.Second)},
@@ -532,9 +479,6 @@ func TestAHPUsageCounterDoesNotShowAHiddenTurn(t *testing.T) {
 	}
 }
 
-// A page of sessions leaves out another person's AHP sessions, and its
-// continue token never names one: pages read on until full, and the token
-// names the last session listed.
 func TestAHPSessionPagesNeverNameAHiddenSession(t *testing.T) {
 	const namespace = "default"
 	turn := &corev1alpha1.Task{
@@ -551,7 +495,6 @@ func TestAHPSessionPagesNeverNameAHiddenSession(t *testing.T) {
 	require.NoError(t, err)
 	ss := sqlite.NewStore(db, ":memory:")
 	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
-	// Newest first: team-new, ahp-alice, team-old.
 	for i, name := range []string{"team-old", "ahp-alice", "team-new"} {
 		at := start.Add(time.Duration(i) * time.Minute)
 		require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{Namespace: namespace, Name: name, SessionType: "task",
@@ -603,8 +546,6 @@ func TestAHPSessionPagesNeverNameAHiddenSession(t *testing.T) {
 	require.Equal(t, []string{"team-new", "team-old"}, all)
 }
 
-// Whose AHP usage is follows from the usage alone, so a report looks up no
-// session owners and lists no Tasks.
 func TestAHPUsageLooksUpNoSessionOwners(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -637,9 +578,6 @@ func TestAHPUsageLooksUpNoSessionOwners(t *testing.T) {
 	require.Zero(t, lists.Load())
 }
 
-// A turn of an AHP session from outside the report's period, such as an
-// operator's from before it, may have used the session's counter too: the
-// report credits nothing on that counter to the person's turns.
 func TestAHPUsageCountsHiddenTurnsOutsideTheReport(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.NewDB(":memory:")
@@ -649,10 +587,8 @@ func TestAHPUsageCountsHiddenTurnsOutsideTheReport(t *testing.T) {
 	alice := &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
 	for _, task := range []store.UsageTask{
 		{Namespace: "default", TaskUID: "operator", TaskName: "operator", SessionName: " ahp-alice\t", Phase: "Succeeded", StartedAt: start.Add(-48 * time.Hour)},
-		// Padded with space SQL's TRIM does not know.
 		{Namespace: "default", TaskUID: "operator-2", TaskName: "operator-2", SessionName: "\u00a0ahp-alice\u2003", Phase: "Succeeded",
 			StartedAt: start.Add(-47 * time.Hour)},
-		// Holding the name without being it.
 		{Namespace: "default", TaskUID: "other", TaskName: "other", SessionName: "ahp-alice-2", Phase: "Succeeded", StartedAt: start.Add(-46 * time.Hour)},
 		{Namespace: "default", TaskUID: "alice", TaskName: "alice", SessionName: "ahp-alice", Phase: "Succeeded", StartedAt: start, Requester: alice},
 		{Namespace: "default", TaskUID: "elsewhere", TaskName: "elsewhere", SessionName: "ahp-elsewhere", Phase: "Succeeded", StartedAt: start.Add(-48 * time.Hour)},
@@ -690,10 +626,6 @@ func TestAHPUsageCountsHiddenTurnsOutsideTheReport(t *testing.T) {
 	require.NotContains(t, string(encoded), "operator")
 }
 
-// A hidden reporter whose Task's row retention pruned, or which reported no
-// counts, cannot show how much of its session's counter it used: a person's
-// turns are credited nothing on that counter. A ServiceAccount, which sees
-// all AHP usage, keeps the counter's gains attributed.
 func TestAHPUsageCounterWithRowlessHiddenUsage(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -714,7 +646,6 @@ func TestAHPUsageCounterWithRowlessHiddenUsage(t *testing.T) {
 		}
 		data := store.UsageData{
 			Tasks: []store.UsageTask{turn("first", start), turn("second", start.Add(2*time.Minute))},
-			// The pruned turn ran between Alice's, and reported no counts.
 			Observations: []store.UsageObservation{report("a", "first", count(100), time.Minute),
 				report("b", "pruned", nil, 90*time.Second), report("c", "second", count(250), 3*time.Minute)},
 		}
@@ -741,7 +672,6 @@ func TestAHPUsageCounterWithRowlessHiddenUsage(t *testing.T) {
 	require.Contains(t, operator, `"inputTokens":150`, "a ServiceAccount's report keeps the gain attributed")
 }
 
-// limitRecordingStore records the limit each session lookup is given.
 type limitRecordingStore struct {
 	*sqlite.Store
 	limits []int
@@ -752,8 +682,6 @@ func (s *limitRecordingStore) ListUsageTasksInSessions(ctx context.Context, name
 	return s.Store.ListUsageTasksInSessions(ctx, namespace, namespaceUID, sessions, startedBy, limit)
 }
 
-// The lookup of a report's AHP session rows has one budget across all its
-// teams, as the report's own record limit does.
 func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.NewDB(":memory:")
@@ -782,12 +710,9 @@ func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
 	require.Equal(t, http.StatusOK, response.StatusCode)
-	// Each lookup may return the team's loaded row again, so its limit leaves
-	// room for it; only the three rows the report did not load use budget.
 	require.Equal(t, []int{usageMaxRecords - 2 + 1, usageMaxRecords - 2 - 3 + 1}, recording.limits,
 		"the report's two records and each team's new rows count against one budget")
 
-	// A report already at its record limit has no budget left for the lookup.
 	full := store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "mine", SessionName: "ahp-shared", StartedAt: start}}}
 	for i := range usageMaxRecords - 1 {
 		full.Observations = append(full.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
@@ -806,9 +731,6 @@ func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
 	require.Equal(t, []int{1}, recording.limits, "only room for the report's own row")
 }
 
-// Placeholders for a session's observations whose Task rows the report did not
-// load are not rows the lookup returns again: they leave its limit alone, and a
-// retained row one stands for is a new record against the budget.
 func TestAHPUsageSessionLookupDoesNotCountPlaceholders(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.NewDB(":memory:")
@@ -824,14 +746,10 @@ func TestAHPUsageSessionLookupDoesNotCountPlaceholders(t *testing.T) {
 	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: recording})
 	report := func(extra int) int {
 		data := &store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "loaded", SessionName: "ahp-shared", StartedAt: start}}}
-		// Five turns whose rows retention pruned, and one, turn-0, whose row
-		// the report did not select: each gets a placeholder.
 		for _, uid := range []string{"gone-0", "gone-1", "gone-2", "gone-3", "gone-4", "turn-0"} {
 			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", TaskUID: uid, TaskName: uid,
 				CounterID: "counter-" + uid, SessionName: "ahp-shared", ObservedAt: start})
 		}
-		// The report's own records leave room for exactly the three turns it
-		// did not load.
 		for i := range usageMaxRecords - 10 + extra {
 			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
 				SessionName: "team-session", ObservedAt: start})
@@ -853,8 +771,6 @@ func TestAHPUsageSessionLookupDoesNotCountPlaceholders(t *testing.T) {
 		"turn-0's retained row is a new record, though a placeholder stands for it")
 }
 
-// A report that the session lookup takes exactly to its record limit is not
-// refused because the lookup also returns a row the report already loaded.
 func TestAHPUsageSessionLookupDoesNotCountLoadedRows(t *testing.T) {
 	ctx := context.Background()
 	db, err := sqlite.NewDB(":memory:")
@@ -870,7 +786,6 @@ func TestAHPUsageSessionLookupDoesNotCountLoadedRows(t *testing.T) {
 	handlers := NewHandlers(HandlersConfig{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), ExecutionEventStore: backend})
 	report := func(extra int) (*store.UsageData, int) {
 		data := &store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "loaded", SessionName: "ahp-shared", StartedAt: start}}}
-		// The report's own records leave room for exactly the two other turns.
 		for i := range usageMaxRecords - 3 + extra {
 			data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
 				SessionName: "team-session", ObservedAt: start})
@@ -891,11 +806,8 @@ func TestAHPUsageSessionLookupDoesNotCountLoadedRows(t *testing.T) {
 	require.True(t, data.HiddenTasks["team-a/turn-0"])
 	require.True(t, data.HiddenTasks["team-a/turn-1"])
 
-	// One record more and the turns no longer fit.
 	_, status = report(1)
 	require.Equal(t, http.StatusUnprocessableEntity, status)
-	// A turn that started after the report's asOf is outside it and uses
-	// none of its budget.
 	require.NoError(t, backend.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team-a", TaskUID: "after-asof",
 		TaskName: "after-asof", SessionName: "ahp-shared", Phase: "Succeeded", StartedAt: start.Add(2 * time.Hour)}))
 	data, status = report(0)

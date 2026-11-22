@@ -102,7 +102,6 @@ func newTaskDownloadCmd() *cobra.Command {
 				return err
 			}
 
-			// Use only the base filename to prevent path traversal
 			safeFilename := filepath.Base(filename)
 			dest := outputPath
 			if dest == "" {

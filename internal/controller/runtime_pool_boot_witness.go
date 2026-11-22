@@ -35,10 +35,6 @@ const (
 	runtimePoolBootTerminatedProof        = "kubernetes-container-termination"
 )
 
-// runtimePoolBootWitness contains no credentials or Pod environment payloads.
-// Its immutable preparation precedes Pod retention; only a committed witness
-// may admit work. Evidence lives in the pool namespace, independently of its
-// cross-namespace Pod and independently of the mutable ActiveInstance pointer.
 type runtimePoolBootWitness struct {
 	SchemaVersion  int             `json:"schemaVersion"`
 	PoolNamespace  string          `json:"poolNamespace"`
@@ -74,8 +70,6 @@ func runtimePoolBootWitnessDigest(w runtimePoolBootWitness) (string, error) {
 	return store.CanonicalBytesDigest(body), nil
 }
 
-// Only the common physical-lifetime fields are projected into the existing
-// external-runtime validator. This does not create an AgentRuntime registration.
 func (w runtimePoolBootWitness) physicalWitness() agentRuntimeBootWitness {
 	return agentRuntimeBootWitness{
 		Namespace: w.PodNamespace, PodName: w.PodName, PodUID: w.PodUID, PodSpecDigest: w.PodSpecDigest,
@@ -150,7 +144,6 @@ func (r *RuntimePoolReconciler) runtimePoolBootRecords(ctx context.Context, pool
 		if e.Spec.Kind != kind || e.Spec.AggregateID != string(pool.UID) {
 			continue
 		}
-		// An empty reservation cannot have retained a Pod or admitted work.
 		if emptyRuntimePoolBootEvidenceReservation(e) {
 			continue
 		}
@@ -166,10 +159,6 @@ func (r *RuntimePoolReconciler) runtimePoolBootRecords(ctx context.Context, pool
 	return result, nil
 }
 
-// observeNativeRuntimePoolBoot brackets the authenticated probe using uncached
-// physical reads. The template marker opts in newly rendered native pools only;
-// legacy templates use the separate authenticated-drain rollout path, never
-// this new-admission path.
 func (r *RuntimePoolReconciler) observeNativeRuntimePoolBoot(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, selected *corev1.Pod) (*runtimePoolBootWitness, error) {
 	if pool.Spec.ExecutionWorkspace != nil {
 		return nil, nil
@@ -231,8 +220,6 @@ func (r *RuntimePoolReconciler) observeNativeRuntimePoolBoot(ctx context.Context
 	}, nil
 }
 
-// nativeRuntimePoolBootOwners validates the complete managed ownership chain,
-// including cross-namespace pool labels and the controller template revision.
 func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, pod *corev1.Pod) (*appsv1.Deployment, *appsv1.ReplicaSet, error) {
 	deployment := &appsv1.Deployment{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: cfg.namespace, Name: cfg.baseName}, deployment); err != nil {
@@ -254,8 +241,6 @@ func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context,
 	if rs.UID == "" || rs.UID != owner.UID || !metav1.IsControlledBy(rs, deployment) {
 		return nil, nil, fmt.Errorf("%w: native runtime ReplicaSet ownership changed", store.ErrConflict)
 	}
-	// The revision was hashed before API defaulting. Compare its exact inherited
-	// identity, not a rehash of the server-defaulted PodTemplateSpec.
 	revision := deployment.Spec.Template.Annotations[runtimePoolTemplateRevisionAnnotation]
 	if store.ValidateCanonicalDigest("runtime template revision", revision) != nil || pod.Annotations[runtimePoolTemplateRevisionAnnotation] != revision {
 		return nil, nil, fmt.Errorf("%w: native RuntimePool template revision changed", store.ErrConflict)
@@ -263,20 +248,12 @@ func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context,
 	if err := validateRecoveryPodTemplate(deployment, rs, pod); err != nil {
 		return nil, nil, err
 	}
-	// The shared template check omits init containers because AgentRuntime
-	// recovery forbids them; toolbox pools render them, so pin them here.
 	if !reflect.DeepEqual(deployment.Spec.Template.Spec.InitContainers, pod.Spec.InitContainers) {
 		return nil, nil, fmt.Errorf("%w: native runtime Pod init containers differ from its Deployment", store.ErrConflict)
 	}
 	return deployment, rs, nil
 }
 
-// runtimePoolBootTopologySpec returns the Pod spec the shared recovery
-// topology check sees. Toolbox and skill init containers are controller-rendered, run to
-// completion before the runtime container starts, and never share its process
-// namespace, so they and their read-only image volumes are removed from the
-// copy. Any other init container, including a restartable sidecar, still
-// fails closed.
 func runtimePoolBootTopologySpec(spec corev1.PodSpec) (corev1.PodSpec, error) {
 	topology := *spec.DeepCopy()
 	for _, container := range spec.InitContainers {
@@ -353,7 +330,6 @@ func (r *RuntimePoolReconciler) retainRuntimePoolBoot(ctx context.Context, pool 
 		if current.ResourceVersion == "" || current.Annotations[runtimePoolBootOwnerVersionAnnotation] == current.ResourceVersion {
 			return fmt.Errorf("%w: RuntimePool retention needs an advancing owner version", store.ErrConflict)
 		}
-		// Fence a delayed owner-finalizer removal before retaining its child.
 		base := current.DeepCopy()
 		if current.Annotations == nil {
 			current.Annotations = map[string]string{}
@@ -410,8 +386,6 @@ func (r *RuntimePoolReconciler) enrollRuntimePoolBoot(ctx context.Context, pool 
 			if !upgradeDrainSupervisorIsQuiescent(status) {
 				return fmt.Errorf("%w: retired RuntimePool boot cannot admit work", store.ErrNotReady)
 			}
-			// Its durable proof, not a released Pod finalizer, authorizes only
-			// completion of the already-quiescent rotation/scale-down path.
 			return nil
 		}
 		return r.requireRuntimePoolBootRetention(ctx, w)
@@ -480,7 +454,7 @@ func (r *RuntimePoolReconciler) resumeRuntimePoolBootPreparations(ctx context.Co
 		err = r.APIReader.Get(ctx, client.ObjectKey{Namespace: w.PodNamespace, Name: w.PodName}, pod)
 		if apierrors.IsNotFound(err) {
 			continue
-		} // Uncommitted: never admitted, and no retirement claim.
+		}
 		if err != nil {
 			return err
 		}
@@ -504,12 +478,6 @@ func (r *RuntimePoolReconciler) resumeRuntimePoolBootPreparations(ctx context.Co
 	return nil
 }
 
-// discardSupersededRuntimePoolBootPreparation withdraws only a never-enrolled,
-// unretained source. It does NOT certify process death, publish a boot witness,
-// remove a finalizer, or create a cleanup receipt. Retain the immutable
-// preparation for audit; replay ignores its absent/deleting original Pod.
-// Obsolescence may be a newer pool generation or a positively observed different
-// container boot. Neither case is evidence that an admitted process died.
 func (r *RuntimePoolReconciler) discardSupersededRuntimePoolBootPreparation(ctx context.Context, pool *corev1alpha1.RuntimePool, w runtimePoolBootWitness, fence store.ControllerEpochFence) (bool, error) {
 	discarded := false
 	err := agentRuntimeRecoveryGuard(ctx, r.ControlStore, fence, func(writeCtx context.Context) error {
@@ -521,10 +489,10 @@ func (r *RuntimePoolReconciler) discardSupersededRuntimePoolBootPreparation(ctx 
 			return fmt.Errorf("%w: superseded native preparation owner changed", store.ErrConflict)
 		}
 		if uint64(current.Generation) < w.Fence.RuntimePoolGeneration || current.Status.ActiveInstance != nil || !runtimePoolRolloutControllerWorkIsQuiescent(current.Status.Capacity) {
-			return nil // Any admission/reservation authority remains unresolved.
+			return nil
 		}
 		if _, err := loadRuntimePoolBootWitness(writeCtx, r.ControlStore, w.identity(runtimePoolBootWitnessKind)); err == nil {
-			return nil // Publication won the race: use normal retained recovery.
+			return nil
 		} else if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrNotReady) {
 			return err
 		}
@@ -562,8 +530,6 @@ func (r *RuntimePoolReconciler) discardSupersededRuntimePoolBootPreparation(ctx 
 		if deployment.UID != w.DeploymentUID || deployment.ResourceVersion == "" || deployment.Labels[runtimePoolUIDLabel] != string(w.PoolUID) || runtimePoolPodTemplateRevision(deployment.Spec.Template) != w.TemplateDigest {
 			return fmt.Errorf("%w: superseded native preparation Deployment changed", store.ErrConflict)
 		}
-		// Stop the exact obsolete template before deleting the unadmitted Pod,
-		// so its ReplicaSet cannot race rollout with another unadmitted boot.
 		if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 {
 			base := deployment.DeepCopy()
 			deployment.Spec.Replicas = new(int32(0))
@@ -571,8 +537,6 @@ func (r *RuntimePoolReconciler) discardSupersededRuntimePoolBootPreparation(ctx 
 				return err
 			}
 		}
-		// A delayed retention PATCH either changes this version and defeats
-		// deletion, or loses to deletion and cannot add a new finalizer.
 		if err := r.Delete(writeCtx, pod, deleteCurrentObjectPreconditions(pod)...); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -582,9 +546,6 @@ func (r *RuntimePoolReconciler) discardSupersededRuntimePoolBootPreparation(ctx 
 	return discarded, err
 }
 
-// runtimePoolPreparedContainerChanged proves only that this unadmitted
-// preparation cannot enroll the currently observed container. It deliberately
-// does not supply termination evidence for the original container lifetime.
 func runtimePoolPreparedContainerChanged(w runtimePoolBootWitness, pod *corev1.Pod) bool {
 	status, err := recoverySupervisorStatus(pod, runtimePoolBootContainerName)
 	if err != nil || status.ContainerID == "" || status.ContainerID == w.ContainerID ||
@@ -603,13 +564,6 @@ func runtimePoolPreparedContainerChanged(w runtimePoolBootWitness, pod *corev1.P
 	return false
 }
 
-// runtimePoolTaskBootMatches reports whether a Task ran on the RuntimePool boot
-// named by instanceID and bootID. The dispatcher records the instance and
-// RuntimeSession identity before it creates the RuntimeSession, and the
-// supervisor boot only after creation succeeds, so a Task whose RuntimeSession
-// never started has no boot. Its instance ID still names this exact boot,
-// because a RuntimePool instance ID is derived from the Pod UID and boot ID. A
-// recorded boot must match exactly.
 func runtimePoolTaskBootMatches(e *corev1alpha1.TaskExecutionStatus, podUID types.UID, instanceID string, bootID harnessv2.SupervisorBootID) bool {
 	if e == nil || e.RuntimeInstanceID != instanceID {
 		return false
@@ -620,8 +574,6 @@ func runtimePoolTaskBootMatches(e *corev1alpha1.TaskExecutionStatus, podUID type
 	return e.RuntimeSessionSupervisorBootID == string(bootID)
 }
 
-// runtimePoolTaskWitnessMatches is shared by read-only historical cleanup and
-// eager Task receipts. It never compares old proof with the replacement pool.
 func runtimePoolTaskWitnessMatches(task *corev1alpha1.Task, taskUID types.UID, w runtimePoolBootWitness) error {
 	e := task.Status.Execution
 	binding := executionBinding(task)
@@ -641,9 +593,6 @@ func runtimePoolTaskWitnessMatches(task *corev1alpha1.Task, taskUID types.UID, w
 	return nil
 }
 
-// emptyRuntimePoolBootEvidenceReservation reports a RuntimePool boot evidence
-// record that was reserved but never written, as an interrupted controller
-// leaves it between the reservation and its transition.
 func emptyRuntimePoolBootEvidenceReservation(effect *corev1alpha1.ExternalEffect) bool {
 	switch effect.Spec.Kind {
 	case runtimePoolBootPreparationKind, runtimePoolBootWitnessKind, runtimePoolBootRetirementKind:

@@ -50,7 +50,6 @@ func newLiveEnvironment(t *testing.T) *liveEnvironment {
 	}
 	cfg, err := clientcmd.BuildConfigFromFlags("", path)
 	require.NoError(t, err)
-	// Require an explicit kind context; never adopt ordinary shared namespaces.
 	raw, err := clientcmd.LoadFromFile(path)
 	require.NoError(t, err)
 	require.True(
@@ -147,7 +146,6 @@ func newLiveEnvironment(t *testing.T) *liveEnvironment {
 
 func (f *liveEnvironment) create(t *testing.T, object client.Object) {
 	t.Helper()
-	// An existing object is an error, so this test cannot overwrite another run.
 	require.NoError(
 		t,
 		f.kube.Create(t.Context(), object),
@@ -258,8 +256,6 @@ func (f *liveEnvironment) installController(t *testing.T, namespace, image, work
 					ResourceNames: []string{namespace, namespace + "-runtimes"},
 					Verbs:         []string{"get"},
 				},
-				// Startup caches read shared infrastructure metadata. Tenant resources
-				// and every write remain covered by the namespace-scoped Roles above.
 				{
 					APIGroups: []string{"storage.k8s.io"},
 					Resources: []string{"storageclasses"},

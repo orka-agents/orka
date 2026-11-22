@@ -4,8 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package agentruntimepolicy resolves registered external runtime policy for
-// Task producers that must materialize the exact brokered tool request.
 package agentruntimepolicy
 
 import (
@@ -19,8 +17,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// RuntimeRefPolicy is the registered harness-v2 policy a generated Task must
-// explicitly request. The AgentRuntime remains the policy authority.
 type RuntimeRefPolicy struct {
 	ProviderKind    string
 	Model           string
@@ -30,8 +26,6 @@ type RuntimeRefPolicy struct {
 	AllowBash       bool
 }
 
-// ResolveRuntimeRefPolicy resolves an Agent's external harness-v2 policy.
-// Built-in Agents return a nil policy.
 func ResolveRuntimeRefPolicy(
 	ctx context.Context,
 	reader client.Reader,
@@ -56,8 +50,6 @@ func ResolveRuntimeRefPolicy(
 	return PolicyForRuntime(runtime)
 }
 
-// PolicyForRuntime returns the registered harness-v2 policy from an already
-// resolved AgentRuntime. Unsupported contracts are rejected.
 func PolicyForRuntime(runtime *corev1alpha1.AgentRuntime) (*RuntimeRefPolicy, error) {
 	if runtime == nil {
 		return nil, fmt.Errorf("external AgentRuntime is required")
@@ -97,8 +89,6 @@ func PolicyForRuntime(runtime *corev1alpha1.AgentRuntime) (*RuntimeRefPolicy, er
 	}, nil
 }
 
-// MaterializeRuntimeRefAllowedTools copies the registered harness-v2 allowlist
-// into a generated Task while preserving an explicit empty list.
 func MaterializeRuntimeRefAllowedTools(task *corev1alpha1.Task, policy *RuntimeRefPolicy) error {
 	if task == nil || policy == nil {
 		return nil
@@ -125,8 +115,6 @@ func MaterializeRuntimeRefAllowedTools(task *corev1alpha1.Task, policy *RuntimeR
 	return nil
 }
 
-// ResolveAndMaterializeRuntimeRefAllowedTools resolves an Agent's registered
-// policy and materializes its exact allowlist into a generated Task.
 func ResolveAndMaterializeRuntimeRefAllowedTools(
 	ctx context.Context,
 	reader client.Reader,
@@ -143,8 +131,6 @@ func ResolveAndMaterializeRuntimeRefAllowedTools(
 	return MaterializeRuntimeRefAllowedTools(task, policy)
 }
 
-// ResolveAndMaterializeTaskRuntimeRefAllowedTools loads the Agent referenced by
-// a generated Task and materializes the registered harness-v2 allowlist.
 func ResolveAndMaterializeTaskRuntimeRefAllowedTools(
 	ctx context.Context,
 	reader client.Reader,
@@ -157,9 +143,6 @@ func ResolveAndMaterializeTaskRuntimeRefAllowedTools(
 	return MaterializeRuntimeRefAllowedTools(task, policy)
 }
 
-// ResolveAndReplaceTaskRuntimeRefAllowedTools resolves the Agent referenced by
-// a copied Task and replaces inherited runtime overrides for external harness-v2
-// execution with the registered allowlist. Built-in settings are preserved.
 func ResolveAndReplaceTaskRuntimeRefAllowedTools(
 	ctx context.Context,
 	reader client.Reader,

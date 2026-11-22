@@ -221,7 +221,6 @@ class CleanupObserverTests(unittest.TestCase):
         run, task = self.fixture()
         run.witness = run.witnesses["boot-1"]
         run.report.update(exposures=[], admissions={})
-        # The CRD defaults this false field, but the typed API omits it.
         task["spec"]["workspace"] = {"intent": "read", "createPR": False}
         api_task = copy.deepcopy(task)
         del api_task["spec"]["workspace"]["createPR"]

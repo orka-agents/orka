@@ -54,7 +54,6 @@ type CreateRepositoryMonitorRunRequest struct {
 	TargetSHA    string `json:"targetSHA,omitempty"`
 }
 
-// CreateRepositoryMonitorCommandRequest records an explicit monitor command from the Orka API.
 type CreateRepositoryMonitorCommandRequest struct {
 	Kind      string `json:"kind"`
 	Number    int64  `json:"number"`
@@ -162,7 +161,6 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if _, err := controller.ParseRepositoryMonitorSchedule(&corev1alpha1.RepositoryMonitor{Spec: spec}); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("spec.schedule is invalid: %v", err))
 	}
-	// The CRD schema bounds the integer limits; this duration has no minimum.
 	if ttl := spec.Review.StaleReviewTTL; ttl != nil && ttl.Duration < 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "spec.review.staleReviewTTL must not be negative")
 	}
@@ -344,9 +342,6 @@ func (h *Handlers) validateRepositoryMonitorReadOnlyAgent(c fiber.Ctx, namespace
 		}
 	case corev1alpha1.AgentRuntimeClaude:
 	case corev1alpha1.AgentRuntimeCodex:
-		// Codex reviewers run inside the RuntimeSession boundary with
-		// controller-rejected elevation requests and read-intent workspace
-		// delta classification failing any modifying turn.
 		if role != monitorRoleReviewer {
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q runtime %q is not supported for read-only repository monitor tasks; use %s", field, ref.Name, agent.Spec.Runtime.Type, allowedRuntimes))
 		}
@@ -457,8 +452,6 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
 		return fiber.NewError(fiber.StatusBadRequest, "at least one repository monitor target must be enabled")
 	}
-	// Mirrors the controller's repositoryMonitorIssueImplementationEnabled and
-	// repositoryMonitorPullRequestLabelScopeField.
 	implementation := spec.IssueWorkflow.Implementation.Enabled
 	if !spec.Targets.Issues.Enabled || spec.Agents.Implementer == nil || (implementation != nil && !*implementation) {
 		return nil
@@ -649,7 +642,6 @@ func (h *Handlers) authorizeContextTokenRepositoryMonitorCredentialSecrets(c fib
 	return nil
 }
 
-// CreateRepositoryMonitor creates a new durable repository monitor.
 func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	var req CreateRepositoryMonitorRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -713,7 +705,6 @@ func (h *Handlers) CreateRepositoryMonitor(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(monitor)
 }
 
-// ListRepositoryMonitors lists configured repository monitors.
 func (h *Handlers) ListRepositoryMonitors(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -755,7 +746,6 @@ func (h *Handlers) ListRepositoryMonitors(c fiber.Ctx) error {
 		return err
 	}
 	if filteredList {
-		// The raw count describes monitors the caller is not allowed to see.
 		remainingItemCount = nil
 	}
 	return c.JSON(ListResponse{
@@ -767,7 +757,6 @@ func (h *Handlers) ListRepositoryMonitors(c fiber.Ctx) error {
 	})
 }
 
-// GetRepositoryMonitor returns a repository monitor configuration.
 func (h *Handlers) GetRepositoryMonitor(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -786,7 +775,6 @@ func (h *Handlers) GetRepositoryMonitor(c fiber.Ctx) error {
 	return c.JSON(monitor)
 }
 
-// UpdateRepositoryMonitor updates an existing repository monitor.
 func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 	var req UpdateRepositoryMonitorRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -841,7 +829,6 @@ func (h *Handlers) UpdateRepositoryMonitor(c fiber.Ctx) error {
 	return c.JSON(updated)
 }
 
-// DeleteRepositoryMonitor deletes a repository monitor configuration.
 func (h *Handlers) DeleteRepositoryMonitor(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -863,7 +850,6 @@ func (h *Handlers) DeleteRepositoryMonitor(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// CreateRepositoryMonitorRun records a manual monitor run request.
 func (h *Handlers) CreateRepositoryMonitorRun(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -891,8 +877,6 @@ func (h *Handlers) CreateRepositoryMonitorRun(c fiber.Ctx) error {
 	if err := validateRepositoryMonitorRunRequest(req); err != nil {
 		return err
 	}
-	// The controller skips queued runs while the monitor reports a
-	// configuration Error, so a new run would stay queued and block the next.
 	if ready := controller.RepositoryMonitorRunsBlockedCondition(monitor); ready != nil {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("repository monitor is not ready (%s): %s; fix the monitor before starting a run", ready.Reason, ready.Message))
 	}
@@ -964,7 +948,6 @@ func (h *Handlers) ensureNoActiveRepositoryMonitorRun(c fiber.Ctx, namespace, mo
 	return nil
 }
 
-// ListRepositoryMonitorRuns lists durable runs for a repository monitor.
 func (h *Handlers) ListRepositoryMonitorRuns(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1001,7 +984,6 @@ func (h *Handlers) ListRepositoryMonitorRuns(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: runs, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// ListRepositoryMonitorItems lists current items for a repository monitor.
 func (h *Handlers) ListRepositoryMonitorItems(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1046,7 +1028,6 @@ func (h *Handlers) ListRepositoryMonitorItems(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: items, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// ListRepositoryMonitorEvents lists audit events for a repository monitor.
 func (h *Handlers) ListRepositoryMonitorEvents(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1107,8 +1088,6 @@ func parseOptionalInt64Query(value string) (int64, error) {
 	return strconv.ParseInt(value, 10, 64)
 }
 
-// CreateRepositoryMonitorCommandEvent records an API-created monitor command and best-effort queues its run.
-//
 //nolint:gocyclo // Command validation is intentionally linear and auditable.
 func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
@@ -1201,7 +1180,7 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		MonitorGeneration:   monitor.Generation,
 		DedupeKey:           id,
 		IdempotencyKey:      id,
-		CommentID:           id, // Keep the legacy comment-based uniqueness key distinct for each API request.
+		CommentID:           id,
 		Author:              "orka-api",
 		Permission:          repositoryMonitorAPICommandPermission(req),
 		Command:             req.Intent,
@@ -1307,7 +1286,6 @@ func validateRepositoryMonitorCommandRequest(req CreateRepositoryMonitorCommandR
 	return fiber.NewError(fiber.StatusBadRequest, "unsupported command intent for target kind")
 }
 
-// ListRepositoryMonitorCommandEvents lists durable label/API command events.
 func (h *Handlers) ListRepositoryMonitorCommandEvents(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1354,7 +1332,6 @@ func (h *Handlers) ListRepositoryMonitorCommandEvents(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: events, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// GetRepositoryMonitorCommandEvent fetches one durable command event.
 func (h *Handlers) GetRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1383,7 +1360,6 @@ func (h *Handlers) GetRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 	return c.JSON(event)
 }
 
-// ListRepositoryMonitorActionRecords lists durable monitor action records.
 func (h *Handlers) ListRepositoryMonitorActionRecords(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1430,7 +1406,6 @@ func (h *Handlers) ListRepositoryMonitorActionRecords(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: records, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// GetRepositoryMonitorActionRecord fetches one durable action record.
 func (h *Handlers) GetRepositoryMonitorActionRecord(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1459,7 +1434,6 @@ func (h *Handlers) GetRepositoryMonitorActionRecord(c fiber.Ctx) error {
 	return c.JSON(record)
 }
 
-// ListRepositoryMonitorWorkActions lists durable workflow queue actions.
 func (h *Handlers) ListRepositoryMonitorWorkActions(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1511,7 +1485,6 @@ func (h *Handlers) ListRepositoryMonitorWorkActions(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: actions, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// GetRepositoryMonitorWorkAction fetches one durable workflow action.
 func (h *Handlers) GetRepositoryMonitorWorkAction(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1540,7 +1513,6 @@ func (h *Handlers) GetRepositoryMonitorWorkAction(c fiber.Ctx) error {
 	return c.JSON(action)
 }
 
-// ListRepositoryMonitorImplementationJobs lists durable issue implementation jobs.
 func (h *Handlers) ListRepositoryMonitorImplementationJobs(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1587,7 +1559,6 @@ func (h *Handlers) ListRepositoryMonitorImplementationJobs(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: jobs, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// GetRepositoryMonitorImplementationJob fetches one implementation job.
 func (h *Handlers) GetRepositoryMonitorImplementationJob(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1616,7 +1587,6 @@ func (h *Handlers) GetRepositoryMonitorImplementationJob(c fiber.Ctx) error {
 	return c.JSON(job)
 }
 
-// ListRepositoryMonitorGitHubMutations lists controller-owned GitHub mutation audit records.
 func (h *Handlers) ListRepositoryMonitorGitHubMutations(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1663,7 +1633,6 @@ func (h *Handlers) ListRepositoryMonitorGitHubMutations(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: records, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// GetRepositoryMonitorGitHubMutation fetches one mutation audit record.
 func (h *Handlers) GetRepositoryMonitorGitHubMutation(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err
@@ -1692,7 +1661,6 @@ func (h *Handlers) GetRepositoryMonitorGitHubMutation(c fiber.Ctx) error {
 	return c.JSON(record)
 }
 
-// GetRepositoryMonitorImplementationPatchPreview returns safe patch artifact metadata for an implementation job.
 func (h *Handlers) GetRepositoryMonitorImplementationPatchPreview(c fiber.Ctx) error {
 	if err := h.ensureRepositoryMonitorStore(); err != nil {
 		return err

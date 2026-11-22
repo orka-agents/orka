@@ -51,7 +51,6 @@ func TestHostStatusWakeAndDelete(t *testing.T) {
 	if out, err := runHostCLI(t, handler, "host", "wake"); err != nil || !woken || !strings.Contains(out, "Waking orka-gh-alice") {
 		t.Fatalf("wake: %v %q", err, out)
 	}
-	// Deleting the volume needs an explicit yes.
 	if _, err := runHostCLI(t, handler, "host", "delete"); err == nil || deleted {
 		t.Fatal("delete without --yes must refuse and send nothing")
 	}
@@ -60,8 +59,6 @@ func TestHostStatusWakeAndDelete(t *testing.T) {
 	}
 }
 
-// Linking a provider that serves agent hosts waits for the host and names
-// the environment to pick in the Copilot app.
 func TestConnectWaitsForTheAgentHost(t *testing.T) {
 	previous, previousHost := connectionReadyPollInterval, agentHostReadyPollInterval
 	connectionReadyPollInterval, agentHostReadyPollInterval = time.Millisecond, time.Millisecond
@@ -86,18 +83,14 @@ func TestConnectWaitsForTheAgentHost(t *testing.T) {
 			hostPolls++
 			switch hostPolls {
 			case 1:
-				// The host follows the link by a moment.
 				w.WriteHeader(http.StatusNotFound)
 				return
 			case 2:
-				// Until then, a ready host kept from another link is not
-				// the one to use.
 				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 					"name": "gh-alice-old", "environment": "orka-gh-alice-old", "phase": "Ready", "ready": true, "connection": "github-old-abc",
 				})
 				return
 			case 3:
-				// Neither is an earlier host still being deleted.
 				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 					"name": "gh-alice", "environment": "orka-gh-alice", "phase": "Deleting", "ready": true, "deleting": true, "connection": "github-abc",
 				})
@@ -119,9 +112,6 @@ func TestConnectWaitsForTheAgentHost(t *testing.T) {
 	}
 }
 
-// A relink finds the host its earlier link left Failed with
-// ConnectionUnavailable, and waits for it; a transaction token read from
-// stdin authenticates every request of the command, not only the first.
 func TestConnectWaitsThroughARelinkWithAStdinToken(t *testing.T) {
 	previous, previousHost := connectionReadyPollInterval, agentHostReadyPollInterval
 	connectionReadyPollInterval, agentHostReadyPollInterval = time.Millisecond, time.Millisecond
@@ -186,8 +176,6 @@ func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
 	polls := 0
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Invites act in the namespace the controller watches; the CLI's
-		// default namespace would be refused.
 		if r.URL.Query().Has("namespace") {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -216,8 +204,6 @@ func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
 		t.Fatalf("invite: %v %q", err, out)
 	}
 
-	// Waiting less than the invite lasts names where its outcome appears,
-	// and that running the command again starts another invite.
 	polls = -1 << 30
 	_, err = runHostCLI(t, handler, "host", "invite", "carol", "--timeout", "20ms")
 	if err == nil || !strings.Contains(err.Error(), agentHostInvitesAPIPath+"/abc") || !strings.Contains(err.Error(), "creates another invite") {
@@ -225,10 +211,6 @@ func TestHostInvitePrintsTheCodeAndWaitsForTheOutcome(t *testing.T) {
 	}
 }
 
-// A relink finds the host still showing a failure the new link clears, such
-// as the other GitHub account the earlier link gave, and waits for it. A
-// failure that outlasts the wait is reported, and so is a wait the deadline
-// cuts short mid-request.
 func TestConnectWaitsOutAFailureTheLinkMayClear(t *testing.T) {
 	previous, previousHost := connectionReadyPollInterval, agentHostReadyPollInterval
 	connectionReadyPollInterval, agentHostReadyPollInterval = time.Millisecond, time.Millisecond

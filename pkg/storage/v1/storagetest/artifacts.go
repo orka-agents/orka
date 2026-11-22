@@ -193,9 +193,6 @@ func runArtifacts(t *testing.T, newProvider ArtifactFactory) {
 	})
 }
 
-// requireValidProviderInfo checks the contract fields of a provider
-// description of a ready dataset, and that the dataset identity and the
-// incarnation are stable across calls.
 func requireValidProviderInfo(t *testing.T, provider storagev1.ProviderDescriber, contract string) storagev1.ProviderInfo {
 	t.Helper()
 	info, err := provider.Describe(t.Context())

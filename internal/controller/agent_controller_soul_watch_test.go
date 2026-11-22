@@ -160,8 +160,6 @@ func TestAgentSoulConfigMapWatchReadinessTransitions(t *testing.T) {
 			require.Contains(t, condition.Message, message)
 		}
 	}
-	// The ConfigMap watch drives readiness; only a failed validation also
-	// schedules the periodic recheck.
 	reconcileMap := func(wantReady bool) {
 		t.Helper()
 		requests := r.agentsForSoulConfigMap(ctx, configMap)

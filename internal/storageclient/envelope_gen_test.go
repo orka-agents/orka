@@ -13,9 +13,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The decorators are generated from the provider interfaces and the method
-// catalog, so a write added to either cannot ship without an envelope, here
-// or in the shared provider suite.
 func TestEnvelopeDecoratorsAreGenerated(t *testing.T) {
 	for pkg, path := range map[string]string{
 		"storageclient": "envelope_gen.go",
@@ -35,8 +32,6 @@ func TestEnvelopeDecoratorsAreGenerated(t *testing.T) {
 	}
 }
 
-// Each decorator declares exactly the write methods of its provider; reads
-// and administrative methods are promoted from the provider unchanged.
 func TestDecoratorsDeclareExactlyTheWrites(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "envelope_gen.go", nil, parser.SkipObjectResolution)
 	if err != nil {

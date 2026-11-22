@@ -21,9 +21,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// TestTaskMemoryConsolidationAdmission runs the generated Task spec schema,
-// with its CEL rules, against memory consolidation Tasks as the API server
-// would, including updates.
 func TestTaskMemoryConsolidationAdmission(t *testing.T) {
 	raw, err := os.ReadFile("../../config/crd/bases/core.orka.ai_tasks.yaml")
 	if err != nil {

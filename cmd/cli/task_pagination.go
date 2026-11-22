@@ -27,8 +27,6 @@ func listFilteredTasks(
 	return listFilteredTasksWithPagination(ctx, c, namespace, limit, "", match, true)
 }
 
-// listFilteredTasksWithSelector is listFilteredTasks with a server-side
-// label selector applied to every page.
 func listFilteredTasksWithSelector(
 	ctx context.Context,
 	c *client.Client,

@@ -55,7 +55,6 @@ describe('RecentTasks', () => {
     render(<RecentTasks tasks={tasks} />)
     expect(screen.getByText('my-task')).toBeInTheDocument()
     expect(screen.getByText('Running')).toBeInTheDocument()
-    // type and namespace shown in description line
     expect(screen.getByText(/container/)).toBeInTheDocument()
     expect(screen.getByText(/default/)).toBeInTheDocument()
   })
@@ -93,7 +92,6 @@ describe('RecentTasks', () => {
       makeTask(`task-${i}`, 'container', 'Succeeded', new Date().toISOString())
     )
     render(<RecentTasks tasks={tasks} />)
-    // Only 10 task links should be rendered
     const links = screen.getAllByRole('link')
     expect(links.length).toBe(10)
   })

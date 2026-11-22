@@ -17,10 +17,6 @@ const kindStyle: Record<AttentionKind, { icon: typeof Hand; rail: string; text: 
 
 const sourceLabel = { parked: 'Parked sign-off', brokered: 'Brokered tool', worker: 'Agent tool' } as const
 
-/**
- * One "Needs you" item. It shows only the server's safe summary and links to
- * the authorized detail page, where the operation can be inspected.
- */
 export function AttentionItemCard({ item, className }: { item: AttentionItem; className?: string }) {
   const style = kindStyle[item.kind] ?? kindStyle.monitorBlocked
   const Icon = style.icon

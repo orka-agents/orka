@@ -33,9 +33,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Ended spans and retained handler contexts outlive Fiber's borrowed strings.
-// Reuse one real fasthttp request buffer before exporting to make this ordering
-// deterministic without relying on the server's pool or concurrent timing.
 func TestNewTracingMiddlewareRequestBufferLifetime(t *testing.T) {
 	for _, sampled := range []bool{true, false} {
 		t.Run(fmt.Sprintf("sampled=%t", sampled), func(t *testing.T) {
@@ -134,7 +131,6 @@ func TestNewTracingMiddlewareRequestBufferLifetime(t *testing.T) {
 					borrowedRequestID = requestCtx.Request.Header.Peek("X-Request-Id")
 				}
 			}
-			// Equal-length peer values must overwrite the same underlying storage.
 			require.Equal(t, requests[1].state, string(borrowedState), "fixture did not reuse tracestate storage")
 			require.Equal(t, requests[1].requestID, string(borrowedRequestID), "fixture did not reuse request ID storage")
 
@@ -145,8 +141,6 @@ func TestNewTracingMiddlewareRequestBufferLifetime(t *testing.T) {
 				assert.Equal(t, request.state, spanContext.TraceState().String(), "retained request %d tracestate", i)
 				assert.Contains(t, headerKeys[i], request.header, "retained request %d carrier keys", i)
 			}
-			// A broker or other detached handler can create children after the HTTP
-			// request ends. Its parent must retain the original request's state.
 			_, child := provider.Tracer("test").Start(contexts[0], "delayed.child")
 			assert.Equal(t, requests[0].traceID, child.SpanContext().TraceID())
 			assert.Equal(t, flags, child.SpanContext().TraceFlags())

@@ -54,7 +54,6 @@ func TestCreateContainerTaskTool_Parameters(t *testing.T) {
 			t.Errorf("missing %s property", key)
 		}
 	}
-	// Task names are generated, so the model is not asked for one.
 	if _, ok := props[nameField]; ok {
 		t.Errorf("schema must not offer a %s argument the tool ignores", nameField)
 	}
@@ -537,9 +536,6 @@ func TestCreateContainerTaskTool_Execute_MissingContext(t *testing.T) {
 	}
 }
 
-// TestCreateContainerTaskTool_ExecuteCoordination_SealsChild covers the
-// worker coordination path: the owned child inherits requestedBy and is
-// handed to the sealer, as delegate_task does.
 func TestCreateContainerTaskTool_ExecuteCoordination_SealsChild(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)

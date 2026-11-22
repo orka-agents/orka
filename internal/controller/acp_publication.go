@@ -43,10 +43,6 @@ type acpPublicationResult struct {
 	Status        corev1alpha1.TaskDeliveryStatus
 }
 
-// publishWorkspaceDelta runs the clean-room prepare/publish/verify transaction
-// for one immutable, already-durable workspace delta. The ACP child never
-// controls the Git repository, branch, commit, credential, or request identity
-// used by this path.
 func (d *ACPDispatcher) publishWorkspaceDelta(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -72,11 +68,6 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	delta harnessv2.WorkspaceDeltaDescriptor,
 	session *acpTaskSession,
 ) (acpPublicationResult, error) {
-	// The delivery context bounds the sequential pre-publish publisher stages
-	// (branch-claim refresh, preflight, prepare); the detached settlement
-	// context created after the publishing CAS separately bounds publish,
-	// verify, and PR reconciliation. Both windows budget
-	// maxSequentialPublisherSettlementStages full publisher calls.
 	deliveryCtx, cancelDelivery := context.WithTimeout(context.WithoutCancel(ctx), publicationSettlementWindow())
 	defer cancelDelivery()
 	ctx = deliveryCtx
@@ -123,9 +114,6 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	if _, err := workspaceSourceRef(workspace); err != nil {
 		return acpPublicationResult{}, err
 	}
-	// Publication preparation is pinned to the verified immutable revision. The
-	// original selector may have been a bare branch or tag and is not durable
-	// enough to reconstruct later publish/verify requests safely.
 	sourceRef := baseline.Revision
 	sourceCredentialRef := workspace.ReadCredentialRef
 	sourceCredentialRole := publisherservice.CredentialRoleSourceRead
@@ -352,9 +340,6 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryPrepared, store.PromptDeliveryPublishing, "publication-publishing", ""); err != nil {
 		return acpPublicationResult{}, err
 	}
-	// Publishing won the durable CAS. Task cancellation may be recorded by the
-	// caller, but it must not abort exact-commit publication or independent
-	// remote verification.
 	settlementCtx, cancelSettlement := context.WithTimeout(context.WithoutCancel(ctx), publicationSettlementWindow())
 	defer cancelSettlement()
 
@@ -592,9 +577,6 @@ func pullRequestNumberFromForgeID(forgeID string) (int64, bool) {
 	if len(parts) < 3 || parts[0] != "github" {
 		return 0, false
 	}
-	// Parse with bitSize 32 so the number always fits platform int; real forge
-	// pull-request numbers never exceed that bound, and anything larger is an
-	// invalid forge identity.
 	number, err := strconv.ParseInt(parts[len(parts)-1], 10, 32)
 	return number, err == nil && number > 0
 }
@@ -846,9 +828,6 @@ func legacyBranchClaimRequestDigest(
 	})
 }
 
-// taskPublicationCommitMessage returns the commit message for task's
-// publication: the Task-authored message, ending in exactly one newline as the
-// publisher requires, or the default title.
 func taskPublicationCommitMessage(task *corev1alpha1.Task) string {
 	if task.Spec.Workspace != nil {
 		if message := strings.TrimRight(task.Spec.Workspace.CommitMessage, "\n"); strings.TrimSpace(message) != "" {
@@ -959,8 +938,6 @@ func (d *ACPDispatcher) taskCancellationRequested(ctx context.Context, task *cor
 	if err := d.APIReader.Get(ctx, clientObjectKey(task), latest); err != nil {
 		return false, err
 	}
-	// A recorded cancel request stops publication at once; the Cancelled
-	// phase follows only when the Task is next reconciled.
 	_, requested := latest.Annotations[labels.AnnotationCancelRequested]
 	return !latest.DeletionTimestamp.IsZero() || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled || requested, nil
 }
@@ -986,8 +963,6 @@ func (d *ACPDispatcher) reclaimStandaloneTaskBranchClaim(
 		return fmt.Errorf("publication %s is not terminal", publication.ID)
 	}
 	if publication.State == store.PublicationOutcomeUnknown {
-		// An ambiguous remote outcome must retain its claim as a durable
-		// fail-closed ownership barrier until explicit reconciliation.
 		return nil
 	}
 	if publication.ID != publicationIDForTask(task) || publication.Namespace != task.Namespace ||
@@ -1044,8 +1019,6 @@ func (d *ACPDispatcher) reclaimStandaloneTaskBranchClaim(
 	}
 	if claim.OwnerKind != store.BranchClaimOwnerTask || claim.OwnerUID != publication.TaskUID ||
 		(claim.RequestDigest != expectedClaimDigest && claim.RequestDigest != legacyClaimDigest) {
-		// The immutable Task-owned identity was already deleted and replaced.
-		// Never let recovery for the old terminal Task reclaim the new owner.
 		return nil
 	}
 	if claim.ID != publication.BranchClaimID || claim.RepositoryID != publication.TargetRepositoryID ||
@@ -1337,14 +1310,12 @@ func publicationIDForTaskUID(task *corev1alpha1.Task, taskUID types.UID) string 
 
 func publicationIDForTask(task *corev1alpha1.Task) string { return publicationID(task) }
 
-// ACPPublicationIDForTask returns the immutable publication identity used by the credential/artifact brokers.
 func ACPPublicationIDForTask(task *corev1alpha1.Task) string { return publicationID(task) }
 
 func publicationOperationID(kind string, task *corev1alpha1.Task) string {
 	return ACPPublicationOperationID(kind, task)
 }
 
-// ACPPublicationOperationID returns the deterministic external-effect operation identity for one Task publication step.
 func ACPPublicationOperationID(kind string, task *corev1alpha1.Task) string {
 	seed := kind
 	if task != nil && task.Status.Execution != nil {
@@ -1367,12 +1338,6 @@ func clientObjectKey(task *corev1alpha1.Task) client.ObjectKey {
 }
 
 func taskDeliveryStatusForKubernetes(task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus) corev1alpha1.TaskDeliveryStatus {
-	// Harness v2 uses "empty" as a protocol-only revision for Tasks without a
-	// repository workspace. It is not a Git object ID and must not escape into
-	// the schema-validated Task status. Preserve every other value so malformed
-	// real-workspace revisions continue to fail closed at the API boundary.
-	// A workspace may declare intent or options without a repository, matching
-	// the emptyRuntimeWorkspace and prepareRuntimeWorkspace admission paths.
 	if task != nil && (task.Spec.Workspace == nil || strings.TrimSpace(task.Spec.Workspace.GitRepo) == "") &&
 		status.StartingSHA == acpNoWorkspaceRevision {
 		status.StartingSHA = ""
@@ -1394,15 +1359,6 @@ func (d *ACPDispatcher) patchDeliveryStatus(ctx context.Context, task *corev1alp
 	})
 }
 
-// terminalProjectionExecution builds the immutable terminal-projection
-// execution payload from a deep copy of the Task's frozen execution identity,
-// overlaying only the terminal classification. Prompt attempt reclamation
-// validates the projection against the attempt's request digest and the
-// Task's complete runtime identity — including the RuntimeSession supervisor
-// boot ID and the profile/MCP/workspace digests — so a sparse payload makes
-// the source PromptAttempt impossible to retire and the Task undeletable.
-// The volatile transition time is cleared so retried settlements enqueue
-// byte-identical payloads.
 func terminalProjectionExecution(
 	task *corev1alpha1.Task,
 	state corev1alpha1.TaskExecutionState,
@@ -1458,8 +1414,6 @@ func (d *ACPDispatcher) completeSuccessWithDelivery(ctx context.Context, task *c
 }
 
 func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
-	// Execution succeeded and only delivery failed, so the projection carries
-	// the frozen successful execution identity with the failed Phase.
 	execution := terminalProjectionExecution(task,
 		corev1alpha1.TaskExecutionStateSucceeded, corev1alpha1.TaskExecutionOutcomeSucceeded, "", "")
 	if err := d.enqueueStandaloneTaskProjection(ctx, task, taskTerminalProjection{
@@ -1495,18 +1449,10 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 }
 
 func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
-	// A requested cancellation ends with the request, which names who
-	// cancelled and why.
 	if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
 		message = requested
 	}
-	// An operator-access taint refusal keeps its bounded message so the Task
-	// matches the publication and delivery records and stays distinguishable
-	// from a user cancellation.
 	message = cancelledBeforePublishMessage(status, message)
-	// Execution succeeded before the cancellation settled the publication, so
-	// the projection carries the frozen successful execution identity with the
-	// cancelled Phase.
 	execution := terminalProjectionExecution(task,
 		corev1alpha1.TaskExecutionStateSucceeded, corev1alpha1.TaskExecutionOutcomeSucceeded, "", "")
 	if err := d.enqueueStandaloneTaskProjection(ctx, task, taskTerminalProjection{
@@ -1541,8 +1487,6 @@ func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *core
 	})
 }
 
-// cancelledBeforePublishMessage replaces the generic cancellation message
-// when the delivery records an operator-taint refusal.
 func cancelledBeforePublishMessage(status corev1alpha1.TaskDeliveryStatus, message string) string {
 	if operatorTaintedDelivery(status) {
 		return operatorTaintedPublicationMessage
@@ -1550,8 +1494,6 @@ func cancelledBeforePublishMessage(status corev1alpha1.TaskDeliveryStatus, messa
 	return message
 }
 
-// cancelPreparedPublication cancels a prepared publication before publish;
-// terminalReason is recorded on it (empty for a user cancellation).
 func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *corev1alpha1.Task, terminalReason string) (bool, error) {
 	if task == nil || task.Status.Execution == nil {
 		return false, nil
@@ -1588,33 +1530,13 @@ func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *cor
 	return true, nil
 }
 
-// maxSequentialPublisherSettlementStages is the largest number of sequential
-// publisher-backed external-effect stages that run under one bounded context
-// in publishWorkspaceDelta: the delivery context covers branch-claim refresh,
-// preflight, and prepare; the detached settlement context covers publish,
-// verify, and pull-request reconciliation. Ledger settle calls and durable
-// store bookkeeping between stages are covered by the trailing margin.
 const maxSequentialPublisherSettlementStages = 3
 
-// publicationSettlementWindow bounds the multi-effect publication settlement
-// and delivery flows. publishWorkspaceDelta runs its publisher-backed stages
-// sequentially under a single context, so the window must budget every stage
-// at its full bounded call duration rather than only one:
-//
-//	window = stages x (call timeout + settlement margin) + settlement margin
-//
-// With the default 4m publisher call bound that is 3 x 5m + 1m = 16m; with
-// ORKA_PUBLISHER_PUBLISH_TIMEOUT=10m it is 3 x 11m + 1m = 34m. Budgeting only
-// one call timeout would let a slow-but-acknowledged publish starve remote
-// verification and PR reconciliation, misclassifying a delivered push as
-// outcome-unknown.
 func publicationSettlementWindow() time.Duration {
 	perStage := externalEffectCallTimeout(store.ExternalEffectIdentity{Kind: publisherPublishOperation}) + externalEffectLeaseSettlementMargin
 	return maxSequentialPublisherSettlementStages*perStage + externalEffectLeaseSettlementMargin
 }
 
-// withTaskPullRequestMetadata accepts the verified execution snapshot's Task,
-// not agent output. The external-effect digest freezes this metadata on retry.
 func withTaskPullRequestMetadata(intent publisher.PullRequestIntent, task *corev1alpha1.Task) publisher.PullRequestIntent {
 	intent.TaskName, intent.TaskNamespace = task.Name, task.Namespace
 	if workspace := task.Spec.Workspace; workspace != nil {

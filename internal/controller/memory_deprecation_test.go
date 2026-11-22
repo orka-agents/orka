@@ -55,7 +55,6 @@ func TestAddAIEnvVars_MemoryDeprecationPolicy(t *testing.T) {
 					Coordination: &corev1alpha1.CoordinationConfig{Enabled: true},
 				}}
 			}
-			// User env cannot hide warnings or falsely mark an opted-in tool.
 			envVars, err := jb.addAIEnvVars(context.Background(), []corev1.EnvVar{
 				{Name: workerenv.AIDeprecatedMemoryTools, Value: "spoofed"},
 			}, task, agent, nil, JobBuildOptions{})

@@ -32,7 +32,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// newReconciler creates a TaskReconciler with all dependencies for testing.
 func newReconciler() *TaskReconciler {
 	db, err := sqlite.NewDB(":memory:")
 	if err != nil {
@@ -51,11 +50,9 @@ func newReconciler() *TaskReconciler {
 	}
 }
 
-// cleanupTask removes the task and waits for deletion.
 func cleanupTask(ctx context.Context, nn types.NamespacedName) {
 	task := &corev1alpha1.Task{}
 	if err := k8sClient.Get(ctx, nn, task); err == nil {
-		// Remove finalizer first so delete can proceed
 		if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
 			controllerutil.RemoveFinalizer(task, labels.TaskFinalizer)
 			_ = k8sClient.Update(ctx, task)
@@ -123,10 +120,8 @@ var _ = Describe("Task Controller", func() {
 			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 
-			// Save result to store
 			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("some-result"))).To(Succeed())
 
-			// Create the task with finalizer
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
@@ -141,29 +136,23 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Set result ref in status
 			task.Status.ResultRef = &corev1alpha1.ResultReference{
 				Available: true,
 			}
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
-			// Delete the task (sets DeletionTimestamp)
 			Expect(k8sClient.Delete(ctx, task)).To(Succeed())
 
-			// Re-fetch to get DeletionTimestamp
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.DeletionTimestamp.IsZero()).To(BeFalse())
 
-			// Reconcile – should call handleDeletion
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(ctrl.Result{}))
 
-			// Result should be deleted from store
 			_, err = r.ResultStore.GetResult(ctx, ns, taskName)
 			Expect(err).To(HaveOccurred())
 
-			// Task should be gone (finalizer removed → deletion completes)
 			err = k8sClient.Get(ctx, nn, &corev1alpha1.Task{})
 			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
@@ -175,7 +164,6 @@ var _ = Describe("Task Controller", func() {
 			ns := defaultNS
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 
-			// Create job
 			job := &batchv1.Job{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName + "-job",
@@ -194,7 +182,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, job)).To(Succeed())
 
-			// Create task with finalizer
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
@@ -209,19 +196,15 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Set job name in status
 			task.Status.JobName = taskName + "-job"
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
-			// Delete the task
 			Expect(k8sClient.Delete(ctx, task)).To(Succeed())
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 
-			// Reconcile to handle deletion
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Job should be deleted
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: taskName + "-job", Namespace: ns}, &batchv1.Job{})
 				return errors.IsNotFound(err)
@@ -267,7 +250,6 @@ var _ = Describe("Task Controller", func() {
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
-			// Create task
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
@@ -281,31 +263,25 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// First reconcile: add finalizer
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Second reconcile: initialize status to Pending
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Third reconcile: handlePending → create Job, set Running
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify task is now Running
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
 			Expect(task.Status.JobName).NotTo(BeEmpty())
 			Expect(task.Status.StartTime).NotTo(BeNil())
 			Expect(task.Status.Attempts).To(Equal(int32(1)))
 
-			// Verify JobCreated condition
 			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeJobCreated)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 
-			// Verify Job exists
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
 			Expect(task.Status.JobUID).To(Equal(string(job.UID)))
@@ -334,11 +310,9 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile through finalizer and status init
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 
-			// handlePending should fail the task because agent doesn't exist
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -349,7 +323,6 @@ var _ = Describe("Task Controller", func() {
 
 		It("should fail a container task whose env reads a Secret without the direct mount opt-in", func() {
 			ctx := context.Background()
-			// The job builder reads the opt-in from the process environment.
 			GinkgoT().Setenv(directSecretMountsEnvVar, "false")
 			r := newReconciler()
 			taskName := "test-pending-env-secret-ref"
@@ -399,7 +372,6 @@ var _ = Describe("Task Controller", func() {
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
-			// Create task and reconcile to Running
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
@@ -413,21 +385,18 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile to Running
-			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // finalizer
-			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // status init
-			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // handlePending→Running
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
 
-			// Simulate Job success by updating Job status
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
 			job.Status.Succeeded = 1
 			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 
-			// Reconcile handleRunning
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -436,7 +405,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.Message).To(Equal("task completed successfully"))
 			Expect(task.Status.CompletionTime).NotTo(BeNil())
 
-			// Verify Complete condition
 			cond := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeComplete)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
@@ -470,7 +438,6 @@ var _ = Describe("Task Controller", func() {
 
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 
-			// Simulate Job failure
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
 			job.Status.Failed = 1
@@ -683,8 +650,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Set status to Running with a non-existent job name old enough to
-			// exclude normal cache propagation delay after Job creation.
 			started := metav1.NewTime(time.Now().Add(-2 * jobCreationVisibilityGracePeriod))
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
 			task.Status.JobName = "nonexistent-job"
@@ -764,7 +729,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Set status to Running with a start time far in the past
 			pastTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
 			task.Status.JobName = "some-job"
@@ -937,7 +901,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile to Running
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -945,12 +908,10 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
 
-			// Job status: no Succeeded, no Failed (still running)
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(5 * time.Second))
 
-			// Phase should still be Running
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
 		})
@@ -1132,7 +1093,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Set status to Running
 			now := metav1.Now()
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning
 			task.Status.JobName = ""
@@ -1144,7 +1104,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Task should be back to Pending
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
 			Expect(task.Status.JobName).To(BeEmpty())
@@ -1174,7 +1133,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile to Running
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -1183,18 +1141,15 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
 			Expect(task.Status.Attempts).To(Equal(int32(1)))
 
-			// Simulate Job failure
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: ns}, job)).To(Succeed())
 			job.Status.Failed = 1
 			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 
-			// Reconcile – should trigger retry (attempts=1 < maxRetries=3)
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Task should be back to Pending for retry
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
 		})
@@ -1233,14 +1188,11 @@ var _ = Describe("Task Controller", func() {
 				},
 				Status: corev1alpha1.TaskStatus{Attempts: 1},
 			}
-			// attempt=1 → delay = 5s (no multiplication)
 			Expect(r.calculateRetryDelay(task)).To(Equal(5 * time.Second))
 
-			// attempt=2 → delay = 5s * 2 = 10s
 			task.Status.Attempts = 2
 			Expect(r.calculateRetryDelay(task)).To(Equal(10 * time.Second))
 
-			// attempt=3 → delay = 5s * 2 * 2 = 20s
 			task.Status.Attempts = 3
 			Expect(r.calculateRetryDelay(task)).To(Equal(20 * time.Second))
 		})
@@ -1258,7 +1210,6 @@ var _ = Describe("Task Controller", func() {
 				},
 				Status: corev1alpha1.TaskStatus{Attempts: 2},
 			}
-			// attempt=2 → delay = 2s * 3 = 6s
 			Expect(r.calculateRetryDelay(task)).To(Equal(6 * time.Second))
 		})
 
@@ -1285,7 +1236,6 @@ var _ = Describe("Task Controller", func() {
 			taskName := "test-collect-result"
 			ns := defaultNS
 
-			// Save result to store
 			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("hello world"))).To(Succeed())
 
 			task := &corev1alpha1.Task{
@@ -1658,10 +1608,8 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// First reconcile: add finalizer
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 
-			// Second reconcile: initialize status
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
@@ -1694,15 +1642,12 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// First reconcile: add finalizer
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Second reconcile: initialize status to Pending
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Third reconcile: should transition to Scheduled
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
@@ -1733,15 +1678,12 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// First reconcile: add finalizer
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Second reconcile: initialize to Pending
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Third reconcile: should fail with invalid cron
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -1772,7 +1714,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile through: finalizer → Pending → Scheduled
 			for range 3 {
 				_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 				Expect(err).NotTo(HaveOccurred())
@@ -1781,7 +1722,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseScheduled))
 			Expect(task.Status.CompletionTime).To(BeNil())
 
-			// Edit the live schedule to an invalid expression.
 			task.Spec.Schedule = "not-a-cron"
 			Expect(k8sClient.Update(ctx, task)).To(Succeed())
 
@@ -1822,7 +1762,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile through: finalizer → Pending → Scheduled
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -1830,7 +1769,6 @@ var _ = Describe("Task Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate time passing: set LastScheduleTime to the past
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseScheduled))
 			pastTime := metav1.NewTime(time.Now().Add(-2 * time.Minute))
@@ -1838,15 +1776,12 @@ var _ = Describe("Task Controller", func() {
 			task.Status.NextScheduleTime = &metav1.Time{Time: time.Now().Add(-1 * time.Minute)}
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
-			// Reconcile should create a child task
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify child task was created
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.LastScheduleTime).NotTo(BeNil())
 
-			// List child tasks
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
@@ -1854,13 +1789,11 @@ var _ = Describe("Task Controller", func() {
 			)).To(Succeed())
 			Expect(childList.Items).NotTo(BeEmpty())
 
-			// Verify child has correct properties
 			child := &childList.Items[0]
 			Expect(child.Spec.Schedule).To(BeEmpty(), "child should not have schedule")
 			Expect(child.Spec.Image).To(Equal("alpine:latest"))
 			Expect(child.Labels[labels.LabelScheduledRun]).To(Equal("true"))
 
-			// Clean up child
 			for i := range childList.Items {
 				cleanupTask(ctx, types.NamespacedName{Name: childList.Items[i].Name, Namespace: defaultNS})
 			}
@@ -1891,15 +1824,11 @@ var _ = Describe("Task Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			// Simulate a long suspend: the last run is far enough in the past
-			// that the next slot is already beyond the starting deadline.
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			stale := metav1.NewTime(time.Now().Add(-30 * time.Minute))
 			task.Status.LastScheduleTime = &stale
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
-			// The reconcile should skip the long-missed slot AND re-anchor the
-			// LastScheduleTime to ~now, instead of leaving it frozen 30m ago.
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
@@ -1933,7 +1862,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Create an active child task
 			activeChild := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName + "-active-child",
@@ -1951,11 +1879,9 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, activeChild)).To(Succeed())
 			defer cleanupTask(ctx, types.NamespacedName{Name: activeChild.Name, Namespace: defaultNS})
 
-			// Set child to Running
 			activeChild.Status.Phase = corev1alpha1.TaskPhaseRunning
 			Expect(k8sClient.Status().Update(ctx, activeChild)).To(Succeed())
 
-			// Reconcile parent through to Scheduled
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -1963,17 +1889,14 @@ var _ = Describe("Task Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Set LastScheduleTime in the past to trigger a run
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			pastTime := metav1.NewTime(time.Now().Add(-2 * time.Minute))
 			task.Status.LastScheduleTime = &pastTime
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
-			// Reconcile should NOT create a new child (Forbid)
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify no additional child was created
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
@@ -2005,7 +1928,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile through to Scheduled
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -2013,18 +1935,15 @@ var _ = Describe("Task Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Set LastScheduleTime in the past
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			pastTime := metav1.NewTime(time.Now().Add(-2 * time.Minute))
 			task.Status.LastScheduleTime = &pastTime
 			Expect(k8sClient.Status().Update(ctx, task)).To(Succeed())
 
-			// Reconcile — should skip because suspended
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(time.Minute))
 
-			// No children should be created
 			var childList corev1alpha1.TaskList
 			Expect(k8sClient.List(ctx, &childList,
 				client.InNamespace(defaultNS),
@@ -2040,7 +1959,6 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 			ns := defaultNS
 
-			// Create parent agent with coordination enabled, maxDepth=1
 			parentAgent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "coord-parent-agent-depth",
@@ -2057,7 +1975,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
 
-			// Create parent task referencing the agent
 			parentTask := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "coord-parent-task-depth",
@@ -2074,7 +1991,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
 			defer cleanupTask(ctx, types.NamespacedName{Name: parentTask.Name, Namespace: ns})
 
-			// Create child task with depth=2 (exceeds maxDepth=1)
 			childName := "coord-child-depth-exceeded"
 			childNN := types.NamespacedName{Name: childName, Namespace: ns}
 			childTask := &corev1alpha1.Task{
@@ -2097,7 +2013,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
 			defer cleanupTask(ctx, childNN)
 
-			// Reconcile through: finalizer → status init → handlePending
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
@@ -2114,7 +2029,6 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 			ns := defaultNS
 
-			// Create parent agent with allowedAgents=[allowed-agent]
 			parentAgent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "coord-parent-agent-allow",
@@ -2133,7 +2047,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
 
-			// Create the disallowed agent so the child's agentRef resolves
 			disallowedAgent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "disallowed-agent",
@@ -2146,7 +2059,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, disallowedAgent)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, disallowedAgent) }()
 
-			// Create parent task
 			parentTask := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "coord-parent-task-allow",
@@ -2163,7 +2075,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
 			defer cleanupTask(ctx, types.NamespacedName{Name: parentTask.Name, Namespace: ns})
 
-			// Create child task referencing disallowed-agent
 			childName := "coord-child-not-allowed"
 			childNN := types.NamespacedName{Name: childName, Namespace: ns}
 			childTask := &corev1alpha1.Task{
@@ -2188,7 +2099,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
 			defer cleanupTask(ctx, childNN)
 
-			// Reconcile through: finalizer → status init → handlePending
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
@@ -2204,7 +2114,6 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 			ns := defaultNS
 
-			// Create parent agent with maxConcurrentChildren=1
 			parentAgent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "coord-parent-agent-conc",
@@ -2221,7 +2130,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
 
-			// Create parent task
 			parentTaskName := "coord-parent-task-conc"
 			parentTask := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2239,7 +2147,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
 			defer cleanupTask(ctx, types.NamespacedName{Name: parentTaskName, Namespace: ns})
 
-			// Create a running sibling child task
 			siblingName := "coord-sibling-running"
 			siblingNN := types.NamespacedName{Name: siblingName, Namespace: ns}
 			sibling := &corev1alpha1.Task{
@@ -2262,11 +2169,9 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, sibling)).To(Succeed())
 			defer cleanupTask(ctx, siblingNN)
 
-			// Set sibling to Running phase
 			sibling.Status.Phase = corev1alpha1.TaskPhaseRunning
 			Expect(k8sClient.Status().Update(ctx, sibling)).To(Succeed())
 
-			// Create the new child task that should be requeued
 			childName := "coord-child-conc-pending"
 			childNN := types.NamespacedName{Name: childName, Namespace: ns}
 			childTask := &corev1alpha1.Task{
@@ -2289,16 +2194,13 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
 			defer cleanupTask(ctx, childNN)
 
-			// Reconcile through: finalizer → status init
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 
-			// Third reconcile: handlePending → should requeue due to concurrency
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Task should still be Pending, not Failed
 			Expect(k8sClient.Get(ctx, childNN, childTask)).To(Succeed())
 			Expect(childTask.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
 		})
@@ -2308,7 +2210,6 @@ var _ = Describe("Task Controller", func() {
 			r := newReconciler()
 			ns := defaultNS
 
-			// Create parent agent with coordination allowing "child-agent"
 			parentAgent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "coord-parent-agent-valid",
@@ -2328,7 +2229,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentAgent)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, parentAgent) }()
 
-			// Create the child agent so agentRef resolves
 			childAgent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "child-agent-valid",
@@ -2341,7 +2241,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, childAgent)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, childAgent) }()
 
-			// Create parent task
 			parentTask := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "coord-parent-task-valid",
@@ -2358,7 +2257,6 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, parentTask)).To(Succeed())
 			defer cleanupTask(ctx, types.NamespacedName{Name: parentTask.Name, Namespace: ns})
 
-			// Create child task with valid depth and allowed agent
 			childName := "coord-child-valid"
 			childNN := types.NamespacedName{Name: childName, Namespace: ns}
 			childTask := &corev1alpha1.Task{
@@ -2383,14 +2281,11 @@ var _ = Describe("Task Controller", func() {
 			Expect(k8sClient.Create(ctx, childTask)).To(Succeed())
 			defer cleanupTask(ctx, childNN)
 
-			// Reconcile through: finalizer → status init → handlePending
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: childNN})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Task should NOT have failed with coordination errors
-			// It may fail later due to provider/job creation, but not coordination
 			Expect(k8sClient.Get(ctx, childNN, childTask)).To(Succeed())
 			if childTask.Status.Phase == corev1alpha1.TaskPhaseFailed {
 				Expect(childTask.Status.Message).NotTo(ContainSubstring("depth"))
@@ -2409,10 +2304,8 @@ var _ = Describe("Task Controller", func() {
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
-			// Save result to store
 			Expect(r.ResultStore.SaveResult(ctx, ns, taskName, []byte("task output"))).To(Succeed())
 
-			// Create task
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       taskName,
@@ -2427,7 +2320,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Complete the task – collectResult should pick up the store result
 			_, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done")
 			Expect(err).NotTo(HaveOccurred())
 
@@ -2448,7 +2340,6 @@ var _ = Describe("Task Controller", func() {
 			agentNN := types.NamespacedName{Name: agentName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
-			// Create Agent with Coordination.Autonomous = true
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      agentName,
@@ -2469,10 +2360,8 @@ var _ = Describe("Task Controller", func() {
 				})
 			}()
 
-			// Verify the agent was created
 			Expect(k8sClient.Get(ctx, agentNN, agent)).To(Succeed())
 
-			// Create Task referencing the autonomous agent
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
@@ -2488,7 +2377,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile through: finalizer → status init → handlePending→Running
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -2498,25 +2386,21 @@ var _ = Describe("Task Controller", func() {
 			Expect(task.Status.JobName).NotTo(BeEmpty())
 			oldJobName := task.Status.JobName
 
-			// Simulate Job success
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: oldJobName, Namespace: ns}, job)).To(Succeed())
 			job.Status.Succeeded = 1
 			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 
-			// Reconcile handleRunning — autonomous path should reset to Pending
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-			// Verify: task is NOT Succeeded, phase is reset to Pending
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
 			Expect(task.Status.Iteration).To(Equal(int32(1)))
 			Expect(task.Status.JobName).To(BeEmpty())
 			Expect(task.Status.Message).To(ContainSubstring("autonomous iteration"))
 
-			// Old Job should be deleted
 			Eventually(func() bool {
 				err := k8sClient.Get(ctx, types.NamespacedName{Name: oldJobName, Namespace: ns}, &batchv1.Job{})
 				return errors.IsNotFound(err)
@@ -2534,7 +2418,6 @@ var _ = Describe("Task Controller", func() {
 			nn := types.NamespacedName{Name: taskName, Namespace: ns}
 			defer cleanupTask(ctx, nn)
 
-			// Create task with cross-namespace agent ref
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      taskName,
@@ -2551,7 +2434,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile through finalizer, status init, then handlePending
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -2559,7 +2441,6 @@ var _ = Describe("Task Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Task should be Failed with isolation error
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(ContainSubstring("cross-namespace agent reference not allowed"))
@@ -2590,7 +2471,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Reconcile through finalizer, status init, then handlePending
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -2598,7 +2478,6 @@ var _ = Describe("Task Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Task should NOT be Failed with isolation error (it will fail because agent doesn't exist, but that's a different error)
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseFailed))
 			Expect(task.Status.Message).To(ContainSubstring("failed to get agent"))
@@ -2611,7 +2490,6 @@ var _ = Describe("Task Controller", func() {
 			r.MaxTasksPerNamespace = 1
 			ns := defaultNS
 
-			// Create a running task to fill the limit
 			existingTaskName := "test-ns-limit-existing"
 			existingNN := types.NamespacedName{Name: existingTaskName, Namespace: ns}
 			defer cleanupTask(ctx, existingNN)
@@ -2629,7 +2507,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, existingTask)).To(Succeed())
 
-			// Drive it to Running phase
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: existingNN})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: existingNN})
@@ -2637,11 +2514,9 @@ var _ = Describe("Task Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: existingNN})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify it's Running
 			Expect(k8sClient.Get(ctx, existingNN, existingTask)).To(Succeed())
 			Expect(existingTask.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
 
-			// Create a new task that should be throttled
 			newTaskName := "test-ns-limit-throttled"
 			newNN := types.NamespacedName{Name: newTaskName, Namespace: ns}
 			defer cleanupTask(ctx, newNN)
@@ -2659,18 +2534,15 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, newTask)).To(Succeed())
 
-			// Drive the new task to Pending phase
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: newNN})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: newNN})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Third reconcile should requeue (not create job)
 			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: newNN})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(10 * time.Second))
 
-			// Task should still be Pending
 			Expect(k8sClient.Get(ctx, newNN, newTask)).To(Succeed())
 			Expect(newTask.Status.Phase).To(Equal(corev1alpha1.TaskPhasePending))
 		})
@@ -2697,7 +2569,6 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 
-			// Drive through to Running
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -2705,7 +2576,6 @@ var _ = Describe("Task Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Task should proceed to Running (not throttled)
 			Expect(k8sClient.Get(ctx, nn, task)).To(Succeed())
 			Expect(task.Status.Phase).To(Equal(corev1alpha1.TaskPhaseRunning))
 		})

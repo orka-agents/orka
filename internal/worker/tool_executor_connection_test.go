@@ -110,8 +110,6 @@ func TestToolExecutorCredentialRequestRefusesCrossOriginRedirect(t *testing.T) {
 			URL: provider.URL, Method: "GET", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
 		}},
 	}
-	// The shared redirect policy stops at the origin boundary and hands the
-	// 302 back as the tool result instead of following it with the header.
 	_, err := executor.Execute(context.Background(), tool, json.RawMessage(`{}`))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 302") {
 		t.Fatalf("Execute() error = %v, want the unfollowed 302", err)
@@ -142,8 +140,6 @@ func TestToolExecutorConnectionOutboundAccessValidatesArgumentsBeforeInjecting(t
 			URL: server.URL, OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "github-conn"},
 		}},
 	}
-	// Arguments outside the provider's curated schema never leave with the
-	// person's credential, whatever the caller supplied.
 	for _, args := range []string{`{"limit":3}`, `{"q":"x","limit":11}`, `{"q":"x","extra":true}`} {
 		if _, err := executor.Execute(context.Background(), tool, json.RawMessage(args)); err == nil || !strings.Contains(err.Error(), "arguments rejected") || ToolRequestWasAttempted(err) {
 			t.Fatalf("%s: err = %v, want refusal before any request", args, err)
@@ -175,8 +171,6 @@ func TestToolExecutorPrivateConnectionEndpointsKeepTransportHardening(t *testing
 		SensitiveValues:  []string{"gho_person_token"},
 		ConnectionUID:    "conn-uid",
 	}}
-	// A Pod-wide proxy setting must not carry a linked-account bearer
-	// anywhere: the hardened transport ignores it even under the allowance.
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9")
 	t.Setenv("https_proxy", "http://127.0.0.1:9")
 	base := server.Client()
@@ -198,7 +192,6 @@ func TestToolExecutorPrivateConnectionEndpointsKeepTransportHardening(t *testing
 		return executor
 	}
 
-	// Without the allowance the loopback server is refused outright.
 	SetAllowPrivateConnectionEndpoints(false)
 	if _, err := newExecutor().Execute(context.Background(), tool, json.RawMessage(`{}`)); err == nil {
 		t.Fatal("a private endpoint must be refused without the allowance")

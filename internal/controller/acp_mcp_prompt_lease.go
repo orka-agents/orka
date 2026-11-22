@@ -10,10 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ACPMCPPromptLeaseRegistry holds the controller-confirmed lease of each live
-// approval-enabled prompt. Its zero value is ready to use. Durable attempts and
-// epoch fences remain authoritative; a missing local lease denies execution,
-// including after controller restart, when accepted prompts are not replayed.
 type ACPMCPPromptLeaseRegistry struct {
 	mu      sync.Mutex
 	prompts map[store.PromptAttemptKey]*acpMCPPromptLease
@@ -75,8 +71,6 @@ func (r *ACPMCPPromptLeaseRegistry) register(ctx context.Context, namespace stri
 	return entry, nil
 }
 
-// renew consumes only a controller-sent renewal whose exact lease the runtime
-// client has confirmed. An ambiguous or late response cannot revive authority.
 func (p *acpMCPPromptLease) renew(request harnessv2.RenewPromptLeaseRequest) error {
 	if p == nil {
 		return nil
@@ -117,8 +111,6 @@ func (r *ACPMCPPromptLeaseRegistry) authorize(request harnessv2.MCPBrokerCallReq
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry := r.prompts[mcpPromptLeaseKey(request.Namespace, request.Metadata)]
-	// Check the context directly, without waiting for a cancellation goroutine
-	// or remote cleanup, and read the clock after the durable authorizer's I/O.
 	if entry == nil || entry.fence != request.Metadata.Fence || entry.ctx.Err() != nil ||
 		!time.Now().UTC().Before(entry.expiresAt) {
 		return errACPMCPPromptLeaseInactive

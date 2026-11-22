@@ -67,8 +67,6 @@ func testACPWorkspaceScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// acpTestDefaultStorageClass is the cluster default StorageClass with Delete
-// reclaim semantics that durable-volume profiles resolve against.
 func acpTestDefaultStorageClass() *storagev1.StorageClass {
 	reclaim := corev1.PersistentVolumeReclaimDelete
 	return &storagev1.StorageClass{
@@ -92,8 +90,6 @@ func (f *acpClassFixture) objects() []client.Object {
 	return []client.Object{f.class, f.provider, f.config, f.profile, acpTestDefaultStorageClass()}
 }
 
-// pinProfileHash recomputes and pins the class profile hash exactly the way
-// the class controller would, using the unstructured shape of the profile.
 func (f *acpClassFixture) pinProfileHash(t *testing.T) {
 	t.Helper()
 	f.profile.Spec.Suspend = nil
@@ -230,13 +226,6 @@ func acpClassTestTask(mutate ...func(*corev1alpha1.Task)) *corev1alpha1.Task {
 	return task
 }
 
-// admitTestACPWorkspace stands in for the workspace core controller and the
-// ACP adapter: it persists the fake API-server identity, the core admission
-// marker, and an adapter-observed Ready status so attachment can proceed.
-// attachTestACPWorkspace drives ensureACPClassWorkspace through the full
-// attach handshake: the attach pass (never ready), core re-admission of the
-// bumped generation, the adapter's enforced-epoch acknowledgement, and the
-// final ready pass.
 func attachTestACPWorkspace(
 	t *testing.T,
 	r *TaskReconciler,
@@ -296,20 +285,15 @@ func admitTestACPWorkspace(t *testing.T, r *TaskReconciler, workspace *workspace
 	t.Helper()
 	ctx := context.Background()
 	if workspace.UID == "" {
-		// The fake client does not assign object UIDs on Create.
 		workspace.UID = types.UID(workspace.Name + "-uid")
 	}
 	if workspace.CreationTimestamp.IsZero() {
-		// The fake client does not stamp creation time; maxLifetime clamping
-		// would otherwise treat the workspace as already expired.
 		workspace.CreationTimestamp = metav1.Now()
 	}
 	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	if err := r.Update(ctx, workspace); err != nil {
 		t.Fatalf("admit workspace: %v", err)
 	}
-	// The spec update zeroes the in-memory status under the fake status
-	// subresource; re-apply the adapter-observed pieces before persisting.
 	markWorkspaceAdmittedForPolicyReview(workspace, workspace.Generation)
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	if err := r.Status().Update(ctx, workspace); err != nil {
@@ -390,8 +374,6 @@ func TestResolveACPWorkspaceClassRequiresRestoreFeatureForCheckpointTask(t *test
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := suspendableSubstrateFixture(t)
-			// DataOnly suspension does not itself require the public restore API.
-			// The Task must add that requirement even when the class omits it.
 			if test.restoreSupported {
 				fixture.provider.Status.SupportedFeatures = append(fixture.provider.Status.SupportedFeatures,
 					workspacev1alpha1.WorkspaceFeatureRestore, workspacev1alpha1.WorkspaceFeatureCheckpoint)
@@ -621,8 +603,6 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("workspace spec = %+v", workspace.Spec)
 	}
 
-	// Admit the workspace and let the adapter-observed status catch up; the
-	// second ensure attaches and links the Task.
 	admitTestACPWorkspace(t, r, workspace)
 	name, ready = attachTestACPWorkspace(t, r, task, plan, workspaceName)
 	if !ready || name != workspaceName {
@@ -646,19 +626,12 @@ func TestEnsureACPClassWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("attachment secret: %v", err)
 	}
 
-	// Idempotent re-ensure keeps the same attachment.
 	if _, ready, err = r.ensureACPClassWorkspace(ctx, task, plan); err != nil || !ready {
 		t.Fatalf("re-ensure = (%v, %v)", ready, err)
 	}
 
 }
 
-// A workspace the adapter marked terminally Failed (for example the frozen
-// maximum lifetime elapsed and its RuntimePool was torn down) must fail the
-// waiting Task instead of requeueing forever.
-// A live provider usage-policy edit must fail class resolution closed
-// immediately: the class's cached Ready condition lags policy changes and the
-// profile hash excludes usagePolicy, so the resolver re-checks the selector.
 func TestResolveACPWorkspaceClassEnforcesLiveNamespacePolicy(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -688,10 +661,6 @@ func TestResolveACPWorkspaceClassEnforcesLiveNamespacePolicy(t *testing.T) {
 	}
 }
 
-// Once the execution binding is frozen, planning must not reapply
-// new-allocation readiness: core deliberately admits Draining providers for
-// already-admitted workspaces, and re-resolving the class here would fail the
-// bound Task and destroy its valid workspace.
 func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -712,10 +681,6 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 		t.Fatalf("a frozen binding must not re-run new-allocation readiness, got rejection %+v", plan)
 	}
 
-	// The configuration gates for bound Tasks are enforced against the
-	// VERIFIED frozen plan at the queue chokepoint - never against the
-	// public status projection, which can still be nil after a restart
-	// between the binding patch and the first queue operation.
 	frozen := &ACPRuntimeWorkspaceBinding{Provider: "fixture.workspace.orka.ai", Class: &ACPWorkspaceClassBinding{ControllerName: "fixture.workspace.orka.ai"}}
 	if reason := r.frozenWorkspaceDispatchDisabledReason(frozen); reason != "" {
 		t.Fatalf("enabled flags must admit the frozen plan, got %q", reason)
@@ -736,10 +701,6 @@ func TestRejectUnsupportedACPWorkspacePlanTrustsFrozenBinding(t *testing.T) {
 	}
 }
 
-// Deleting or replacing the frozen class, provider, or RuntimeWorkspaceProfile
-// after the snapshot froze is irreversible for this incarnation: the
-// dependency-loss and profile-mismatch denials must fail the Task instead of
-// requeueing forever.
 func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 	t.Parallel()
 	for _, reason := range []string{
@@ -788,10 +749,6 @@ func TestEnsureACPClassWorkspaceDependencyLossIsTerminal(t *testing.T) {
 	}
 }
 
-// The settlement link must be durable BEFORE the session workspace is
-// created: a crash between Create and the post-create link patch would
-// otherwise orphan the deterministic session workspace forever. The link
-// label lands even when the Create itself fails.
 func TestEnsureACPClassWorkspacePersistsLinkBeforeCreation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -872,11 +829,6 @@ func TestEnsureACPClassWorkspaceFailedStateIsTerminal(t *testing.T) {
 	}
 }
 
-// A continuation must never attach while a revocation stamp stands — even for
-// a Suspend detach action. The suspend settlement retires the stamp in the
-// same optimistic patch that lands DesiredState=Suspended; attaching earlier
-// would reuse the workspace warm and let the old settlement observe a foreign
-// attachment as completion, silently skipping the requested checkpoint.
 func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -902,9 +854,6 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 	}
 	workspace.Spec.AttachmentEpoch = 1
 	admitTestACPWorkspace(t, r, workspace)
-	// The predecessor's Suspend settlement is mid-flight: the attachment was
-	// revoked and the revocation stamp stands, but the suspension patch has
-	// not landed DesiredState=Suspended yet.
 	base := workspace.DeepCopy()
 	if workspace.Annotations == nil {
 		workspace.Annotations = map[string]string{}
@@ -929,10 +878,6 @@ func TestEnsureACPClassWorkspaceBlocksContinuationDuringPendingSuspend(t *testin
 	}
 }
 
-// TestEnsureACPClassWorkspaceSessionContention proves attachment exclusivity
-// on a genuinely shared workspace: two session-reused Tasks with the same
-// immutable Session UID derive the same workspace name, so the competitor
-// contends for the exact workspace the holder attached.
 func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -978,8 +923,6 @@ func TestEnsureACPClassWorkspaceSessionContention(t *testing.T) {
 		t.Fatalf("holder attach = (%v)", ready)
 	}
 
-	// The competitor resolves the same workspace but must not take the held
-	// attachment: it either waits (not ready) or fails closed, never attaches.
 	competitorPlan := ACPRuntimePlan{PoolName: plan.PoolName, Workspace: competitorBinding}
 	if _, ready, err := r.ensureACPClassWorkspace(ctx, competitor, competitorPlan); err == nil && ready {
 		t.Fatalf("competitor must not attach a held workspace")
@@ -1044,10 +987,6 @@ func TestEnsureACPClassWorkspaceRejectsSuspendedAttachedWorkspace(t *testing.T) 
 	}
 }
 
-// A revised class or provider snapshot keeps the same session workspace name
-// while the class UID and Session UID remain stable. The successor waits for
-// the attached predecessor's Delete settlement, but the same stale workspace
-// is rejected once no predecessor owns it.
 func TestEnsureACPClassWorkspaceQueuesRevisedSessionBehindPredecessor(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1254,10 +1193,6 @@ func TestEnsureACPClassWorkspaceBackfillsAndValidatesSuspendedCap(t *testing.T) 
 	}
 }
 
-// TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift proves adoption is
-// fail-closed against provider identity or materialization drift: a workspace
-// whose recorded provider identity or controller-owned RuntimePool markers no
-// longer match the frozen binding is rejected instead of reused.
 func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 	t.Parallel()
 	const (
@@ -1355,9 +1290,6 @@ func TestEnsureACPClassWorkspaceRejectsProviderIdentityDrift(t *testing.T) {
 	}
 }
 
-// TestSettleACPClassWorkspaceSkipsForeignLinkTarget proves settlement
-// revalidates the mutable link label: a workspace the Task neither owns nor
-// shares a Session with is skipped, never revoked or deleted.
 func TestSettleACPClassWorkspaceSkipsForeignLinkTarget(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1389,8 +1321,6 @@ func TestSettleACPClassWorkspaceSkipsForeignLinkTarget(t *testing.T) {
 		t.Fatalf("foreign workspace desired state = %q", foreign.Spec.DesiredState)
 	}
 
-	// A link naming a workspace without the ACP controller label is equally
-	// skipped even when the Task owns it.
 	unlabeled := foreign.DeepCopy()
 	unlabeled.ObjectMeta = metav1.ObjectMeta{
 		Namespace: acpTestNamespace, Name: "acp-ws-unlabeled", UID: types.UID("unlabeled-ws-uid"),
@@ -1411,12 +1341,6 @@ func TestSettleACPClassWorkspaceSkipsForeignLinkTarget(t *testing.T) {
 	}
 }
 
-// TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout proves the frozen
-// detachTimeout bounds settlement: when the adapter never releases the revoked
-// epoch, the workspace is quarantined fail-closed and the Task releases.
-// TestSettleACPClassWorkspaceSkipsRecreatedIncarnation proves an old Task
-// never settles a same-name workspace from a different incarnation (for
-// example a Session recreated under the same name).
 func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1451,7 +1375,6 @@ func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 		t.Fatalf("link must pin the workspace incarnation UID, got %q", task.Annotations[acpExecutionWorkspaceUIDAnnotation])
 	}
 
-	// Replace the workspace with a same-name different-UID incarnation.
 	if err := r.Delete(ctx, workspace); err != nil {
 		t.Fatalf("delete original workspace: %v", err)
 	}
@@ -1475,9 +1398,6 @@ func TestSettleACPClassWorkspaceSkipsRecreatedIncarnation(t *testing.T) {
 	}
 }
 
-// Settlement can race deterministic-name replacement after its uncached read.
-// The stamp patch and BeginRevocation must both fence the original UID so an
-// old Task cannot mark or detach the replacement workspace.
 func TestACPWorkspaceRevocationFencesReplacementIncarnation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1595,8 +1515,6 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 		t.Fatalf("enforce epoch: %v", err)
 	}
 
-	// First settle revokes and stamps the revocation start; the adapter still
-	// enforces the epoch and the deadline has not passed, so it waits.
 	done, err := r.settleACPClassWorkspace(ctx, task)
 	if err != nil || done {
 		t.Fatalf("settle while enforced = (%v, %v), want (false, nil)", done, err)
@@ -1608,8 +1526,6 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 		t.Fatalf("revocation start must be stamped")
 	}
 
-	// Backdate the stamp past the frozen detachTimeout: settlement quarantines
-	// the workspace and reports done so the Task finalizer releases.
 	base := workspace.DeepCopy()
 	expired := time.Now().UTC().Add(-workspace.Spec.Lifecycle.DetachTimeout.Duration - time.Minute)
 	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s",
@@ -1617,8 +1533,6 @@ func TestSettleACPClassWorkspaceQuarantinesPastDetachTimeout(t *testing.T) {
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
 		t.Fatalf("backdate revocation: %v", err)
 	}
-	// A stamp bound to a previous epoch never serves as this revocation's
-	// deadline: it is replaced with a fresh stamp instead of quarantining.
 	staleBase := workspace.DeepCopy()
 	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s",
 		workspace.Spec.AttachmentEpoch-1, expired.Format(time.RFC3339Nano))
@@ -1735,8 +1649,6 @@ func TestQuarantineACPWorkspacePastDetachTimeoutRefusesForeignCredentials(t *tes
 	}
 }
 
-// TestResolveACPClassRejectsDeletingProviderConfig proves the resolver fails
-// closed on a RuntimeProviderConfig the operator has already withdrawn.
 func TestResolveACPClassRejectsDeletingProviderConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1783,8 +1695,6 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 		t.Fatalf("reload task: %v", err)
 	}
 
-	// Simulate the adapter enforcing the epoch: settlement must not finalize
-	// or delete while the data plane still reports the attachment.
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
 		t.Fatalf("read attached workspace: %v", err)
 	}
@@ -1806,7 +1716,6 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 		t.Fatalf("revocation must clear attachment intent")
 	}
 
-	// Adapter releases the epoch; settlement finalizes and deletes.
 	workspace.Status.AttachedEpoch = 0
 	if err := r.Status().Update(ctx, workspace); err != nil {
 		t.Fatalf("release epoch: %v", err)
@@ -1823,16 +1732,11 @@ func TestSettleACPClassWorkspaceRevokesAndDeletes(t *testing.T) {
 		t.Fatalf("workspace must be deleted, got %v", err)
 	}
 
-	// Settlement is idempotent after deletion.
 	if done, err := r.settleACPClassWorkspace(ctx, task); err != nil || !done {
 		t.Fatalf("repeat settle = (%v, %v)", done, err)
 	}
 }
 
-// A frozen snapshot carrying a Retain deletion action must fail closed on an
-// older controller whose only implemented settlement action destroys the
-// workspace: rollback must never begin destructive cleanup under a retention
-// contract this version cannot honor.
 func TestValidateACPWorkspaceClassBindingRejectsRetainActions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1931,9 +1835,6 @@ func TestValidateACPWorkspaceClassBindingRejectsInvalidLifecycle(t *testing.T) {
 	}
 }
 
-// A same-name replacement of the immutable RuntimeProviderConfig is fenced by
-// the adapter-pinned config identity: class resolution must fail closed
-// instead of dispatching new Tasks onto the replacement backend.
 func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1947,13 +1848,6 @@ func TestResolveACPWorkspaceClassRejectsReplacedProviderConfig(t *testing.T) {
 	}
 }
 
-// A durable-volume profile bound to a retaining StorageClass violates the
-// all-Delete lifecycle: finalization would report the volume deleted while
-// Kubernetes leaves the PV and repository data behind.
-
-// The metadata annotation is only a mirror. Class resolution must wait for
-// the adapter to establish the controller-owned status pin before it can
-// authorize a new workspace against this provider.
 func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1970,9 +1864,6 @@ func TestResolveACPWorkspaceClassRequiresProtectedProviderConfigPin(t *testing.T
 	}
 }
 
-// RuntimePool creation repeats the resolver's protected pin check. The config
-// object and its hash can stay unchanged while the provider reports that it
-// now operates against a different configuration.
 func TestACPWorkspacePoolRequiresProtectedProviderConfigPin(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2023,10 +1914,6 @@ func TestACPWorkspacePoolRequiresProtectedProviderConfigPin(t *testing.T) {
 	}
 }
 
-// A terminally Failed workspace still held by its predecessor keeps the
-// continuation queued: the predecessor's settlement removes this incarnation
-// and the deterministic name is recreated fresh, so a permanent
-// WorkspaceFailed rejection would be wrong.
 func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2050,7 +1937,6 @@ func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
 		t.Fatalf("read workspace: %v", err)
 	}
-	// The predecessor still holds the attachment when the workspace fails.
 	workspace.Spec.AttachmentEpoch = 4
 	workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
 		TaskRef:        workspacev1alpha1.ObjectIdentityReference{Name: "predecessor", UID: types.UID("predecessor-uid")},
@@ -2072,9 +1958,6 @@ func TestEnsureACPClassWorkspaceQueuesBehindFailedAttachedPredecessor(t *testing
 	}
 }
 
-// The attached-ready fast path rechecks the frozen maxLifetime: a deadline
-// that elapsed between Attach and the adapter's Failed publication must not
-// admit RuntimePool demand from the stale Ready observation.
 func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2102,8 +1985,6 @@ func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 	if _, ready := attachTestACPWorkspace(t, r, task, plan, workspace.Name); !ready {
 		t.Fatalf("attach = (%v)", ready)
 	}
-	// The lifetime elapses after attachment; the adapter has not yet failed
-	// the workspace.
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}, workspace); err != nil {
 		t.Fatalf("reload workspace: %v", err)
 	}
@@ -2118,10 +1999,6 @@ func TestEnsureACPClassWorkspaceRefusesReadyPastMaxLifetime(t *testing.T) {
 	}
 }
 
-// An attachment can expire while a Task still waits for its RuntimePool. The
-// readiness path must rotate the epoch and bearer before recreating pool
-// demand, then delete the superseded bearer only after the new epoch is
-// enforced.
 func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -2158,8 +2035,6 @@ func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T
 	firstDigest := workspace.Spec.Attachment.TokenSHA256
 	base := workspace.DeepCopy()
 	workspace.Spec.Attachment.ExpiresAt = metav1.NewTime(time.Now().Add(-time.Minute))
-	// Simulate stale metadata from a predecessor. Credential rotation must bind
-	// this Task's frozen action atomically with the replacement attachment.
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 	if err := r.Patch(ctx, workspace, client.MergeFrom(base)); err != nil {
 		t.Fatalf("expire attachment: %v", err)
@@ -2200,9 +2075,6 @@ func TestEnsureACPClassWorkspaceRotatesExpiredAttachmentBeforeReady(t *testing.T
 	}
 }
 
-// Running ACP Tasks bypass the queue path, so their attachment expiry must be
-// revisited by handleRunning. Rotation keeps the same Task attached and the
-// public projection advances only after the adapter acknowledges the new epoch.
 func TestHandleRunningRotatesExpiredACPClassWorkspaceAttachment(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

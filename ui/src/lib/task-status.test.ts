@@ -11,7 +11,6 @@ describe('phaseStyle', () => {
       expect(s.railClass).toBe(`border-status-${phase.toLowerCase()}`)
       expect(s.textClass).toBe(`text-status-${phase.toLowerCase()}`)
       expect(s.bgClass).toBe(`bg-status-${phase.toLowerCase()}-bg`)
-      // Guard against any regression back to template pastels.
       expect(s.dotClass).not.toMatch(/-(100|200|800|900)\b/)
     },
   )

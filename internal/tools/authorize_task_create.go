@@ -25,14 +25,10 @@ func authorizeTaskCreate(ctx context.Context, tc *ToolContext, task *corev1alpha
 	return "", true
 }
 
-// sealTaskCreate hands a just-created Task to the API's sealer, when one is
-// installed, so its server-assigned UID is bound to the stamped requester.
 func sealTaskCreate(ctx context.Context, tc *ToolContext, task *corev1alpha1.Task) {
 	if tc == nil || tc.SealTaskCreate == nil || tc.Client == nil {
 		return
 	}
-	// An unsealed child is still created; it fails closed for connector
-	// tools, so the failure is recorded rather than returned to the agent.
 	if err := tc.SealTaskCreate(ctx, tc.Client, task); err != nil {
 		log.FromContext(ctx).Info("child task could not be sealed for connector use", "task", task.Name, "error", err.Error())
 	}

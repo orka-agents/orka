@@ -51,13 +51,12 @@ type chartAcceptance struct {
 }
 
 type acceptanceReport struct {
-	Result       string `json:"result"`
-	CandidateSHA string `json:"candidateSHA"`
-	// Exact keys are part of the release binding; reject additional fields here.
-	Release     map[string]string        `json:"release"`
-	BuiltImages map[string]string        `json:"builtImages"`
-	Images      map[string]observedImage `json:"images"`
-	Chart       chartAcceptance          `json:"chart"`
+	Result       string                   `json:"result"`
+	CandidateSHA string                   `json:"candidateSHA"`
+	Release      map[string]string        `json:"release"`
+	BuiltImages  map[string]string        `json:"builtImages"`
+	Images       map[string]observedImage `json:"images"`
+	Chart        chartAcceptance          `json:"chart"`
 }
 
 type runArtifact struct {
@@ -331,7 +330,6 @@ func (w *workflow) verifyPublication(directory string) (candidateBundle, error) 
 	if err := w.verifyProof(data, directory); err != nil {
 		return data, err
 	}
-	// A rerun cannot replace images, chart, or CLI assets while earlier evidence awaits approval.
 	temporary, err := os.MkdirTemp("", "orka-release-candidate-")
 	if err != nil {
 		return data, err

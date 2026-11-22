@@ -4,8 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package executionmode defines the immutable execution-plane identity shared
-// by controllers and admission. Each installation claims its namespace.
 package executionmode
 
 import (
@@ -16,17 +14,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// NamespaceLabel is the immutable namespace execution-mode claim.
 const NamespaceLabel = "orka.ai/controller-mode"
 
-// Mode identifies the only execution contract an installation may serve.
 type Mode string
 
 const (
 	HarnessV2 Mode = "harness-v2"
 )
 
-// Parse returns a supported, canonical mode.
 func Parse(raw string) (Mode, error) {
 	mode := Mode(strings.TrimSpace(raw))
 	switch mode {
@@ -37,7 +32,6 @@ func Parse(raw string) (Mode, error) {
 	}
 }
 
-// ContractVersion returns the only harness contract admitted by the mode.
 func (m Mode) ContractVersion() corev1alpha1.AgentRuntimeContractVersion {
 	if m == HarnessV2 {
 		return corev1alpha1.AgentRuntimeContractHarnessV2
@@ -45,10 +39,6 @@ func (m Mode) ContractVersion() corev1alpha1.AgentRuntimeContractVersion {
 	return ""
 }
 
-// DefaultBuiltInAgentContract stamps the installation's immutable harness
-// contract on a built-in Agent runtime when the trusted producer omitted it.
-// Explicit selectors are never rewritten, and an unsupported selector is
-// rejected before the object reaches admission.
 func DefaultBuiltInAgentContract(agent *corev1alpha1.Agent, mode Mode) error {
 	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type == "" || agent.Spec.Runtime.RuntimeRef != nil {
 		return nil
@@ -72,7 +62,6 @@ func DefaultBuiltInAgentContract(agent *corev1alpha1.Agent, mode Mode) error {
 	return nil
 }
 
-// FromNamespace reads and validates a namespace's immutable mode claim.
 func FromNamespace(namespace *corev1.Namespace) (Mode, error) {
 	if namespace == nil {
 		return "", fmt.Errorf("execution-mode namespace is required")
@@ -88,7 +77,6 @@ func FromNamespace(namespace *corev1.Namespace) (Mode, error) {
 	return mode, nil
 }
 
-// ValidateNamespace verifies the namespace is permanently claimed by mode.
 func ValidateNamespace(namespace *corev1.Namespace, mode Mode) error {
 	claimed, err := FromNamespace(namespace)
 	if err != nil {

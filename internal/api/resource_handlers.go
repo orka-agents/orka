@@ -98,8 +98,6 @@ func toolSpecHasProtectedAuth(spec corev1alpha1.ToolSpec) bool {
 	return false
 }
 
-// toolSpecHasEgressCredential reports whether a Substrate MCP actor asks
-// the egress gateway to inject a Secret.
 func toolSpecHasEgressCredential(spec corev1alpha1.ToolSpec) bool {
 	if spec.MCP == nil || spec.MCP.SubstrateActor == nil {
 		return false
@@ -220,7 +218,6 @@ func providerReadItem(provider *corev1alpha1.Provider) fiber.Map {
 	}
 }
 
-// ListProviders lists configured LLM providers.
 func (h *Handlers) ListProviders(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -280,7 +277,6 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 		return err
 	}
 	if filteredList {
-		// The raw count describes Providers the caller is not allowed to see.
 		remainingItemCount = nil
 	}
 	return c.JSON(ListResponse{
@@ -292,15 +288,11 @@ func (h *Handlers) ListProviders(c fiber.Ctx) error {
 	})
 }
 
-// GetProvider returns a configured LLM provider.
 func (h *Handlers) GetProvider(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
-	// Authorize the requested name before any controller-credential read so
-	// an unauthorized caller cannot tell an existing Provider (403) from an
-	// unknown one (404).
 	if err := h.authorizeCoreResourceAction(c, "get", "providers", namespace, c.Params(apiFieldName)); err != nil {
 		return err
 	}
@@ -324,7 +316,6 @@ func (h *Handlers) GetProvider(c fiber.Ctx) error {
 	return c.JSON(provider)
 }
 
-// CreateProvider creates a provider.
 func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 	var req CreateProviderRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -367,7 +358,6 @@ func (h *Handlers) CreateProvider(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(provider)
 }
 
-// UpdateProvider updates a provider spec.
 func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
@@ -412,8 +402,6 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 		if err := validateProviderRESTUpdate(req.Spec, current.Spec); err != nil {
 			return err
 		}
-		// REST updates cannot set protected routing fields, but they also must
-		// not clear values that were created through the Kubernetes API/RBAC path.
 		desiredSpec := req.Spec.DeepCopy()
 		desiredSpec.BaseURL = current.Spec.BaseURL
 		current.Spec = *desiredSpec
@@ -444,7 +432,6 @@ func (h *Handlers) UpdateProvider(c fiber.Ctx) error {
 	return c.JSON(provider)
 }
 
-// DeleteProvider deletes a provider.
 func (h *Handlers) DeleteProvider(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "provider"); err != nil {
 		return err
@@ -463,7 +450,6 @@ func (h *Handlers) fetchProvider(c fiber.Ctx, name string) (*corev1alpha1.Provid
 	return fetchNamespaced(h, c, &corev1alpha1.Provider{}, name, "provider")
 }
 
-// CreateTool creates a Tool CRD.
 func (h *Handlers) CreateTool(c fiber.Ctx) error {
 	var req CreateToolRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -512,7 +498,6 @@ func (h *Handlers) CreateTool(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(tool)
 }
 
-// UpdateTool updates a Tool CRD.
 func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
 		return err
@@ -597,7 +582,6 @@ func (h *Handlers) UpdateTool(c fiber.Ctx) error {
 	return c.JSON(tool)
 }
 
-// DeleteTool deletes a Tool CRD.
 func (h *Handlers) DeleteTool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "tool"); err != nil {
 		return err
@@ -620,7 +604,6 @@ func (h *Handlers) fetchToolCRD(c fiber.Ctx, name string) (*corev1alpha1.Tool, e
 	return fetchNamespaced(h, c, &corev1alpha1.Tool{}, name, "tool")
 }
 
-// ListSubstrateActorPools lists Orka Substrate actor pools.
 func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -646,7 +629,6 @@ func (h *Handlers) ListSubstrateActorPools(c fiber.Ctx) error {
 	})
 }
 
-// GetSubstrateActorPool gets an Orka Substrate actor pool.
 func (h *Handlers) GetSubstrateActorPool(c fiber.Ctx) error {
 	pool, err := h.fetchSubstrateActorPool(c, c.Params(apiFieldName))
 	if err != nil {
@@ -662,7 +644,6 @@ func (h *Handlers) GetSubstrateActorPool(c fiber.Ctx) error {
 	return c.JSON(pool)
 }
 
-// CreateSubstrateActorPool creates an Orka Substrate actor pool.
 func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 	var req CreateSubstrateActorPoolRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -702,7 +683,6 @@ func (h *Handlers) CreateSubstrateActorPool(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(pool)
 }
 
-// UpdateSubstrateActorPool updates an Orka Substrate actor pool.
 func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
 		return err
@@ -737,7 +717,6 @@ func (h *Handlers) UpdateSubstrateActorPool(c fiber.Ctx) error {
 	return c.JSON(updated)
 }
 
-// DeleteSubstrateActorPool deletes an Orka Substrate actor pool.
 func (h *Handlers) DeleteSubstrateActorPool(c fiber.Ctx) error {
 	if err := rejectContextTokenResourceMutation(c, "substrate actor pool"); err != nil {
 		return err
@@ -756,7 +735,6 @@ func (h *Handlers) fetchSubstrateActorPool(c fiber.Ctx, name string) (*corev1alp
 	return fetchNamespaced(h, c, &corev1alpha1.SubstrateActorPool{}, name, "substrate actor pool")
 }
 
-// handleAuthWhoAmI returns a sanitized authenticated identity.
 func (s *Server) handleAuthWhoAmI(c fiber.Ctx) error {
 	ui := GetUserInfo(c)
 	if ui == nil {

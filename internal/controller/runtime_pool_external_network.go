@@ -22,8 +22,6 @@ import (
 
 const externalProcessIngressTargetsAnnotation = "orka.ai/external-native-ingress-targets"
 
-// Endpoint targets are fixed before any policy write, including its namespace.
-// Policy UIDs remain Kubernetes identities and are fenced on each write/delete.
 type externalProcessIngressTarget struct {
 	Namespace string            `json:"namespace"`
 	Name      string            `json:"name"`
@@ -38,8 +36,6 @@ func externalFrozenIngressTargets(pool *corev1alpha1.RuntimePool, runtime *works
 	}
 	var controller, proxy *externalProcessIngressTarget
 	for _, rule := range runtime.NetworkPolicy.Egress {
-		// Core's DNS rule has two ports. The two endpoint rules each have one
-		// exact TCP port and one namespace/Pod peer; no observed policy is input.
 		if len(rule.Ports) != 1 || len(rule.To) != 1 {
 			continue
 		}
@@ -215,7 +211,6 @@ func (r *RuntimePoolReconciler) deleteExternalIngressPolicies(ctx context.Contex
 			return false, err
 		}
 		if !externalCorePolicyOwned(pool, cfg, policy) {
-			// Another object's labels never authorize its deletion or block ours.
 			continue
 		}
 		if !externalIngressPolicyMatchesIdentity(policy, target, binding) {
@@ -238,27 +233,17 @@ func (r *RuntimePoolReconciler) deleteExternalCorePolicy(ctx context.Context, po
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(policy), current); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
-	// A same-name replacement is not the policy whose deletion was authorized.
 	return current.UID == policy.UID, nil
 }
 
 func (r *RuntimePoolReconciler) deleteExternalCoreNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
 	var frozenTargets []externalProcessIngressTarget
-	// Only an admitted NetworkPolicy shape is frozen intent that observed
-	// policy specs must match before deletion.
 	matchFrozenSpecs := w.Spec.Workload != nil
 	if w.Spec.Workload != nil {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.Template.Namespace == "" {
 			return false, workspaceprovider.ErrStaleIdentity
 		}
 		cfg.namespace = w.Spec.Workload.Runtime.Template.Namespace
-		// A gateway-enforced (egress allowlist) request never froze Pod peers,
-		// and Core grants its routed process no worker ingress. Its pool
-		// policies select no runtime Pod and are not admission intent: they
-		// were last written from provider-proxy and controller settings that
-		// may since have changed or lost their credential. Core ownership of
-		// the deterministic names alone authorizes their deletion, so cleanup
-		// never depends on live configuration or credentials.
 		if runtime := w.Spec.Workload.Runtime; runtime.Egress != nil && runtime.NetworkPolicy == nil {
 			matchFrozenSpecs = false
 		} else {
@@ -307,7 +292,6 @@ func (r *RuntimePoolReconciler) deleteExternalCoreNetworkPolicies(ctx context.Co
 		return false, err
 	}
 	if targets == nil {
-		// Legacy native pools can use their immutable published target intent.
 		targets = frozenTargets
 	}
 	pending, err := r.deleteExternalIngressPolicies(ctx, pool, cfg, targets, binding)

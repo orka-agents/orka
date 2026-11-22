@@ -10,8 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Runtime completions and synthesized closures share a prompt-and-tool key.
-// A losing State must not forget text already published by the winning State.
 func TestExecutionEventToolDedupHistory(t *testing.T) {
 	for _, collision := range []string{"runtime-wins-buffered-closure", "buffered-closure-wins-runtime", "runtime-wins-persisted-closure"} {
 		for _, followKnownWinner := range []bool{false, true} {
@@ -22,7 +20,6 @@ func TestExecutionEventToolDedupHistory(t *testing.T) {
 			t.Run(collision+"/"+which, func(t *testing.T) {
 				ctx := context.Background()
 				journal, _ := newModelHistoryJournal(t, "")
-				// Standalone prompts have no Session-wide reopen suppression.
 				journal.MapContext.SessionName = ""
 				live, err := journal.Open(ctx)
 				if err != nil {
@@ -34,9 +31,6 @@ func TestExecutionEventToolDedupHistory(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// Populate both buffers from an identical stream prefix; the
-				// fresh State publishes one metadata-free start at sequence 3.
-				// No store append deduplicates until the terminal collision.
 				if collision != "runtime-wins-persisted-closure" {
 					fragment := "."
 					if collision == "buffered-closure-wins-runtime" {
@@ -81,8 +75,6 @@ func TestExecutionEventToolDedupHistory(t *testing.T) {
 				final.Type = harnessv2.EventCompleted
 				final.Completed = &harnessv2.CompletedEvent{StopReason: harnessv2.ACPStopReasonEndTurn,
 					Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "d=synthetic-tool-fixture"}}}}
-				// The buffered-closure loser meets its dedup collision and then
-				// emits an assistant transcript in the ordinary sorted flush.
 				if err := next.AppendBufferedStreamsIfNew(ctx, &final, 5, "d=synthetic-tool-fixture", false); err != nil {
 					t.Fatal(err)
 				}

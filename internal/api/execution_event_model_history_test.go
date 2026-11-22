@@ -125,8 +125,6 @@ func TestExecutionEventModelFinalNormalization(t *testing.T) {
 				if len(rows) != wantRows {
 					t.Fatalf("persisted rows = %d, want %d", len(rows), wantRows)
 				}
-				// Inspect the target record alone so an acceptance failure cannot
-				// hide whether a later projection also normalizes after matching.
 				copies := modelHistoryPublicCopies(t, rows[len(rows)-1])
 				for _, value := range copies {
 					if value == events.ExecutionEventRedactedValue {
@@ -137,8 +135,6 @@ func TestExecutionEventModelFinalNormalization(t *testing.T) {
 						t.Error("public model is neither the sanitized model nor its redaction marker")
 					}
 				}
-				// Use the exact DTO strings, including any remaining whitespace.
-				// Either field can precede the other when public values are joined.
 				for _, joined := range []string{copies[0] + copies[1], copies[1] + copies[0]} {
 					if events.RedactExecutionEventText(joined) != joined {
 						t.Error("final normalized model DTO copies reconstruct a protected value")
@@ -311,8 +307,6 @@ func assertModelHistoryPublicCopies(t *testing.T, rows []store.ExecutionEvent, m
 	t.Helper()
 	var rawCopies int
 	for _, row := range rows {
-		// Each persisted row is counted once. The root model and content.model
-		// are two real DTO locations; replaying the same event adds no rows.
 		for _, value := range modelHistoryPublicCopies(t, row) {
 			switch value {
 			case model:

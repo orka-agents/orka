@@ -34,18 +34,13 @@ const (
 	agentKitMCPTimeoutEnv      = "AGENTKIT_MCP_TIMEOUT"
 )
 
-// externalACPAdapter describes an out-of-tree ACP adapter that the supervisor
-// launches with a frozen command line, a digest-pinned adapter identity, and a
-// fixed provider environment contract. Every such adapter shares one
-// profile, projection, and digest implementation; only the table differs.
 type externalACPAdapter struct {
 	kind        string
 	digestEnv   string
 	adapterName string
 	command     string
 	args        []string
-	// label prefixes every user-visible error message.
-	label string
+	label       string
 
 	baseURLEnv      string
 	tokenEnv        string
@@ -146,8 +141,6 @@ func (a externalACPAdapter) digestFromEnv() (string, error) {
 	return digest, nil
 }
 
-// adapterDigests returns nil when the digest is missing or malformed so the
-// supervisor keeps its default-nil unknown-provider behavior.
 func (a externalACPAdapter) adapterDigests() map[string]string {
 	digest, err := a.digestFromEnv()
 	if err != nil {
@@ -158,20 +151,16 @@ func (a externalACPAdapter) adapterDigests() map[string]string {
 
 func providerCapabilities(provider, model string) harnessv2.ProviderCapabilities {
 	capabilities := harnessv2.ProviderCapabilities{
-		ProviderKinds:             []string{provider},
-		Models:                    []string{model},
-		SupportsPermissions:       true,
-		SupportsCancel:            true,
-		SupportsTools:             true,
-		SupportsImages:            true,
-		SupportsEmbeddedResources: true,
-		// Each built-in projection launches the provider to ask in
-		// NativePermissionsAsk sessions; see ProviderSessionProjection.
+		ProviderKinds:               []string{provider},
+		Models:                      []string{model},
+		SupportsPermissions:         true,
+		SupportsCancel:              true,
+		SupportsTools:               true,
+		SupportsImages:              true,
+		SupportsEmbeddedResources:   true,
 		SupportsNativePermissionAsk: acp.BuiltInRuntimeSupportsNativePermissionAsk(provider),
 	}
 	if isExternalACPProvider(provider) {
-		// These ACP adapters do not emit session/request_permission or
-		// support rich prompt content.
 		capabilities.SupportsPermissions = false
 		capabilities.SupportsImages = false
 		capabilities.SupportsAudio = false

@@ -16,8 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// unacceptedResultStore refuses results, as the storage client does while
-// the controller's fence is not open or an earlier write's outcome is unknown.
 type unacceptedResultStore struct {
 	store.ResultStore
 	err error
@@ -27,8 +25,6 @@ func (s *unacceptedResultStore) SaveResult(context.Context, string, string, []by
 	return s.err
 }
 
-// A Task whose result the store has not accepted yet, or may have saved, is
-// not completed without its result: the completion is retried.
 func TestTaskCompletionRetriesAResultTheStoreHasNotAccepted(t *testing.T) {
 	for name, storageErr := range map[string]error{
 		"not ready":       fmt.Errorf("save: %w", store.ErrNotReady),

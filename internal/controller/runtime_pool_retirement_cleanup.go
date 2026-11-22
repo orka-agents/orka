@@ -12,9 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// recordDrainedRuntimePoolTaskCleanup preserves exact cleanup evidence before
-// the pool lifecycle owner forgets a retired instance. Callers have validated
-// the authenticated probe against the selected Pod and its deployed profile.
 func (r *RuntimePoolReconciler) recordDrainedRuntimePoolTaskCleanup(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -41,8 +38,6 @@ func (r *RuntimePoolReconciler) recordDrainedRuntimePoolTaskCleanup(
 			continue
 		}
 		binding := executionBinding(task)
-		// Standalone Tasks freeze the profile in AgentExecutionBinding. The
-		// additional session profile digest is populated for Session reuse.
 		sessionProfileMatches := execution.RuntimeSessionProfileDigest == active.ProfileDigest ||
 			(task.Spec.SessionRef == nil && execution.RuntimeSessionProfileDigest == "")
 		if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool || binding.Task.UID != taskUID ||

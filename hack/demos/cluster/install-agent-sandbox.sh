@@ -1,37 +1,11 @@
 #!/usr/bin/env bash
-# Install the kubernetes-sigs agent-sandbox backend and archived demo assets
-# on a kind cluster. This does not install an external ACP provider or class.
-#
-# Base layer (always): agent-sandbox CRDs + controller, the orka-live
-# SandboxTemplate.
-#
-# Archived agentic layer (AGENTIC=1, default):
-#   1. Build + push the sandbox-runtime image (real codex CLI + git + gh).
-#   2. Build + deploy the upstream sandbox-router (the agent-sandbox SDK's
-#      exec data-path; from the agent-sandbox Go module's python client).
-#   3. Deploy the vekil model proxy (one-time GitHub device-code login) +
-#      create the model Secret (OPENAI_BASE_URL -> vekil) and the git Secret.
-# Current ACP workspaces require a separately installed provider, its profiles
-# and ExecutionWorkspaceClass, and the generic Orka workspace dispatch flags.
-# Demo 60 also needs migration to the harness v2 runtime and publisher contract;
-# see docs/development/workspace-provider-authoring.md.
-#
-# IMPORTANT (kind registry addressing): normal pods on a kind cluster pull from
-# the local registry via "localhost:<port>" (the containerd mirror host), NOT
-# the registry's bridge IP. Substrate ACTORS pull via the bridge IP; agent-
-# sandbox pods + the router are normal pods, so they use localhost:<port>.
-#
-# Requires: kind, kubectl, docker, go (and gh for the git token). Set
-# AGENTIC=0 to install only the base layer.
 
 set -Eeuo pipefail
 
 cluster_name="${ORKA_DEMO_CLUSTER:-orka-demo}"
-# Backend version is independent of the external provider installation.
 agent_sandbox_version="${ORKA_AGENT_SANDBOX_VERSION:-v1.0.3}"
 demo_namespace="${DEMO_NAMESPACE:-orka-system}"
 
-# Agentic layer knobs.
 AGENTIC="${AGENTIC:-1}"
 KIND_REGISTRY_PORT="${KIND_REGISTRY_PORT:-5001}"
 VEKIL_NS="${VEKIL_NAMESPACE:-vekil-system}"
@@ -40,8 +14,6 @@ sandbox_router_tag="${ORKA_SANDBOX_ROUTER_TAG:-demo}"
 sandbox_model_secret="${DEMO_RUNTIME_SECRET_REF:-sandbox-model-key}"
 sandbox_git_secret="${DEMO_GIT_SECRET_REF:-github-credentials}"
 
-# The runtime image: built by the agentic layer when AGENTIC=1, else taken from
-# ORKA_SANDBOX_RUNTIME_IMAGE (you build/load it yourself).
 if [[ "${AGENTIC}" == "1" ]]; then
   runtime_image="${ORKA_SANDBOX_RUNTIME_IMAGE:-localhost:${KIND_REGISTRY_PORT}/orka-sandbox-runtime:${sandbox_runtime_tag}}"
 else
@@ -77,12 +49,6 @@ if [[ "${AGENTIC}" == "1" ]]; then
   docker info >/dev/null 2>&1 || die "docker daemon is not reachable"
 fi
 
-# Select context: prefer kind-<cluster_name> if that kind cluster exists,
-# otherwise use the current context (lets Demo 60 share an existing cluster,
-# e.g. the Substrate demo cluster).
-# registry_cluster is the kind cluster behind the selected context, or empty
-# when the context is not a local kind cluster; the local registry can only be
-# wired to that cluster's nodes.
 registry_cluster=""
 if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
   log "Selecting kubectl context kind-${cluster_name}"
@@ -97,8 +63,6 @@ else
   fi
 fi
 
-# ensure_kind_registry starts and wires the local registry to the selected
-# kind cluster once; every image push (runtime or router) goes through it.
 registry_ready=0
 ensure_kind_registry() {
   if [[ "${registry_ready}" == "1" ]]; then
@@ -110,19 +74,10 @@ ensure_kind_registry() {
   registry_ready=1
 }
 
-# Agentic layer: build + push the runtime + router images to the kind registry
-# (normal pods pull via localhost:<port>). Done BEFORE the template is applied
-# so the SandboxTemplate references an image that exists.
 if [[ "${AGENTIC}" == "1" ]]; then
   node_arch="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || echo amd64)"
 
   if [[ -z "${ORKA_SANDBOX_RUNTIME_IMAGE:-}" ]]; then
-    # cluster-up.sh wires the kind node to the repo's local registry helper
-    # (scripts/lib/kind-local-registry.sh); push through the same helper so
-    # the node can actually pull what we built, and pin the digest it
-    # returns. The registry must be wired to the cluster the selected context
-    # points at, not the default demo cluster name, or the pinned image is
-    # unpullable when Demo 60 shares an existing cluster.
     ensure_kind_registry
     local_runtime_image="orka-sandbox-runtime:${sandbox_runtime_tag}"
     log "Building sandbox-runtime image ${local_runtime_image} (arch ${node_arch}; real codex + git + gh)"
@@ -147,10 +102,6 @@ sed "s|REPLACE_RUNTIME_IMAGE|${runtime_image}|g; s|namespace: demo-magic|namespa
   | kubectl apply -f -
 
 if [[ "${AGENTIC}" == "1" ]]; then
-  # ---- sandbox-router (the SDK's exec data-path) ------------------------
-  # The agent-sandbox Go SDK reaches sandbox pods through a "sandbox-router"
-  # Service. The base agent-sandbox release does NOT ship it; its source lives
-  # in the agent-sandbox Go module's python client. Build + deploy it.
   router_src="$(go env GOMODCACHE)/sigs.k8s.io/agent-sandbox@${agent_sandbox_version}/clients/python/agentic-sandbox-client/sandbox-router"
   local_router_image="orka-sandbox-router:${sandbox_router_tag}"
   router_image=""
@@ -165,9 +116,6 @@ if [[ "${AGENTIC}" == "1" ]]; then
     rm -rf "${router_build_dir}"
 
     log "Deploying sandbox-router into ${demo_namespace}"
-    # The legacy Python router refuses to start without ROUTER_AUTH_TOKEN
-    # unless ALLOW_UNAUTHENTICATED_ROUTER is explicitly "true". The demo
-    # cluster is a local kind sandbox with no external exposure.
     awk -v image="${router_image}" '
       {
         gsub(/\$\{ROUTER_IMAGE\}/, image)
@@ -186,7 +134,6 @@ if [[ "${AGENTIC}" == "1" ]]; then
     log "Run 'go mod download sigs.k8s.io/agent-sandbox' or deploy a router manually."
   fi
 
-  # ---- vekil model proxy (one-time GitHub device-code login) ------------
   vekil_script="${repo_root}/.claude/skills/vekil-reverse-proxy-deploy/scripts/deploy_vekil_reverse_proxy.sh"
   if kubectl -n "${VEKIL_NS}" get deploy vekil >/dev/null 2>&1; then
     log "vekil already deployed in ${VEKIL_NS} — reusing it"
@@ -200,7 +147,6 @@ if [[ "${AGENTIC}" == "1" ]]; then
   fi
   vekil_url="http://vekil.${VEKIL_NS}.svc.cluster.local:1337/v1"
 
-  # ---- model Secret + git Secret ----------------------------------------
   log "Creating model Secret ${demo_namespace}/${sandbox_model_secret} (endpoint -> vekil)"
   kubectl -n "${demo_namespace}" create secret generic "${sandbox_model_secret}" \
     --from-literal=OPENAI_BASE_URL="${vekil_url}" \
@@ -213,10 +159,6 @@ if [[ "${AGENTIC}" == "1" ]]; then
   fi
   if [[ -n "${git_token}" ]]; then
     log "Creating git Secret ${demo_namespace}/${sandbox_git_secret} (token not printed)"
-    # Include a `token` key alongside username/password: on the unified cluster
-    # this installer runs LAST and would otherwise clobber the 3-key secret that
-    # install-demo-model.sh creates, breaking Demo 30 (it reads GH_TOKEN from the
-    # `token` key -> CreateContainerConfigError "couldn't find key token").
     kubectl -n "${demo_namespace}" create secret generic "${sandbox_git_secret}" \
       --from-literal=username=oauth2 --from-literal=password="${git_token}" \
       --from-literal=token="${git_token}" \
@@ -226,12 +168,6 @@ if [[ "${AGENTIC}" == "1" ]]; then
     log "No git token (set GIT_TOKEN/GITHUB_TOKEN or 'gh auth login'); create ${sandbox_git_secret} before Demo 60."
   fi
 
-  # ---- Orka API client ServiceAccount -----------------------------------
-  # The demos authenticate to the Orka API with a token minted for this SA
-  # (prepare_api_env -> get_orka_token -> kubectl create token orka-client).
-  # The Orka API validates any SA token via Kubernetes TokenReview, so the SA
-  # just needs to exist. On the shared demo cluster cluster-up.sh provides it;
-  # on this e2e-built cluster nothing does, so ensure it here.
   orka_client_sa="${ORKA_TOKEN_SERVICE_ACCOUNT:-orka-client}"
   orka_client_ns="${ORKA_TOKEN_NAMESPACE:-${demo_namespace}}"
   log "Ensuring Orka API client ServiceAccount ${orka_client_ns}/${orka_client_sa}"

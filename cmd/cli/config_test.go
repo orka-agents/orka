@@ -147,7 +147,6 @@ func TestConfigViewCmd(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	// Save a config first
 	cfg := orkaConfig{
 		Server:    "http://test:8080",
 		Token:     "abcdef12345",
@@ -158,7 +157,6 @@ func TestConfigViewCmd(t *testing.T) {
 	}
 
 	cmd := newConfigViewCmd()
-	// Execute should not error
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error: %v", err)
 	}
@@ -178,21 +176,18 @@ func TestConfigSetServerPreservesToken(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	// Set token first
 	tokenCmd := newConfigSetTokenCmd()
 	tokenCmd.SetArgs([]string{"opaque-value-456"})
 	if err := tokenCmd.Execute(); err != nil {
 		t.Fatalf("set-token error: %v", err)
 	}
 
-	// Set server
 	serverCmd := newConfigSetServerCmd()
 	serverCmd.SetArgs([]string{"http://srv:8080"})
 	if err := serverCmd.Execute(); err != nil {
 		t.Fatalf("set-server error: %v", err)
 	}
 
-	// Verify both are preserved
 	cfg := loadConfig()
 	if cfg.Token != "opaque-value-456" {
 		t.Errorf("Token = %q, want %q (should be preserved)", cfg.Token, "opaque-value-456")

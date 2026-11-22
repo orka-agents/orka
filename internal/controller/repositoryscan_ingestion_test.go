@@ -28,9 +28,6 @@ import (
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// Exercise the real collection order: retained threat-model, mapper, and review
-// Tasks from the first run precede the same stages from the next run. The old
-// mapper used to reclaim shared slices, letting both runs count reviews again.
 func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "scans.db")
@@ -65,7 +62,6 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 		finishScanTask(t, cl, tasks[0])
 		finishScanTask(t, cl, tasks[1])
 		reconcile()
-		// Keep the last review active while terminal Tasks are reconciled again.
 		for _, task := range tasks[2 : len(tasks)-1] {
 			finishScanTask(t, cl, task)
 		}
@@ -122,7 +118,6 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, receipt.Completed)
 		}
-		// Reopen SQLite and rebuild the reconciler, retaining the same Tasks.
 		require.NoError(t, db.Close())
 		db, err = sqlitestore.NewDB(path)
 		require.NoError(t, err)
@@ -148,8 +143,6 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 		require.NoError(t, cl.List(ctx, &retained))
 		require.Len(t, retained.Items, (runIndex+1)*16, "ingestion must not delete retained Tasks")
 	}
-	// Task history cleanup can remove old Tasks and their artifacts without
-	// deleting ingestion receipts or changing the completed run history.
 	var oldTasks corev1alpha1.TaskList
 	require.NoError(t, cl.List(ctx, &oldTasks, client.MatchingLabels{labels.LabelSecurityScanID: "scan_retained_0"}))
 	for i := range oldTasks.Items {
@@ -193,10 +186,6 @@ func TestRepositoryScanIngestsTerminalPipelineOnRestart(t *testing.T) {
 	require.Equal(t, 2, run.DroppedFindings)
 }
 
-// newUningestedStageRace seeds a run whose threat-model Task, and optionally
-// mapper Task, finished after ingestOwnedTasks listed them. Progression is the
-// first step that sees them terminal, so it must not trust their output before
-// ingesting it.
 func newUningestedStageRace(t *testing.T, runID string, keepMapper bool) (context.Context, *storageclient.Client, client.Client, *RepositoryScanReconciler, *corev1alpha1.RepositoryScan, []*corev1alpha1.Task) {
 	t.Helper()
 	ctx := context.Background()
@@ -396,7 +385,6 @@ func TestReviewIngestionRequiresSliceUpdate(t *testing.T) {
 			require.Empty(t, dropped)
 			_, err = f.store.GetScanTaskIngestion(f.ctx, scanTaskIngestionIdentity(f.scan, f.sourceTask))
 			require.ErrorIs(t, err, store.ErrNotFound)
-			// Repair the missing ownership/update and retry the same Task.
 			f.sourceTask.Labels[labels.LabelSecuritySliceID] = f.slice.ID
 			f.slice.LastScanRunID = f.run.ID
 			require.NoError(t, f.store.UpsertReviewSlice(f.ctx, f.slice))
@@ -581,15 +569,11 @@ func TestReviewIngestionResumesFollowupWithoutRecounting(t *testing.T) {
 			require.Equal(t, 1, before.ReviewedSliceCount)
 			require.Equal(t, 1, before.AcceptedFindings)
 			require.Equal(t, 1, before.DroppedFindings)
-			// Recovery must use the receipt even when original Task results have
-			// already been cleaned up, or the source slice now has another owner.
 			require.NoError(t, f.store.DeleteResult(f.ctx, defaultNS, f.sourceTask.Name))
 			f.slice.LastScanRunID = "later-run"
 			require.NoError(t, f.store.UpsertReviewSlice(f.ctx, f.slice))
 			restarted := &RepositoryScanReconciler{Client: f.client, Scheme: f.reconciler.Scheme, SecurityStore: f.store, ArtifactStore: f.store, ResultStore: f.store}
 			if tt.delayedCache {
-				// Lists can lag a successful creation. Retrying after the old
-				// timestamp name would change must still hit AlreadyExists.
 				restarted.Client = &missingValidationTaskList{Client: f.client}
 				time.Sleep(time.Second)
 			}

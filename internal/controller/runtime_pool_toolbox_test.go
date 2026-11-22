@@ -113,7 +113,6 @@ func TestRuntimePoolPodTemplateCopyModeWiresToolboxes(t *testing.T) {
 	if err := ValidateACPToolboxNodeSelector(map[string]string{"kubernetes.io/os": "linux", "zone": "a"}); err != nil {
 		t.Fatalf("linux OS selector must be accepted: %v", err)
 	}
-	// Pull secrets are Pod-level references, never container mounts or env.
 	for _, container := range append(append([]corev1.Container(nil), template.Spec.InitContainers...), template.Spec.Containers...) {
 		for _, mount := range container.VolumeMounts {
 			if strings.Contains(mount.Name, "pull") {
@@ -202,8 +201,6 @@ func assertToolboxCopyVolumes(t *testing.T, template corev1.PodTemplateSpec, cou
 			t.Fatalf("toolbox volume %d = %#v (must reserve a block per permitted entry)", i, volume)
 		}
 	}
-	// The Pod's ephemeral-storage budget grows by the handoff volume plus one
-	// full toolbox volume per toolbox, so kubelet never evicts a filling Pod.
 	base := runtimePoolResourceRequirements(runtimePoolResourceClassStandard)
 	want := base.Limits.StorageEphemeral().Value() + runtimePoolToolboxHandoffBytes + int64(count)*runtimePoolToolboxVolumeBytes
 	if got := template.Spec.Containers[0].Resources.Limits.StorageEphemeral().Value(); got != want {
@@ -269,12 +266,8 @@ func TestRuntimePoolPodTemplateImageVolumeMode(t *testing.T) {
 		t.Fatalf("mount method env = %q", environment[runtimePoolToolboxMountMethod])
 	}
 	assertRuntimeContainerProtections(t, template)
-	// The mount method changes the template, never the profile digest.
 	copyPolicy := acpTestToolboxPolicy()
 	_, copyTemplate := renderToolboxTemplate(t, pool, copyPolicy)
-	// The supervisor's image-volume check runs before it serves, so the
-	// startup probe must allow the full check on top of the normal startup
-	// allowance; copy mode checks in init containers and keeps the default.
 	startupBudget := func(probe *corev1.Probe) time.Duration {
 		return time.Duration(probe.FailureThreshold*probe.PeriodSeconds) * time.Second
 	}
@@ -294,9 +287,6 @@ func TestRuntimePoolPodTemplateImageVolumeMode(t *testing.T) {
 	}
 }
 
-// assertRuntimeContainerProtections guards the properties image volumes rely
-// on: the runtime container stays non-privileged with no privilege
-// escalation, and toolbox wiring never adds capabilities.
 func assertRuntimeContainerProtections(t *testing.T, template corev1.PodTemplateSpec) {
 	t.Helper()
 	sc := template.Spec.Containers[0].SecurityContext
@@ -372,7 +362,6 @@ func TestRuntimePoolToolboxAdmissionFailsClosed(t *testing.T) {
 func TestRuntimePoolReconcileReportsToolboxUnavailableWhenDisabled(t *testing.T) {
 	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
 	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)
-	// Admit the pool first so a Deployment exists, then disable toolboxes.
 	r.ToolboxPolicy = acpTestToolboxPolicy()
 	runtimePoolReconcile(t, r, pool)
 	deployment := runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
@@ -380,14 +369,11 @@ func TestRuntimePoolReconcileReportsToolboxUnavailableWhenDisabled(t *testing.T)
 		t.Fatalf("admitted pool Deployment replicas = %d, want 1", ptr.Deref(deployment.Spec.Replicas, 0))
 	}
 	r.ToolboxPolicy = ACPToolboxPolicy{}
-	// First reconcile persists the admission-closed barrier only.
 	runtimePoolReconcile(t, r, pool)
 	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
 	if ptr.Deref(deployment.Spec.Replicas, 0) != 1 {
 		t.Fatalf("the barrier reconcile must not touch the Deployment, got %d replicas", ptr.Deref(deployment.Spec.Replicas, 0))
 	}
-	// With the barrier persisted and no Pod able to run anything, the next
-	// reconcile scales the workload to zero.
 	runtimePoolReconcile(t, r, pool)
 	deployment = runtimePoolTestDeployment(t, r, pool.Namespace, runtimePoolResourceName(pool.Namespace, pool.Name))
 	if ptr.Deref(deployment.Spec.Replicas, 0) != 0 {
@@ -410,9 +396,6 @@ func TestRuntimePoolReconcileReportsToolboxUnavailableWhenDisabled(t *testing.T)
 	}
 }
 
-// A Pod that becomes Ready after toolbox admission is revoked, before the
-// pool recorded an active instance, is drained through the same
-// authenticated barrier and scaled away instead of running indefinitely.
 func TestRuntimePoolToolboxFailureDrainsReadyPodWithoutActiveInstance(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
 	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
@@ -430,8 +413,6 @@ func TestRuntimePoolToolboxFailureDrainsReadyPodWithoutActiveInstance(t *testing
 		t.Fatalf("a NotReady Pod must not be recorded as the active instance: %#v", current.Status.ActiveInstance)
 	}
 
-	// Toolboxes are disabled; the barrier reconcile records no instance and
-	// the Pod becomes Ready afterwards.
 	r.ToolboxPolicy = ACPToolboxPolicy{}
 	runtimePoolReconcile(t, r, pool)
 	runtimePoolTestSetPodReady(t, r, &pod, true)
@@ -440,8 +421,6 @@ func TestRuntimePoolToolboxFailureDrainsReadyPodWithoutActiveInstance(t *testing
 		t.Fatalf("barrier status = %#v", current.Status)
 	}
 
-	// The unrecorded Ready Pod is never assumed idle: the first observation
-	// requests an authenticated drain and keeps the workload.
 	drainCallsBefore := supervisor.drainCalls
 	runtimePoolReconcile(t, r, pool)
 	if supervisor.drainCalls != drainCallsBefore+1 || supervisor.drainReason != harnessv2.DrainReasonToolboxUnavailable {
@@ -451,7 +430,6 @@ func TestRuntimePoolToolboxFailureDrainsReadyPodWithoutActiveInstance(t *testing
 		t.Fatal("the workload must stay until the drained supervisor is observed quiescent")
 	}
 
-	// A busy supervisor keeps the workload even after the drain request.
 	supervisor.probe.Status.Drain.Requested = true
 	supervisor.probe.Status.Drain.RequestedAt = runtimePoolTestNow
 	supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
@@ -463,7 +441,6 @@ func TestRuntimePoolToolboxFailureDrainsReadyPodWithoutActiveInstance(t *testing
 		t.Fatal("a supervisor with live descendants must not be scaled away")
 	}
 
-	// Once the drained supervisor is quiescent the workload is scaled to zero.
 	supervisor.probe.Status.Pressure.LiveDescendants = 0
 	runtimePoolReconcile(t, r, pool)
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 0 {
@@ -475,10 +452,6 @@ func TestRuntimePoolToolboxFailureDrainsReadyPodWithoutActiveInstance(t *testing
 	}
 }
 
-// A pool that loses toolbox admission while its supervisor still serves a
-// session keeps its workload until the live probe reports it idle; the probe
-// is consulted directly because the toolbox gate runs before the rollout
-// path that refreshes the pool's capacity counters.
 func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
 	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
@@ -492,8 +465,6 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 		t.Fatal("admitted pool must run one replica")
 	}
 
-	// Toolboxes get disabled while the supervisor is busy. The first reconcile
-	// persists only the admission-closed barrier and keeps the exact fence.
 	supervisor.probe.Status.Pressure.ActivePrompts = 1
 	supervisor.probe.Status.Pressure.ResidentSessions = 1
 	supervisor.probe.Status.Sessions = []harnessv2.RuntimeSessionStatus{{RuntimeSessionID: "busy-session", RuntimeSessionUID: "busy-session-uid", Generation: 1, State: harnessv2.RuntimeSessionStatePromptRunning, ActivePromptID: "busy-prompt", LastTransitionAt: runtimePoolTestNow}}
@@ -509,8 +480,6 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 		t.Fatal("the barrier reconcile must not touch the Deployment")
 	}
 
-	// With the barrier persisted, a busy supervisor still keeps the workload
-	// and the fence.
 	runtimePoolReconcile(t, r, pool)
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
 		t.Fatal("a busy supervisor must not be scaled away")
@@ -520,7 +489,6 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 		t.Fatalf("busy status = %#v", current.Status)
 	}
 
-	// A live descendant alone also keeps it; the idle invariant is complete.
 	supervisor.probe.Status.Pressure.ActivePrompts = 0
 	supervisor.probe.Status.Pressure.ResidentSessions = 0
 	supervisor.probe.Status.Sessions = nil
@@ -531,7 +499,6 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 		t.Fatal("a supervisor with live descendants must not be scaled away")
 	}
 
-	// A NotReady active Pod is a readiness blip, not idleness.
 	supervisor.probe.Status.Pressure.LiveDescendants = 0
 	runtimePoolTestSetPodReady(t, r, &pod, false)
 	runtimePoolReconcile(t, r, pool)
@@ -540,9 +507,6 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 	}
 	runtimePoolTestSetPodReady(t, r, &pod, true)
 
-	// Even with nothing running, the first idle observation only requests a
-	// supervisor drain; the workload stays until a later probe shows the
-	// drained supervisor quiescent.
 	drainCallsBefore := supervisor.drainCalls
 	runtimePoolReconcile(t, r, pool)
 	if supervisor.drainCalls != drainCallsBefore+1 || supervisor.drainReason != harnessv2.DrainReasonToolboxUnavailable {
@@ -551,8 +515,6 @@ func TestRuntimePoolToolboxFailureScalesDownOnlyWhenSupervisorIsIdle(t *testing.
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, name).Spec.Replicas, 0) != 1 {
 		t.Fatal("the workload must stay until the drained supervisor is observed quiescent")
 	}
-	// The supervisor confirms the drain and reports the complete quiescence
-	// invariant: the workload is scaled to zero and the fence cleared only now.
 	supervisor.probe.Status.Drain.Requested = true
 	supervisor.probe.Status.Drain.RequestedAt = runtimePoolTestNow
 	supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
@@ -900,9 +862,6 @@ func TestRuntimePoolToolboxesFromEnvironment(t *testing.T) {
 	}
 }
 
-// A previously active runtime Pod that restarts and fails its toolbox checks
-// must report ToolboxUnavailable (not the generic RolloutFailed) so waiting
-// Tasks fail instead of retrying against a fence that can never serve again.
 func TestRuntimePoolReconcileReportsToolboxUnavailableForRestartedActivePod(t *testing.T) {
 	scheme := runtimePoolTestScheme(t)
 	pool := runtimePoolToolboxTestObject(runtimePoolTestToolboxes()...)
@@ -920,7 +879,6 @@ func TestRuntimePoolReconcileReportsToolboxUnavailableForRestartedActivePod(t *t
 		t.Fatalf("pool with toolboxes did not become serving: %#v", current.Status)
 	}
 
-	// The active Pod restarts and the supervisor's startup toolbox check fails.
 	runtimePoolTestSetPodReady(t, r, &pod, false)
 	currentPod := &corev1.Pod{}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(&pod), currentPod); err != nil {
@@ -1027,7 +985,6 @@ func TestRuntimePoolToolboxRetirementPreservesTaskCleanupReceipt(t *testing.T) {
 	supervisor.probe.Status.Drain.Reason = harnessv2.DrainReasonToolboxUnavailable
 	supervisor.probe.Status.Lifecycle = harnessv2.SupervisorLifecycleDraining
 	supervisor.probe.Status.Drain.AcceptingNewSessions = false
-	// A lost receipt write must retain the authenticated instance for retry.
 	failReceipt := true
 	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
@@ -1090,8 +1047,6 @@ func TestRuntimePoolRecoversFromTransientToolboxImagePull(t *testing.T) {
 	supervisor := &fakeRuntimePoolSupervisorClient{probe: runtimePoolValidProbe(pool, &pod, "recovering-boot", false)}
 	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), supervisor, pool, &pod)
 	r.ToolboxPolicy = acpTestToolboxPolicy()
-	// Rendering the native Deployment materializes the bare fixture Pod after
-	// the reconciler listed it, so the optimistic pull observation conflicts once.
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}); err != nil && !apierrors.IsConflict(err) {
 		t.Fatalf("first reconcile = %v", err)
 	}
@@ -1132,7 +1087,6 @@ func TestRuntimePoolToolboxPolicyRemovalRecyclesInPlaceSupervisorRestart(t *test
 	if ptr.Deref(runtimePoolTestDeployment(t, r, pool.Namespace, deployment.Name).Spec.Replicas, 0) != 0 {
 		t.Fatal("legitimate in-place restart stranded a rejected workload")
 	}
-	// API deletion alone is not process-death evidence for enrolled native Pods.
 	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("exact restarted Pod was not recycled: %v", err)
@@ -1217,7 +1171,6 @@ func TestRuntimePoolToolboxRestartRecycleRetriesAfterScaleToZero(t *testing.T) {
 		t.Fatal("failed Pod removal did not preserve fence after scale-to-zero")
 	}
 	runtimePoolReconcile(t, r, pool)
-	// API deletion alone is not process-death evidence for enrolled native Pods.
 	runtimePoolTestCompleteDeletedBoot(t, r, pool, &pod)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(&pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("zero-replica Deployment skipped exact Pod recycle retry: %v", err)

@@ -52,14 +52,8 @@ function ApprovalCard({
 }: {
   approval: Approval
   taskId: string
-  // Whether the owning task has reached a terminal phase. The backend rejects
-  // decisions on terminal tasks (409), so such approvals are non-actionable even
-  // if still derived as pending.
   taskTerminal?: boolean
-  // The approval an active parked wait is waiting on; it stays decidable after
-  // the parked turn has ended.
   parkedApprovalId?: string
-  // Called when a decision returns 409 so the panel can refetch settled state.
   onConflict?: () => void
 }) {
   const decide = useDecideApproval(taskId)
@@ -67,8 +61,6 @@ function ApprovalCard({
   const [conflict, setConflict] = useState<string | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const isPending = approval.status === 'pending'
-  // A pending approval on a completed task can't be decided — show it read-only —
-  // unless it is the sign-off a parked turn is waiting on.
   const closed = !!taskTerminal && approval.id !== parkedApprovalId
   const actionable = isPending && !closed
   const submitting = decide.isPending
@@ -83,19 +75,12 @@ function ApprovalCard({
         reason: reason.trim() || undefined,
       })
       toast.success(`Decision recorded: ${statusStyle(updated.status).label}`)
-      // The decided card drops its buttons; keep keyboard focus on the card
-      // instead of letting it fall back to the page.
       headingRef.current?.focus()
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        // The approval changed underneath us (decided elsewhere, expired, or
-        // cancelled). Surface it and refetch so the card reflects the settled
-        // server state instead of waiting for the next poll — useDecideApproval
-        // only invalidates on success, so we trigger the refresh here.
         setConflict(err.message || 'This approval was already decided.')
         toast.error('Approval already decided')
         onConflict?.()
-        // The refetch settles the card, which can remove its buttons.
         headingRef.current?.focus()
       } else {
         const message = err instanceof Error ? err.message : 'Unknown error'
@@ -122,12 +107,9 @@ function ApprovalCard({
               call: {approval.toolCallID.length > 12 ? approval.toolCallID.slice(0, 12) + '…' : approval.toolCallID}
             </Badge>
           )}
-          {/* IDs can be 64 characters; break them rather than overflow the card. */}
           <span className="ml-auto break-all font-mono text-xs text-muted-foreground">{approval.id}</span>
         </div>
 
-        {/* Request guidance can describe an unexecuted tool; after a decision,
-            the execution outcome below describes its current state. */}
         {isPending && approval.riskSummary && (
           <p className="break-words text-sm text-muted-foreground">{approval.riskSummary}</p>
         )}
@@ -163,7 +145,6 @@ function ApprovalCard({
           {approval.timeout && <span>Timeout {approval.timeout}</span>}
         </div>
 
-        {/* Terminal decision details. */}
         {!isPending && (approval.decisionActor || approval.decisionReason || approval.decisionTime) && (
           <div className="rounded-md bg-muted px-3 py-2 text-xs">
             {approval.decisionActor && <div>Decided by <span className="font-medium">{approval.decisionActor}</span></div>}
@@ -172,8 +153,6 @@ function ApprovalCard({
           </div>
         )}
 
-        {/* The note explains why a decision on a still-pending card failed;
-            once the refetched card settles, its decision details replace it. */}
         {conflict && isPending && (
           <p className="rounded-md border border-status-pending/40 bg-status-pending-bg px-3 py-2 text-xs text-status-pending">
             {conflict}
@@ -197,9 +176,6 @@ function ApprovalCard({
               aria-label="Decision reason"
               disabled={submitting}
             />
-            {/* aria-disabled, not disabled, while a decision is in flight:
-                disabling the focused button would drop keyboard focus, and
-                submit() already ignores repeat presses. */}
             <div className="flex gap-2">
               <Button
                 size="sm"
@@ -239,12 +215,8 @@ export function TaskApprovalPanel({
   taskUid?: string
   parkedApprovalId?: string
 }) {
-  // Poll for new approvals while active and unresolved execution after termination.
   const taskRunning = isTaskInFlight(taskPhase)
-  // Terminal tasks reject decisions, but recovery can still update their approvals.
   const taskTerminal = isTaskTerminal(taskPhase)
-  // A parked sign-off keeps polling until it is decided, including across an
-  // empty first response or a failed read, which carry no pending approval.
   const { data, isLoading, error, refetch } = useTaskApprovals(
     taskId,
     true,

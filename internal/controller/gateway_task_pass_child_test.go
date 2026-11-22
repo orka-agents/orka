@@ -27,8 +27,6 @@ type childPassRequest struct {
 	Deadline                                                                    time.Time
 }
 
-// This fake implements the proposed gateway contract, not provider OAuth.
-// It refuses conflicting reacquisition, wider children and account relinking.
 type childPassGateway struct {
 	sync.Mutex
 	bindings   map[string]childPassRequest
@@ -175,7 +173,6 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	require.Equal(t, []string{string(parent.UID), string(child.UID)}, g.issued)
 	require.Equal(t, []string{string(child.UID)}, g.called)
 	g.Unlock()
-	// A reconstructed executor reacquires the exact binding, with no parent tool effect.
 	require.NoError(t, execute())
 	g.Lock()
 	require.Len(t, g.called, 2)
@@ -196,15 +193,12 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 		_, err = r.freezeGatewayTaskGrant(t.Context(), forged, *childBody.MCPConfiguration)
 		require.True(t, isPermanentACPAgentConfigurationError(err))
 	}
-	// A parent with no agent execution binding, such as a native AI-worker
-	// Task, never gains one, so its child fails instead of retrying.
 	unbound := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "unbound-parent", Namespace: parent.Namespace}, Spec: *parent.Spec.DeepCopy()}
 	require.NoError(t, r.Create(t.Context(), unbound))
 	unboundChild := newGatewayPassChild(t, r, unbound, "unbound-parent-child")
 	_, err = r.freezeGatewayTaskGrant(t.Context(), unboundChild, *childBody.MCPConfiguration)
 	require.ErrorContains(t, err, "parent has no frozen gateway grant")
 	require.True(t, isPermanentACPAgentConfigurationError(err))
-	// The advertised but non-inherited tool never gets a pass.
 	forbidden := &corev1alpha1.Tool{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: child.Namespace, Name: "forbidden"}, forbidden))
 	forbiddenDescriptor, err := customACPMCPToolDescriptor(forbidden)
@@ -226,7 +220,6 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	g.Lock()
 	require.Equal(t, []string{string(parent.UID), string(child.UID), string(grandchild.UID)}, g.issued[len(g.issued)-3:])
 	g.Unlock()
-	// Cross-namespace child execution retains the original gateway namespace UID.
 	require.NoError(t, r.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "pass-child-ns"}}))
 	for _, name := range []string{"lookup", "forbidden"} {
 		copy := tool.DeepCopy()
@@ -267,7 +260,6 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 		}
 		require.NoError(t, r.Update(t.Context(), child))
 	}
-	// Parent deliberately parks after its successful turn; root reply authority stays closed.
 	parent.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	parent.Status.Execution = &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "parent-turn", State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded}
 	parent.Status.Wait = &corev1alpha1.TaskWaitStatus{RequestedAt: metav1.Now(), State: corev1alpha1.TaskWaitStateWaiting, Kind: corev1alpha1.TaskWaitKindTasks, Attempt: 1, PromptID: "parent-turn", References: []string{child.Name}, ReferenceUIDs: []string{string(child.UID)}, Deadline: metav1.NewTime(time.Now().Add(2 * time.Minute))}
@@ -276,7 +268,6 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, eligible)
 	require.NoError(t, execute())
-	// Final reply projection must not consume the separate child delegation.
 	require.NoError(t, r.GatewayService.ProjectTerminals(t.Context()))
 	event, err := r.GatewayService.EventStore.GetGatewayEventForTask(t.Context(), parent.Namespace, parent.Name, string(parent.UID))
 	require.NoError(t, err)
@@ -337,7 +328,6 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	require.Len(t, g.called, before)
 	g.relinked = false
 	g.Unlock()
-	// Cancellation racing issuance must prevent the following tool send.
 	g.Lock()
 	g.afterIssue = func() {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(parent), parent))
@@ -350,7 +340,6 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	g.Lock()
 	require.Len(t, g.called, before)
 	g.Unlock()
-	// Deletion independently stops the child, even with a live waiting parent.
 	delete(parent.Annotations, labels.AnnotationCancelRequested)
 	delete(parent.Annotations, labels.AnnotationCancelWait)
 	require.NoError(t, r.Update(t.Context(), parent))

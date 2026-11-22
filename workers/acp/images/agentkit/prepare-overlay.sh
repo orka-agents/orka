@@ -1,5 +1,4 @@
 #!/bin/sh
-# Runs only in the native Go builder, against a read-only source-image mount.
 set -eu
 
 source=$1
@@ -16,16 +15,12 @@ test "${#adapter_digest}" -eq 64 || fail "AGENTKIT_ADAPTER_DIGEST digest must ha
 case "$adapter_digest" in *[!0-9a-f]*) fail "AGENTKIT_ADAPTER_DIGEST must use a lowercase sha256 digest" ;; esac
 test "$AGENTKIT_ADAPTER_DIGEST" = "sha256:$digest" || fail "AGENTKIT_ADAPTER_DIGEST must equal the digest-pinned AgentKit source image"
 
-# Absolute links belong to the source root, not the builder. Do not execute the
-# runtime's interpreter (which may also be for a different architecture).
 resolve_source() (
     pending=$1
     resolved=
     links=0
     while test -n "$pending"; do
         component=${pending%%/*}
-        # Keep the separator too: a trailing slash requires a directory,
-        # including when the preceding component is another symlink.
         remaining=${pending#"$component"}
         pending=${remaining#/}
         case "$component" in
@@ -36,8 +31,6 @@ resolve_source() (
                 if test -L "$candidate"; then
                     links=$((links + 1))
                     test "$links" -le 40 || fail "too many source symlinks"
-                    # Keep trailing newlines until validation; command substitution
-                    # would otherwise validate a different target than cp preserves.
                     target=$(readlink -n "$candidate" && printf '.') || fail "cannot read source symlink: $candidate"
                     target=${target%.}
                     case "$target" in *'
@@ -54,9 +47,6 @@ resolve_source() (
     printf '%s\n' "$source$resolved"
 )
 
-# A symlinked overlay directory could make chmod/chown escape the four trees.
-# Reject that layout instead of following a link into the builder or widening
-# the overlay to unrelated source paths.
 for path in /opt /opt/agentkit /agent /sessions /usr /usr/share /usr/share/licenses /usr/share/licenses/orka; do
     test ! -L "$source$path" || fail "overlay directory must not be a symlink: $path"
     if test -e "$source$path"; then test -d "$source$path" || fail "overlay path must be a directory: $path"; fi
@@ -71,8 +61,6 @@ case "$config" in "$source"/agent/*) ;; *) fail "agent.yaml symlink target must 
 
 test ! -e "$overlay" || fail "prepared overlay already exists"
 mkdir -p "$overlay"
-# COPY merges these parent directories too. Archive only their metadata, not
-# their children; cp -a below preserves all contents of the four changed trees.
 set -- .
 for path in /opt /usr /usr/share /usr/share/licenses; do
     if test -d "$source$path"; then set -- "$@" ".$path"; fi

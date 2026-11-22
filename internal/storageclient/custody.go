@@ -12,24 +12,15 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// SnapshotKeyBytes is the length of the snapshot key, an AES-256 key.
 const SnapshotKeyBytes = 32
 
-// ErrSnapshotKeyNotActive is returned by every operation on sealed records
-// until ActivateSnapshotKey has succeeded.
 var ErrSnapshotKeyNotActive = errors.New("agent execution snapshot encryption is not configured; snapshot persistence fails closed")
 
-// Page sizes for authenticating retained records. Snapshot bodies are usually
-// small but have no fixed size limit, and native session records can
-// hold large bundles, so native records are read one at a time.
 const (
 	snapshotVerificationPageSize      = 8
 	nativeSessionVerificationPageSize = 1
 )
 
-// keyCustody holds the snapshot key as an AES-256-GCM AEAD. Every sealed
-// record format uses a fresh random nonce and binds the record's identity
-// through the associated data. The key never leaves this type.
 type keyCustody struct {
 	aead cipher.AEAD
 }
@@ -59,8 +50,6 @@ func (k *keyCustody) seal(additionalData, plaintext []byte) (nonce, ciphertext [
 	return nonce, k.aead.Seal(nil, nonce, plaintext, additionalData), nil
 }
 
-// open authenticates and decrypts. It rejects a nonce of the wrong length,
-// which the AEAD would otherwise panic on.
 func (k *keyCustody) open(nonce, ciphertext, additionalData []byte) ([]byte, error) {
 	if len(nonce) != k.aead.NonceSize() {
 		return nil, errInvalidNonce
@@ -68,14 +57,6 @@ func (k *keyCustody) open(nonce, ciphertext, additionalData []byte) ([]byte, err
 	return k.aead.Open(nil, nonce, ciphertext, additionalData)
 }
 
-// ActivateSnapshotKey makes key the client's snapshot key. It first
-// authenticates every retained sealed snapshot, native session and connector
-// custody record through the provider, and installs the key only if all of
-// them open. A key that cannot open retained data is rejected, so one dataset
-// never accumulates records sealed under different keys and linked accounts
-// remain usable and revocable. Startup activates the key before any consumer
-// uses the client; until then, sealed records fail closed with
-// ErrSnapshotKeyNotActive.
 func (c *Client) ActivateSnapshotKey(ctx context.Context, key []byte) error {
 	custody, err := newKeyCustody(key)
 	if err != nil {
@@ -147,9 +128,6 @@ func (c *Client) verifyRetainedNativeSessions(ctx context.Context, custody *keyC
 	}
 }
 
-// verifyNativeSessionSeal authenticates a retained native record and its
-// digest, without the record checks a read applies, so key activation
-// accepts every record an earlier release could store.
 func verifyNativeSessionSeal(custody *keyCustody, sealed storagev1.SealedNativeSession) error {
 	if len(sealed.Nonce) != custody.aead.NonceSize() {
 		return errors.New("retained native session has invalid nonce")

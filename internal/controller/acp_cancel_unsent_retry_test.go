@@ -185,8 +185,6 @@ func TestPromptCancellationRetryPreservesAcknowledgmentGrace(t *testing.T) {
 			writes++
 			_ = readCancelRetryRequest(t, sent, string(request.Metadata.PromptID))
 			response := cancelRetryResponse(t)
-			// The runtime proves settlement at its deadline; response delivery
-			// may finish later within the original control request grace.
 			time.Sleep(2 * time.Second)
 			if err := sent.Context().Err(); err != nil {
 				return nil, err

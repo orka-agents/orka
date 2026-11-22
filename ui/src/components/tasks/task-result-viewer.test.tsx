@@ -30,7 +30,6 @@ describe('TaskResultViewer', () => {
     const { container } = render(<TaskResultViewer taskId="done-task" taskPhase="Succeeded" taskUid="u1" />)
     expect(await screen.findByText('final answer 1')).toBeInTheDocument()
     expect(screen.queryByText('Load Result')).not.toBeInTheDocument()
-    // Long results grow with the page and wrap instead of hiding behind a short cap.
     const pre = container.querySelector('pre')!
     expect(pre.className).not.toMatch(/max-h-/)
     expect(pre).toHaveClass('break-words')
@@ -107,7 +106,6 @@ describe('TaskResultViewer', () => {
     const user = userEvent.setup()
     render(<TaskResultViewer taskId="task-3" />)
     await user.click(screen.getByText('Load Result'))
-    // While the request is in-flight, the loading skeleton should appear
     await waitFor(() => {
       expect(screen.queryByText('Load Result')).not.toBeInTheDocument()
     })
@@ -241,7 +239,6 @@ describe('TaskResultViewer', () => {
     await waitFor(() => {
       expect(screen.getByText('Just plain text output')).toBeInTheDocument()
     })
-    // Should not show structured elements
     expect(screen.queryByTestId('verdict-badge')).not.toBeInTheDocument()
   })
 

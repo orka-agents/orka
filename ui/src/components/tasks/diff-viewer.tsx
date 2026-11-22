@@ -20,7 +20,6 @@ function parseDiff(diff: string): DiffLine[] {
   let newLinesRemaining = 0
 
   for (const line of lines) {
-    // Source lines can resemble file headers until the current hunk is complete.
     const inHunk = oldLinesRemaining > 0 || newLinesRemaining > 0
     if (
       line.startsWith('diff ') ||
@@ -53,10 +52,6 @@ function parseDiff(diff: string): DiffLine[] {
       oldLinesRemaining = Math.max(0, oldLinesRemaining - 1)
       newLinesRemaining = Math.max(0, newLinesRemaining - 1)
     } else {
-      // Metadata such as "\ No newline at end of file" and "index ..." rows:
-      // keep them visible, but never assign source line numbers or advance
-      // counters. The empty item produced by a trailing patch newline is
-      // dropped entirely.
       if (line === '') continue
       result.push({ type: 'metadata', content: line })
     }

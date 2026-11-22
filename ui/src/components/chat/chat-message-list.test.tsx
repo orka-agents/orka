@@ -23,7 +23,6 @@ beforeEach(() => {
 describe('ChatMessageList', () => {
   it('empty state shows welcome text with orca brand mark', () => {
     render(<ChatMessageList />)
-    // The page title is the h1, so the welcome heading is the next level down.
     expect(screen.getByRole('heading', { level: 2, name: 'Orka Meta Agent' })).toBeInTheDocument()
     expect(
       screen.getByText(/Chat with the orchestrator/i),
@@ -55,13 +54,9 @@ describe('ChatMessageList', () => {
     useChatStore.setState({ messages: [{ id: 'm1', role: 'user', content: 'Hello', timestamp: now }] })
     const { container } = render(<ChatMessageList />)
     const root = container.querySelector('[data-slot="scroll-area"]') as HTMLElement
-    // The list is a shrinkable flex child, so it scrolls instead of the page.
     expect(root.className).toContain('min-h-0')
     expect(root.className).toContain('flex-1')
     const viewport = container.querySelector('[data-slot="scroll-area-viewport"]') as HTMLElement
-    // Radix's content wrapper is a `display: table` box that grows to the
-    // widest unbreakable line; forcing it to a block keeps the transcript
-    // inside the viewport.
     expect(viewport).toHaveClass('[&>div]:block!')
     let top = 0
     Object.defineProperty(viewport, 'scrollHeight', { configurable: true, get: () => 1000 })
@@ -69,19 +64,16 @@ describe('ChatMessageList', () => {
     Object.defineProperty(viewport, 'scrollTop', { configurable: true, get: () => top, set: (value: number) => { top = value } })
     const add = (message: ChatMessage) => act(() => useChatStore.getState().addMessage(message))
 
-    // A reader who scrolled up keeps their place while the reply grows.
     top = 100
     fireEvent.scroll(viewport)
     add({ id: 'm2', role: 'assistant', content: 'part one', timestamp: now })
     expect(top).toBe(100)
 
-    // Back near the bottom, new content is followed.
     top = 760
     fireEvent.scroll(viewport)
     add({ id: 'm3', role: 'assistant', content: 'part two', timestamp: now })
     expect(top).toBe(1000)
 
-    // The reader's own message always returns to the bottom.
     top = 0
     fireEvent.scroll(viewport)
     add({ id: 'm4', role: 'user', content: 'again', timestamp: now })

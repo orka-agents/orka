@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Real AgentKit/Foundry adapters; deterministic model and Azure transport fixtures.
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -41,8 +40,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# These commits contain the matching brokered-approval contracts. Fetch only
-# these public sources; no sibling worktrees or provider credentials are used.
 agentkit_revision=490bb6d6c968d0240f3034318e05f9561baf4334
 foundry_revision=9f994c305989ffa63835b9f97dccd6c45426bdcc
 checkout_source() {
@@ -81,8 +78,6 @@ context="$(kubectl --kubeconfig "$KUBECONFIG" config current-context)"
 cluster="${context#kind-}"
 registry_created=1
 orka_kind_registry_start "$cluster" "$run_id"
-# BuildKit runs in the kind network so digest-pinned source images resolve on
-# both Linux runners and Docker Desktop, where host loopback is outside its VM.
 cat >"$work/buildkitd.toml" <<EOF
 [registry."$ORKA_KIND_REGISTRY_ADDR"]
   mirrors = ["$ORKA_KIND_REGISTRY_NAME:5000"]
@@ -145,8 +140,6 @@ jq -n --arg head "$(git rev-parse HEAD)" --arg agentkit "$agentkit_revision" \
   '{head:$head,agentkit:$agentkit,foundry:$foundry,controller:$controller,publisher:$publisher,
     images:$images[0],supervisors:$composed[0],transport:"local-fixture"}' >"$work/evidence/build.json"
 "$python" "$fixture/e2e.py" run --work "$work" --context "$context" --cluster "$cluster"
-# The EXIT trap always disposes of the cluster. Success additionally requires
-# receipts, normal Task deletion, and retired runtime authority beforehand.
 jq -e '.passed == true and .taskCount == .normallyDeletedTasks and
   (.agentRuntimesDeleted | length) == 2 and .retainedBootAuthorityCount == 0' \
   "$work/evidence/cleanup.json" >/dev/null

@@ -45,12 +45,9 @@ describe('ConnectorsPage', () => {
     expect(screen.getAllByText('Linked · read only')).toHaveLength(2)
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
     expect(screen.getByText(/create_pull_request/)).toBeInTheDocument()
-    // A linked provider offers mode change and disconnect, not connect.
     expect(screen.getByRole('button', { name: 'Allow writes' })).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Disconnect' })).toHaveLength(2)
-    // A read-only link to a provider with no write tools has nothing to widen to.
     expect(screen.getAllByRole('button', { name: 'Allow writes' })).toHaveLength(1)
-    // An unready provider cannot be connected yet.
     expect(screen.getByRole('button', { name: 'Connect (read only)' })).toBeDisabled()
     open.mockRestore()
     expect(posted).toBeUndefined()
@@ -111,15 +108,10 @@ describe('ConnectorsPage', () => {
       return HttpResponse.json({ ...linked, namespace: 'team-a', mode: 'readWrite' })
     }))
     render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc', namespace: 'team-a' }} />)
-    // The page showed orka-system, but the consent was sealed in team-a:
-    // the completion went there, and the page switches to that namespace.
     await waitFor(() => expect(useUIStore.getState().namespace).toBe('team-a'))
     expect(completions).toEqual([{ body: { completion: 'one-time' }, namespace: 'team-a' }])
-    // A reload of the address bar no longer looks like an unfinished consent.
     expect(window.location.hash).toBe('')
     expect(window.location.search).toBe('')
-    // The content remounted for team-a before the router cleared the search
-    // (here it never does): it must not replay the spent callback.
     await waitFor(() => expect(screen.getByText('GitHub')).toBeInTheDocument())
     expect(screen.queryByText(/without a completion token/)).not.toBeInTheDocument()
     expect(completions).toHaveLength(1)
@@ -135,8 +127,6 @@ describe('ConnectorsPage', () => {
   })
 
   it('offers the sign-in and CLI fallback when completion answers not found', async () => {
-    // The API hides another person's Connection as 404, so a dashboard
-    // signed in as someone else must still get the fallback.
     useProviders([github])
     window.history.replaceState(null, '', '/settings/connectors?status=pending&connection=github-abc#completion=one-time')
     server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('connection not found', { status: 404 })))
@@ -165,7 +155,6 @@ describe('ConnectorsPage', () => {
     }))
     render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('orka connection complete github-abc'))
-    // The token is still in the address bar, so a reload could retry too.
     expect(window.location.hash).toBe('#completion=one-time')
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Linked github (readWrite).'))
@@ -198,7 +187,6 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByText('Disconnecting…')).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: 'Disconnect' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument()
-    // The poll keeps going until the finalizer has removed the object.
     await waitFor(() => expect(screen.getByRole('button', { name: 'Connect (read only)' })).toBeInTheDocument(), { timeout: 8000 })
   }, 12000)
 
@@ -221,7 +209,6 @@ describe('ConnectorsPage', () => {
     let attempts = 0
     server.use(http.post(`${API}/connections/github-abc/complete`, () => {
       attempts += 1
-      // Both retryable conflicts the API can return while a completion is parked.
       const message = attempts === 1 ? 'connection is not yet protected by the controller; retry shortly' : 'connector provider is not ready; retry shortly'
       return new HttpResponse(message, { status: 409 })
     }))
@@ -261,7 +248,6 @@ describe('ConnectorsPage', () => {
     render(<ConnectorsPage />)
     await waitFor(() => expect(screen.getByText('This token cannot read linked accounts')).toBeInTheDocument())
     expect(screen.queryByText('Sign in as yourself to link accounts')).not.toBeInTheDocument()
-    // The read scope is operator-configurable, so the default is never named.
     expect(screen.getByText(/scope your controller requires to read linked accounts/)).toBeInTheDocument()
     expect(screen.queryByText(/orka:connectors/)).not.toBeInTheDocument()
   })
@@ -272,7 +258,6 @@ describe('ConnectorsPage', () => {
       http.get(`${API}/connectors`, () => HttpResponse.json({ items: [github] })),
       http.get(`${API}/connections`, () => {
         lists += 1
-        // The cache lags: the first refetch after the PUT still says readOnly.
         return HttpResponse.json({ items: [{ ...linked, mode: lists >= 3 ? 'readWrite' : 'readOnly' }] })
       }),
       http.put(`${API}/connections/github-abc`, () => HttpResponse.json({ connection: { ...linked, mode: 'readWrite' } })),
@@ -280,9 +265,6 @@ describe('ConnectorsPage', () => {
     render(<ConnectorsPage />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Allow writes' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Allow writes' }))
-    // The PUT response is applied at once, but the stale refetch that
-    // follows flips the card back; polling continues until the list shows
-    // the requested mode (the third list here), and the card settles.
     await waitFor(() => expect(lists).toBeGreaterThanOrEqual(3), { timeout: 12000 })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Limit to reads' })).toBeInTheDocument(), { timeout: 3000 })
   }, 15000)
@@ -293,7 +275,6 @@ describe('ConnectorsPage', () => {
     await waitFor(() => expect(screen.getByText('Extra link to this provider')).toBeInTheDocument())
     expect(screen.getByText(/github · my-second-github-link/)).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Disconnect' })).toHaveLength(2)
-    // The card's own link is unusable too: no linked badge, no mode or reconnect actions.
     expect(screen.getByText('Duplicate links')).toBeInTheDocument()
     expect(screen.queryByText('Linked · read only')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Allow writes' })).not.toBeInTheDocument()
@@ -326,8 +307,6 @@ describe('ConnectorsPage', () => {
     useProviders([github])
     render(<ConnectorsPage search={{ status: 'error', reason: 'access_denied', connection: 'github-abc', namespace: 'team-a' }} />)
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('cancelled'))
-    // The error redirect is unauthenticated: the persisted namespace stays
-    // put until the person chooses to switch.
     expect(useUIStore.getState().namespace).toBe('orka-system')
     fireEvent.click(screen.getByRole('button', { name: 'Switch to team-a' }))
     await waitFor(() => expect(useUIStore.getState().namespace).toBe('team-a'))
@@ -341,7 +320,6 @@ describe('ConnectorsPage', () => {
     server.use(http.post(`${API}/connections/github-abc/complete`, () => new HttpResponse('context token is not authorized for connectorsManage', { status: 403 })))
     render(<ConnectorsPage search={{ status: 'pending', connection: 'github-abc' }} />)
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('scope your controller requires to manage linked accounts'))
-    // The scope name is operator-configurable, so the default is never named.
     expect(screen.getByRole('alert')).not.toHaveTextContent('orka:connectors')
     expect(screen.getByRole('alert')).not.toHaveTextContent('orka connection complete')
     expect(screen.getByRole('alert')).not.toHaveTextContent('Sign in as yourself')

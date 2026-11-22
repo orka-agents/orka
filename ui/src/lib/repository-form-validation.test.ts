@@ -71,20 +71,17 @@ describe('isCronSchedule', () => {
     '0 0 32 * *',
     '0 0 * 0 *',
     '0 0 * 13 *',
-    // robfig/cron's standard parser has no weekday 7.
     '0 0 * * 7',
     '0 0 * * 1-7',
     '30-10 * * * *',
     '*/0 * * * *',
     '1/2/3 * * * *',
     '1-2-3 * * * *',
-    // robfig/cron skips empty list items; an empty item is a typo here.
     '1,,2 * * * *',
     '-1 * * * *',
     '0 MON * * *',
     '0 0 * * JAN',
     '0 0 * * monday',
-    // @every needs a Go duration of at least one minute.
     '@every 0',
     '@every 0s',
     '@every -0',
@@ -106,10 +103,8 @@ describe('isCronSchedule', () => {
     '@every 5m-1s',
     '@every +-5m',
     '@every 5M',
-    // robfig/cron splits "@every " off, so a second space is part of the duration.
     '@every  5m',
     '@every\t5m',
-    // Past int64 nanoseconds, which time.ParseDuration refuses.
     '@every 3000000h',
     'TZ=UTC @every 30s',
   ])('rejects %s', (schedule) => {

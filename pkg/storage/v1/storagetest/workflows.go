@@ -184,7 +184,6 @@ func runSecurity(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Len(t, next, 1)
 		require.NotEqual(t, page[0].ID, next[0].ID)
-		// A provider may end the list on a full page or with one more empty page.
 		if cursor != "" {
 			last, _, err := p.ListReviewSlices(ctx, storagev1.ReviewSliceFilter{Namespace: workflowNamespace,
 				RepositoryScan: workflowScan, Limit: 1, Cursor: cursor})
@@ -618,7 +617,6 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 			require.NoError(t, err)
 			want := *before
 			if parked {
-				// Only these fields change; the lease, attempt and task stay.
 				want.Status, want.Phase = storagev1.WorkActionStatusRetryPending, storagev1.WorkActionStatusRetryPending
 				want.RunID, want.BlockedReason, want.Error, want.CompletedAt = "run-2", "run_signal_failed", "signal failed", nil
 				require.False(t, after.UpdatedAt.Before(before.UpdatedAt), status)
@@ -932,8 +930,6 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, p.RecordUsage(ctx, observation("task-c", "c-call", "call-c", "call", 9, 9,
 			workflowAt(0).Add(time.Second))))
 
-		// Same-time observations on one counter keep the order they were
-		// recorded in.
 		require.NoError(t, p.RecordUsage(ctx, observation("task-c", "c-call-tie-z", "call-c", "call", 10, 9,
 			workflowAt(0).Add(4*time.Second))))
 		require.NoError(t, p.RecordUsage(ctx, observation("task-c", "c-call-tie-a", "call-c", "call", 11, 9,
@@ -1082,8 +1078,6 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, "team", tasks[0].TaskUID)
 		_, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, time.Time{}, 2)
 		require.ErrorIs(t, err, storagev1.ErrUsageSelectionTooLarge)
-		// A Task that started after startedBy is left out and uses none of
-		// the limit: three rows started by then fit a limit of three.
 		require.NoError(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, NamespaceUID: "uid-1",
 			TaskUID: "later", TaskName: "later", SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at.Add(time.Hour)}))
 		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, at, 3)

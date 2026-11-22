@@ -492,3 +492,13 @@ func TestSourcedAliasesBlockDeletion(t *testing.T) {
 		}
 	}
 }
+
+func TestSpacedNolintAndAttributionHeadersAreExempt(t *testing.T) {
+	src := "// Modified from example.com/upstream at abc123.\npackage main\n\n" +
+		"// nolint:gocyclo\nfunc f() {}\n\n// real\nvar X = 1\n"
+	got, err := scanGo("main.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTexts(t, got, "// real")
+}

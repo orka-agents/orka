@@ -34,8 +34,6 @@ func TestRepositoryMonitorPauseScopeRejectionSettlesCompletedImplementation(t *t
 					t.Fatal(err)
 				}
 				f.monitor = &current
-				// Policy changes do not change the issue digest. While pause is
-				// present, the completed result and its active budget stay parked.
 				f.inventory(t, "policy-while-paused")
 				parked := f.item(t)
 				if parked.WorkflowPhase != repositoryMonitorIssuePhasePaused || parked.SnapshotDigest != original.SnapshotDigest || parked.LastActionID != original.LastActionID {

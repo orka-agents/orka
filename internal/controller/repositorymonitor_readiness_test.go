@@ -98,7 +98,6 @@ func TestRepositoryMonitorReadinessStatusLifecycle(t *testing.T) {
 				t.Fatalf("non-idempotent initial statuses: %+v", writes)
 			}
 
-			// A queued rerun must revoke old success before its Task has started.
 			action := &store.WorkAction{ID: "new-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 1, TargetSHA: sha, DesiredAction: "review", Status: "queued"}
 			if err := db.CreateWorkAction(ctx, action); err != nil {
 				t.Fatal(err)
@@ -110,7 +109,6 @@ func TestRepositoryMonitorReadinessStatusLifecycle(t *testing.T) {
 			}
 			reconcile(repositoryMonitorStatusSuccess)
 
-			// Simulate a successful pending POST followed by a failed durable audit.
 			action.Status = "queued"
 			if err := db.UpdateWorkAction(ctx, action); err != nil {
 				t.Fatal(err)
@@ -176,7 +174,6 @@ func TestRepositoryMonitorCIExcludesOnlyPersistedOwnedStatusIDs(t *testing.T) {
 			if failedCheck {
 				conclusion = "failure"
 			}
-			// A check-run ID matching a status ID must never be excluded.
 			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":%q}]}`, conclusion)
 			return
 		}
@@ -511,8 +508,6 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 	if writes != 2 {
 		t.Fatalf("identical blocking outcome wrote %d statuses, want pending then failure", writes)
 	}
-	// Different persistent blockers must produce one deterministic status,
-	// regardless of the PR being reconciled or the inventory response order.
 	firstDraft = true
 	reconcile(items[0], repositoryMonitorStatusFailure)
 	stableWrites := writes
@@ -524,7 +519,6 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 	if writes != stableWrites {
 		t.Fatalf("unchanged distinct blockers wrote %d extra statuses", writes-stableWrites)
 	}
-	// Reusing inventory must preserve the peer's blocker without another list.
 	beforeLists := lists
 	inventory := []repositoryMonitorPullRequest{
 		{Number: 1, HeadSHA: "head", State: "open", BaseBranch: "main", Draft: firstDraft},
@@ -536,8 +530,6 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 		t.Fatalf("inventory reuse changed the shared outcome: lists=%d writes=%d", lists-beforeLists, writes-stableWrites)
 	}
 	firstDraft = false
-	// Once the peer closes, the shared audit must permit a fresh success. A
-	// per-PR digest would incorrectly suppress it as an unchanged old success.
 	peerClosed = true
 	reconcile(items[0], repositoryMonitorStatusSuccess)
 	records, _, err := db.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Operation: repositoryMonitorReadinessOperation})

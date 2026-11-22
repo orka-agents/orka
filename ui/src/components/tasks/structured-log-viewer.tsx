@@ -50,24 +50,18 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
   const [search, setSearch] = useState('')
   const [pinToBottom, setPinToBottom] = useState(true)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  // While the reader is scrolled up, hold the lines they are reading: a
-  // running task refetches a sliding tail window every poll, which would
-  // shift rows (and restart their numbers) under them. Pinning resumes.
   const [frozen, setFrozen] = useState<{ taskId: string; lines: string[] } | null>(null)
   const frozenLines = !pinToBottom && frozen?.taskId === taskId ? frozen.lines : null
   const shownLogs = frozenLines ?? logs
   const newLinesWaiting = frozenLines !== null && !sameLines(frozenLines, logs)
 
   const indexedLogs = shownLogs.map((line, index) => ({ index: index + 1, line }))
-  // Sized for the widest row number so text does not shift at 10, 100, ...
   const lineNumberWidth = `${String(shownLogs.length).length}ch`
 
   const filteredLogs = search
     ? indexedLogs.filter(({ line }) => line.toLowerCase().includes(search.toLowerCase()))
     : indexedLogs
 
-  // Scroll the log container itself: scrollIntoView on a bottom marker also
-  // scrolls every ancestor, which moved the whole page when the tab opened.
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current
     if (el) el.scrollTop = el.scrollHeight
@@ -92,9 +86,6 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
     scrollToBottom()
   }, [scrollToBottom])
 
-  // No Job or pod yet (pending, scheduled parents, runtime-pool agents) is
-  // expected, not a failure: explain it with the server's reason instead of
-  // an error and Retry. Running tasks keep polling, so logs replace this.
   if (!shownLogs.length && unavailable && !error) {
     return (
       <Card>
@@ -153,8 +144,6 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
   return (
     <Card>
       <CardHeader>
-        {/* The controls wrap below the title on narrow cards, and the filter
-            grows to the row instead of pushing Pin and Clear off the card. */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="flex items-center gap-2">
             Logs
@@ -206,7 +195,6 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
             >
               <ArrowDown className="h-3 w-3" />
             </Button>
-            {/* Clearing starts over from the newest output, so it follows it. */}
             <Button
               variant="outline"
               size="sm"
@@ -222,9 +210,6 @@ export function StructuredLogViewer({ taskId, taskPhase }: { taskId: string; tas
         </div>
       </CardHeader>
       <CardContent className="relative">
-        {/* A native scroller, so the ref and onScroll sit on the element
-            that actually scrolls; it takes focus so the keyboard can
-            scroll it too. */}
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}

@@ -36,7 +36,9 @@ export const noComments = {
         const codeStart = firstToken ? firstToken.range[0] : Infinity;
         for (const comment of sourceCode.getAllComments()) {
           const licenseHeader =
-            comment.range[1] <= codeStart && /copyright/i.test(comment.value);
+            comment.range[1] <= codeStart && /copyright|spdx-license-identifier|licensed under|modified from|derived from/i.test(
+              comment.value,
+            );
           if (
             comment.type === "Shebang" ||
             directive.test(comment.value) ||

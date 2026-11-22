@@ -6,15 +6,6 @@ MIT License - see LICENSE file for details.
 
 package api
 
-// Model-free evals for the chat orchestrator. A scripted provider stands in for
-// the LLM, so these run in milliseconds and check what the real HandleChat path
-// sends to the model and how Orka handles the decisions a model makes. They do
-// not measure model judgment.
-//
-// A case with knownDefect documents a check that fails on current code. It
-// passes while the defect reproduces and fails once the defect is fixed, so the
-// fix also removes the knownDefect marker.
-
 import (
 	"bytes"
 	"context"
@@ -45,15 +36,11 @@ import (
 )
 
 const (
-	chatEvalProviderType = "chat-eval-scripted"
-	chatEvalNamespace    = "team-eval"
-	// chatEvalMaxModelContextBytes bounds the system prompt plus tool schemas
-	// for the seeded eval fixture, not every possible namespace. Raise it
-	// deliberately when that fixture or its prompt must grow.
+	chatEvalProviderType         = "chat-eval-scripted"
+	chatEvalNamespace            = "team-eval"
 	chatEvalMaxModelContextBytes = 40000
 )
 
-// evalRecordingProvider records every completion request the chat loop sends.
 type evalRecordingProvider struct {
 	chatMockProvider
 	requests []*llm.CompletionRequest
@@ -67,8 +54,6 @@ func (p *evalRecordingProvider) Complete(ctx context.Context, req *llm.Completio
 	return p.chatMockProvider.Complete(ctx, req)
 }
 
-// chatEvalCluster seeds each namespace with the same Providers and Agents:
-// a runtime coding agent, a plain AI reviewer, and a non-runtime coordinator.
 func chatEvalCluster(t *testing.T, namespaces ...string) client.Client {
 	t.Helper()
 	objs := make([]runtime.Object, 0, 8*len(namespaces))
@@ -97,8 +82,6 @@ func chatEvalCluster(t *testing.T, namespaces ...string) client.Client {
 	return fake.NewClientBuilder().WithScheme(newTestScheme()).WithRuntimeObjects(objs...).Build()
 }
 
-// runChatEvalTurn sends one chat request through HandleChat with a scripted
-// model and returns the recorded model requests and the chat response.
 func runChatEvalTurn(t *testing.T, c client.Client, req ChatRequest, responses ...*llm.CompletionResponse) (*evalRecordingProvider, ChatResponse) {
 	t.Helper()
 	provider := &evalRecordingProvider{chatMockProvider: chatMockProvider{name: chatEvalProviderType, responses: responses}}
@@ -106,7 +89,6 @@ func runChatEvalTurn(t *testing.T, c client.Client, req ChatRequest, responses .
 
 	cfg := DefaultChatConfig()
 	cfg.MaxIterations = 3
-	// Exercise the full chat-tool catalog, including flag-gated connector tools.
 	cfg.ConnectorsEnabled = true
 	cfg.RuntimeAvailability = ACPRuntimeAvailability{Codex: true, Copilot: true}
 	ch := newTestChatHandler(t, c, newTestSessionStore(t), newTestResultStore(t), cfg)
@@ -137,8 +119,6 @@ func runChatEvalTurn(t *testing.T, c client.Client, req ChatRequest, responses .
 	return provider, chatResp
 }
 
-// chatEvalModelInput is everything the model reads on a turn except the static
-// tool schemas.
 func chatEvalModelInput(req *llm.CompletionRequest) string {
 	var sb strings.Builder
 	sb.WriteString(req.SystemPrompt)
@@ -151,8 +131,6 @@ func chatEvalModelInput(req *llm.CompletionRequest) string {
 	return sb.String()
 }
 
-// expectChatEvalCheck applies the knownDefect contract described at the top
-// of this file.
 func expectChatEvalCheck(t *testing.T, ok bool, detail, knownDefect string) {
 	t.Helper()
 	switch {
@@ -165,9 +143,6 @@ func expectChatEvalCheck(t *testing.T, ok bool, detail, knownDefect string) {
 	}
 }
 
-// TestChatEvalRequestContextReachesModel checks that request fields the prompt
-// tells the model to act on change what the model sees. Identical model input
-// for different requests means the model cannot follow that instruction.
 func TestChatEvalFeatureGateDoesNotRestrictUnscopedPrompt(t *testing.T) {
 	for _, connectorsEnabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("connectors=%v", connectorsEnabled), func(t *testing.T) {
@@ -240,10 +215,6 @@ func TestChatEvalRequestContextReachesModel(t *testing.T) {
 	}
 }
 
-// TestChatEvalScopedCallerPromptMatchesTools checks that a caller whose token
-// limits the tools it may use is not told to call the tools it lost. Chat tool
-// names in the model input must be among the tools offered on the turn, and a
-// selected agent must stay visible even when its tool is not offered.
 func TestChatEvalScopedCallerPromptMatchesTools(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -364,10 +335,6 @@ func TestChatEvalProviderRefExtraction(t *testing.T) {
 	}
 }
 
-// TestChatEvalInjectedDirectivesReferenceExistingProviders checks text that
-// HandleChat adds to the user's message. Those directives are mandatory for the
-// model, so every Provider they name must exist in the namespace. Without a
-// selected agent, the message must reach the model unchanged.
 func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -421,14 +388,8 @@ func TestChatEvalInjectedDirectivesReferenceExistingProviders(t *testing.T) {
 	}
 }
 
-// Names followed by = or : are tool arguments such as wait_timeout="30m".
 var chatEvalToolMentionPattern = regexp.MustCompile(`\b((?:create|wait|fetch|check|delegate|send|cancel|list|update|delete|get|code|web|file|request|reply|recall|propose|search|remember|merge|auto|comment|post|review)_[a-z][a-z0-9]*(?:_[a-z0-9]+)*|remember)\b(\s*"?\s*[=:])?`)
 
-// TestChatEvalPromptBuiltInToolReferencesExist catches model-message, system-prompt,
-// or tool-schema text that still names a renamed or removed built-in tool.
-// Custom Tool CRD identifiers are outside this built-in vocabulary check.
-// Coordinator-only tools may be mentioned because the prompt describes what
-// coordinator Agents will do.
 func TestChatEvalPromptBuiltInToolReferencesExist(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
@@ -442,7 +403,6 @@ func TestChatEvalPromptBuiltInToolReferencesExist(t *testing.T) {
 			wantDirective: `[Using agent "coder" which has runtime`,
 		},
 		{
-			// Issue workflows no longer get a synthetic coordinator directive.
 			name: "issue PR workflow",
 			req:  ChatRequest{Message: "pick up https://github.com/acme/api/issues/42 and open a PR for it"},
 		},
@@ -530,8 +490,6 @@ func TestChatEvalUnknownBuiltInToolReferences(t *testing.T) {
 	}
 }
 
-// New built-in families must participate in the scan rather than being silently
-// ignored. This pins coverage to the actual registry, including single-word tools.
 func TestChatEvalEveryKnownBuiltInToolNameIsScanned(t *testing.T) {
 	for _, name := range chattools.KnownBuiltInToolNames() {
 		t.Run(name, func(t *testing.T) {
@@ -554,10 +512,6 @@ func TestChatEvalModelContextBudget(t *testing.T) {
 	require.LessOrEqual(t, size, chatEvalMaxModelContextBytes, "chat model context grew past the budget")
 }
 
-// TestChatEvalModelDecisionsFailFast replays tool calls a model can make and
-// checks that Orka rejects bad ones immediately, in a result the model can act
-// on, instead of accepting them and failing minutes later. Bad decisions are
-// paired with a valid control so a check cannot pass by rejecting everything.
 func TestChatEvalModelDecisionsFailFast(t *testing.T) {
 	tests := []struct {
 		name        string

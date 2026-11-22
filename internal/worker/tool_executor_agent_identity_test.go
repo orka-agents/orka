@@ -22,9 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// An Agent identity credential is bound to the Tool's declared destination,
-// so even a same-origin redirect is returned unfollowed, as for a person's
-// linked-account credential.
 func TestToolExecutorAgentIdentityRequestNeverFollowsRedirects(t *testing.T) {
 	followed := false
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -56,8 +53,6 @@ func TestToolExecutorAgentIdentityRequestNeverFollowsRedirects(t *testing.T) {
 	}
 }
 
-// The authenticated Task reaches resolution on its own, so identity use
-// records name it even for a Task with no identity binding.
 func TestToolExecutorPassesTaskUIDToResolution(t *testing.T) {
 	resolver := &fakeOutboundAccessResolver{err: errors.New("refused")}
 	executor := &ToolExecutor{namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
@@ -76,8 +71,6 @@ func TestToolExecutorPassesTaskUIDToResolution(t *testing.T) {
 	}
 }
 
-// A native worker's executor names its Task from the controller-set
-// environment, so its identity use records do too.
 func TestNewToolExecutorBindsTheWorkerTaskUID(t *testing.T) {
 	t.Setenv(workerenv.TaskUID, " task-uid ")
 	if got := NewToolExecutor().TaskUID(); got != "task-uid" {

@@ -9,10 +9,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/storagetest"
 )
 
-// openConformanceStore opens a fresh file-backed store through the production
-// open path: process lock, schema creation and dataset identity. As in
-// production, it refuses every write without a write envelope; the suite
-// attaches one.
 func openConformanceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
@@ -36,10 +32,6 @@ func TestArtifactProviderConformance(t *testing.T) {
 	})
 }
 
-// artifactsOnly serves only artifacts.v1. The suite cannot give its dataset
-// the first controller epoch through the state mirror, so it advances the
-// dataset, which records the suite's installation, as it would for a
-// provider that serves artifacts alone.
 type artifactsOnly struct {
 	storagev1.ArtifactProvider
 }

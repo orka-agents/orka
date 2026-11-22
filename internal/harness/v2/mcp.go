@@ -17,10 +17,7 @@ const (
 	MaxMCPArgumentsBytes = 256 << 10
 	MaxMCPResultBytes    = 1 << 20
 
-	MCPBrokerCallPath = "/internal/v2/acp/mcp/tools/call"
-	// MCPBrokerPoolNamespaceHeader and MCPBrokerPoolUIDHeader carry the
-	// non-secret pool identity so the broker can resolve and verify the
-	// controller bearer before consuming the request body.
+	MCPBrokerCallPath            = "/internal/v2/acp/mcp/tools/call"
 	MCPBrokerPoolNamespaceHeader = "X-Orka-ACP-Pool-Namespace"
 	MCPBrokerPoolUIDHeader       = "X-Orka-ACP-Pool-UID"
 )
@@ -44,8 +41,6 @@ const (
 	MCPToolEffectConsequential MCPToolEffect = "consequential"
 )
 
-// MCPToolErrorCodeConnectionRequired marks an error result the requester
-// fixes by linking or re-linking their account; its message says how.
 const MCPToolErrorCodeConnectionRequired = "connection_required"
 
 type MCPToolDescriptor struct {
@@ -55,9 +50,7 @@ type MCPToolDescriptor struct {
 	Source           MCPToolSource   `json:"source"`
 	Effect           MCPToolEffect   `json:"effect"`
 	DefinitionDigest string          `json:"definitionDigest,omitempty"`
-	// Forward marks a forwarding Tool, which the runtime serves to a
-	// command-line client and never lists to the model.
-	Forward *MCPToolForward `json:"forward,omitempty"`
+	Forward          *MCPToolForward `json:"forward,omitempty"`
 }
 
 func (d MCPToolDescriptor) Validate() error {
@@ -102,8 +95,6 @@ func (d MCPToolDescriptor) Validate() error {
 		return fmt.Errorf("provider-native tool %q must not carry an MCP input schema", d.Name)
 	}
 	if d.Forward != nil {
-		// Reads are read-only; the derived write tool is consequential and
-		// named after its Tool.
 		effect := MCPToolEffectReadOnly
 		if d.Forward.Write {
 			effect = MCPToolEffectConsequential
@@ -200,8 +191,6 @@ func (p MCPToolPolicy) Allows(name string) bool {
 	if strings.TrimSpace(name) == "" || !slices.Contains(p.AllowedToolNames, name) || slices.Contains(p.DisallowedToolNames, name) {
 		return false
 	}
-	// Denying a forwarding Tool denies the write tool derived from it,
-	// whichever path built the lists.
 	if base := MCPForwardToolResource(name); base != name && slices.Contains(p.DisallowedToolNames, base) {
 		return false
 	}
@@ -225,8 +214,6 @@ type MCPApprovalPolicy struct {
 	RequiredTools []string `json:"requiredTools,omitempty"`
 }
 
-// Approval waiting does not consume the tool execution budget. The enclosing
-// MCP call remains subject to cancellation and the renewable prompt lease.
 const (
 	MCPApprovalWaitTimeout      = 10 * time.Minute
 	MCPApprovalExecutionTimeout = 4 * time.Minute
@@ -253,11 +240,6 @@ func (p MCPApprovalPolicy) Requires(toolName string) bool {
 	return slices.Contains(p.RequiredTools, toolName)
 }
 
-// NeedsRuntimeApprovals reports whether some approval-required tool is one
-// the runtime's own MCP client calls, and so needs a runtime that waits for
-// brokered approvals. A forwarding write tool is not: only a client
-// forwarder in the supervisor calls it, and that forwarder holds the
-// client's request while the broker waits.
 func (p MCPApprovalPolicy) NeedsRuntimeApprovals(toolPolicy MCPToolPolicy) bool {
 	for _, name := range p.RequiredTools {
 		index := slices.IndexFunc(toolPolicy.Tools, func(tool MCPToolDescriptor) bool { return tool.Name == name })
@@ -269,34 +251,21 @@ func (p MCPApprovalPolicy) NeedsRuntimeApprovals(toolPolicy MCPToolPolicy) bool 
 }
 
 type MCPPolicyConfiguration struct {
-	ToolPolicyDigest       string            `json:"toolPolicyDigest"`
-	ApprovalPolicyDigest   string            `json:"approvalPolicyDigest"`
-	MCPConfigurationDigest string            `json:"mcpConfigurationDigest"`
-	ToolPolicy             MCPToolPolicy     `json:"toolPolicy"`
-	ApprovalPolicy         MCPApprovalPolicy `json:"approvalPolicy"`
-	// NativePermissions selects how the runtime launches the provider-native
-	// tools the tool policy allows. It is part of the RuntimeSession's launch
-	// configuration: every prompt of the session must carry the same value.
-	NativePermissions NativePermissionMode `json:"nativePermissions,omitempty"`
+	ToolPolicyDigest       string               `json:"toolPolicyDigest"`
+	ApprovalPolicyDigest   string               `json:"approvalPolicyDigest"`
+	MCPConfigurationDigest string               `json:"mcpConfigurationDigest"`
+	ToolPolicy             MCPToolPolicy        `json:"toolPolicy"`
+	ApprovalPolicy         MCPApprovalPolicy    `json:"approvalPolicy"`
+	NativePermissions      NativePermissionMode `json:"nativePermissions,omitempty"`
 }
 
-// NativePermissionMode selects whether a runtime may pre-approve the
-// provider-native tools its frozen tool policy allows.
 type NativePermissionMode string
 
 const (
-	// NativePermissionsPreapproved, the empty value, lets the runtime launch
-	// the provider with the policy's native grants pre-approved. The provider
-	// asks only where it insists on asking itself.
 	NativePermissionsPreapproved NativePermissionMode = ""
-	// NativePermissionsAsk launches the provider so it sends a permission
-	// request before every policy-allowed native tool that acts: shell
-	// commands and file writes or edits. Tools outside the policy stay
-	// excluded or denied exactly as in the pre-approved mode.
-	NativePermissionsAsk NativePermissionMode = "ask"
+	NativePermissionsAsk         NativePermissionMode = "ask"
 )
 
-// Validate accepts only the modes this protocol version defines.
 func (m NativePermissionMode) Validate() error {
 	switch m {
 	case NativePermissionsPreapproved, NativePermissionsAsk:
@@ -306,9 +275,6 @@ func (m NativePermissionMode) Validate() error {
 	}
 }
 
-// MCPPolicyRequiresPermissionCapability reports whether enforcing one policy
-// requires the runtime to emit ACP permission requests for provider-native
-// tools. Orka decides brokered tool approvals through the MCP call itself.
 func MCPPolicyRequiresPermissionCapability(toolPolicy MCPToolPolicy, _ MCPApprovalPolicy) bool {
 	return slices.ContainsFunc(toolPolicy.Tools, func(tool MCPToolDescriptor) bool {
 		return tool.Source == MCPToolSourceProviderNative
@@ -372,9 +338,6 @@ func (c MCPPolicyConfiguration) Matches(other MCPPolicyConfiguration) bool {
 	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
-// MCPApprovalEvidence is retained so legacy runtime-supplied grants receive an
-// explicit rejection. Only the controller's persisted decision authorizes a
-// brokered tool; an ACP permission response is not approval evidence.
 type MCPApprovalEvidence struct {
 	PermissionRequestID PermissionRequestID `json:"permissionRequestID"`
 	ToolCallID          string              `json:"toolCallID"`

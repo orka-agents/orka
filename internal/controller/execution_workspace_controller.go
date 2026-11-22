@@ -28,9 +28,6 @@ const (
 	workspaceRequeueInterval    = 10 * time.Second
 )
 
-// ExecutionWorkspaceReconciler owns generic workspace identity, immutable
-// binding validation, desired lifecycle, and finalization. It never writes
-// provider-native fields or performs provider lifecycle calls directly.
 type ExecutionWorkspaceReconciler struct {
 	client.Client
 	APIReader               client.Reader
@@ -46,13 +43,6 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	if r.CleanupOnly && workspace.DeletionTimestamp.IsZero() {
-		// Cleanup-only mode admits nothing new, but the cleanup finalizer
-		// must still be installed: a workspace created just before the API
-		// was disabled would otherwise never gain it, retention would wait on
-		// it forever, and neither idleTimeout nor maxLifetime could ever
-		// reclaim the workspace and its pool. Only ACP-owned workspaces get
-		// this recovery, identified by the protected materialization markers.
-		// Generic provider-routed workspaces keep their adapter-owned cleanup.
 		if !workspaceHasACPControllerOwnership(workspace) {
 			return ctrl.Result{}, nil
 		}
@@ -75,9 +65,6 @@ func (r *ExecutionWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted && workspaceHasACPControllerOwnership(workspace) {
-		// Deleting a linked RuntimePool makes Deleted terminal without deleting
-		// the object. Delete it too so finalization frees the deterministic
-		// Session name instead of leaving a workspace no Task can attach.
 		if err := r.Delete(ctx, workspace, deleteCurrentObjectPreconditions(workspace)...); err != nil &&
 			!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			return ctrl.Result{}, err
@@ -244,8 +231,6 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceAdmissionDenial(
 	message string,
 ) (ctrl.Result, error) {
 	if !workspaceAdmissionRetryable(reason) {
-		// Invalidate the protected admitted generation with the quarantine spec
-		// update before publishing any provider-visible denial status.
 		if err := r.quarantineWorkspace(ctx, workspace, message); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -279,8 +264,6 @@ func (r *ExecutionWorkspaceReconciler) validateWorkspaceBindings(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 ) (string, string, error) {
-	// ExecutionWorkspace and coreAdmission ship in the same unreleased API version,
-	// so there is no legacy marker backfill path. Missing markers are new allocations.
 	previouslyAdmitted := workspaceHasCoreAdmission(workspace)
 	class, reason, message, err := r.boundWorkspaceClass(ctx, workspace)
 	if err != nil || reason != string(workspacev1alpha1.ReasonReady) {
@@ -583,8 +566,6 @@ func (r *ExecutionWorkspaceReconciler) patchWorkspaceCoreAdmission(
 			PoolBinding:     poolBinding,
 		}
 	}
-	// Updating coreAdmission is a spec change, so the API server advances the
-	// workspace generation once. Publish the generation that adapters will observe.
 	workspace.Spec.CoreAdmission.AdmittedGeneration = targetGeneration
 	if err := r.Patch(patchCtx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return "", "", err
@@ -684,10 +665,6 @@ func (r *ExecutionWorkspaceReconciler) reconcileWorkspaceDeletion(
 	}
 	var dispositionErr error
 	if workspaceCarriesACPMaterializationMarkers(workspace) {
-		// External providers never held core's credentials. Their disposition
-		// covers provider resources; core separately proves pool and attachment
-		// credentials gone. The protected materialization markers identify this
-		// ownership before the pool publishes its first workload request.
 		dispositionErr = workspaceprovider.ValidateDeletedDisposition(workspace.Status.Disposition, workspace.Spec.Lifecycle.DeletionPolicy)
 		if dispositionErr == nil {
 			core := &workspaceCoreCleanup{Client: r.Client, APIReader: r.APIReader}
@@ -787,9 +764,6 @@ func (r *ExecutionWorkspaceReconciler) patchWorkspaceCondition(
 		}
 		before := workspace.DeepCopy()
 		workspaceprovider.SetCondition(&workspace.Status.Conditions, condition)
-		// A merge patch replaces the whole conditions array and carries no precondition, so
-		// without the optimistic lock a stale core write silently erases adapter-owned
-		// conditions and RetryOnConflict never sees the race.
 		return r.Status().Patch(ctx, workspace, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	})
 }
@@ -915,7 +889,6 @@ func (r *ExecutionWorkspaceReconciler) projectWorkspaceToOwnerWithTerminalDeleti
 	}
 }
 
-// WorkspaceReusable reports whether a workspace is safe for selection by a new Task.
 func WorkspaceReusable(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
 	if !workspaceCurrentlyAdmittedByCore(workspace) || workspace.Status.ObservedGeneration != workspace.Generation ||
 		!workspace.DeletionTimestamp.IsZero() || workspace.Spec.Attachment != nil {
@@ -942,7 +915,6 @@ func dispositionFailed(disposition *workspacev1alpha1.ExecutionWorkspaceDisposit
 		disposition.ProviderResources == workspacev1alpha1.DispositionFailed
 }
 
-// SetupWithManager registers the generic concrete workspace coordinator.
 func (r *ExecutionWorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

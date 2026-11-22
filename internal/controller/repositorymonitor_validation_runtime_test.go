@@ -585,7 +585,6 @@ func TestRepositoryMonitorValidationJobRequiresExactOwnerAndSpec(t *testing.T) {
 	if err := defaultExpectedRepositoryMonitorValidationJob(actual, actual); err != nil {
 		t.Fatal(err)
 	}
-	// The API also fills the legacy alias when only serviceAccountName is set.
 	actual.Spec.Template.Spec.DeprecatedServiceAccount = actual.Spec.Template.Spec.ServiceAccountName
 	if err := validateRepositoryMonitorValidationJobAgainstExpected(task, actual, expected); err != nil {
 		t.Fatalf("valid API-defaulted Job rejected: %v", err)
@@ -643,9 +642,6 @@ func TestRepositoryMonitorValidationJobAcceptsAPIDefaultedEnvFieldRef(t *testing
 	}
 	actual.Spec.Template.Spec.DeprecatedServiceAccount = actual.Spec.Template.Spec.ServiceAccountName
 
-	// The API server, not Orka's normalizer, sets apiVersion on stored fieldRefs.
-	// Set it here independently so the test fails if the normalizer stops
-	// matching what Kubernetes stores.
 	fieldRefs := 0
 	for _, containers := range [][]corev1.Container{actual.Spec.Template.Spec.InitContainers, actual.Spec.Template.Spec.Containers} {
 		for i := range containers {
@@ -691,7 +687,6 @@ func TestRepositoryMonitorValidationPodRequiresExactJobOwnerAndSpec(t *testing.T
 			pod.Spec.DeprecatedServiceAccount = pod.Spec.ServiceAccountName
 		}, wantMatch: true},
 		{name: "API defaulted memory pressure toleration", mutate: func(pod *corev1.Pod) {
-			// Kubernetes adds this toleration to non-BestEffort Pods at admission.
 			toleration := corev1.Toleration{
 				Key: corev1.TaintNodeMemoryPressure, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule,
 			}

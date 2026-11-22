@@ -29,7 +29,6 @@ func TestRepositoryMonitorPullRequestIncludeLabelsAPI(t *testing.T) {
 	if !repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main", Labels: []string{"Orka:Review"}}, "") {
 		t.Fatal("pull request event with an include label was rejected")
 	}
-	// Removing the include label must reach the controller so it retires the PR.
 	if !repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main"}, "orka:review") {
 		t.Fatal("removal of the include label was rejected")
 	}

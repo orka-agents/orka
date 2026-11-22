@@ -25,9 +25,7 @@ vi.mock('@tanstack/react-router', async () => {
 })
 
 const mockDetailQuery = vi.fn()
-// Overrides the runs query result; null keeps the empty default.
 const mockRunsResult: { current: unknown } = { current: null }
-// Overrides the PR queue query result; null keeps the empty default.
 const mockItemsResult: { current: unknown } = { current: null }
 
 vi.mock('@/hooks/use-monitors', () => {

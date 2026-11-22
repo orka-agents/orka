@@ -43,32 +43,23 @@ const (
 	substrateStatusCrashed    = "STATUS_CRASHED"
 )
 
-// SubstrateConfig configures a Substrate-backed WorkspaceExecutor.
 type SubstrateConfig struct {
-	APIEndpoint        string
-	APICAFile          string
-	APICertFile        string
-	APIKeyFile         string
-	APIBearerTokenFile string
-	// Atespace scopes unqualified actor names. Qualified name.atespace IDs
-	// carry their own scope and never depend on a name-to-namespace cache.
+	APIEndpoint           string
+	APICAFile             string
+	APICertFile           string
+	APIKeyFile            string
+	APIBearerTokenFile    string
 	Atespace              string
 	APIInsecureSkipVerify bool
 	RouterURL             string
 	HandoffToken          string
 	BootstrapToken        string
-	// SealedBootstrap enables native process-bound credential delivery for injected clients.
-	// Real upstream control clients always use this protocol.
-	SealedBootstrap bool
-	// EnableTelemetry propagates W3C trace context to the Substrate control
-	// API and router and records content-free client spans. It follows the
-	// controller's --enable-telemetry flag.
-	EnableTelemetry bool
-	HTTPClient      *http.Client
-	ControlClient   substrateControlClient
+	SealedBootstrap       bool
+	EnableTelemetry       bool
+	HTTPClient            *http.Client
+	ControlClient         substrateControlClient
 }
 
-// NewSubstrateExecutor returns a WorkspaceExecutor backed by Agent Substrate.
 func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, error) {
 	if strings.TrimSpace(cfg.RouterURL) == "" {
 		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "router URL is required", false, nil)
@@ -81,8 +72,6 @@ func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, err
 		}
 		cfg.HTTPClient = client
 	} else {
-		// A caller-supplied client keeps its transport and connections but
-		// must not follow an Actor's redirect either.
 		client := *cfg.HTTPClient
 		client.CheckRedirect = refuseSubstrateRouterRedirect
 		cfg.HTTPClient = &client
@@ -116,26 +105,17 @@ func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, err
 }
 
 type SubstrateWorkspaceExecutor struct {
-	control    substrateControlClient
-	httpClient *http.Client
-	// ownsHTTPClient is true when the executor built httpClient itself. Close
-	// then drops its idle router connections; a caller-supplied client is
-	// shared and left alone.
-	ownsHTTPClient bool
-	routerURL      string
-	// atespace qualifies unqualified Actor IDs for router targets, matching
-	// the control client\'s default scope.
+	control         substrateControlClient
+	httpClient      *http.Client
+	ownsHTTPClient  bool
+	routerURL       string
 	atespace        string
 	handoffToken    string
 	bootstrapToken  string
 	sealedBootstrap bool
-	// Native bootstrap retries must use the credential already delivered to
-	// this Actor/Pod lifetime. Cache it before a possibly ambiguous PUT; a new
-	// executor recovers the installed credential through an authenticated
-	// sealed reply.
-	actorHandoffMu sync.Mutex
-	actorHandoffs  map[string]substrateActorHandoff
-	now            func() time.Time
+	actorHandoffMu  sync.Mutex
+	actorHandoffs   map[string]substrateActorHandoff
+	now             func() time.Time
 }
 
 type substrateActorHandoff struct {
@@ -151,8 +131,6 @@ type substrateControlClient interface {
 	CreateActor(ctx context.Context, actorID, templateNamespace, templateName string) (*substrateActor, error)
 	ResumeActor(ctx context.Context, actorID string, boot bool) (*substrateActor, error)
 	SuspendActor(ctx context.Context, actorID string) (*substrateActor, error)
-	// DeleteActor terminates in any state without creating a snapshot. A
-	// nonempty actorUID is enforced as a native precondition.
 	DeleteActor(ctx context.Context, actorID, actorUID string) error
 	ListWorkers(ctx context.Context) ([]substrateWorker, error)
 	ListActors(ctx context.Context) ([]substrateActor, error)
@@ -277,8 +255,6 @@ func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, templ
 	wantName := strings.TrimSpace(template.Name)
 	if actualNamespace == wantNamespace && actualName == wantName {
 		if template.UID != "" && actor.TemplateUID != template.UID {
-			// Fresh upstream Actors have no current template UID until their first
-			// boot. Their identity must be checked again before readiness is returned.
 			unbooted := actor.TemplateUID == "" && actor.Status == substrateStatusSuspended &&
 				actor.WorkerName == "" && actor.PodName == "" && actor.PodUID == "" &&
 				actor.LastSnapshot == "" && actor.InProgressSnapshot == ""
@@ -303,7 +279,6 @@ func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, templ
 	)
 }
 
-// Close releases network resources owned by this executor.
 func (e *SubstrateWorkspaceExecutor) Close() error {
 	e.forgetActorHandoff("")
 	if e.ownsHTTPClient && e.httpClient != nil {
@@ -485,9 +460,6 @@ func substrateExecContext(ctx context.Context, timeout time.Duration) (context.C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// The daemon's whole-second command timer expires before it can publish
-	// the final result. Bound that collection window without extending the
-	// caller's deadline or cancellation, and never replay the command.
 	return context.WithDeadline(ctx, time.Now().Add(timeout).Add(substrateExecResultTimeout))
 }
 
@@ -567,12 +539,6 @@ func (e *SubstrateWorkspaceExecutor) Upload(ctx context.Context, req UploadReque
 	return &UploadResult{Ref: req.Ref, Artifacts: daemonArtifactsToWorkspace(resp.Artifacts)}, nil
 }
 
-// issueActorHandoffCredential returns the per-Actor bearer the controller uses
-// for calls into this Actor's workspace agent. Upstream Substrate v1 lets only
-// its egress gateway mint actor JWTs, so the controller generates a random
-// credential itself and delivers it through the sealed bootstrap, bound to the
-// exact Actor UID and worker Pod. Injected clients without sealed bootstrap
-// keep the configured static handoff token.
 func (e *SubstrateWorkspaceExecutor) issueActorHandoffCredential(ctx context.Context, ref WorkspaceRef) (string, error) {
 	if !e.sealedBootstrap {
 		return "", nil
@@ -759,10 +725,6 @@ func (e *SubstrateWorkspaceExecutor) Delete(ctx context.Context, req DeleteReque
 	if actor.Status == substrateStatusRunning && !req.SkipScrub {
 		scrubErr = e.scrubDaemon(ctx, actorID)
 	}
-	// Native AnyState deletion terminates the workload. Suspending first would
-	// create an unwanted snapshot and prevents stateless MCP Actors from being
-	// deleted when their template's Data policy has no durable volume.
-	// An uncertain delete must not restore credentials or report completion.
 	if err := e.control.DeleteActor(ctx, actorID, actor.ActorUID); err != nil {
 		if scrubErr != nil {
 			return nil, NewError(
@@ -1136,8 +1098,6 @@ func substrateControlError(op string, err error) error {
 	}
 }
 
-// Native Workers do not contain an Actor ID. Correlate inventory with the
-// Actor's immutable worker assignment, checking the Pod UID when available.
 func substrateWorkerHostsActor(worker substrateWorker, actor substrateActor) bool {
 	if worker.WorkerName != "" && actor.WorkerName != "" {
 		return worker.WorkerName == actor.WorkerName && (actor.PodUID == "" || worker.WorkerPodUID == actor.PodUID)

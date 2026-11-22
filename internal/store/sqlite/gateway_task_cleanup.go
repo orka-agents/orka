@@ -32,9 +32,6 @@ func gatewayTaskCleanupSchemaStatements() []string {
 	}
 }
 
-// GetGatewayTaskCleanupReceipt does not consult bounded deduplication history or
-// current Gateway/Binding objects. The original Task UID remains authoritative
-// when their names, or an external event ID, are reused.
 func (s *Store) GetGatewayTaskCleanupReceipt(ctx context.Context, namespace, taskName, taskUID string) (*store.GatewayTaskCleanupReceipt, error) {
 	for field, value := range map[string]string{"Task namespace": namespace, "Task name": taskName, "Task UID": taskUID} {
 		if err := store.ValidateControlIdentifier(field, value); err != nil {
@@ -44,8 +41,6 @@ func (s *Store) GetGatewayTaskCleanupReceipt(ctx context.Context, namespace, tas
 	return getGatewayTaskCleanupReceiptQuery(ctx, s.db, namespace, taskName, taskUID)
 }
 
-// ListGatewayTaskCleanupReceipts uses the primary key as an exclusive cursor so
-// receipts retained for live Tasks cannot starve later entries.
 func (s *Store) ListGatewayTaskCleanupReceipts(ctx context.Context, filter store.GatewayTaskCleanupReceiptFilter) ([]store.GatewayTaskCleanupReceipt, error) {
 	if filter.Limit < 1 || filter.Limit > 100 {
 		return nil, store.ValidationErrorf("Gateway Task cleanup receipt limit must be between 1 and 100")
@@ -94,8 +89,6 @@ func (s *Store) ListGatewayTaskCleanupReceipts(ctx context.Context, filter store
 	return receipts, rows.Err()
 }
 
-// DeleteGatewayTaskCleanupReceipt is idempotent and never deletes another
-// incarnation that reused the Task name.
 func (s *Store) DeleteGatewayTaskCleanupReceipt(ctx context.Context, namespace, taskName, taskUID string) error {
 	return writeOperationErr(ctx, s, "DeleteGatewayTaskCleanupReceipt", func(ctx context.Context) error {
 		return s.deleteGatewayTaskCleanupReceiptWrite(ctx, namespace, taskName, taskUID)
@@ -137,11 +130,9 @@ func getGatewayTaskCleanupReceiptQuery(ctx context.Context, q queryRower, namesp
 	return receipt, nil
 }
 
-// archiveGatewayTaskCleanupReceiptTx shares the event-compaction transaction.
-// It never reconstructs ownership from an expired tombstone or Task annotations.
 func archiveGatewayTaskCleanupReceiptTx(ctx context.Context, tx *sql.Tx, event *store.GatewayEvent, now time.Time) error {
 	if event.TaskName == "" || event.TaskUID == "" {
-		return nil // No exact Task was linked to this event.
+		return nil
 	}
 	receipt := store.GatewayTaskCleanupReceipt{
 		Namespace: event.Namespace, NamespaceUID: event.NamespaceUID,
@@ -176,8 +167,6 @@ func archiveGatewayTaskCleanupReceiptTx(ctx context.Context, tx *sql.Tx, event *
 	if err != nil {
 		return err
 	}
-	// Keep the original compaction time on an exact retry. Every ownership field
-	// must match; a newer admission must have its own Task UID and receipt.
 	identity := *existing
 	identity.CompactedAt = receipt.CompactedAt
 	if identity != receipt {

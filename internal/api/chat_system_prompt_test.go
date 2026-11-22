@@ -297,8 +297,8 @@ func TestFormatAgent(t *testing.T) {
 	tests := []struct {
 		name    string
 		agent   *corev1alpha1.Agent
-		want    []string // substrings expected
-		notWant []string // substrings not expected
+		want    []string
+		notWant []string
 	}{
 		{
 			name: "agent with no spec fields",
@@ -514,7 +514,6 @@ func TestBuildDynamicContext(t *testing.T) {
 		if !strings.Contains(providers, "agents=1") {
 			t.Errorf("providers = %q, expected agents=1", providers)
 		}
-		// 3 built-in + 1 custom = 4
 		if !strings.Contains(providers, "tools=6") {
 			t.Errorf("providers = %q, expected tools=6", providers)
 		}
@@ -534,7 +533,6 @@ func TestBuildDynamicContext(t *testing.T) {
 			&corev1alpha1.Skill{ObjectMeta: metav1.ObjectMeta{Name: "zeta-skill", Namespace: "default"}},
 			&corev1alpha1.Skill{ObjectMeta: metav1.ObjectMeta{Name: "alpha-skill", Namespace: "default"}},
 		}
-		// A cached client lists in no fixed order; reverse every list to stand in for it.
 		reversed := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if err := c.List(ctx, list, opts...); err != nil {
 				return err
@@ -1025,14 +1023,12 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 	if strings.Contains(containerOnly, "/home/nonroot") {
 		t.Error("container-task-only prompt must not reference non-writable /home/nonroot")
 	}
-	// Whole words, so the coordinator's own wait_for_tasks tool does not count.
 	unoffered := regexp.MustCompile(`\b(?:wait_for_task|create_ai_task)\b`)
 	for _, prompt := range []string{agentOnly, containerOnly} {
 		if unoffered.MatchString(prompt) {
 			t.Error("limited prompt names a tool that is not offered")
 		}
 	}
-	// Coordination guidance for create_agent survives without the other task tools.
 	coordinator := build("create_agent", "create_ai_task")
 	for _, want := range []string{"PREFERRED (one-shot)", "initialPrompt=", "use create_ai_task.", "use the one-shot coordinator pattern above"} {
 		if !strings.Contains(coordinator, want) {
@@ -1042,7 +1038,6 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 	if aiOnly := build("create_ai_task"); !strings.Contains(aiOnly, "use create_ai_task.") || strings.Contains(aiOnly, "one-shot coordinator") {
 		t.Error("prompt without create_agent must keep the create_ai_task fallback and drop the one-shot pattern")
 	}
-	// Without a task creation tool, the model must not be told to create tasks.
 	for _, prompt := range []string{build("wait_for_task", "fetch_task_output"), build("list_agents"), build()} {
 		if strings.Contains(prompt, "create_*_task") || strings.Contains(prompt, "CRITICAL RULE") {
 			t.Error("prompt without a task creation tool still tells the model to create tasks")
@@ -1053,10 +1048,6 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 	}
 }
 
-// TestPromptPartsDeclareTheChatToolsTheyName keeps each guidance part's
-// declared requirements in step with its text: a part that names a chat tool
-// must require it, and a part that refers to create_*_task must need a task
-// creation tool.
 func TestPromptPartsDeclareTheChatToolsTheyName(t *testing.T) {
 	for section, parts := range promptSections() {
 		for i, part := range parts {
@@ -1072,8 +1063,6 @@ func TestPromptPartsDeclareTheChatToolsTheyName(t *testing.T) {
 	}
 }
 
-// A scoped caller keeps the general rules even when it lacks tools that other
-// rules name, and the kept rules are numbered without gaps.
 func TestBuildSystemPromptKeepsGeneralRulesForScopedCallers(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
 	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
@@ -1263,10 +1252,6 @@ func TestSystemPromptAgentTaskExamplesMatchSchema(t *testing.T) {
 	}
 }
 
-// Test helpers that render a single guidance section as if every tool were offered.
-
-// promptSections returns every guidance part list, for tests that check the
-// declared requirements.
 func promptSections() map[string][]promptPart {
 	return map[string][]promptPart{
 		"behavior": behaviorParts(), "tool_call_style": toolCallStyleParts(), "task_types": taskTypeParts(),

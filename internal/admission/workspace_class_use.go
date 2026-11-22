@@ -24,16 +24,11 @@ import (
 )
 
 const (
-	// TaskWorkspaceClassUseWebhookPath validates Task workspace class selection.
 	TaskWorkspaceClassUseWebhookPath = "/validate-core-orka-ai-v1alpha1-task-workspace-class-use"
-	// ToolWorkspaceClassUseWebhookPath validates Tool workspace class selection.
 	ToolWorkspaceClassUseWebhookPath = "/validate-core-orka-ai-v1alpha1-tool-workspace-class-use"
 	CheckpointSourceUseWebhookPath   = "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use"
 )
 
-// WorkspaceClassUseAuthorizer checks the live admission caller's permission to
-// use one namespaced ExecutionWorkspaceClass, to consume retained checkpoint
-// data, and to export a workspace's data as a checkpoint source.
 type WorkspaceClassUseAuthorizer interface {
 	Authorize(context.Context, string, string, authenticationv1.UserInfo) error
 	AuthorizeCheckpoint(context.Context, string, string, authenticationv1.UserInfo) error
@@ -48,9 +43,6 @@ const (
 	workspaceCheckpointSource
 )
 
-// RegisterWorkspaceClassUseWebhooks registers fail-closed Task and Tool class
-// selection handlers. The corresponding ValidatingWebhookConfiguration decides
-// whether Kubernetes routes requests to these endpoints.
 func RegisterWorkspaceClassUseWebhooks(
 	server webhook.Server,
 	scheme *runtime.Scheme,
@@ -67,8 +59,6 @@ func RegisterWorkspaceClassUseWebhooks(
 	})
 }
 
-// WorkspaceClassUseValidator authorizes newly selected workspace classes using
-// AdmissionRequest.UserInfo rather than forgeable fields from the submitted object.
 type WorkspaceClassUseValidator struct {
 	decoder    ctrladmission.Decoder
 	authorizer WorkspaceClassUseAuthorizer
@@ -87,7 +77,6 @@ func newWorkspaceClassUseValidator(
 	}
 }
 
-// Handle implements admission.Handler.
 func (v *WorkspaceClassUseValidator) Handle(
 	ctx context.Context,
 	req ctrladmission.Request,
@@ -96,8 +85,6 @@ func (v *WorkspaceClassUseValidator) Handle(
 		return ctrladmission.Allowed("not a workspace class selection write")
 	}
 	if v.resource == workspaceCheckpointSource {
-		// The CRD makes the source immutable. Only creation introduces access;
-		// controller finalizer updates must remain possible after revocation.
 		if req.Operation != admissionv1.Create {
 			return ctrladmission.Allowed("checkpoint source is immutable")
 		}
@@ -191,16 +178,10 @@ func requestNamespace(requestNamespace, objectNamespace string) string {
 	return strings.TrimSpace(objectNamespace)
 }
 
-// SecretUseAuthorizer checks the live admission caller's permission to read
-// one namespaced Secret.
 type SecretUseAuthorizer interface {
 	AuthorizeSecret(context.Context, string, string, authenticationv1.UserInfo) error
 }
 
-// authorizeToolEgressCredentials requires the caller to be allowed to get
-// every Secret a Substrate MCP actor egress credential references, so a Tool
-// author cannot have the egress gateway inject a Secret they cannot read.
-// Like class selection, every create and spec update is reauthorized.
 func (v *WorkspaceClassUseValidator) authorizeToolEgressCredentials(ctx context.Context, req ctrladmission.Request, namespace string) (ctrladmission.Response, bool) {
 	tool := &corev1alpha1.Tool{}
 	if err := v.decoder.Decode(req, tool); err != nil {

@@ -45,7 +45,6 @@ func TestRetryTaskBackoffSurvivesReconcileEventsAndRestart(t *testing.T) {
 		Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: string(oldJob.UID),
 	}), store.ErrTaskJobRevoked)
 
-	// A new reconciler has only persisted Task state, as after a restart.
 	restarted := &TaskReconciler{Client: r.Client, APIReader: r.Client, Scheme: r.Scheme, JobBuilder: r.JobBuilder,
 		Recorder: r.Recorder, ResultStore: r.ResultStore, ExecutionEventStore: r.ExecutionEventStore, Mode: executionmode.HarnessV2}
 	for _, reconciler := range []*TaskReconciler{r, restarted} {
@@ -69,8 +68,6 @@ func TestRetryTaskBackoffSurvivesReconcileEventsAndRestart(t *testing.T) {
 		}
 	}
 
-	// Move only the test clock anchor into the past; no sleeping is needed to
-	// prove that an expired retry deadline admits exactly the next attempt.
 	meta.FindStatusCondition(current.Status.Conditions, ConditionTypeJobCreated).LastTransitionTime = metav1.NewTime(time.Now().Add(-31 * time.Second))
 	require.NoError(t, r.Status().Update(t.Context(), current))
 	_, err = restarted.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
@@ -166,7 +163,6 @@ func TestRetryTaskBackoffDeadlineBoundary(t *testing.T) {
 	require.Equal(t, time.Nanosecond, r.remainingRetryDelay(task, deadline.Add(-time.Nanosecond)))
 	require.Zero(t, r.remainingRetryDelay(task, deadline))
 	require.Zero(t, r.remainingRetryDelay(task, deadline.Add(time.Nanosecond)))
-	// ACP and harness-v1 attempts own their retry/admission lifecycle.
 	task.Spec.Type = corev1alpha1.TaskTypeAgent
 	require.Zero(t, r.remainingRetryDelay(task, at))
 }

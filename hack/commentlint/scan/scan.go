@@ -64,7 +64,7 @@ type Target struct {
 	Category string `json:"category,omitempty"`
 }
 
-var goDirective = regexp.MustCompile(`^(?://(?:go:|nolint|lint:|export |line |extern |\+|\s*\+[a-z]|revive:` +
+var goDirective = regexp.MustCompile(`^(?://(?:go:|\s*nolint|lint:|export |line |extern |\+|\s*\+[a-z]|revive:` +
 	`|\s*#nosec)|/\*line )`)
 
 var deprecation = regexp.MustCompile(`(?m)^Deprecated: `)
@@ -76,6 +76,9 @@ var exampleOutput = regexp.MustCompile(`(?i)^[[:space:]]*(unordered )?output:`)
 var pythonDirective = regexp.MustCompile(`^#\s*(nosec|noqa|type:|pylint:|pyright:|mypy:|-\*-|fmt:|isort:)`)
 
 var shellAliases = regexp.MustCompile(`\balias\b|expand_aliases`)
+
+var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|licensed under|` +
+	`modified from|derived from|code generated .*do not edit`)
 
 var pythonInterpreter = regexp.MustCompile(`^python(3(\.\d+)?)?$`)
 
@@ -263,7 +266,7 @@ func scanGo(path string, src []byte) ([]Comment, error) {
 			continue
 		}
 		startLine := fset.PositionFor(group.Pos(), false).Line
-		if startLine < packageLine && strings.Contains(group.Text(), "Copyright") {
+		if startLine < packageLine && licenseNotice.MatchString(group.Text()) {
 			continue
 		}
 		if deprecation.MatchString(group.Text()) || exampleOutputGroup(group, examples) {
@@ -352,7 +355,7 @@ func scanHash(path string, src []byte, directive *regexp.Regexp) ([]Comment, err
 }
 
 func licenseHeader(src []byte, c Comment) bool {
-	if !strings.Contains(c.Text, "Copyright") {
+	if !licenseNotice.MatchString(c.Text) {
 		return false
 	}
 	for i, line := range strings.Split(string(src), "\n")[:c.Line-1] {

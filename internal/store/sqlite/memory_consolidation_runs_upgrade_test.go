@@ -11,9 +11,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// runTableApplicationRows returns the application rows before, taken from a
-// store below schema version 7, as the version 7 step leaves them: with an
-// empty memory consolidation run table.
 func runTableApplicationRows(before map[string][]string) map[string][]string {
 	after := maps.Clone(before)
 	after["memory_consolidation_runs"] = nil
@@ -28,7 +25,6 @@ func schemaVersion6StoreDB(t *testing.T, origin string, complete bool, installat
 
 	schema, err := readSchema(db)
 	require.NoError(t, err)
-	// A literal digest, independent of schema174, as in historicalSchemaDB.
 	require.Equal(t, "44db6c191e5b2d8c2570a251762e50e89231b2e61ad7a5f40a42d6d5784ed75b", schemaFingerprint(schema))
 	version, err := readSchemaVersion(db)
 	require.NoError(t, err)
@@ -36,10 +32,6 @@ func schemaVersion6StoreDB(t *testing.T, origin string, complete bool, installat
 	return path, db
 }
 
-// A version 6 store upgrades in place to the memory consolidation run
-// layout: it keeps its identity row, binding, key bootstrap state,
-// controller epoch, operation receipts and every record, and gains an empty
-// run table. A second open is current and does not back up again.
 func TestSchemaVersion6StoreUpgradesInPlace(t *testing.T) {
 	for _, state := range version3StoreStates {
 		t.Run(state.name, func(t *testing.T) {
@@ -101,8 +93,6 @@ func TestSchemaVersion6StoreUpgradesInPlace(t *testing.T) {
 	}
 }
 
-// A failed memory consolidation run step leaves the version 6 store unchanged,
-// including its binding and records, and the next open upgrades it.
 func TestSchemaVersion6UpgradeFailureRollsBack(t *testing.T) {
 	path, db := schemaVersion6StoreDB(t, datasetOriginNew, true, "installation-a", true)
 	before, err := readDataset(db)
@@ -116,7 +106,6 @@ func TestSchemaVersion6UpgradeFailureRollsBack(t *testing.T) {
 	steps := versionUpgrades()
 	first := slices.IndexFunc(steps, func(step versionUpgrade) bool { return step.from == 6 })
 	require.GreaterOrEqual(t, first, 0)
-	// The final step fails, so every step from version 6 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
 	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 6, schema173, steps[first:]), "no_such_function",
 		"the failing step ran and rolled back, rather than the upgrade refusing the layout")
@@ -144,10 +133,6 @@ func TestSchemaVersion6UpgradeFailureRollsBack(t *testing.T) {
 	assertMigrationRecords(t, s.db, path)
 }
 
-// A fixture rebuilt from historical DDL plus every step through 172-to-173.sql
-// has the version 6 layout but no identity row. It takes the version 0 path
-// and is adopted, while every real version 6 store is refused there and takes
-// the version path, as for earlier versions.
 func TestSchemaVersion6StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	_, fixture := historicalSchemaDB(t, "abd2c040")
 	_, err := fixture.Exec(migration166To167 + migration167To168 + migration168To169 + migration169To170 + migration170To171 + migration171To172 + migration172To173)

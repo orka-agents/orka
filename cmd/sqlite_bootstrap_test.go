@@ -31,8 +31,6 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 		return ensureAgentExecutionSnapshotKey(ctx, c, c, ref.Namespace,
 			agentExecutionSnapshotSecretOptions{Name: ref.Name, Key: "key"}, info.CanBootstrapSnapshotKey)
 	}
-	// A failed key load after schema creation must release the lock and leave
-	// resumable fresh history rather than misclassifying file existence.
 	failed, _, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
 		return nil, errors.New("unavailable key service")
 	})
@@ -64,8 +62,6 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 	require.Nil(t, failed)
 	require.NoError(t, c.Get(ctx, ref, secret))
 	require.Empty(t, secret.Data)
-	// A completed dataset remains an existing installation even after all
-	// ordinary rows have been deleted.
 	raw, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	_, err = raw.Exec(`DELETE FROM results`)
@@ -140,7 +136,6 @@ func TestControllerSQLiteBootstrapResumesAfterKeyWriteLostResponse(t *testing.T)
 	firstLoader := func(info sqlite.DatasetInfo) ([]byte, error) {
 		_, err := ensureAgentExecutionSnapshotKey(ctx, c, c, ref.Namespace, opts, info.CanBootstrapSnapshotKey)
 		require.NoError(t, err)
-		// Simulate losing the startup result after the API server committed the key.
 		return nil, errors.New("lost startup response")
 	}
 	failed, _, _, err := openControllerSQLiteStore(path, firstLoader)
@@ -159,8 +154,6 @@ func TestControllerSQLiteBootstrapResumesAfterKeyWriteLostResponse(t *testing.T)
 	require.True(t, bytes.Equal(expected, actual), "retry replaced the committed key")
 }
 
-// The production store refuses every contract write that does not come
-// through the storage client with a write envelope.
 func TestControllerSQLiteStoreRequiresWriteEnvelopes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	s, _, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {

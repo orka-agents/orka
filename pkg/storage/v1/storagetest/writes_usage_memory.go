@@ -9,12 +9,8 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The usage and memory write cases.
-
 var (
-	catalogUsageWorkID = storagev1.UsageWorkID(workflowNamespace, "monitor-uid", "org/repo", "issue", 1)
-	// catalogUsagePruneCutoff is fixed once, so every attempt of the prune
-	// case sends the same request.
+	catalogUsageWorkID      = storagev1.UsageWorkID(workflowNamespace, "monitor-uid", "org/repo", "issue", 1)
 	catalogUsagePruneCutoff = time.Now().UTC().Add(-90 * 24 * time.Hour).Truncate(time.Second)
 )
 

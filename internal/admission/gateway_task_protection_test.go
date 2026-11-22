@@ -100,9 +100,6 @@ func TestGatewayTaskProtectionForegroundFinalizationWithFieldManager(t *testing.
 		{name: "last unowned finalizer after Orka cleanup", initial: []string{"orka.ai/cleanup"}, foregroundDelete: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Record ownership through Kubernetes field management. Tracking
-			// only the Orka finalizer by hand misses changes to the finalizer
-			// field set when GC removes a tracked value or the list itself.
 			initial := gatewayPolicyTask()
 			initial.SetManagedFields(nil)
 			initial.SetFinalizers(tc.initial)
@@ -113,9 +110,6 @@ func TestGatewayTaskProtectionForegroundFinalizationWithFieldManager(t *testing.
 			oldTask := tracked.(*unstructured.Unstructured)
 			require.NotEmpty(t, oldTask.GetManagedFields())
 			if tc.foregroundDelete {
-				// Foreground DELETE adds its finalizer directly through storage.
-				// The controller then removes its own cleanup finalizer, leaving
-				// GC to remove the list whose presence the controller tracked.
 				oldTask.SetFinalizers([]string{"orka.ai/cleanup", metav1.FinalizerDeleteDependents})
 				withoutOrka := oldTask.DeepCopy()
 				withoutOrka.SetFinalizers([]string{metav1.FinalizerDeleteDependents})
@@ -320,8 +314,6 @@ func compileGatewayTaskProtection(t *testing.T) admissionPolicyEvaluator {
 	))
 }
 
-// Compile a shipped config/admission policy with the same CEL compiler and
-// object conversion used by kube-apiserver, including its lazy policy variables.
 func compileAdmissionPolicy(t *testing.T, file string, replacements *strings.Replacer) admissionPolicyEvaluator {
 	t.Helper()
 	documents, err := splitYAMLDocuments(filepath.Join("..", "..", "config", "admission", file))
@@ -381,7 +373,6 @@ func (p admissionPolicyEvaluator) admits(
 	return p.admitsAs(t, kind, resource, name, operation, &user.DefaultInfo{Name: username}, subresource, object, oldObject)
 }
 
-// admitsAs is admits for a requester with groups.
 func (p admissionPolicyEvaluator) admitsAs(
 	t *testing.T,
 	kind schema.GroupVersionKind,

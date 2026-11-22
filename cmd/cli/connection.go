@@ -26,34 +26,27 @@ const (
 	connectionModeReadWrite = "readWrite"
 )
 
-// connectionReadyPollInterval paces the wait for a consent to complete. It
-// is a variable only so tests can poll a local server quickly.
 var connectionReadyPollInterval = 2 * time.Second
 
-// connectionView is the API's public view of a Connection.
 type connectionView struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Provider  string `json:"provider"`
-	Mode      string `json:"mode"`
-	State     string `json:"state"`
-	Ready     bool   `json:"ready"`
-	LinkedAt  string `json:"linkedAt"`
-	Message   string `json:"message"`
-	// GrantSequence advances on every completed consent.
-	GrantSequence int64 `json:"grantSequence"`
-	// Deleting marks a disconnect that is still finishing.
-	Deleting bool `json:"deleting"`
+	Name          string `json:"name"`
+	Namespace     string `json:"namespace"`
+	Provider      string `json:"provider"`
+	Mode          string `json:"mode"`
+	State         string `json:"state"`
+	Ready         bool   `json:"ready"`
+	LinkedAt      string `json:"linkedAt"`
+	Message       string `json:"message"`
+	GrantSequence int64  `json:"grantSequence"`
+	Deleting      bool   `json:"deleting"`
 }
 
-// connectionAuthorizeView is the API's response to a consent start.
 type connectionAuthorizeView struct {
 	Connection   connectionView `json:"connection"`
 	AuthorizeURL string         `json:"authorizeURL"`
 	AgentHost    bool           `json:"agentHost"`
 }
 
-// connectionStateError is the API's state for a link that cannot be used.
 const connectionStateError = "Error"
 
 func newConnectCmd() *cobra.Command {
@@ -99,18 +92,11 @@ func newConnectCmd() *cobra.Command {
 			} else if err := openBrowser(started.AuthorizeURL); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Could not open browser: %v\nOpen the URL above manually.\n", err) //nolint:errcheck
 			}
-			// The provider sends the browser back to the dashboard, which
-			// finishes the link only when it is signed in as this person.
-			// The consent is sealed in the Connection's namespace, so the
-			// fallback names it explicitly rather than trusting a later
-			// invocation's default.
 			fmt.Fprintf(out, "After consenting, the dashboard finishes the link if it is signed in as you. Otherwise copy the value after '#completion=' from the address bar and run:\n  %s\n", completionCommand(started.Connection)) //nolint:errcheck
 			if noWait {
 				return nil
 			}
 			fmt.Fprintf(out, "Waiting up to %s for the link to become ready...\n", timeout) //nolint:errcheck
-			// The deadline bounds the requests themselves, not only the
-			// checks between them, so a stalled poll cannot outlive --timeout.
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			for {
@@ -119,9 +105,6 @@ func newConnectCmd() *cobra.Command {
 					if ctx.Err() != nil {
 						return fmt.Errorf("connection %s did not become ready within %s; finish the consent and run 'orka connection get %s'", started.Connection.Name, timeout, started.Connection.Name)
 					}
-					// The API reads through a cache that may not hold the
-					// Connection the POST just created; a 404 here is a
-					// moment too early, not a verdict.
 					if strings.Contains(err.Error(), "HTTP 404") {
 						select {
 						case <-ctx.Done():
@@ -136,9 +119,6 @@ func newConnectCmd() *cobra.Command {
 				if err := decodeInto(raw, &current); err != nil {
 					return err
 				}
-				// A link that was already Ready stays Ready while the new
-				// consent runs; only an advanced grant sequence proves this
-				// consent finished rather than reporting the old grant.
 				if current.Ready && (!started.Connection.Ready || current.GrantSequence > started.Connection.GrantSequence) {
 					fmt.Fprintf(out, "Linked %s (%s)\n", current.Provider, current.Mode) //nolint:errcheck
 					if started.AgentHost {
@@ -146,11 +126,6 @@ func newConnectCmd() *cobra.Command {
 					}
 					return nil
 				}
-				// A fresh consent was just started, so the state the link
-				// had before it (Revoked, Expired, or a stale Error from a
-				// provider that has since recovered) is what is being
-				// repaired, not the outcome: only an Error that appeared
-				// after the consent started is final.
 				if current.State == connectionStateError && (started.Connection.State != connectionStateError || current.Message != started.Connection.Message) {
 					return fmt.Errorf("connection %s is %s: %s", current.Name, current.State, current.Message)
 				}
@@ -169,8 +144,6 @@ func newConnectCmd() *cobra.Command {
 	return cmd
 }
 
-// completionCommand is the CLI fallback that finishes a consent when the
-// dashboard cannot, in the namespace the consent was sealed in.
 func completionCommand(connection connectionView) string {
 	command := "orka connection complete " + connection.Name
 	if strings.TrimSpace(connection.Namespace) != "" {
@@ -179,10 +152,6 @@ func completionCommand(connection connectionView) string {
 	return command + " --completion <value>"
 }
 
-// providerReadiness returns which connector providers are accepted right
-// now. A link's own conditions can lag a provider change, and credential
-// resolution refuses a link whose provider is not accepted, so the CLI
-// joins the two before calling a link ready.
 func providerReadiness(ctx context.Context, c *client.Client) (map[string]bool, error) {
 	raw, err := c.DoJSON(ctx, http.MethodGet, connectorsAPIPath, nil, nil)
 	if err != nil {
@@ -204,8 +173,6 @@ func providerReadiness(ctx context.Context, c *client.Client) (map[string]bool, 
 	return ready, nil
 }
 
-// duplicateProviders names the providers a person holds more than one
-// link to; credential resolution refuses every link to such a provider.
 func duplicateProviders(items []connectionView) map[string]bool {
 	counts := map[string]int{}
 	for _, item := range items {
@@ -220,7 +187,6 @@ func duplicateProviders(items []connectionView) map[string]bool {
 	return duplicated
 }
 
-// duplicateProvidersFor lists the person's links to find duplicated providers.
 func duplicateProvidersFor(ctx context.Context, c *client.Client) (map[string]bool, error) {
 	raw, err := c.DoJSON(ctx, http.MethodGet, connectionsAPIPath, nil, nil)
 	if err != nil {
@@ -235,14 +201,9 @@ func duplicateProvidersFor(ctx context.Context, c *client.Client) (map[string]bo
 	return duplicateProviders(list.Items), nil
 }
 
-// joinProviderReadiness folds the provider's acceptance and the person's
-// duplicate links into the view.
-// stateNotUsableSuffix marks a stored Ready state the API judged unusable.
 const stateNotUsableSuffix = " (not usable)"
 
 func joinProviderReadiness(item connectionView, providersReady map[string]bool, duplicated map[string]bool) connectionView {
-	// A disconnect in progress (tokens being revoked, possibly retrying)
-	// is neither ready nor something to relink.
 	if item.Deleting {
 		item.Ready = false
 		item.State = "Disconnecting"
@@ -256,9 +217,6 @@ func joinProviderReadiness(item connectionView, providersReady map[string]bool, 
 		return item
 	}
 	if !item.Ready {
-		// The API reports a link it judged unusable (its provider changed or
-		// is gone) with the stored state still Ready; the state says so, and
-		// 'orka connection get' shows why.
 		if item.State == corev1alpha1.ConnectionStateReady {
 			item.State += stateNotUsableSuffix
 		}
@@ -274,8 +232,6 @@ func joinProviderReadiness(item connectionView, providersReady map[string]bool, 
 	return item
 }
 
-// joinProviderReadinessInto is joinProviderReadiness for the raw API
-// object, so structured output keeps every field the API returned.
 func joinProviderReadinessInto(item map[string]any, providersReady map[string]bool, duplicated map[string]bool) {
 	if deleting, _ := item["deleting"].(bool); deleting {
 		item["ready"] = false
@@ -341,8 +297,6 @@ func newConnectionListCmd() *cobra.Command {
 			}
 			duplicated := duplicateProviders(list.Items)
 			if format != outputTable {
-				// Structured output carries the same joined readiness as
-				// the table, so scripts never see a link the resolver refuses.
 				var payload struct {
 					Items []map[string]any `json:"items"`
 				}
@@ -390,8 +344,6 @@ func newConnectionGetCmd() *cobra.Command {
 			if err != nil {
 				return connectionError(err)
 			}
-			// A duplicate link to the same provider makes every link to it
-			// unusable, so one link is judged against the whole list.
 			duplicated, err := duplicateProvidersFor(cmd.Context(), c)
 			if err != nil {
 				return connectionError(err)
@@ -470,8 +422,6 @@ func newConnectionDeleteCmd() *cobra.Command {
 			if err := c.DeleteResource(context.Background(), connectionsAPIPath+"/"+url.PathEscape(args[0]), nil); err != nil {
 				return connectionError(err)
 			}
-			// DELETE only starts the removal: the finalizer revokes the
-			// tokens first and may retry, so nothing is claimed finished.
 			fmt.Fprintf(cmd.OutOrStdout(), "Disconnect requested for %s: its tokens are being revoked where the provider supports it and deleted, and the link removed. Check with 'orka connection get %s'.\n", args[0], args[0]) //nolint:errcheck
 			return nil
 		},
@@ -529,7 +479,6 @@ func newConnectionProvidersCmd() *cobra.Command {
 	return cmd
 }
 
-// decodeInto re-encodes a generic JSON value into a typed view.
 func decodeInto(raw any, target any) error {
 	encoded, err := json.Marshal(raw)
 	if err != nil {
@@ -538,8 +487,6 @@ func decodeInto(raw any, target any) error {
 	return json.Unmarshal(encoded, target)
 }
 
-// connectionError explains the one failure people hit first: a token that
-// is not a person's.
 func connectionError(err error) error {
 	if err == nil {
 		return nil

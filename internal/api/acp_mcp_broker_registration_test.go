@@ -69,11 +69,6 @@ func (inertExternalEffectStore) TransitionExternalEffect(context.Context, store.
 	return nil, store.ErrNotFound
 }
 
-// handlerScopedRequestContext stands in for the pooled *fasthttp.RequestCtx
-// that fasthttpadaptor passes as r.Context(). Like that context it is neither a
-// WithCancel context nor an AfterFunc implementer, so a cancelable context
-// derived from it starts a standard-library goroutine that calls Done whenever
-// it is scheduled. It records every use after the broker takes the request.
 type handlerScopedRequestContext struct {
 	done      chan struct{}
 	handedOff atomic.Bool
@@ -133,7 +128,6 @@ func TestACPMCPBrokerRouteRunsOnHandlerOwnedContext(t *testing.T) {
 			require.NoError(t, err)
 			frozenPolicy := request.Authorization.Configuration()
 			credentials := controller.ACPMCPBrokerCredentials{
-				// These credentials are synthetic and never leave the loopback test server.
 				ControllerBearerToken: strings.Repeat("b", 32), CapabilitySecret: bytes.Repeat([]byte("c"), harnessv2.MinCapabilitySecretBytes),
 				ExpectedFence: request.Metadata.Fence, RuntimeProfile: profile, ExpectedMCPConfiguration: &frozenPolicy,
 				ControllerFence: store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID},
@@ -171,8 +165,6 @@ func TestACPMCPBrokerRouteRunsOnHandlerOwnedContext(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			if serverShutdown {
-				// Closing the request context's Done channel is how fasthttp
-				// signals server shutdown to a running handler.
 				go func() {
 					select {
 					case <-toolStarted:
@@ -182,7 +174,6 @@ func TestACPMCPBrokerRouteRunsOnHandlerOwnedContext(t *testing.T) {
 				}()
 			}
 			response, err := client.Call(ctx, request)
-			// Close waits for the handler to return.
 			server.Close()
 			if serverShutdown {
 				require.Error(t, err)

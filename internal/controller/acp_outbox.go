@@ -206,11 +206,6 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 			if isPermanentOutboxDeliveryError(projectErr) && projection.Attempts >= p.MaxAttempts {
 				state = store.OutboxProjectionDeadLetter
 			} else {
-				// Infrastructure failures (for example a Kubernetes control-plane
-				// outage) must stay retryable: recovery treats any existing
-				// projection as authoritative and Task deletion requires the
-				// projection to reach Delivered, so dead-lettering a transient
-				// failure would leave the Task nonterminal and undeletable.
 				state = store.OutboxProjectionPending
 				availableAt = now.Add(outboxBackoff(projection.Attempts))
 			}
@@ -237,10 +232,6 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 
 type taskTerminalProjection = taskterminal.Projection
 
-// permanentOutboxDeliveryError marks delivery failures that can never succeed
-// on retry (payload corruption or identity mismatches). Only these may be
-// dead-lettered; every other failure is treated as transient infrastructure
-// trouble and stays pending so the terminal projection remains deliverable.
 type permanentOutboxDeliveryError struct{ err error }
 
 func (e *permanentOutboxDeliveryError) Error() string { return e.err.Error() }
@@ -307,15 +298,8 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			binding := executionBinding(task)
 			if binding == nil || string(binding.Task.UID) != payload.TaskUID || !acpTaskUsesRestoredSourceIdentity(task) ||
 				task.Status.Execution == nil || task.Status.Execution.Attempt != payload.Attempt {
-				// Permanent so MaxAttempts applies: the bounded retries cover an
-				// in-progress restore settlement, while a Task name recreated
-				// with a different UID can never deliver and must not be
-				// claimed and retried forever.
 				return permanentOutboxDelivery(fmt.Errorf("task UID does not match outbox projection"))
 			}
-			// Clean-cluster restore settlement already patched the new Task
-			// incarnation directly. This projection remains immutable source
-			// history, so delivery is an exact no-op against the restored UID.
 			deliveredResourceVersion = task.ResourceVersion
 			return nil
 		}
@@ -337,7 +321,6 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 			delivery.LastTransitionTime = &now
 			task.Status.Delivery = &delivery
 		}
-		// A terminal Task no longer waits on any approval it was parked on.
 		if waiting := meta.FindStatusCondition(task.Status.Conditions, ConditionTypeWaitingForApproval); waiting != nil &&
 			waiting.Status == metav1.ConditionTrue && payload.Phase.IsTerminal() {
 			meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
@@ -373,8 +356,6 @@ func sanitizeOutboxError(err error) string {
 	if err == nil {
 		return ""
 	}
-	// The outbox store rejects invalid UTF-8, so repair invalid sequences and
-	// truncate on a rune boundary or the projection could never settle.
 	message := strings.ToValidUTF8(strings.TrimSpace(err.Error()), "�")
 	return truncateUTF8(message, 1024)
 }

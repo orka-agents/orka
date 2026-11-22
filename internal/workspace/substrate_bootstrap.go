@@ -73,8 +73,6 @@ func (e *SubstrateWorkspaceExecutor) recoverNativeWorkspaceCredential(ctx contex
 	if err := e.confirmNativeWorkspaceBootstrapLifetime(ctx, actorID, actor); err != nil {
 		return "", err
 	}
-	// An authenticated empty response proves this process has not been seeded.
-	// A recovered JWT stays in memory and never replaces the installed token.
 	return recovered.HandoffToken, nil
 }
 
@@ -117,9 +115,6 @@ func (e *SubstrateWorkspaceExecutor) nativeWorkspaceBootstrapRequest(
 	if response.StatusCode != http.StatusOK || decodeErr != nil {
 		return nil, nil, fmt.Errorf("native workspace did not provide a sealed bootstrap challenge")
 	}
-	// The provider projects Actor identity but not Pod identity into the
-	// process. A read after the challenge binds its process key to the observed
-	// assignment; later rerouting cannot decrypt this process's envelope.
 	observed, err := e.control.GetActor(ctx, actorID)
 	if err != nil {
 		return nil, nil, err

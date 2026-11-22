@@ -29,9 +29,6 @@ func TestPinnedBackendDialTransportDialsPinsOnly(t *testing.T) {
 	transport := conformance.PinnedBackendDialTransport([]string{listener.Addr().String()})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	// The requested address is deliberately not the pinned backend: a Service
-	// ClusterIP would resolve here, and the transport must ignore it in favor of
-	// the verified backend.
 	conn, err := transport.DialContext(ctx, "tcp", "203.0.113.7:9999")
 	if err != nil {
 		t.Fatalf("pinned dial: %v", err)

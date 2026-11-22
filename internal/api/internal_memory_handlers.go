@@ -50,7 +50,6 @@ func (h *InternalHandlers) internalMemoryProposalNamespace(c fiber.Ctx) (string,
 	return namespace, nil
 }
 
-// ListMemories lists memories for the namespace in the internal route.
 func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryNamespace(c)
 	if err != nil {
@@ -67,16 +66,7 @@ func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	// An agent's recall_memory call counts the memories it returned; a
-	// prompt's memory context and operator listings do not. A response larger
-	// than the tool reads is not counted, since the agent never gets all of
-	// it. Any ServiceAccount in the namespace can list here, so only the
-	// verified worker of an active Task can mark a listing as a recall. The
-	// check reads Kubernetes, so it runs with the count, after the response,
-	// on a copy of the caller.
 	if caller := GetUserInfo(c); caller != nil && len(encoded) <= tools.MemoryRecallResultLimit {
-		// Route parameters can share the request's buffers, which are
-		// reused once the handler returns, so the count keeps a copy.
 		namespace := strings.Clone(namespace)
 		callerCopy := *caller
 		authorizer := h.internalCallerAuthorizer()
@@ -89,7 +79,6 @@ func (h *InternalHandlers) ListMemories(c fiber.Ctx) error {
 	return c.Send(encoded)
 }
 
-// CreateMemory creates a memory in the namespace in the internal route.
 func (h *InternalHandlers) CreateMemory(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryNamespace(c)
 	if err != nil {
@@ -105,7 +94,6 @@ func (h *InternalHandlers) CreateMemory(c fiber.Ctx) error {
 	return createNamespaceMemory(c, h.memoryStore, namespace, memory)
 }
 
-// GetMemory gets a memory by ID from the namespace in the internal route.
 func (h *InternalHandlers) GetMemory(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryNamespace(c)
 	if err != nil {
@@ -114,7 +102,6 @@ func (h *InternalHandlers) GetMemory(c fiber.Ctx) error {
 	return getNamespaceMemory(c, h.memoryStore, namespace)
 }
 
-// UpdateMemory updates a memory in the namespace in the internal route.
 func (h *InternalHandlers) UpdateMemory(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryNamespace(c)
 	if err != nil {
@@ -130,7 +117,6 @@ func (h *InternalHandlers) UpdateMemory(c fiber.Ctx) error {
 	return updateNamespaceMemory(c, h.memoryStore, namespace, req)
 }
 
-// DeleteMemory soft-deletes a memory in the namespace in the internal route.
 func (h *InternalHandlers) DeleteMemory(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryNamespace(c)
 	if err != nil {
@@ -139,12 +125,10 @@ func (h *InternalHandlers) DeleteMemory(c fiber.Ctx) error {
 	return deleteNamespaceMemory(c, h.memoryStore, namespace)
 }
 
-// DisableMemory disables a memory for recall in the namespace in the internal route.
 func (h *InternalHandlers) DisableMemory(c fiber.Ctx) error {
 	return h.setMemoryDisabled(c, true)
 }
 
-// EnableMemory enables a memory for recall in the namespace in the internal route.
 func (h *InternalHandlers) EnableMemory(c fiber.Ctx) error {
 	return h.setMemoryDisabled(c, false)
 }
@@ -157,7 +141,6 @@ func (h *InternalHandlers) setMemoryDisabled(c fiber.Ctx, disabled bool) error {
 	return setNamespaceMemoryDisabled(c, h.memoryStore, namespace, disabled)
 }
 
-// ListMemoryProposals lists memory proposals for the namespace in the internal route.
 func (h *InternalHandlers) ListMemoryProposals(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryProposalNamespace(c)
 	if err != nil {
@@ -170,7 +153,6 @@ func (h *InternalHandlers) ListMemoryProposals(c fiber.Ctx) error {
 	return c.JSON(proposals)
 }
 
-// CreateMemoryProposal creates a memory governance proposal in the namespace in the internal route.
 func (h *InternalHandlers) CreateMemoryProposal(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryProposalNamespace(c)
 	if err != nil {
@@ -186,7 +168,6 @@ func (h *InternalHandlers) CreateMemoryProposal(c fiber.Ctx) error {
 	return createNamespaceMemoryProposal(c, h.memoryProposalStore, namespace, proposal)
 }
 
-// GetMemoryProposal gets a memory proposal by ID from the namespace in the internal route.
 func (h *InternalHandlers) GetMemoryProposal(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryProposalNamespace(c)
 	if err != nil {
@@ -195,7 +176,6 @@ func (h *InternalHandlers) GetMemoryProposal(c fiber.Ctx) error {
 	return getNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
-// ReviewMemoryProposal records a review decision without applying the proposal automatically.
 func (h *InternalHandlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryProposalNamespace(c)
 	if err != nil {
@@ -214,14 +194,7 @@ func (h *InternalHandlers) ReviewMemoryProposal(c fiber.Ctx) error {
 	return reviewNamespaceMemoryProposal(c, h.memoryProposalStore, review)
 }
 
-// refuseInternalConsolidationProposal keeps consolidation proposals off the
-// internal review and apply routes. Those routes check only the namespace,
-// and a consolidation proposal disables or deletes the memories it targets,
-// so it is reviewed and applied through the API, which authorizes the person
-// doing it against each target.
 func (h *InternalHandlers) refuseInternalConsolidationProposal(c fiber.Ctx, namespace, id string) error {
-	// The store trims the ID it reviews or applies, so the check reads the
-	// same proposal.
 	proposal, err := h.memoryProposalStore.GetMemoryProposal(c.Context(), strings.TrimSpace(namespace), strings.TrimSpace(id))
 	if err != nil {
 		return memoryStoreError("get memory proposal", "memory proposal", err)
@@ -232,7 +205,6 @@ func (h *InternalHandlers) refuseInternalConsolidationProposal(c fiber.Ctx, name
 	return nil
 }
 
-// ArchiveMemoryProposal archives a proposal in the namespace in the internal route without applying it.
 func (h *InternalHandlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryProposalNamespace(c)
 	if err != nil {
@@ -241,7 +213,6 @@ func (h *InternalHandlers) ArchiveMemoryProposal(c fiber.Ctx) error {
 	return archiveNamespaceMemoryProposal(c, h.memoryProposalStore, namespace)
 }
 
-// ApplyMemoryProposal applies an accepted memory proposal into durable memory in the namespace in the internal route.
 func (h *InternalHandlers) ApplyMemoryProposal(c fiber.Ctx) error {
 	namespace, err := h.internalMemoryProposalNamespace(c)
 	if err != nil {

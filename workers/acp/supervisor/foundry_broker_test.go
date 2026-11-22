@@ -477,7 +477,7 @@ func TestSupervisorRetriesFailedFoundryDrainCleanup(t *testing.T) {
 	}
 	assertFailedFoundryCleanupRetained(t, server, state, settlement)
 	if runtime.GOOS != linuxGOOS {
-		return // Successful descendant cleanup proof requires Linux.
+		return
 	}
 	deleted := performMutation(t, server.Handler(), http.MethodDelete, "/v2/runtime-sessions/session-1", deletion, cfg)
 	if deleted.Code != http.StatusOK {

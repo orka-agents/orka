@@ -71,7 +71,6 @@ describe('StructuredLogViewer', () => {
       refetch: vi.fn(),
       clear: vi.fn(),
     })
-    // scrollIntoView would also scroll every ancestor, moving the page.
     const originalScrollIntoView = Element.prototype.scrollIntoView
     const scrollIntoView = vi.fn()
     Element.prototype.scrollIntoView = scrollIntoView
@@ -126,12 +125,10 @@ describe('StructuredLogViewer', () => {
     try {
       const { rerender } = render(<StructuredLogViewer taskId="task-1" taskPhase="Running" />)
       const output = screen.getByRole('region', { name: 'Log output' })
-      // The reader scrolls up, which unpins the view.
       output.scrollTop = 100
       fireEvent.scroll(output)
       expect(screen.getByRole('button', { name: 'Pin logs to bottom' })).not.toHaveClass('bg-primary')
 
-      // The next poll returns a slid tail window; the rows on screen stay put.
       mockedUseTaskLogs.mockReturnValue(hookResult(['second', 'third']))
       rerender(<StructuredLogViewer taskId="task-1" taskPhase="Running" />)
       expect(lineTexts()).toEqual(['1first', '2second'])
@@ -187,7 +184,6 @@ describe('StructuredLogViewer', () => {
     const logLines = screen.getAllByTestId('log-line')
     expect(logLines).toHaveLength(2)
     expect(screen.getByText('(2 of 4 loaded lines)')).toBeInTheDocument()
-    // Duplicate messages stay separate rows with their buffer positions.
     expect(logLines[0]).toHaveTextContent('3')
     expect(logLines[1]).toHaveTextContent('4')
     expect(logLines[0]).toHaveTextContent('Request failed')
@@ -270,7 +266,6 @@ describe('StructuredLogViewer', () => {
 
     render(<StructuredLogViewer taskId="task-1" />)
     const rows = screen.getAllByTestId('log-line')
-    // Blank lines are rendered as rows too.
     expect(rows).toHaveLength(120)
     const firstNumber = rows[0].querySelector('span')!
     const lastNumber = rows[119].querySelector('span')!
@@ -291,7 +286,6 @@ describe('StructuredLogViewer', () => {
     render(<StructuredLogViewer taskId="task-1" />)
     const streaming = screen.getByText('Streaming')
     expect(streaming).toBeInTheDocument()
-    // Liveness uses the reserved live token, not an ad-hoc pastel.
     expect(streaming.className).toContain('text-live')
   })
 
@@ -309,8 +303,6 @@ describe('StructuredLogViewer', () => {
     const live = screen.getByText('Live')
     expect(live).toBeInTheDocument()
     expect(live.className).toContain('text-live')
-    // The live badge carries a motion-safe pulsing dot (class includes the
-    // motion-safe: variant prefix in the DOM).
     expect(live.querySelector('[class*="animate-pulse-live"]')).not.toBeNull()
   })
 })

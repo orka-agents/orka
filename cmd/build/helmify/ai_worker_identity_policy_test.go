@@ -11,8 +11,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// internal/admission tests the canonical policy. Helm must render the same
-// rules with its release's AI worker ServiceAccount, for both worker profiles.
 func TestStaticChartAIWorkerIdentityProtectionMatchesCanonicalPolicy(t *testing.T) {
 	canonical, err := os.ReadFile(filepath.Join(
 		"..", "..", "..", "config", "admission", "ai_worker_identity_protection.yaml"))
@@ -55,8 +53,6 @@ func TestStaticChartAIWorkerIdentityProtectionMatchesCanonicalPolicy(t *testing.
 	}
 }
 
-// The policy is on by default and when an older release's reused values lack
-// the setting; operators can turn it off explicitly, and only with a boolean.
 func TestStaticChartAIWorkerIdentityProtectionOptOut(t *testing.T) {
 	const policyKind = "kind: ValidatingAdmissionPolicy\nmetadata:\n  name: test-orka-ai-worker-identity-protection"
 	for _, tc := range []struct {

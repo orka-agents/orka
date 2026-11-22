@@ -35,9 +35,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// This fixture is independent of the production policy map. Each row is an
-// actual HTTP request and its expected resource authorization, including every
-// write in compound operations. An omitted route fails the inventory check.
 const externalAuthorizationInventory = `
 GET /api/v1/usage | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
 GET /api/v1/usage/work/:id | list core.orka.ai:tasks; list core.orka.ai:repositorymonitors; list core.orka.ai:sessions
@@ -369,9 +366,6 @@ func (f *externalAuthorizationFixture) request(t *testing.T, method, path, body 
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Authorization", fmt.Sprintf("Bearer fixture-%s-%d", t.Name(), f.sequence))
-	// The oversized usage report scans 20,000 SQLite rows: about 0.4s normally
-	// but 11-12s under -race, past the former 5s budget. A hung handler still
-	// fails with a deadline error instead of an empty response.
 	response, err := f.server.app.Test(request, fiber.TestConfig{Timeout: 60 * time.Second, FailOnTimeout: true})
 	require.NoError(t, err)
 	defer response.Body.Close() //nolint:errcheck
@@ -387,8 +381,6 @@ func (f *externalAuthorizationFixture) changes(t *testing.T) int64 {
 	return count
 }
 
-// receipts counts operation receipts: every write through the storage client
-// stores one with its effect.
 func (f *externalAuthorizationFixture) receipts(t *testing.T) int64 {
 	t.Helper()
 	var count int64
@@ -420,13 +412,13 @@ func TestExternalAPIRouteInventory(t *testing.T) {
 		}
 		key := route.Method + " " + route.Path
 		if key == "POST /api/v1/gateways/:namespace/:name/events" {
-			continue // Bound-secret ingress has a separate tested contract.
+			continue
 		}
 		if key == "GET "+connectors.CallbackPath {
-			continue // The OAuth callback is authenticated by signed single-use state; see connection_handlers_test.go.
+			continue
 		}
 		if key == "GET /api/v1/auth/config" || key == "POST /api/v1/auth/github" {
-			continue // GitHub sign-in precedes any Orka credential: the GitHub token is checked; see github_signin_test.go.
+			continue
 		}
 		require.Contains(t, externalAPIPolicies, key, "external route lacks an explicit policy")
 		require.True(t, cases[key], "external route lacks an HTTP authorization test: %s", key)

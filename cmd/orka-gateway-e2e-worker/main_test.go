@@ -65,7 +65,6 @@ func TestWorkerAuthenticatedReplayAndReleaseFence(t *testing.T) {
 						_, _ = io.WriteString(w, `{"error":{"code":"interim_delivery_unsupported"}}`)
 						return
 					}
-					// Replay remains possible at the configured lifetime cap.
 					_ = json.NewEncoder(w).Encode(map[string]any{"accepted": calls, "limit": 1, "requestExists": calls > 0})
 				case "/internal/v1/tasks/ns/task/gateway-messages":
 					calls++
@@ -154,7 +153,6 @@ func TestWorkerFailsClosedOnAdmissionAndReplayErrors(t *testing.T) {
 						w.WriteHeader(http.StatusConflict)
 						_, _ = io.WriteString(w, `{"error":{"code":"conflict"}}`)
 					case "untyped unsupported":
-						// Matching backend prose is not a typed, definitive tool rejection.
 						w.WriteHeader(http.StatusConflict)
 						_, _ = io.WriteString(w,
 							`{"error":{"code":"unknown","message":"gateway adapter does not support interim delivery"}}`)

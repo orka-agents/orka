@@ -207,7 +207,6 @@ func TestUpdateAgentTool_Execute_VerifyUpdatedFields(t *testing.T) {
 		t.Fatalf("expected success, got error: %s", res.Error)
 	}
 
-	// Verify persisted changes
 	updated := &corev1alpha1.Agent{}
 	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyAgentName, Namespace: defaultNamespace}, updated); err != nil {
 		t.Fatalf("failed to get updated agent: %v", err)
@@ -269,8 +268,6 @@ func TestUpdateAgentTool_Execute_UpdatesNestedModelFields(t *testing.T) {
 	}
 }
 
-// The Registry preserves numeric-string text, and the fake client does not
-// enforce CRD bounds: validation must reject before any Agent update.
 func TestUpdateAgentTool_Execute_TemperatureBounds(t *testing.T) {
 	cases := []struct {
 		name  string

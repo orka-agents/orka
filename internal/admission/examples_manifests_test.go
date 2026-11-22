@@ -33,12 +33,6 @@ import (
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// TestShippedManifestsDecodeStrictly guards the YAML that users copy first.
-// Every Orka-group document under examples/ and config/samples/ must
-// strict-decode into its typed API object (catching unknown or misspelled
-// fields that the API server would reject), and every built-in runtime Agent
-// must pass the same admission contract the live webhook enforces, including
-// the harness-v2 "spec.model.name is required" rule.
 func TestShippedManifestsDecodeStrictly(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -86,8 +80,6 @@ func TestShippedManifestsDecodeStrictly(t *testing.T) {
 			return nil
 		}))
 	}
-	// Guard the guard: if the walk finds nothing, the roots moved and the
-	// test is validating air.
 	require.Greater(t, checkedDocuments, 10, "expected Orka manifests under examples/ and config/samples/")
 	require.Greater(t, checkedAgents, 3, "expected Agent manifests under examples/ and config/samples/")
 }
@@ -101,8 +93,6 @@ func splitYAMLDocuments(path string) ([][]byte, error) {
 	return splitYAMLDocumentsFrom(file)
 }
 
-// splitYAMLDocumentsFrom splits a multi-document YAML stream on "---",
-// dropping empty documents.
 func splitYAMLDocumentsFrom(source io.Reader) ([][]byte, error) {
 	reader := apimachineryyaml.NewYAMLReader(bufio.NewReader(source))
 	var documents [][]byte
@@ -121,10 +111,6 @@ func splitYAMLDocumentsFrom(source io.Reader) ([][]byte, error) {
 	}
 }
 
-// strictDecodeOrkaDocument decodes one YAML document into its registered Orka
-// typed object with unknown fields rejected. Known Kubernetes and Kustomize
-// resources are skipped. Unknown API identities are errors so misspelled Orka
-// groups cannot bypass validation; other third-party kinds need explicit support.
 func strictDecodeOrkaDocument(scheme *runtime.Scheme, document []byte) (runtime.Object, bool, error) {
 	var typeMeta metav1.TypeMeta
 	if err := sigsyaml.Unmarshal(document, &typeMeta); err != nil {
@@ -138,8 +124,6 @@ func strictDecodeOrkaDocument(scheme *runtime.Scheme, document []byte) (runtime.
 		return nil, false, fmt.Errorf("parse apiVersion %q: %w", typeMeta.APIVersion, err)
 	}
 	gvk := groupVersion.WithKind(typeMeta.Kind)
-	// Provider schemas are served and validated by separately installed modules.
-	// Core validates its own API examples without importing a provider SDK.
 	providerKinds := map[string][]string{
 		"sandbox.workspace.orka.ai":   {"SandboxProviderConfig", "SandboxWorkspaceProfile"},
 		"substrate.workspace.orka.ai": {"SubstrateProviderConfig", "SubstrateWorkspaceProfile"},
@@ -201,11 +185,6 @@ func TestStrictDecodeOrkaDocument_APIIdentity(t *testing.T) {
 	}
 }
 
-// validateExampleAgentContract runs a shipped Agent through the real
-// AgentContractValidator under a harness-v2 namespace, mirroring the mutating
-// contract defaulter that runs first in a live cluster. This is what catches
-// an example Agent that would deploy but fail at dispatch, such as a built-in
-// runtime Agent without spec.model.name.
 func validateExampleAgentContract(t *testing.T, scheme *runtime.Scheme, agent *corev1alpha1.Agent) error {
 	t.Helper()
 	object := agent.DeepCopy()
@@ -241,19 +220,6 @@ func validateExampleAgentContract(t *testing.T, scheme *runtime.Scheme, agent *c
 	return nil
 }
 
-// TestDocumentedManifestsDecodeStrictly guards the YAML people copy out of the
-// root README, documentation site, and example READMEs. Every YAML fence or
-// shell heredoc that carries an Orka apiVersion and kind must strict-decode
-// into its typed API object, so a renamed or misspelled field cannot tell
-// users to write something the API server rejects.
-//
-// Fragments without either type metadata field and known non-Orka resources
-// are skipped. Unknown apiVersion/kind pairs and partial type metadata are
-// rejected. kubectl manifest heredocs must parse and include both fields.
-// A deliberately invalid block (showing a rejected manifest, for example)
-// opts out with an HTML comment on the line before its opening fence:
-//
-//	<!-- orka:skip-strict-decode reason -->
 func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -278,7 +244,6 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 				if block.strict {
 					return fmt.Errorf("%s:%d: YAML does not parse: %w", path, block.line, err)
 				}
-				// Other shell heredocs may carry arbitrary text.
 				continue
 			}
 			if block.wholeManifest && len(documents) == 0 {
@@ -296,7 +261,6 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 					if block.wholeManifest {
 						return fmt.Errorf("%s:%d document %d: kubectl manifest must include apiVersion and kind", path, block.line, index+1)
 					}
-					// YAML fences and other heredocs may illustrate a fragment.
 					continue
 				}
 				object, checked, err := strictDecodeOrkaDocument(scheme, document)
@@ -318,27 +282,18 @@ func TestDocumentedManifestsDecodeStrictly(t *testing.T) {
 	} {
 		require.NoError(t, filepath.WalkDir(root, checkMarkdown))
 	}
-	// Guard the guard: if the walk finds nothing, the docs moved and the test
-	// is validating air.
 	require.Greater(t, checkedDocuments, 40, "expected Orka manifests in documented code blocks")
 }
 
-// yamlCodeBlock is one extracted YAML block, with the 1-based line number of
-// its first content line so a failure points at the right place in the source file.
 type yamlCodeBlock struct {
-	line int
-	body string
-	// YAML fences and kubectl manifest heredocs must parse as YAML. Other
-	// heredocs may carry scripts, patches, or arbitrary text.
-	strict bool
-	// kubectl apply/create requires complete objects, not YAML fragments.
+	line          int
+	body          string
+	strict        bool
 	wholeManifest bool
 }
 
 const docsStrictDecodeSkipMarker = "<!-- orka:skip-strict-decode"
 
-// extractYAMLCodeBlocks returns YAML fences and shell heredocs from a markdown
-// file, accepting backtick or tilde fences and respecting the opt-out marker.
 func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -368,9 +323,6 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 		case "yaml", "yml":
 			blocks = append(blocks, yamlCodeBlock{line: start + 2, body: strings.Join(body, "\n"), strict: true})
 		case "bash", "sh", "shell", "console":
-			// The install and first-task instructions pipe manifests through
-			// `kubectl apply -f - <<'EOF'`. Those are the manifests users copy
-			// before any other, so they get checked too.
 			heredocs, err := extractShellHeredocs(start+2, body)
 			if err != nil {
 				return nil, err
@@ -383,12 +335,8 @@ func extractYAMLCodeBlocks(path string) ([]yamlCodeBlock, error) {
 
 var heredocOpener = regexp.MustCompile(`<<(-?)\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 
-// Match the kubectl stdin-manifest commands used by the install examples.
 var kubectlManifestHeredoc = regexp.MustCompile(`^\s*(?:\$\s+)?kubectl\b.*\b(?:apply|create)\b.*(?:-f\s+|--filename(?:=|\s+))-(?:\s|$)`)
 
-// extractShellHeredocs returns the body of every heredoc in a shell code
-// block. baseLine is the 1-based line number of the shell block's first content
-// line. Non-manifest heredocs are filtered out later by looksLikeManifest.
 func extractShellHeredocs(baseLine int, lines []string) ([]yamlCodeBlock, error) {
 	var blocks []yamlCodeBlock
 	for i := 0; i < len(lines); i++ {
@@ -423,9 +371,6 @@ func extractShellHeredocs(baseLine int, lines []string) ([]yamlCodeBlock, error)
 	return blocks, nil
 }
 
-// parseOpeningFence reports the fence run and language of a code fence line.
-// Docusaurus allows metadata after the language ("```yaml title=x"); only the
-// first word is the language.
 func parseOpeningFence(line string) (string, string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if len(trimmed) < 3 || (trimmed[0] != '`' && trimmed[0] != '~') {
@@ -503,9 +448,6 @@ func TestExtractYAMLCodeBlocks_HeredocTerminators(t *testing.T) {
 	}
 }
 
-// looksLikeManifest identifies Kubernetes objects and rejects malformed YAML
-// or partial type metadata. Documents without either type metadata field are
-// fragments, as are lists and scalars illustrating a single field.
 func looksLikeManifest(document []byte) (bool, error) {
 	var probe any
 	if err := sigsyaml.Unmarshal(document, &probe); err != nil {

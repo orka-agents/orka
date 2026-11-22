@@ -85,9 +85,6 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		return ctrl.Result{}, errors.New("verified external v2 execution is missing its AgentRuntime target")
 	}
 	if reason := r.frozenWorkspaceDispatchDisabledReason(bound.plan.Workspace); reason != "" {
-		// The single configuration gate for bound Tasks: ordinary planning
-		// AND bound-task recovery both flow through this chokepoint before
-		// any workspace or RuntimePool demand exists.
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceUnsupported"), reason)
 	}
 	if err := r.ACPAdmissionGate.Check(); err != nil {
@@ -135,8 +132,6 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			return ctrl.Result{}, err
 		}
 		if !workspaceReady {
-			// The controller-first workspace is not yet admitted, attachable, or
-			// exclusively held by this Task; no RuntimePool demand exists yet.
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 		runtimeBound := taskExecutionHasRuntimeOrSessionBinding(task.Status.Execution) ||
@@ -274,8 +269,6 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested, LastTransitionTime: &now,
 	}
 	if plan.Workspace != nil {
-		// Provider-neutral projection only: no claim, sandbox, or other
-		// provider-native identifier ever enters public Task status.
 		task.Status.ExecutionWorkspace = statusrules.Update{
 			Provider:      plan.Workspace.Provider,
 			Phase:         corev1alpha1.ExecutionWorkspacePhasePending,
@@ -863,10 +856,6 @@ func (r *TaskReconciler) cancelACPTaskBeforeDurableAttempt(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-// settleUnprojectedACPAttempt settles the PromptAttempt a Task may have
-// persisted before its execution status was projected: a Queued attempt is
-// cancelled with reason and message. It returns the attempt, or nil when
-// none was persisted.
 func (r *TaskReconciler) settleUnprojectedACPAttempt(
 	ctx context.Context,
 	latest *corev1alpha1.Task,
@@ -922,10 +911,6 @@ func (r *TaskReconciler) settleUnprojectedACPAttempt(
 	})
 }
 
-// setCancelledBeforeStatusExecution records a Task that ended Cancelled before
-// its execution status was projected, bound to the attempt settled by
-// settleUnprojectedACPAttempt when one exists. Cleanup recognizes this shape
-// and discovers any unbound attempt authoritatively.
 func setCancelledBeforeStatusExecution(
 	status *corev1alpha1.TaskStatus,
 	attempt *store.PromptAttempt,
@@ -1311,9 +1296,6 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 			return err
 		}
 	}
-	// Apply the RuntimeSession relative-root rule here so an unsafe subPath
-	// fails preflight before repository resolution and archive preparation
-	// spend SCM and artifact work on a Task session creation must reject.
 	if err := harnessv2.ValidateWorkspaceRelativeRoot(workspace.SubPath); err != nil {
 		return fmt.Errorf("subPath is invalid: %w", err)
 	}
@@ -1417,15 +1399,6 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 				plan.PoolName,
 			)
 		}
-		// The pool's runtime namespace is FROZEN from the linked workspace's
-		// creation-time annotation, not re-read from the mutable controller
-		// flag: workspace creation and pool creation happen on different
-		// reconciles, and a flag change between them would realize the
-		// SandboxClaim and durable PVC in a namespace the workspace's
-		// deletion proofs never probe (a false NotFound would then report
-		// the volume deleted while repository data remains). An explicit
-		// frozen namespace the current controller no longer permits fails
-		// the pool visibly instead of silently splitting the two.
 		poolRuntimeNamespace := strings.TrimSpace(r.ACPRuntimeNamespace)
 		var workspaceRequiredFeatures []workspacev1alpha1.ExecutionWorkspaceFeature
 		if plan.Workspace != nil && workspaceName != "" {
@@ -1460,16 +1433,9 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 		annotations := map[string]string{acpRuntimeLastDemandAnnotation: time.Now().UTC().Format(time.RFC3339Nano)}
 		var executionWorkspace *corev1alpha1.RuntimePoolExecutionWorkspaceSpec
 		if plan.Workspace != nil {
-			// A workspace-backed pool hosts exactly one logical RuntimeSession
-			// inside one provider-owned physical workspace.
 			capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
 			labels[acpRuntimeWorkspaceProviderLabel] = string(plan.Workspace.Provider)
 			if workspaceName != "" {
-				// Links the pool to its controller-first ExecutionWorkspace so
-				// the ACP workspace adapter can prove exact ownership before
-				// tearing the pool down. The name link is paired with the
-				// workspace-incarnation UID pin: the adapter deletes only a
-				// pool carrying both.
 				labels[acpExecutionWorkspaceLinkLabel] = workspaceName
 				if workspaceUID != "" {
 					annotations[acpExecutionWorkspaceUIDAnnotation] = workspaceUID
@@ -1514,10 +1480,6 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 			if getErr := r.Get(ctx, key, pool); getErr != nil {
 				return nil, false, getErr
 			}
-			// Another creator won the deterministic-name race. Validate and
-			// activate that observed object through the same path as a pool that
-			// existed before this reconcile; never bind a Task to an unchecked
-			// same-name winner.
 			err = nil
 		} else {
 			poolPreexisting = false
@@ -1596,8 +1558,6 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 	return pool, poolPreexisting, nil
 }
 
-// Collect requirements only from the exact class/profile frozen in the plan.
-// The nonempty set also freezes whether this pool materializes a native process.
 func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, reader client.Reader, plan ACPRuntimePlan, workspace *workspacev1alpha1.ExecutionWorkspace) ([]workspacev1alpha1.ExecutionWorkspaceFeature, error) {
 	if err := verifyACPClassWorkspaceBindings(workspace, plan.Workspace, plan.PoolName); err != nil {
 		return nil, err
@@ -1616,9 +1576,6 @@ func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, r
 	}
 	providerGenerationMatches := provider.Generation == bound.ProviderGeneration
 	if provider.Spec.LifecycleState == workspacev1alpha1.ExecutionWorkspaceProviderDraining {
-		// Draining advances the registration generation without replacing an
-		// admitted Session workspace's frozen installation. Reuse only that
-		// exact logical workspace; new identities still require Active.
 		providerGenerationMatches = bound.ProviderGeneration > 0 && bound.ProviderGeneration <= provider.Generation &&
 			plan.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession && plan.Workspace.SessionUID != "" &&
 			workspace.Spec.SessionRef != nil && string(workspace.Spec.SessionRef.UID) == plan.Workspace.SessionUID &&
@@ -1651,8 +1608,6 @@ func (r *TaskReconciler) acpWorkspacePoolRequiredFeatures(ctx context.Context, r
 	return required, nil
 }
 
-// verifyFrozenACPProfile rereads the provider and class parameters and requires
-// the provider's protected pin and the frozen profile hash to still match.
 func (r *TaskReconciler) verifyFrozenACPProfile(
 	ctx context.Context,
 	reader client.Reader,
@@ -1720,11 +1675,6 @@ func (r *TaskReconciler) recordACPRuntimePoolImageProvenance(
 	})
 }
 
-// verifyACPWorkspaceReadyForPool repeats the complete workspace admission and
-// attachment handshake through the uncached reader after a RuntimePool has
-// materialized. Recovery waits preserve the data-bearing pool without allowing
-// prompt dispatch. Withdrawn authority deletes the pool before prompt demand
-// can survive against an orphaned, quarantined, expired, or revoked workspace.
 func (r *TaskReconciler) verifyACPWorkspaceReadyForPool(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -1854,8 +1804,6 @@ func acpWorkspacePoolReadinessFailure(
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		if runtimePoolHasExternalWorkspace(pool) && workspaceHasCoreAdmission(workspace) && workspace.Spec.CoreAdmission.AdmittedGeneration > 0 {
 			condition := workspaceprovider.FindCondition(workspace.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted))
-			// Core re-admits in two writes: the Admitted condition names the
-			// next generation before the coreAdmission patch lands.
 			readmitting := workspace.Spec.CoreAdmission.AdmittedGeneration < workspace.Generation &&
 				workspaceCoreAdmissionConditionMatches(workspace, workspace.Generation+1)
 			if (workspaceHasCoreAdmissionEvidence(workspace) && workspace.Spec.CoreAdmission.AdmittedGeneration < workspace.Generation) || readmitting ||
@@ -1867,8 +1815,6 @@ func acpWorkspacePoolReadinessFailure(
 	}
 	if workspace.Status.ObservedGeneration != workspace.Generation {
 		if runtimePoolHasExternalWorkspace(pool) {
-			// Publishing workload and admission each advance generation. The
-			// provider acknowledges them asynchronously before prompt dispatch.
 			return errACPWorkspaceRecoveryPending
 		}
 		return errors.New("provider status has not observed the current workspace generation")
@@ -1882,9 +1828,6 @@ func acpWorkspacePoolReadinessFailure(
 		attached.Reason == string(workspacev1alpha1.ReasonProgressing) && attached.ObservedGeneration == workspace.Generation &&
 		provisioned != nil && provisioned.Status == metav1.ConditionFalse &&
 		provisioned.Reason == string(workspacev1alpha1.ReasonProgressing) && provisioned.ObservedGeneration == workspace.Generation {
-		// The adapter deliberately withdraws the enforced epoch during a
-		// recoverable outage. Keep the exact data lineage, but do not queue
-		// any prompt until the adapter restores the attachment handshake.
 		return errACPWorkspaceRecoveryPending
 	}
 	if workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateAttached {
@@ -1940,8 +1883,6 @@ func taskManagedByACP(task *corev1alpha1.Task) bool {
 		(strings.TrimSpace(task.Status.Execution.RuntimePoolName) != "" || strings.TrimSpace(task.Status.Execution.AgentRuntimeName) != "")
 }
 
-// acpRuntimePoolCapacity returns the configured concurrency for a new
-// non-workspace RuntimePool, filling unset limits with the API defaults.
 func (r *TaskReconciler) acpRuntimePoolCapacity() *corev1alpha1.RuntimePoolCapacitySpec {
 	capacity := r.ACPRuntimePoolCapacity
 	if capacity.MaxResidentSessions <= 0 {

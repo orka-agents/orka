@@ -12,14 +12,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Names and paths the AgentHost controller reserves in a host Pod.
 const (
-	// AgentHostContainerName is the template container that runs the host daemon.
-	AgentHostContainerName = "host"
-	// AgentHostStateVolumeName mounts the host's PersistentVolumeClaim.
-	AgentHostStateVolumeName = "workspace"
-	// AgentHostStatusPort is the port of the Orka host agent sidecar.
-	AgentHostStatusPort int32 = 7790
+	AgentHostContainerName         = "host"
+	AgentHostStateVolumeName       = "workspace"
+	AgentHostStatusPort      int32 = 7790
 )
 
 // AgentHostAccess selects how clients reach a host.
@@ -27,11 +23,7 @@ const (
 type AgentHostAccess string
 
 const (
-	// AgentHostAccessRelay means the host registers with an outbound relay the
-	// client already knows, so the cluster needs no inbound path.
-	AgentHostAccessRelay AgentHostAccess = "Relay"
-	// AgentHostAccessStandalone means the client port-forwards to the loopback
-	// listener and presents the host's connection token.
+	AgentHostAccessRelay      AgentHostAccess = "Relay"
 	AgentHostAccessStandalone AgentHostAccess = "Standalone"
 )
 
@@ -407,7 +399,6 @@ type AgentHostObjectReceipt struct {
 	UID string `json:"uid,omitempty"`
 }
 
-// AgentHost phases.
 const (
 	AgentHostPhasePending      = "Pending"
 	AgentHostPhaseProvisioning = "Provisioning"

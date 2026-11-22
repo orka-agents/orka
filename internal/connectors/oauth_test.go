@@ -22,8 +22,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// fixtureClient routes every request for the configured public-looking host
-// to the local TLS fixture, so the production URL checks stay strict.
 func fixtureClient(server *httptest.Server) *http.Client {
 	addr := server.Listener.Addr().String()
 	return &http.Client{
@@ -161,7 +159,6 @@ func TestExchangeCodeAndRefresh(t *testing.T) {
 		t.Fatalf("Authorization = %q, want basic client auth", lastAuth)
 	}
 
-	// GitHub-style 200 with an error body is a rejection with a sanitized code.
 	_, err = client.ExchangeCode(ctx, cfg, "bad-code", "verifier", "https://orka.example.test/cb")
 	var oauthErr *OAuthError
 	if !asOAuthError(err, &oauthErr) || oauthErr.Code != "bad_verification_code" || !oauthErr.IsInvalidGrant() {
@@ -223,8 +220,6 @@ func TestOAuthClientRejectsUnsafeEndpoints(t *testing.T) {
 			t.Fatalf("%s endpoint must be rejected", name)
 		}
 	}
-	// The validator's host rules apply at call time too, before any DNS
-	// lookup or dial, for endpoints stored before a rule existed.
 	for name, tokenURL := range map[string]string{
 		"metadata name":        "https://metadata.google.internal/token",
 		"cluster service":      "https://kubernetes.default.svc/token",
@@ -346,7 +341,6 @@ func TestTokenResponseEdgeCases(t *testing.T) {
 		}
 		switch path {
 		case "/comma-scope":
-			// GitHub delimits granted scopes with commas; spaces are accepted too.
 			if strings.Join(token.Scopes, "|") != "read|write|repo" || !token.ScopePresent {
 				t.Fatalf("comma scope = %v present %t", token.Scopes, token.ScopePresent)
 			}
@@ -442,8 +436,6 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// TestOAuthClientRevokesOnlyAtTheIssuer covers a revocation endpoint on a
-// different host than the token endpoint: the token is never sent there.
 func TestOAuthClientRevokesOnlyAtTheIssuer(t *testing.T) {
 	client := NewOAuthClient(OAuthClientOptions{})
 	cfg := testOAuthConfig()

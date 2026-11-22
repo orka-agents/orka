@@ -147,12 +147,19 @@ How monitors review and repair pull requests.
 ### Code comments
 
 Why the code carries no comments, and the decisions recovered from the comments it used to
-carry. Each cleanup round adds one catalog record.
+carry. Each cleanup round adds catalog records.
 
 | # | Decision | Status |
 | --- | --- | --- |
 | [0062](0062-code-carries-no-comments.md) | Code carries no comments; decisions live in ADRs | Accepted |
 | [0063](0063-code-comment-decisions-round-1.md) | Decisions recovered from code comments, round 1 | Accepted |
+| [0064](0064-code-comment-decisions-controller.md) | Decisions recovered from code comments: the controllers | Accepted |
+| [0065](0065-code-comment-decisions-api.md) | Decisions recovered from code comments: the API server | Accepted |
+| [0066](0066-code-comment-decisions-acp-runtime.md) | Decisions recovered from code comments: the ACP runtime and agent hosts | Accepted |
+| [0067](0067-code-comment-decisions-storage.md) | Decisions recovered from code comments: storage | Accepted |
+| [0068](0068-code-comment-decisions-platform-packages.md) | Decisions recovered from code comments: the other platform packages | Accepted |
+| [0069](0069-code-comment-decisions-commands-scripts-tests.md) | Decisions recovered from code comments: commands, scripts, and tests | Accepted |
+| [0070](0070-code-comment-decisions-ui.md) | Decisions recovered from code comments: the UI | Accepted |
 
 ## Writing a new one
 

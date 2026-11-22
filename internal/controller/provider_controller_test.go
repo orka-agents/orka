@@ -29,8 +29,6 @@ func newProviderScheme() *runtime.Scheme {
 	return s
 }
 
-// ---------- validateProvider ----------
-
 func TestValidateProvider(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -204,8 +202,6 @@ func TestValidateProvider(t *testing.T) {
 	}
 }
 
-// ---------- Reconcile ----------
-
 func TestProviderReconcile(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -264,7 +260,6 @@ func TestProviderReconcile(t *testing.T) {
 				t.Fatalf("Reconcile returned error: %v", err)
 			}
 
-			// Re-fetch provider
 			got := &corev1alpha1.Provider{}
 			if err := cl.Get(context.Background(), nn, got); err != nil {
 				t.Fatalf("failed to get provider: %v", err)
@@ -297,8 +292,6 @@ func TestProviderReconcile_NotFound(t *testing.T) {
 		t.Fatalf("expected no error for not-found provider, got: %v", err)
 	}
 }
-
-// ---------- updateStatus ----------
 
 func TestProviderUpdateStatus(t *testing.T) {
 	tests := []struct {
@@ -357,8 +350,6 @@ func TestProviderUpdateStatus(t *testing.T) {
 	}
 }
 
-// ---------- SetupWithManager ----------
-
 func TestProviderSetupWithManager_NilManager(t *testing.T) {
 	r := &ProviderReconciler{}
 	err := r.SetupWithManager(nil)
@@ -366,8 +357,6 @@ func TestProviderSetupWithManager_NilManager(t *testing.T) {
 		t.Error("expected error when passing nil manager")
 	}
 }
-
-// ---------- helpers ----------
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))

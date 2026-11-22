@@ -19,22 +19,10 @@ import (
 )
 
 const (
-	// A crashed process can leave a two-minute control-store mutation lease.
-	// Wait beyond its expiry without weakening the lease's fencing checks.
 	defaultEpochAcquisitionTimeout = 3 * time.Minute
 	defaultEpochCASMaxRetryDelay   = time.Second
 )
 
-// ControllerEpochManager acquires one durable epoch after controller-runtime
-// leader election. Every ACP control-store mutation must use CurrentFence so a
-// stale leader cannot commit authoritative state after takeover.
-//
-// After acquiring the epoch in Kubernetes, the manager advances the
-// controller epoch of every storage dataset it is given to the exact record
-// Kubernetes granted, bound to the installation, and opens each storage
-// contract's write fence once that contract's dataset has advanced. Each
-// dataset opens independently, so an artifact store outage at takeover does
-// not hold back state writes. CurrentFence opens with the state contract.
 type ControllerEpochManager struct {
 	Store    store.ControllerEpochStore
 	Name     string
@@ -49,15 +37,11 @@ type ControllerEpochManager struct {
 	storage   map[string]*contractFence
 }
 
-// EpochDataset is a storage dataset whose controller epoch the manager
-// advances.
 type EpochDataset interface {
 	storagev1.ProviderDescriber
 	storagev1.ControllerEpochAdvancer
 }
 
-// contractFence is the write fence of one storage contract. datasetID and
-// fence are set before open is closed.
 type contractFence struct {
 	dataset   EpochDataset
 	open      chan struct{}
@@ -66,10 +50,7 @@ type contractFence struct {
 }
 
 const (
-	// epochStorageCallTimeout bounds one call of a storage step at takeover.
-	epochStorageCallTimeout = 30 * time.Second
-	// epochStorageMaxRetryDelay caps the wait between retries of a storage
-	// step that failed for a reason retrying can fix.
+	epochStorageCallTimeout   = 30 * time.Second
 	epochStorageMaxRetryDelay = 30 * time.Second
 )
 
@@ -79,9 +60,6 @@ func NewControllerEpochManager(epochStore store.ControllerEpochStore, holderID s
 	}
 }
 
-// WithStorage registers the dataset that serves a storage contract. The
-// manager advances its controller epoch at takeover and opens the contract's
-// write fence afterwards. Call this only during startup wiring.
 func (m *ControllerEpochManager) WithStorage(contract string, dataset EpochDataset) *ControllerEpochManager {
 	if m == nil {
 		return m
@@ -144,8 +122,6 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 		case controllerEpochMatchesCAS(observed, pending.change):
 			acquired = observed
 		case controllerEpochsEqual(observed, pending.predecessor):
-			// The CAS did not commit. Retain the exact payload, including its
-			// digest and timestamp, so a retry remains idempotent.
 		case coherentCompetingControllerEpoch(observed, pending):
 			pending, err = newControllerEpochCASIntent(m.Name, m.HolderID, observed)
 			if err != nil {
@@ -170,10 +146,6 @@ func (m *ControllerEpochManager) Start(ctx context.Context) error {
 	return m.openStorage(ctx, *acquired)
 }
 
-// openStorage advances every registered dataset to the acquired epoch and
-// opens each contract's fence once its dataset has advanced. It returns when
-// ctx ends, or with the first storage error that retrying cannot fix, such
-// as a dataset bound to another installation or a newer controller epoch.
 func (m *ControllerEpochManager) openStorage(ctx context.Context, acquired store.ControllerEpoch) error {
 	m.storageMu.Lock()
 	contracts := make(map[string]*contractFence, len(m.storage))
@@ -225,8 +197,6 @@ func (m *ControllerEpochManager) openStorage(ctx context.Context, acquired store
 	return nil
 }
 
-// openContract opens one contract's fence once its dataset has advanced to
-// the acquired epoch. Contracts served by one dataset share one advance.
 func (m *ControllerEpochManager) openContract(
 	ctx context.Context, contract string, fence *contractFence, acquired store.ControllerEpoch,
 	installationID string, advances *datasetAdvances,
@@ -284,8 +254,6 @@ func (m *ControllerEpochManager) openCurrent(acquired store.ControllerEpoch) {
 	m.once.Do(func() { close(m.ready) })
 }
 
-// datasetAdvances runs one advance for each dataset, however many contracts
-// it serves.
 type datasetAdvances struct {
 	mu       sync.Mutex
 	advances map[string]*datasetAdvance
@@ -317,9 +285,6 @@ func (a *datasetAdvances) do(ctx context.Context, datasetID string, advance func
 	}
 }
 
-// retryEpochStorageStep runs one storage step at takeover, retrying with
-// backoff until it succeeds, ctx ends, or it fails in a way retrying cannot
-// fix.
 func retryEpochStorageStep[T any](ctx context.Context, step string, call func(context.Context) (T, error)) (T, error) {
 	for attempt := 0; ; attempt++ {
 		callCtx, cancel := context.WithTimeout(ctx, epochStorageCallTimeout)
@@ -344,12 +309,6 @@ func retryEpochStorageStep[T any](ctx context.Context, step string, call func(co
 	}
 }
 
-// definiteEpochStorageError reports whether a storage step at takeover
-// failed in a way retrying cannot fix: the dataset is bound to another
-// installation or holds a newer or conflicting epoch (ErrFenced, which also
-// matches ErrConflict), the binding names another dataset, the request is
-// invalid, the dataset schema is incompatible, or the installation record is
-// missing.
 func definiteEpochStorageError(err error) bool {
 	return errors.Is(err, store.ErrConflict) ||
 		errors.Is(err, storagev1.ErrDatasetMismatch) ||
@@ -358,7 +317,6 @@ func definiteEpochStorageError(err error) bool {
 		errors.Is(err, store.ErrNotFound)
 }
 
-// ignoreDone returns nil for an error caused by ctx ending.
 func ignoreDone(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return nil
@@ -374,9 +332,6 @@ func isNilEpochDataset(dataset EpochDataset) bool {
 	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
-// WriteFence implements the storage client's fence source: it waits until
-// the dataset that serves contract has advanced to this controller's epoch
-// and returns the dataset's ID and the fence its writes carry.
 func (m *ControllerEpochManager) WriteFence(ctx context.Context, contract string) (string, store.ControllerEpochFence, error) {
 	if m == nil {
 		return "", store.ControllerEpochFence{}, fmt.Errorf("controller epoch manager is not initialized")

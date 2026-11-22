@@ -18,53 +18,26 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// scriptedStep is what a scripted provider call does.
 type scriptedStep int
 
 const (
-	// stepPass reaches the store and returns its outcome.
 	stepPass scriptedStep = iota
-	// stepLose commits in the store, then reports ErrOutcomeUnknown, as a
-	// lost response would.
 	stepLose
-	// stepLoseThenDown commits, reports ErrOutcomeUnknown, and makes the
-	// store unreachable for every later call, including ResolveOperation.
 	stepLoseThenDown
-	// stepUnknown reports ErrOutcomeUnknown without reaching the store.
 	stepUnknown
-	// stepUnavailable reports ErrUnavailable without reaching the store.
 	stepUnavailable
-	// stepRefuse reports ErrConflict without reaching the store, as a
-	// refused precondition would.
 	stepRefuse
-	// stepClockSkew reports ErrClockSkew without reaching the store.
 	stepClockSkew
-	// stepLoseThenRun commits, runs the method's hook once, and reports
-	// ErrOutcomeUnknown, as a lost response followed by another writer's
-	// change would.
 	stepLoseThenRun
-	// stepJobRevoked and stepCleanupChanged report a Task data fence that no
-	// longer holds without reaching the store, as a provider does when a
-	// retry carries a fence that a Job revocation or cleanup has moved.
 	stepJobRevoked
 	stepCleanupChanged
-	// stepStall never answers: it returns only when its context ends, as a
-	// provider call that stalls does.
 	stepStall
-	// stepUnavailableThenRun runs the method's hook once and reports
-	// ErrUnavailable without reaching the store.
 	stepUnavailableThenRun
-	// stepSlow reaches the store after slowAttempt, or returns when its
-	// context ends first.
 	stepSlow
 )
 
-// slowAttempt is how long a stepSlow call takes: longer than the fixture's
-// retry horizon.
 const slowAttempt = 600 * time.Millisecond
 
-// lossyStore wraps the SQLite store with scripted provider failures for the
-// writes these tests use, and records the envelope of every call.
 type lossyStore struct {
 	*sqlite.Store
 
@@ -138,7 +111,6 @@ func (s *lossyStore) intercept(ctx context.Context, method string, call func(con
 	return nil
 }
 
-// runHook runs the method's hook once.
 func (s *lossyStore) runHook(method string) {
 	s.mu.Lock()
 	hook := s.hooks[method]
@@ -214,8 +186,6 @@ func (s *lossyStore) SaveResult(ctx context.Context, namespace, taskName string,
 	})
 }
 
-// CreateSealedAgentExecutionSnapshot records the sealed request of every
-// attempt.
 func (s *lossyStore) CreateSealedAgentExecutionSnapshot(ctx context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
 	s.mu.Lock()
 	s.snapshots = append(s.snapshots, snapshot)
@@ -247,7 +217,6 @@ func (s *lossyStore) ResolveOperation(ctx context.Context, request storagev1.Res
 	return outcome, err
 }
 
-// staticFences serves one dataset and fence for every contract.
 type staticFences struct {
 	datasetID string
 	fence     storagev1.ControllerEpochFence
@@ -259,8 +228,6 @@ func (f staticFences) WriteFence(context.Context, string) (string, storagev1.Con
 
 var testFence = storagev1.ControllerEpochFence{Name: storagev1.DefaultControllerEpochName, Epoch: 1, HolderID: "controller-a"}
 
-// advanceTestDataset gives backend's dataset testFence's epoch and returns
-// its dataset ID.
 func advanceTestDataset(t *testing.T, backend *sqlite.Store, fence storagev1.ControllerEpochFence) string {
 	t.Helper()
 	info, err := backend.Describe(t.Context())
@@ -342,8 +309,6 @@ func message(content string) *store.Message {
 	return &store.Message{Namespace: "tenant", FromTask: "writer", ToTask: "reader", ParentTask: "parent", Content: content}
 }
 
-// requireRetriedWithOneEnvelope checks that every attempt of method carried
-// the same envelope.
 func requireRetriedWithOneEnvelope(t *testing.T, f *lossyFixture, method string, attempts int) {
 	t.Helper()
 	seen := f.lossy.seen(method)
@@ -357,8 +322,6 @@ func requireRetriedWithOneEnvelope(t *testing.T, f *lossyFixture, method string,
 	}
 }
 
-// A lost response after a committed write is retried with the same envelope
-// and returns the original outcome; the effect happens once.
 func TestLostResponseReturnsTheOriginalOutcome(t *testing.T) {
 	t.Run("SendMessage", func(t *testing.T) {
 		f := newLossyFixture(t)
@@ -425,7 +388,6 @@ func TestLostResponseReturnsTheOriginalOutcome(t *testing.T) {
 	})
 }
 
-// ErrUnavailable means nothing committed, so the same envelope is retried.
 func TestUnavailableWriteIsRetriedWithTheSameEnvelope(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnavailable, stepUnavailable)
@@ -438,9 +400,6 @@ func TestUnavailableWriteIsRetriedWithTheSameEnvelope(t *testing.T) {
 	}
 }
 
-// Every write carries the dataset and fence the fence source gives, a new
-// UUIDv7 operation ID, the digest of its arguments, the issue time and the
-// next sequence.
 func TestWriteEnvelopeFields(t *testing.T) {
 	f := newLossyFixture(t)
 	before := time.Now().UTC()
@@ -475,10 +434,6 @@ func TestWriteEnvelopeFields(t *testing.T) {
 	}
 }
 
-// When the store becomes unreachable after a write committed, the client
-// cannot settle it: the write returns ErrOutcomeUnknown, never success or
-// failure, and new writes to the dataset are refused until background
-// resolution finds the operation committed. Nothing is repeated.
 func TestUnsettledWriteBlocksTheDatasetUntilItIsResolved(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()
@@ -525,8 +480,6 @@ func TestUnsettledWriteBlocksTheDatasetUntilItIsResolved(t *testing.T) {
 	}
 }
 
-// An unknown outcome that did not commit is resolved as aborted, so a late
-// arrival of the same operation can never commit.
 func TestUnknownOutcomeThatDidNotCommitIsAborted(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()
@@ -535,8 +488,6 @@ func TestUnknownOutcomeThatDidNotCommitIsAborted(t *testing.T) {
 		f.lossy.plan("SaveResult", stepUnavailable)
 	}
 	err := f.client.SaveResult(ctx, "tenant", "task", []byte("result"))
-	// Nothing committed and transient failures ended the attempts, so the
-	// write can run again as a new operation, as after ErrUnavailable.
 	if !errors.Is(err, storagev1.ErrOperationAborted) || !errors.Is(err, storagev1.ErrUnavailable) ||
 		errors.Is(err, storagev1.ErrOutcomeUnknown) {
 		t.Fatalf("SaveResult error = %v, want ErrOperationAborted and ErrUnavailable, not an unknown outcome", err)
@@ -553,8 +504,6 @@ func TestUnknownOutcomeThatDidNotCommitIsAborted(t *testing.T) {
 	}
 }
 
-// A refusal after an attempt whose outcome is unknown settles only that
-// attempt, so the client resolves the operation before returning it.
 func TestRefusalAfterAnUnknownOutcomeIsResolved(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnknown, stepRefuse)
@@ -567,8 +516,6 @@ func TestRefusalAfterAnUnknownOutcomeIsResolved(t *testing.T) {
 	}
 }
 
-// Clock skew means the store is not ready to accept writes from this
-// controller.
 func TestClockSkewRefusalIsNotReady(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.fail("SaveResult", fmt.Errorf("%w: issued ahead of the store clock", storagev1.ErrClockSkew))
@@ -578,8 +525,6 @@ func TestClockSkewRefusalIsNotReady(t *testing.T) {
 	}
 }
 
-// A write whose context already carries an envelope belongs to its caller
-// and runs once with that envelope.
 func TestCallerEnvelopeRunsUnchanged(t *testing.T) {
 	f := newLossyFixture(t)
 	digest, err := storagev1.RequestDigest("SaveResult", "tenant", "task", []byte("result"))
@@ -600,7 +545,6 @@ func TestCallerEnvelopeRunsUnchanged(t *testing.T) {
 	}
 }
 
-// gatedFences opens every contract's fence once open is closed.
 type gatedFences struct {
 	open      chan struct{}
 	datasetID string
@@ -616,8 +560,6 @@ func (g gatedFences) WriteFence(ctx context.Context, _ string) (string, storagev
 	}
 }
 
-// A write waits for its dataset's fence, and is refused with ErrNotReady once
-// the wait passes.
 func TestWritesWaitForTheirFence(t *testing.T) {
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	if err != nil {
@@ -663,8 +605,6 @@ func TestWritesWaitForTheirFence(t *testing.T) {
 	}
 }
 
-// A method that takes its own fence carries that fence in its envelope, so a
-// caller holding a replaced fence is refused with ErrFenced, as before.
 func TestExplicitFenceIsTheEnvelopeFence(t *testing.T) {
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	if err != nil {
@@ -699,9 +639,6 @@ func TestExplicitFenceIsTheEnvelopeFence(t *testing.T) {
 	}
 }
 
-// Writes under a Task data fence carry a write envelope as well, against a
-// store that refuses writes without one. A write the fence refuses after the
-// Job's revocation is a definite refusal: it is not retried.
 func TestFencedTaskDataWritesRunUnderEnvelopes(t *testing.T) {
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	if err != nil {
@@ -749,8 +686,6 @@ func TestFencedTaskDataWritesRunUnderEnvelopes(t *testing.T) {
 	}
 }
 
-// A committed write with an unreadable result must not become a fresh write
-// after reauthorization. Its outcome is settled, so it blocks no dataset.
 func TestFencedRetryAfterTheFenceMovedKeepsTheResultUnknown(t *testing.T) {
 	for name, tc := range map[string]struct {
 		step scriptedStep
@@ -777,10 +712,6 @@ func TestFencedRetryAfterTheFenceMovedKeepsTheResultUnknown(t *testing.T) {
 	}
 }
 
-// The same rule against the provider: a SaveResult under a Task data fence
-// commits, its response is lost, and the Job is revoked before the retry.
-// The provider checks the fence before it replays the receipt, so the write
-// reports an unreadable result without inviting the caller to write again.
 func TestFencedRetryAfterRevocationKeepsTheResultUnknown(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()
@@ -809,10 +740,6 @@ func TestFencedRetryAfterRevocationKeepsTheResultUnknown(t *testing.T) {
 	}
 }
 
-// Any other refusal of the replay of a committed write, such as a stored
-// result the provider has since cleared, leaves the result unreadable: the
-// write returns ErrOutcomeUnknown, never the refusal, so a caller that
-// retries on a conflict does not write again.
 func TestRefusedReplayOfACommittedWriteIsUnknown(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepLose, stepRefuse, stepRefuse)
@@ -830,7 +757,6 @@ func TestConsumingReadLostResponseAndNamespaceCleanupDoesNotReexecute(t *testing
 			t.Fatal(err)
 		}
 	}
-	// A consuming read reaches the provider as ConsumeMessages.
 	f.lossy.hooks["ConsumeMessages"] = func() {
 		if err := f.client.DeleteResult(t.Context(), "tenant", "unrelated-task"); err != nil {
 			t.Errorf("advance the namespace cleanup fence: %v", err)
@@ -840,8 +766,6 @@ func TestConsumingReadLostResponseAndNamespaceCleanupDoesNotReexecute(t *testing
 	authorizations := 0
 	var consumed []store.Message
 	var err error
-	// Match the API's reauthorization loop and its conversion of provider
-	// errors to handler errors. A committed read must never become a new call.
 	for range 3 {
 		err = f.client.WithAuthorizedTaskDataAccess(t.Context(), "tenant", "", func(context.Context) ([]store.TaskJobIdentity, error) {
 			authorizations++
@@ -870,12 +794,6 @@ func TestConsumingReadLostResponseAndNamespaceCleanupDoesNotReexecute(t *testing
 	}
 }
 
-// A committed connector credential write whose sealed result the provider
-// cleared, because the Connection's custody was shredded after the commit,
-// cannot be read back: the provider refuses its replay with ErrConflict. The
-// write returns ErrOutcomeUnknown, not that conflict, so the client's commit
-// loop, which seals again after a conflict, sends no second write that
-// would store the credential again after the shred.
 func TestReplayOfAClearedSealedResultIsUnknown(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()
@@ -898,8 +816,6 @@ func TestReplayOfAClearedSealedResultIsUnknown(t *testing.T) {
 	if !errors.Is(err, storagev1.ErrOutcomeUnknown) || errors.Is(err, store.ErrConflict) {
 		t.Fatalf("PutConnectorCredential error = %v, want only ErrOutcomeUnknown", err)
 	}
-	// The first attempt, its retry and the replay after resolution carry one
-	// envelope: nothing was sealed and sent again.
 	requireRetriedWithOneEnvelope(t, f, "PutSealedConnectorCredential", 3)
 	if _, err := f.backend.GetSealedConnectorCredential(ctx, ref.ConnectionUID); !errors.Is(err, storagev1.ErrNotFound) {
 		t.Fatalf("credential after the shred = %v, want ErrNotFound", err)
@@ -909,10 +825,6 @@ func TestReplayOfAClearedSealedResultIsUnknown(t *testing.T) {
 	}
 }
 
-// The envelope is attached below the client's sealing step, so a sealed
-// write whose response is lost is retried with the same sealed request, and
-// the provider answers the retry from its receipt instead of refusing a
-// request whose fresh nonce would change its digest.
 func TestRetriedSealedWriteResendsTheSameSealedRequest(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()
@@ -940,9 +852,6 @@ func TestRetriedSealedWriteResendsTheSameSealedRequest(t *testing.T) {
 	}
 }
 
-// When a retry after an unknown outcome is refused and the outcome cannot be
-// resolved, the write's error matches only ErrOutcomeUnknown: the refusal
-// settled only that attempt, so it must not read as a definite failure.
 func TestUnsettledOutcomeHidesTheRefusalBehindIt(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnknown, stepRefuse)
@@ -963,11 +872,6 @@ func TestUnsettledOutcomeHidesTheRefusalBehindIt(t *testing.T) {
 	}
 }
 
-// Orka's callback protocols run through the client against a store that, as
-// in production, refuses contract writes without an envelope: scan ingestion
-// commits its computed writes as one conditional command, fenced task data
-// access writes through the client, and memory proposal application commits
-// the memory it authorized.
 func TestCallbackProtocolsRunAgainstAStrictStore(t *testing.T) {
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	if err != nil {
@@ -1022,11 +926,6 @@ func TestCallbackProtocolsRunAgainstAStrictStore(t *testing.T) {
 	}
 }
 
-// The retry horizon bounds a retry in flight: a provider call that stalls on
-// a retry ends when the horizon does, even with no caller deadline, and the
-// write goes to resolution because the stalled attempt may have committed.
-// Here it never reached the store, so resolution finds it aborted, and the
-// write is as safe to run again as after ErrUnavailable.
 func TestRetryHorizonEndsAStalledRetry(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnavailable, stepStall)
@@ -1047,9 +946,6 @@ func TestRetryHorizonEndsAStalledRetry(t *testing.T) {
 	}
 }
 
-// A caller deadline that comes before the retry horizon ends the retries
-// itself: a retry it ends returns the caller's context error, and is never
-// taken for one the horizon ended.
 func TestCallerDeadlineBeforeTheHorizonIsNotACap(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnavailable, stepStall)
@@ -1065,9 +961,6 @@ func TestCallerDeadlineBeforeTheHorizonIsNotACap(t *testing.T) {
 	}
 }
 
-// Retries end before the operation outlives its envelope: a first attempt
-// that fails once the operation is MaxOperationAge old, less MaxClockSkew,
-// is not retried, because a provider refuses an envelope that old.
 func TestRetriesEndWithTheOperationLifetime(t *testing.T) {
 	f := newLossyFixture(t)
 	var offset atomic.Int64
@@ -1081,8 +974,6 @@ func TestRetriesEndWithTheOperationLifetime(t *testing.T) {
 	requireRetriedWithOneEnvelope(t, f, "SaveResult", 1)
 }
 
-// The first attempt runs under the caller's deadline alone: a write that takes
-// longer than the retry horizon, such as a large transfer, is not cut short.
 func TestFirstAttemptIsNotBoundByTheRetryHorizon(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepSlow)
@@ -1098,9 +989,6 @@ func TestFirstAttemptIsNotBoundByTheRetryHorizon(t *testing.T) {
 	}
 }
 
-// A write whose call ends before its dataset's fence opens is only not
-// ready: it matches ErrNotReady, so callers retry it, and still matches the
-// context error.
 func TestWriteWhoseCallEndsBeforeItsFenceOpensIsNotReady(t *testing.T) {
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
 	if err != nil {
@@ -1120,8 +1008,6 @@ func TestWriteWhoseCallEndsBeforeItsFenceOpensIsNotReady(t *testing.T) {
 	}
 }
 
-// Clock skew that ends the attempts after an unknown outcome still reads as
-// not ready once resolution finds the operation aborted, so callers retry it.
 func TestClockSkewAfterAnUnknownOutcomeStaysNotReady(t *testing.T) {
 	f := newLossyFixture(t)
 	f.lossy.plan("SaveResult", stepUnknown, stepClockSkew)

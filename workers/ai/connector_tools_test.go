@@ -124,8 +124,6 @@ func TestConnectorToolProxyTimeoutFollowsTheTool(t *testing.T) {
 	if got := connectorToolProxyTimeout(slow); got != 8*time.Minute+connectorToolSettlementMargin {
 		t.Fatalf("slow tool = %v, want the tool timeout plus the settlement margin", got)
 	}
-	// A declared duration beyond the controller's maximum is clamped before
-	// the margin is added, so it can neither overflow nor outlast the call.
 	huge := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
 		Timeout: &metav1.Duration{Duration: time.Duration(math.MaxInt64 - 1)},
 	}}}
@@ -211,7 +209,6 @@ func TestExecuteConnectorToolRetriesUnavailableController(t *testing.T) {
 	stub.responses["/internal/v1/tasks/default/task-a/connector-tools/gh_search"] = func(w http.ResponseWriter) {
 		calls++
 		if calls < 3 {
-			// The Task's Job identity is not published yet.
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "task job identity is not yet published"})
 			return
@@ -258,9 +255,6 @@ func TestExecuteConnectorToolReportsOversizedControllerResponse(t *testing.T) {
 
 func TestExecuteConnectorToolTransportFailureIsNotAttempted(t *testing.T) {
 	stub := newConnectorControllerStub(t)
-	// The controller is unreachable: nothing was executed and the local
-	// approval must not be consumed, so an exact retry can go back through
-	// the controller's claim and effect ledger.
 	stub.server.Close()
 	_, err := stub.call("gh_search", json.RawMessage(`{"q":"x"}`), "call-1", "ap-1")
 	if err == nil || worker.ToolRequestWasAttempted(err) {
@@ -273,8 +267,6 @@ func TestConnectorBackedToolsHonorFrozenDigestsAsUpperBound(t *testing.T) {
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	// The policy moved out of connection mode after dispatch; the frozen
-	// digests still route the tool to the controller, which refuses it.
 	direct := &corev1alpha1.OutboundAccessPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "github-conn", Namespace: "default"},
 		Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}},
@@ -305,9 +297,6 @@ func TestConnectorBackedToolsHonorFrozenDigestsAsUpperBound(t *testing.T) {
 	}
 }
 
-// A transient policy read failure at startup is retried and then fails the
-// worker, instead of marking the tool connector-backed without the policy
-// spec its approval target needs.
 func TestConnectorBackedToolsRetriesThenFailsOnPolicyReadErrors(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -339,9 +328,6 @@ func TestConnectorBackedToolsRetriesThenFailsOnPolicyReadErrors(t *testing.T) {
 	}
 }
 
-// A Tool the Job dispatched as connector-backed is never silently dropped
-// at startup: a transient read is retried, and one that keeps failing fails
-// the worker instead of running with a reduced tool set.
 func TestLoadCustomToolsKeepsFrozenConnectorTools(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -372,14 +358,12 @@ func TestLoadCustomToolsKeepsFrozenConnectorTools(t *testing.T) {
 	if _, err := loadCustomTools(context.Background(), c, "default", []string{"gh_search"}); err == nil {
 		t.Fatal("a frozen connector tool that stays unreadable must fail startup")
 	}
-	// A frozen tool that was deleted after dispatch fails startup as well.
 	reads.Store(0)
 	t.Setenv(workerenv.ConnectorToolDigests, `{"gh_missing":"digest-b"}`)
 	if _, err := loadCustomTools(context.Background(), c, "default", []string{"gh_missing"}); err == nil {
 		t.Fatal("a frozen connector tool that no longer exists must fail startup")
 	}
 	reads.Store(-1000)
-	// A tool the Job did not freeze is still skipped with a warning.
 	t.Setenv(workerenv.ConnectorToolDigests, "")
 	loaded, err = loadCustomTools(context.Background(), c, "default", []string{"gh_search"})
 	if err != nil || loaded["gh_search"] != nil {
@@ -387,10 +371,6 @@ func TestLoadCustomToolsKeepsFrozenConnectorTools(t *testing.T) {
 	}
 }
 
-// TestExecuteConnectorToolDoesNotFollowRedirectsOrProxies covers the default
-// client: a redirect from the controller URL is not followed (the worker's
-// ServiceAccount token never reaches another host), and inherited proxy
-// settings are ignored.
 func TestExecuteConnectorToolDoesNotFollowRedirectsOrProxies(t *testing.T) {
 	var elsewhere atomic.Int32
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -420,10 +400,6 @@ func TestExecuteConnectorToolDoesNotFollowRedirectsOrProxies(t *testing.T) {
 	}
 }
 
-// TestConnectorApprovalTargetTreatsEmptyArgumentsAsTheEmptyObject covers an
-// approval-required connector tool called with no arguments: the controller
-// executes and digests the call as `{}`, so the worker's approval target is
-// built from the same bytes and the approval matches.
 func TestConnectorApprovalTargetTreatsEmptyArgumentsAsTheEmptyObject(t *testing.T) {
 	connector := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{
 		Name: "gh_write", Annotations: map[string]string{connectorBackedToolAnnotation: connectorBackedToolValue},
@@ -434,16 +410,12 @@ func TestConnectorApprovalTargetTreatsEmptyArgumentsAsTheEmptyObject(t *testing.
 			t.Fatalf("connector target args for %q = %q err = %v, want {}", empty, got, err)
 		}
 	}
-	// A tool the worker executes itself keeps its existing target.
 	local := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "local"}}
 	if got, err := approvalTargetArguments(nil, local); err != nil || len(got) != 0 {
 		t.Fatalf("local target args = %q err = %v, want unchanged", got, err)
 	}
 }
 
-// TestDecodeConnectorToolResponseReadsTheErrorEnvelope covers the API's
-// shared error envelope: the worker shows the controller's message rather
-// than the raw JSON body, and a 502 is still reported as attempted.
 func TestDecodeConnectorToolResponseReadsTheErrorEnvelope(t *testing.T) {
 	envelope := []byte(`{"error":{"code":502,"message":"connector tool \"gh_write\": upstream refused"}}`)
 	_, err := decodeConnectorToolResponse("gh_write", http.StatusBadGateway, envelope)

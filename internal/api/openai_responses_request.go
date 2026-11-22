@@ -16,8 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 )
 
-// ResponsesRequest is the stateless, text-only subset served by Orka. Unknown
-// fields fail closed so a client cannot mistake ignored state for saved history.
 type ResponsesRequest struct {
 	Model              string               `json:"model"`
 	Include            []string             `json:"include,omitempty"`
@@ -102,7 +100,6 @@ func parseResponsesRequest(body []byte) (*ResponsesRequest, *llm.CompletionReque
 	if req.Store == nil || *req.Store {
 		return nil, nil, responsesInvalid("store", "Responses requires store:false; history must be supplied by the client")
 	}
-	// Even null is rejected: these fields are not part of the stateless contract.
 	if len(req.PreviousResponseID) != 0 {
 		return nil, nil, responsesInvalid("previous_response_id", "previous_response_id is unsupported; include history in input")
 	}
@@ -304,8 +301,6 @@ func appendResponsesMessage(messages []llm.Message, item responsesInputItem, has
 	if err != nil {
 		return nil, err
 	}
-	// Keep text and function items distinct so Responses providers preserve
-	// the input order. Providers with turn-based formats normalize at their edge.
 	messages = append(messages, llm.Message{Role: role, Content: content})
 
 	return messages, nil

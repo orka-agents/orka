@@ -17,15 +17,9 @@ type compatCoordinatorSetup struct {
 	Namespace           string
 	ToolUseAction       string
 	AuthorizationConfig ContextTokenAuthorizationConfig
-	// ConnectorsEnabled mirrors --connectors-enabled; without it the
-	// coordinator never offers list_connections.
-	ConnectorsEnabled bool
+	ConnectorsEnabled   bool
 }
 
-// prepareCompatCoordinatorTools mutates req for Orka coordinator mode and
-// reports whether coordinator tools are enabled for this request. Protocol
-// adapters keep their own error mapping; this module owns the shared mutation
-// order so OpenAI and Anthropic do not drift.
 func prepareCompatCoordinatorTools(
 	c fiber.Ctx,
 	req *llm.CompletionRequest,

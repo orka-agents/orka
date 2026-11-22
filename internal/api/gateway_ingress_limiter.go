@@ -22,17 +22,6 @@ const (
 	gatewayIngressClientTTL   = 10 * time.Minute
 )
 
-// GitHub sign-in spends the App's GitHub rate limit, which renewal and
-// invites share, typically 5,000 requests an hour. One sign-in makes at most
-// four App-authenticated calls: it checks the submitted token, the token its
-// refresh token yields, and the token custody already holds, and revokes a
-// minted token it does not keep. The global rate allows at most 900 sign-ins,
-// 3,600 such calls, an hour, plus its burst, however many clients call.
-// Clients are told apart by address, and behind an Ingress every sign-in
-// comes from the proxy's: one client's limit lets a team sign in together,
-// 20 at once and 12 a minute after, and stops a single source from using
-// the whole of the global rate. Session renewals, which make one such call,
-// share the limit, keyed by the person.
 const (
 	githubSignInGlobalRate  = rate.Limit(0.25)
 	githubSignInGlobalBurst = 30
@@ -107,10 +96,6 @@ func (l *gatewayIngressLimiter) Allow(key string, now time.Time) bool {
 	return entry.limiter.AllowN(now, 1)
 }
 
-// AllowClientFirst is Allow that spends global capacity only on a request
-// its client's limit admits: a client over its own limit cannot drain what
-// every other client shares. A request the global limit then refuses gives
-// its client's token back.
 func (l *gatewayIngressLimiter) AllowClientFirst(key string, now time.Time) bool {
 	if l == nil {
 		return false

@@ -26,8 +26,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// This opt-in test runs inside the pinned Codex runtime image. It uses only
-// local scripted inference and newly supplied test credentials.
 func TestPinnedNativeCodexACPRoundTrip(t *testing.T) {
 	if os.Getenv("ORKA_NATIVE_CODEX_TEST") != "1" {
 		t.Skip("requires the pinned Codex runtime image and ORKA_NATIVE_CODEX_TEST=1")
@@ -245,8 +243,6 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 		t.Fatal(err)
 	}
 	if intent == harnessv2.WorkspaceIntentWrite {
-		// Verify bytes through the uploaded delta below. The supervisor has no
-		// DAC_OVERRIDE and cannot directly read this child-owned private tree.
 		if deltaResponse.Delta.State != harnessv2.WorkspaceDeltaPrepared || deltaResponse.Delta.ChangedFileCount != 1 || deltaResponse.Delta.EntryCount != 1 {
 			t.Fatalf("native write-intent continuation did not prepare its publishable delta: %+v", deltaResponse.Delta)
 		}
@@ -395,8 +391,6 @@ func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent
 	}
 }
 
-// This fixture stores the actual delta bytes and returns their content-addressed
-// receipt. It exercises the production uploader without a forge or live model.
 func pinnedNativeArtifactUploader(t *testing.T, marker string) (*RemoteArtifactUploader, func(harnessv2.ArtifactReference)) {
 	t.Helper()
 	var mu sync.Mutex

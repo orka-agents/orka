@@ -200,8 +200,6 @@ func TestGatewayResourceListsUseAPIReader(t *testing.T) {
 	}
 }
 
-// continueRejectingReader answers every list the way the API server answers
-// an unusable continue token.
 type continueRejectingReader struct {
 	client.Reader
 	err error

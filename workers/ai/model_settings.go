@@ -25,7 +25,6 @@ func parseModelSettings(workerEnv workerenv.AIWorkerEnv) (modelSettings, error) 
 	if workerEnv.Temperature != "" {
 		temperature, err := strconv.ParseFloat(workerEnv.Temperature, 64)
 		if err != nil || math.IsNaN(temperature) || math.IsInf(temperature, 0) || temperature < 0 || temperature > 2 {
-			// Parsing errors include the raw input, which must not enter worker logs or events.
 			return modelSettings{}, fmt.Errorf("%s must be a finite number between 0 and 2", workerenv.AITemperature)
 		}
 		settings.temperature = temperature
@@ -36,7 +35,6 @@ func parseModelSettings(workerEnv workerenv.AIWorkerEnv) (modelSettings, error) 
 		if err != nil {
 			return modelSettings{}, fmt.Errorf("%s must be a signed 32-bit integer", workerenv.AIMaxTokens)
 		}
-		// Preserve the legacy default for omitted and non-positive Agent output caps.
 		if maxTokens > 0 {
 			settings.maxTokens = int(maxTokens)
 		}

@@ -13,9 +13,6 @@ import (
 
 var errACPMCPAuthorityUnavailable = errors.New("MCP authority could not be read")
 
-// Mark failures at the read boundary, where an unavailable backend can still be
-// distinguished from the identity and policy checks that consume its result.
-// A missing or invalid record is definitive; an unreadable one is not.
 func acpMCPAuthorityReadError(err error) error {
 	if err == nil || apierrors.IsNotFound(err) || errors.Is(err, store.ErrNotFound) ||
 		errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrValidation) {

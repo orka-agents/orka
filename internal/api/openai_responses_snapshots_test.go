@@ -113,7 +113,7 @@ func TestResponsesProductionPartSnapshots(t *testing.T) {
 						switch mode {
 						case "done-only":
 							events = append(events, event(kind, want, 0))
-							delete(response, "output") // A compatible terminal carries only outcome/usage.
+							delete(response, "output")
 						case "prefix", "implicit-part":
 							events = append(events, event("response.output_text.delta", "ans", 0), event(kind, want, 0))
 							if mode == "implicit-part" {
@@ -124,7 +124,6 @@ func TestResponsesProductionPartSnapshots(t *testing.T) {
 						case "duplicates":
 							events = append(events, event(kind, want, 0), event(kind, want, 0), event("response.output_text.done", want, 0), event("response.content_part.done", want, 0))
 						case "two-parts", "reverse-parts", "same-aggregate-conflict":
-							// Build parts independently of whether the event carries text or a part.
 							item["content"] = []any{snapshotTextEvent("response.content_part.done", "a", 0, indexed)["part"], snapshotTextEvent("response.content_part.done", "bc", 1, indexed)["part"]}
 							events = append(events, event(kind, "a", 0), event(kind, "bc", 1))
 							if mode == "reverse-parts" {
@@ -338,8 +337,6 @@ func TestResponsesProductionCachedStreamNotFound(t *testing.T) {
 	require.EqualValues(t, 2, completions.Load(), "cached probe followed by exactly one completion retry")
 }
 
-// The terminal snapshot may omit status metadata, but cannot erase an
-// explicitly unfinished function item that arrived earlier in the stream.
 func TestResponsesProductionFunctionItemStatus(t *testing.T) {
 	for _, status := range []string{"", "completed", "incomplete", "in_progress"} {
 		for _, terminalStatus := range []string{"", "completed"} {

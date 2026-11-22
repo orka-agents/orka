@@ -54,10 +54,6 @@ var (
 	ErrACPUpgradeDrainEpochLost = errors.New("controller epoch changed during ACP planned upgrade drain")
 )
 
-// ACPAdmissionGate is the process-local first barrier for new ACP demand. A
-// planned drain closes it before any RuntimePool mutation. Callers must also
-// check it inside the final RuntimePool reservation CAS so an admission that
-// raced an earlier queue scan cannot cross the shutdown boundary.
 type ACPAdmissionGate struct {
 	mu       sync.RWMutex
 	closed   bool
@@ -111,9 +107,6 @@ func (g *ACPAdmissionGate) Closed() (bool, string, time.Time) {
 	return g.closed, g.reason, g.closedAt
 }
 
-// ACPUpgradeDrainOptions is shared by the normal controller process and the
-// same-binary preStop trigger mode. The trigger listener is deliberately
-// loopback-only; the preStop child shares the Pod network namespace.
 type ACPUpgradeDrainOptions struct {
 	BindAddress       string
 	Timeout           time.Duration
@@ -135,8 +128,6 @@ func DefaultACPUpgradeDrainOptions() ACPUpgradeDrainOptions {
 	}
 }
 
-// BindFlags registers all flags required by cmd/main.go. TriggerURL is empty in
-// the long-running controller and non-empty only in the preStop child process.
 func (o *ACPUpgradeDrainOptions) BindFlags(fs *flag.FlagSet) {
 	if o == nil || fs == nil {
 		return
@@ -162,27 +153,20 @@ func (o *ACPUpgradeDrainOptions) BindFlags(fs *flag.FlagSet) {
 	fs.DurationVar(&o.TriggerTimeout, "acp-upgrade-drain-trigger-timeout", o.TriggerTimeout, "Timeout for the preStop child waiting for the running controller drain result.")
 }
 
-// ACPUpgradeDrainEpochSource supplies the epoch already acquired after
-// controller-runtime leader election.
 type ACPUpgradeDrainEpochSource interface {
 	CurrentFence(context.Context) (store.ControllerEpochFence, error)
 }
 
-// ACPUpgradeDrainOutboxBarrier must report all Pending or Delivering outbox
-// records, including records whose retry availability is in the future.
 type ACPUpgradeDrainOutboxBarrier interface {
 	CountUnsettledOutboxProjections(context.Context) (int64, error)
 }
 
-// ACPUpgradeDrainOutboxBarrierFunc adapts a function for store-specific wiring.
 type ACPUpgradeDrainOutboxBarrierFunc func(context.Context) (int64, error)
 
 func (f ACPUpgradeDrainOutboxBarrierFunc) CountUnsettledOutboxProjections(ctx context.Context) (int64, error) {
 	return f(ctx)
 }
 
-// ACPUpgradeDrainBarrierSnapshot is the durable work outside RuntimePool
-// supervisor state that must settle before a planned leader handoff.
 type ACPUpgradeDrainBarrierSnapshot struct {
 	UnsettledOutboxProjections int64 `json:"unsettledOutboxProjections"`
 	NonterminalPromptAttempts  int64 `json:"nonterminalPromptAttempts"`
@@ -196,24 +180,16 @@ func (s ACPUpgradeDrainBarrierSnapshot) Quiescent() bool {
 		s.ActiveSessionControls == 0 && s.NonterminalPublications == 0 && s.NonterminalExternalEffects == 0
 }
 
-// ACPUpgradeDrainBarrierObserver reads the publication, external-effect, and
-// transactional-outbox barriers without mutating or claiming them.
 type ACPUpgradeDrainBarrierObserver interface {
 	ObserveACPUpgradeDrainBarriers(context.Context) (ACPUpgradeDrainBarrierSnapshot, error)
 }
 
-// ACPUpgradeDrainBarrierObserverFunc adapts a function for tests or a composite
-// store implementation during the Kubernetes control-store cutover.
 type ACPUpgradeDrainBarrierObserverFunc func(context.Context) (ACPUpgradeDrainBarrierSnapshot, error)
 
 func (f ACPUpgradeDrainBarrierObserverFunc) ObserveACPUpgradeDrainBarriers(ctx context.Context) (ACPUpgradeDrainBarrierSnapshot, error) {
 	return f(ctx)
 }
 
-// KubernetesACPUpgradeDrainBarrierObserver treats Kubernetes PromptAttempt,
-// RuntimeSessionControl, Publication, and ExternalEffect records as
-// authoritative. It samples the SQLite-backed outbox before and after those
-// sinks so a Delivering record cannot disappear into newly projected work.
 type KubernetesACPUpgradeDrainBarrierObserver struct {
 	Reader    client.Reader
 	Outbox    ACPUpgradeDrainOutboxBarrier
@@ -269,9 +245,6 @@ func (o *KubernetesACPUpgradeDrainBarrierObserver) ObserveACPUpgradeDrainBarrier
 	}
 	for i := range effects.Items {
 		if emptyRuntimePoolBootEvidenceReservation(&effects.Items[i]) {
-			// Boot evidence only records a local observation. An interrupted
-			// controller can leave its reservation empty; the writer resumes it,
-			// and it never stands for in-flight external work.
 			continue
 		}
 		switch store.ExternalEffectState(effects.Items[i].Status.State) {
@@ -334,7 +307,6 @@ const (
 	ACPUpgradeDrainFailed    ACPUpgradeDrainPhase = "Failed"
 )
 
-// ACPUpgradeDrainSnapshot combines exact RuntimePool and durable-store barriers.
 type ACPUpgradeDrainSnapshot struct {
 	ObservedPools              int                            `json:"observedPools"`
 	PoolsAwaitingQuiescence    int                            `json:"poolsAwaitingQuiescence"`
@@ -352,11 +324,6 @@ type ACPUpgradeDrainSnapshot struct {
 }
 
 func (s ACPUpgradeDrainSnapshot) Quiescent() bool {
-	// Durable Queued+NotRequested attempts are safe to resume under the next
-	// controller epoch. QueuedTasks remains diagnostic, while finalization is
-	// fenced by the authoritative PromptAttempt, SessionControl, Publication,
-	// ExternalEffect, and outbox barriers instead of a potentially stale pool
-	// summary after dispatcher admission closes.
 	return s.PoolsAwaitingQuiescence == 0 &&
 		s.ReservedSessions == 0 && s.ReservedPrompts == 0 && s.ReservationRecords == 0 &&
 		s.RunningPrompts == 0 && s.ResidentSessions == 0 &&
@@ -365,7 +332,6 @@ func (s ACPUpgradeDrainSnapshot) Quiescent() bool {
 		s.Barriers.Quiescent()
 }
 
-// ACPUpgradeDrainStatus is safe to expose through readiness and diagnostics.
 type ACPUpgradeDrainStatus struct {
 	Phase           ACPUpgradeDrainPhase    `json:"phase"`
 	ControllerEpoch int64                   `json:"controllerEpoch,omitempty"`
@@ -384,10 +350,6 @@ const (
 	ACPUpgradeDrainMarkerTimedOut  ACPUpgradeDrainMarkerState = "TimedOut"
 )
 
-// ACPUpgradeDrainMarker is the durable proof used by the next leader. Only a
-// Completed marker for the exact previous epoch permits planned-takeover
-// recovery; missing, Intent, TimedOut, malformed, or stale markers are
-// deliberately classified as unplanned takeover.
 type ACPUpgradeDrainMarker struct {
 	Version             string                     `json:"version"`
 	State               ACPUpgradeDrainMarkerState `json:"state"`
@@ -402,9 +364,6 @@ type ACPUpgradeDrainMarker struct {
 	Snapshot            ACPUpgradeDrainSnapshot    `json:"snapshot"`
 }
 
-// ACPUpgradeDrainCoordinator runs only on the elected leader. It exposes a
-// loopback trigger for a same-binary preStop child and retains leadership while
-// RuntimePools and durable finalization barriers settle.
 type ACPUpgradeDrainCoordinator struct {
 	Client              client.Client
 	APIReader           client.Reader
@@ -414,7 +373,7 @@ type ACPUpgradeDrainCoordinator struct {
 	Barriers            ACPUpgradeDrainBarrierObserver
 	SupervisorClient    RuntimePoolSupervisorClient
 	HTTPClient          *http.Client
-	SubstrateRouter     *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
+	SubstrateRouter     *RuntimePoolSubstrateRouter
 	ControllerNamespace string
 	Options             ACPUpgradeDrainOptions
 	Now                 func() time.Time
@@ -517,8 +476,6 @@ func writeACPUpgradeDrainHTTPStatus(w http.ResponseWriter, statusCode int, statu
 	_ = json.NewEncoder(w).Encode(status)
 }
 
-// Trigger starts the same drain path used by the preStop endpoint and waits for
-// completion, timeout, epoch loss, or caller cancellation.
 func (c *ACPUpgradeDrainCoordinator) Trigger(ctx context.Context) error {
 	if err := c.initialize(); err != nil {
 		return err
@@ -1374,10 +1331,6 @@ func (c *ACPUpgradeDrainCoordinator) failStatus(err error) {
 	c.status = status
 }
 
-// RunACPUpgradeDrainTriggerMode is the single early-entrypoint hook used by
-// cmd/main.go after flag parsing. It returns handled=true whenever TriggerURL is
-// set, so the preStop child must exit instead of opening the store or starting a
-// second controller manager.
 func RunACPUpgradeDrainTriggerMode(ctx context.Context, options ACPUpgradeDrainOptions) (handled bool, err error) {
 	if strings.TrimSpace(options.TriggerURL) == "" {
 		return false, nil
@@ -1390,9 +1343,6 @@ func RunACPUpgradeDrainTriggerMode(ctx context.Context, options ACPUpgradeDrainO
 	return true, RequestACPUpgradeDrain(triggerCtx, options.TriggerURL)
 }
 
-// RequestACPUpgradeDrain is the distroless-compatible preStop helper. cmd/main
-// invokes it in trigger-only mode from a second /manager process; no shell,
-// curl, wget, Service, or externally reachable drain endpoint is required.
 func RequestACPUpgradeDrain(ctx context.Context, endpoint string) error {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || parsed.Scheme != urlSchemeHTTP || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {

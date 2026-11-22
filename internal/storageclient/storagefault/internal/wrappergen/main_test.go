@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// TestGeneratedWrappersAreCurrent fails when wrappers_gen.go differs from the
-// generator's output, for example after a provider interface gained a method.
-// The package builds without the generated file, so the test still runs while
-// the file is out of date.
 func TestGeneratedWrappersAreCurrent(t *testing.T) {
 	want, err := generate()
 	if err != nil {

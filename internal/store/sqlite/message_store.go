@@ -20,17 +20,11 @@ var _ store.MessageStore = (*Store)(nil)
 
 const initialMessageBatchCapacity = 32
 
-// sentMessage is the identity SendMessage assigns. The operation receipt keeps
-// only this, not the message's content, so the content leaves the store with
-// the message when Task cleanup deletes it.
 type sentMessage struct {
 	ID        int64
 	CreatedAt time.Time
 }
 
-// SendMessage stores a new inter-agent message and, once it has committed,
-// writes its assigned ID and creation time back into msg. A caller's creation
-// time is kept; a zero one gets the store clock.
 func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
 	if msg == nil {
 		return store.ValidationErrorf("message is required")
@@ -76,17 +70,10 @@ func (s *Store) sendMessageUnfenced(ctx context.Context, msg store.Message) (sen
 	return sentMessage{ID: id, CreatedAt: createdAt}, nil
 }
 
-// GetMessages implements Orka's store.MessageStore for callers that use the
-// store directly: it consumes the oldest batch of the inbox when markRead is
-// set and lists it otherwise.
 func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
 	return store.ReadMessages(ctx, s, namespace, taskName, parentTask, markRead)
 }
 
-// ListUnreadMessages returns up to limit of the oldest unread messages in a
-// Task's inbox, including broadcasts to its siblings, without marking them.
-// parentTask scopes both direct and broadcast delivery to one coordinator
-// family.
 func (s *Store) ListUnreadMessages(ctx context.Context, namespace, taskName, parentTask string, limit int) ([]store.Message, error) {
 	limit, err := storagev1.MessageBatchLimit(limit)
 	if err != nil {
@@ -101,12 +88,6 @@ func (s *Store) ListUnreadMessages(ctx context.Context, namespace, taskName, par
 	return messages, err
 }
 
-// ConsumeMessages returns up to request.Limit of the oldest unread messages in
-// a Task's inbox and marks exactly those messages read, by ID. The operation
-// receipt keeps only the IDs. A replay reads those messages again in its own
-// transaction, after the Task data fence check, so it leaves out a message
-// deleted since and returns nothing past a cleanup or Job revocation the
-// fence detects.
 func (s *Store) ConsumeMessages(ctx context.Context, request store.ConsumeMessagesRequest) ([]store.Message, error) {
 	limit, err := storagev1.MessageBatchLimit(request.Limit)
 	if err != nil {
@@ -151,9 +132,6 @@ func (s *Store) consumeMessagesUnfenced(ctx context.Context, request store.Consu
 	if err != nil {
 		return nil, err
 	}
-	// Mark exactly the selected messages, by ID, so a message the selection
-	// did not return is never marked, whatever the isolation level. The batch
-	// limit bounds the placeholders.
 	if len(messages) > 0 {
 		args := make([]any, 0, len(messages)+1)
 		args = append(args, request.Namespace)
@@ -209,11 +187,6 @@ func selectUnreadMessages(
 	return scanMessages(rows, namespace)
 }
 
-// selectMessagesByID reads the messages a consuming read of request's inbox
-// returned, in ID order. A message deleted since is left out. They are
-// returned as that read returned them, without their read flag. The inbox
-// predicate keeps the replay to the reader's own inbox even if a later message
-// were given a deleted message's ID.
 func selectMessagesByID(
 	ctx context.Context, executor taskDataExecutor, request store.ConsumeMessagesRequest, ids []int64,
 ) ([]store.Message, error) {
@@ -259,7 +232,6 @@ func scanMessages(rows *sql.Rows, namespace string) ([]store.Message, error) {
 	return messages, nil
 }
 
-// DeleteTaskMessages deletes all messages involving a task (sent or received).
 func (s *Store) DeleteTaskMessages(ctx context.Context, namespace, taskName string) error {
 	return writeOperationErr(ctx, s, "DeleteTaskMessages", func(ctx context.Context) error {
 		return s.deleteTaskMessagesWrite(ctx, namespace, taskName)
@@ -273,7 +245,6 @@ func (s *Store) deleteTaskMessagesWrite(ctx context.Context, namespace, taskName
 	)
 }
 
-// DeleteParentMessages deletes all messages for children of a parent task.
 func (s *Store) DeleteParentMessages(ctx context.Context, namespace, parentTask string) error {
 	return writeOperationErr(ctx, s, "DeleteParentMessages", func(ctx context.Context) error {
 		return s.deleteParentMessagesWrite(ctx, namespace, parentTask)

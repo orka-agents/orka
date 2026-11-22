@@ -25,9 +25,6 @@ type SubstrateDiagnostics struct {
 	NativeLifecyclePreconditions bool                       `json:"nativeLifecyclePreconditions"`
 }
 
-// DiagnoseSubstrate is read-only. It reports configuration and observed native
-// API compatibility separately from the adapter's implemented capabilities.
-// Execution and router stream timeouts require the bundled conformance suite.
 func DiagnoseSubstrate(ctx context.Context, cfg SubstrateConfig, templateName string) SubstrateDiagnostics {
 	report := SubstrateDiagnostics{Ready: true, AdapterCapabilities: []string{"direct-exec", "mcp-actors", "acp-runtime", "data-only-suspend", "checkpoint-export", "cold-restore", "explicit-recovery"}}
 	check := func(area string, ready bool, reason string) {
@@ -112,8 +109,6 @@ func DiagnoseSubstrate(ctx context.Context, cfg SubstrateConfig, templateName st
 	return report
 }
 
-// Substrate v1 workers report the gVisor class through their registered
-// sandbox runtimes; templates no longer carry a sandbox class.
 func substrateWorkerRunsGVisor(classes []*ateapipb.WorkerSandboxClass) bool {
 	if len(classes) == 0 {
 		return false
@@ -126,15 +121,6 @@ func substrateWorkerRunsGVisor(classes []*ateapipb.WorkerSandboxClass) bool {
 	return true
 }
 
-// Upstream workers accept up to --max-actors Actors, which no WorkerPool field
-// sets. Placement books each Actor against worker capacity, so a worker whose
-// CPU or memory cannot hold a second template-sized Actor hosts one.
-//
-// What placement books is the template's limits plus the actor_overhead of the
-// worker runtime the Actor runs under: a fixed amount of memory and an amount
-// per GiB of the memory limit. An Actor cold-boots under a class's default
-// runtime and restores under the restorable runtime that matches its snapshot,
-// so the worker must hold exactly one Actor under each runtime it reports.
 func substrateWorkerFitsExactlyOne(worker *ateapipb.WorkerStatus, limits *ateapipb.Resources) bool {
 	overheads := []*ateapipb.RuntimeOverhead{}
 	for _, class := range worker.GetSandboxClasses() {
@@ -144,7 +130,6 @@ func substrateWorkerFitsExactlyOne(worker *ateapipb.WorkerStatus, limits *ateapi
 		}
 	}
 	if len(overheads) == 0 {
-		// A runtime that reports no overhead has none.
 		overheads = append(overheads, nil)
 	}
 	for _, overhead := range overheads {
@@ -162,15 +147,9 @@ func substrateCapacityFitsExactlyOne(capacity *ateapipb.WorkerResources, limits 
 		capacity.GetCpuMillicores() < cpu || capacity.GetMemoryBytes() < memory {
 		return false
 	}
-	// A second Actor needs twice the booking; compare by subtraction so a
-	// large booking cannot overflow.
 	return capacity.GetActors() == 1 || capacity.GetCpuMillicores()-cpu < cpu || capacity.GetMemoryBytes()-memory < memory
 }
 
-// substrateActorMemoryBooking mirrors upstream placement: the memory limit,
-// plus the runtime's fixed overhead, plus its per-GiB overhead scaled to the
-// limit and rounded down to a byte. It reports false for a negative input or a
-// sum that does not fit an int64, which placement treats as not fitting.
 func substrateActorMemoryBooking(limit int64, overhead *ateapipb.RuntimeOverhead) (int64, bool) {
 	fixed, rate := overhead.GetMemoryBytes(), overhead.GetMemoryBytesPerGib()
 	if limit < 0 || fixed < 0 || rate < 0 {

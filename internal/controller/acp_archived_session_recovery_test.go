@@ -78,8 +78,6 @@ func TestACPDispatcherRestartIsolatesAndRetriesBlockedArchives(t *testing.T) {
 			if !reflect.DeepEqual(before, captureArchivedSessionEvidence(t, fixture, cleanup, tasks)) {
 				t.Fatal("isolated recovery changed durable evidence or terminal Task status")
 			}
-			// Model a transient read failure clearing without restarting the
-			// dispatcher. The ordinary scan must complete the blocked epoch.
 			broken.err = nil
 			var listed corev1alpha1.TaskList
 			if err := fixture.client.List(fixture.ctx, &listed); err != nil {

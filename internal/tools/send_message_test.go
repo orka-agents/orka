@@ -171,7 +171,6 @@ func TestSendMessageTool_Execute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clear env vars first
 			for _, k := range []string{envOrkaTaskName, envOrkaTaskNamespace, envOrkaParentTask, envOrkaControllerURL} {
 				t.Setenv(k, "")
 			}

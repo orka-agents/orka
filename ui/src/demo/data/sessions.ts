@@ -3,16 +3,11 @@ import { currentRuntimePool } from './runtimes'
 import { ago, digest, uid } from '../shared'
 import { AGENTS, SESSIONS, type AgentKey } from '../world'
 
-// Session transcripts for world.ts SESSIONS. A transcript is JSONL of chat
-// messages; session event streams are built from the session's tasks.
-
 export interface SessionFixture {
   name: string
   agent: AgentKey
-  /** minutes before page load the session started */
   createdAgo: number
   messages: TranscriptMessage[]
-  /** ACP sessions carry an execution-control record. */
   acp?: { runtime: string; generation: number }
 }
 
@@ -107,7 +102,6 @@ export const SESSION_FIXTURES: SessionFixture[] = [
   },
 ]
 
-/** Execution-control record for an ACP-backed session. */
 export function sessionExecutionControl(name: string, acp: NonNullable<SessionFixture['acp']>, createdAgo: number) {
   const sessionUID = uid(`session:${name}`)
   const pool = currentRuntimePool(acp.runtime)

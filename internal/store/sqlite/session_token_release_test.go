@@ -34,7 +34,6 @@ func TestReleaseLockWithTokenUsageCountsOnce(t *testing.T) {
 	if err := s.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "default", Name: "counted", OwnerName: "owner", OwnerUID: "owner-uid", Now: time.Now().UTC()}, 150, 25); err != nil {
 		t.Fatalf("ReleaseLockWithTokenUsage: %v", err)
 	}
-	// A replay after the release matches no owner and adds nothing.
 	if err := s.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "default", Name: "counted", OwnerName: "owner", OwnerUID: "owner-uid", Now: time.Now().UTC()}, 150, 25); err != nil {
 		t.Fatalf("replayed ReleaseLockWithTokenUsage: %v", err)
 	}
@@ -42,7 +41,6 @@ func TestReleaseLockWithTokenUsageCountsOnce(t *testing.T) {
 		t.Fatalf("tokens/owner = %d/%d/%q, want 150/25 and released", in, out, owner)
 	}
 
-	// Another owner's release changes nothing.
 	create("other-owner")
 	if err := s.ReleaseLockWithTokenUsage(ctx, store.SessionOwnerWrite{Namespace: "default", Name: "other-owner", OwnerName: "intruder", OwnerUID: "intruder-uid", Now: time.Now().UTC()}, 10, 10); err != nil {
 		t.Fatalf("ReleaseLockWithTokenUsage(intruder): %v", err)
@@ -51,7 +49,6 @@ func TestReleaseLockWithTokenUsageCountsOnce(t *testing.T) {
 		t.Fatalf("tokens/owner = %d/%d/%q, want 0/0 and still held by owner", in, out, owner)
 	}
 
-	// An expired lock is released without counting its usage.
 	create("expired")
 	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET active_task_expires_at = ? WHERE namespace = ? AND name = ?`,
 		now.Add(-time.Minute), "default", "expired"); err != nil {

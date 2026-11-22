@@ -62,8 +62,6 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 		_, _ = utils.Run(cmd)
 	})
 
-	// --- Test 1: JSON response mode ---
-
 	It("should return a JSON response when Accept header is application/json", func() {
 		const marker = "[e2e:chat-advanced-json]"
 		model := e2eOpenAIModel
@@ -114,8 +112,6 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 			expectMockLLMServed(marker, 30*time.Second)
 		}
 	})
-
-	// --- Test 2: Chat with agentRef ---
 
 	It("should handle chat with agentRef", func() {
 		model := e2eOpenAIModel
@@ -180,8 +176,6 @@ var _ = Describe("Chat Advanced Features", Ordered, func() {
 			Expect(served[0].Body.Model).To(Equal(model), "agentRef should select the Agent's model")
 		}
 	})
-
-	// --- Test 3: Management tools - create_agent via chat ---
 
 	It("should create an agent via create_agent management tool in chat", func() {
 		model := e2eOpenAIModel

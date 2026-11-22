@@ -8,28 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// leaseNow is the request time of the suite's lease decisions. It is far from
-// the wall clock, so a provider that judges a lease on its own clock instead
-// of the request's fails the lease cases.
 var leaseNow = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-// leaseExpiry is a lease expiry an hour after leaseNow.
 var leaseExpiry = leaseNow.Add(time.Hour)
 
 var writeCaseCreated = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-// lockOwner names a Session lock owner at leaseNow.
 func lockOwner(namespace, name, ownerName, ownerUID string) storagev1.SessionOwnerWrite {
 	return storagev1.SessionOwnerWrite{Namespace: namespace, Name: name, OwnerName: ownerName, OwnerUID: ownerUID, Now: leaseNow}
 }
 
-// chatTurn reserves the case chat Session for turnID at leaseNow until
-// leaseExpiry.
 func chatTurn(turnID string) storagev1.AcquireChatTurnRequest {
 	return storagev1.AcquireChatTurnRequest{Session: chatSession(), TurnID: turnID, Now: leaseNow, ExpiresAt: leaseExpiry}
 }
 
-// turnCommit commits messages and tokens for turnID at leaseNow.
 func turnCommit(
 	session *storagev1.SessionRecord, turnID string, expected int, messages []storagev1.SessionMessage, input, output int,
 ) storagev1.CommitSessionTurnRequest {
@@ -45,7 +37,6 @@ func observeSession(name string) func(t *testing.T, p storagev1.StateProvider) a
 		session, err := p.GetSession(t.Context(), "tenant", name)
 		listed, listErr := p.ListSessions(t.Context(), "tenant")
 		require.NoError(t, listErr)
-		// IsLocked changes nothing while no lock has expired.
 		locked, lockErr := p.IsLocked(t.Context(), "tenant", name, "observer", "observer-uid", leaseNow)
 		return []any{observed(t, session, err), listed, observed(t, locked, lockErr)}
 	}

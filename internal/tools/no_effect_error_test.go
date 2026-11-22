@@ -66,8 +66,6 @@ func TestCommentOnIssueToolMarksOnlyDefiniteFailuresAsNoEffect(t *testing.T) {
 }
 
 func TestCommentOnIssueToolKeepsRefusalsAfterRedirectsUncertain(t *testing.T) {
-	// The POST may have taken effect before redirecting to a result the
-	// token may not read.
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /repos/testorg/testrepo/issues/1/comments", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/result", http.StatusSeeOther)
@@ -89,7 +87,6 @@ func TestCommentOnIssueToolKeepsRefusalsAfterRedirectsUncertain(t *testing.T) {
 }
 
 func TestGitHubRefusalSummaryKeepsTheWholeMessage(t *testing.T) {
-	// The caller redacts the summary before bounding it, so it must arrive whole.
 	message := strings.Repeat("m", 2*maxGitHubErrorNoteBytes)
 	body, _ := json.Marshal(map[string]string{"message": message})
 	err := githubStatusError(&http.Response{StatusCode: http.StatusForbidden, Request: &http.Request{}}, body)

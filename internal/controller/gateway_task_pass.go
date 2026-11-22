@@ -71,9 +71,6 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 	return grant, nil
 }
 
-// inheritGatewayTaskGrant returns the grant a delegated child inherits: its
-// parent's frozen grant, bounded by every waiting ancestor's deadline and
-// linked to that parent.
 func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task) (*gatewayruntime.TaskGrant, error) {
 	if !r.TaskProvenanceProtected {
 		return nil, permanentACPAgentConfiguration(errors.New("child gateway task passes require Task provenance admission"))
@@ -86,8 +83,6 @@ func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *core
 		}
 		return nil, err
 	}
-	// A parent binds before it runs, so one that could delegate but has no
-	// binding, such as a native AI-worker Task, never will.
 	if parent.Status.AgentExecutionBinding == nil {
 		return nil, permanentACPAgentConfiguration(errors.New("parent has no frozen gateway grant"))
 	}

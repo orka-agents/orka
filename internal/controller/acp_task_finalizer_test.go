@@ -239,8 +239,6 @@ func TestACPTaskTimeoutRequiresAuthoritativeAttemptDiscovery(t *testing.T) {
 	}
 }
 
-// A workspace that already failed terminally rejects the Task in planning, like
-// an invalid one, so neither ever has a prompt attempt to reclaim.
 func TestACPNoAttemptReclamationIgnoresUnboundSessionReference(t *testing.T) {
 	for _, reason := range []string{"InvalidWorkspace", "WorkspaceFailed"} {
 		t.Run(reason, func(t *testing.T) {

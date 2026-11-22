@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-// The contract and its provider suite must be usable by a separately built
-// provider, so neither may depend on Orka's internal packages.
 func TestContractPackagesDoNotImportOrkaInternals(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {

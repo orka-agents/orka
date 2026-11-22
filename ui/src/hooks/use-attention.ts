@@ -8,7 +8,6 @@ import { mergeApprovalsSource } from '@/lib/attention-lanes'
 import type { AttentionResponse } from '@/schemas/attention'
 import type { Approval } from '@/schemas/execution-event'
 
-/** The namespace's "Needs you" ranking: one page, highest priority first. */
 export function useAttention(limit = 50, refetchInterval: number | false = 15000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)
@@ -21,22 +20,12 @@ export function useAttention(limit = 50, refetchInterval: number | false = 15000
   })
 }
 
-/** Pages of the board's attention walk; later items stay unresolved. */
 export const maxAttentionWalkPages = 10
 
 export interface AttentionWalk extends AttentionResponse {
-  /** More attention items exist past the walk bound; their Tasks are unclassified. */
   truncated: boolean
 }
 
-/**
- * Every attention item the board needs, walked page by page (bounded), so a
- * Task ranked past the first page is never shown as Done. The ranking totals
- * and incomplete flag come from the first page; scan bounds hit on any page
- * are kept. Each page rescans live state and some items sort on fields that
- * change, so an item can come back on a later page: the walk keeps one copy
- * per ID, the one from the latest page.
- */
 export function useAttentionAll(pageLimit = 200, refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)
@@ -55,14 +44,11 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
       do {
         const page = await api.get<AttentionResponse>('/attention', pageParams({ namespace, limit: String(pageLimit) }, next))
         first ??= page
-        // A source any page skipped stays skipped for the whole walk, and an
-        // unavailable approvals source wins over a partial one.
         sources = {
           approvals: (sources ? mergeApprovalsSource(sources.approvals, page.sources?.approvals) : page.sources?.approvals)!,
           monitors: sources && sources.monitors !== 'included' ? sources.monitors : page.sources?.monitors,
         }
         for (const item of page.items) {
-          // Re-inserting moves a repeated item to its latest position.
           items.delete(item.id)
           items.set(item.id, item)
         }
@@ -80,17 +66,8 @@ export function useAttentionAll(pageLimit = 200, refetchInterval: number | false
   })
 }
 
-/**
- * A 403 or 501 from the inbox will not clear on its own: it stops retries
- * and polling, and it replaces any cached rows so stale decision controls
- * are never left on screen.
- */
 export const isTerminalInboxError = (error: unknown) => error instanceof ApiError && (error.status === 403 || error.status === 501)
 
-/**
- * Decidable approvals across the namespace's Tasks, soonest deadline first,
- * one page at a time: later pages follow metadata.continue on demand.
- */
 export function usePendingApprovals(limit = 100, refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)
@@ -118,12 +95,6 @@ export type InboxDecisionResult =
   | { outcome: 'decided'; approval: Approval }
   | { outcome: 'alreadyDecided'; message: string }
 
-/**
- * Posts a decision from the inbox through the existing per-Task decision
- * route, fenced to the Task UID the inbox listed so a later Task that reuses
- * the name is never decided. A 409 or 410 means someone (or the Task's end)
- * settled it first: the first decision wins.
- */
 export function useInboxDecision() {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)

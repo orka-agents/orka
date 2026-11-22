@@ -19,9 +19,6 @@ type ReclaimGatewaySessionRequest struct {
 	RequestedAt time.Time
 }
 
-// GatewaySessionCleanupOperation binds a completion to the Gateway owner and
-// exact physical Session. Ingress can recognize these completions without
-// reusing deleted names or erasing the archive receipts old Tasks still need.
 func GatewaySessionCleanupOperation(namespace, sessionName, sessionUID, gatewayUID, bindingUID string) (string, string) {
 	encoded, _ := json.Marshal([]string{"orka.gateway.session-retention.v1", namespace, sessionName, sessionUID, gatewayUID, bindingUID})
 	digest := CanonicalBytesDigest(encoded)

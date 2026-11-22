@@ -24,8 +24,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// A stdout result is decoded only when it can fit the result limit, and a
-// larger one is refused whole.
 func TestExtractStdoutTaskResultRefusesAResultAboveTheLimit(t *testing.T) {
 	limit := bytes.Repeat([]byte("r"), store.MaxResultBytes)
 	got, ok, err := extractStdoutTaskResult(workerenv.ResultStdoutPrefix + base64.StdEncoding.EncodeToString(limit))
@@ -38,8 +36,6 @@ func TestExtractStdoutTaskResultRefusesAResultAboveTheLimit(t *testing.T) {
 	require.True(t, ok)
 	require.Nil(t, got)
 
-	// A payload too long for the limit is refused before it is decoded, so
-	// its content is never examined.
 	tooLong := strings.Repeat("!", base64.StdEncoding.EncodedLen(store.MaxResultBytes)+4)
 	got, ok, err = extractStdoutTaskResult(workerenv.ResultStdoutPrefix + tooLong)
 	require.ErrorIs(t, err, store.ErrTooLarge)
@@ -47,9 +43,6 @@ func TestExtractStdoutTaskResultRefusesAResultAboveTheLimit(t *testing.T) {
 	require.Nil(t, got)
 }
 
-// A result above the limit is never stored, so a Task with one is neither
-// reported as succeeded without it nor left retrying it: it ends with the
-// reason recorded.
 func TestTaskCompletionEndsWithAResultAboveTheLimit(t *testing.T) {
 	t.Run("stdout result of a successful workload", func(t *testing.T) {
 		task, job, pod, namespace := deferredFinalizationFixture()
@@ -75,8 +68,6 @@ func TestTaskCompletionEndsWithAResultAboveTheLimit(t *testing.T) {
 	})
 
 	t.Run("deferred result the store refuses", func(t *testing.T) {
-		// A controller without the stdout bound could stage a result above
-		// the limit before stopping the work. The store refuses it.
 		task, _, _, namespace := deferredFinalizationFixture()
 		r := newUnitReconciler(newTestScheme(), task, namespace)
 		oversized := bytes.Repeat([]byte("r"), store.MaxResultBytes+1)
@@ -112,8 +103,6 @@ func TestTaskCompletionEndsWithAResultAboveTheLimit(t *testing.T) {
 	})
 
 	t.Run("cancellation retried after a session outage", func(t *testing.T) {
-		// The staged intent keeps the original decision, so the retried
-		// completion records the reason once.
 		task, job, pod, namespace := deferredFinalizationFixture()
 		task.Spec.Type = corev1alpha1.TaskTypeAI
 		task.Spec.Prompt = "summarize the release"
@@ -150,22 +139,16 @@ func TestTaskCompletionEndsWithAResultAboveTheLimit(t *testing.T) {
 	})
 }
 
-// A log cut at the stdout read limit is refused whole: the cut can land on a
-// base64 boundary inside the result line, leaving a prefix that decodes below
-// the result limit and would otherwise be stored as the whole result.
 func TestStdoutResultLogCutAtTheReadLimitIsRefused(t *testing.T) {
 	result := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("r"), 3000))
 	prefix := strings.Repeat("d", 100) + "\n" + workerenv.ResultStdoutPrefix
 	log := prefix + result + "\n"
-	// The read stops inside the result line, on a base64 quantum, so the
-	// first limit bytes end in a result prefix that still decodes.
 	limit := int64(len(prefix) + 2000)
 	decoded, ok, err := extractStdoutTaskResult(log[:limit])
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, decoded, 1500)
 
-	// A reader that requests limit+1 bytes sees the longer log and refuses it.
 	_, err = boundedStdoutResultLog(log[:limit+1], limit)
 	require.ErrorIs(t, err, store.ErrTooLarge)
 	got, err := boundedStdoutResultLog(log[:limit], limit)
@@ -173,8 +156,6 @@ func TestStdoutResultLogCutAtTheReadLimitIsRefused(t *testing.T) {
 	require.Equal(t, log[:limit], got)
 }
 
-// A Task whose result could not be collected says why: a result above the
-// storage limit, or a stdout log above its read limit with a result of any size.
 func TestTaskResultTooLargeOutcomeNamesTheLimit(t *testing.T) {
 	phase, message := taskResultTooLargeOutcome(corev1alpha1.TaskPhaseSucceeded, "", errTaskResultTooLarge)
 	require.Equal(t, corev1alpha1.TaskPhaseFailed, phase)

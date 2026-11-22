@@ -9,7 +9,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// The default derives from the release namespace (staticChartTestNamespace).
 const taskWebhookSigningTestNamespace = "orka-test-task-webhook-signing"
 
 func renderedControllerDeployment(t *testing.T, args ...string) appsv1.Deployment {
@@ -52,8 +51,6 @@ func TestStaticChartTaskWebhookSigningKeyLivesInItsOwnNamespace(t *testing.T) {
 	}
 }
 
-// Only the controller may touch Secrets in the signing namespace, whatever the
-// AI worker profile: no worker, client or proxy binding reaches the key.
 func TestStaticChartOnlyTheControllerReachesTheTaskWebhookSigningKey(t *testing.T) {
 	for _, profile := range []string{"default", "restricted"} {
 		t.Run(profile, func(t *testing.T) {
@@ -203,8 +200,6 @@ func TestStaticChartRejectsTaskWebhookSigningBesideTasks(t *testing.T) {
 	}
 }
 
-// Each release owns its signing namespace, so a second release elsewhere in
-// the cluster does not collide with the first on Helm ownership.
 func TestStaticChartTaskWebhookSigningNamespaceIsPerRelease(t *testing.T) {
 	namespaces := map[string]string{}
 	for _, release := range []struct{ name, namespace string }{
@@ -234,8 +229,6 @@ func TestStaticChartTaskWebhookSigningNamespaceIsPerRelease(t *testing.T) {
 	}
 }
 
-// OutboundAccessPolicies refuse ServiceAccounts with the platform marker as
-// token sources, so every account the chart creates must carry it.
 func TestStaticChartServiceAccountsCarryPlatformIdentity(t *testing.T) {
 	rendered := requireHelmRender(t, "--set", "client.create=true")
 	var count int

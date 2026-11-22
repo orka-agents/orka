@@ -12,11 +12,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// TestTaskProvenanceValidatorKeepsWorkersFromRootTasksForIdentityAgents covers
-// a worker, which holds Agent use broadly, creating a Task with no parent:
-// it may not name an identity-bound Agent, which would otherwise bind as a
-// root Task no use check covered. Other Agents and non-worker callers are
-// unaffected.
 func TestTaskProvenanceValidatorKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -27,8 +22,6 @@ func TestTaskProvenanceValidatorKeepsWorkersFromRootTasksForIdentityAgents(t *te
 		}},
 	}
 	plainAgent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "helper", Namespace: admissionTestNamespace}}
-	// The identity was removed from the spec, but the claim is not released
-	// until the Agent reconciles; restoring it in between keeps the grant.
 	removedAgent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "between-edits", Namespace: admissionTestNamespace},
 		Status: corev1alpha1.AgentStatus{IdentityClaim: &corev1alpha1.AgentIdentityClaim{
@@ -58,9 +51,6 @@ func TestTaskProvenanceValidatorKeepsWorkersFromRootTasksForIdentityAgents(t *te
 	require.True(t, resp.Allowed, "a non-worker caller is judged by the Agent use check, not here: %s", resp.Result.Message)
 }
 
-// TestWorkerRuleIgnoresTheProvenanceTrustOverride covers an operator who
-// overrides the trusted worker ServiceAccounts and leaves a real worker out:
-// that worker, still holding Agent use, is held to the rule all the same.
 func TestWorkerRuleIgnoresTheProvenanceTrustOverride(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

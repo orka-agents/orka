@@ -17,9 +17,6 @@ import (
 
 const retainedCleanupBodyLimit = 1 << 20
 
-// retainedPoolCleanupTransport binds the actual encoded request, not merely a
-// client method name. Old-epoch runtime credentials are pool-wide: they must
-// never let a cleanup client target a peer Session or outlive its current owner.
 type retainedPoolCleanupTransport struct {
 	base         http.RoundTripper
 	endpoint     *url.URL
@@ -62,8 +59,6 @@ func (t *retainedPoolCleanupTransport) RoundTrip(request *http.Request) (*http.R
 		return nil, err
 	}
 	var response *http.Response
-	// Hold the authoritative interlock through transmission and the bounded
-	// response body. The old runtime epoch alone cannot fence out a new leader.
 	err = agentRuntimeRecoveryGuard(request.Context(), t.control, t.owner, func(guardCtx context.Context) error {
 		if err := t.verify(guardCtx); err != nil {
 			return err

@@ -14,9 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// printDescribed prints a single object as a readable field list for table
-// output and defers to printStructured for json/yaml, so the structured
-// shapes stay byte-for-byte what scripts already parse.
 func printDescribed(cmd *cobra.Command, value any, rows func(map[string]any) []describeRow) error {
 	format, err := outputFormat(cmd)
 	if err != nil {
@@ -31,9 +28,6 @@ func printDescribed(cmd *cobra.Command, value any, rows func(map[string]any) []d
 	return printDescribe(cmd, rows(toGenericMap(value)))
 }
 
-// taskAgentLabel is what the AGENT column and describe views show for a
-// Task: the Agent name for ai/agent Tasks, or the image (last path segment
-// and tag) for container Tasks.
 func taskAgentLabel(agentRef, image string) string {
 	if agentRef = strings.TrimSpace(agentRef); agentRef != "" {
 		return agentRef
@@ -41,9 +35,6 @@ func taskAgentLabel(agentRef, image string) string {
 	return shortImage(image)
 }
 
-// shortImage keeps the last path segment of an image reference plus its tag,
-// so registry.example.com/team/golang:1.27 prints as golang:1.27. A digest
-// reference keeps only its repository name.
 func shortImage(image string) string {
 	image = strings.TrimSpace(image)
 	if image == "" {
@@ -58,11 +49,6 @@ func shortImage(image string) string {
 	return image
 }
 
-// taskWaitingOn says what a running Task is waiting on a person for, or
-// nothing. A Task held on an approval reports Running; its
-// WaitingForApproval condition is the only sign someone has to act. The
-// command it suggests names the Task's namespace, so it finds this Task
-// whatever namespace the CLI defaults to.
 func taskWaitingOn(task map[string]any) string {
 	conditions, _ := nestedMap(task, "status")["conditions"].([]any)
 	for _, item := range conditions {
@@ -154,8 +140,6 @@ func providerDescribeRows(provider map[string]any) []describeRow {
 	status := nestedMap(provider, "status")
 	ready := readinessString(status["ready"])
 	if _, flat := provider["ready"]; flat && len(status) == 0 {
-		// The restricted flat projection served to context-token callers
-		// carries readiness at the top level.
 		ready = readinessString(provider["ready"])
 	}
 	return []describeRow{
@@ -283,8 +267,6 @@ func approvalDescribeRows(approval map[string]any) []describeRow {
 	return rows
 }
 
-// approvalExpiry shows the time left on a pending request and nothing once
-// the request has been decided.
 func approvalExpiry(approval map[string]any, now time.Time) string {
 	if !strings.EqualFold(firstString(approval, "status"), approvalStatusPending) {
 		return ""
@@ -296,8 +278,6 @@ func toolDescribeRows(tool map[string]any) []describeRow {
 	spec := nestedMap(tool, "spec")
 	httpSpec := nestedMap(spec, "http")
 	mcp := nestedMap(spec, "mcp")
-	// An MCP Tool may carry http transport settings as well, so the MCP
-	// backend is the discriminator when present.
 	kind := ""
 	switch {
 	case len(mcp) > 0:
@@ -308,8 +288,6 @@ func toolDescribeRows(tool map[string]any) []describeRow {
 	if class := firstString(spec, "brokeredToolClass"); class != "" {
 		kind = joinNonEmpty(kind, class, " / ")
 	}
-	// The MCP server is hosted by a workspace class or a Substrate actor
-	// template; that reference is its identity.
 	mcpServer := ""
 	if class := nestedString(mcp, "workspace", "classRef", "name"); class != "" {
 		mcpServer = "workspace class " + class
@@ -578,15 +556,10 @@ func whoamiDescribeRows(identity map[string]any) []describeRow {
 	return rows
 }
 
-// workspaceStatusRows prints the safe workspace status one field per line,
-// identity and phase first, then the workspace, execution workspace, and
-// delivery sections.
 func workspaceStatusRows(status map[string]any) []describeRow {
 	return orderedFlatRows(status, "task", "namespace", "phase", "workspace", "executionWorkspace", "delivery")
 }
 
-// orderedFlatRows is flatDescribeRows with the named keys first, in the
-// order given, and the remaining keys sorted after them.
 func orderedFlatRows(object map[string]any, preferred ...string) []describeRow {
 	ordered := map[string]any{}
 	rows := make([]describeRow, 0, len(object))
@@ -605,9 +578,6 @@ func orderedFlatRows(object map[string]any, preferred ...string) []describeRow {
 	return append(rows, flatDescribeRows(rest)...)
 }
 
-// flatDescribeRows renders every scalar field of an object in key order and
-// nested objects as indented sections, for views such as workspace status
-// whose fields are already a curated safe subset.
 func flatDescribeRows(object map[string]any) []describeRow {
 	rows := make([]describeRow, 0, len(object))
 	for _, key := range sortedAnyKeys(object) {
@@ -623,9 +593,6 @@ func flatDescribeRows(object map[string]any) []describeRow {
 	return rows
 }
 
-// readinessString renders a readiness boolean, treating an absent value as
-// false: the API omits `ready` when it is false, and a missing Ready row
-// would hide the one negative state a person checks for.
 func readinessString(value any) string {
 	if b, ok := value.(bool); ok && b {
 		return "true"
@@ -667,9 +634,6 @@ func sortedAnyKeys(m map[string]any) []string {
 	return keys
 }
 
-// printListWith prints a list (or any table-shaped response) with a
-// dedicated table printer for table output and defers to printStructured
-// otherwise.
 func printListWith(cmd *cobra.Command, value any, table func(*cobra.Command, any) error) error {
 	format, err := outputFormat(cmd)
 	if err != nil {
@@ -681,8 +645,6 @@ func printListWith(cmd *cobra.Command, value any, table func(*cobra.Command, any
 	return table(cmd, value)
 }
 
-// printPullRequestReceipt prints the pull request URL a finding's patch was
-// published to.
 func printPullRequestReceipt(cmd *cobra.Command, value any) error {
 	receipt := toGenericMap(value)
 	url := firstString(receipt, "prURL")

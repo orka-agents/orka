@@ -9,11 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The envelope checks and the task-data fence run in one transaction, in
-// order: a replay checks the task-data fence before it returns its stored
-// outcome, and ResolveOperation still reports that outcome; a write the
-// task-data fence refuses leaves no receipt; and a stale envelope fence is
-// reported before a stale task-data fence.
 func TestEnvelopeChecksComposeWithTheTaskDataFence(t *testing.T) {
 	ctx := t.Context()
 	s := setupTestStore(t)
@@ -24,7 +19,6 @@ func TestEnvelopeChecksComposeWithTheTaskDataFence(t *testing.T) {
 
 	saveCtx, saved := testEnvelope(t, fenced, dataset, "SaveResult", time.Now().UTC(), "ns", "task", []byte("result"))
 	require.NoError(t, s.SaveResult(saveCtx, "ns", "task", []byte("result")))
-	// Cleanup moves the Task's fence on.
 	require.NoError(t, s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"}))
 	require.ErrorIs(t, s.SaveResult(saveCtx, "ns", "task", []byte("result")), store.ErrTaskDataCleanupChanged,
 		"a replay checks the task-data fence before it returns the stored outcome")

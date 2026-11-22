@@ -65,14 +65,9 @@ const (
 	chatStreamFinalized
 )
 
-// ChatConfig holds configuration for the chat handler.
 type ChatConfig struct {
-	Enabled bool
-	// ConnectorsEnabled mirrors --connectors-enabled: without it the
-	// linked-account surfaces (list_connections) are not offered at all.
-	ConnectorsEnabled bool
-	// DashboardEnabled mirrors --dashboard-enabled, so linked-account
-	// guidance names the dashboard page only when this controller serves it.
+	Enabled                bool
+	ConnectorsEnabled      bool
 	DashboardEnabled       bool
 	Provider               string
 	Model                  string
@@ -81,22 +76,15 @@ type ChatConfig struct {
 	ToolTimeout            time.Duration
 	MaxConcurrent          int
 	MaxTasksPerTurn        int
-	MaxSessionSize         int // bytes
-	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
+	MaxSessionSize         int
+	MaxPrematureEndRetries int
 	RuntimeAvailability    ACPRuntimeAvailability
 	ExecutionMode          executionmode.Mode
-	// LinkedAccounts builds the linked-account resolver for one signed-in
-	// person's chat turn; nil leaves built-in GitHub tools on their own
-	// credentials. The controller wires it when connectors are enabled.
-	LinkedAccounts LinkedAccountsFactory
+	LinkedAccounts         LinkedAccountsFactory
 }
 
-// LinkedAccountsFactory returns a resolver for a person's linked accounts
-// in a namespace, or nil when there is nothing to resolve.
 type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) chattools.LinkedAccountCredentials
 
-// ACPRuntimeAvailability identifies built-in profiles backed by configured,
-// digest-pinned RuntimePool images.
 type ACPRuntimeAvailability struct {
 	Codex    bool
 	Claude   bool
@@ -104,7 +92,6 @@ type ACPRuntimeAvailability struct {
 	OpenCode bool
 }
 
-// ChatRequest is the request body for POST /api/v1/chat.
 type ChatRequest struct {
 	Message      string   `json:"message"`
 	SessionID    string   `json:"sessionId,omitempty"`
@@ -117,7 +104,6 @@ type ChatRequest struct {
 	AgentRef     string   `json:"agentRef,omitempty"`
 }
 
-// ChatResponse is the response body for POST /api/v1/chat (JSON mode).
 type ChatResponse struct {
 	SessionID string         `json:"sessionId"`
 	Message   string         `json:"message"`
@@ -125,14 +111,12 @@ type ChatResponse struct {
 	Usage     ChatUsage      `json:"usage"`
 }
 
-// ToolCallInfo describes a tool invocation and its result.
 type ToolCallInfo struct {
 	Name   string          `json:"name"`
 	Args   json.RawMessage `json:"args"`
 	Result json.RawMessage `json:"result"`
 }
 
-// ChatUsage holds usage statistics for a chat turn.
 type ChatUsage struct {
 	InputTokens  int    `json:"inputTokens"`
 	OutputTokens int    `json:"outputTokens"`
@@ -142,7 +126,6 @@ type ChatUsage struct {
 	Duration     string `json:"duration"`
 }
 
-// SSEEvent is the payload for server-sent events during streaming.
 type SSEEvent struct {
 	SessionID string `json:"sessionId"`
 	Content   string `json:"content,omitempty"`
@@ -152,17 +135,11 @@ type SSEEvent struct {
 }
 
 type activeChatRequest struct {
-	cancel          context.CancelFunc
-	done            chan struct{}
-	deleteRequested bool
-	deleteWaiters   int
-	// gate marks a reservation a Session cancel holds on an idle chat to keep
-	// the next message out. It is not a chat request, so another cancel that
-	// finds it reports no running turn.
-	gate bool
-	// keepCreatedSession records that a Session cancel stopped the request:
-	// a Session the request created is kept, empty, rather than deleted as
-	// for a disconnected client, so the cancel's caller can still read it.
+	cancel             context.CancelFunc
+	done               chan struct{}
+	deleteRequested    bool
+	deleteWaiters      int
+	gate               bool
 	keepCreatedSession bool
 }
 
@@ -181,7 +158,6 @@ type activeChatReservation struct {
 	once          sync.Once
 }
 
-// ChatHandler implements the orchestrator chat endpoints.
 type ChatHandler struct {
 	client                    client.Client
 	apiReader                 client.Reader
@@ -223,7 +199,7 @@ type chatStreamRequest struct {
 	turnDeadline   time.Time
 	finalizeTurn   func()
 	provider       llm.Provider
-	providerName   string // the Provider resource's name; provider.Name() is only its type
+	providerName   string
 	messages       []llm.Message
 	systemPrompt   string
 	tools          []llm.Tool
@@ -238,7 +214,6 @@ type chatStreamRequest struct {
 	span           trace.Span
 }
 
-// NewChatHandler creates a new ChatHandler.
 func NewChatHandler(c client.Client, apiReader client.Reader, sm *controller.SessionManager, config ChatConfig, watchNamespace string, enforceNS bool, ss store.SessionStore, rs store.ResultStore, resolver *ProviderResolver, kubeClientOpt ...kubernetes.Interface) *ChatHandler {
 	var kubeClient kubernetes.Interface
 	if len(kubeClientOpt) > 0 {
@@ -271,14 +246,11 @@ func (ch *ChatHandler) contextTokenAuthorizationReader() client.Reader {
 	return uncachedReaderOr(ch.apiReader, ch.client)
 }
 
-// blockedNamespaces that cannot be targeted by chat requests.
 var blockedNamespaces = map[string]bool{
 	"kube-system": true,
 	"kube-public": true,
 }
 
-// HandleChat handles POST /api/v1/chat.
-//
 //nolint:gocyclo // Auth, provider setup, JSON/SSE streaming, cancellation, and Session fencing share one request boundary.
 func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	var req ChatRequest
@@ -296,7 +268,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		contextToken = userInfo.ContextToken
 	}
 
-	// Try to acquire semaphore (non-blocking)
 	select {
 	case ch.semaphore <- struct{}{}:
 	default:
@@ -310,14 +281,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}()
 
-	// Derive non-SSE work from the Fiber user context so chat.request,
-	// tool-loop, and GenAI spans remain children of the API SERVER span.
-	// SSE mode captures the span context before returning and seeds its
-	// long-lived background context below.
 	ctx, cancel := context.WithTimeout(c.Context(), ch.config.MaxDuration)
 	defer cancel()
 
-	// Resolve namespace from request or token
 	namespace, err := ResolveNamespace(c, req.Namespace, ch.watchNamespace, ch.enforceNamespaceIsolation)
 	if err != nil {
 		return err
@@ -335,7 +301,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}
 
-	// Resolve or create session ID
 	sessionID := resolveChatSessionID(req.SessionID)
 	ctx = usageRequestContext(ctx, ch.resultStore, uncachedReaderOr(ch.apiReader, ch.client), namespace, sessionID)
 	if req.SessionID != "" {
@@ -344,7 +309,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 				return err
 			}
 		}
-		// Another person's AHP conversation cannot be continued, and so read.
 		if err := ch.ahpSessionVisible(ctx, userInfo, namespace, sessionID); err != nil {
 			return err
 		}
@@ -364,7 +328,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}()
 
-	// Resolve LLM provider
 	provider, model, providerInfo, err := ch.resolver.ResolveWithInfo(ctx, ResolveOpts{
 		ProviderName: req.Provider,
 		Model:        req.Model,
@@ -379,8 +342,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			}
 			return authorizeChatProviderUse(c, ch.kubeClient, "chat", provider)
 		},
-		// Enforced scoped context tokens get no implicit Provider selection;
-		// callers must name one directly or use an Agent bound to one.
 		RequireExplicitProvider: requestRequiresExplicitProvider(c, ch.contextTokenAuthorization),
 	})
 	if err != nil {
@@ -391,16 +352,13 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("failed to resolve provider: %v", err))
 	}
 
-	// Wrap provider with retry and fallback
 	provider, err = ch.wrapWithRetryAndFallback(ctx, c, provider, req, namespace)
 	if err != nil {
 		return err
 	}
 
-	// Wrap provider with tracing
 	provider = llm.NewTracingProvider(provider)
 
-	// Start chat.request span
 	tracer := tracing.Tracer("orka.chat")
 	ctx, span := tracer.Start(ctx, "chat.request",
 		trace.WithAttributes(
@@ -416,12 +374,9 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		}
 	}()
 
-	// Build system prompt
 	discoveryClient := newExternalToolClient(ch.client, ch.kubeClient, userInfo, namespace, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.gatewayEventStore)
 	promptBuilder := NewSystemPromptBuilder(externalToolDiscoveryClient{Client: discoveryClient}, namespace, ch.config.RuntimeAvailability)
 	promptBuilder.SetChatProvider(providerInfo.Name)
-	// The tool list itself is built later; filter the names the same way now
-	// so the prompt only describes tools this caller is offered.
 	chatToolNames := chattools.ChatToolNames()
 	chatToolStubs := make([]llm.Tool, 0, len(chatToolNames))
 	for _, name := range chatToolNames {
@@ -445,15 +400,12 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 	turnID := activeChat.turnID
 
-	// Load session history only after reserving its observed revision.
 	messages, err := ch.loadReservedChatSession(ctx, namespace, sessionID)
 	if err != nil {
 		return err
 	}
 	persistedCount := len(messages)
 
-	// Append user message — if an agentRef is set, prepend context so the LLM
-	// knows which agent the user selected and which task tool runs it.
 	userContent := req.Message
 	if req.AgentRef != "" {
 		agentObj := &corev1alpha1.Agent{}
@@ -466,8 +418,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 				userContent = fmt.Sprintf("[Using agent %q which has no runtime — use create_ai_task with agentRef=%q for this request.]\n\n%s",
 					req.AgentRef, req.AgentRef, req.Message)
 			default:
-				// The tool that runs this agent is not offered; keep the selection
-				// visible without telling the model to call it.
 				userContent = fmt.Sprintf("[Using agent %q. The tool that runs it is not available in this conversation.]\n\n%s",
 					req.AgentRef, req.Message)
 			}
@@ -479,7 +429,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		Content: userContent,
 	})
 
-	// Create tool executor (also creates the chat registry)
 	executor := NewToolExecutor(ch.client, ch.sessionManager, namespace, sessionID, ch.watchNamespace, ch.enforceNamespaceIsolation, ch.config.MaxTasksPerTurn, ch.config.ToolTimeout, ch.resultStore, ch.kubeClient)
 	executor.userInfo = userInfo
 	executor.gatewayEventStore = ch.gatewayEventStore
@@ -523,7 +472,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return authorizeContextTokenSecretRead(contextToken, ch.contextTokenAuthorization, "chatToolReadSecret", namespace, secretName)
 	})
 
-	// Build tools from the chat registry and restrict execution to the exposed set.
 	tools := executor.registry.ToLLMTools(chattools.ChatToolNames())
 	if !ch.config.ConnectorsEnabled {
 		tools = filterCompletionToolsExcluding(tools, chattools.ListConnectionsToolName)
@@ -534,7 +482,6 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	}
 	executor.SetAllowedTools(tools)
 
-	// Build completion request parameters
 	var temperature float64
 	if req.Temperature != nil {
 		temperature = *req.Temperature
@@ -544,10 +491,8 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		maxTokens = int(*req.MaxTokens)
 	}
 
-	// Check Accept header for response format
 	accept := c.Get("Accept")
 	if accept == "application/json" {
-		// JSON mode: run tool loop, collect all content, return JSON
 		content, usage, toolCalls, err := ch.runToolLoop(
 			ctx, provider, messages, systemPrompt, tools, executor,
 			sessionID, namespace, model, temperature, maxTokens, persistedCount, nil, turnID,
@@ -597,8 +542,6 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
-	// SendStreamWriter outlives the handler, so capture only trace and baggage
-	// state from the recyclable Fiber request context.
 	sseParentCtx := baggage.ContextWithBaggage(
 		trace.ContextWithSpanContext(context.Background(), req.span.SpanContext()),
 		baggage.FromContext(req.parentCtx),
@@ -659,7 +602,7 @@ func (ch *ChatHandler) sendChatStream(c fiber.Ctx, req chatStreamRequest) error 
 			return
 		}
 
-		_ = content // content already emitted via SSE
+		_ = content
 		doneData, _ := json.Marshal(map[string]any{"usage": usage})
 		emitSSE("done", string(doneData))
 	})
@@ -869,8 +812,6 @@ func (ch *ChatHandler) reserveActiveChat(namespace, sessionID string) (*activeCh
 	return ch.reserveActiveChatAs(namespace, sessionID, false)
 }
 
-// reserveActiveChatAs reserves the chat for a request, or, with gate, only to
-// keep a request from starting.
 func (ch *ChatHandler) reserveActiveChatAs(namespace, sessionID string, gate bool) (*activeChatReservation, error) {
 	cancelContext, cancel := context.WithCancel(context.Background())
 	request := &activeChatRequest{cancel: cancel, done: make(chan struct{}), gate: gate}
@@ -925,8 +866,6 @@ func (ch *ChatHandler) activateReservedChat(
 	if err != nil {
 		return nil, err
 	}
-	// The request reservation covers provider setup and deletion handoff; the
-	// durable turn owns transcript writes. Either cancellation path stops work.
 	stopTurnCancellation := context.AfterFunc(turnCancelCtx, reservation.cancel)
 	release := func() {
 		stopTurnCancellation()
@@ -970,7 +909,6 @@ func (ch *ChatHandler) deleteChatSession(ctx context.Context, namespace, session
 	return ch.sessionStore.DeleteSession(ctx, namespace, sessionID, time.Now().UTC())
 }
 
-// runToolLoop executes the agentic tool loop until the LLM produces a final text response.
 func (ch *ChatHandler) runToolLoop(
 	ctx context.Context,
 	provider llm.Provider,
@@ -990,8 +928,6 @@ func (ch *ChatHandler) runToolLoop(
 	if persistedCount < 0 || persistedCount > len(messages) {
 		return "", usage, nil, fmt.Errorf("invalid persisted message count %d for %d messages", persistedCount, len(messages))
 	}
-	// Provider context may shrink or gain synthetic truncation notes. Keep the
-	// new turn separately; persistedCount only fences its database commit.
 	turnMessages := slices.Clone(messages[persistedCount:])
 	appendTurnMessages := func(newMessages ...llm.Message) {
 		turnMessages = append(turnMessages, newMessages...)
@@ -1040,13 +976,10 @@ func (ch *ChatHandler) runToolLoop(
 			})
 		}
 
-		// Truncate a view of the whole conversation each step, never the
-		// history itself, so the cut stays where it was and the prompt
-		// prefix stays cacheable.
 		sent := ch.sessionView(messages)
 		resp, shortened, retried, err := ch.callLLMWithRetry(iterCtx, provider, sent, systemPrompt, model, tools, maxTokens, temperature)
 		if retried {
-			messages = shortened // the provider refused the context as too long
+			messages = shortened
 		}
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
@@ -1060,8 +993,6 @@ func (ch *ChatHandler) runToolLoop(
 		usage.OutputTokens += resp.OutputTokens
 
 		if len(resp.ToolCalls) == 0 {
-			// Check if any tasks created in this session are still running.
-			// If so, re-prompt the LLM to keep waiting instead of ending the session.
 			if executor.tasksCreated > 0 && hasRunningTasks(iterCtx, taskClient, namespace, sessionID) {
 				if emitSSE != nil && resp.Content != "" {
 					msgData, _ := json.Marshal(map[string]string{apiFieldContent: resp.Content})
@@ -1071,7 +1002,6 @@ func (ch *ChatHandler) runToolLoop(
 					llm.Message{Role: chatRoleAssistant, Content: resp.Content},
 					llm.Message{Role: chatRoleUser, Content: "[System: You have tasks still running. Do NOT stop. Call wait_for_task again for each running task until it reaches Succeeded or Failed, then call fetch_task_output to get the result.]"},
 				)
-				// Don't increment iteration here — the for loop's post-statement handles it
 				iterSpan.End()
 				continue
 			}
@@ -1096,8 +1026,6 @@ func (ch *ChatHandler) runToolLoop(
 	}
 }
 
-// handleIterationLimit checks if the iteration limit is reached and if so,
-// injects a termination prompt, makes a final LLM call, emits SSE, and saves the session.
 func (ch *ChatHandler) handleIterationLimit(
 	ctx context.Context,
 	iteration int,
@@ -1156,8 +1084,6 @@ func (ch *ChatHandler) handleIterationLimit(
 	return resp.Content, true, nil
 }
 
-// sessionView is the conversation as the provider gets it: truncated to the
-// session size budget, if one is set.
 func (ch *ChatHandler) sessionView(messages []llm.Message) []llm.Message {
 	if ch.config.MaxSessionSize > 0 {
 		return llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
@@ -1165,9 +1091,6 @@ func (ch *ChatHandler) sessionView(messages []llm.Message) []llm.Message {
 	return messages
 }
 
-// callLLMWithRetry calls the LLM provider and retries once with truncated messages
-// if the context is too long. It returns the messages it sent last and whether
-// that retry shortened them.
 func (ch *ChatHandler) callLLMWithRetry(
 	ctx context.Context,
 	provider llm.Provider,
@@ -1206,8 +1129,6 @@ func (ch *ChatHandler) callLLMWithRetry(
 	return resp, messages, false, err
 }
 
-// executeToolCalls iterates over tool calls from the LLM response, emits SSE events,
-// executes each tool, tracks repetitions, and returns the new transcript messages.
 func (ch *ChatHandler) executeToolCalls(
 	ctx context.Context,
 	resp *llm.CompletionResponse,
@@ -1268,8 +1189,6 @@ func (ch *ChatHandler) executeToolCalls(
 			Content:    result,
 		})
 
-		// Preserve numeric precision and valid JSON numbers outside float64's
-		// range when returning the same tool data that the transcript stores.
 		toolCalls = append(toolCalls, ToolCallInfo{
 			Name:   tc.Name,
 			Args:   tc.Arguments,
@@ -1287,7 +1206,6 @@ func (ch *ChatHandler) executeToolCalls(
 	return messages, toolCalls, iterationBump
 }
 
-// handleFinalResponse emits the final SSE message and saves the chat session.
 func (ch *ChatHandler) handleFinalResponse(
 	ctx context.Context,
 	content string,
@@ -1325,7 +1243,6 @@ func setUsageSpanAttributes(span trace.Span, usage ChatUsage) {
 	)
 }
 
-// loadChatSession loads chat session messages from the session store.
 func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID string) ([]llm.Message, error) {
 	sessionType, err := transcriptSessionType(ctx, ch.sessionStore, namespace, sessionID)
 	if err != nil {
@@ -1343,7 +1260,6 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 		return nil, nil
 	}
 
-	// Convert store.SessionMessage to llm.Message
 	llmMessages := make([]llm.Message, 0, len(messages))
 	for _, msg := range messages {
 		m := llm.Message{
@@ -1366,7 +1282,6 @@ func (ch *ChatHandler) loadChatSession(ctx context.Context, namespace, sessionID
 	return llmMessages, nil
 }
 
-// saveChatSession atomically commits new transcript messages and their usage.
 func (ch *ChatHandler) saveChatSession(
 	ctx context.Context,
 	namespace, sessionID string,
@@ -1402,10 +1317,6 @@ func (ch *ChatHandler) saveChatSession(
 		return fmt.Errorf("session store does not support atomic chat turns")
 	}
 
-	// The provider and tool loop remain bound to the request/turn context, but
-	// once a final response exists its atomic persistence owns the durability
-	// handoff. Detach cancellation here and bound the commit to the same grace
-	// window added to the chat-turn lease.
 	durabilityCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatDurabilityTimeout)
 	defer cancel()
 	return ch.sessionTurnCommitter.CommitSessionTurn(durabilityCtx, store.CommitSessionTurnRequest{
@@ -1425,19 +1336,12 @@ func (ch *ChatHandler) saveChatSession(
 	})
 }
 
-// HandleChatConfig handles GET /api/v1/chat/config.
 func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	toolNames := chattools.ChatToolNames()
-	// The advertised set matches what a turn will actually offer: no
-	// list_connections without connectors, or for a delegated token that
-	// may not read linked accounts.
 	if !ch.config.ConnectorsEnabled || !contextTokenAllowsConnectorRead(GetUserInfo(c), ch.contextTokenAuthorization) {
 		toolNames = slices.DeleteFunc(slices.Clone(toolNames), func(name string) bool { return name == chattools.ListConnectionsToolName })
 	}
 
-	// Context-token callers must name a Provider explicitly: the resolver
-	// refuses the implicit server default for them, so the UI must not offer
-	// it.
 	requireExplicitProvider := requestRequiresExplicitProvider(c, ch.contextTokenAuthorization)
 	provider, model := ch.config.Provider, ch.config.Model
 	if requireExplicitProvider {
@@ -1457,8 +1361,6 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 	})
 }
 
-// HandleCancelChat handles DELETE /api/v1/chat/{sessionId}.
-// ahpSessionVisible refuses, as not found, another person's AHP session.
 func (ch *ChatHandler) ahpSessionVisible(ctx context.Context, ui *UserInfo, namespace, sessionID string) error {
 	if ch.client == nil {
 		return nil
@@ -1488,7 +1390,6 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	// Another person's AHP session cannot be cancelled or removed.
 	if err := ch.ahpSessionVisible(ctx, GetUserInfo(c), namespace, sessionID); err != nil {
 		return err
 	}
@@ -1527,8 +1428,6 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 		}
 	}
 
-	// Delete the session to cancel it. ACP-enabled servers route through the
-	// fenced cross-store cleanup coordinator.
 	if err := ch.deleteChatSession(ctx, namespace, sessionID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return c.SendStatus(fiber.StatusNoContent)
@@ -1564,27 +1463,17 @@ func (ch *ChatHandler) cancelAndWaitForActiveChat(ctx context.Context, namespace
 	}
 }
 
-// stopActiveChat stops a chat Session's in-flight request, as a client
-// disconnect would, and waits until it has stopped. Until release is called,
-// the Session stays fenced: no next message can start, so the caller can
-// cancel the stopped turn's Tasks without catching a new turn's. The Session
-// is kept and accepts the next message after release. It reports whether a
-// request was running.
 func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, func(), error) {
 	key := activeChatKey(namespace, sessionID)
 	for range 3 {
 		ch.activeChatsMu.Lock()
 		request := ch.activeChats[key]
 		if request != nil {
-			// A gate holds the entry after the request finishes, as a
-			// deletion does, so reserveActiveChat refuses the next message.
 			request.deleteWaiters++
 			request.keepCreatedSession = true
 		}
 		ch.activeChatsMu.Unlock()
 		if request == nil {
-			// Idle: hold the reservation ourselves. A request that started
-			// meanwhile is stopped on the next pass.
 			reservation, err := ch.reserveActiveChatAs(namespace, sessionID, true)
 			if errors.Is(err, store.ErrConflict) {
 				continue
@@ -1596,8 +1485,6 @@ func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID 
 		}
 		release := func() { ch.abandonChatDeletionWaiter(namespace, sessionID, request) }
 		if request.gate {
-			// Another cancel already holds the idle chat; this one joins its
-			// gate and reports no running turn.
 			return false, release, nil
 		}
 		running := true
@@ -1656,8 +1543,6 @@ func (ch *ChatHandler) abandonChatDeletionWaiter(namespace, sessionID string, re
 	}
 }
 
-// wrapWithRetryAndFallback wraps a provider with retry logic and adds fallback
-// providers if the agent has them configured.
 func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx, provider llm.Provider, req ChatRequest, namespace string) (llm.Provider, error) {
 	var resultProvider llm.Provider = llm.NewRetryProvider(provider)
 
@@ -1730,9 +1615,6 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 	return resultProvider, nil
 }
 
-// chatSessionEpoch returns the label value pinning the chat Session's current
-// incarnation, or "" when the store cannot tell, which leaves the chat's
-// Tasks unable to act for their requester through an Agent identity.
 func chatSessionEpoch(ctx context.Context, sessions store.SessionStore, namespace, sessionID string) string {
 	reader, ok := sessions.(store.SessionCreationReader)
 	if !ok {
@@ -1747,14 +1629,12 @@ func chatSessionEpoch(ctx context.Context, sessions store.SessionStore, namespac
 	return labels.SessionEpoch(createdAt)
 }
 
-// generateChatID returns 8 random hex characters.
 func generateChatID() string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// hashArgs creates a short hash of tool name + arguments for repetition detection.
 func hashArgs(name string, args json.RawMessage) string {
 	h := sha256.New()
 	h.Write([]byte(name))
@@ -1762,7 +1642,6 @@ func hashArgs(name string, args json.RawMessage) string {
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }
 
-// writeSSE writes a server-sent event to the writer.
 func writeSSE(w *bufio.Writer, event, data string) error {
 	_, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 	if err != nil {
@@ -1771,7 +1650,6 @@ func writeSSE(w *bufio.Writer, event, data string) error {
 	return w.Flush()
 }
 
-// hasRunningTasks checks if any tasks created by this chat session are still running.
 func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID string) bool {
 	var taskList corev1alpha1.TaskList
 	if err := c.List(ctx, &taskList,
@@ -1782,7 +1660,6 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 	}
 	for i := range taskList.Items {
 		phase := taskList.Items[i].Status.Phase
-		// A recurring parent stays Scheduled by design and never completes.
 		if !phase.IsTerminal() && phase != corev1alpha1.TaskPhaseScheduled {
 			return true
 		}
@@ -1790,8 +1667,6 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 	return false
 }
 
-// agentRuntimeLabel names an Agent's runtime for the model: its built-in
-// type, or the external AgentRuntime it references.
 func agentRuntimeLabel(runtime *corev1alpha1.AgentCLIRuntime) string {
 	switch {
 	case runtime.Type != "":

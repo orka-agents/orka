@@ -85,7 +85,6 @@ func TestDeleteSessionChatTurnLease(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tt.expired {
-				// Simulate a process exiting before release, without a timing-dependent sleep.
 				if _, err := s.db.Exec(`UPDATE sessions SET chat_turn_expires_at = ?
 					WHERE namespace = ? AND name = ?`, time.Now().UTC().Add(-time.Minute), session.Namespace, session.Name); err != nil {
 					t.Fatal(err)

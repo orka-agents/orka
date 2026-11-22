@@ -6,8 +6,6 @@ import { scriptChatTurn, SUGGESTED_PROMPTS } from '../data/chat'
 import { handleDemoRequest } from '../server'
 import { AGENTS } from '../world'
 
-// Chat's create tools hand off to the task domain; stub it so these tests
-// cover only chat's side of the contract.
 vi.mock('./tasks', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./tasks')>()),
   createDemoTask: vi.fn(() => 'review-pr-1486-abc12'),

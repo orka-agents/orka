@@ -54,15 +54,8 @@ type RuntimeProfile struct {
 	ProxyCredentialRole      string            `json:"proxyCredentialRole"`
 	ProxyCredentialScope     string            `json:"proxyCredentialScope"`
 	ResourceClass            string            `json:"resourceClass"`
-	// Toolboxes lists the read-only tool images bound into the runtime Pod,
-	// in declared order. An absent list serializes identically to profiles
-	// that predate toolboxes, so their digests are unchanged.
-	Toolboxes []RuntimeToolbox `json:"toolboxes,omitempty"`
-	// Skills lists the Agent Skills bound read-only into the runtime Pod and
-	// projected into each session's native skills folder, in declared order.
-	// An absent list serializes identically to profiles that predate skills,
-	// so their digests are unchanged.
-	Skills []RuntimeSkill `json:"skills,omitempty"`
+	Toolboxes                []RuntimeToolbox  `json:"toolboxes,omitempty"`
+	Skills                   []RuntimeSkill    `json:"skills,omitempty"`
 }
 
 func (p RuntimeProfile) Validate() error {
@@ -134,9 +127,6 @@ const (
 	reasoningEffortMax    = "max"
 )
 
-// AgentSessionConfiguration is the resolved, non-secret Agent configuration
-// frozen into one RuntimeSession. Its canonical digest must match the
-// RuntimeProfile AgentConfigurationDigest.
 type AgentSessionConfiguration struct {
 	AgentUID        string `json:"agentUID"`
 	AgentGeneration int64  `json:"agentGeneration"`
@@ -221,7 +211,6 @@ func validateAgentExecutionControls(providerKind string, maxTurns int32, reasoni
 	}
 	switch providerKind {
 	case providerKindCodex:
-		// Codex accepts the full enum; the selected model may support a subset.
 		return nil
 	case providerKindClaude:
 		if reasoningEffort == "none" {
@@ -285,28 +274,12 @@ func (b WorkspaceBaseline) Validate() error {
 }
 
 type WorkspaceSpec struct {
-	Intent       WorkspaceIntent   `json:"intent"`
-	Baseline     WorkspaceBaseline `json:"baseline"`
-	RelativeRoot string            `json:"relativeRoot,omitempty"`
-	// ExpectDurableResume asserts that this session MUST resume a committed
-	// durable workspace checkpoint: the controller sets it for sessions on a
-	// resumed workspace lineage, and the runtime fails session creation when
-	// no committed checkpoint exists instead of silently materializing a
-	// fresh baseline over lost data.
-	ExpectDurableResume bool `json:"expectDurableResume,omitempty"`
-	// ExpectDurableResumeFrom carries the controller-validated PRIOR
-	// repository identity of a resumed lineage whose continuation
-	// legitimately moved to a new repository (a verified publication
-	// transition, for example the fork a PR publishes to). Under
-	// ExpectDurableResume, a committed checkpoint bound to exactly this
-	// identity may be wiped and re-materialized from the new baseline;
-	// any other foreign identity still fails creation closed.
-	ExpectDurableResumeFrom string `json:"expectDurableResumeFrom,omitempty"`
-	// ExpectDurableResumeMinGeneration carries the controller's persisted
-	// floor for the committed checkpoint's session generation: a same-
-	// identity checkpoint whose recorded generation is OLDER than this floor
-	// is a stale provider restore and fails session creation closed.
-	ExpectDurableResumeMinGeneration uint64 `json:"expectDurableResumeMinGeneration,omitempty"`
+	Intent                           WorkspaceIntent   `json:"intent"`
+	Baseline                         WorkspaceBaseline `json:"baseline"`
+	RelativeRoot                     string            `json:"relativeRoot,omitempty"`
+	ExpectDurableResume              bool              `json:"expectDurableResume,omitempty"`
+	ExpectDurableResumeFrom          string            `json:"expectDurableResumeFrom,omitempty"`
+	ExpectDurableResumeMinGeneration uint64            `json:"expectDurableResumeMinGeneration,omitempty"`
 }
 
 func (w WorkspaceSpec) Validate() error {
@@ -322,9 +295,6 @@ func (w WorkspaceSpec) Validate() error {
 	return validateWorkspaceRelativeRoot(w.RelativeRoot)
 }
 
-// ValidateWorkspaceRelativeRoot exposes the RuntimeSession workspace
-// relative-root rule so the controller preflight can reject unsafe subPath
-// values with exactly the semantics session creation enforces.
 func ValidateWorkspaceRelativeRoot(value string) error {
 	return validateWorkspaceRelativeRoot(value)
 }

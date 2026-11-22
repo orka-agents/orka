@@ -38,8 +38,6 @@ type webhookReceipt struct {
 	body   []byte
 }
 
-// webhookReceiver records every request and answers with the next scripted
-// status (the last one repeats).
 type webhookReceiver struct {
 	server   *httptest.Server
 	mu       sync.Mutex
@@ -89,8 +87,6 @@ func newWebhookTestKeys(t *testing.T) taskwebhook.KeySet {
 	return taskwebhook.KeySet{Current: key}
 }
 
-// newTestWebhookNotifier admits only 127.0.0.1 so tests can reach httptest
-// servers while every other non-public address stays forbidden.
 func newTestWebhookNotifier(t *testing.T, keys taskwebhook.KeySet, clock *webhookTestClock) *WebhookNotifier {
 	t.Helper()
 	loopback := netip.MustParseAddr("127.0.0.1")
@@ -173,7 +169,6 @@ func TestWebhookDeliverySignsAndRecordsSuccess(t *testing.T) {
 	assertDeliveredRecord(t, stored, http.StatusAccepted)
 	assertSignedDelivery(t, task, stored.Status.WebhookDelivery, receipt, claims)
 
-	// A delivered notice is settled: nothing more is sent.
 	if requeue, err := notifier.reconcileDelivery(context.Background(), client.Status(), stored); err != nil || requeue != 0 {
 		t.Fatalf("settled reconcileDelivery() = %v, %v", requeue, err)
 	}
@@ -247,7 +242,6 @@ func TestWebhookDeliveryRetriesWithBackoffThenFails(t *testing.T) {
 			t.Fatalf("attempt %d requeue = %v, want %v", attempt, requeue, wantBackoff[attempt-1])
 		}
 		if attempt < 3 {
-			// Calling early sends nothing and reports the remaining backoff.
 			early := reloadWebhookTask(t, client, task)
 			clock.now = clock.now.Add(time.Second)
 			remaining, err := notifier.reconcileDelivery(context.Background(), client.Status(), early)
@@ -289,9 +283,6 @@ func TestWebhookDeliveryRetriesWithBackoffThenFails(t *testing.T) {
 	}
 }
 
-// failingResultWrites fails every status write after the first, simulating a
-// controller that dies after claiming an attempt and sending it but before
-// recording the result.
 type failingResultWrites struct {
 	ctrlclient.SubResourceWriter
 	writes int
@@ -322,7 +313,6 @@ func TestWebhookDeliverySurvivesControllerRestart(t *testing.T) {
 		t.Fatalf("claimed delivery = %#v, want a durable lease for attempt 1", claimed)
 	}
 
-	// A fresh controller honors the lease of the interrupted attempt.
 	restarted := newTestWebhookNotifier(t, keys, clock)
 	clock.now = clock.now.Add(30 * time.Second)
 	requeue, err := restarted.reconcileDelivery(context.Background(), client.Status(), reloadWebhookTask(t, client, task))
@@ -368,7 +358,6 @@ func TestWebhookDeliveryNeverClaimsPastTheBoundAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.now = clock.now.Add(time.Hour)
-	// The final attempt is claimed and sent, but its result is never recorded.
 	if _, err := notifier.reconcileDelivery(context.Background(), &failingResultWrites{SubResourceWriter: client.Status()}, reloadWebhookTask(t, client, task)); err == nil {
 		t.Fatal("expected the simulated crash to surface")
 	}
@@ -432,7 +421,6 @@ func TestWebhookDeliverySupersedesPendingNoticeWithNewerState(t *testing.T) {
 	if err := client.Status().Update(context.Background(), original); err != nil {
 		t.Fatal(err)
 	}
-	// Newer state never accelerates the pending backoff.
 	if early, err := notifier.reconcileDelivery(context.Background(), client.Status(), reloadWebhookTask(t, client, task)); err != nil || early == 0 {
 		t.Fatalf("reconcile during backoff = %v, %v", early, err)
 	}
@@ -492,8 +480,6 @@ func TestWebhookDeliveryNeverSendsUnsigned(t *testing.T) {
 	t.Parallel()
 	receiver := newWebhookReceiver(t, http.StatusOK)
 
-	// Disabled signing fails the notice terminally rather than requeueing a
-	// finished Task forever.
 	disabledTask := newWebhookTask(receiver.server.URL)
 	disabledClient := newWebhookTestClient(t, disabledTask)
 	disabled := newTestWebhookNotifier(t, taskwebhook.KeySet{}, nil)
@@ -506,7 +492,6 @@ func TestWebhookDeliveryNeverSendsUnsigned(t *testing.T) {
 		t.Fatalf("disabled: delivery = %#v, want Failed without attempts", delivery)
 	}
 
-	// A configured key source whose keys are temporarily unavailable retries.
 	task := newWebhookTask(receiver.server.URL)
 	client := newWebhookTestClient(t, task)
 	unavailable := newTestWebhookNotifier(t, taskwebhook.KeySet{}, nil)
@@ -603,9 +588,6 @@ func TestWebhookDeliveryFailsClosedOnDNSAndPrivateAnswers(t *testing.T) {
 	}
 }
 
-// TestWebhookDeliveryPinsSameNamespaceServiceToClusterIP proves the in-cluster
-// path keeps working under the public-only policy: the connection goes to the
-// validated Service's ClusterIP without consulting DNS.
 func TestWebhookDeliveryPinsSameNamespaceServiceToClusterIP(t *testing.T) {
 	t.Parallel()
 	receiver := newWebhookReceiver(t, http.StatusOK)
@@ -674,8 +656,6 @@ func TestWebhookBackoffIsBounded(t *testing.T) {
 	}
 }
 
-// slowWebhookKeySource advances the clock while loading keys, as a slow Secret
-// read or key-source lock would.
 type slowWebhookKeySource struct {
 	taskwebhook.StaticKeySource
 	clock *webhookTestClock
@@ -697,7 +677,6 @@ func TestWebhookDeliveryLeaseStartsAfterKeyLoading(t *testing.T) {
 		task     *corev1alpha1.Task
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The attempt is claimed before sending; record the claimed lease.
 		claimed := &corev1alpha1.Task{}
 		if err := client.Get(r.Context(), ctrlclient.ObjectKeyFromObject(task), claimed); err == nil && claimed.Status.WebhookDelivery != nil {
 			mu.Lock()
@@ -724,8 +703,6 @@ func TestWebhookDeliveryLeaseStartsAfterKeyLoading(t *testing.T) {
 	}
 }
 
-// stalledClaimWrites delays the claim write past the attempt lease, as a
-// stalled API server would, then lets it land.
 type stalledClaimWrites struct {
 	ctrlclient.SubResourceWriter
 	stall  time.Duration
@@ -759,8 +736,6 @@ func TestWebhookDeliveryNeverSendsAfterItsLeaseExpires(t *testing.T) {
 	}
 }
 
-// Status times serialize at whole seconds; the persisted lease must not end
-// before the in-process lease that bounds the send.
 func TestWebhookDeliveryPersistedLeaseNeverEndsEarly(t *testing.T) {
 	t.Parallel()
 	clock := &webhookTestClock{now: time.Unix(1_800_000_100, 700_000_000)}

@@ -22,8 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// A normal API deletion must retain the exact Pod long enough to observe the
-// container's terminal lifetime. API absence itself is not retirement proof.
 func TestRuntimePoolRetirementUnexpectedPodDeletionRetainsEvidence(t *testing.T) {
 	pool := runtimePoolTestObject(1)
 	supervisor := &fakeRuntimePoolSupervisorClient{}
@@ -41,9 +39,6 @@ func TestRuntimePoolRetirementUnexpectedPodDeletionRetainsEvidence(t *testing.T)
 	}
 }
 
-// The fake API has no Deployment controller or kubelet. Only explicitly marked
-// native fixtures acquire real owner identities, running status and durable
-// epoch authority; deletion is NEVER synthesized into termination evidence.
 func runtimePoolTestPrepareBootEnrollment(t *testing.T, r *RuntimePoolReconciler, pod *corev1.Pod) {
 	t.Helper()
 	if r.ControlStore == nil {
@@ -129,10 +124,6 @@ func runtimePoolTestTerminateBootPod(t *testing.T, r *RuntimePoolReconciler, pod
 	}
 }
 
-// Old unit fixtures supply bare Pod metadata rather than a real Deployment
-// controller/kubelet. Materialize only those spec-less fixtures for NEW native
-// templates, before any authenticated observation. Explicitly modeled legacy
-// Pods (including diagnostic history) are never rewritten by this helper.
 func runtimePoolTestMaterializeBarePods(t *testing.T, r *RuntimePoolReconciler, deployment *appsv1.Deployment) {
 	t.Helper()
 	pool := &corev1alpha1.RuntimePool{}
@@ -204,8 +195,6 @@ func TestRuntimePoolBootReleasedWitnessDoesNotBlockNewBoot(t *testing.T) {
 	}
 	failPublication = false
 	runtimePoolTestRestartBootContainer(t, f, first)
-	// The first boot is retired from its exact last termination, and the second
-	// enrolls in the same Pod because the first active pointer never published.
 	f.serve(t)
 	second := f.witness(t)
 	task := f.task(t, "second-boot-turn")
@@ -216,7 +205,6 @@ func TestRuntimePoolBootReleasedWitnessDoesNotBlockNewBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Force the historical-first order, independently of ExternalEffect names.
 	if err := f.r.releaseRuntimePoolBootPod(t.Context(), first, []runtimePoolBootWitness{first, second}, fence); err != nil {
 		t.Fatalf("already-released history blocked the later retention owner: %v", err)
 	}

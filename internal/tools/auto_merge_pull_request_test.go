@@ -319,7 +319,7 @@ func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
+	cancel()
 
 	args, _ := json.Marshal(AutoMergePullRequestArgs{
 		TaskName: testCoderTaskName,
@@ -328,10 +328,7 @@ func TestAutoMergePullRequestTool_ContextCancelled(t *testing.T) {
 	})
 
 	result, err := tool.Execute(ctx, args)
-	// The first iteration runs immediately with a cancelled context.
-	// Depending on timing, either the HTTP call fails or we get a timeout/cancelled outcome.
 	if err != nil {
-		// Error is acceptable when context is cancelled during HTTP calls
 		return
 	}
 
@@ -604,8 +601,6 @@ func TestAutoMergePullRequestTool_MissingTask(t *testing.T) {
 	}
 }
 
-// --- Helper function unit tests ---
-
 func TestGetGitHubPRDetails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); auth != testBearerToken {
@@ -750,7 +745,6 @@ func TestIsTransientHTTPError(t *testing.T) {
 }
 
 func TestAutoMergePullRequestTool_ForcePushNewSHA(t *testing.T) {
-	// Test getGitHubPRDetails returns different SHAs on successive calls
 	var callCount atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -827,13 +821,11 @@ func TestGitHubAPIError_Error(t *testing.T) {
 }
 
 func TestPollOnce_TransientPRError(t *testing.T) {
-	// Test that pollOnce handles transient errors from getGitHubPRDetails
 	var callCount int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.Contains(r.URL.Path, "/pulls/"):
 			callCount++
-			// Return 429 rate limit (transient)
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = fmt.Fprintf(w, `{"message":"rate limited"}`)
 		default:
@@ -1345,7 +1337,6 @@ func TestAutoMergePullRequestTool_CustomForgeCredentialKey(t *testing.T) {
 }
 
 func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
-	// Test that getGitHubPRDetails returns a transient error on 500, and succeeds on retry
 	var callCount atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1364,7 +1355,6 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// First call: should return transient error
 	_, _, _, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err == nil {
 		t.Fatal("expected error on first call")
@@ -1373,7 +1363,6 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 		t.Errorf("expected transient HTTP error, got: %v", err)
 	}
 
-	// Second call: should succeed
 	sha, state, merged, err := getGitHubPRDetails(context.Background(), testGitHubToken, testGitHubOwner, testRepositoryName, 42, server.URL)
 	if err != nil {
 		t.Fatalf("unexpected error on retry: %v", err)
@@ -1389,9 +1378,6 @@ func TestAutoMergePullRequestTool_Transient5xx(t *testing.T) {
 	}
 }
 
-// TestCheckCIStatusDetailedReadsEveryPage covers commits with more check
-// runs than one page: a failure on a later page is found, and runs that
-// could not be read keep CI from being reported as passed.
 func TestCheckCIStatusDetailedReadsEveryPage(t *testing.T) {
 	page := func(total int, runs []string) string {
 		entries := make([]string, 0, len(runs))
@@ -1449,13 +1435,9 @@ func TestCheckCIStatusDetailedReadsEveryPage(t *testing.T) {
 	}
 }
 
-// TestCheckCIStatusDetailed_RefusesOversizedPage covers a check-runs page
-// past the 1 MiB read limit: it is refused rather than decoded from a cut
-// prefix or accepted with trailing bytes ignored.
 func TestCheckCIStatusDetailed_RefusesOversizedPage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
-		// A complete, valid document followed by padding past the limit.
 		_, _ = fmt.Fprint(w, `{"total_count":1,"check_runs":[{"name":"build","status":"completed","conclusion":"success"}]}`)
 		_, _ = fmt.Fprint(w, strings.Repeat(" ", 1<<20))
 	}))

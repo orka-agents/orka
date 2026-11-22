@@ -34,9 +34,6 @@ const (
 	cliTaskTypeCont  = "container"
 )
 
-// completeTaskType suggests the canonical task types for flag completion,
-// filtered by the typed prefix. The suggestions are static, so completion
-// never contacts an Orka server.
 func completeTaskType(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	return completeWithPrefix(toComplete,
 		string(corev1alpha1.TaskTypeAI),
@@ -45,8 +42,6 @@ func completeTaskType(_ *cobra.Command, _ []string, toComplete string) ([]string
 	), cobra.ShellCompDirectiveNoFileComp
 }
 
-// completeTaskStatus suggests the canonical task phases for flag completion,
-// filtered by the typed prefix.
 func completeTaskStatus(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	return completeWithPrefix(toComplete,
 		string(corev1alpha1.TaskPhasePending),
@@ -119,11 +114,6 @@ func newTaskCreateCmd() *cobra.Command {
 			}
 
 			prompt := strings.Join(args, " ")
-			// The default type is ai, but an explicit --image is an
-			// unambiguous request for a container task. --agent is not:
-			// it also names native AI Agents, so the referenced Agent's
-			// spec decides whether this is an agent task. Only an explicit
-			// --type overrides the inference.
 			if !cmd.Flags().Changed("type") {
 				if strings.TrimSpace(image) != "" && strings.TrimSpace(agent) != "" {
 					return fmt.Errorf("--image and --agent are ambiguous without --type: pass --type container or --type ai|agent explicitly")
@@ -192,9 +182,6 @@ func newTaskCreateCmd() *cobra.Command {
 
 			if taskType == cliTaskTypeAI {
 				if strings.TrimSpace(provider) == "" && agent == "" {
-					// No Provider named: pick the namespace's only ready
-					// Provider, or explain what is available, instead of
-					// assuming one named "default" exists.
 					resolved, err := resolveDefaultProviderName(cmd.Context(), c)
 					if err != nil {
 						return err
@@ -341,15 +328,10 @@ func newTaskGetCmd() *cobra.Command {
 				return printStructured(cmd, detail)
 			}
 			view := toGenericMap(detail)
-			// The readable view shows the first lines of the stored result;
-			// it lives behind a separate endpoint, so fetch it only for this
-			// view and only when the Task reports one.
 			if len(nestedMap(view, "status", "resultRef")) > 0 {
 				result, err := c.GetTaskResult(context.Background(), args[0], client.GetOptions{Namespace: c.Namespace})
 				switch {
 				case err != nil:
-					// The rest of the view is still useful; say the result
-					// could not be read rather than pretending there is none.
 					view["result"] = "unavailable: " + err.Error()
 				case result != nil:
 					view["result"] = result.Result
@@ -501,15 +483,12 @@ func newTaskWaitCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("invalid timeout: %w", err)
 				}
-				// One context deadline stops polling and cancels in-flight requests.
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, d)
 				defer cancel()
 			}
 
 			c := newClientFromCmd(cmd)
-			// A Task held on an approval would otherwise look like a plain
-			// wait; say once, on stderr, that it needs a person.
 			announced := false
 			return waitForTaskPhase(
 				ctx,
@@ -570,8 +549,6 @@ func waitForTaskPhase(
 	}
 }
 
-// taskPhaseIsTerminal reports whether a task phase means the task is over,
-// so nothing more (such as an approval request) can come from it.
 func taskPhaseIsTerminal(phase string) bool {
 	for _, terminal := range []corev1alpha1.TaskPhase{corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled} {
 		if strings.EqualFold(phase, string(terminal)) {
@@ -581,8 +558,6 @@ func taskPhaseIsTerminal(phase string) bool {
 	return false
 }
 
-// waitContextError maps the polling context's terminal state to the same
-// user-facing errors a deadline without request cancellation would produce.
 func waitContextError(ctx context.Context, taskName string) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("timed out waiting for task %s", taskName)
@@ -643,10 +618,6 @@ type resolvedAgentRuntimePolicy struct {
 	requireWorkspaceIntentMatch bool
 }
 
-// resolveAgentRuntimePolicy loads the task policy for a runtimeRef Agent.
-// The registered MCP policy and workspace intent are authoritative. A nil
-// result means the Agent is missing or uses a built-in runtime. An explicit
-// empty allowedTools result is a deny-all policy and must be serialized as [].
 func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName string) (*resolvedAgentRuntimePolicy, error) {
 	agentPath := "/api/v1/agents/" + url.PathEscape(strings.TrimSpace(agentName))
 	body, _, err := c.GetRaw(ctx, agentPath, map[string]string{cliNamespaceQuery: c.Namespace})
@@ -708,13 +679,6 @@ func resolveAgentRuntimePolicy(ctx context.Context, c *client.Client, agentName 
 	}, nil
 }
 
-// resolveAgentTaskType decides whether --agent names an ACP runtime Agent
-// (task type "agent") or a native AI Agent (task type "ai") by reading the
-// Agent's spec. A missing Agent (404) keeps the historical "ai" default —
-// creation surfaces the real problem server-side — but any other read
-// failure (for example a token without agents read permission) is surfaced
-// instead of silently guessing: a wrong guess would submit an AI Task for a
-// runtime Agent, or vice versa.
 func resolveAgentTaskType(ctx context.Context, c *client.Client, agent string) (string, error) {
 	body, _, err := c.GetRaw(ctx, "/api/v1/agents/"+url.PathEscape(strings.TrimSpace(agent)), map[string]string{cliNamespaceQuery: c.Namespace})
 	if err != nil {
@@ -740,10 +704,6 @@ func resolveAgentTaskType(ctx context.Context, c *client.Client, agent string) (
 	return cliTaskTypeAI, nil
 }
 
-// resolveDefaultProviderName selects the Provider for an ai task when none was
-// named: the namespace's only ready Provider is used; otherwise the error
-// lists what exists so the user can pass --provider. The list is paged through
-// completely so the decision never rests on a truncated first page.
 func resolveDefaultProviderName(ctx context.Context, c *client.Client) (string, error) {
 	type providerItem struct {
 		Name     string `json:"name"`
@@ -802,8 +762,6 @@ func resolveDefaultProviderName(ctx context.Context, c *client.Client) (string, 
 			ready = append(ready, name)
 		}
 	}
-	// Mirror the server resolver's precedence: a ready Provider named
-	// "default" wins outright, then a sole ready Provider.
 	for _, name := range ready {
 		if name == "default" {
 			return name, nil

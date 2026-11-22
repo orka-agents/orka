@@ -18,14 +18,10 @@ const (
 	DefaultBufferedEventBytes = 32 << 20
 	DefaultInitializeTimeout  = 60 * time.Second
 
-	// MinPermissionTimeout and MaxPermissionTimeout bound how long a runtime
-	// waits for the answer to a permission request. A person may answer one,
-	// so the window is configurable; it can never be unbounded.
 	MinPermissionTimeout = time.Minute
 	MaxPermissionTimeout = time.Hour
 )
 
-// ValidatePermissionTimeout checks a configured permission timeout.
 func ValidatePermissionTimeout(timeout time.Duration) error {
 	if timeout < MinPermissionTimeout || timeout > MaxPermissionTimeout {
 		return fmt.Errorf("permission timeout must be between %s and %s", MinPermissionTimeout, MaxPermissionTimeout)
@@ -33,55 +29,32 @@ func ValidatePermissionTimeout(timeout time.Duration) error {
 	return nil
 }
 
-// ErrPromptCancellationPending rejects admission until an earlier session-scoped
-// cancellation write finishes. The prompt has not been accepted and may be retried.
 var ErrPromptCancellationPending = errors.New("runtime session has a pending prompt cancellation write")
 
-// ErrPromptCancellationTimedOut closes admission after an unresponsive
-// cancellation transport forces retirement; its queued write cannot be reused.
 var ErrPromptCancellationTimedOut = errors.New("runtime session cancellation transport timed out")
 
-// ErrPromptLeaseExpired rejects admission before capabilities are activated.
-// No prompt has been accepted, so a new valid lease may reuse the session.
 var ErrPromptLeaseExpired = errors.New("prompt lease deadline must be in the future")
 
-// ErrPromptActivationExpired rejects an unaccepted prompt whose lease expired
-// after capability activation. The caller must retire or fully roll back those
-// capabilities before allowing another admission.
 var ErrPromptActivationExpired = errors.New("prompt lease deadline expired during capability activation")
 
 type RuntimeSessionConfig struct {
-	ID             string
-	Generation     int64
-	ProfileDigest  string
-	Process        ProcessConfig
-	MCPServers     []MCPServer
-	NewSessionMeta Meta
-	// RequiredModeID, when set, is the session mode the adapter must report as
-	// current in its session/new and session/resume responses. An adapter that
-	// fell back to another mode fails creation or the in-place resume.
-	RequiredModeID string
-	// ResumeSessionID requests an installed native provider session. Failure to
-	// advertise or complete resume must fail creation without session/new.
-	ResumeSessionID string
-	AuthMethodID    string
-	ClientInfo      Implementation
-	// ValidateAdapterRelaunch, when set, runs after an idle adapter's exit is
-	// proven and before a replacement launches. Session creation checks the
-	// workspace once, but the agent can change it afterwards; an error retires
-	// the session as lost instead of starting a replacement.
+	ID                      string
+	Generation              int64
+	ProfileDigest           string
+	Process                 ProcessConfig
+	MCPServers              []MCPServer
+	NewSessionMeta          Meta
+	RequiredModeID          string
+	ResumeSessionID         string
+	AuthMethodID            string
+	ClientInfo              Implementation
 	ValidateAdapterRelaunch func() error
 
-	InitializeTimeout time.Duration
-	PromptLease       time.Duration
-	PermissionTimeout time.Duration
-	CancelGrace       time.Duration
-	MaxBufferedEvents int
-	// MaxBufferedEventBytes bounds the aggregate size of buffered, not yet
-	// consumed prompt events (measured as the raw notification payload) so a
-	// burst of large valid events cannot exhaust the runtime's memory before
-	// the event-count limit fires. Consumers release bytes through
-	// PromptRun.Release.
+	InitializeTimeout     time.Duration
+	PromptLease           time.Duration
+	PermissionTimeout     time.Duration
+	CancelGrace           time.Duration
+	MaxBufferedEvents     int
 	MaxBufferedEventBytes int
 }
 
@@ -92,16 +65,11 @@ type RuntimeSession struct {
 	providerSessionID string
 	config            RuntimeSessionConfig
 
-	mu sync.Mutex
-	// process is the live adapter child. It is replaced in place when an
-	// idle adapter exits and the agent supports session/resume.
-	process      *Process
-	capabilities AgentCapabilities
-	// resuming is non-nil while an in-place adapter restart is in flight;
-	// its done channel closes when the restart settles either way.
-	resuming        *runtimeSessionRestart
-	adapterRestarts int
-	// frozen is set from a workspace freeze attempt until a proven thaw.
+	mu                  sync.Mutex
+	process             *Process
+	capabilities        AgentCapabilities
+	resuming            *runtimeSessionRestart
+	adapterRestarts     int
 	frozen              bool
 	active              *activePrompt
 	pendingCancelWrites int
@@ -111,13 +79,7 @@ type RuntimeSession struct {
 	deletion            *runtimeSessionDeletion
 }
 
-// AdapterLostError reports that the adapter process exited while the runtime
-// session was idle and the session could not be resumed in place: either the
-// agent does not advertise session/resume, or the resume attempt failed. The
-// provider session is gone for this generation; the caller must retire the
-// RuntimeSession so the controller continues from Orka's canonical transcript.
 type AdapterLostError struct {
-	// Attempted is true when a session/resume was attempted and failed.
 	Attempted bool
 	Cause     error
 }
@@ -131,12 +93,8 @@ func (e *AdapterLostError) Error() string {
 
 func (e *AdapterLostError) Unwrap() error { return e.Cause }
 
-// closeSessionGraceCap bounds the graceful session/close wait during
-// deletion so a wedged adapter cannot delay the proven process stop.
 const closeSessionGraceCap = 5 * time.Second
 
-// runtimeSessionRestart reserves the prompt identity before adapter recovery
-// releases s.mu. Cancellation stays recorded even if its caller stops waiting.
 type runtimeSessionRestart struct {
 	promptID        string
 	requestDigest   string
@@ -151,8 +109,6 @@ type runtimeSessionDeletion struct {
 	err    error
 }
 
-// InitializationError retains the failed session's stop proof. The session is
-// sealed against prompts, but remains available for a later cleanup attempt.
 type InitializationError struct {
 	Err     error
 	Cleanup CleanupStatus
@@ -172,20 +128,13 @@ const (
 )
 
 type PromptEvent struct {
-	Type     PromptEventType
-	Sequence int64
-	// Timestamp is assigned when the event is enqueued for the consumer.
-	Timestamp time.Time
-	// ReceivedAt is when the session received the notification from the
-	// child, stamped before any pre-acceptance buffering, so it preserves
-	// the phase the child emitted the event in even when the event is
-	// enqueued later.
+	Type       PromptEventType
+	Sequence   int64
+	Timestamp  time.Time
 	ReceivedAt time.Time
 	Update     *SessionNotification
 	Permission *PermissionRequestEvent
-	// Size is the raw notification payload size counted against the prompt's
-	// buffered-bytes budget until the consumer releases the event.
-	Size int
+	Size       int
 }
 
 type PermissionRequestEvent struct {
@@ -208,14 +157,11 @@ type PromptResult struct {
 	Err        error
 	Accepted   bool
 	SettledAt  time.Time
-	// Usage is the agent-reported turn token usage, for telemetry only.
-	Usage *PromptUsage
+	Usage      *PromptUsage
 }
 
 type PromptRun struct {
-	Events <-chan PromptEvent
-	// Release returns an event's bytes to the buffered-bytes budget; call it
-	// as soon as the event has been received from Events.
+	Events  <-chan PromptEvent
 	Release func(PromptEvent)
 	Result  <-chan PromptResult
 }
@@ -325,8 +271,6 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	if process == nil {
 		return nil, err
 	}
-	// Creation failures after the child starts go through Delete so the
-	// caller receives proven-or-unproven process cleanup evidence.
 	session.process = process
 	if err != nil {
 		return nil, initializationFailed(session, err)
@@ -357,8 +301,6 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	if err != nil {
 		return nil, initializationFailed(session, fmt.Errorf("create ACP provider session: %w", err))
 	}
-	// Capabilities are recorded only once a provider session exists, so a
-	// failed creation never sends session/close for an empty session ID.
 	session.capabilities = capabilities
 	session.providerSessionID = newSession.SessionID
 	if err := verifySessionMode(newSession.Modes, cfg.RequiredModeID); err != nil {
@@ -367,8 +309,6 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 	return session, nil
 }
 
-// verifySessionMode checks the current mode an adapter reported for a
-// created or resumed provider session.
 func verifySessionMode(modes json.RawMessage, required string) error {
 	if required == "" {
 		return nil
@@ -382,13 +322,6 @@ func verifySessionMode(modes json.RawMessage, required string) error {
 	return nil
 }
 
-// launchAdapter starts one adapter child and completes the ACP handshake:
-// initialize, the HTTP MCP capability check, and optional authentication. A
-// handshake failure returns the started process with the error, and the caller
-// owns its cleanup: creation proves it through Delete, while the in-place
-// resume stops it best-effort. It is shared by session creation and by the
-// in-place resume after an idle adapter exit, so both paths negotiate exactly
-// the same way.
 func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapabilities, error) {
 	cfg := s.config
 	process, err := StartProcess(cfg.Process)
@@ -405,11 +338,7 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 		ClientCapabilities: ClientCapabilities{
 			FS:       FileSystemCapabilities{},
 			Terminal: false,
-			// Adapters that support ACP session notices (the pinned codex-acp
-			// and claude-agent-acp) then send advisories, such as Codex's
-			// missing model metadata warning, as notice updates instead of
-			// prefixing them to the agent's reply.
-			Session: map[string]any{"notices": map[string]any{}},
+			Session:  map[string]any{"notices": map[string]any{}},
 		},
 	})
 	if err != nil {
@@ -433,24 +362,18 @@ func (s *RuntimeSession) ID() string                { return s.id }
 func (s *RuntimeSession) Generation() int64         { return s.generation }
 func (s *RuntimeSession) ProviderSessionID() string { return s.providerSessionID }
 
-// Process returns the current adapter child. After an in-place resume this is
-// the replacement process, not the one that exited.
 func (s *RuntimeSession) Process() *Process {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.process
 }
 
-// AgentCapabilities returns the capabilities the live adapter advertised
-// during its initialize handshake.
 func (s *RuntimeSession) AgentCapabilities() AgentCapabilities {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.capabilities
 }
 
-// AdapterRestarts counts successful in-place adapter resumes for this
-// RuntimeSession generation.
 func (s *RuntimeSession) AdapterRestarts() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -469,13 +392,6 @@ func processExited(process *Process) bool {
 	}
 }
 
-// recoverExitedAdapterLocked is called with s.mu held, with no active prompt
-// and no deletion. When the adapter child has exited it restarts the adapter
-// and resumes the provider session in place; the lock is released during the
-// restart and re-acquired before returning, so callers must re-validate
-// deletion afterwards. A nil return with the lock held means a live adapter
-// is bound; an *AdapterLostError means the provider session is unrecoverable
-// for this generation.
 func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, promptID, requestDigest string, leaseDeadline time.Time) error {
 	if s.resuming != nil {
 		return fmt.Errorf("runtime session adapter restart is in flight")
@@ -508,9 +424,6 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, promptI
 
 	s.mu.Lock()
 	if resuming.cancelRequested {
-		// Resume may have answered just before cancellation acquired s.mu.
-		// Stop even a successful replacement before releasing the reservation;
-		// the cancelled prompt must never be submitted or replayed.
 		if process != nil {
 			s.mu.Unlock()
 			_ = stopProcessBestEffort(process, s.config.CancelGrace)
@@ -528,15 +441,9 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, promptI
 		}
 	}
 	if err != nil {
-		// Even an interrupted restart (caller gone, lease over) is lost: a
-		// failed StartPrompt leaves the supervisor's prompt gates cancelling,
-		// so this generation cannot take another prompt anyway. Retiring it
-		// hands recovery to the controller's transcript recreation.
 		return &AdapterLostError{Attempted: true, Cause: err}
 	}
 	if s.deleted {
-		// Delete cancels before joining a restart. Keep this guard as well:
-		// a replacement that cannot be bound must not outlive the session.
 		s.mu.Unlock()
 		_ = stopProcessBestEffort(process, s.config.CancelGrace)
 		s.mu.Lock()
@@ -554,12 +461,6 @@ func (s *RuntimeSession) recoverExitedAdapterLocked(ctx context.Context, promptI
 	return nil
 }
 
-// resumeAdapter proves the exited adapter tree is gone, launches a replacement
-// through the same handshake as session creation, and reconnects it to the
-// existing provider session with session/resume. The provider session ID is
-// pinned: an agent that answers with a different ID is rejected and the
-// replacement is stopped, because Orka's transcript continuity is bound to the
-// original provider session.
 func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, leaseDeadline time.Time) (*Process, AgentCapabilities, error) {
 	cfg := s.config
 	deadline := leaseDeadline
@@ -569,12 +470,6 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 	resumeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
-	// The replacement reuses this session's UID/GID. Under the production
-	// fence (root supervisor, distinct child UID) the exited tree must be
-	// PROVEN gone before another child exists under that identity, or a
-	// straggler could later be mistaken for the new adapter. Without a
-	// distinct identity there is nothing UID-scoped to prove; the observed
-	// leader exit is the only evidence available, exactly as for deletion.
 	if exited.usesUIDProcessScope() {
 		status, err := exited.Stop(resumeCtx, cfg.CancelGrace)
 		if err != nil {
@@ -584,11 +479,6 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 			return nil, AgentCapabilities{}, fmt.Errorf("exited adapter cleanup could not be proven; remaining pids %v", status.RemainingPIDs)
 		}
 	}
-	// The exited client's read loop calls this session's handlers
-	// synchronously and closes Done when it ends. Wait for it, so a
-	// notification still buffered on the old stdout is delivered now, while
-	// no prompt is active, and can never reach the prompt the replacement
-	// admits.
 	select {
 	case <-exited.Client().Done():
 	case <-resumeCtx.Done():
@@ -640,10 +530,6 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 	return process, capabilities, nil
 }
 
-// closeProviderSession sends a bounded, best-effort session/close before the
-// process stop so agents that persist state on close (thread rollouts,
-// session files) get to do so. The request write can block on a wedged
-// adapter, so it runs detached; adapter exit closes stdin and ends it.
 func (s *RuntimeSession) closeProviderSession(ctx context.Context, process *Process) {
 	grace := s.config.CancelGrace
 	if grace <= 0 {
@@ -659,8 +545,6 @@ func (s *RuntimeSession) closeProviderSession(ctx context.Context, process *Proc
 	select {
 	case err := <-done:
 		if err != nil {
-			// The error text is adapter-controlled; log only its JSON-RPC
-			// code.
 			code := 0
 			if rpcErr, ok := errors.AsType[*RPCError](err); ok {
 				code = rpcErr.Code
@@ -673,7 +557,6 @@ func (s *RuntimeSession) closeProviderSession(ctx context.Context, process *Proc
 	}
 }
 
-// StartPrompt starts a prompt bounded by the configured default lease.
 func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock) (PromptRun, error) {
 	if s.config.PromptLease <= 0 {
 		return PromptRun{}, fmt.Errorf("prompt lease duration must be positive")
@@ -681,14 +564,6 @@ func (s *RuntimeSession) StartPrompt(ctx context.Context, promptID, requestDiges
 	return s.StartPromptWithLeaseDeadline(ctx, promptID, requestDigest, prompt, time.Now().Add(s.config.PromptLease))
 }
 
-// RecoverExitedAdapter restarts and resumes an adapter that exited while the
-// session was idle, so a caller can finish that handshake before it grants the
-// prompt any provider or MCP access: an agent that calls the model during
-// session/resume is then refused instead of spending the prompt's turns. It is
-// a no-op when the adapter is alive or the session is deleted, busy, or has
-// already settled promptID; StartPromptWithLeaseDeadline reports those cases.
-// It is the only path that restarts an adapter: StartPromptWithLeaseDeadline
-// treats an exited adapter as lost.
 func (s *RuntimeSession) RecoverExitedAdapter(ctx context.Context, promptID, requestDigest string, leaseDeadline time.Time) error {
 	promptID = strings.TrimSpace(promptID)
 	requestDigest = strings.TrimSpace(requestDigest)
@@ -710,9 +585,6 @@ func (s *RuntimeSession) RecoverExitedAdapter(ctx context.Context, promptID, req
 		s.mu.Unlock()
 		return nil
 	}
-	// A restart can finish its RPC on time but wait for s.mu past the lease.
-	// Retire that replacement before any ACP prompt write, so the caller gets
-	// a typed loss instead of a generic lease failure.
 	s.deleted = true
 	process := s.process
 	s.mu.Unlock()
@@ -720,19 +592,10 @@ func (s *RuntimeSession) RecoverExitedAdapter(ctx context.Context, promptID, req
 	return &AdapterLostError{Attempted: true, Cause: fmt.Errorf("prompt lease expired before admission: %w", context.DeadlineExceeded)}
 }
 
-// StartPromptWithLeaseDeadline preserves the controller's absolute lease bound
-// across capability activation and admission delays.
 func (s *RuntimeSession) StartPromptWithLeaseDeadline(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time) (PromptRun, error) {
 	return s.StartPromptWithLeaseDeadlineAndActivation(ctx, promptID, requestDigest, prompt, leaseDeadline, nil)
 }
 
-// StartPromptWithLeaseDeadlineAndActivation checks admission before activating
-// prompt capabilities, so a pending cancellation cannot create remote authority.
-// activate runs under the session lock: it must not perform transport I/O or call
-// another RuntimeSession method. An activation error leaves the prompt unaccepted.
-// Expiry before activation returns ErrPromptLeaseExpired without invoking activate.
-// If the lease expires after activation succeeds, ErrPromptActivationExpired
-// requires the caller to retire or fully roll back the activated capabilities.
 func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.Context, promptID, requestDigest string, prompt []ContentBlock, leaseDeadline time.Time, activate func() error) (PromptRun, error) {
 	promptID = strings.TrimSpace(promptID)
 	requestDigest = strings.TrimSpace(requestDigest)
@@ -785,16 +648,11 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.C
 		s.mu.Unlock()
 		return PromptRun{}, &DuplicatePromptError{PromptID: promptID, Active: true}
 	}
-	// session/cancel identifies only the provider session, so settlement
-	// alone cannot allow a new prompt while an old cancel can still arrive.
 	if s.pendingCancelWrites != 0 {
 		s.mu.Unlock()
 		return PromptRun{}, ErrPromptCancellationPending
 	}
 	if exited := s.process; processExited(exited) {
-		// Only RecoverExitedAdapter restarts an adapter, before the caller
-		// grants this prompt any access. An adapter that exited after that
-		// is lost rather than resumed with the prompt's gates already open.
 		exitErr := errors.New("adapter process exited")
 		if exited != nil {
 			if err := exited.Client().Err(); err != nil {
@@ -811,9 +669,6 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.C
 			return PromptRun{}, err
 		}
 	}
-	// Local capability locks can consume the remaining lease. Never dispatch
-	// behind an already-due watchdog, and distinguish successful activation
-	// so the caller cannot reopen admission without retiring its capabilities.
 	if !leaseDeadline.After(time.Now()) {
 		s.mu.Unlock()
 		if activate != nil {
@@ -848,7 +703,6 @@ func (s *RuntimeSession) StartPromptWithLeaseDeadlineAndActivation(ctx context.C
 	return PromptRun{Events: active.events, Result: active.result, Release: func(event PromptEvent) { s.releaseBufferedEvent(active, event) }}, nil
 }
 
-// RenewPromptLease extends a still-live prompt lease by the configured default.
 func (s *RuntimeSession) RenewPromptLease(promptID string) error {
 	if s.config.PromptLease <= 0 {
 		return fmt.Errorf("prompt lease duration must be positive")
@@ -856,7 +710,6 @@ func (s *RuntimeSession) RenewPromptLease(promptID string) error {
 	return s.RenewPromptLeaseUntil(promptID, time.Now().Add(s.config.PromptLease))
 }
 
-// RenewPromptLeaseUntil extends a still-live prompt lease to an absolute bound.
 func (s *RuntimeSession) RenewPromptLeaseUntil(promptID string, leaseDeadline time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -870,9 +723,6 @@ func (s *RuntimeSession) RenewPromptLeaseUntil(promptID string, leaseDeadline ti
 	if !s.active.leaseDeadline.After(now) {
 		return &StalePromptError{PromptID: promptID}
 	}
-	// A relative timer may already have fired after a backward wall-clock
-	// step. Only the absolute deadline or a locked cancellation decision
-	// ends renewal authority; fence any queued callback with a new version.
 	s.active.leaseDeadline = leaseDeadline
 	s.resetPromptLeaseLocked(s.active)
 	return nil
@@ -928,8 +778,6 @@ func (s *RuntimeSession) CancelPrompt(ctx context.Context, promptID string) (Pro
 	return s.cancelPrompt(ctx, active, process)
 }
 
-// startPromptCancellationLocked commits cancellation and reserves the admission
-// fence before unlocking, even if settlement beats the courtesy goroutine.
 func (s *RuntimeSession) startPromptCancellationLocked(active *activePrompt) {
 	active.cancelRequested = true
 	cancelPendingPermissions(active)
@@ -940,15 +788,10 @@ func (s *RuntimeSession) startPromptCancellationLocked(active *activePrompt) {
 	s.pendingCancelWrites++
 	process := s.process
 	go func() {
-		// Settlement can stop every prompt watchdog while this write is still
-		// queued. Bound it independently of caller contexts and settlement.
 		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 2*s.config.CancelGrace)
 		err := process.Client().Cancel(writeCtx, s.providerSessionID)
 		cancelWrite()
 		if errors.Is(err, context.DeadlineExceeded) {
-			// Notify can time out with its write still queued. Permanently close
-			// admission before stopping the transport, so a late old cancellation
-			// cannot reach a replacement prompt, even if cleanup is unproven.
 			s.mu.Lock()
 			s.cancelWriteTimedOut = true
 			s.mu.Unlock()
@@ -956,16 +799,12 @@ func (s *RuntimeSession) startPromptCancellationLocked(active *activePrompt) {
 			_, _ = process.Stop(stopCtx, s.config.CancelGrace)
 			cancelStop()
 		}
-		// The admission fence outlives any committed stop. Never hold s.mu
-		// across transport I/O or release a timed-out session for reuse.
 		s.mu.Lock()
 		s.pendingCancelWrites--
 		s.mu.Unlock()
 	}()
 }
 
-// cancelPrompt joins the exact prompt whose cancellation was started under s.mu.
-// Its grace/stop escalation must not wait for a blocked courtesy write.
 func (s *RuntimeSession) cancelPrompt(ctx context.Context, active *activePrompt, process *Process) (PromptResult, error) {
 	promptID := active.id
 	done := active.done
@@ -987,11 +826,6 @@ func (s *RuntimeSession) cancelPrompt(ctx context.Context, active *activePrompt,
 	}
 }
 
-// WaitPromptSettlement joins the exact local prompt without requesting another
-// cancellation. Proxies use it after revoking authority to avoid delivering the
-// resulting request error before the adapter consumes its courtesy cancel. The
-// wait is bounded even if the caller's cancellation never reaches the child;
-// neither this wait nor its timeout supplies remote settlement or cleanup proof.
 func (s *RuntimeSession) WaitPromptSettlement(ctx context.Context, promptID string) error {
 	s.mu.Lock()
 	active := s.active
@@ -1023,9 +857,6 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 	s.mu.Lock()
 	firstDeletion := !s.deleted
 	s.deleted = true
-	// Close admission and cancel before joining an in-flight restart. The
-	// restart owns an unbound replacement and must stop it without submitting
-	// its reserved prompt, even if this deletion caller stops waiting.
 	for s.resuming != nil {
 		s.resuming.cancelRequested = true
 		s.resuming.cancel()
@@ -1056,9 +887,6 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 			}
 		}
 	}
-	// A failed observation is not a cleanup proof. A later caller may observe
-	// the same stopped process again, while callers already joining an attempt
-	// retain that attempt's result even if another retry starts first.
 	deletion = &runtimeSessionDeletion{done: make(chan struct{})}
 	s.deletion = deletion
 	active := s.active
@@ -1067,15 +895,9 @@ func (s *RuntimeSession) Delete(ctx context.Context) (CleanupStatus, error) {
 		cancelPendingPermissions(active)
 	}
 	process := s.process
-	// A frozen adapter cannot read session/close; sending it would only
-	// stall deletion for the close grace.
 	closeSupported := s.capabilities.SessionCapability(SessionCapabilityClose) && !s.frozen
 	s.mu.Unlock()
 	if firstDeletion && active != nil {
-		// Best-effort courtesy cancel: the notification is a blocking pipe write,
-		// and a wedged adapter that stopped reading stdin would otherwise block
-		// Delete forever before the bounded process stop. Adapter exit closes
-		// stdin, which unblocks the write and ends the goroutine.
 		go func() {
 			_ = process.Client().Cancel(context.Background(), s.providerSessionID)
 		}()
@@ -1109,8 +931,6 @@ func (s *RuntimeSession) runPrompt(active *activePrompt, process *Process) {
 		queued := append([]PromptEvent(nil), active.preAccepted...)
 		active.preAccepted = nil
 		for _, event := range queued {
-			// Bytes were counted when the event was parked pre-acceptance;
-			// hand them back before emitLocked counts the enqueue.
 			active.bufferedBytes -= event.Size
 			s.emitLocked(active, event)
 		}
@@ -1142,9 +962,6 @@ func classifyPromptErrorOutcome(err error, written bool) PromptOutcome {
 		return PromptOutcomeFailed
 	}
 	if _, ok := errors.AsType[*RPCError](err); ok {
-		// A structured JSON-RPC error proves that the adapter received and
-		// conclusively rejected or failed the prompt. Only loss of the response
-		// after the request write leaves the outcome ambiguous.
 		return PromptOutcomeFailed
 	}
 	return PromptOutcomeOutcomeUnknown
@@ -1156,11 +973,6 @@ func (s *RuntimeSession) finishPrompt(active *activePrompt, result PromptResult)
 	if active.settled {
 		return
 	}
-	// Provider gates revoke at the exact lease deadline. Their resulting RPC
-	// error can beat the lease timer's courtesy cancel, so timer scheduling
-	// cannot decide whether a conclusively settled prompt expired. Use the
-	// original receipt time, not the time this lock became available, and
-	// never turn lost transport/settlement evidence into cancellation proof.
 	if result.Accepted && !active.leaseDeadline.IsZero() && !result.SettledAt.IsZero() &&
 		!result.SettledAt.Before(active.leaseDeadline) {
 		switch result.Outcome {
@@ -1278,8 +1090,6 @@ func (s *RuntimeSession) emitLocked(active *activePrompt, event PromptEvent) {
 	}
 }
 
-// releaseBufferedEvent returns a consumed event's bytes to the prompt's
-// buffered-bytes budget.
 func (s *RuntimeSession) releaseBufferedEvent(active *activePrompt, event PromptEvent) {
 	if active == nil || event.Size <= 0 {
 		return
@@ -1292,10 +1102,6 @@ func (s *RuntimeSession) releaseBufferedEvent(active *activePrompt, event Prompt
 	s.mu.Unlock()
 }
 
-// markOverflowedLocked records event loss and schedules the bounded prompt
-// cancellation exactly once. Pre-acceptance overflow must escalate the same
-// way as post-acceptance overflow: a prompt that permanently lost events must
-// not keep occupying a global prompt slot until settlement or lease expiry.
 func (s *RuntimeSession) markOverflowedLocked(active *activePrompt) {
 	if active.overflowed {
 		return
@@ -1326,18 +1132,11 @@ func (s *RuntimeSession) expirePrompt(active *activePrompt, version uint64) {
 		s.mu.Unlock()
 		return
 	}
-	// Timers wait a relative duration, but controller wire deadlines are
-	// absolute. A backward wall-clock step can leave authority live when the
-	// timer fires. Preserve monotonic comparisons for local deadlines too.
 	if remaining := time.Until(active.leaseDeadline); remaining > 0 {
 		active.lease.Reset(remaining)
 		s.mu.Unlock()
 		return
 	}
-	// Commit expiry and fence replacement under the same lock as renewal.
-	// A prior cancellation caller may have exited before grace escalation;
-	// the lease watchdog must still stop an unresponsive prompt. The courtesy
-	// write remains idempotent through startPromptCancellationLocked.
 	s.startPromptCancellationLocked(active)
 	process := s.process
 	s.mu.Unlock()
@@ -1413,14 +1212,11 @@ func (s *RuntimeSession) Freeze(ctx context.Context) error {
 		return fmt.Errorf("runtime session must be idle before workspace freeze")
 	}
 	process := s.process
-	// Set before the attempt: a failed freeze may still have stopped part
-	// of the tree, and only a successful Thaw proves it runs again.
 	s.frozen = true
 	s.mu.Unlock()
 	return process.Freeze(ctx)
 }
 
-// ChildIdentity returns the immutable UID/GID assigned to the provider process.
 func (s *RuntimeSession) ChildIdentity() (int, int) {
 	if s == nil {
 		return 0, 0

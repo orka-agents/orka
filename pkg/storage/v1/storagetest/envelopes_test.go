@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// combinedEnvelopeProbe serves both contracts and records the artifact write
-// metadata; all unused methods come from the embedded interfaces.
 type combinedEnvelopeProbe struct {
 	storagev1.StateProvider
 	storagev1.ArtifactStore

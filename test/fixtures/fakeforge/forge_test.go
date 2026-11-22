@@ -47,7 +47,6 @@ func startForge(t *testing.T) (*httptest.Server, string) {
 	return server, host
 }
 
-// gitAs runs git against the forge with the publisher's credential header.
 func gitAs(t *testing.T, header string, args ...string) (string, error) {
 	t.Helper()
 	base := []string{"-c", "http.sslVerify=false", "-c", "user.name=e2e", "-c", "user.email=e2e@orka.ai"}
@@ -101,8 +100,6 @@ func TestForgeAcceptsEachTokenOnlyOnItsSurface(t *testing.T) {
 			t.Fatalf("clone with the %s token succeeded", role)
 		}
 	}
-	// The publisher observes the target branch with the push credential
-	// before its CAS push, so the push token may list refs.
 	output, err := gitAs(t, basicAuth(RolePush), "-c", "protocol.version=2", "ls-remote", url, "refs/heads/main")
 	if err != nil {
 		t.Fatalf("ls-remote with the push token failed: %v: %s", err, output)
@@ -151,7 +148,6 @@ func TestForgeAcceptsEachTokenOnlyOnItsSurface(t *testing.T) {
 			t.Fatalf("no request %+v in %+v", want, state.Requests)
 		}
 	}
-	// Protocol v2 ls-remote sends ls-refs over POST upload-pack.
 	lsRefs := RequestRecord{Method: http.MethodPost, Path: "/e2e/source.git/git-upload-pack",
 		Surface: SurfaceGitRefs, Role: RolePush, Status: http.StatusOK}
 	if !slices.Contains(state.Requests, lsRefs) {
@@ -260,8 +256,6 @@ func TestForgeReconcilesPullRequestsForPushedBranches(t *testing.T) {
 	}
 }
 
-// The injection is in the real Git baseline, not added by a model prompt or an
-// arbitrary-content fixture API; the independent forge read agrees with Git.
 func TestForgeSeedsRepositoryOriginEvalInjection(t *testing.T) {
 	server, _ := startForge(t)
 	work := filepath.Join(t.TempDir(), "read-control")
@@ -292,7 +286,6 @@ func TestForgeSeedsRepositoryConfigBranch(t *testing.T) {
 		server.URL+"/e2e/source.git", work); err != nil {
 		t.Fatal("credentialed clone of the repository config branch failed")
 	}
-	// The branch builds on main, so every other eval input is still present.
 	if _, err := gitAs(t, "", "-C", work, "show", "HEAD:"+EvalInjectionPath); err != nil {
 		t.Fatal("repository config branch lost the main baseline")
 	}
@@ -304,7 +297,6 @@ func TestForgeSeedsRepositoryConfigBranch(t *testing.T) {
 		if strings.HasSuffix(name, ".json") && !json.Valid([]byte(got)) {
 			t.Fatalf("%s is not valid JSON", name)
 		}
-		// Every command only creates a marker under /tmp.
 		for _, command := range strings.Split(got, "touch ")[1:] {
 			if !strings.HasPrefix(command, "/tmp/"+RepositoryConfigMarkerPrefix) {
 				t.Fatalf("%s runs something other than a marker", name)

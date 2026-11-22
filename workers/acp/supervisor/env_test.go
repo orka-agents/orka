@@ -160,9 +160,6 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 	}
 	maps.Copy(environment, projection.Environment)
 	assertCodexResumeModelProvider(t, environment)
-	// Read-only sessions keep the orka-external agent mode: Codex's own
-	// sandbox needs unprivileged user namespaces the runtime Pod forbids, so
-	// the RuntimeSession boundary enforces the read-only surface instead.
 	if environment["INITIAL_AGENT_MODE"] != codexAgentModeOrkaExternal {
 		t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", environment["INITIAL_AGENT_MODE"])
 	}
@@ -244,8 +241,6 @@ func TestClaudeProviderSessionProjection(t *testing.T) {
 		!slices.Contains(options["disallowedTools"].([]string), providerToolBash) {
 		t.Fatalf("Claude options = %#v", options)
 	}
-	// The adapter defaults to user, project, and local settings; repository
-	// settings can define hooks and redirect the provider base URL.
 	if sources, ok := options["settingSources"].([]string); !ok || sources == nil || len(sources) != 0 {
 		t.Fatalf("Claude settingSources = %#v, want an explicit empty list", options["settingSources"])
 	}
@@ -355,8 +350,6 @@ func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
 		})
 	}
 
-	// The child owns the session root after it has run, so a restart's check
-	// must not follow a workspace it replaced with a link to another tree.
 	linked := newPaths(t)
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere", "workspace")
 	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
@@ -374,9 +367,6 @@ func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
 	}
 }
 
-// OPENCODE_CONFIG_DIR is OpenCode's global configuration folder and lives in
-// the agent-writable session tree. An idle adapter restart must refuse
-// anything there that Orka or OpenCode did not put there, and $HOME/.opencode.
 func TestOpenCodeRejectsSessionConfigurationWrittenAfterCreation(t *testing.T) {
 	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentWrite, testOpenCodeModelLimits())
 	if err != nil {
@@ -394,14 +384,12 @@ func TestOpenCodeRejectsSessionConfigurationWrittenAfterCreation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// Before PrepareSession the folder does not exist yet.
 		if err := profile.ValidateWorkspace(paths); err != nil {
 			t.Fatalf("fresh session tree was rejected: %v", err)
 		}
 		if err := profile.PrepareSession(paths); err != nil {
 			t.Fatal(err)
 		}
-		// What OpenCode and Orka add while the session runs.
 		configDir := filepath.Join(paths.Config, "opencode")
 		writeTestFile(t, filepath.Join(configDir, ".gitignore"), "node_modules\n")
 		writeTestFile(t, filepath.Join(configDir, "skills", "code-review", "SKILL.md"), "---\nname: code-review\n---\n")
@@ -782,8 +770,6 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 	}
 }
 
-// Both adapter processes must receive the actual Codex provider environment,
-// including after the runtime reconnects the persisted session with session/resume.
 func TestCodexProviderResumeEnvironmentSurvivesIdleRestart(t *testing.T) {
 	server, cfg, profile := newTestServer(t, adapterResumeMode)
 	codex, err := providerProfile(providerKindCodex, profile.Model, profile.WorkspaceIntent)
@@ -845,8 +831,6 @@ func assertCodexResumeModelProvider(t *testing.T, environment map[string]string)
 	if err := json.Unmarshal([]byte(environment["CODEX_CONFIG"]), &config); err != nil {
 		t.Fatal(err)
 	}
-	// The pinned adapter does not consult CODEX_CONFIG for thread/resume's
-	// modelProvider. Its explicit MODEL_PROVIDER must match the session config.
 	if got := environment["MODEL_PROVIDER"]; got != codexProviderID || got != config["model_provider"] {
 		t.Fatalf("MODEL_PROVIDER = %q, CODEX_CONFIG.model_provider = %v, want %q", got, config["model_provider"], codexProviderID)
 	}
@@ -1144,7 +1128,6 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 		}
 	}
 
-	// The file variable always wins over the bootstrap variable.
 	controllerToken := filepath.Join(dir, "controller-token")
 	if err := os.WriteFile(controllerToken, []byte(strings.Repeat("f", 32)), 0o600); err != nil {
 		t.Fatal(err)
@@ -1164,7 +1147,6 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 		t.Fatal("unused bootstrap secret survived file-backed config load")
 	}
 
-	// Neither the file nor the bootstrap variable fails closed.
 	t.Setenv(EnvControllerTokenFile, "")
 	t.Setenv(EnvControllerTokenBootstrap, "")
 	t.Setenv(EnvCapabilitySecretBootstrap, strings.Repeat("s", 32))
@@ -1279,10 +1261,6 @@ func containsArg(args []string, want string) bool {
 	return slices.Contains(args, want)
 }
 
-// assertCodexWebSocketTransportsDisabled proves the session config selects
-// the custom HTTPS-only provider instead of Codex's built-in "openai"
-// provider, whose Responses WebSocket attempt the proxy rejects with 403 and
-// whose fallback warning would leak into the agent's first message.
 func assertCodexWebSocketTransportsDisabled(t *testing.T, config map[string]any) {
 	t.Helper()
 	if config["model_provider"] != codexProviderID {

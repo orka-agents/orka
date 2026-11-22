@@ -13,8 +13,6 @@ vi.mock('@tanstack/react-router', async () => {
   return { ...actual, Link: ({ children, ...props }: any) => <a {...props}>{children}</a> }
 })
 
-// Control the stream hook output so the container test is deterministic, and
-// capture the options it was called with so we can assert the seed cursor.
 const streamState: { current: Partial<UseExecutionEventStreamResult> } = { current: {} }
 const streamCalls: { url: string; after?: number; enabled: boolean }[] = []
 vi.mock('@/hooks/use-execution-event-stream', () => ({
@@ -82,18 +80,14 @@ describe('TaskEventTimeline', () => {
         }),
       ),
     )
-    // Stream replays seq 2 (overlap) and adds seq 3.
     streamState.current = {
       events: [makeEvent({ seq: 2, type: 'TaskStarted' }), makeEvent({ seq: 3, type: 'ToolCallStarted' })],
       lastSeq: 3,
       status: 'streaming',
     }
     render(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
-    // TaskCreated (seq 1) comes only from the async initial load, so waiting on it
-    // guarantees both the initial page and the synchronous stream events merged.
     await waitFor(() => expect(screen.getByText('TaskCreated')).toBeInTheDocument())
     expect(screen.getByText('ToolCallStarted')).toBeInTheDocument()
-    // seq 1,2,3 — no duplicate seq 2.
     expect(screen.getAllByTestId('event-row')).toHaveLength(3)
   })
 
@@ -134,7 +128,6 @@ describe('TaskEventTimeline', () => {
     render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
     await waitFor(() => expect(screen.getByText('done')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: /fork from here/i }))
-    // The dialog opens, pre-seeded with the row's seq.
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText(/fork from checkpoint/i)).toBeInTheDocument()
     expect(within(dialog).getByText(/#3/)).toBeInTheDocument()
@@ -152,7 +145,6 @@ describe('TaskEventTimeline', () => {
   })
 
   it('seeds the live stream from the highest loaded seq, not latestSeq, on a partial page', async () => {
-    // Loaded page tops out at seq 100 while the server reports latestSeq 500.
     server.use(
       http.get(`${API}/tasks/:id/events`, () =>
         HttpResponse.json({
@@ -162,17 +154,11 @@ describe('TaskEventTimeline', () => {
       ),
     )
     render(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
-    // After the page loads (events up to seq 100), the stream must be seeded with
-    // the loaded tail (100) so it replays 101..500, rather than latestSeq (500)
-    // which would skip every event in the gap. Before the query resolves the seed
-    // is 0 (empty page), so wait for the post-load seed.
     await waitFor(() => expect(streamCalls.some((c) => c.enabled && c.after === 100)).toBe(true))
     expect(streamCalls.some((c) => c.enabled && c.after === 500)).toBe(false)
   })
 
   it('backfills a completed task with more events than the loaded page, even when not following', async () => {
-    // Completed task (follow defaults off), loaded page tops at 100 but the server
-    // reports latestSeq 1500 — there's a tail to backfill.
     server.use(
       http.get(`${API}/tasks/:id/events`, () =>
         HttpResponse.json({
@@ -183,8 +169,6 @@ describe('TaskEventTimeline', () => {
     )
     render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
     await waitFor(() => expect(screen.getByText('loaded tail')).toBeInTheDocument())
-    // The stream is enabled (to backfill 101..1500) even though following is off,
-    // seeded from the loaded tail.
     await waitFor(() => expect(streamCalls.some((c) => c.enabled && c.after === 100)).toBe(true))
   })
 
@@ -199,15 +183,10 @@ describe('TaskEventTimeline', () => {
     )
     render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
     await waitFor(() => expect(screen.getByText('all loaded')).toBeInTheDocument())
-    // Everything is loaded (latestSeq == maxSeq) and we're not following, so the
-    // stream stays closed.
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
 
   it('closes the backfill stream once it has caught up so pausing follow works', async () => {
-    // First page caps at seq 100, server reports latestSeq 1500 (a gap), and the
-    // mocked stream has already replayed through 1500 and completed (the terminal
-    // stream_complete frame arrived).
     streamState.current = {
       events: [makeEvent({ seq: 1500, type: 'ModelMessage', summary: 'caught up' })],
       lastSeq: 1500,
@@ -222,12 +201,8 @@ describe('TaskEventTimeline', () => {
         }),
       ),
     )
-    // Completed task, follow off. The gap forced the stream open, but the merged
-    // events now reach latestSeq (1500), so the gap is closed.
     render(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
     await waitFor(() => expect(screen.getByText('caught up')).toBeInTheDocument())
-    // The most recent stream call reflects the closed gap: not enabled, because
-    // following is off and there's no longer a tail to backfill.
     await waitFor(() => {
       const last = streamCalls[streamCalls.length - 1]
       expect(last.enabled).toBe(false)
@@ -243,12 +218,9 @@ describe('TaskEventTimeline', () => {
         }),
       ),
     )
-    // Mounted before status.phase is known (undefined) — following is off, no gap.
     const view = render(<TaskEventTimeline taskId="tk" taskPhase={undefined} />)
     await waitFor(() => expect(screen.getByText('TaskCreated')).toBeInTheDocument())
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
-    // The task polls into a running phase; follow auto-starts so live events
-    // aren't missed, even though the user never clicked Follow.
     view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
     await waitFor(() => expect(streamCalls.some((c) => c.enabled)).toBe(true))
   })
@@ -262,25 +234,16 @@ describe('TaskEventTimeline', () => {
         }),
       ),
     )
-    // Auto-followed running task; stream is open and has caught up to latestSeq
-    // (so the backfill gap is closed and only `following`/terminal-catch-up keep
-    // it open).
     streamState.current = { events: [], lastSeq: 5, status: 'streaming' }
     const view = render(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
     await waitFor(() => expect(screen.getByText('mid run')).toBeInTheDocument())
     expect(streamCalls[streamCalls.length - 1].enabled).toBe(true)
 
-    // The controller persists the terminal phase before the terminal event, so
-    // the poll flips taskPhase to Succeeded while the stream is still streaming
-    // (no stream_complete yet). The stream must stay open to receive the final
-    // TaskSucceeded + stream_complete.
     streamCalls.length = 0
     view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
     await waitFor(() => expect(streamCalls.length).toBeGreaterThan(0))
     expect(streamCalls[streamCalls.length - 1].enabled).toBe(true)
 
-    // Once stream_complete is observed, the catch-up releases and the stream
-    // disables.
     streamCalls.length = 0
     streamState.current = {
       events: [],
@@ -308,19 +271,14 @@ describe('TaskEventTimeline', () => {
     const user = userEvent.setup()
     const view = render(<TaskEventTimeline taskId="tk" taskPhase="Running" />)
     await waitFor(() => expect(screen.getByText('paused run')).toBeInTheDocument())
-    // User explicitly stops following.
     await user.click(screen.getByRole('button', { name: /stop following/i }))
     streamCalls.length = 0
-    // Task completes — but since the user paused, we do NOT force the stream open.
     view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
     await waitFor(() => expect(streamCalls.length).toBeGreaterThan(0))
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
 
   it('does not open a stream for an already-terminal task opened fresh with no events', async () => {
-    // A settled task with an empty event stream (e.g. created before execution
-    // events were recorded). The backend never emits stream_complete here, so
-    // terminal catch-up must not fire — we were never following this task.
     server.use(
       http.get(`${API}/tasks/:id/events`, () =>
         HttpResponse.json({
@@ -333,24 +291,15 @@ describe('TaskEventTimeline', () => {
     await waitFor(() =>
       expect(screen.getByText(/no execution events recorded for this task/i)).toBeInTheDocument(),
     )
-    // Give any spurious catch-up a chance to enable the stream.
     await new Promise((r) => setTimeout(r, 50))
     expect(streamCalls.every((c) => !c.enabled)).toBe(true)
   })
 
   it('keeps retrying terminal catch-up across the controller race until the terminal event lands', async () => {
-    // The controller persists the terminal phase before appending the terminal
-    // event (and retries that append ~1s later), so the first catch-up probe can
-    // race ahead and still see no terminal event. A one-shot refetch would give
-    // up here and leave the tab stale; the bounded poll must keep probing until
-    // the event appears.
     let getCalls = 0
     server.use(
       http.get(`${API}/tasks/:id/events`, () => {
         getCalls += 1
-        // Initial load (call 1) and the first catch-up probe (call 2) still see no
-        // terminal event; it only appears from the third response on, mirroring the
-        // controller's delayed append.
         if (getCalls <= 2) {
           return HttpResponse.json({
             namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq: 0, events: [],
@@ -365,12 +314,9 @@ describe('TaskEventTimeline', () => {
         })
       }),
     )
-    // Mounted before the phase is known, then jumps straight to Succeeded.
     const view = render(<TaskEventTimeline taskId="tk" taskPhase={undefined} />)
     await waitFor(() => expect(getCalls).toBe(1))
     view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
-    // The terminal event only surfaces because catch-up probed more than once;
-    // allow time for the spaced retries.
     await waitFor(() => expect(screen.getByText('finished after race')).toBeInTheDocument(), {
       timeout: 4000,
     })
@@ -378,8 +324,6 @@ describe('TaskEventTimeline', () => {
   }, 8000)
 
   it('stops terminal catch-up after a bounded number of attempts when no terminal event ever lands', async () => {
-    // A settled task that genuinely has no terminal event (events disabled, or
-    // recorded before the feature). Catch-up must not poll forever.
     let getCalls = 0
     server.use(
       http.get(`${API}/tasks/:id/events`, () => {
@@ -392,11 +336,7 @@ describe('TaskEventTimeline', () => {
     const view = render(<TaskEventTimeline taskId="tk" taskPhase={undefined} />)
     await waitFor(() => expect(getCalls).toBe(1))
     view.rerender(<TaskEventTimeline taskId="tk" taskPhase="Succeeded" />)
-    // The catch-up issues exactly TERMINAL_REFETCH_MAX_ATTEMPTS (5) probes — the
-    // first immediate, the rest spaced ~1.5s — on top of the initial load, so the
-    // total settles at 1 + 5 = 6. Wait for the full bounded sequence to run.
     await waitFor(() => expect(getCalls).toBe(6), { timeout: 6000 })
-    // Then confirm it actually stops: no further probes after the cap is hit.
     await new Promise((r) => setTimeout(r, 1500))
     expect(getCalls).toBe(6)
   }, 12000)

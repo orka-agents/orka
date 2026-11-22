@@ -4,11 +4,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// CRD-level defaults the API server stamps onto every persisted TaskSpec
-// (see the +kubebuilder:default markers under api/v1alpha1). A controller that
-// compares a freshly built desired spec against a stored Task must apply the
-// same defaults first, otherwise the two never match. Defaults whose value is
-// the Go zero value (false, 0, "") need no mirroring.
 const (
 	taskSpecDefaultPriority                = int32(500)
 	taskSpecDefaultStartingDeadlineSeconds = int64(100)
@@ -21,9 +16,6 @@ const (
 	taskSpecDefaultWorkspaceSlot           = "default"
 )
 
-// taskSpecWithServerDefaults returns a copy of spec with the CRD defaults
-// applied exactly as the API server would on create. Nested defaults only
-// apply when the enclosing object is present, mirroring OpenAPI defaulting.
 func taskSpecWithServerDefaults(spec corev1alpha1.TaskSpec) corev1alpha1.TaskSpec {
 	out := *spec.DeepCopy()
 	if out.Priority == nil {

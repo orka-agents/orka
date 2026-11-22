@@ -50,9 +50,6 @@ func TestSupervisorTelemetryMetricsFromEnv(t *testing.T) {
 	}
 }
 
-// The controller projects a setting both signals share under its generic
-// name. Both exporters must honour it, and each supervisor's metrics must
-// carry its own instance identity and nothing else from the environment.
 func TestSupervisorTelemetrySharedSettingsAndMetricInstanceIdentity(t *testing.T) {
 	var traceRequests atomic.Int32
 	bodies := make(chan []byte, 8)

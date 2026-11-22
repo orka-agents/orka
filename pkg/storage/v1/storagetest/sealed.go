@@ -10,10 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Sealed records carry bytes the provider cannot read. These cases use
-// arbitrary opaque bytes: a provider must store and return them exactly, and
-// decide every conditional commit from the plain fields beside them.
-
 var sealedBaseTime = time.Date(2026, 9, 1, 10, 30, 0, 123456789, time.FixedZone("UTC+3", 3*60*60))
 
 func sealedBytes(label string) []byte {
@@ -324,8 +320,6 @@ func runSealedNativeSessions(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// turnFixture is an open SessionTurn of a Session whose canonical owner is
-// bound, ready to finalize.
 type turnFixture struct {
 	provider storagev1.StateProvider
 	name     string
@@ -336,8 +330,6 @@ type turnFixture struct {
 func newTurnFixture(t *testing.T, provider storagev1.StateProvider, name string) turnFixture {
 	t.Helper()
 	ctx := t.Context()
-	// A turn step commits only under the dataset's current controller epoch.
-	// It is set before the first write, which carries it.
 	fence := syncEpoch(t, provider, 1, "controller")
 	require.NoError(t, provider.CreateSession(ctx, &storagev1.SessionRecord{Namespace: "tenant", Name: name, SessionType: "task"}))
 	uid := name + "-uid"
@@ -384,8 +376,6 @@ func (f turnFixture) basis(t *testing.T) *storagev1.SessionTurnFinalizationBasis
 	return basis
 }
 
-// nativeFinalization seals a capture against the boundary after the
-// finalization appends its two messages.
 func (f turnFixture) nativeFinalization(t *testing.T, finalization storagev1.SealedSessionTurnFinalization) *storagev1.SealedNativeSessionFinalization {
 	t.Helper()
 	basis := f.basis(t)

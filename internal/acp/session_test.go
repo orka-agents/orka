@@ -287,8 +287,6 @@ func TestMergeNewSessionMetaRejectsProtectedNamespace(t *testing.T) {
 	}
 }
 
-// Adapters send advisories as notices only to a client that advertises them;
-// otherwise the pinned codex-acp prefixes them to the agent's reply.
 func TestRuntimeSessionAdvertisesSessionNotices(t *testing.T) {
 	_, stateDir := newTestRuntimeSessionWithOptions(t, "immediate", nil, nil)
 	data, err := os.ReadFile(filepath.Join(stateDir, helperClientCapabilities))
@@ -318,10 +316,6 @@ func newTestRuntimeSessionWithMeta(t *testing.T, mode string, newSessionMeta Met
 	return session
 }
 
-// newTestRuntimeSessionWithOptions starts a helper-backed RuntimeSession and
-// returns it with the helper's writable state directory, which the helper uses
-// to persist its provider session across adapter restarts and to record
-// lifecycle markers such as a received session/close.
 func newTestRuntimeSessionWithOptions(t *testing.T, mode string, newSessionMeta Meta, extraEnv map[string]string) (*RuntimeSession, string) {
 	t.Helper()
 	uid, gid := os.Getuid(), os.Getgid()
@@ -388,25 +382,12 @@ func newTestRuntimeSessionWithOptions(t *testing.T, mode string, newSessionMeta 
 	return session, stateDir
 }
 
-// Helper modes exercising the ACP v1 session lifecycle methods beyond
-// session/new and session/prompt.
 const (
-	// helperModeResume advertises session/resume and session/close, persists
-	// its provider session ID in the state directory, and honors a resume of
-	// exactly that session from a fresh process.
-	helperModeResume = "resume"
-	// helperModeResumeReject advertises session/resume but refuses every
-	// resume request, as an agent whose persisted thread is gone would.
-	helperModeResumeReject = "resume-reject"
-	// helperModeClose advertises only session/close and records receiving it.
-	helperModeClose = "close"
-	// helperExitAfterPromptEnv makes the helper exit right after answering a
-	// prompt, simulating an adapter crash while the session is idle.
-	helperExitAfterPromptEnv = "ACP_HELPER_EXIT_AFTER_PROMPT"
-	// helperHangFirstResumeEnv makes the first session/resume never answer,
-	// so the caller's context ends mid-restart; later resumes succeed.
-	helperHangFirstResumeEnv = "ACP_HELPER_HANG_FIRST_RESUME"
-	// helperBlockFirstResumeEnv parks the first resume until the test releases it.
+	helperModeResume            = "resume"
+	helperModeResumeReject      = "resume-reject"
+	helperModeClose             = "close"
+	helperExitAfterPromptEnv    = "ACP_HELPER_EXIT_AFTER_PROMPT"
+	helperHangFirstResumeEnv    = "ACP_HELPER_HANG_FIRST_RESUME"
 	helperBlockFirstResumeEnv   = "ACP_HELPER_BLOCK_FIRST_RESUME"
 	helperSkipResumeUpdateEnv   = "ACP_HELPER_SKIP_RESUME_UPDATE"
 	helperStateDirEnv           = "ACP_HELPER_STATE_DIR"
@@ -420,8 +401,6 @@ const (
 	helperClientCapabilities    = "client-capabilities"
 )
 
-// helperCreationResumeMode reports the modes that resume a provider session
-// while the runtime session is created, instead of after an idle adapter exit.
 func helperCreationResumeMode(mode string) bool {
 	switch mode {
 	case "resume-success", "resume-error", "resume-wrong-id", "resume-unsupported":
@@ -569,9 +548,6 @@ func TestACPHelperProcess(t *testing.T) {
 				}
 			}
 			writeHelperState(helperResumedStateFile, "1")
-			// Real agents (Codex, Claude, OpenCode) send an
-			// available_commands_update after a resume; it must not reach any
-			// prompt stream.
 			if os.Getenv(helperSkipResumeUpdateEnv) != "1" {
 				writeACPHelper(writer, map[string]any{
 					"jsonrpc": "2.0", "method": MethodSessionUpdate,
@@ -721,10 +697,6 @@ func TestEmitLockedEnforcesBufferedByteBudget(t *testing.T) {
 	}
 }
 
-// A notification the child sends before the prompt request is marked
-// written is parked until acceptance and enqueued afterwards; its receipt
-// time must still be the instant it arrived, while the enqueue timestamp
-// reflects when the consumer could first see it.
 func TestRuntimeSessionPreAcceptedEventKeepsReceiptTime(t *testing.T) {
 	session := &RuntimeSession{config: RuntimeSessionConfig{MaxBufferedEvents: 4, MaxBufferedEventBytes: 1 << 20}}
 	active := &activePrompt{events: make(chan PromptEvent, 4)}

@@ -35,7 +35,6 @@ var _ = Describe("Scheduled Tasks", Ordered, func() {
 			cmd := exec.Command("kubectl", "delete", "task", name, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		}
-		// Clean up child tasks
 		cmd := exec.Command("kubectl", "delete", "tasks", "-l", "orka.ai/scheduled-run=true",
 			"-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)

@@ -84,8 +84,6 @@ type AgentSpec struct {
 	TTLAfterLastTask *metav1.Duration `json:"ttlAfterLastTask,omitempty"`
 }
 
-// MarshalJSON preserves an explicitly empty native tool policy instead of
-// omitting it. Nil and nonempty lists retain their existing wire representation.
 func (in AgentSpec) MarshalJSON() ([]byte, error) {
 	type agentSpecJSON AgentSpec
 	if in.Tools == nil || len(in.Tools) > 0 {
@@ -263,8 +261,6 @@ type AgentRuntimeCeiling struct {
 	MaxTurns *int32 `json:"maxTurns,omitempty"`
 }
 
-// MarshalJSON preserves an explicitly empty AllowedTools ceiling, which
-// permits no tools, instead of omitting it, which leaves tools unbounded.
 func (in AgentRuntimeCeiling) MarshalJSON() ([]byte, error) {
 	type agentRuntimeCeilingJSON struct {
 		AllowedTools *[]string `json:"allowedTools,omitempty"`
@@ -283,9 +279,6 @@ func (in AgentRuntimeCeiling) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// MarshalJSON preserves the distinction between an omitted tool allowlist and
-// an explicitly empty deny-all allowlist. The standard omitempty handling for
-// slices would otherwise serialize both states as omission.
 func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 	type agentCLIRuntimeJSON struct {
 		Type                   AgentRuntimeType             `json:"type,omitempty"`
@@ -318,9 +311,6 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// BuiltInContractVersion returns the Agent's explicit built-in harness
-// protocol, or empty when absent. Callers must reject an absent contract.
-// AgentIdentityIssuerEntra names Microsoft Entra Agent ID identities.
 const AgentIdentityIssuerEntra = "entra"
 
 // AgentIdentity selects exactly one issuer-typed external identity.
@@ -340,8 +330,6 @@ type EntraAgentIdentity struct {
 	AgentIdentityID string `json:"agentIdentityID"`
 }
 
-// IdentityRef returns the Agent's issuer type and identity ID. Identity IDs
-// compare case-insensitively, so the ID is lowercased.
 func (in *Agent) IdentityRef() (issuer, id string, ok bool) {
 	if in == nil || in.Spec.Identity == nil || in.Spec.Identity.Entra == nil {
 		return "", "", false
@@ -353,10 +341,6 @@ func (in *Agent) IdentityRef() (issuer, id string, ok bool) {
 	return AgentIdentityIssuerEntra, id, true
 }
 
-// HoldsIdentity reports whether the Agent declares an external identity or
-// still holds a claim to one. A claim outlives the declaration until the
-// Agent next reconciles, so an identity removed and restored in between is
-// still held throughout.
 func (in *Agent) HoldsIdentity() bool {
 	if _, _, declared := in.IdentityRef(); declared {
 		return true

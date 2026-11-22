@@ -19,16 +19,12 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// recordingStore is the in-process SQLite provider with a recorder in front
-// of every write that carries content Orka redacts, sanitizes or derives. It
-// records each text value it receives before passing the call on.
 type recordingStore struct {
 	*sqlite.Store
 
-	mu    sync.Mutex
-	calls map[string]int
-	texts []recordedText
-	// attributions holds the usage attribution each append's context carried.
+	mu           sync.Mutex
+	calls        map[string]int
+	texts        []recordedText
 	attributions []store.UsageAttribution
 }
 
@@ -53,8 +49,6 @@ func (r *recordingStore) record(method string, values ...any) {
 	}
 }
 
-// collectTexts visits every string and byte slice reachable from value,
-// including fields hidden from JSON.
 func collectTexts(value reflect.Value, seen map[uintptr]bool, visit func(string)) {
 	switch value.Kind() {
 	case reflect.String:
@@ -241,10 +235,6 @@ func protectedSecrets() map[string]string {
 	}
 }
 
-// TestProviderReceivesOnlyRedactedContent drives every write outside the
-// gateway family whose content Orka redacts, sanitizes or derives through the
-// client and proves that the provider receives none of the secrets the caller
-// supplied. TestProviderReceivesOnlySanitizedGatewayText covers gateway writes.
 func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	secrets := protectedSecrets()
 	openAI, github, bearer := secrets["OpenAI key"], secrets["GitHub token"], secrets["bearer value"]
@@ -272,8 +262,6 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 		[]store.ExecutionEventAppend{{Event: event("grouped"), DedupeKey: "key"}})
 	require.NoError(t, err)
 
-	// Usage derived from a worker report and from the controller journal
-	// carries provider and model names; both reach the provider redacted.
 	workerUsage, err := json.Marshal(map[string]any{"usage": map[string]any{
 		"id": "call-1", "counterID": "call-1", "provider": openAI, "model": github,
 		"inputTokens": 10, "outputTokens": 2, "status": store.UsageStatusCompleted,
@@ -326,8 +314,6 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 		if err := tx.SaveThreatModel(ctx, threatModel("Authorization: Bearer "+bearer)); err != nil {
 			return err
 		}
-		// A read after the write is answered by a preview, which also
-		// carries the sanitized threat model.
 		_, err := tx.GetLatestThreatModel(ctx, "tenant", "repo")
 		return err
 	})
@@ -340,14 +326,10 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 		"SaveThreatModel", "SaveThreatModelIfVersion", "PreviewScanTaskIngestion", "CommitScanTaskIngestion",
 	)
 	recorder.requireNoSecret(t, secrets)
-	// The provider received the content around the secrets, so the check
-	// above is not passing on empty records.
 	recorder.requireReceived(t, "AppendExecutionEvent", "kept")
 	recorder.requireReceived(t, "AppendExecutionEvent", "task-uid/call-1")
 	recorder.requireReceived(t, "AppendExecutionEventIfAbsent", "acp/task-uid/prompt/1/")
 	recorder.requireReceived(t, "AppendExecutionEventsIfAbsent", "kept")
-	// The controller's attribution stays with the client: the recorder also
-	// records the attribution in each append's context, and it is empty.
 	recorder.requireNoAttribution(t)
 	recorder.requireReceived(t, "CreateMemory", "the deploy token is")
 	recorder.requireReceived(t, "CommitScanTaskIngestion", "Authorization:")
@@ -367,7 +349,6 @@ func TestClientDerivesWorkerUsageOnlyForTheAttributedTask(t *testing.T) {
 			StreamID: streamID, TaskName: streamID, Type: events.ExecutionEventTypeModelMessage, Content: content})
 		require.NoError(t, err)
 	}
-	// Without controller attribution a "usage" field is ordinary content.
 	report(ctx, "unattributed")
 	data, err := client.LoadUsage(ctx, store.UsageFilter{Namespaces: []string{"tenant"}, AsOf: time.Now().UTC()})
 	require.NoError(t, err)
@@ -388,8 +369,6 @@ func TestClientDerivesWorkerUsageOnlyForTheAttributedTask(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, [2]int64{7, 3}, [2]int64{input, output})
 
-	// An invalid worker report fails the append rather than being dropped,
-	// and counts as an append failure.
 	failures := func() float64 {
 		return metrics.CounterVecValue(metrics.ExecutionEventAppendFailuresTotal,
 			store.ExecutionEventStreamTypeTask, events.ExecutionEventTypeModelMessage)
@@ -404,9 +383,6 @@ func TestClientDerivesWorkerUsageOnlyForTheAttributedTask(t *testing.T) {
 	require.InDelta(t, before+1, failures(), 0)
 }
 
-// TestClientCountsSanitizationOncePerNewEvent checks that the client records
-// the redaction and truncation metrics once for each newly appended event and
-// not for a deduplicated replay.
 func TestClientCountsSanitizationOncePerNewEvent(t *testing.T) {
 	client := newEmbeddedClient(t)
 	ctx := t.Context()
@@ -453,11 +429,8 @@ func TestClientTaskTokenUsageAttributesOnlyTheTaskShare(t *testing.T) {
 			ID: id, CounterID: counter, Scope: scope, Source: store.UsageSourceAgent,
 			InputTokens: &input, OutputTokens: &output, Status: "running", ObservedAt: at.Add(offset)}))
 	}
-	// A runtime session counter is cumulative across turns: the earlier turn
-	// left it at 100/10, so task-b consumed only the increase to 160/16.
 	record("task-a", "a-session", "acp-session/s/1", store.UsageScopeSession, 100, 10, 0)
 	record("task-b", "b-session", "acp-session/s/1", store.UsageScopeSession, 160, 16, 2*time.Second)
-	// A per-call counter counts its final value once, not every snapshot.
 	record("task-b", "b-call-running", "call-b", store.UsageScopeCall, 3, 0, time.Second)
 	record("task-b", "b-call-final", "call-b", store.UsageScopeCall, 7, 2, 3*time.Second)
 	record("task-c", "c-call", "call-c", store.UsageScopeCall, 9, 9, time.Second)

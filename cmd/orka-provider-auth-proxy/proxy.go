@@ -111,8 +111,6 @@ func normalizeProxyConfig(cfg proxyConfig) (proxyConfig, *url.URL, error) {
 		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
 	}
 	if strings.HasPrefix(parsed.Host, "[") && net.ParseIP(parsed.Hostname()) == nil {
-		// url.Parse accepts any bracketed authority; only a real IPv6 literal
-		// can be dialed, so anything else must fail here rather than at runtime.
 		return proxyConfig{}, nil, fmt.Errorf("provider upstream base URL is invalid")
 	}
 	if parsed.Path == "" {
@@ -251,8 +249,6 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(response.StatusCode)
 	flusher, _ := w.(http.Flusher)
-	// Flush headers before waiting for the first upstream body chunk, then flush
-	// every chunk so streamed responses reach the ACP runtime promptly.
 	if flusher != nil {
 		flusher.Flush()
 	}
@@ -266,9 +262,6 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Ordinary requests still stream without buffering. Only a challenge for our
-// independently pinned physical route needs a bounded check of the actual
-// model selector. A stale conditional resend must not reach another gateway.
 func (p *providerAuthProxy) requestBody(r *http.Request, target *url.URL) (io.ReadCloser, string, error) {
 	var body io.ReadCloser = &boundedReadCloser{ReadCloser: r.Body, remaining: p.maxRequestBytes}
 	var challenge string
@@ -284,7 +277,6 @@ func (p *providerAuthProxy) requestBody(r *http.Request, target *url.URL) (io.Re
 		if !providerproxy.DirectCodexBody(data, p.codex429Model) {
 			challenge = ""
 		}
-		// In particular, do not give net/http GetBody for an idempotency-keyed POST.
 		body = io.NopCloser(bytes.NewReader(data))
 	}
 	if retry := r.Header.Values(providerproxy.Codex429RetryHeader); len(retry) > 0 && (len(retry) != 1 || retry[0] != "1" || challenge == "") {
@@ -322,8 +314,6 @@ type boundedReadCloser struct {
 }
 
 func (r *boundedReadCloser) Read(buffer []byte) (int, error) {
-	// Flushing an HTTP/1 response can close the incoming body before the
-	// upstream transport makes its final EOF check after sending the body.
 	if r.sawEOF {
 		return 0, io.EOF
 	}

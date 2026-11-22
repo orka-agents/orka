@@ -55,8 +55,6 @@ func baseAgent(name string) *corev1alpha1.Agent {
 	}
 }
 
-// ---------- validateAgent ----------
-
 func TestValidateAgent_ValidModelProvider(t *testing.T) {
 	r := setupAgentReconciler()
 	agent := baseAgent("valid")
@@ -337,7 +335,6 @@ func TestValidateAgent_RuntimeRefRequiresExistingAgentRuntime(t *testing.T) {
 		})
 	}
 
-	// The Agent reports the missing runtime as not Ready.
 	agent := runtimeRefAgent()
 	r := setupAgentReconciler()
 	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
@@ -466,8 +463,6 @@ func TestValidateAgent_RuntimeRefRejectsUnsupportedAgentPolicy(t *testing.T) {
 	}
 }
 
-// ---------- validateProviderRef ----------
-
 func TestValidateProviderRef(t *testing.T) {
 	readyProvider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: "ready-prov", Namespace: testNS},
@@ -554,8 +549,6 @@ func TestValidateProviderRef(t *testing.T) {
 	}
 }
 
-// ---------- validateSecretRef ----------
-
 func TestValidateSecretRef(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-secret", Namespace: testNS},
@@ -612,8 +605,6 @@ func TestValidateSecretRef(t *testing.T) {
 		})
 	}
 }
-
-// ---------- validateTools ----------
 
 func TestValidateTools(t *testing.T) {
 	existingTool := &corev1alpha1.Tool{
@@ -679,8 +670,6 @@ func TestValidateTools(t *testing.T) {
 		})
 	}
 }
-
-// ---------- validateSkills ----------
 
 func TestValidateSkills(t *testing.T) {
 	skillCR := &corev1alpha1.Skill{
@@ -774,8 +763,6 @@ func TestValidateSkills(t *testing.T) {
 	}
 }
 
-// ---------- validateSystemPromptConfigMap ----------
-
 func TestValidateSystemPromptConfigMap(t *testing.T) {
 	promptCM := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "prompt-cm", Namespace: testNS},
@@ -857,8 +844,6 @@ func TestValidateSystemPromptConfigMap(t *testing.T) {
 		})
 	}
 }
-
-// ---------- validateCoordination ----------
 
 func TestValidateCoordination(t *testing.T) {
 	delegateAgent := &corev1alpha1.Agent{
@@ -957,8 +942,6 @@ func TestValidateCoordination(t *testing.T) {
 		})
 	}
 }
-
-// ---------- countActiveTasks ----------
 
 func TestCountActiveTasks(t *testing.T) {
 	agent := baseAgent("count-agent")
@@ -1074,8 +1057,6 @@ func TestCountActiveTasks(t *testing.T) {
 	}
 }
 
-// ---------- updateStatus ----------
-
 func TestUpdateStatus(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -1182,8 +1163,6 @@ func TestUpdateStatus(t *testing.T) {
 	})
 }
 
-// ---------- checkTTLExpiry ----------
-
 func TestCheckTTLExpiry(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1267,8 +1246,6 @@ func TestCheckTTLExpiry(t *testing.T) {
 	}
 }
 
-// ---------- Reconcile ----------
-
 func TestAgentReconcile_NotFound(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -1324,7 +1301,6 @@ func TestAgentReconcile_ValidationFailure(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = result
-	// Re-fetch agent and check status condition
 	updated := &corev1alpha1.Agent{}
 	_ = fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-invalid", Namespace: testNS}, updated)
 	cond := findCondition(updated.Status.Conditions, "Ready")
@@ -1351,7 +1327,6 @@ func TestAgentReconcile_TTLExpired(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = result
-	// Agent should have been deleted
 	updated := &corev1alpha1.Agent{}
 	getErr := fc.Get(context.Background(), types.NamespacedName{Name: "reconcile-ttl", Namespace: testNS}, updated)
 	if getErr == nil {
@@ -1388,8 +1363,6 @@ func TestAgentReconcile_WithActiveTasks(t *testing.T) {
 	}
 }
 
-// ---------- updateStatus additional ----------
-
 func TestUpdateStatus_TTLExpiredNoRequeue(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -1408,7 +1381,6 @@ func TestUpdateStatus_TTLExpiredNoRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// TTL already expired, remaining <= 0, no requeue
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue for expired TTL, got %v", result.RequeueAfter)
 	}
@@ -1443,7 +1415,6 @@ func TestUpdateStatus_RechecksFailedValidation(t *testing.T) {
 		WithStatusSubresource(agent).Build()
 	r := &AgentReconciler{Client: fc, Scheme: scheme}
 
-	// A Secret created later is not watched, so readiness must be rechecked.
 	result, err := r.updateStatus(context.Background(), agent, 0, errors.New(`referenced secret "later" not found`), nil, agentIdentityState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1452,8 +1423,6 @@ func TestUpdateStatus_RechecksFailedValidation(t *testing.T) {
 		t.Errorf("RequeueAfter = %v, want %v", result.RequeueAfter, agentValidationRecheckInterval)
 	}
 }
-
-// ---------- helpers ----------
 
 type errTest string
 

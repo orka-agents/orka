@@ -67,7 +67,6 @@ func TestFailedParkedRuntimeReleaseIsRetriedBeforeTheNextTurnClaimsASlot(t *test
 			})
 			return
 		}
-		// Not found is a completed deletion.
 		writeDispatcherJSONStatus(w, http.StatusNotFound, harnessv2.ErrorResponse{
 			Protocol: harnessv2.ProtocolVersion, Code: harnessv2.ErrorCodeInvalidRequest, Message: "runtime session not found",
 		})
@@ -104,14 +103,12 @@ func TestFailedParkedRuntimeReleaseIsRetriedBeforeTheNextTurnClaimsASlot(t *test
 		t.Fatal("a failed release must keep the binding that requires recreation")
 	}
 
-	// The next turn would reuse generation 2: never delete it.
 	calls := len(deletes())
 	d.retryParkedRuntimeRelease(context.Background(), runtimeClient, "session-parked", "runtime-instance", 2)
 	if len(deletes()) != calls {
 		t.Fatal("the release must not delete a generation the current turn may use")
 	}
 
-	// A still-failing retry keeps the release pending.
 	d.retryParkedRuntimeRelease(context.Background(), runtimeClient, "session-parked", "runtime-instance", 3)
 	if len(deletes()) != calls+1 {
 		t.Fatalf("the next turn must retry the release before claiming a slot, got %d calls", len(deletes())-calls)
@@ -131,7 +128,6 @@ func TestFailedParkedRuntimeReleaseIsRetriedBeforeTheNextTurnClaimsASlot(t *test
 		t.Fatal("a completed release must be forgotten")
 	}
 
-	// A replaced runtime instance retired its sessions; nothing is deleted.
 	d.setPendingParkedRuntimeRelease(parkedRuntimeReleaseKey("session-parked", fence), acpParkedRuntimeRelease{task: parked, runtimeSessionID: "runtime-session-parked-g2", fence: fence})
 	calls = len(deletes())
 	d.retryParkedRuntimeRelease(context.Background(), runtimeClient, "session-parked", "runtime-instance-2", 3)
@@ -164,8 +160,6 @@ func TestParkedRuntimeReleaseKeepsASuccessorsBinding(t *testing.T) {
 		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion, RuntimeSessionUID: "session-parked", RuntimeSessionGeneration: 2,
 	}
 	d := &ACPDispatcher{}
-	// A later turn of the Session installed its own binding while this
-	// deletion was in flight.
 	successor := ACPRuntimeSessionBinding{SessionUID: "session-parked", Generation: 3, RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id"}
 	d.setRuntimeSessionBinding(successor)
 	d.releaseParkedRuntimeSession(context.Background(), runtimeClient, "runtime-session-parked-g2", parked, fence, "session-parked")
@@ -264,7 +258,6 @@ func TestParkedRuntimeReleasesOfDifferentGenerationsNeverEraseEachOther(t *testi
 		t.Fatalf("a newer generation's failed release must not replace an older one, got %d pending", got)
 	}
 
-	// The newer generation's release succeeds; the older one still fails.
 	mu.Lock()
 	delete(failing, "/v2/runtime-sessions/runtime-session-parked-g4")
 	mu.Unlock()
@@ -279,8 +272,6 @@ func TestParkedRuntimeReleasesOfDifferentGenerationsNeverEraseEachOther(t *testi
 		}
 	}
 
-	// A later successful release of the newer incarnation itself does not
-	// clear the older pending retry either.
 	d.releaseParkedRuntimeSession(context.Background(), runtimeClient, "runtime-session-parked-g4", newer, newerFence, "session-parked")
 	if got := len(d.pendingParkedRuntimeReleases("session-parked")); got != 1 {
 		t.Fatalf("another incarnation's release must not clear a pending retry, got %d pending", got)

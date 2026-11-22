@@ -23,7 +23,6 @@ const (
 	kindBoolean          = "a boolean"
 )
 
-// ToolNotFoundError reports a call to a tool the registry does not hold.
 type ToolNotFoundError struct {
 	Name string
 }
@@ -32,8 +31,6 @@ func (e *ToolNotFoundError) Error() string {
 	return fmt.Sprintf("tool %q not found", e.Name)
 }
 
-// ToolArgumentError reports an argument path whose JSON type contradicts
-// the tool schema.
 type ToolArgumentError struct {
 	Field string
 	Want  string
@@ -44,21 +41,8 @@ func (e *ToolArgumentError) Error() string {
 	return fmt.Sprintf("invalid arguments: %s must be %s, got %s", e.Field, e.Want, e.Got)
 }
 
-// jsonNumberPattern matches a JSON number literal.
 var jsonNumberPattern = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
 
-// normalizeArgTypes recursively checks arguments against the JSON types the tool
-// schema declares, before the tool sees them. A null value for a declared
-// field counts as omitted. Numeric strings become numbers for integer and number
-// fields, and strconv.ParseBool strings become booleans, matching the leniency tools
-// already apply. A value whose type plainly contradicts the schema is
-// rejected: an object or array for a string, a non-numeric value for a number,
-// a non-boolean value for a boolean, a non-array for an array, and a number,
-// boolean, or array for an object. Strings stay allowed for objects, which
-// some tools read as shorthand, and numbers and booleans stay allowed for
-// strings. Object strings containing JSON objects are decoded before checking
-// their contents. Fields without a declared property or typed additionalProperties
-// schema pass through unchanged. Null array items cannot count as omitted fields.
 func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error) {
 	values, err := decodeArgObject(args)
 	if err != nil || len(values) == 0 {
@@ -83,9 +67,6 @@ func normalizeArgTypes(tool Tool, args json.RawMessage) (json.RawMessage, error)
 	return normalized, nil
 }
 
-// normalizeArgObjectTypes checks declared properties and typed map values.
-// Boolean additionalProperties schemas do not declare a value type or reject
-// extra keys here; other schema constraints remain the tool's responsibility.
 func normalizeArgObjectTypes(path string, schema, values map[string]any) (bool, error) {
 	properties, _ := schema[jsonSchemaPropertiesField].(map[string]any)
 	additional, _ := schema["additionalProperties"].(map[string]any)
@@ -123,8 +104,6 @@ func normalizeArgObjectTypes(path string, schema, values map[string]any) (bool, 
 	return changed, nil
 }
 
-// normalizeArgSchemaType applies the scalar rules before descending into any
-// declared object properties, array items, or typed additionalProperties.
 func normalizeArgSchemaType(path string, schema map[string]any, value any) (any, error) {
 	want, _ := schema[jsonSchemaTypeField].(string)
 	normalized, err := normalizeArgType(path, want, value)
@@ -140,11 +119,9 @@ func normalizeArgSchemaType(path string, schema map[string]any, value any) (any,
 			return nil, err
 		}
 		if object == nil {
-			return nil, nil // Preserve non-object strings used as shorthand.
+			return nil, nil
 		}
 		value = object
-		// Preserve the object spelling and key order when its contents do
-		// not need normalization, like decodeStringifiedObjectArgs does.
 		normalized = json.RawMessage(encoded)
 	}
 	switch value := value.(type) {
@@ -175,10 +152,6 @@ func normalizeArgSchemaType(path string, schema map[string]any, value any) (any,
 	return normalized, nil
 }
 
-// DecodeToolArgumentObject decodes an argument object without normalizing its
-// values. Numbers remain json.Number, and duplicate keys and invalid Unicode
-// are rejected at every depth. Unlike normalization, callers rewriting arguments
-// must also reject invalid JSON, trailing data, and non-object roots.
 func DecodeToolArgumentObject(args json.RawMessage) (map[string]any, error) {
 	values, err := decodeArgObject(args)
 	if err != nil {
@@ -190,12 +163,6 @@ func DecodeToolArgumentObject(args json.RawMessage) (map[string]any, error) {
 	return values, nil
 }
 
-// decodeArgObject decodes a JSON object of arguments. It returns nil values
-// for invalid JSON, trailing data, or a non-object, which the tool rejects
-// itself. A duplicate key is an error: the tool would see only one of the
-// values, and the others would skip the type check. So is invalid Unicode
-// (invalid UTF-8 or an unpaired surrogate escape), which decoding would
-// silently replace.
 func decodeArgObject(args json.RawMessage) (map[string]any, error) {
 	if !json.Valid(args) {
 		return nil, nil
@@ -234,8 +201,6 @@ func decodeArgObject(args json.RawMessage) (map[string]any, error) {
 	return values, nil
 }
 
-// decodeArgValue decodes one argument value, keeping numbers as json.Number
-// and rejecting duplicate keys at every depth before decoding loses them.
 func decodeArgValue(raw json.RawMessage, path string) (any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -287,15 +252,8 @@ func decodeArgJSONValue(decoder *json.Decoder, path string) (any, error) {
 	}
 }
 
-// canonicalJSONInteger returns the plain spelling of an integral JSON number
-// literal, such as "10" for "10.0" or "1e3", which tools decoding into Go
-// integers accept. It works on the text, so float64 rounding cannot hide a
-// fraction. got describes the value when it is not a whole number that fits in
-// an int64.
 func canonicalJSONInteger(text string) (canonical, got string) {
 	const outOfRange = "a number out of range"
-	// Clamp the exponent so the arithmetic below cannot overflow. A value this
-	// far out is a fraction or out of range either way.
 	const maxExponent = 1 << 20
 	mantissa, exponent, _ := strings.Cut(strings.ToLower(text), "e")
 	exp := 0
@@ -319,7 +277,6 @@ func canonicalJSONInteger(text string) (canonical, got string) {
 	if digits == "" {
 		return "0", ""
 	}
-	// The value is digits * 10^-scale.
 	switch scale := len(fraction) - exp; {
 	case scale > 0:
 		if len(digits)-len(strings.TrimRight(digits, "0")) < scale {
@@ -327,7 +284,6 @@ func canonicalJSONInteger(text string) (canonical, got string) {
 		}
 		digits = digits[:len(digits)-scale]
 	case scale < 0:
-		// Bound the zeros before writing them; an int64 has at most 19 digits.
 		if len(digits)-scale > 19 {
 			return "", outOfRange
 		}
@@ -339,8 +295,6 @@ func canonicalJSONInteger(text string) (canonical, got string) {
 	return sign + digits, ""
 }
 
-// normalizeArgType returns a replacement value, nil to keep the value as is,
-// or an error when the value contradicts the declared type.
 func normalizeArgType(name, want string, value any) (any, error) {
 	switch want {
 	case jsonSchemaTypeString:

@@ -28,7 +28,6 @@ const (
 
 var errControllerEpochLeaseSnapshotChanged = errors.New("controller epoch Lease snapshot changed")
 
-// GetControllerEpoch reads the authoritative controller-epoch Lease.
 func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.ControllerEpoch, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -66,10 +65,6 @@ func (s *Store) GetControllerEpoch(ctx context.Context, name string) (*store.Con
 	return &result, nil
 }
 
-// GetControllerEpochFence reads and validates the current authoritative fence
-// without synchronizing the inspection mirror. Broker authorization paths use
-// this read-only form because unrelated control-store mutations legitimately
-// change the Lease resourceVersion while leaving its epoch authority intact.
 func (s *Store) GetControllerEpochFence(ctx context.Context, name string) (store.ControllerEpochFence, error) {
 	if err := s.requireClient(); err != nil {
 		return store.ControllerEpochFence{}, err
@@ -117,10 +112,6 @@ func (s *Store) GetControllerEpochFence(ctx context.Context, name string) (store
 	return store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID}, nil
 }
 
-// CompareAndSwapControllerEpoch creates or advances the authoritative Lease.
-// A same-holder, same-digest retry of an already committed target epoch is
-// idempotent even when the caller's expected values are stale.
-//
 //nolint:gocyclo // Creation, idempotency, mutation-lock, and epoch CAS checks form one boundary.
 func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.ControllerEpochCAS) (*store.ControllerEpoch, error) {
 	if err := s.requireClient(); err != nil {
@@ -153,10 +144,6 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 		if change.ExpectedVersion != 0 || change.ExpectedEpoch != 0 || change.NewEpoch != 1 {
 			return nil, store.ConflictErrorf("controller epoch %q does not exist; creation requires expected version/epoch 0 and new epoch 1", change.Name)
 		}
-		// Creating the inspection object is the API-server-serialized proof that
-		// this is a genuinely fresh control store. A pre-existing object, even
-		// with blank status, may be a restored authority whose Lease has not been
-		// applied yet; it must never authorize epoch reuse.
 		if objectErr := s.createFreshControllerEpochObject(ctx, change); objectErr != nil {
 			return nil, objectErr
 		}
@@ -188,9 +175,6 @@ func (s *Store) CompareAndSwapControllerEpoch(ctx context.Context, change store.
 	if err != nil {
 		return nil, err
 	}
-	// Reconcile an authenticated prior CAS crash tail, consume the one-shot
-	// epoch-1 initialization marker, and establish the immutable Lease UID
-	// binding before either returning an idempotent target or advancing again.
 	if syncErr := s.syncControllerEpochStatus(ctx, current, lease, predecessorDigest); syncErr != nil {
 		return nil, syncErr
 	}
@@ -370,10 +354,6 @@ func controllerEpochPredecessorDigest(lease *coordinationv1.Lease) (string, erro
 	return digest, nil
 }
 
-// ControllerEpochInstallationID returns the UID of the ControllerEpoch
-// object, which is created once, when the installation's first controller
-// acquires the epoch, and identifies the installation that owns every
-// storage dataset Orka advances.
 func (s *Store) ControllerEpochInstallationID(ctx context.Context, name string) (string, error) {
 	if err := s.requireClient(); err != nil {
 		return "", err

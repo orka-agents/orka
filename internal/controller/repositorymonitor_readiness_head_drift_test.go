@@ -119,8 +119,6 @@ func TestRepositoryMonitorReadinessRetriesDepartedHeadWrite(t *testing.T) {
 	if err != nil || item.HeadSHA != "old-head" {
 		t.Fatalf("failed retirement lost its prior head: item=%+v err=%v", item, err)
 	}
-	// On retry GitHub's list has caught up. The store must retain the old head
-	// until cleanup succeeds. A draft keeps this test focused on readiness.
 	f.listHead, f.draft = "new-head", true
 	run.StartedAt = time.Now().Add(-time.Second)
 	if err := f.r.Store.UpdateMonitorRun(t.Context(), run); err != nil {
@@ -237,7 +235,6 @@ func newRepositoryMonitorReadinessHeadDriftFixture(t *testing.T, peer bool) *rep
 		parts := strings.Split(req.URL.Path, "/")
 		switch {
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls"):
-			// The list can lag behind detail or catch up between retries.
 			prs := []any{prJSON(1, f.listHead)}
 			if peer {
 				prs = append(prs, prJSON(2, "old-head"))

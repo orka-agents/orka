@@ -11,10 +11,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// TestAzureGatewayServesTheRealAzureCLI runs a stock Azure CLI against the
-// gateway, with a broker that answers like Resource Manager. Orka signs az in,
-// so no command runs `az login`. It needs az, so it runs only when
-// ORKA_TEST_AZ_CLI names the binary.
 func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 	az := os.Getenv("ORKA_TEST_AZ_CLI")
 	if az == "" {
@@ -57,7 +53,6 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 		t.Fatalf("az group create should be refused as a write: %v\n%s", err, output)
 	}
 	checkAzNamesTheMissingLink(t, fixture, run)
-	// After az forgets its sign-in, az's own managed-identity login works.
 	if output, err := run("account", "clear"); err != nil {
 		t.Fatalf("az account clear: %v\n%s", err, output)
 	}
@@ -74,9 +69,6 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 	}
 }
 
-// TestAzureGatewayPlaceholderAccountWorksInTheRealAzureCLI checks that az
-// accepts the placeholder profile and shows why the sign-in failed, not
-// "Please run 'az login'".
 func TestAzureGatewayPlaceholderAccountWorksInTheRealAzureCLI(t *testing.T) {
 	az := os.Getenv("ORKA_TEST_AZ_CLI")
 	if az == "" {
@@ -88,8 +80,6 @@ func TestAzureGatewayPlaceholderAccountWorksInTheRealAzureCLI(t *testing.T) {
 	})
 	waitForAttempt(t, fixture)
 	run := azRunner(az, fixture)
-	// An agent that looks before the sign-in finishes reads that it should
-	// retry, not that the identity has no subscription.
 	if output, err := run("account", "show", "--query", "name", "-o", "tsv"); err != nil || strings.TrimSpace(output) != azureSignInPendingName {
 		t.Fatalf("az account show under the placeholder: %v\n%s", err, output)
 	}
@@ -98,8 +88,6 @@ func TestAzureGatewayPlaceholderAccountWorksInTheRealAzureCLI(t *testing.T) {
 		strings.Contains(output, "Please run 'az login'") {
 		t.Fatalf("az group list under the placeholder should name the fix: %v\n%s", err, output)
 	}
-	// Once the account is linked, the next command signs in and asks to be
-	// run again, and the one after that works.
 	fixture.mu.Lock()
 	fixture.respond = func(request harnessv2.MCPBrokerCallRequest) json.RawMessage {
 		forwarded, _ := harnessv2.DecodeMCPForwardRequest(request.Call.Arguments)
@@ -132,8 +120,6 @@ func azRunner(az string, fixture *azureGatewayFixture) func(...string) (string, 
 	}
 }
 
-// checkAzNamesTheMissingLink checks that with no usable linked account the
-// error names the fix.
 func checkAzNamesTheMissingLink(t *testing.T, fixture *azureGatewayFixture, run func(...string) (string, error)) {
 	t.Helper()
 	fixture.mu.Lock()

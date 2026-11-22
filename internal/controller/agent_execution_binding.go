@@ -36,12 +36,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// The binding stage creates a write-once execution binding: every executable
-// agent Task freezes its protocol, backend, and an
-// immutable content-addressed execution snapshot before any executor-specific
-// side effect. The snapshot store and revisioned backend control are mandatory:
-// a controller that cannot prove either one never queues executor demand.
-
 const (
 	agentExecutionBindingConflictReason = "BindingConflict"
 	agentExecutionSettingsReason        = "ExecutionSettings"
@@ -66,81 +60,52 @@ func isFrozenExternalRuntimeBindingDrift(err error) bool {
 	return errors.As(err, &drift)
 }
 
-// agentExecutionCandidate is the pure resolution product: the prospective
-// binding plus the plaintext snapshot body it references. Resolution performs
-// reads only; no durable writes or runtime side effects.
 type agentExecutionCandidate struct {
 	binding             corev1alpha1.AgentExecutionBinding
 	snapshotBody        []byte
 	workspaceSessionUID string
-	// model and reasoningEffort are the effective built-in session settings,
-	// reported when the binding is first written.
-	model           string
-	reasoningEffort string
+	model               string
+	reasoningEffort     string
 }
 
-// agentExecutionSnapshotBody is the canonical non-secret executable input
-// record frozen into the immutable snapshot. Credentials remain references
-// only; raw credential values and TxTokens never enter this structure.
 type agentExecutionSnapshotBody struct {
-	SchemaVersion    int32                                  `json:"schemaVersion"`
-	ContractVersion  string                                 `json:"contractVersion"`
-	Backend          string                                 `json:"backend"`
-	RuntimeType      string                                 `json:"runtimeType"`
-	Agent            agentExecutionSnapshotAgent            `json:"agent"`
-	Configuration    agentExecutionSnapshotConfig           `json:"configuration"`
-	RuntimeImage     string                                 `json:"runtimeImage"`
-	RuntimeProfile   harnessv2.RuntimeProfile               `json:"runtimeProfile"`
-	ProfileDigest    string                                 `json:"profileDigest"`
-	PoolName         string                                 `json:"poolName"`
-	MCPConfiguration *harnessv2.MCPPolicyConfiguration      `json:"mcpConfiguration,omitempty"`
-	Prompt           string                                 `json:"prompt"`
-	Timeout          string                                 `json:"timeout,omitempty"`
-	RetryPolicy      *corev1alpha1.RetryPolicy              `json:"retryPolicy,omitempty"`
-	SessionRef       *corev1alpha1.SessionReference         `json:"sessionRef,omitempty"`
-	Workspace        *corev1alpha1.WorkspaceConfig          `json:"workspace,omitempty"`
-	RuntimeOverride  *corev1alpha1.AgentRuntimeSpec         `json:"runtimeOverride,omitempty"`
-	DefaultTools     *agentExecutionSnapshotToolPolicy      `json:"defaultTools,omitempty"`
-	ExternalRuntime  *agentExecutionSnapshotExternalRuntime `json:"externalRuntime,omitempty"`
-	// ExecutionWorkspace freezes the resolved execution-workspace binding for
-	// workspace-provider-backed RuntimePools. It is absent for plain pools.
+	SchemaVersion      int32                                   `json:"schemaVersion"`
+	ContractVersion    string                                  `json:"contractVersion"`
+	Backend            string                                  `json:"backend"`
+	RuntimeType        string                                  `json:"runtimeType"`
+	Agent              agentExecutionSnapshotAgent             `json:"agent"`
+	Configuration      agentExecutionSnapshotConfig            `json:"configuration"`
+	RuntimeImage       string                                  `json:"runtimeImage"`
+	RuntimeProfile     harnessv2.RuntimeProfile                `json:"runtimeProfile"`
+	ProfileDigest      string                                  `json:"profileDigest"`
+	PoolName           string                                  `json:"poolName"`
+	MCPConfiguration   *harnessv2.MCPPolicyConfiguration       `json:"mcpConfiguration,omitempty"`
+	Prompt             string                                  `json:"prompt"`
+	Timeout            string                                  `json:"timeout,omitempty"`
+	RetryPolicy        *corev1alpha1.RetryPolicy               `json:"retryPolicy,omitempty"`
+	SessionRef         *corev1alpha1.SessionReference          `json:"sessionRef,omitempty"`
+	Workspace          *corev1alpha1.WorkspaceConfig           `json:"workspace,omitempty"`
+	RuntimeOverride    *corev1alpha1.AgentRuntimeSpec          `json:"runtimeOverride,omitempty"`
+	DefaultTools       *agentExecutionSnapshotToolPolicy       `json:"defaultTools,omitempty"`
+	ExternalRuntime    *agentExecutionSnapshotExternalRuntime  `json:"externalRuntime,omitempty"`
 	ExecutionWorkspace *agentExecutionSnapshotWorkspaceBinding `json:"executionWorkspace,omitempty"`
-	// Connections freezes, per connection-mode OutboundAccessPolicy reachable
-	// from the frozen tool policy, the identity of the requester's Connection
-	// at dispatch. Call-time resolution fails closed unless the live
-	// Connection still matches. No token material is ever recorded.
-	Connections  []agentExecutionSnapshotConnection `json:"connections,omitempty"`
-	GatewayGrant *gatewayruntime.TaskGrant          `json:"gatewayGrant,omitempty"`
+	Connections        []agentExecutionSnapshotConnection      `json:"connections,omitempty"`
+	GatewayGrant       *gatewayruntime.TaskGrant               `json:"gatewayGrant,omitempty"`
 }
 
-// agentExecutionSnapshotConnection is one frozen person-to-provider link.
 type agentExecutionSnapshotConnection struct {
-	// PolicyName is the connection-mode policy, or the BuiltinConnectionKey
-	// of a built-in tool the controller runs under the link.
-	PolicyName string `json:"policyName"`
-	// Tool is set for a built-in binding: the tool the link was frozen for.
-	Tool           string `json:"tool,omitempty"`
-	Provider       string `json:"provider"`
-	ConnectionName string `json:"connectionName"`
-	UID            string `json:"uid"`
-	Generation     int64  `json:"generation"`
-	// GrantSequence is the consent count the Connection carried when
-	// frozen; a later re-link of the same object raises it and invalidates
-	// this snapshot's authority to use the account.
-	GrantSequence int64  `json:"grantSequence"`
-	Mode          string `json:"mode"`
-	// PolicyUID and PolicyGeneration pin the connection-mode policy the
-	// Connection was frozen under: its credential output semantics are part
-	// of what the Task was dispatched with.
+	PolicyName       string `json:"policyName"`
+	Tool             string `json:"tool,omitempty"`
+	Provider         string `json:"provider"`
+	ConnectionName   string `json:"connectionName"`
+	UID              string `json:"uid"`
+	Generation       int64  `json:"generation"`
+	GrantSequence    int64  `json:"grantSequence"`
+	Mode             string `json:"mode"`
 	PolicyUID        string `json:"policyUID,omitempty"`
 	PolicyGeneration int64  `json:"policyGeneration,omitempty"`
 }
 
-// agentExecutionSnapshotExternalRuntime freezes the non-secret registration
-// and authentication authority used by one external v2 binding. The runtime's
-// live status fence is re-read immediately before dispatch because controller
-// epochs and supervisor boots may change without changing the registered
-// endpoint or profile.
 type agentExecutionSnapshotExternalRuntime struct {
 	KubernetesRecovery              *corev1alpha1.AgentRuntimeKubernetesRecoverySpec `json:"kubernetesRecovery,omitempty"`
 	Namespace                       string                                           `json:"namespace"`
@@ -154,9 +119,6 @@ type agentExecutionSnapshotExternalRuntime struct {
 	OperationCapability             agentExecutionSnapshotSecretRef                  `json:"operationCapability"`
 }
 
-// agentExecutionSnapshotWorkspaceBinding freezes the canonical, provider-neutral
-// execution-workspace binding. It never carries provider-native identifiers,
-// physical workspace names, or secrets.
 type agentExecutionSnapshotWorkspaceBinding struct {
 	Provider          string                                     `json:"provider"`
 	ReusePolicy       string                                     `json:"reusePolicy"`
@@ -171,9 +133,6 @@ type agentExecutionSnapshotWorkspaceBinding struct {
 	BindingDigest     string                                     `json:"bindingDigest"`
 }
 
-// agentExecutionSnapshotWorkspaceClass freezes the controller-first class
-// binding for class-selected execution workspaces. It carries only Orka-owned
-// identity and policy: no provider-native identifiers and no secrets.
 type agentExecutionSnapshotWorkspaceClass struct {
 	Name                     string                                    `json:"name"`
 	UID                      string                                    `json:"uid"`
@@ -205,8 +164,6 @@ type agentExecutionSnapshotWorkspaceClass struct {
 	} `json:"deletionPolicy"`
 }
 
-// agentExecutionSnapshotSandboxVolume freezes the durable workspace PVC shape
-// for suspend-capable agent-sandbox class bindings.
 type agentExecutionSnapshotSandboxVolume struct {
 	StorageClassName string   `json:"storageClassName,omitempty"`
 	StorageClassUID  string   `json:"storageClassUID,omitempty"`
@@ -231,8 +188,6 @@ type agentExecutionSnapshotConfig struct {
 	SystemPrompt    string `json:"systemPrompt,omitempty"`
 }
 
-// agentExecutionSnapshotToolPolicy preserves the omitted-versus-explicit-empty
-// allowlist distinction from the Agent defaults.
 type agentExecutionSnapshotToolPolicy struct {
 	AllowedToolsOmitted bool     `json:"allowedToolsOmitted"`
 	AllowedTools        []string `json:"allowedTools"`
@@ -260,10 +215,6 @@ type verifiedAgentExecution struct {
 	mcpConfiguration harnessv2.MCPPolicyConfiguration
 }
 
-// resolveAgentExecutionCandidate performs pure candidate resolution for an
-// explicitly v2-classified built-in agent Task: it resolves the frozen session
-// configuration and runtime plan, assembles the snapshot body, and computes
-// the canonical binding. It performs no durable writes.
 func (r *TaskReconciler) resolveAgentExecutionCandidate(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -304,15 +255,10 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
-	// Connector-backed tool visibility and approval defaults depend on the
-	// requester's links; apply them to copies so the plan, the MCP policy,
-	// and the frozen snapshot all describe the same effective policy.
 	task, agent, connectorClassification, err := adjustInputsForConnectorTools(ctx, reader, r.MCPRegistry, task, agent)
 	if err != nil {
 		return nil, err
 	}
-	// A forwarding Tool that allows writes brings its write tool, approved
-	// unless the Tool waives it.
 	if task, agent, err = adjustInputsForForwardingWrites(ctx, reader, task, agent, connectorClassification); err != nil {
 		return nil, err
 	}
@@ -337,11 +283,6 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	workspaceSessionUID = strings.TrimSpace(workspaceSessionUID)
 	if workspaceSessionUID == "" && taskRequestsWorkspaceClass(task) &&
 		task.Spec.Execution.Workspace.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
-		// A class-backed continuation must resolve its immutable Session UID
-		// before the class resolver considers live storage. The linked
-		// RuntimePool carries the frozen durable-volume identity, so requiring
-		// the original StorageClass or a current cluster default first would
-		// reject a valid continuation after that class was retired.
 		plannedUID, sessionErr := r.planACPWorkspaceSessionUID(ctx, task)
 		if sessionErr != nil {
 			wrapped := fmt.Errorf("plan immutable execution-workspace Session identity: %w", sessionErr)
@@ -407,15 +348,11 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
-	// The launch mode is frozen with the tool policy, so the RuntimeSession
-	// binding, the session create, and every prompt carry the same value.
 	mcpConfiguration.NativePermissions = taskNativePermissions(task.Spec.AgentRuntime)
 	frozenConnections, frozenClassification, frozenTools, err := freezeRequesterConnectionsClassified(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
 	if err != nil {
 		return nil, fmt.Errorf("freeze requester connections: %w", err)
 	}
-	// Visibility and approvals were decided from the first classification;
-	// the snapshot must not bind a tool that read differently since.
 	if err := connectorClassificationUnchanged(connectorClassification, frozenClassification, frozenTools); err != nil {
 		return nil, err
 	}
@@ -539,9 +476,6 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	}, nil
 }
 
-// resolveExternalBindingTargets reads the Task namespace and the exact
-// AgentRuntime registration an external binding freezes, and judges the Agent
-// ceiling against that registration.
 func resolveExternalBindingTargets(
 	ctx context.Context,
 	reader client.Reader,
@@ -560,8 +494,6 @@ func resolveExternalBindingTargets(
 	if runtime.UID == "" || runtime.Generation < 1 {
 		return nil, nil, errors.New("external AgentRuntime immutable identity is incomplete")
 	}
-	// Planning judged an earlier read; judge the registration this binding
-	// freezes, so a policy change between the two reads cannot widen tools.
 	if err := validateAgentRuntimeCeilingForRegistration(task, agent, runtime); err != nil {
 		return nil, nil, permanentACPAgentConfiguration(err)
 	}
@@ -619,9 +551,6 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 		if err != nil {
 			return nil, fmt.Errorf("freeze requester connections: %w", err)
 		}
-		// The visibility check above saw a Ready link for every linked
-		// built-in; a link gone since then is a transient state, and the
-		// snapshot is not written without it.
 		if len(frozenConnections) != len(linkedBuiltins) {
 			return nil, fmt.Errorf("the requester's linked account changed while the task was being bound; retrying")
 		}
@@ -818,9 +747,6 @@ func classifyACPWorkspaceClassResolutionError(err error) error {
 	return permanentACPAgentConfiguration(err)
 }
 
-// canonicalAgentExecutionBindingDigest computes the canonical binding digest
-// over the binding with its digest and timestamp cleared, so re-resolution of
-// identical inputs is digest-stable across reconciles.
 func canonicalAgentExecutionBindingDigest(binding corev1alpha1.AgentExecutionBinding) (string, error) {
 	normalized := *binding.DeepCopy()
 	normalized.BindingDigest = ""
@@ -836,7 +762,6 @@ func canonicalAgentExecutionSnapshotBody(body agentExecutionSnapshotBody) ([]byt
 	return encoded, nil
 }
 
-// persistAgentExecutionSnapshot idempotently stores the immutable snapshot.
 func (r *TaskReconciler) persistAgentExecutionSnapshot(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -850,9 +775,6 @@ func (r *TaskReconciler) persistAgentExecutionSnapshot(
 	})
 }
 
-// errAgentExecutionBindingConflict marks a permanent conflict: an existing
-// binding never gets overwritten and the Task never dispatches under a
-// mismatched candidate.
 type errAgentExecutionBindingConflict struct {
 	existingDigest  string
 	candidateDigest string
@@ -863,8 +785,6 @@ func (e *errAgentExecutionBindingConflict) Error() string {
 		e.existingDigest, e.candidateDigest)
 }
 
-// persistAgentExecutionBinding implements the uncached compare-if-absent
-// write-once binding CAS. It never overwrites an existing binding.
 func (r *TaskReconciler) persistAgentExecutionBinding(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -878,8 +798,6 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	if current.UID != task.UID {
 		return nil, fmt.Errorf("task UID changed from %s to %s; never dispatching", task.UID, current.UID)
 	}
-	// A matching persisted binding is authoritative even if this reconcile is
-	// recovering an ambiguous status-patch response.
 	if existing := current.Status.AgentExecutionBinding; existing != nil {
 		if existing.BindingDigest == candidate.binding.BindingDigest {
 			return existing, nil
@@ -902,9 +820,6 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	base := current.DeepCopy()
 	current.Status.AgentExecutionBinding = candidate.binding.DeepCopy()
 	if err := r.Status().Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		// A transport error can arrive after the API server committed the status
-		// patch. Re-read before classifying the failure so an exact binding is
-		// recognized instead of treated as a conflicting retry.
 		latest := &corev1alpha1.Task{}
 		if readErr := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, latest); readErr == nil &&
 			latest.UID == task.UID {
@@ -1054,9 +969,6 @@ func validateAgentExecutionSnapshot(
 	}, configuration, mcpConfiguration, nil
 }
 
-// validateFrozenNativePermissions checks a snapshot's frozen launch mode.
-// Only a RuntimePool session can be launched to ask, and its mode must be
-// exactly the one the frozen permission decisions require.
 func validateFrozenNativePermissions(
 	backend corev1alpha1.AgentExecutionBackend,
 	runtimeOverride *corev1alpha1.AgentRuntimeSpec,
@@ -1117,8 +1029,6 @@ func validateExternalAgentRuntimeSnapshotSecret(namespace, role string, ref agen
 	return nil
 }
 
-// snapshotWorkspaceClassFromBinding freezes the class binding into its
-// snapshot encoding.
 func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentExecutionSnapshotWorkspaceClass {
 	if class == nil {
 		return nil
@@ -1164,8 +1074,6 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 	return frozen
 }
 
-// workspaceClassBindingFromSnapshot rebuilds the frozen class binding from its
-// snapshot encoding.
 func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceClass) *ACPWorkspaceClassBinding {
 	if class == nil {
 		return nil
@@ -1220,8 +1128,6 @@ func sandboxVolumeFromSnapshot(volume *agentExecutionSnapshotSandboxVolume) *ACP
 	}
 }
 
-// verifiedSnapshotWorkspaceBinding re-verifies the frozen execution-workspace
-// binding against its canonical digest and the immutable Task/session identity.
 func verifiedSnapshotWorkspaceBinding(
 	binding *corev1alpha1.AgentExecutionBinding,
 	body agentExecutionSnapshotBody,
@@ -1258,10 +1164,6 @@ func verifiedSnapshotWorkspaceBinding(
 	return frozen, nil
 }
 
-// loadVerifiedACPWorkspaceBindingForSettlement reads the encrypted execution
-// snapshot without applying dispatch-only deletion or generation gates. The
-// immutable binding remains the settlement authority after a Task terminates or
-// begins deleting.
 func (r *TaskReconciler) loadVerifiedACPWorkspaceBindingForSettlement(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1329,8 +1231,6 @@ func frozenTaskFromAgentExecutionSnapshot(task *corev1alpha1.Task, binding *core
 	return frozen
 }
 
-// loadVerifiedBoundExecution re-reads the Task, backend control, and encrypted
-// snapshot uncached immediately before executor demand is persisted.
 func (r *TaskReconciler) loadVerifiedBoundExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1339,9 +1239,6 @@ func (r *TaskReconciler) loadVerifiedBoundExecution(
 	return r.loadVerifiedBoundExecutionWithReadyRequirement(ctx, task, binding, true)
 }
 
-// loadVerifiedBoundExecutionForActiveSession preserves the immutable binding
-// checks for already-admitted work without requiring the runtime to keep
-// accepting new sessions while it drains.
 func (r *TaskReconciler) loadVerifiedBoundExecutionForActiveSession(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1479,8 +1376,6 @@ func (r *TaskReconciler) loadVerifiedBoundExecutionWithReadyRequirement(
 	}, nil
 }
 
-// verifyBoundExecution preserves the narrow verification API used by binding
-// reconciliation while sharing the exact queue-time verification path.
 func (r *TaskReconciler) verifyBoundExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1505,11 +1400,6 @@ func (r *TaskReconciler) handleAgentExecutionBindingVerificationFailure(
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
-// agentCacheBehind returns how long to wait before binding when the cached
-// Agent a Task was validated against, ceiling included, is not the live one.
-// The binding freezes that generation, so a tightened ceiling is never bound
-// past by a stale copy. An Agent already deleted is left to the paths that
-// handle deletion; one recreated under its name differs by UID.
 func agentCacheBehind(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent) time.Duration {
 	if agent == nil {
 		return 0
@@ -1531,10 +1421,6 @@ func agentCacheBehind(ctx context.Context, reader client.Reader, agent *corev1al
 	return 0
 }
 
-// ensureAgentExecutionBinding runs the binding stage for the ACP execution
-// path. It returns handled=true when the caller must return the result
-// immediately (failure or requeue) and handled=false when dispatch may
-// proceed under a verified binding.
 func (r *TaskReconciler) ensureAgentExecutionBinding(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1645,13 +1531,6 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 	return r.requireBoundAgentCeiling(ctx, task, reader, binding)
 }
 
-// requireBoundAgentCeiling re-judges a bound Task against its Agent's live
-// ceiling until the Task starts executing. The binding froze the generation
-// the cache held when the live check passed; a ceiling tightened between
-// that check and the binding write is caught here, and a Task the newer
-// ceiling refuses fails before it runs. A change after this read follows
-// the binding, as it does for a Task already running. Registered external
-// runtimes are judged against their AgentRuntime policy during planning.
 func (r *TaskReconciler) requireBoundAgentCeiling(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1681,12 +1560,6 @@ func (r *TaskReconciler) requireBoundAgentCeiling(
 	return ctrl.Result{}, nil, false
 }
 
-// checkExternalLinkedBuiltins admits GitHub built-ins under a linked account
-// on an external v2 runtime only when the requester's link changes nothing
-// about the registered policy: every such tool must stay visible (a Ready
-// link, readWrite for write tools) and every write tool must already be in
-// the registered approval-required set. Anything else is a permanent
-// configuration refusal, never a per-person narrowing of the profile.
 func checkExternalLinkedBuiltins(
 	ctx context.Context,
 	reader client.Reader,
@@ -1722,15 +1595,6 @@ func checkExternalLinkedBuiltins(
 	return nil
 }
 
-// checkExternalConnectorTools applies the connector rules to an external v2
-// runtime. Its MCP policy is fixed by its registered profile, so
-// per-requester links cannot narrow it. Tools behind connection-mode
-// policies therefore fail closed here, with a definitive reason, rather than
-// being advertised as tools whose every call would fail for want of a frozen
-// Connection; only names that resolve to brokered custom Tools count. GitHub
-// built-ins under a linked account are carried only when the requester's
-// link leaves the registered policy exactly as registered; see
-// checkExternalLinkedBuiltins.
 func (r *TaskReconciler) checkExternalConnectorTools(
 	ctx context.Context,
 	reader client.Reader,
@@ -1745,10 +1609,6 @@ func (r *TaskReconciler) checkExternalConnectorTools(
 		runtimeAllowed = runtime.Spec.Capabilities.MCPPolicy.AllowedTools
 		runtimeDisallowed = runtime.Spec.Capabilities.MCPPolicy.DisallowedTools
 	}
-	// The session's descriptors come from the registered policy alone, so a
-	// Task-level deny of a linked built-in that policy still exposes would
-	// not remove it: it would be frozen and offered anyway. Such a Task is
-	// refused rather than bound with a tool it denied.
 	if task.Spec.AgentRuntime != nil {
 		for _, denied := range brokeredLinkedBuiltins(r.MCPRegistry, task.Spec.AgentRuntime.DisallowedTools) {
 			if slices.Contains(runtimeAllowed, denied) && !slices.Contains(runtimeDisallowed, denied) {
@@ -1773,10 +1633,6 @@ func (r *TaskReconciler) checkExternalConnectorTools(
 	return linkedBuiltins, nil
 }
 
-// brokeredCustomCandidates keeps the names that would resolve to brokered
-// custom Tools, mirroring buildCanonicalMCPToolDescriptors: a registered
-// built-in or a provider-native tool takes precedence over a same-named Tool
-// CR, which is then never exposed and cannot make a Task connector-backed.
 func brokeredCustomCandidates(names []string, providerKind string, registry *tools.Registry) []string {
 	native := providerNativeTools[strings.ToLower(providerKind)]
 	kept := make([]string, 0, len(names))
@@ -1794,8 +1650,6 @@ func brokeredCustomCandidates(names []string, providerKind string, registry *too
 	return kept
 }
 
-// recordAgentExecutionSettings reports the model and reasoning effort a
-// built-in runtime Task runs with. The binding stores only digests of them.
 func (r *TaskReconciler) recordAgentExecutionSettings(task *corev1alpha1.Task, candidate *agentExecutionCandidate) {
 	if r.Recorder == nil || candidate == nil || candidate.binding.RuntimeType == "" {
 		return

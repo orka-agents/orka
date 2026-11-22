@@ -304,8 +304,6 @@ func TestContextTokenConnectorReadScopeGatesListConnections(t *testing.T) {
 		}
 	}
 
-	// tools:use alone offers the coordinator tools but not the person's
-	// linked accounts; execution is refused the same way.
 	probe(ContextTokenScopeToolsUse)
 	if slices.Contains(gotNames, "list_connections") || !slices.Contains(gotNames, "create_agent_task") || !gateDenied {
 		t.Fatalf("tools:use only: names = %v denied = %t", gotNames, gateDenied)
@@ -316,9 +314,6 @@ func TestContextTokenConnectorReadScopeGatesListConnections(t *testing.T) {
 	}
 }
 
-// TestConnectorReadToolAuthorizerRecordsAuditFailures allows list_connections
-// in audit mode for a token without the connector-read scope but records the
-// failure, as the connector routes do; enforce mode refuses and records it.
 func TestConnectorReadToolAuthorizerRecordsAuditFailures(t *testing.T) {
 	ui := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: "https://issuer.example.test",
 		ContextToken: &ContextToken{Subject: "alice", Issuer: "https://issuer.example.test", Scopes: []string{ContextTokenScopeToolsUse}}}
@@ -360,8 +355,6 @@ func TestConnectorReadToolAuthorizerRecordsAuditFailures(t *testing.T) {
 	}
 }
 
-// fakeLinkedAccounts reports every catalog built-in as bound and counts
-// the resolutions that reached it.
 type fakeLinkedAccounts struct{ calls *int }
 
 func (f fakeLinkedAccounts) BuiltinToolCredential(context.Context, string) (toolspkg.LinkedAccountCredential, bool, error) {
@@ -369,11 +362,6 @@ func (f fakeLinkedAccounts) BuiltinToolCredential(context.Context, string) (tool
 	return toolspkg.LinkedAccountCredential{AccessToken: "linked"}, true, nil
 }
 
-// TestScopedLinkedAccountsFollowConnectorReadBoundary covers the linked
-// GitHub tools of chat and the compatibility proxies: under enforcement a
-// delegated token without the connector-read scope uses no linked account
-// and never reaches the resolver, audit mode resolves the link and records
-// the missing scope, and a token carrying the scope is not narrowed.
 func TestScopedLinkedAccountsFollowConnectorReadBoundary(t *testing.T) {
 	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
 	narrowed := &UserInfo{AuthType: AuthTypeContextToken, Subject: "alice", Issuer: requester.Issuer,
@@ -414,9 +402,6 @@ func TestScopedLinkedAccountsFollowConnectorReadBoundary(t *testing.T) {
 	}
 }
 
-// TestResponsesWiresConnectorSettings covers the OpenAI Responses endpoint:
-// it offers list_connections and resolves linked accounts exactly as Chat
-// Completions does when connectors are enabled.
 func TestResponsesWiresConnectorSettings(t *testing.T) {
 	handler, app := setupTestOpenAIHandler()
 	handler.config.ConnectorsEnabled = true

@@ -163,9 +163,6 @@ func TestParseSinceAcceptsDurationAndTimestamp(t *testing.T) {
 	}
 }
 
-// TestTaskDescribeShowsAPendingApproval covers a Task held on an approval:
-// its phase is Running, so the WaitingForApproval condition is shown with the
-// command that lists the request. A cleared condition shows nothing.
 func TestTaskDescribeShowsAPendingApproval(t *testing.T) {
 	task := func(status string) map[string]any {
 		return map[string]any{
@@ -179,7 +176,6 @@ func TestTaskDescribeShowsAPendingApproval(t *testing.T) {
 	if got, want := taskWaitingOn(task("True")), "approval; see 'orka task approvals az-write'"; got != want {
 		t.Fatalf("taskWaitingOn = %q, want %q", got, want)
 	}
-	// The suggested command finds the Task in its own namespace.
 	namespaced := task("True")
 	namespaced["metadata"].(map[string]any)["namespace"] = "team-a"
 	if got, want := taskWaitingOn(namespaced), "approval; see 'orka task approvals az-write -n team-a'"; got != want {

@@ -190,7 +190,6 @@ describe('AgentCreateForm', () => {
       fireEvent.pointerDown(modeTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
     })
     fireEvent.click(await screen.findByRole('option', { name: 'ACP agent runtime' }))
-    // The model is mode-specific and starts over on a mode switch.
     await user.type(screen.getByLabelText('Model'), 'runtime-model')
 
     const roleInput = screen.getByLabelText('System Prompt')
@@ -426,7 +425,6 @@ describe('AgentCreateForm', () => {
     await waitFor(() => expect(providerTrigger).not.toBeDisabled())
     await pickOption(providerTrigger, /anthropic-prod/)
     await waitFor(() => expect(providerTrigger).toHaveTextContent('anthropic-prod'))
-    // The model placeholder follows the selected Provider's default model.
     expect(screen.getByLabelText('Model')).toHaveAttribute('placeholder', 'claude-default')
     await user.type(screen.getByLabelText('Model'), 'native-model')
     if (withPrompts) {

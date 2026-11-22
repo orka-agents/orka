@@ -19,8 +19,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The recorder captures every connector provider call with its arguments.
-
 func (r *recordingStore) ReadConnectorCustody(ctx context.Context, connectionUID string) (*storagev1.ConnectorCustody, error) {
 	r.record("ReadConnectorCustody", connectionUID)
 	return r.Store.ReadConnectorCustody(ctx, connectionUID)
@@ -144,10 +142,6 @@ func connectorCompletion(nonce, uid string, sequence int64, token string) store.
 	}
 }
 
-// TestProviderReceivesOnlySealedConnectorCustody drives every connector
-// custody path through the client, then proves the provider never received a
-// token, a PKCE verifier, a per-record data key or the snapshot key, in any
-// encoding.
 func TestProviderReceivesOnlySealedConnectorCustody(t *testing.T) {
 	var dataKeys [][]byte
 	t.Cleanup(storageclient.ObserveConnectorDataKeys(func(key []byte) { dataKeys = append(dataKeys, key) }))
@@ -200,7 +194,6 @@ func TestProviderReceivesOnlySealedConnectorCustody(t *testing.T) {
 	consumedCompletion, err := client.ConsumeConnectorCompletion(ctx, completion.Nonce)
 	require.NoError(t, err)
 	require.True(t, consumedCompletion.Committed)
-	// Key activation pages through every connector family.
 	activatedClient(t, recorder, sealedTestKey)
 	require.NoError(t, client.TombstoneConnectorCustody(ctx, ref.ConnectionUID))
 	require.NoError(t, client.DeleteConnectorCredential(ctx, ref.ConnectionUID))
@@ -227,15 +220,10 @@ func TestProviderReceivesOnlySealedConnectorCustody(t *testing.T) {
 		secrets[fmt.Sprintf("base64 data key %d", i)] = base64.StdEncoding.EncodeToString(key)
 	}
 	recorder.requireNoSecret(t, secrets)
-	// The provider received the records' plain facts, so the check above is
-	// not passing on empty records.
 	recorder.requireReceived(t, "CommitSealedConnectorCompletion", ref.SubjectDigest)
 	recorder.requireReceived(t, "CreateSealedConnectorConsent", consent.AuthorityDigest)
 	recorder.requireReceived(t, "RetireSealedConnectorCredential", ref.ConnectionUID)
 }
-
-// Legacy connector formats, implemented independently of the client as the
-// embedded store sealed them before the client held the key.
 
 func legacyConnectorCredentialAAD(ref store.ConnectorCredentialRef) []byte {
 	return []byte("orka.connector-credential\x00" + ref.ConnectionUID + "\x00" + ref.Namespace + "\x00" + ref.Name + "\x00" + ref.SubjectDigest + "\x00" + ref.Provider)
@@ -256,16 +244,12 @@ func legacyConnectorCompletionAAD(c storagev1.SealedConnectorCompletion) []byte 
 		c.Nonce, c.ConnectionUID, c.SubjectDigest, c.Namespace, c.Name, c.Provider, c.Mode, c.ExpiresAt.UnixNano(), c.ConsentSequence)
 }
 
-// TestSealedConnectorFormatsMatchStoredRecords proves the client opens
-// connector records sealed in the stored formats and writes records those
-// formats open, so existing datasets open unchanged.
 func TestSealedConnectorFormatsMatchStoredRecords(t *testing.T) {
 	backend := openSQLite(t)
 	ctx := t.Context()
 	now := time.Now().UTC()
 	ref := connectorRef("uid-legacy")
 
-	// A credential sealed under its own data key, in the stored format.
 	dataKey := bytes.Repeat([]byte{0x6b}, 32)
 	expires := time.Date(2030, 1, 2, 3, 4, 5, 6, time.UTC)
 	body := []byte(`{"accessToken":"legacy-access","refreshToken":"legacy-refresh","tokenType":"bearer","expiresAt":"` +
@@ -311,7 +295,6 @@ func TestSealedConnectorFormatsMatchStoredRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "legacy-verifier", opened.CodeVerifier)
 
-	// Records the client seals open in the stored formats.
 	_, err = client.CommitConnectorCompletion(ctx, completion.Nonce, ref, parked.Credential)
 	require.NoError(t, err)
 	sealed, err := backend.GetSealedConnectorCredential(ctx, ref.ConnectionUID)
@@ -345,16 +328,12 @@ func TestSealedConnectorFormatsMatchStoredRecords(t *testing.T) {
 	require.Equal(t, clientConsent.CodeVerifier, string(legacyOpen(t, sealedTestKey, stored.VerifierNonce, stored.VerifierCiphertext, legacyConnectorConsentAAD(stored))))
 }
 
-// connectorTamperingStore changes what the provider returns for connector
-// records.
 type connectorTamperingStore struct {
 	*sqlite.Store
 	credential func(*storagev1.SealedConnectorCredential)
 	completion func(*storagev1.SealedConnectorCompletion)
 	consent    func(*storagev1.SealedConnectorConsent)
-	// foreign is another Connection's completion the provider adds to a
-	// custody read.
-	foreign *storagev1.SealedConnectorCompletion
+	foreign    *storagev1.SealedConnectorCompletion
 }
 
 func (s *connectorTamperingStore) GetSealedConnectorCredential(ctx context.Context, uid string) (*storagev1.SealedConnectorCredential, error) {
@@ -406,8 +385,6 @@ func TestConnectorConsentExpiringDuringConsumptionIsRefused(t *testing.T) {
 	consumed := false
 	backend.consent = func(*storagev1.SealedConnectorConsent) {
 		consumed = true
-		// The provider accepted a live consent, but its response arrives only
-		// after expiry. No verifier should escape the client at that point.
 		time.Sleep(time.Until(consent.ExpiresAt.Add(time.Millisecond)))
 	}
 	got, err := client.ConsumeConnectorConsent(t.Context(), consent.Nonce)
@@ -416,8 +393,6 @@ func TestConnectorConsentExpiringDuringConsumptionIsRefused(t *testing.T) {
 	require.Empty(t, got.CodeVerifier)
 }
 
-// disconnectingStore tombstones a Connection's custody right after a custody
-// read, as a disconnect that commits between two reads would.
 type disconnectingStore struct {
 	*sqlite.Store
 	armed       bool
@@ -439,10 +414,6 @@ func (s *disconnectingStore) GetSealedConnectorCredential(ctx context.Context, u
 	return s.Store.GetSealedConnectorCredential(ctx, uid)
 }
 
-// TestConnectorCredentialGrantUsesOneCustodyRead covers a disconnect that
-// commits while the grant is read: the grant comes from the same custody read
-// that passed the tombstone check, never from a second read, and the next
-// read reports the disconnect.
 func TestConnectorCredentialGrantUsesOneCustodyRead(t *testing.T) {
 	ctx := t.Context()
 	backend := &disconnectingStore{Store: openSQLite(t)}
@@ -460,9 +431,6 @@ func TestConnectorCredentialGrantUsesOneCustodyRead(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrConnectorCustodyTombstoned)
 }
 
-// TestClientRejectsModifiedConnectorRecords covers records a provider altered
-// or returned for another Connection: the client refuses them without
-// panicking and without echoing token material.
 func TestClientRejectsModifiedConnectorRecords(t *testing.T) {
 	ctx := t.Context()
 	backend := &connectorTamperingStore{Store: openSQLite(t)}
@@ -520,8 +488,6 @@ func TestClientRejectsModifiedConnectorRecords(t *testing.T) {
 		require.NotContains(t, err.Error(), "parked-tampered", name)
 	}
 	backend.completion = nil
-	// Another Connection's own, intact completion in this Connection's
-	// custody is refused rather than judged or committed.
 	foreign := connectorCompletion("completion-foreign", other.ConnectionUID, 1, "parked-foreign")
 	require.NoError(t, client.CreateConnectorCompletion(ctx, foreign))
 	backend.foreign, err = backend.Store.GetSealedConnectorCompletion(ctx, foreign.Nonce)
@@ -551,9 +517,6 @@ func TestClientRejectsModifiedConnectorRecords(t *testing.T) {
 	}
 }
 
-// TestConnectorKeyActivationAuthenticatesEveryFamily covers key rotation over
-// each kind of retained connector record on its own: a key that cannot open
-// it is refused and not installed, while an expired consent does not block.
 func TestConnectorKeyActivationAuthenticatesEveryFamily(t *testing.T) {
 	wrong := bytes.Repeat([]byte{0x24}, storageclient.SnapshotKeyBytes)
 	for name, seed := range map[string]func(*testing.T, *storageclient.Client, *sqlite.Store){
@@ -594,9 +557,6 @@ func TestConnectorKeyActivationAuthenticatesEveryFamily(t *testing.T) {
 	})
 }
 
-// interleavingStore runs a step once, right after the client reads a
-// Connection's custody, as another API replica would between this replica's
-// read and its conditional commit.
 type interleavingStore struct {
 	*sqlite.Store
 	afterRead    func()
@@ -620,9 +580,6 @@ func (s *interleavingStore) CommitSealedConnectorCompletion(ctx context.Context,
 	return s.Store.CommitSealedConnectorCompletion(ctx, request)
 }
 
-// TestConnectorCommitJudgesExpiryWhenItCommits covers a commit that stalls
-// after its read until the completion expires: the provider refuses it at the
-// commit's own time, nothing becomes custody and the completion is dropped.
 func TestConnectorCommitJudgesExpiryWhenItCommits(t *testing.T) {
 	for _, delayAt := range []string{"after custody read", "before provider commit"} {
 		t.Run(delayAt, func(t *testing.T) {
@@ -649,11 +606,6 @@ func TestConnectorCommitJudgesExpiryWhenItCommits(t *testing.T) {
 	}
 }
 
-// TestConnectorWritesRereadCustodyThatChanged covers concurrent writers: a
-// conditional command built from custody another replica changed is refused
-// and decided again from a fresh read, so a completion is committed once,
-// consents take distinct sequences and an older consent never parks over a
-// newer one.
 func TestConnectorWritesRereadCustodyThatChanged(t *testing.T) {
 	ctx := t.Context()
 	backend := &interleavingStore{Store: openSQLite(t)}
@@ -695,8 +647,6 @@ func TestConnectorWritesRereadCustodyThatChanged(t *testing.T) {
 	_, err = client.PeekConnectorCompletion(ctx, older.Nonce)
 	require.ErrorIs(t, err, store.ErrNotFound)
 
-	// A commit whose custody keeps changing gives up after bounded rereads
-	// and changes nothing.
 	rounds := 0
 	var churn func()
 	churn = func() {

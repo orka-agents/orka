@@ -9,10 +9,6 @@ import (
 	"strings"
 )
 
-// requireAudience checks that a requester's token is addressed to the
-// identity's blueprint, so a Connection linked for another client can never
-// be exchanged. The token came from Orka's own custody, so only its claims
-// are read here; the issuer verifies its signature during the exchange.
 func requireAudience(token, blueprintClientID string) error {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {

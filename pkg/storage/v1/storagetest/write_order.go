@@ -11,29 +11,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The Task whose result and artifact the write order cases replace.
 const (
 	orderNamespace = "tenant"
 	orderTask      = "task"
 )
 
-// orderTarget is a whole object a write replaces: a result, or one artifact
-// file. The write order cases run the same checks on both.
 type orderTarget[P any] struct {
-	// limit is the largest object the contract accepts.
-	limit int
-	// saveMethod and deleteMethod name the contract methods, and saveArgs
-	// and deleteArgs return their arguments after the context.
+	limit                    int
 	saveMethod, deleteMethod string
 	saveArgs                 func(data []byte) []any
 	deleteArgs               func() []any
 	save                     func(ctx context.Context, p P, data []byte) error
 	delete                   func(ctx context.Context, p P) error
-	// get returns the stored object, or ErrNotFound.
-	get func(ctx context.Context, p P) ([]byte, error)
-	// observe returns everything the Task's reads return, so a check can show
-	// that nothing changed.
-	observe func(t *testing.T, p P) any
+	get                      func(ctx context.Context, p P) ([]byte, error)
+	observe                  func(t *testing.T, p P) any
 }
 
 func resultOrder() orderTarget[storagev1.StateProvider] {
@@ -96,8 +87,6 @@ func artifactOrder() orderTarget[storagev1.ArtifactProvider] {
 	return target
 }
 
-// orderWriter makes writes of one target with envelopes whose order stamp the
-// case chooses.
 type orderWriter[P writeCaseProvider] struct {
 	target  orderTarget[P]
 	p       P
@@ -152,8 +141,6 @@ func (w orderWriter[P]) requireSeesNothing(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrNotFound)
 }
 
-// runWriteOrder checks that a whole object is replaced in issue order rather
-// than commit order, and that its size limit holds on every attempt.
 func runWriteOrder[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, target orderTarget[P]) {
 	t.Run("a replayed save leaves one version", func(t *testing.T) {
 		w := newOrderWriter(t, newProvider(t), target)
@@ -259,8 +246,6 @@ func runWriteOrder[P writeCaseProvider](t *testing.T, newProvider func(t *testin
 	})
 }
 
-// runResultWriteOrder runs the write order cases on results, and checks that
-// prompt result receipts hold the result limit.
 func runResultWriteOrder(t *testing.T, newProvider StateFactory) {
 	runWriteOrder(t, newProvider, resultOrder())
 
@@ -282,7 +267,6 @@ func runResultWriteOrder(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// runArtifactWriteOrder runs the write order cases on one artifact file.
 func runArtifactWriteOrder(t *testing.T, newProvider ArtifactFactory) {
 	runWriteOrder(t, newProvider, artifactOrder())
 }

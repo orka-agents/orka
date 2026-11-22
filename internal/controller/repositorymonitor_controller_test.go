@@ -1780,7 +1780,6 @@ func TestRepositoryMonitorReviewPublishDisabledSkipsWithoutGitHubCall(t *testing
 	t.Cleanup(server.Close)
 
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-disabled")
-	// Suspend new inventory while testing publication of existing reviews.
 	suspend := true
 	monitor.Spec.Suspend = &suspend
 	task := repositoryMonitorReviewIngestTestTask("publish-disabled-task", "publish-disabled", 1, reviewHeadSHA)
@@ -1831,7 +1830,6 @@ func TestRepositoryMonitorReviewPublishPostsCommentReviewWithInlineFindings(t *t
 	maxComments := int32(1)
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-inline")
-	// Suspend new inventory while testing publication of existing reviews.
 	suspend := true
 	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
@@ -2044,7 +2042,6 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			t.Cleanup(publishServer.Close)
 
 			monitor := repositoryMonitorReviewIngestTestMonitor(monitorName)
-			// Suspend new inventory while testing publication of existing reviews.
 			suspend := true
 			monitor.Spec.Suspend = &suspend
 			monitor.Spec.Review.Publish.Enabled = true
@@ -2120,7 +2117,6 @@ func TestRepositoryMonitorReviewPublishRetriesReviewRecordWithoutTerminalPublish
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-pending")
-	// Suspend new inventory while testing publication of existing reviews.
 	suspend := true
 	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
@@ -2188,7 +2184,6 @@ func TestRepositoryMonitorReviewPublishRetriesRecoverableSkippedRecord(t *testin
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recoverable-skip")
-	// Suspend new inventory while testing publication of existing reviews.
 	suspend := true
 	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
@@ -2274,7 +2269,6 @@ func TestRepositoryMonitorReviewPublishWaitsBeforeRetryingRecentRecoverableSkip(
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-recent-skip")
-	// Suspend new inventory while testing publication of existing reviews.
 	suspend := true
 	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
@@ -2361,7 +2355,6 @@ func TestRepositoryMonitorReviewPublishGitHubPermissionFailureCreatesFailedRecor
 
 	postNeedsChanges := true
 	monitor := repositoryMonitorReviewIngestTestMonitor("publish-forbidden")
-	// Suspend new inventory while testing publication of existing reviews.
 	suspend := true
 	monitor.Spec.Suspend = &suspend
 	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
@@ -3748,8 +3741,6 @@ func newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t *testing.T, nu
 	}))
 }
 
-// newRepositoryMonitorReviewContextUnavailableServer answers every GitHub
-// request with 404 so review Task creation embeds contextUnavailable.
 func newRepositoryMonitorReviewContextUnavailableServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -3759,12 +3750,6 @@ func newRepositoryMonitorReviewContextUnavailableServer(t *testing.T) *httptest.
 	}))
 }
 
-// repositoryMonitorInventoryServerRoutesReviewContext serves the single pull
-// request and pull request files endpoints the review-context builder calls,
-// derived from the same inventory body. It returns true when it handled the
-// request.
-// repositoryMonitorTestServesNoHeldWorkflowRuns answers the workflow-run
-// approval lookup: no run for the commit waits for a maintainer.
 func repositoryMonitorTestServesNoHeldWorkflowRuns(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet || r.URL.Path != "/repos/orka-agents/orka/actions/runs" {
 		return false
@@ -3774,8 +3759,6 @@ func repositoryMonitorTestServesNoHeldWorkflowRuns(w http.ResponseWriter, r *htt
 	return true
 }
 
-// repositoryMonitorTestWithoutHeldWorkflowRuns serves no held workflow runs
-// and passes every other request to next.
 func repositoryMonitorTestWithoutHeldWorkflowRuns(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
@@ -3792,7 +3775,6 @@ func repositoryMonitorInventoryServerRoutesReviewContext(t *testing.T, w http.Re
 	const prefix = "/repos/orka-agents/orka/pulls/"
 	const comparePrefix = "/repos/orka-agents/orka/compare/"
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, comparePrefix) {
-		// The review-context builder binds the file set to base...head SHAs.
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"files":[{"filename":"main.go","status":"modified","additions":1,"deletions":0,"patch":"@@ -1 +1,2 @@\n package main\n+// change"}]}`))
 		return true
@@ -3922,8 +3904,6 @@ func repositoryMonitorReviewIngestTestTask(name, monitorName string, prNumber in
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type: corev1alpha1.TaskTypeAgent,
-			// A complete (non-truncated, available) rendered context so passed
-			// verdicts from these fixtures pass the controller-side gate.
 			Prompt: "review\n" + renderRepositoryMonitorReviewContext(repositoryMonitorReviewContext{
 				SchemaVersion: repositoryMonitorReviewContextSchemaVersion, Repo: "orka-agents/orka",
 				PRNumber: prNumber, HeadSHA: headSHA,
@@ -3983,8 +3963,6 @@ func repositoryMonitorReviewResultEnvelopeWith(t *testing.T, prNumber int64, hea
 		},
 		"suggestedComment": "Please fix the failing path.",
 	}
-	// Orka derives a passed verdict only when no blocking finding is open,
-	// so a passed review reports no findings by default.
 	if verdict == repositoryMonitorReviewVerdictPassed {
 		payload["findings"] = []map[string]any{}
 		payload["summary"] = "Review found no issues."
@@ -4015,18 +3993,16 @@ type repositoryMonitorPublishTestServerConfig struct {
 	FilesBody   string
 	PostStatus  int
 	PostBody    string
-	// PutBody answers review summary updates; it defaults to PostBody.
-	PutBody string
+	PutBody     string
 }
 
 type repositoryMonitorPublishTestServer struct {
 	*httptest.Server
 	PostCount    int
 	PostedReview repositoryMonitorPullRequestReviewRequest
-	// PutPath and PutBody record the last review summary update.
-	PutCount int
-	PutPath  string
-	PutBody  string
+	PutCount     int
+	PutPath      string
+	PutBody      string
 }
 
 func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPublishTestServerConfig) *repositoryMonitorPublishTestServer {
@@ -4713,8 +4689,6 @@ func TestRepositoryMonitorValidationAllowsCodexReviewer(t *testing.T) {
 	)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl}
-	// Codex reviewers run in the native read-only agent mode, so monitor
-	// validation accepts them.
 	reason, message, err := reconciler.validateRepositoryMonitorReviewerAgent(ctx, monitor)
 	if err != nil || reason != "" || message != "" {
 		t.Fatalf("validation reason=%q message=%q err=%v", reason, message, err)
@@ -6764,8 +6738,6 @@ func TestRepositoryMonitorIssueRunLimitRefreshRetainsActiveWorkflowAcrossSnapsho
 		got.LastVerdict != existing.LastVerdict || got.LinkedPRNumber != existing.LinkedPRNumber {
 		t.Fatalf("inventory refresh lost active workflow state: %#v", got)
 	}
-	// The retained workflow keeps the snapshot it was started from, so the
-	// next uncapped run still sees the edit as a digest change.
 	if got.SnapshotDigest != existing.SnapshotDigest || got.Title != existing.Title || got.Body != existing.Body {
 		t.Fatalf("retention advanced the snapshot past the retained workflow: %#v", got)
 	}
@@ -6893,9 +6865,6 @@ func TestRepositoryMonitorPermanentCommandRunTerminalizesWorkAction(t *testing.T
 	}
 }
 
-// Command intake can coalesce a command after the controller lists it as
-// accepted. Recovery then finds the coalesced action and must settle the
-// command as intake does, without queuing a run or rewriting the action.
 func TestRepositoryMonitorCommandRecoveryKeepsCoalescedAction(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -6927,8 +6896,6 @@ func TestRepositoryMonitorCommandRecoveryKeepsCoalescedAction(t *testing.T) {
 		t.Fatalf("command status=%q error=%q, want the coalesced outcome", persisted.Status, persisted.Error)
 	}
 
-	// A run that started before the coalesced action was created still
-	// cannot rewrite it.
 	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, &store.MonitorRun{ID: runID}, &command, repositoryMonitorPullRequestKind, 9, "head-9", "", "review", repositoryMonitorWorkActionStatusBlocked, "blocked", "", "issue_closed"); err != nil {
 		t.Fatalf("recordRepositoryMonitorWorkActionState() error = %v", err)
 	}
@@ -6941,9 +6908,6 @@ func TestRepositoryMonitorCommandRecoveryKeepsCoalescedAction(t *testing.T) {
 	}
 }
 
-// Intake can coalesce a command after recovery has already queued its run.
-// Execution must then stop as it does for a cancelled action, so the command's
-// work never runs twice.
 func TestRepositoryMonitorIssueCommandRunStopsForCoalescedAction(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -6974,9 +6938,6 @@ func TestRepositoryMonitorIssueCommandRunStopsForCoalescedAction(t *testing.T) {
 	}
 }
 
-// A halted issue command must not block the shared issue or emit an event
-// for it, whether the phase is disabled or the transition is not allowed: the
-// issue is driven by the action that still owns the work.
 func TestRepositoryMonitorHaltedIssueCommandLeavesSharedIssue(t *testing.T) {
 	disabled := false
 	cases := map[string]func(*corev1alpha1.RepositoryMonitor) string{
@@ -7026,9 +6987,6 @@ func TestRepositoryMonitorHaltedIssueCommandLeavesSharedIssue(t *testing.T) {
 	}
 }
 
-// A halted fix command (cancelled, or coalesced into another action) must not
-// mark the shared PR item failed when the PR carries a blocked label: the item
-// belongs to the action that is still doing the work.
 func TestRepositoryMonitorHaltedRepairCommandLeavesBlockedPullRequestItem(t *testing.T) {
 	for _, status := range []string{repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusCompleted} {
 		t.Run(status, func(t *testing.T) {
@@ -8817,8 +8775,6 @@ func TestRepositoryMonitorRepeatedImplementCommandDoesNotRestartPlanning(t *test
 
 func TestRepositoryMonitorIssueStatusCommentRedactsCredentials(t *testing.T) {
 	t.Parallel()
-	// A research agent can echo a credential it found in the repository;
-	// the public status comment must carry the redaction, not the secret.
 	const secret = "ak-live-0123456789abcdef"
 	got := sanitizeRepositoryMonitorPublicCommentText("The bug: api_key=" + secret + " is hard-coded in config.py")
 	if strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {

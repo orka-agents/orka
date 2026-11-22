@@ -22,10 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Exercise ingestion, durable publication records, Secret reload and real HTTP
-// requests through Reconcile. Only the Kubernetes client and GitHub service are
-// substituted; no LLM execution is needed to republish a completed review.
-//
 //nolint:gocyclo // Keep credential rotation, cooldown, restart, and terminal outcomes in one publication lifecycle fixture.
 func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 	tests := []struct {
@@ -91,8 +87,6 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 				return result
 			}
 			if !tt.suspended {
-				// A recent inventory run keeps automatic polling out of this
-				// publication retry fixture without disabling review ingestion.
 				if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "recent-inventory", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRunPhaseSucceeded, StartedAt: time.Now()}); err != nil {
 					t.Fatal(err)
 				}
@@ -111,8 +105,6 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 				t.Fatalf("fixture failures = %d, want exactly one", initialFailures)
 			}
 
-			// Rotate the Secret, then replace the reconciler to exclude in-memory
-			// retry state. The stored result and failed publication are retained.
 			if err := cl.Get(ctx, types.NamespacedName{Namespace: secret.Namespace, Name: secret.Name}, secret); err != nil {
 				t.Fatal(err)
 			}
@@ -135,7 +127,6 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 				t.Fatal("authentication failure must keep reconciliation scheduled during cooldown")
 			}
 
-			// Advance the persisted attempt time instead of sleeping in the test.
 			failed[0].UpdatedAt = time.Now().Add(-6 * time.Minute)
 			if err := monitorStore.UpdateReviewPublishRecord(ctx, &failed[0]); err != nil {
 				t.Fatal(err)

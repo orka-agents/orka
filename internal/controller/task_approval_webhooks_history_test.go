@@ -31,7 +31,6 @@ import (
 
 const approvalHistoryParent = "nightly"
 
-// approvalHistoryParentTask is a scheduled Task that keeps no successful runs.
 func approvalHistoryParentTask() *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: approvalHistoryParent, Namespace: defaultNS, UID: "uid-nightly"},
@@ -39,7 +38,6 @@ func approvalHistoryParentTask() *corev1alpha1.Task {
 	}
 }
 
-// approvalHistoryRun is a finished scheduled run of approvalHistoryParent.
 func approvalHistoryRun(name string, uid types.UID, age time.Duration) *corev1alpha1.Task {
 	return &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -84,9 +82,6 @@ func setApprovalNoticeState(t *testing.T, c ctrlclient.Client, name string, stat
 	}
 }
 
-// A run that keeps no history must stay until its queued request and
-// resolution notices are sent: deleting it after the request alone drops the
-// resolution, which no later reconcile could recover.
 func TestScheduledRunHistoryKeepsARunUntilItsApprovalNoticesSettle(t *testing.T) {
 	run := approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour)
 	run.Finalizers = []string{labels.TaskFinalizer}
@@ -126,8 +121,6 @@ func TestScheduledRunHistoryKeepsARunUntilItsApprovalNoticesSettle(t *testing.T)
 	}
 }
 
-// Parent-triggered pruning respects the hold, and prunes the run on the next
-// enforcement once its notice is delivered or retired.
 func TestScheduledRunHistoryHoldsPendingApprovalNoticesForTheParent(t *testing.T) {
 	for _, settled := range []corev1alpha1.TaskWebhookDeliveryState{corev1alpha1.TaskWebhookDeliveryDelivered, corev1alpha1.TaskWebhookDeliveryFailed} {
 		t.Run(string(settled), func(t *testing.T) {
@@ -158,8 +151,6 @@ func TestScheduledRunHistoryHoldsPendingApprovalNoticesForTheParent(t *testing.T
 	}
 }
 
-// A continuation's pending notice holds its whole run, which is pruned
-// through the head once the notice settles.
 func TestScheduledRunHistoryHoldsAChainWhoseContinuationHasPendingNotices(t *testing.T) {
 	parent := approvalHistoryParentTask()
 	head := approvalHistoryRun("parked-run", "uid-parked-run", 3*time.Hour)
@@ -189,7 +180,6 @@ func TestScheduledRunHistoryHoldsAChainWhoseContinuationHasPendingNotices(t *tes
 	}
 }
 
-// A failed read of the run or its chain keeps the run.
 func TestApprovalNoticeHoldFailsSafeOnLookupErrors(t *testing.T) {
 	head := approvalHistoryRun("parked-run", "uid-parked-run", 3*time.Hour)
 	head.Status.Wait = &corev1alpha1.TaskWaitStatus{
@@ -223,9 +213,6 @@ func TestApprovalNoticeHoldFailsSafeOnLookupErrors(t *testing.T) {
 	}
 }
 
-// appendAfterProjectionStore appends once, right after the at-th approval
-// event list returns, as a decision committing between a reconcile's
-// projection and its history enforcement would.
 type appendAfterProjectionStore struct {
 	store.ExecutionEventStore
 	at     int
@@ -243,9 +230,6 @@ func (s *appendAfterProjectionStore) ListExecutionEvents(ctx context.Context, fi
 	return listed, err
 }
 
-// approvalHistoryHarness is a finished run of approvalHistoryParent that
-// keeps no history and selects both approval events, served by a real event
-// store and receiver.
 func approvalHistoryHarness(t *testing.T, run *corev1alpha1.Task) (*approvalWebhookHarness, *TaskReconciler) {
 	t.Helper()
 	run.Finalizers = []string{labels.TaskFinalizer}
@@ -265,8 +249,6 @@ func approvalHistoryHarness(t *testing.T, run *corev1alpha1.Task) (*approvalWebh
 	return h, reconciler
 }
 
-// reconcileApprovalHistoryRun reconciles the run until it is pruned, at most
-// rounds times, and returns the approval event types the receiver got.
 func reconcileApprovalHistoryRun(t *testing.T, h *approvalWebhookHarness, reconciler *TaskReconciler, rounds int) []string {
 	t.Helper()
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: defaultNS, Name: approvalWebhookTestTask}}
@@ -287,13 +269,6 @@ func reconcileApprovalHistoryRun(t *testing.T, h *approvalWebhookHarness, reconc
 	return sent
 }
 
-// A decision that commits after a run's projection read but before its
-// history enforcement is not yet a notice. Pruning then would delete the
-// stream and lose the resolution, so the run is held until a later
-// reconcile notifies it, once, and is pruned after that. The decision lands
-// after the first, then the second, approval read of the run's reconciles;
-// the second lands before the enforcement of the reconcile that settles the
-// request notice.
 func TestScheduledRunHistoryHoldsADecisionAppendedAfterProjection(t *testing.T) {
 	for at := 1; at <= 2; at++ {
 		t.Run(strconv.Itoa(at), func(t *testing.T) {
@@ -318,9 +293,6 @@ func TestScheduledRunHistoryHoldsADecisionAppendedAfterProjection(t *testing.T) 
 	}
 }
 
-// Parent-triggered pruning holds a run whose stream has approval events its
-// projection has not reached, and prunes it once the run's own reconcile
-// notified them.
 func TestScheduledRunHistoryParentHoldsUnprojectedApprovalEvents(t *testing.T) {
 	run := approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour)
 	h, reconciler := approvalHistoryHarness(t, run)
@@ -353,8 +325,6 @@ func TestScheduledRunHistoryParentHoldsUnprojectedApprovalEvents(t *testing.T) {
 	}
 }
 
-// unprojectedApprovalRun is a finished run that tracks both approval events,
-// with its cursor at seq. Its terminal notice was already delivered.
 func unprojectedApprovalRun(seq int64) *corev1alpha1.Task {
 	run := approvalHistoryRun(approvalWebhookTestTask, approvalWebhookTestUID, time.Hour)
 	run.Spec.WebhookURL = "https://receiver.example/hook"
@@ -375,9 +345,6 @@ func approvalHoldReconciler(t *testing.T, run *corev1alpha1.Task, eventStore sto
 	return r
 }
 
-// Delivery is asynchronous, so a finished run can still be waiting for a
-// worker to send its terminal notice. The parent keeps it until that notice
-// settles, since deleting the run drops the notice.
 func TestScheduledRunHistoryHoldsAnOutstandingTerminalNotice(t *testing.T) {
 	run := unprojectedApprovalRun(0)
 	run.Spec.WebhookEvents = nil
@@ -395,8 +362,6 @@ func TestScheduledRunHistoryHoldsAnOutstandingTerminalNotice(t *testing.T) {
 	}
 }
 
-// A continuation that is still running inherits the webhook URL but owes no
-// terminal notice yet, so it does not hold its chain's head.
 func TestScheduledRunHistoryIgnoresTheTerminalNoticeOfARunningContinuation(t *testing.T) {
 	head := approvalHistoryRun("parked-run", "uid-parked-run", 3*time.Hour)
 	head.Spec.WebhookURL = "https://receiver.example/hook"
@@ -417,9 +382,6 @@ func TestScheduledRunHistoryIgnoresTheTerminalNoticeOfARunningContinuation(t *te
 	}
 }
 
-// A failed event store read keeps a recently settled run, since it cannot
-// tell whether a decision is still to be notified, but not past the approval
-// notice window: a store that stays unavailable holds no run indefinitely.
 func TestApprovalEventHoldFailsSafeOnStoreErrorsWithinTheWindow(t *testing.T) {
 	failing := failingExecutionEventStore{err: errors.New("event store unavailable")}
 	run := unprojectedApprovalRun(0)
@@ -437,13 +399,9 @@ func TestApprovalEventHoldFailsSafeOnStoreErrorsWithinTheWindow(t *testing.T) {
 	}
 }
 
-// Only a transition projection would still notify holds a run. Events that
-// never become one never advance the cursor, so they must not hold it for
-// good.
 func TestApprovalEventHoldIgnoresEventsProjectionNeverNotifies(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		// arrange appends events and returns the run, its cursor set.
+		name    string
 		arrange func(h *approvalWebhookHarness) *corev1alpha1.Task
 		held    bool
 	}{

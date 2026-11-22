@@ -45,8 +45,6 @@ func TestParseThreatModelResultRequiresExactEnvelopeAndBinding(t *testing.T) {
 
 func TestParseThreatModelResultRedactsCredentials(t *testing.T) {
 	expected := AgentResultBinding{RepositoryScan: "repo", ScanID: "scan_123", PolicyDigest: "sha256:policy"}
-	// Synthetic values are assembled here so the fixtures cannot be mistaken
-	// for credentials copied from a repository.
 	token := "ghp_" + strings.Repeat("a", 36)
 	value := strings.Repeat("b", 32)
 	const prefix = "# Threat model\n\nCredential handling in `config/auth.go:12`.\n\n"
@@ -220,7 +218,6 @@ func TestParseValidationResultRestrictsEvidenceToAcceptedFinding(t *testing.T) {
 		t.Fatalf("ParseValidationResult() error = %v", err)
 	}
 
-	// Evidence the finding cannot absorb is dropped; the verdict survives.
 	for name, ref := range map[string]store.FindingEvidenceRef{
 		"out of range": {Kind: "file", Path: "internal/api/server.go", StartLine: 1, EndLine: 15},
 		"artifact":     {Kind: "artifact", Name: "transcript.txt"},

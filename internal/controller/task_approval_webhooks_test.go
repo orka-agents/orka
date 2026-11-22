@@ -45,24 +45,16 @@ const (
 
 var approvalWebhookTestNow = time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 
-// approvalWebhookHarness drives approval notices over a fake API, the
-// fenced storage client over SQLite, and a recording receiver. Every
-// reconcile uses a fresh notifier, as a restarted controller would: all state
-// comes from status.
 type approvalWebhookHarness struct {
-	t      *testing.T
-	now    time.Time
-	client ctrlclient.Client
-	db     *storesqlite.Store
-	// storage is the fenced client; events is what the controller reads and
-	// writes through, storage unless a test intercepts it.
-	storage  *storageclient.Client
-	events   store.ExecutionEventStore
-	receiver *webhookReceiver
-	keys     taskwebhook.KeySet
-	// maxAttempts overrides the approval attempt bound when non-zero.
-	maxAttempts int32
-	// signingUnavailable configures a key source whose keys are missing.
+	t                  *testing.T
+	now                time.Time
+	client             ctrlclient.Client
+	db                 *storesqlite.Store
+	storage            *storageclient.Client
+	events             store.ExecutionEventStore
+	receiver           *webhookReceiver
+	keys               taskwebhook.KeySet
+	maxAttempts        int32
 	signingUnavailable bool
 }
 
@@ -79,14 +71,11 @@ func newApprovalWebhookHarness(t *testing.T, task *corev1alpha1.Task, statuses .
 	h.events = h.storage
 	if task != nil {
 		task.Spec.WebhookURL = h.receiver.server.URL + "/hook"
-		// The Task reconciler records usage in the store, keyed by namespace UID.
 		h.client = newWebhookTestClient(t, task, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: defaultNS, UID: "namespace-uid"}})
 	}
 	return h
 }
 
-// newApprovalWebhookTask returns a Task that has run. A Task that selects
-// approval events has tracking set, as status initialization records it.
 func newApprovalWebhookTask(phase corev1alpha1.TaskPhase, selected ...corev1alpha1.TaskWebhookEvent) *corev1alpha1.Task {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: approvalWebhookTestTask, Namespace: defaultNS, UID: approvalWebhookTestUID},
@@ -124,8 +113,6 @@ func (h *approvalWebhookHarness) notifier() *WebhookNotifier {
 	return notifier
 }
 
-// reconcileApprovalNotices runs one approval pass with no phase work between
-// recording notices and sending them, as the Task reconciler does around it.
 func (w *WebhookNotifier) reconcileApprovalNotices(
 	ctx context.Context,
 	status taskStatusWriter,
@@ -143,7 +130,6 @@ func (w *WebhookNotifier) reconcileApprovalNotices(
 	return minPositiveDuration(prepared, sent), nil
 }
 
-// reconcile runs one approval pass for the stored Task.
 func (h *approvalWebhookHarness) reconcile() time.Duration {
 	h.t.Helper()
 	requeue, err := h.notifier().reconcileApprovalNotices(context.Background(), h.client.Status(), h.events, h.task())
@@ -169,8 +155,6 @@ func (h *approvalWebhookHarness) append(event *store.ExecutionEvent) *store.Exec
 	return appended
 }
 
-// request appends an AI-worker style approval request with free text that
-// must never reach the receiver.
 func (h *approvalWebhookHarness) request(uid types.UID, approvalID string) *store.ExecutionEvent {
 	h.t.Helper()
 	content, _ := json.Marshal(map[string]any{
@@ -184,7 +168,6 @@ func (h *approvalWebhookHarness) request(uid types.UID, approvalID string) *stor
 	})
 }
 
-// boundRequest appends a brokered review whose expiry the model enforces.
 func (h *approvalWebhookHarness) boundRequest(approvalID string, expiresAt time.Time) {
 	h.t.Helper()
 	content, _ := json.Marshal(map[string]any{
@@ -197,7 +180,6 @@ func (h *approvalWebhookHarness) boundRequest(approvalID string, expiresAt time.
 	})
 }
 
-// decide appends a decision as the approval API does, with reviewer text.
 func (h *approvalWebhookHarness) decide(uid types.UID, approvalID, eventType string) *store.ExecutionEvent {
 	h.t.Helper()
 	content, _ := json.Marshal(map[string]string{
@@ -213,8 +195,6 @@ type approvalReceipt struct {
 	receipt webhookReceipt
 }
 
-// receipts verifies every received approval notice and returns them in
-// arrival order.
 func (h *approvalWebhookHarness) receipts() []approvalReceipt {
 	h.t.Helper()
 	task := h.task()
@@ -243,8 +223,6 @@ func (h *approvalWebhookHarness) receipts() []approvalReceipt {
 	return out
 }
 
-// receiptIssuedAt reads the unverified issue time of a receipt's token, so a
-// receipt recorded earlier is verified as of when it was received.
 func receiptIssuedAt(t *testing.T, receipt webhookReceipt) time.Time {
 	t.Helper()
 	parts := strings.Split(receipt.header.Get(taskwebhook.HeaderSignature), ".")
@@ -359,7 +337,6 @@ func TestApprovalWebhooksRecordBrokeredExpiryOnceBeforeNotifying(t *testing.T) {
 		t.Fatalf("requeue = %v, want the expiry plus grace", requeue)
 	}
 
-	// Past expiresAt but within the grace the broker owns the expiry.
 	h.now = expiresAt.Add(time.Second)
 	h.reconcile()
 	if got := len(h.receipts()); got != 1 {
@@ -406,7 +383,6 @@ func TestApprovalWebhooksBrokeredDecisionBeforeExpiryWins(t *testing.T) {
 
 func TestApprovalWebhooksIsolateSameNameTasksByUID(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...))
-	// An earlier Task with the same name left its approvals in the stream.
 	h.request(approvalWebhookOtherUID, "approval-old")
 	h.decide(approvalWebhookOtherUID, "approval-old", events.ExecutionEventTypeApprovalApproved)
 	h.reconcile()
@@ -497,9 +473,6 @@ func TestApprovalWebhooksRetireNoticesThatAreNoLongerSelected(t *testing.T) {
 	}
 }
 
-// An opt-out observed while the head notice waits out its retry backoff
-// retires every deselected notice at once, so selecting the event again
-// before the retry is due never sends a notice from before the opt-out.
 func TestApprovalWebhooksOptOutDuringBackoffRetiresNotices(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...), http.StatusServiceUnavailable)
 	h.request(approvalWebhookTestUID, "approval-1")
@@ -513,7 +486,6 @@ func TestApprovalWebhooksOptOutDuringBackoffRetiresNotices(t *testing.T) {
 		t.Fatalf("head notice = %+v, want it waiting out a retry backoff", head)
 	}
 
-	// Still before NextAttemptTime: deselect requests, then select them again.
 	h.setWebhookEvents(corev1alpha1.TaskWebhookEventApprovalResolved)
 	h.reconcile()
 	for _, notice := range h.task().Status.ApprovalWebhooks.Notices {
@@ -529,9 +501,6 @@ func TestApprovalWebhooksOptOutDuringBackoffRetiresNotices(t *testing.T) {
 	}
 }
 
-// Projection retires deselected notices when it observes the opt-out, so a
-// notice from before the opt-out is never sent even when no delivery pass
-// runs until the event is selected again.
 func TestApprovalWebhooksProjectionRetiresDeselectedNotices(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...), http.StatusServiceUnavailable)
 	h.request(approvalWebhookTestUID, "approval-1")
@@ -542,7 +511,6 @@ func TestApprovalWebhooksProjectionRetiresDeselectedNotices(t *testing.T) {
 
 	for _, selection := range [][]corev1alpha1.TaskWebhookEvent{{corev1alpha1.TaskWebhookEventApprovalResolved}, nil} {
 		h.setWebhookEvents(selection...)
-		// Only the reconcile-side projection observes the opt-out.
 		if _, err := h.notifier().prepareApprovalNotices(context.Background(), h.client.Status(), h.events, h.task()); err != nil {
 			t.Fatal(err)
 		}
@@ -599,14 +567,12 @@ func TestApprovalWebhooksOverflowIsVisibleAndKeepsPendingNotices(t *testing.T) {
 		}
 	}
 
-	// Later transitions are counted, never notified or regenerated.
 	h.request(approvalWebhookTestUID, "approval-late")
 	h.reconcile()
 	if state := h.task().Status.ApprovalWebhooks; state.Omitted != 4 || len(state.Notices) != corev1alpha1.MaxTaskApprovalWebhookNotices {
 		t.Fatalf("state after overflow = %+v", state)
 	}
 
-	// The receiver recovers: every recorded notice is delivered in order.
 	h.receiver.mu.Lock()
 	h.receiver.statuses = []int{http.StatusOK}
 	h.receiver.receipts = nil
@@ -642,7 +608,6 @@ func TestApprovalWebhooksPruneOnlySettledNotices(t *testing.T) {
 		int(state.Pruned)+len(state.Notices) != total || len(h.receiver.all()) != total {
 		t.Fatalf("state = %d notices, pruned=%d overflowed=%v, %d receipts", len(state.Notices), state.Pruned, state.Overflowed, len(h.receiver.all()))
 	}
-	// A pruned transition is never regenerated.
 	h.reconcile()
 	if got := len(h.receiver.all()); got != total {
 		t.Fatalf("receipts = %d after another pass, want %d", got, total)
@@ -693,7 +658,6 @@ func TestApprovalWebhooksParkedSignOffNotifiesAfterTheTurnSucceeded(t *testing.T
 		t.Fatalf("wait state = %s, want Waiting", parked.Status.Wait.State)
 	}
 	approvalNotices()
-	// The terminal notice stays deferred while the sign-off is pending.
 	h.deliver("parked")
 	if stored := h.task("parked"); stored.Status.WebhookDelivered || stored.Status.WebhookDelivery != nil {
 		t.Fatalf("parked Task recorded a terminal notice: %+v", stored.Status.WebhookDelivery)
@@ -732,14 +696,11 @@ func TestApprovalWebhooksParkedSignOffNotifiesAfterTheTurnSucceeded(t *testing.T
 	if !slices.Equal(continuation.Spec.WebhookEvents, bothApprovalEvents) {
 		t.Fatalf("continuation webhookEvents = %v, want the parked Task's", continuation.Spec.WebhookEvents)
 	}
-	// The resumed parked Task still sends no terminal notice of its own.
 	if stored := h.task("parked"); stored.Status.WebhookDelivered || stored.Status.WebhookDelivery != nil {
 		t.Fatalf("resumed parked Task recorded a terminal notice: %+v", stored.Status.WebhookDelivery)
 	}
 }
 
-// The Task reconciler drives approval notices in every phase, here for a
-// finished Task, alongside its terminal notice.
 func TestTaskReconcilerDeliversApprovalNoticesForAFinishedTask(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseSucceeded, bothApprovalEvents...)
 	task.Spec.Type = corev1alpha1.TaskTypeContainer
@@ -768,15 +729,11 @@ func TestTaskReconcilerDeliversApprovalNoticesForAFinishedTask(t *testing.T) {
 			approvalEvents = append(approvalEvents, event)
 		}
 	}
-	// Approval and terminal notices are independent; approval notices keep
-	// their own order.
 	if terminal != 1 || !slices.Equal(approvalEvents, []string{"task.approval_requested", "task.approval_resolved"}) {
 		t.Fatalf("terminal notices = %d, approval events = %v", terminal, approvalEvents)
 	}
 }
 
-// approvalListFailAfterExpiryStore fails the first approval history read
-// that follows the controller's first ApprovalExpired append.
 type approvalListFailAfterExpiryStore struct {
 	*storageclient.Client
 	appended atomic.Bool
@@ -798,10 +755,6 @@ func (s *approvalListFailAfterExpiryStore) ListExecutionEvents(ctx context.Conte
 	return s.Client.ListExecutionEvents(ctx, filter)
 }
 
-// A Task that selects approval resolutions late, while a brokered review is
-// already past its expiry grace, persists its selection boundary before the
-// controller records the expiry, so a failed read after that append cannot
-// leave the expiry behind an unpersisted boundary and suppress it.
 func TestApprovalWebhooksLateSelectionPersistsBoundaryBeforeRecordingExpiry(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning)
 	task.Spec.Type = corev1alpha1.TaskTypeAI
@@ -826,9 +779,6 @@ func TestApprovalWebhooksLateSelectionPersistsBoundaryBeforeRecordingExpiry(t *t
 	}
 }
 
-// approvalExpiryCleanupStore runs cleanup once, just before the controller's
-// first ApprovalExpired append reaches the store: after the approval history
-// was listed and, under the fence, after the fenced read of the request.
 type approvalExpiryCleanupStore struct {
 	*storageclient.Client
 	cleanup func(context.Context) error
@@ -848,10 +798,6 @@ func (s *approvalExpiryCleanupStore) AppendExecutionEvent(ctx context.Context, e
 	return s.Client.AppendExecutionEvent(ctx, event)
 }
 
-// Timeline or Session cleanup that commits after the controller read an
-// expired brokered review must refuse the controller's expiry append, so it
-// neither recreates the cleaned request's history nor restores the cleaned
-// Session association.
 func TestApprovalWebhooksExpiryCleanupAfterListRecreatesNothing(t *testing.T) {
 	const session = "approval-session"
 	for _, cleanup := range []string{"timeline", "session"} {
@@ -926,7 +872,6 @@ func TestApprovalWebhooksExpiryCleanupAfterListRecreatesNothing(t *testing.T) {
 	}
 }
 
-// setWebhookEvents changes the stored Task's selection.
 func (h *approvalWebhookHarness) setWebhookEvents(selected ...corev1alpha1.TaskWebhookEvent) {
 	h.t.Helper()
 	task := h.task()
@@ -936,14 +881,10 @@ func (h *approvalWebhookHarness) setWebhookEvents(selected ...corev1alpha1.TaskW
 	}
 }
 
-// Selecting approval events on a Task whose spec is still mutable, or
-// selecting them again after opting out, never notifies earlier history and
-// cannot fill the queue with it; later transitions are notified exactly once.
 func TestApprovalWebhooksLateSelectionDoesNotReplayHistory(t *testing.T) {
 	task := newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning)
 	task.Spec.Type = corev1alpha1.TaskTypeAI
 	h := newApprovalWebhookHarness(t, task)
-	// More history than the queue holds, so a replay would overflow it.
 	for i := range corev1alpha1.MaxTaskApprovalWebhookNotices + 4 {
 		id := fmt.Sprintf("approval-old-%02d", i)
 		h.request(approvalWebhookTestUID, id)
@@ -960,8 +901,6 @@ func TestApprovalWebhooksLateSelectionDoesNotReplayHistory(t *testing.T) {
 		t.Fatalf("late selection replayed history: %d receipts, state %+v", got, state)
 	}
 
-	// A transition after the selection is notified once, even for an
-	// approval requested before it.
 	h.decide(approvalWebhookTestUID, "approval-open", events.ExecutionEventTypeApprovalDeclined)
 	h.request(approvalWebhookTestUID, "approval-new")
 	h.reconcile()
@@ -973,8 +912,6 @@ func TestApprovalWebhooksLateSelectionDoesNotReplayHistory(t *testing.T) {
 		t.Fatalf("events = %v, want only the transitions after the selection", got)
 	}
 
-	// While opted out, transitions are not tracked, and selecting again does
-	// not replay them.
 	h.setWebhookEvents()
 	h.reconcile()
 	if state := h.task().Status.ApprovalWebhooks; state.Tracking {
@@ -1001,9 +938,6 @@ func TestApprovalWebhooksLateSelectionDoesNotReplayHistory(t *testing.T) {
 	}
 }
 
-// Status initialization records that a Task selected approval events from
-// the start, so an approval it requests before its first projection is still
-// notified. A Task that selects none gets no approval state.
 func TestTaskReconcilerInitializesApprovalTrackingWithStatus(t *testing.T) {
 	for _, selected := range [][]corev1alpha1.TaskWebhookEvent{nil, bothApprovalEvents} {
 		t.Run(fmt.Sprintf("selected=%d", len(selected)), func(t *testing.T) {

@@ -30,16 +30,13 @@ import (
 )
 
 const (
-	fakeEntraImage    = "ghcr.io/orka-agents/orka/e2e-fake-entra:e2e"
-	fakeEntraName     = "e2e-fake-entra"
-	fakeEntraTrust    = "e2e-fake-entra-trust"
-	fakeEntraTenant   = "0e2e0000-0000-4000-8000-000000000001"
-	fakeEntraBlueprnt = "0e2e0000-0000-4000-8000-000000000002"
-	fakeEntraIdentity = "0e2e0000-0000-4000-8000-000000000003"
-	fakeEntraResource = "api://orka-e2e-identity-probe"
-	// The controller caches a token until a minute before it expires, so a
-	// 70s lifetime keeps each one for 10s and a disabled identity is noticed
-	// on the next request.
+	fakeEntraImage         = "ghcr.io/orka-agents/orka/e2e-fake-entra:e2e"
+	fakeEntraName          = "e2e-fake-entra"
+	fakeEntraTrust         = "e2e-fake-entra-trust"
+	fakeEntraTenant        = "0e2e0000-0000-4000-8000-000000000001"
+	fakeEntraBlueprnt      = "0e2e0000-0000-4000-8000-000000000002"
+	fakeEntraIdentity      = "0e2e0000-0000-4000-8000-000000000003"
+	fakeEntraResource      = "api://orka-e2e-identity-probe"
 	fakeEntraTokenLifetime = 70 * time.Second
 	fakeEntraTrustDir      = "/etc/orka-e2e-entra"
 
@@ -48,12 +45,6 @@ const (
 	agentIdentityE2ETool   = "e2eidentityprobe"
 )
 
-// The Agent identity path end to end with a fake Entra: the controller is
-// configured with an Entra issuer, verifies an Agent's identity, binds it to
-// a Task, and the ACP broker calls a Tool with the identity's own token. The
-// fake's resource accepts only tokens the fake issued for it, so a passing
-// probe proves the whole chain; disabling the identity at the fake proves
-// verification and calls stop.
 var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("agent-runtime", "agent-identity"), func() {
 	var apiBaseURL, apiToken string
 
@@ -75,8 +66,6 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 		})).To(Succeed())
 
 		By("installing the Agent use admission policies the controller flag asserts")
-		// --agent-use-authorization-enabled trusts that these are installed;
-		// with them, direct Task writes are checked for `use` as well.
 		DeferCleanup(func() {
 			_, _ = utils.Run(exec.Command("kubectl", "delete", "-k", "config/agent-use-policy", "--ignore-not-found"))
 		})
@@ -131,7 +120,6 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 		Expect(applyManifestJSON(agent)).To(Succeed())
 	})
 
-	// runTask runs one scripted Task to a terminal phase and returns it.
 	runTask := func(name, marker string) string {
 		DeferCleanup(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -158,8 +146,6 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 			g.Expect(agentCondition(agent, "IdentityVerified")).To(HaveField("Status", BeEquivalentTo("True")))
 			grantedAt = agent.Status.IdentityClaim.GrantedAt.Time
 		}, 2*time.Minute, time.Second).Should(Succeed())
-		// Only a Task created in a later second than the grant may bind the
-		// identity, and both times have one-second precision.
 		time.Sleep(time.Until(grantedAt.Add(2 * time.Second)))
 		Eventually(func(g Gomega) {
 			var tool corev1alpha1.Tool
@@ -206,11 +192,6 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 		_, err := utils.Run(exec.Command("kubectl", "create", "--raw",
 			fakeEntraProxyPath("/fixture/identities/"+fakeEntraIdentity+"/disable"), "-f", "-"))
 		Expect(err).NotTo(HaveOccurred())
-		// Let the cached verification token lapse, then make the Agent
-		// re-verify. The controller keeps its last answer until the Agent's
-		// generation changes, so this edits the spec, not an annotation;
-		// both Tasks set their own turn limit, so the new default changes
-		// nothing they run with.
 		time.Sleep(fakeEntraTokenLifetime - time.Minute + 2*time.Second)
 		_, err = utils.Run(exec.Command("kubectl", "patch", "agent", agentIdentityE2EAgent, "-n", namespace,
 			"--type", "merge", "-p", `{"spec":{"runtime":{"defaultMaxTurns":7}}}`))
@@ -228,10 +209,6 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 			Step: "app", ClientID: fakeEntraIdentity, Identity: fakeEntraIdentity, Scope: fakeentra.ExchangeScope,
 			Error: "unauthorized_client", ErrorCode: fakeentra.DisabledErrorCode,
 		}), "re-verification must have been refused at the issuer")
-		// The refusal reaches the model as a failed tool call; the Task's own
-		// outcome does not matter, but the call must have been attempted and
-		// refused. Once the issuer has refused the identity, Orka refuses the
-		// call itself, so no token is even requested for the resource.
 		evalBefore, err := providerProxyMockLLM.evalSnapshot()
 		Expect(err).NotTo(HaveOccurred())
 		marker := "[e2e:agent-identity-disabled]"
@@ -252,7 +229,6 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 	})
 })
 
-// resourceTokenRequests counts the token requests for the probe resource.
 func resourceTokenRequests(state fakeentra.State) int {
 	n := 0
 	for _, request := range state.Requests {
@@ -294,8 +270,6 @@ func agentCondition(agent corev1alpha1.Agent, conditionType string) *metav1.Cond
 	return nil
 }
 
-// deployFakeEntra serves the fake on port 443 behind a serving certificate
-// from a fresh test CA, and returns that CA.
 func deployFakeEntra(assertion string) []byte {
 	caPEM, certPEM, keyPEM := newFakeForgeTLS(fakeEntraHost())
 	DeferCleanup(deleteE2EObjects, "deployment,service,secret", fakeEntraName)
@@ -345,12 +319,6 @@ func deployFakeEntra(assertion string) []byte {
 	return caPEM
 }
 
-// configureControllerForFakeEntra points the controller's Entra issuer at the
-// fake, trusts the fake's CA, mounts the credential the fake expects, and
-// turns on what identity-bound Agents need. The fixture-only private-endpoint
-// allowance lets the identity-backed Tool reach the in-cluster resource; it
-// needs a plain-http localhost callback base, which nothing here uses. The
-// original pod template is restored when the spec ends.
 func configureControllerForFakeEntra() {
 	name, err := controllerManagerDeploymentName()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
@@ -371,8 +339,6 @@ func configureControllerForFakeEntra() {
 		"connectors-allow-private-endpoints":       "i-understand-tokens-may-leave-the-cluster",
 		"connector-callback-base-url":              "http://localhost:18080",
 	})
-	// SSL_CERT_DIR adds the fake's CA to the system roots; the default CA
-	// bundle file is still read.
 	env := append(slices.Clone(manager.Env), corev1.EnvVar{Name: "SSL_CERT_DIR", Value: fakeEntraTrustDir + "/ca"})
 	mounts := append(slices.Clone(manager.VolumeMounts),
 		corev1.VolumeMount{Name: fakeEntraTrust, MountPath: fakeEntraTrustDir, ReadOnly: true})

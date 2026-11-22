@@ -9,7 +9,6 @@ function ScrollArea({
   children,
   ...props
 }: React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
-  /** Extra classes for the scrolling viewport. */
   viewportClassName?: string
 }) {
   return (

@@ -362,8 +362,6 @@ func plannerRuntimeRefAgent() *corev1alpha1.Agent {
 	return agent
 }
 
-// plannerWorkspaceTask enables a canonical agent-sandbox execution workspace
-// on the planner task and applies an optional mutation to it.
 func plannerWorkspaceTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec)) func(*corev1alpha1.Task) {
 	return func(task *corev1alpha1.Task) {
 		task.UID = "task-uid-workspace"
@@ -375,7 +373,6 @@ func plannerWorkspaceTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec)) fun
 	}
 }
 
-// plannerRequesterDecisions asks for the requester's permission decisions.
 func plannerRequesterDecisions(task *corev1alpha1.Task) {
 	task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{PermissionDecisions: corev1alpha1.PermissionDecisionsRequester}
 }

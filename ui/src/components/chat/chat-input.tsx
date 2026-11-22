@@ -5,11 +5,8 @@ import { useChatStore } from '@/stores/chat'
 
 interface ChatInputProps {
   onSend: (message: string) => void
-  /** Blocks sending (for example while no Provider is selected). */
   disabled?: boolean
-  /** Shown next to the composer when sending is blocked. */
   disabledHint?: string
-  /** The composer, for a page that hands focus back to it. */
   textareaRef?: React.RefObject<HTMLTextAreaElement | null>
 }
 
@@ -21,7 +18,6 @@ export function ChatInput({ onSend, disabled = false, disabledHint, textareaRef:
   const stopRequested = useChatStore((s) => s.stopRequested)
   const requestStop = useChatStore((s) => s.requestStop)
 
-  // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current
     if (el) {
@@ -32,15 +28,11 @@ export function ChatInput({ onSend, disabled = false, disabledHint, textareaRef:
 
   const handleSubmit = () => {
     const trimmed = input.trim()
-    // The store, not the render snapshot: a second Enter in the same tick
-    // must see the turn the first one just started.
     if (!trimmed || useChatStore.getState().isStreaming || disabled) return
     onSend(trimmed)
     setInput('')
   }
 
-  // Pressing Stop disables it and then swaps it for Send, either of which
-  // would drop focus to <body>; the composer takes it instead.
   const handleStop = () => {
     requestStop()
     textareaRef.current?.focus()
@@ -56,8 +48,6 @@ export function ChatInput({ onSend, disabled = false, disabledHint, textareaRef:
   return (
     <div className="border-t border-border bg-card p-4">
       <div className="mx-auto flex max-w-3xl items-end gap-2">
-        {/* The composer stays enabled while a reply streams so it keeps focus
-            and the next message can be drafted; only sending is blocked. */}
         <textarea
           ref={textareaRef}
           value={input}

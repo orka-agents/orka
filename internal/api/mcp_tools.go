@@ -27,8 +27,6 @@ import (
 	"github.com/orka-agents/orka/internal/redact"
 )
 
-// MCP JSON field and schema keyword names shared across tool definitions and
-// results.
 const (
 	mcpFieldDecision  = "decision"
 	mcpFieldReason    = "reason"
@@ -80,18 +78,15 @@ const (
 	mcpStatusCancelled     = "cancelled"
 )
 
-// mcpToolDefinition is one tools/list entry plus its executor.
 type mcpToolDefinition struct {
-	Name        string         `json:"name"`
-	Title       string         `json:"title,omitempty"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-	Annotations map[string]any `json:"annotations,omitempty"`
-	Execution   map[string]any `json:"execution,omitempty"`
-	// REST names the REST routes the tool replays, for documentation and
-	// tests. It is not sent to clients.
-	REST []string                                                             `json:"-"`
-	run  func(m *mcpServer, call *mcpCall, args json.RawMessage) (any, error) `json:"-"`
+	Name        string                                                               `json:"name"`
+	Title       string                                                               `json:"title,omitempty"`
+	Description string                                                               `json:"description"`
+	InputSchema map[string]any                                                       `json:"inputSchema"`
+	Annotations map[string]any                                                       `json:"annotations,omitempty"`
+	Execution   map[string]any                                                       `json:"execution,omitempty"`
+	REST        []string                                                             `json:"-"`
+	run         func(m *mcpServer, call *mcpCall, args json.RawMessage) (any, error) `json:"-"`
 }
 
 type mcpContent struct {
@@ -106,10 +101,8 @@ type mcpToolResult struct {
 	Meta              map[string]any `json:"_meta,omitempty"`
 }
 
-// mcpSchemaTypeObject is the JSON Schema type of an object.
 const mcpSchemaTypeObject = "object"
 
-// mcpArgumentError is a tool input error the model can correct.
 type mcpArgumentError string
 
 func (e mcpArgumentError) Error() string { return string(e) }
@@ -156,8 +149,6 @@ var (
 	}
 )
 
-// mcpToolDefinitions returns the tool catalog. Every tool's authorization is
-// the authorization of the REST routes it replays; see REST.
 func mcpToolDefinitions() []mcpToolDefinition {
 	return []mcpToolDefinition{
 		{
@@ -346,17 +337,13 @@ func mcpToolByName(name string) (mcpToolDefinition, bool) {
 type mcpToolCallParams struct {
 	Name      string
 	Arguments json.RawMessage
-	// Task is the 2025-11-25 task augmentation.
-	Task *mcpTaskAugmentation
+	Task      *mcpTaskAugmentation
 }
 
 type mcpTaskAugmentation struct {
 	TTL *int64 `json:"ttl,omitempty"`
 }
 
-// decodeMCPToolCallParams decodes tools/call params. The sessionless
-// revisions define no params.task: there it is an unknown field, ignored like
-// any other without being held to the 2025-11-25 shape, and selects nothing.
 func decodeMCPToolCallParams(raw json.RawMessage, sessionless bool) (mcpToolCallParams, error) {
 	var wire struct {
 		Name      string          `json:"name"`
@@ -389,10 +376,6 @@ func (m *mcpServer) callTool(call *mcpCall) (any, error) {
 		return m.createTaskAsMCPTask(call, params)
 	}
 	if params.Task != nil {
-		// 2025-11-25 task augmentation of a tool that does not declare
-		// execution.taskSupport. Running it as an ordinary call would apply
-		// its effect and then answer in a shape the client did not ask for,
-		// which a task-aware client can take for a failure and retry.
 		return nil, newMCPError(mcpCodeMethodNotFound, "tool "+tool.Name+" does not support task-augmented execution")
 	}
 	value, err := tool.run(m, call, params.Arguments)
@@ -410,8 +393,6 @@ func mcpStructuredResult(value any) mcpToolResult {
 	return mcpToolResult{Content: []mcpContent{{Type: "text", Text: string(data)}}, StructuredContent: value}
 }
 
-// mcpToolErrorResult reports a tool failure to the model. Only argument and
-// REST errors carry detail; anything else is logged and reported generically.
 func mcpToolErrorResult(err error) (any, error) {
 	var restErr *mcpRESTError
 	var argErr mcpArgumentError
@@ -452,8 +433,6 @@ func decodeMCPArguments(raw json.RawMessage, target any) error {
 	return nil
 }
 
-// mcpInt accepts a JSON number or a numeric string, as model tool calls
-// sometimes quote integers. Null and omission leave it unset.
 type mcpInt struct {
 	set   bool
 	value int64
@@ -486,7 +465,6 @@ func (v mcpInt) bounded(field string, minimum, maximum, fallback int64) (int64, 
 	return v.value, nil
 }
 
-// mcpBool accepts a JSON boolean or "true"/"false".
 type mcpBool struct {
 	value bool
 }
@@ -507,8 +485,6 @@ func (v *mcpBool) UnmarshalJSON(data []byte) error {
 	v.value = value
 	return nil
 }
-
-// --- Agents ---
 
 type mcpAgentSummary struct {
 	Name        string   `json:"name"`
@@ -641,8 +617,6 @@ func (m *mcpServer) getAgent(c fiber.Ctx, namespace, name string) (*corev1alpha1
 	return agent, nil
 }
 
-// --- Tasks ---
-
 type mcpTaskSummary struct {
 	TaskID           string              `json:"taskId"`
 	Name             string              `json:"name"`
@@ -678,7 +652,6 @@ type mcpDeliverySummary struct {
 	PullRequestURL string `json:"pullRequestURL,omitempty"`
 }
 
-// mcpTaskResponse is the GET /api/v1/tasks/:id response shape.
 type mcpTaskResponse struct {
 	corev1alpha1.Task `json:",inline"`
 	Plan              *struct {
@@ -688,8 +661,6 @@ type mcpTaskResponse struct {
 	} `json:"plan,omitempty"`
 }
 
-// mcpTaskState is one authorized read of a Task and, while it runs, its
-// approval requests.
 type mcpTaskState struct {
 	response       mcpTaskResponse
 	approvals      []approvals.Approval
@@ -714,7 +685,6 @@ func mcpTaskTerminal(phase corev1alpha1.TaskPhase) bool {
 	return false
 }
 
-// mcpTaskStatus maps an Orka Task lifecycle phase to an MCP task status.
 func (s mcpTaskState) status() string {
 	switch s.response.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded:
@@ -789,9 +759,6 @@ func (s mcpTaskState) summary(includePrompt bool) mcpTaskSummary {
 	return summary
 }
 
-// loadTaskState reads a Task and, unless it has finished, its approvals.
-// Approvals are read through their own route, which requires the same Task
-// read permission; a server without execution event storage has none.
 func (m *mcpServer) loadTaskState(c fiber.Ctx, namespace, name string) (mcpTaskState, error) {
 	var state mcpTaskState
 	if err := m.restJSON(c, fiber.MethodGet, mcpTaskPath(name), mcpNamespaceQuery(namespace), nil, &state.response); err != nil {
@@ -809,7 +776,6 @@ func (m *mcpServer) loadTaskState(c fiber.Ctx, namespace, name string) (mcpTaskS
 		return state, err
 	}
 	if listed.TaskUID != "" && listed.TaskUID != string(state.response.UID) {
-		// The Task was replaced between the two reads; report what we know.
 		return state, nil
 	}
 	state.approvals = listed.Approvals
@@ -841,8 +807,6 @@ func generateMCPTaskName() string {
 	return "mcp-" + strings.ToLower(rand.Text()[:12])
 }
 
-// createTask creates the Task through POST /api/v1/tasks. Validation beyond
-// argument shape is the REST handler's and the API server's.
 func (m *mcpServer) createTask(call *mcpCall, raw json.RawMessage) (mcpTaskState, error) {
 	var args mcpCreateTaskArgs
 	if err := decodeMCPArguments(raw, &args); err != nil {
@@ -902,8 +866,6 @@ func (m *mcpServer) createTask(call *mcpCall, raw json.RawMessage) (mcpTaskState
 		if err := validateMCPObjectName("session.name", args.Session.Name); err != nil {
 			return mcpTaskState{}, err
 		}
-		// append is sent explicitly: the REST route stores an omitted value as
-		// false, and a Session that records no turns cannot be continued.
 		body["sessionRef"] = map[string]any{"name": args.Session.Name, "create": args.Session.Create.value, "append": true}
 	}
 	var state mcpTaskState
@@ -972,24 +934,16 @@ func (m *mcpServer) toolListTasks(call *mcpCall, raw json.RawMessage) (any, erro
 	return map[string]any{"tasks": tasks, "continue": response.Metadata.Continue}, nil
 }
 
-// waitForTask polls a Task until it finishes, needs input, or the wait ends.
 func (m *mcpServer) waitForTask(call *mcpCall, namespace, name, uid string, timeout time.Duration) (mcpTaskState, bool, error) {
 	return m.pollTask(call, namespace, name, uid, timeout, func(state mcpTaskState) bool { return state.status() != mcpStatusWorking })
 }
 
-// pollTask trades the request permit for a wait permit, held for the rest of
-// the request, and polls a Task until done reports true or the wait ends.
-// uid, when set, pins the Task identity so a replacement is never reported.
 func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout time.Duration, done func(mcpTaskState) bool) (mcpTaskState, bool, error) {
 	if !call.permit.enterWait() {
 		return mcpTaskState{}, false, &mcpRESTError{Status: fiber.StatusTooManyRequests, Message: "too many concurrent waits; poll get_task instead"}
 	}
 	c := call.c
 	deadline := time.Now().Add(timeout)
-	// Every read made under the wait permit ends by the wait's deadline: a
-	// slow authorization or storage call must not hold the permit past the
-	// advertised bound. The permit is held for the rest of the request, so
-	// the deadline stays too, and bounds a result read that follows the wait.
 	c.Locals(mcpReplayDeadlineKey{}, deadline)
 	var last mcpTaskState
 	read := false
@@ -999,8 +953,6 @@ func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout
 			if time.Until(deadline) > 0 {
 				return state, false, err
 			}
-			// The deadline cut this read short, whatever the route made of
-			// it. Report the wait as over with the last state read.
 			if !read {
 				return state, false, &mcpRESTError{Status: fiber.StatusGatewayTimeout, Message: "the wait ended before the task could be read"}
 			}
@@ -1025,7 +977,6 @@ func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout
 			return state, true, nil
 		}
 		if time.Until(deadline) <= 0 {
-			// No time is left for another read.
 			return state, true, nil
 		}
 	}
@@ -1071,17 +1022,11 @@ func (m *mcpServer) toolCancelTask(call *mcpCall, raw json.RawMessage) (any, err
 	}, nil
 }
 
-// requestCancellation asks POST /api/v1/tasks/:id/cancel to stop a Task.
-// Unlike deletion it keeps the Task's result and artifacts; the controller
-// ends the Task as Cancelled asynchronously. A non-empty uid fences the
-// request to that Task.
 func (m *mcpServer) requestCancellation(c fiber.Ctx, namespace, name, uid string) (taskCancellation, error) {
 	var cancelled taskCancellation
 	err := m.restJSON(c, fiber.MethodPost, mcpTaskPath(name, "cancel"), mcpNamespaceQuery(namespace), cancelRequest{UID: uid}, &cancelled)
 	return cancelled, err
 }
-
-// --- Approvals ---
 
 type mcpApprovalSummary struct {
 	ID                string          `json:"id"`
@@ -1125,8 +1070,6 @@ func summarizeMCPApproval(approval approvals.Approval) mcpApprovalSummary {
 		DecisionTime:     mcpTimePointer(approval.DecisionTime),
 		ExecutionOutcome: approval.ExecutionOutcome,
 	}
-	// The preview is already sanitized by the approval producer. Redact once
-	// more and drop it if it is too large to show safely.
 	if preview := approval.TargetArgsPreview; len(preview) > 0 && len(preview) <= mcpMaxApprovalPreview {
 		redacted := redact.SensitiveText(string(preview))
 		if json.Valid([]byte(redacted)) {
@@ -1171,8 +1114,6 @@ func validateMCPApprovalID(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return mcpArgumentError("approvalId is required")
 	}
-	// Dot segments would be normalized out of the replayed path and address a
-	// different route, so they are refused rather than escaped.
 	if id == "." || id == ".." || len(id) > mcpMaxApprovalIDLength || !utf8.ValidString(id) ||
 		strings.ContainsFunc(id, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return mcpArgumentError("approvalId is invalid")
@@ -1180,10 +1121,6 @@ func validateMCPApprovalID(id string) error {
 	return nil
 }
 
-// decideApproval records a decision through the REST decision route, which
-// owns every decision rule: permissions, Task and run binding, first
-// decision wins, and refusal for finished or deleting Tasks.
-// A non-empty uid fences the decision to that Task.
 func (m *mcpServer) decideApproval(c fiber.Ctx, namespace, task, uid, approvalID, decision, reason string) (approvals.Approval, error) {
 	var decided approvals.Approval
 	path := mcpTaskPath(task, "approvals", url.PathEscape(approvalID), mcpFieldDecision)
@@ -1226,8 +1163,6 @@ func (m *mcpServer) toolDecideApproval(call *mcpCall, raw json.RawMessage) (any,
 	return summarizeMCPApproval(decided), nil
 }
 
-// --- Results and artifacts ---
-
 type mcpOutputArgs struct {
 	mcpNamedArgs
 	Offset   mcpInt `json:"offset"`
@@ -1239,13 +1174,10 @@ func (a mcpOutputArgs) window() (int64, int64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	// A window of at least one full UTF-8 character always advances.
 	limit, err := a.MaxBytes.bounded("maxBytes", utf8.UTFMax, mcpMaxOutputBytes, mcpDefaultOutputBytes)
 	return offset, limit, err
 }
 
-// mcpOutputChunk redacts the whole text first, so a credential split by a
-// chunk boundary is still removed, then returns one UTF-8-safe window.
 func mcpOutputChunk(text string, offset, limit int64) map[string]any {
 	redacted := redact.SensitiveText(text)
 	total := int64(len(redacted))
@@ -1254,8 +1186,6 @@ func mcpOutputChunk(text string, offset, limit int64) map[string]any {
 		start++
 	}
 	end := min(start+limit, total)
-	// Back off at most one partial character, so invalid UTF-8 (a run of
-	// continuation bytes) still yields a non-empty chunk and progress.
 	for back := 0; back < utf8.UTFMax-1 && end < total && end > start+1 && !utf8.RuneStart(redacted[end]); back++ {
 		end--
 	}
@@ -1336,8 +1266,6 @@ func validateMCPArtifactFilename(filename string) error {
 	if filename == "" {
 		return mcpArgumentError("filename is required")
 	}
-	// The REST route matches the raw path segment, so only names that need
-	// no escaping can be addressed through it.
 	if len(filename) > 255 || filename == "." || filename == ".." || url.PathEscape(filename) != filename {
 		return mcpArgumentError("filename must be a plain artifact name; download other artifacts through the REST API")
 	}

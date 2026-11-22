@@ -103,8 +103,6 @@ func TestExecutionEventMarkerWhitespaceAfterLargeHistory(t *testing.T) {
 						t.Errorf("event %d %s changed unexpectedly", row.Seq, field.name)
 					}
 				}
-				// ContentText is the only public copy of titled tool output.
-				// Count persisted DTO locations once, regardless of replay reads.
 				publicOutput.WriteString(dto.ContentText)
 			}
 			if output := publicOutput.String(); events.RedactExecutionEventText(output) != output {
@@ -130,9 +128,6 @@ func TestExecutionEventMarkerWhitespaceAfterLargeHistory(t *testing.T) {
 
 func seedMarkerWhitespaceHistory(t *testing.T, state *eventjournal.State, toolHistory bool) (int, string) {
 	t.Helper()
-	// Titles and pending plan entries each contribute one logical field with
-	// two public copies. Retain the full tool sequence for the original tab
-	// regression; one bulk plan seeds the same candidate pressure elsewhere.
 	entries := make([]harnessv2.PlanEntry, 0, markerWhitespaceHistorySize)
 	lines := []string{"# Plan"}
 	for i := 1; i <= markerWhitespaceHistorySize; i++ {

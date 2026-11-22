@@ -89,7 +89,6 @@ describe('demo connectors', () => {
 
     const started = await call<ConnectionAuthorizeResponse>('/connections?namespace=default', { method: 'POST', json: { provider: 'linear', mode: 'readOnly' } })
     expect(started.body.connection.state).toBe('Pending')
-    // The consent comes back to the Connectors page with the callback the page reads.
     const callback = new URL(started.body.authorizeURL!)
     const fragment = new URLSearchParams(callback.hash.slice(1))
     expect(callback.hash.startsWith('#/settings/connectors?')).toBe(true)
@@ -100,7 +99,6 @@ describe('demo connectors', () => {
     const linked = await call<Connection>(`/connections/${name}/complete?namespace=default`, { method: 'POST', json: { completion } })
     expect(linked.body).toMatchObject({ provider: 'linear', mode: 'readOnly', state: 'Ready', ready: true })
 
-    // Writes need a fresh consent; dropping them does not.
     const upgrade = await call<ConnectionAuthorizeResponse>(`/connections/${name}?namespace=default`, { method: 'PUT', json: { mode: 'readWrite' } })
     expect(upgrade.body.authorizeURL).toBeTruthy()
     const github = (await get<{ items: Connection[] }>('/connections?namespace=default')).items.find((c) => c.provider === 'github')!
@@ -152,7 +150,6 @@ describe('demo usage', () => {
     expect(work.tasks?.[0].usage.inputTokens).toBe(seed.inputTokens)
     expect(work.models).toEqual(['gpt-5'])
 
-    // The gateway review of checkout-service#1479 is shared usage on the request that opened it.
     const outbox = report.works.find((item) => item.number === 2201)!
     const detail = await get<{ work: UsageWork }>(`/usage/work/${outbox.id}?${params}`)
     expect(detail.work.pullRequests?.map((pr) => pr.number)).toEqual([1479])

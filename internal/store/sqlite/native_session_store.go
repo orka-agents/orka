@@ -10,17 +10,8 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Native session records arrive sealed by the storage client. SQLite stores
-// the nonce and ciphertext as opaque bytes and decides ownership, transcript
-// boundaries and monotonic history from the plain fields beside them.
-
 var _ storagev1.SealedNativeSessionStore = (*Store)(nil)
 
-// SetNativeSessionFinalizationSealer installs the storage client's sealer for
-// the duplicate SQL control implementation, which tests use in place of the
-// Kubernetes control store. That path finalizes turns inside its own
-// transaction, so it asks the sealer to seal native state there. Production
-// finalization reaches SQLite already sealed and never uses it.
 func (s *Store) SetNativeSessionFinalizationSealer(sealer store.NativeSessionFinalizationSealer) {
 	s.nativeSessionSealer = sealer
 }
@@ -77,8 +68,6 @@ func nativeSessionOwnerTx(ctx context.Context, tx *sql.Tx, namespace, name strin
 	return
 }
 
-// lastSessionMessageIDTx returns the ID of the Session's last transcript
-// message, or empty when count is zero.
 func lastSessionMessageIDTx(ctx context.Context, tx *sql.Tx, namespace, name string, count int) (string, error) {
 	if count <= 0 {
 		return "", nil
@@ -88,9 +77,6 @@ func lastSessionMessageIDTx(ctx context.Context, tx *sql.Tx, namespace, name str
 	return lastID, err
 }
 
-// GetSealedNativeSession implements storagev1.SealedNativeSessionStore. It
-// returns the record only to its canonical owner and only while it covers the
-// current transcript.
 func (s *Store) GetSealedNativeSession(ctx context.Context, namespace, name, uid string) (*storagev1.SealedNativeSession, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -124,9 +110,6 @@ func (s *Store) GetSealedNativeSession(ctx context.Context, namespace, name, uid
 	return record, nil
 }
 
-// SaveSealedNativeSession implements storagev1.SealedNativeSessionStore. It
-// preserves monotonic native checkpoints and immutable named operation
-// outcomes. Old captures cannot replace newer conversation history.
 func (s *Store) SaveSealedNativeSession(ctx context.Context, request storagev1.SaveSealedNativeSessionRequest) error {
 	return writeOperationErr(ctx, s, "SaveSealedNativeSession", func(ctx context.Context) error {
 		return s.saveSealedNativeSessionWrite(ctx, request)
@@ -195,9 +178,6 @@ func saveSealedNativeSessionTx(ctx context.Context, tx *sql.Tx, request storagev
 	return err
 }
 
-// commitSealedNativeFinalizationTx binds sealed native state to the canonical
-// messages a turn finalization just appended in this transaction. The record
-// must cover exactly that transcript boundary.
 func commitSealedNativeFinalizationTx(
 	ctx context.Context, tx *sql.Tx, turnID, namespace, name, uid string,
 	native *storagev1.SealedNativeSessionFinalization, captureDigest string,
@@ -234,9 +214,6 @@ func commitSealedNativeFinalizationTx(
 	return err
 }
 
-// carrySealedNativeSessionTx replaces the stored checkpoint with the same
-// checkpoint at an advanced transcript boundary. The stored record must be the
-// one Orka opened, and the plain facts must carry over unchanged.
 func carrySealedNativeSessionTx(ctx context.Context, tx *sql.Tx, uid string, native *storagev1.SealedNativeSessionFinalization) error {
 	record := native.Record
 	if err := record.Validate(); err != nil {
@@ -257,9 +234,6 @@ func carrySealedNativeSessionTx(ctx context.Context, tx *sql.Tx, uid string, nat
 	return writeSealedNativeSessionTx(ctx, tx, record)
 }
 
-// StageSealedNativeSessionImport implements storagev1.SealedNativeSessionStore.
-// It atomically reserves a new Session and stages the import. A caller cannot
-// replace even an empty Session owned by another call.
 func (s *Store) StageSealedNativeSessionImport(ctx context.Context, request storagev1.StageSealedNativeSessionImportRequest) (*store.NativeSessionImportReceipt, error) {
 	return writeOperation(ctx, s, "StageSealedNativeSessionImport", nil, func(ctx context.Context) (*store.NativeSessionImportReceipt, error) {
 		return s.stageSealedNativeSessionImportWrite(ctx, request)
@@ -346,7 +320,6 @@ func (s *Store) stageSealedNativeSessionImportWrite(ctx context.Context, request
 	return &receipt, nil
 }
 
-// ListSealedNativeSessions implements storagev1.SealedNativeSessionStore.
 func (s *Store) ListSealedNativeSessions(ctx context.Context, cursor string, limit int) (*storagev1.SealedNativeSessionPage, error) {
 	if err := validateSealedPageLimit(limit); err != nil {
 		return nil, err
@@ -378,8 +351,6 @@ func (s *Store) ListSealedNativeSessions(ctx context.Context, cursor string, lim
 		return nil, err
 	}
 	if len(page.Sessions) == limit {
-		// Probe for a following record by key only, so a full page never
-		// reads one more record's sealed bytes.
 		last := page.Sessions[limit-1]
 		var more bool
 		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM native_session_snapshots
@@ -393,10 +364,6 @@ func (s *Store) ListSealedNativeSessions(ctx context.Context, cursor string, lim
 	return page, nil
 }
 
-// validateNativeFinalizationShape admits plaintext native state on exactly two
-// terminal shapes: a fresh capture committed with a canonical assistant
-// result, or the Session's existing checkpoint carried across a non-success
-// outcome marker.
 func validateNativeFinalizationShape(native *store.NativeSessionRecord, carried bool, kind store.SessionTurnTerminalKind, skipTranscriptAppend bool) error {
 	if native == nil {
 		if carried {
@@ -416,8 +383,6 @@ func validateNativeFinalizationShape(native *store.NativeSessionRecord, carried 
 	return nil
 }
 
-// newFinalizationMessageIDs assigns the IDs of the transcript messages a
-// duplicate SQL control finalization appends.
 func newFinalizationMessageIDs(skipTranscript, skipUserPrompt bool) (string, string, error) {
 	if skipTranscript {
 		return "", "", nil
@@ -437,9 +402,6 @@ func newFinalizationMessageIDs(skipTranscript, skipUserPrompt bool) (string, str
 	return userMessageID, terminalMessageID, nil
 }
 
-// sealDuplicateControlNativeSessionTx has the installed storage client sealer
-// seal the duplicate SQL control path's native state against the transcript
-// boundary its finalization produces. It fails closed without a sealer.
 func (s *Store) sealDuplicateControlNativeSessionTx(
 	ctx context.Context, tx *sql.Tx, control store.SessionControl, request store.FinalizeSessionTurnRequest,
 	userMessageID, terminalMessageID string,

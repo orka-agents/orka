@@ -13,9 +13,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The digest-checking store also records, for the writes the client stamps,
-// whether each request the provider receives matches its envelope's digest.
-
 func (s *digestCheckingStore) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
 	s.check(ctx, "AppendMessages", namespace, name, messages)
 	return s.Store.AppendMessages(ctx, namespace, name, messages)
@@ -52,8 +49,6 @@ func (s *digestCheckingStore) attempts(method string) []bool {
 	return append([]bool(nil), s.matched[method]...)
 }
 
-// callerEnvelope returns ctx carrying an envelope its caller built for method
-// and args, as a caller that owns the operation does.
 func callerEnvelope(t *testing.T, ctx context.Context, f *lossyFixture, method string, args ...any) context.Context {
 	t.Helper()
 	digest, err := storagev1.RequestDigest(method, args...)
@@ -72,10 +67,6 @@ func callerEnvelope(t *testing.T, ctx context.Context, f *lossyFixture, method s
 
 var callerStamp = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-// A caller that supplies its own write envelope and stamps its request sends
-// that request to the provider unchanged: the digest recomputed from what the
-// provider receives matches the caller's envelope. The client assigns no
-// identity or time, not even a transcript message's zero timestamp.
 func TestCallerEnvelopeRequestReachesTheProviderUnchanged(t *testing.T) {
 	f, checking := newDigestFixture(t)
 	ctx := t.Context()
@@ -114,9 +105,6 @@ func TestCallerEnvelopeRequestReachesTheProviderUnchanged(t *testing.T) {
 	requireEveryAttemptMatched(t, checking, "CreateMemory", 1)
 }
 
-// A caller that supplies its own write envelope but leaves out an identity or
-// time the client would assign is refused with ErrValidation before the
-// provider is called, so nothing is written without it.
 func TestCallerEnvelopeRefusesAnUnstampedRequest(t *testing.T) {
 	owner := store.SessionOwnerWrite{Namespace: "tenant", Name: "session", OwnerName: "task", OwnerUID: "uid", Now: callerStamp}
 	unnamed := []store.SessionMessage{{Role: "user", Content: "no ID"}}

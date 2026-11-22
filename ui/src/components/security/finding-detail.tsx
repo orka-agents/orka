@@ -42,14 +42,10 @@ export function FindingDetail({ findingId }: { findingId: string }) {
     </Button>
   )
 
-  // A 403 replaces cached data (the token lost access); any other failure
-  // keeps what already loaded and only blocks a page that never loaded.
   if (isForbiddenError(error) || (error && !isNotFoundError(error) && !finding)) {
     return <AccessErrorView title="Could not load finding" resource={`finding ${findingId}`} error={error} action={backToSecurity} />
   }
 
-  // A 404 wins over cached data. The patch proposals query lives in
-  // FindingDetailContent, so a missing finding sends no further requests.
   if (isNotFoundError(error) || !finding) {
     return (
       <NotFoundView
@@ -393,8 +389,6 @@ function FindingDetailContent({ findingId, finding }: { findingId: string; findi
   )
 }
 
-// Evidence artifacts download through the authenticated fetch path: a plain
-// link to the API cannot carry the bearer token, so the server would answer 401.
 function ArtifactDownloadLink({ taskName, filename, namespace, className, children }: {
   taskName: string
   filename: string
