@@ -16,7 +16,7 @@ const directive = new RegExp(
 );
 
 const notice =
-  /copyright|spdx-license-identifier|\blicen[cs]ed?\b|all rights reserved|modified from|derived from|code generated[\s\S]*do not edit/i;
+  /copyright|spdx-license-identifier|\blicen[cs]ed?\b|all rights reserved|permission is hereby granted|warrant|liabilit|redistribution|modified from|derived from|code generated[\s\S]*do not edit/i;
 
 function onlyNotices(value) {
   const paragraphs = value

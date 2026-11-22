@@ -518,3 +518,21 @@ func TestNoticeHeadersCannotCarryOtherProse(t *testing.T) {
 	assertTexts(t, mustScan(t, "h.sh", "#!/bin/sh\n# Copyright (c) 2026.\n#\n# Retries are skipped.\necho hi\n"),
 		"# Copyright (c) 2026.\n#\n# Retries are skipped.")
 }
+
+func TestFullLicenseTextsAreExempt(t *testing.T) {
+	mit := "/*\nCopyright (c) 2026 Example\n\n" +
+		"Permission is hereby granted, free of charge, to any person obtaining a copy\nof this software.\n\n" +
+		"The above copyright notice and this permission notice shall be included in all\ncopies.\n\n" +
+		"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND.\n*/\n\npackage main\n"
+	apache := "// Copyright 2026 Example\n//\n// Licensed under the Apache License, Version 2.0 (the \"License\");\n" +
+		"// you may not use this file except in compliance with the License.\n//\n" +
+		"// Unless required by applicable law or agreed to in writing, software\n" +
+		"// distributed under the License is distributed on an \"AS IS\" BASIS,\n" +
+		"// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.\n\npackage main\n"
+	for name, src := range map[string]string{"mit.go": mit, "apache.go": apache} {
+		got, err := scanGo(name, []byte(src))
+		if err != nil || len(got) != 0 {
+			t.Errorf("%s: %q, %v", name, texts(got), err)
+		}
+	}
+}

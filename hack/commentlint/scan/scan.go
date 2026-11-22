@@ -78,7 +78,8 @@ var pythonDirective = regexp.MustCompile(`^#\s*(nosec|noqa|type:|pylint:|pyright
 var shellAliases = regexp.MustCompile(`\balias\b|expand_aliases`)
 
 var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|\blicen[cs]ed?\b|` +
-	`all rights reserved|modified from|derived from|code generated .*do not edit`)
+	`all rights reserved|permission is hereby granted|warrant|liabilit|redistribution|` +
+	`modified from|derived from|code generated .*do not edit`)
 
 var pythonInterpreter = regexp.MustCompile(`^python(3(\.\d+)?)?$`)
 
