@@ -77,8 +77,8 @@ var pythonDirective = regexp.MustCompile(`^#\s*(nosec|noqa|type:|pylint:|pyright
 
 var shellAliases = regexp.MustCompile(`\balias\b|expand_aliases`)
 
-var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|licensed under|` +
-	`modified from|derived from|code generated .*do not edit`)
+var licenseNotice = regexp.MustCompile(`(?is)copyright|spdx-license-identifier|\blicen[cs]ed?\b|` +
+	`all rights reserved|modified from|derived from|code generated .*do not edit`)
 
 var pythonInterpreter = regexp.MustCompile(`^python(3(\.\d+)?)?$`)
 
@@ -266,7 +266,7 @@ func scanGo(path string, src []byte) ([]Comment, error) {
 			continue
 		}
 		startLine := fset.PositionFor(group.Pos(), false).Line
-		if startLine < packageLine && licenseNotice.MatchString(group.Text()) {
+		if startLine < packageLine && onlyNotices(group.Text()) {
 			continue
 		}
 		if deprecation.MatchString(group.Text()) || exampleOutputGroup(group, examples) {
@@ -355,7 +355,11 @@ func scanHash(path string, src []byte, directive *regexp.Regexp) ([]Comment, err
 }
 
 func licenseHeader(src []byte, c Comment) bool {
-	if !licenseNotice.MatchString(c.Text) {
+	var plain strings.Builder
+	for line := range strings.SplitSeq(c.Text, "\n") {
+		plain.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "#")) + "\n")
+	}
+	if !onlyNotices(plain.String()) {
 		return false
 	}
 	for i, line := range strings.Split(string(src), "\n")[:c.Line-1] {
@@ -365,6 +369,20 @@ func licenseHeader(src []byte, c Comment) bool {
 		}
 	}
 	return true
+}
+
+func onlyNotices(text string) bool {
+	found := false
+	for paragraph := range strings.SplitSeq(text, "\n\n") {
+		if strings.TrimSpace(paragraph) == "" {
+			continue
+		}
+		if !licenseNotice.MatchString(paragraph) {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func exampleOutputGroup(group *ast.CommentGroup, examples []*ast.BlockStmt) bool {

@@ -15,6 +15,22 @@ const directive = new RegExp(
     ")(?=[\\s:]|$)",
 );
 
+const notice =
+  /copyright|spdx-license-identifier|\blicen[cs]ed?\b|all rights reserved|modified from|derived from|code generated[\s\S]*do not edit/i;
+
+function onlyNotices(value) {
+  const paragraphs = value
+    .split("\n")
+    .map((line) => line.replace(/^\s*\*?\s?/, ""))
+    .join("\n")
+    .split(/\n\s*\n/)
+    .filter((paragraph) => paragraph.trim() !== "");
+  return (
+    paragraphs.length > 0 &&
+    paragraphs.every((paragraph) => notice.test(paragraph))
+  );
+}
+
 export const noComments = {
   meta: {
     type: "suggestion",
@@ -36,9 +52,7 @@ export const noComments = {
         const codeStart = firstToken ? firstToken.range[0] : Infinity;
         for (const comment of sourceCode.getAllComments()) {
           const licenseHeader =
-            comment.range[1] <= codeStart && /copyright|spdx-license-identifier|licensed under|modified from|derived from/i.test(
-              comment.value,
-            );
+            comment.range[1] <= codeStart && onlyNotices(comment.value);
           if (
             comment.type === "Shebang" ||
             directive.test(comment.value) ||

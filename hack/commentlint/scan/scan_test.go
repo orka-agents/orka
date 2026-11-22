@@ -502,3 +502,19 @@ func TestSpacedNolintAndAttributionHeadersAreExempt(t *testing.T) {
 	}
 	assertTexts(t, got, "// real")
 }
+
+func TestNoticeHeadersCannotCarryOtherProse(t *testing.T) {
+	mixed := "// Modified from example.com/upstream at abc123.\n//\n" +
+		"// We skip retries here because it was easier.\npackage main\n"
+	got, err := scanGo("main.go", []byte(mixed))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("mixed Go header = %q, %v", texts(got), err)
+	}
+	license := "/*\nCopyright (c) 2026.\n\nMIT License - see LICENSE file for details.\n*/\n\npackage main\n"
+	got, err = scanGo("license.go", []byte(license))
+	if err != nil || len(got) != 0 {
+		t.Fatalf("license header = %q, %v", texts(got), err)
+	}
+	assertTexts(t, mustScan(t, "h.sh", "#!/bin/sh\n# Copyright (c) 2026.\n#\n# Retries are skipped.\necho hi\n"),
+		"# Copyright (c) 2026.\n#\n# Retries are skipped.")
+}
