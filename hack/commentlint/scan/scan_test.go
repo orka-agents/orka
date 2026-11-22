@@ -529,7 +529,8 @@ func TestFullLicenseTextsAreExempt(t *testing.T) {
 		"// Unless required by applicable law or agreed to in writing, software\n" +
 		"// distributed under the License is distributed on an \"AS IS\" BASIS,\n" +
 		"// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.\n\npackage main\n"
-	zeroBSD := "// Copyright (C) 2026 Example\n//\n// Permission to use, copy, modify, and/or distribute this software for any\n" +
+	zeroBSD := "// Copyright (C) 2026 Example\n//\n" +
+		"// Permission to use, copy, modify, and/or distribute this software for any\n" +
 		"// purpose with or without fee is hereby granted.\n//\n" +
 		"// THE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES.\n\npackage main\n"
 	cases := map[string]string{"mit.go": mit, "apache.go": apache, "0bsd.go": zeroBSD}
