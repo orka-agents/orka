@@ -532,7 +532,8 @@ func TestFullLicenseTextsAreExempt(t *testing.T) {
 	zeroBSD := "// Copyright (C) 2026 Example\n//\n// Permission to use, copy, modify, and/or distribute this software for any\n" +
 		"// purpose with or without fee is hereby granted.\n//\n" +
 		"// THE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES.\n\npackage main\n"
-	for name, src := range map[string]string{"mit.go": mit, "apache.go": apache, "0bsd.go": zeroBSD} {
+	cases := map[string]string{"mit.go": mit, "apache.go": apache, "0bsd.go": zeroBSD}
+	for name, src := range cases {
 		got, err := scanGo(name, []byte(src))
 		if err != nil || len(got) != 0 {
 			t.Errorf("%s: %q, %v", name, texts(got), err)
