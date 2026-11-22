@@ -32,8 +32,16 @@ export const noComments = {
     const sourceCode = context.sourceCode;
     return {
       Program() {
+        const firstToken = sourceCode.ast.tokens[0];
+        const codeStart = firstToken ? firstToken.range[0] : Infinity;
         for (const comment of sourceCode.getAllComments()) {
-          if (comment.type === "Shebang" || directive.test(comment.value)) {
+          const licenseHeader =
+            comment.range[1] <= codeStart && /copyright/i.test(comment.value);
+          if (
+            comment.type === "Shebang" ||
+            directive.test(comment.value) ||
+            licenseHeader
+          ) {
             continue;
           }
           context.report({ loc: comment.loc, messageId: "comment" });
