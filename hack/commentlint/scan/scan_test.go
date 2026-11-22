@@ -531,7 +531,8 @@ func TestOnlyKnownNoticeFormsAreExempt(t *testing.T) {
 		"//  See the License for the specific language governing permissions and\n" +
 		"//  limitations under the License.\n\npackage main\n"
 	spdx := "// Copyright Orka Contributors.\n// SPDX-License-Identifier: Apache-2.0 OR MIT\n\npackage main\n"
-	for name, src := range map[string]string{"apache.go": apache, "spdx.go": spdx} {
+	starred := "/*\n * Copyright (c) 2026.\n *\n * MIT License - see LICENSE file for details.\n */\n\npackage main\n"
+	for name, src := range map[string]string{"apache.go": apache, "spdx.go": spdx, "starred.go": starred} {
 		got, err := scanGo(name, []byte(src))
 		if err != nil || len(got) != 0 {
 			t.Errorf("%s: %q, %v", name, texts(got), err)

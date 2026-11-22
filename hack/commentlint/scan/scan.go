@@ -387,8 +387,12 @@ func licenseHeader(src []byte, c Comment) bool {
 }
 
 func onlyNotices(text string) bool {
+	var plain strings.Builder
+	for line := range strings.SplitSeq(text, "\n") {
+		plain.WriteString(strings.TrimPrefix(strings.TrimSpace(line), "*") + "\n")
+	}
 	found := false
-	for paragraph := range strings.SplitSeq(text, "\n\n") {
+	for paragraph := range strings.SplitSeq(plain.String(), "\n\n") {
 		normalized := strings.Join(strings.Fields(paragraph), " ")
 		if normalized == "" {
 			continue
