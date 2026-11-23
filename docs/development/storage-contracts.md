@@ -1354,7 +1354,10 @@ capability, so it does not raise `ContractRevision`.
   names; other providers map their own layout to them. `sequence_heads` holds
   the last value each provider-assigned sequence issued, which can be higher
   than the largest value still stored after records were deleted, so an import
-  never issues a value a client may have seen. Two fields carry an order a
+  never issues a value a client may have seen. Agent Host Protocol
+  connection tokens and sign-in sessions are copied with their token hashes,
+  so one issued before a migration stays valid after it; no family holds a
+  raw token. Two fields carry an order a
   provider may keep implicitly, so a copy keeps it even when keys sort
   differently. `security_scan_runs.admission_seq` is the order runs were
   admitted in, which `ListScanRuns` and the newer-run guard of
