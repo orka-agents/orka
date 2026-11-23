@@ -1634,8 +1634,12 @@ artifact-fence cases run only in process.
   `UNAVAILABLE`, `UNAUTHENTICATED` or `INCOMPATIBLE` that `Describe` may
   return, or `UNAVAILABLE` for any other error). The server describes the
   provider again before every read or administrative call that names a
-  dataset, so a provider whose dataset changed while it serves never answers
-  such a call for the dataset it served before. A write is compared against
+  dataset, so a provider whose dataset changed before such a call never
+  answers it for the dataset it served before. A switch while the provider
+  runs the call is not detected: its response can carry records from the new
+  dataset under the dataset the check named. Closing that window is open in
+  the provider contract, either by a provider serving one dataset for its
+  lifetime or by each read checking the dataset it reads. A write is compared against
   the dataset the provider last described, on the first call that names a
   dataset or on any later `Describe` or read, and is still checked by its
   envelope's dataset. A
@@ -1654,7 +1658,10 @@ artifact-fence cases run only in process.
   `orka-storage-envelope-bin`, and the server puts it in the
   provider's context with `WithWriteEnvelope`. A read or an administrative
   call never carries one: the client leaves it off, and the server refuses one
-  (`VALIDATION`). A call made under a Task data fence carries the
+  (`VALIDATION`). A write's envelope names the dataset its call names: the
+  bound client refuses one for another dataset before sending, and the server
+  refuses it before the provider runs (`DATASET_MISMATCH`), so a write never
+  commits to a dataset other than the one its response names. A call made under a Task data fence carries the
   `TaskDataFence` as the binary header `orka-storage-task-data-fence-bin`, and
   the server puts it in the provider's context with `WithTaskDataFence`.
 - **Request digests.** Before the provider runs a write that carries an
