@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -205,14 +206,49 @@ func (c *credentialStore) reloadClientCAs() error {
 	if !changed {
 		return nil
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(bundle) {
-		return c.failed("client-ca", errors.New("the bundle holds no PEM certificate"))
+	pool, err := parseCABundle(bundle)
+	if err != nil {
+		return c.failed("client-ca", err)
 	}
 	c.clientCAs.Store(pool)
 	c.loaded("client-ca", sum)
 	c.metrics.credentialReload("client-ca", true)
 	return nil
+}
+
+// parseCABundle parses every certificate in a PEM bundle. Unlike
+// x509.CertPool.AppendCertsFromPEM, which keeps whatever parses, it refuses
+// the whole bundle when any block is malformed or not a certificate, so a
+// rotation bundle with a broken entry never replaces a working pool and
+// drops a CA still in use.
+func parseCABundle(bundle []byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	parsed := 0
+	for rest := bundle; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("the bundle holds a %q block, not a certificate", block.Type)
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("the bundle holds an invalid certificate: %w", err)
+		}
+		pool.AddCert(certificate)
+		parsed++
+	}
+	// pem.Decode skips a block it cannot decode, so every block the bundle
+	// begins must have been parsed.
+	if begun := bytes.Count(bundle, []byte("-----BEGIN ")); begun != parsed {
+		return nil, fmt.Errorf("the bundle holds %d PEM blocks, of which only %d decode", begun, parsed)
+	}
+	if parsed == 0 {
+		return nil, errors.New("the bundle holds no PEM certificate")
+	}
+	return pool, nil
 }
 
 func (c *credentialStore) failed(name string, err error) error {

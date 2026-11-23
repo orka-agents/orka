@@ -539,6 +539,39 @@ func TestServeAuthenticatesClientCertificates(t *testing.T) {
 		"the old CA stays trusted while the bundle holds both")
 }
 
+// A CA bundle with any malformed entry never replaces the trusted CAs, so a
+// rotation bundle with a broken copy of the old CA does not drop it.
+func TestServeRefusesPartlyInvalidCABundles(t *testing.T) {
+	broken := func(t *testing.T, f *fixture) []byte {
+		// A PEM block that decodes but holds no valid certificate.
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
+	}
+	undecodable := func(t *testing.T, f *fixture) []byte {
+		lines := strings.Split(string(f.clientCA.pem), "\n")
+		lines[1] = "!!!!" + lines[1][4:]
+		return []byte(strings.Join(lines, "\n"))
+	}
+	for name, bad := range map[string]func(*testing.T, *fixture) []byte{"invalid certificate": broken, "undecodable block": undecodable} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			running := start(t, f, f.mtlsConfig(newMemoryArtifacts()))
+			allowed := f.clientCA.clientCertificate(t, f.clientURI)
+			require.NoError(t, wire.NewClient(running.dial(t, allowed, nil), wire.ClientConfig{}).HealthCheck(t.Context()))
+
+			rotated := newAuthority(t, "rotated client CA")
+			writeFile(t, f.caFile, append(append([]byte(nil), rotated.pem...), bad(t, f)...))
+			require.Eventually(t, func() bool {
+				_, metrics := running.get(t, "/metrics")
+				return strings.Contains(metrics, `orka_storage_server_credential_reloads_total{credential="client-ca",result="failure"}`)
+			}, 5*time.Second, 10*time.Millisecond)
+			require.NoError(t, wire.NewClient(running.dial(t, allowed, nil), wire.ClientConfig{}).HealthCheck(t.Context()),
+				"the old CA stays trusted")
+			err := wire.NewClient(running.dial(t, rotated.clientCertificate(t, f.clientURI), nil), wire.ClientConfig{}).HealthCheck(t.Context())
+			require.ErrorIs(t, err, storagev1.ErrUnavailable, "the refused bundle's CA is not trusted")
+		})
+	}
+}
+
 // A connection outlives its handshake, so every call verifies the client
 // certificate again: removing its CA from the bundle, or the certificate
 // expiring, stops a connection that is already open.
