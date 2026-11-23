@@ -658,6 +658,37 @@ func TestServeProbesAndMetrics(t *testing.T) {
 	running.waitReady(t, true)
 }
 
+// The probe port closes a connection whose peer stalls a request body or
+// leaves the connection idle, so a probe connection never stays open
+// indefinitely.
+func TestServeClosesStalledAndIdleProbeConnections(t *testing.T) {
+	t.Cleanup(adapterkit.SetProbeTimeouts(200*time.Millisecond, 200*time.Millisecond))
+	f := newFixture(t)
+	running := start(t, f, f.bearerConfig(newMemoryArtifacts()))
+	running.waitReady(t, true)
+
+	closed := func(t *testing.T, conn net.Conn) {
+		t.Helper()
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, err := io.Copy(io.Discard, conn)
+		var timeout net.Error
+		require.False(t, errors.As(err, &timeout) && timeout.Timeout(), "the adapter closes the connection: %v", err)
+	}
+	for name, request := range map[string]string{
+		"idle keep-alive": "GET /healthz HTTP/1.1\r\nHost: probe\r\n\r\n",
+		"stalled body":    "POST /healthz HTTP/1.1\r\nHost: probe\r\nContent-Length: 1000\r\n\r\npartial",
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", running.probe)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+			_, err = io.WriteString(conn, request)
+			require.NoError(t, err)
+			closed(t, conn)
+		})
+	}
+}
+
 // syncBuffer is a bytes.Buffer safe for a logger's concurrent writes.
 type syncBuffer struct {
 	mu  sync.Mutex

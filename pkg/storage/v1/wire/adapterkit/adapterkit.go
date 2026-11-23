@@ -277,7 +277,8 @@ func Serve(ctx context.Context, config Config) error {
 	serving = true
 	readiness := &readiness{config: &config, server: server, metrics: metrics, logger: logger}
 	probe := &http.Server{
-		Handler: probeHandler(readiness, metrics), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second,
+		Handler: probeHandler(readiness, metrics), ReadHeaderTimeout: probeReadTimeout, ReadTimeout: probeReadTimeout,
+		WriteTimeout: 10 * time.Second, IdleTimeout: probeIdleTimeout,
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -322,6 +323,15 @@ func Serve(ctx context.Context, config Config) error {
 	logger.InfoContext(ctx, "storage adapter stopped", "forced", forced)
 	return serveErr
 }
+
+// The probe server's timeouts. ReadTimeout bounds a whole request,
+// including a body the server discards after a probe handler that never reads
+// it, and IdleTimeout closes a keep-alive connection no probe uses, so a
+// stalled or idle peer never holds a probe connection open.
+var (
+	probeReadTimeout = 5 * time.Second
+	probeIdleTimeout = 60 * time.Second
+)
 
 // listen opens the storage and probe listeners Serve has not been given.
 func listen(config *Config) (net.Listener, net.Listener, error) {
