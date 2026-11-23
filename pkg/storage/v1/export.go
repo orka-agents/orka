@@ -468,5 +468,13 @@ type MigrationMarkerStore interface {
 	// ClearMigrationMarker removes the marker, which only an explicit
 	// rollback of the migration does. A contract part without a marker
 	// succeeds; one marked for another target returns ErrConflict.
+	//
+	// A target is marked at most once. An import fills only a dataset with
+	// origin [DatasetOriginNew], so a rolled-back target, which reports
+	// [DatasetOriginMigrated], is never filled again, and a later migration
+	// copies into a new dataset with its own ID. The caller therefore never
+	// marks a contract part again for a target whose marker it cleared, and
+	// a retried clear whose first outcome was unknown cannot remove a newer
+	// marker.
 	ClearMigrationMarker(ctx context.Context, request MigrationMarkerRequest) error
 }
