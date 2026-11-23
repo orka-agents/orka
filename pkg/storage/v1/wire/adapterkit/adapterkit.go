@@ -416,11 +416,36 @@ func (r *readiness) check(ctx context.Context) {
 		if ready {
 			r.logger.InfoContext(ctx, "storage adapter ready", "dataset", r.server.DatasetID())
 		} else if ctx.Err() == nil && !r.draining {
-			r.logger.WarnContext(ctx, "storage adapter not ready", "error", err)
+			r.logger.WarnContext(ctx, "storage adapter not ready", "reason", readinessReason(err))
 		}
 	}
 	r.ready = ready
 	r.metrics.setReady(ready)
+}
+
+// errProviderPanicked is the readiness failure of a provider that panicked.
+var errProviderPanicked = errors.New("the storage provider panicked")
+
+// readinessReason names why a readiness check failed without the provider's
+// error text or panic value, which can carry backend details such as a
+// connection string's credentials.
+func readinessReason(err error) string {
+	switch {
+	case errors.Is(err, errProviderPanicked):
+		return "the storage provider panicked"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "the readiness check timed out"
+	case errors.Is(err, storagev1.ErrNotReady):
+		return "the storage provider is not ready"
+	case errors.Is(err, storagev1.ErrUnavailable):
+		return "the storage provider is unavailable"
+	case errors.Is(err, storagev1.ErrUnauthenticated):
+		return "the storage provider cannot authenticate"
+	case errors.Is(err, storagev1.ErrIncompatible):
+		return "the storage provider is incompatible"
+	default:
+		return "the storage provider failed its readiness check"
+	}
 }
 
 // probe describes the providers and checks their health. A provider that
@@ -429,7 +454,7 @@ func (r *readiness) check(ctx context.Context) {
 func (r *readiness) probe(ctx context.Context) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("the storage provider panicked: %v", recovered)
+			err = errProviderPanicked
 		}
 	}()
 	if err := r.server.Refresh(ctx); err != nil {

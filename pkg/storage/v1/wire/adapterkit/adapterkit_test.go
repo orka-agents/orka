@@ -11,7 +11,9 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -54,6 +56,8 @@ type memoryArtifacts struct {
 	panicDescribe atomic.Bool
 	panicHealth   atomic.Bool
 	panics        atomic.Int32
+	// healthErr, when set, is the error HealthCheck returns.
+	healthErr atomic.Pointer[error]
 }
 
 type storedArtifact struct {
@@ -71,7 +75,10 @@ func newMemoryArtifacts() *memoryArtifacts {
 func (p *memoryArtifacts) HealthCheck(context.Context) error {
 	if p.panicHealth.Load() {
 		p.panics.Add(1)
-		panic("health check bug")
+		panic("health check bug: password=panic-secret")
+	}
+	if err := p.healthErr.Load(); err != nil {
+		return *err
 	}
 	if !p.healthy.Load() {
 		return storagev1.ErrUnavailable
@@ -589,6 +596,52 @@ func TestServeProbesAndMetrics(t *testing.T) {
 	require.Contains(t, metrics, "orka_storage_server_ready 0")
 	provider.healthy.Store(true)
 	running.waitReady(t, true)
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger's concurrent writes.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A failed readiness check logs why the adapter is not ready without the
+// provider's error text or panic value, which can carry backend credentials.
+func TestServeNeverLogsProviderReadinessErrors(t *testing.T) {
+	f := newFixture(t)
+	provider := newMemoryArtifacts()
+	logs := &syncBuffer{}
+	config := f.bearerConfig(provider)
+	config.Logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	running := start(t, f, config)
+	running.waitReady(t, true)
+
+	failure := fmt.Errorf("dial postgres://orka:health-secret@db: %w", storagev1.ErrUnavailable)
+	provider.healthErr.Store(&failure)
+	running.waitReady(t, false)
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "storage adapter not ready") },
+		5*time.Second, 10*time.Millisecond)
+	require.Contains(t, logs.String(), "the storage provider is unavailable")
+	provider.healthErr.Store(nil)
+	running.waitReady(t, true)
+
+	provider.panicHealth.Store(true)
+	running.waitReady(t, false)
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "the storage provider panicked") },
+		5*time.Second, 10*time.Millisecond)
+	require.NotContains(t, logs.String(), "health-secret")
+	require.NotContains(t, logs.String(), "panic-secret")
 }
 
 // Stopping reports not ready at once, lets a call in progress finish and
