@@ -36,6 +36,46 @@ func TestRunExportImportSplitsBatchesAProviderRefuses(t *testing.T) {
 	}, seedMemoryExport)
 }
 
+// The reference provider keeps its records apart from the buffers its
+// callers pass and receive, as a provider that copies records over the
+// network does.
+func TestReferenceProviderCopiesRecordBodies(t *testing.T) {
+	ctx := t.Context()
+	source := newMemoryExport()
+	seedMemoryExport(t, source)
+	page, err := source.ExportRecords(ctx, storagev1.ExportRequest{Family: "results", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, page.Records, 1)
+	exported := slices.Clone(page.Records[0].Body)
+	page.Records[0].Body[0]++
+	again, err := source.ExportRecords(ctx, storagev1.ExportRequest{Family: "results", Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, exported, again.Records[0].Body, "changing an exported body does not change the stored record")
+
+	target := newMemoryExport()
+	manifest := make([]storagev1.FamilyDigest, 0)
+	families, err := source.ExportFamilies(ctx)
+	require.NoError(t, err)
+	for _, family := range families {
+		digest, err := source.ExportDigest(ctx, family.Name)
+		require.NoError(t, err)
+		manifest = append(manifest, digest)
+	}
+	info, err := source.Describe(ctx)
+	require.NoError(t, err)
+	session, err := target.BeginImport(ctx, beginImportRequest(t, info, manifest))
+	require.NoError(t, err)
+	record := again.Records[0]
+	_, err = target.ImportRecords(ctx, storagev1.ImportRecordsRequest{
+		SessionID: session.SessionID, Family: "results", Sequence: 1, Records: []storagev1.RawRecord{record},
+	})
+	require.NoError(t, err)
+	record.Body[0]++
+	imported, err := target.ExportRecords(ctx, storagev1.ExportRequest{Family: "results", Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, exported, imported.Records[0].Body, "reusing an imported buffer does not change the stored record")
+}
+
 // typedError accepts an error a provider returns as a value or a pointer.
 func TestTypedErrorAcceptsValuesAndPointers(t *testing.T) {
 	want := storagev1.TooLargeError{What: "result", Size: 2, Limit: 1}
@@ -188,7 +228,10 @@ func (m *memoryExport) ExportRecords(_ context.Context, request storagev1.Export
 			page.NextCursor = memoryCursorPrefix + base64.RawURLEncoding.EncodeToString([]byte(page.Records[len(page.Records)-1].Key))
 			break
 		}
-		page.Records = append(page.Records, m.records[request.Family][key])
+		// The caller owns the page, so it gets a copy of each stored body.
+		record := m.records[request.Family][key]
+		record.Body = slices.Clone(record.Body)
+		page.Records = append(page.Records, record)
 	}
 	return page, nil
 }
@@ -314,6 +357,9 @@ func (m *memoryExport) ImportRecords(_ context.Context, request storagev1.Import
 		case ok && !bytes.Equal(stored.Body, record.Body):
 			return storagev1.ImportFamilyProgress{}, storagev1.ConflictErrorf("family %q holds the record's key with another body", request.Family)
 		case !ok:
+			// The provider keeps the bytes it validated, not the caller's
+			// buffer.
+			record.Body = slices.Clone(record.Body)
 			added = append(added, record)
 		}
 	}
