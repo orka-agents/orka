@@ -1,9 +1,11 @@
 package wire_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"reflect"
@@ -689,6 +691,28 @@ func TestFailedAuthenticationIsUnauthenticated(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrUnauthenticated)
 	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "an unauthenticated write committed nothing")
 	require.Empty(t, provider.callsTo("SavePlan"))
+}
+
+// leakyAuthenticator refuses every call with an error that quotes the
+// presented credential.
+type leakyAuthenticator struct{}
+
+func (leakyAuthenticator) Authenticate(_ context.Context, _ string, header metadata.MD) error {
+	return fmt.Errorf("token %q is not accepted", header.Get("authorization"))
+}
+
+// The server never logs an authenticator's error, which can quote the
+// credential it refused.
+func TestFailedAuthenticationNeverLogsTheCredential(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server, err := wire.NewServer(wire.ServerConfig{State: newRecordingProvider(), Authenticator: leakyAuthenticator{}, Logger: logger})
+	require.NoError(t, err)
+	ctx := metadata.AppendToOutgoingContext(t.Context(), "authorization", "Bearer secret-credential-value")
+	err = wire.NewClient(serveInsecure(t, server), wire.ClientConfig{}).HealthCheck(ctx)
+	require.ErrorIs(t, err, storagev1.ErrUnauthenticated)
+	require.Contains(t, logs.String(), "storage authentication failed")
+	require.NotContains(t, logs.String(), "secret-credential-value")
 }
 
 // acceptAll passes every authentication.

@@ -340,7 +340,9 @@ func (s *Server) tap(ctx context.Context, info *tap.Info) (context.Context, erro
 		if m := methodByFullName(info.FullMethodName); m != nil {
 			call.Method, call.Kind, call.Class = m.name, m.kind, m.class
 		}
-		s.logger.DebugContext(ctx, "storage authentication failed", "method", call.Method, "error", err)
+		// The authenticator saw credential-bearing metadata, so its error
+		// is never logged.
+		s.logger.DebugContext(ctx, "storage authentication failed", "method", call.Method)
 		if s.observer != nil {
 			s.observer.ObserveCall(call)
 		}
