@@ -1,11 +1,8 @@
 # Policy inputs: approvals on the native AI path
 
-This page describes the two inputs that decide a native AI Job's approval set,
-which the [policy contract](policy-contract.md) (statement 7) relies on. Code
-references are at commit `d31cf6b`; paths are relative to the repository root.
+This page describes the two inputs that decide a native AI Job's approval set, which the [policy contract](policy-contract.md) (statement 7) relies on. Code references are at commit `d31cf6b`; paths are relative to the repository root.
 
-Both inputs are enforce-only: neither has an audit mode, and there is no
-namespace- or installation-level approval setting.
+Both inputs are enforce-only: neither has an audit mode, and there is no namespace- or installation-level approval setting.
 
 ## The Agent's approval list
 
@@ -41,15 +38,9 @@ namespace- or installation-level approval setting.
 
 ## Where the sources differ
 
-The `ConnectorProvider` API comment says write tools "default into the Agent's
-approval-required set" (`api/v1alpha1/connector_provider_types.go:157-158`).
-That describes the native AI path. Other paths treat them differently:
+The `ConnectorProvider` API comment says write tools "default into the Agent's approval-required set" (`api/v1alpha1/connector_provider_types.go:157-158`). That describes the native AI path. Other paths treat them differently:
 
-- Built-in coding-agent runtimes are not offered connector write tools
-  (`internal/controller/acp_mcp_policy.go:268-275`).
-- An external `runtimeRef` runtime requires each linked write tool to be
-  listed in the registration's `approvalRequiredTools`, or the Task fails with
-  a configuration error
-  (`internal/controller/agent_execution_binding.go:1711-1722`).
+- Built-in coding-agent runtimes are not offered connector write tools (`internal/controller/acp_mcp_policy.go:268-275`).
+- An external `runtimeRef` runtime requires each linked write tool to be listed in the registration's `approvalRequiredTools`, or the Task fails with a configuration error (`internal/controller/agent_execution_binding.go:1711-1722`).
 
 Those paths are outside the tests on this page.
