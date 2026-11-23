@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
@@ -34,6 +35,62 @@ func TestRunExportImportSplitsBatchesAProviderRefuses(t *testing.T) {
 		m.maxBatchRecords = 1
 		return m
 	}, seedMemoryExport)
+}
+
+// The reference provider keeps its records apart from the buffers its
+// callers pass and receive, as a provider that copies records over the
+// network does.
+func TestReferenceProviderCopiesRecordBodies(t *testing.T) {
+	ctx := t.Context()
+	source := newMemoryExport()
+	seedMemoryExport(t, source)
+	page, err := source.ExportRecords(ctx, storagev1.ExportRequest{Family: "results", Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, page.Records, 1)
+	exported := slices.Clone(page.Records[0].Body)
+	page.Records[0].Body[0]++
+	again, err := source.ExportRecords(ctx, storagev1.ExportRequest{Family: "results", Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, exported, again.Records[0].Body, "changing an exported body does not change the stored record")
+
+	target := newMemoryExport()
+	manifest := make([]storagev1.FamilyDigest, 0)
+	families, err := source.ExportFamilies(ctx)
+	require.NoError(t, err)
+	for _, family := range families {
+		digest, err := source.ExportDigest(ctx, family.Name)
+		require.NoError(t, err)
+		manifest = append(manifest, digest)
+	}
+	info, err := source.Describe(ctx)
+	require.NoError(t, err)
+	session, err := target.BeginImport(ctx, beginImportRequest(t, info, manifest))
+	require.NoError(t, err)
+	record := again.Records[0]
+	_, err = target.ImportRecords(ctx, storagev1.ImportRecordsRequest{
+		SessionID: session.SessionID, Family: "results", Sequence: 1, Records: []storagev1.RawRecord{record},
+	})
+	require.NoError(t, err)
+	record.Body[0]++
+	imported, err := target.ExportRecords(ctx, storagev1.ExportRequest{Family: "results", Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, exported, imported.Records[0].Body, "reusing an imported buffer does not change the stored record")
+}
+
+// A changed value differs from the original without growing, so a record at
+// a size bound, such as a message identifier of MaxControlIdentifierBytes,
+// stays valid and conflicts only through the change.
+func TestChangedExportValueKeepsTheSize(t *testing.T) {
+	field := storagev1.ExportField{Name: "namespace", Kind: storagev1.ExportString}
+	for _, value := range []string{strings.Repeat("w", storagev1.MaxControlIdentifierBytes), "x", "é-x", "é"} {
+		changed, ok := changedExportValue(field, value).(string)
+		require.True(t, ok)
+		require.NotEqual(t, value, changed)
+		require.True(t, utf8.ValidString(changed), "%q stays valid UTF-8", value)
+		if strings.ContainsFunc(value, func(r rune) bool { return r < utf8.RuneSelf }) {
+			require.Len(t, changed, len(value), "%q keeps its length", value)
+		}
+	}
 }
 
 // typedError accepts an error a provider returns as a value or a pointer.
@@ -188,7 +245,10 @@ func (m *memoryExport) ExportRecords(_ context.Context, request storagev1.Export
 			page.NextCursor = memoryCursorPrefix + base64.RawURLEncoding.EncodeToString([]byte(page.Records[len(page.Records)-1].Key))
 			break
 		}
-		page.Records = append(page.Records, m.records[request.Family][key])
+		// The caller owns the page, so it gets a copy of each stored body.
+		record := m.records[request.Family][key]
+		record.Body = slices.Clone(record.Body)
+		page.Records = append(page.Records, record)
 	}
 	return page, nil
 }
@@ -314,6 +374,9 @@ func (m *memoryExport) ImportRecords(_ context.Context, request storagev1.Import
 		case ok && !bytes.Equal(stored.Body, record.Body):
 			return storagev1.ImportFamilyProgress{}, storagev1.ConflictErrorf("family %q holds the record's key with another body", request.Family)
 		case !ok:
+			// The provider keeps the bytes it validated, not the caller's
+			// buffer.
+			record.Body = slices.Clone(record.Body)
 			added = append(added, record)
 		}
 	}
@@ -416,6 +479,9 @@ func (m *memoryExport) MarkDatasetMigrated(_ context.Context, request storagev1.
 	defer m.mu.Unlock()
 	if request.DatasetID != m.datasetID {
 		return storagev1.MigrationMarker{}, storagev1.ErrDatasetMismatch
+	}
+	if m.state == storagev1.DatasetImporting {
+		return storagev1.MigrationMarker{}, fmt.Errorf("%w: the dataset is importing", storagev1.ErrNotReady)
 	}
 	if marker, ok := m.markers[request.Contract]; ok {
 		if marker.TargetDatasetID != request.TargetDatasetID {

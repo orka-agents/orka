@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
@@ -280,6 +281,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		progress, err := target.GetImportProgress(t.Context(), session.SessionID)
 		require.NoError(t, err)
 		require.Zero(t, importedCount(progress, schema.Name), "a refused batch commits nothing")
+		require.Zero(t, importedSequence(progress, schema.Name), "a refused batch does not advance the family's batches")
 	})
 
 	t.Run("an import refuses message content over the target's limit", func(t *testing.T) {
@@ -326,6 +328,13 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		after, err := target.GetImportProgress(t.Context(), session.SessionID)
 		require.NoError(t, err)
 		require.Equal(t, int64(1), importedCount(after, schema.Name), "a refused batch commits nothing")
+		require.Equal(t, int64(1), importedSequence(after, schema.Name), "a refused batch does not advance the family's batches")
+		progress, err = target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+			SessionID: session.SessionID, Family: schema.Name, Sequence: 2,
+			Records: []storagev1.RawRecord{message(2, info.Limits.MaxMessageContentBytes)},
+		})
+		require.NoError(t, err, "the import continues with the batch that was refused")
+		require.Equal(t, int64(2), progress.Imported)
 	})
 
 	t.Run("an import keeps message identifiers within the bound SendMessage enforces", func(t *testing.T) {
@@ -380,7 +389,13 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 			after, err := target.GetImportProgress(t.Context(), session.SessionID)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), importedCount(after, schema.Name), "a refused batch commits nothing")
+			require.Equal(t, int64(1), importedSequence(after, schema.Name), "a refused batch does not advance the family's batches")
 		}
+		progress, err = target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+			SessionID: session.SessionID, Family: schema.Name, Sequence: 2, Records: []storagev1.RawRecord{message(2, "")},
+		})
+		require.NoError(t, err, "the import continues with the batch that was refused")
+		require.Equal(t, int64(2), progress.Imported)
 	})
 
 	t.Run("completion compares the import with the manifest", func(t *testing.T) {
@@ -430,6 +445,10 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		session, err := target.BeginImport(t.Context(), request)
 		require.NoError(t, err)
 		importDataset(t, target, session.SessionID, manifest, records, false)
+		_, err = target.MarkDatasetMigrated(t.Context(), storagev1.MigrationMarkerRequest{
+			DatasetID: session.DatasetID, Contract: request.Contracts[0], TargetDatasetID: "target-dataset",
+		})
+		require.ErrorIs(t, err, storagev1.ErrNotReady, "an importing dataset is not a migration source")
 		require.NoError(t, target.AbortImport(t.Context(), session.SessionID))
 
 		aborted := describe(t, target)
@@ -437,6 +456,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		require.Equal(t, storagev1.DatasetReady, aborted.State)
 		require.Nil(t, aborted.Source)
 		require.Nil(t, aborted.Binding)
+		require.Empty(t, aborted.MigratedTo, "an aborted import leaves no marker")
 		require.True(t, aborted.Bootstrap.Empty, "an aborted import leaves a dataset that reports itself empty")
 		require.NotEqual(t, session.DatasetID, aborted.DatasetID, "an aborted import's dataset ID is not reused")
 		require.NotEqual(t, empty.DatasetID, aborted.DatasetID)
@@ -615,6 +635,17 @@ func requireProgressMatches(t *testing.T, manifest []storagev1.FamilyDigest, pro
 	}
 }
 
+// importedSequence returns the last batch a family committed, or -1 when the
+// progress does not list the family.
+func importedSequence(progress storagev1.ImportProgress, family string) int64 {
+	for _, held := range progress.Families {
+		if held.Family == family {
+			return held.Sequence
+		}
+	}
+	return -1
+}
+
 func importedCount(progress storagev1.ImportProgress, family string) int64 {
 	for _, held := range progress.Families {
 		if held.Family == family {
@@ -661,7 +692,18 @@ func changedRecord(t *testing.T, record storagev1.RawRecord) storagev1.RawRecord
 func changedExportValue(field storagev1.ExportField, value any) any {
 	switch typed := value.(type) {
 	case string:
-		return typed + "-changed"
+		// A changed ASCII byte keeps the length, so an identifier at its
+		// bound stays within it and the change is the only difference.
+		for i := range len(typed) {
+			if typed[i] < utf8.RuneSelf {
+				replacement := byte('x')
+				if typed[i] == 'x' {
+					replacement = 'y'
+				}
+				return typed[:i] + string(replacement) + typed[i+1:]
+			}
+		}
+		return typed + "x"
 	case int64:
 		return typed + 1
 	case bool:

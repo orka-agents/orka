@@ -344,8 +344,8 @@ func (e ImportVerificationError) Is(target error) bool {
 // An import moves the dataset from empty, through [DatasetImporting], to
 // [DatasetReady] with origin [DatasetOriginMigrated], or back to empty when
 // it is aborted. While the dataset is importing, every write, the controller
-// epoch advance and BindDataset return [ErrNotReady], and reads may observe a
-// partial import.
+// epoch advance, BindDataset and [MigrationMarkerStore.MarkDatasetMigrated]
+// return [ErrNotReady], and reads may observe a partial import.
 type DatasetImporter interface {
 	// BeginImport requires a dataset that serves every requested contract
 	// part, or returns ErrValidation. Its Describe must report origin
@@ -461,10 +461,20 @@ func (r MigrationMarkerRequest) Validate() error {
 type MigrationMarkerStore interface {
 	// MarkDatasetMigrated writes the marker and returns it. A repeat for the
 	// same target returns the stored marker; a contract part marked for
-	// another target returns ErrConflict.
+	// another target returns ErrConflict. A dataset that is importing is not
+	// a migration source and returns ErrNotReady, so an aborted import
+	// leaves no marker behind.
 	MarkDatasetMigrated(ctx context.Context, request MigrationMarkerRequest) (MigrationMarker, error)
 	// ClearMigrationMarker removes the marker, which only an explicit
 	// rollback of the migration does. A contract part without a marker
 	// succeeds; one marked for another target returns ErrConflict.
+	//
+	// A target is marked at most once. An import fills only a dataset with
+	// origin [DatasetOriginNew], so a rolled-back target, which reports
+	// [DatasetOriginMigrated], is never filled again, and a later migration
+	// copies into a new dataset with its own ID. The caller therefore never
+	// marks a contract part again for a target whose marker it cleared, and
+	// a retried clear whose first outcome was unknown cannot remove a newer
+	// marker.
 	ClearMigrationMarker(ctx context.Context, request MigrationMarkerRequest) error
 }

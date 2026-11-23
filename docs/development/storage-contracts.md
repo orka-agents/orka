@@ -1415,7 +1415,9 @@ capability, so it does not raise `ContractRevision`.
   watermark or record of any kind.
   It records the source dataset, its schema version and the manifest digest,
   mints a new dataset ID and moves the dataset to `importing`, where every
-  write, the controller epoch advance and `BindDataset` return `ErrNotReady`.
+  write, the controller epoch advance, `BindDataset` and
+  `MarkDatasetMigrated` return `ErrNotReady`, so an aborted import leaves no
+  marker.
   `ImportRecords` commits one batch atomically; batches are numbered per
   family, a repeated batch is accepted only when the family already holds its
   records unchanged, and a record whose key is held with another body, or
@@ -1449,7 +1451,11 @@ capability, so it does not raise `ContractRevision`.
   `ErrTaskJobRevoked`. `AdvanceWriteWatermark`, which both parts serve, is refused
   only once every part the provider serves is marked. Writing or clearing a
   marker does not advance the watermark. Only an explicit rollback clears a
-  marker. `Describe` reports markers in `ProviderInfo.MigratedTo`, and the
+  marker. A target is marked at most once: an import fills only a dataset
+  with origin `new`, so a rolled-back target is never filled again and a later
+  migration copies into a new dataset. The caller never marks a contract part
+  again for a target whose marker it cleared, so a retried clear whose first
+  outcome was unknown cannot remove a newer marker. `Describe` reports markers in `ProviderInfo.MigratedTo`, and the
   wire carries a refused write as `DATASET_MIGRATED`.
 - **Switch detection.** Kubernetes records, per contract part, the dataset
   that serves it with its acknowledged controller epoch and write watermark
