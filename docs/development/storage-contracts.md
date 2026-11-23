@@ -1725,7 +1725,11 @@ artifact-fence cases run only in process.
   streaming call receives or sends, so an upload or download whose peer stalls,
   or never sends its request, is ended as `UNAVAILABLE` and frees its slot. A
   write whose response cannot be sent in time after its provider ran is
-  `OUTCOME_UNKNOWN`, since the provider may have committed.
+  `OUTCOME_UNKNOWN`, since the provider may have committed. The limit
+  reaches a provider only through its context's cancellation: a call whose
+  admission outlasts the limit, such as one whose provider described its
+  dataset late, starts no provider work and is refused as `UNAVAILABLE`.
+  A successful response names the dataset the call was admitted against.
   A client checks a download's declared size from the response headers before
   it receives any of the blob, and a server describes the artifact limit it
   enforces, which its own blob limit can lower.

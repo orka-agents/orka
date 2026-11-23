@@ -392,10 +392,11 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 		}
 		s.logCall(ctx, m, started, err)
 	}()
-	callCtx, release, err := s.admit(ctx, m)
+	callCtx, release, served, err := s.admit(ctx, m)
 	// Every authenticated call, including one refused, answers with the
-	// contract, revision and, once known, the serving dataset.
-	if headerErr := grpc.SetHeader(ctx, s.responseHeader()); headerErr != nil {
+	// contract, revision and, once known, the serving dataset; an admitted
+	// call answers with the dataset it was checked against.
+	if headerErr := grpc.SetHeader(ctx, s.responseHeader(served)); headerErr != nil {
 		if err == nil {
 			release()
 		}
@@ -446,8 +447,8 @@ func (s *Server) interceptStream(srv any, stream grpc.ServerStream, info *grpc.S
 		}
 		s.logCall(ctx, m, started, err)
 	}()
-	callCtx, release, err := s.admit(ctx, m)
-	if headerErr := stream.SetHeader(s.responseHeader()); headerErr != nil {
+	callCtx, release, served, err := s.admit(ctx, m)
+	if headerErr := stream.SetHeader(s.responseHeader(served)); headerErr != nil {
 		if err == nil {
 			release()
 		}
@@ -522,10 +523,10 @@ func unsupportedFieldStatus() error {
 // the call's admission when it ends. admit owns the admission until it
 // returns successfully, so a refused call, or a provider that panics while it
 // is described, has already released it.
-func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, release func(), err error) {
+func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, release func(), served string, err error) {
 	header, _ := metadata.FromIncomingContext(ctx)
 	if err := checkContract(header); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	release = func() {}
 	if slots := s.admission[m.class]; slots != nil {
@@ -540,7 +541,7 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 			if revision, _ := strconv.Atoi(header.Get(HeaderRevision)[0]); revision < overloadedSince {
 				reason = ReasonUnavailable
 			}
-			return nil, nil, errorStatus(codes.Unavailable, reason,
+			return nil, nil, "", errorStatus(codes.Unavailable, reason,
 				"the storage server is at its "+m.class.String()+" call limit", nil)
 		}
 	}
@@ -561,16 +562,23 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 	}()
 	served, describeErr := s.servingDataset(ctx, m, header)
 	if err := s.checkDataset(ctx, m, header, served, describeErr); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if ctx, err = withEnvelope(ctx, m, header); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if ctx, err = withTaskDataFence(ctx, header); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
+	}
+	if ctx.Err() != nil {
+		// A provider that ignores its context can describe the dataset after
+		// the call's time limit passed; the call then starts no provider
+		// work.
+		return nil, nil, "", errorStatus(codes.Unavailable, ReasonUnavailable,
+			"the storage call reached its time limit before it was admitted", nil)
 	}
 	accepted = true
-	return ctx, free, nil
+	return ctx, free, served, nil
 }
 
 // overloadedSince is the protocol revision whose clients know the
@@ -748,11 +756,18 @@ func describeRefusal(err error) bool {
 		errors.Is(err, storagev1.ErrIncompatible)
 }
 
-// responseHeader names the contract, this library's revision and, once the
-// server knows it, the serving dataset.
-func (s *Server) responseHeader() metadata.MD {
+// responseHeader names the contract, this library's revision and a
+// dataset: admitted, the dataset an admitted call was checked against, or
+// otherwise, once the server knows it, the serving dataset. A write's
+// response thus names the dataset it ran against even when a description
+// replaced or cleared the serving dataset after its admission.
+func (s *Server) responseHeader(admitted string) metadata.MD {
 	header := metadata.Pairs(HeaderContract, storagev1.ContractVersion, HeaderRevision, strconv.Itoa(ProtocolRevision))
-	if dataset := s.DatasetID(); dataset != "" {
+	dataset := admitted
+	if dataset == "" {
+		dataset = s.DatasetID()
+	}
+	if dataset != "" {
 		header.Set(HeaderDataset, dataset)
 	}
 	return header

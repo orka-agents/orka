@@ -191,6 +191,32 @@ func TestServerForgetsItsDatasetWhenTheProvidersDisagree(t *testing.T) {
 	require.Len(t, state.callsTo("SavePlan"), 2)
 }
 
+// lateDescriber describes its dataset only after delay, ignoring its
+// context's cancellation.
+type lateDescriber struct {
+	*recordingProvider
+	delay time.Duration
+}
+
+func (p lateDescriber) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	time.Sleep(p.delay)
+	return p.recordingProvider.Describe(context.WithoutCancel(ctx))
+}
+
+// A provider that ignores cancellation can describe its dataset after the
+// call's time limit passed. The server then refuses the call as unavailable
+// rather than start provider work with an expired context.
+func TestServerStartsNoProviderWorkAfterTheTimeLimit(t *testing.T) {
+	provider := lateDescriber{recordingProvider: newRecordingProvider(), delay: 200 * time.Millisecond}
+	server, err := wire.NewServer(wire.ServerConfig{State: provider, Limits: wire.Limits{
+		MaxDuration: map[storagev1.CallClass]time.Duration{storagev1.CallInteractive: 50 * time.Millisecond},
+	}})
+	require.NoError(t, err)
+	_, err = wire.NewClient(serveInsecure(t, server), boundConfig).GetPlan(t.Context(), "n", "t")
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	require.Empty(t, provider.callsTo("GetPlan"), "no provider work starts after the limit")
+}
+
 // gatedProvider describes the dataset it holds when Describe starts and,
 // while gate is set, waits on it before answering.
 type gatedProvider struct {
