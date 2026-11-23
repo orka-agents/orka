@@ -849,7 +849,9 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	// Add task-level env vars. AI worker telemetry env vars are reserved for
 	// controller injection so workload authors cannot bypass default-off telemetry
-	// policy or redirect GenAI metadata to arbitrary collectors. Restore
+	// policy or redirect GenAI metadata to arbitrary collectors. code_exec
+	// sandbox settings are reserved too, so the backend, image, NetworkPolicy,
+	// runtime class, AppArmor profile and limits keep their defaults. Restore
 	// controller-owned identity and approval env vars so task authors cannot
 	// spoof execution identity or approval state.
 	envVars = appendTaskEnvVars(envVars, task)
@@ -1038,7 +1040,7 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 		return envVars
 	}
 	for _, envVar := range task.Spec.Env {
-		if isReservedTaskTelemetryEnv(task, envVar.Name) {
+		if isReservedTaskEnv(task, envVar.Name) {
 			continue
 		}
 		envVars = append(envVars, envVar)
@@ -1046,16 +1048,23 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 	return envVars
 }
 
-func isReservedTaskTelemetryEnv(task *corev1alpha1.Task, name string) bool {
+func isReservedTaskEnv(task *corev1alpha1.Task, name string) bool {
 	if task == nil {
 		return false
 	}
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
-		return isReservedAIWorkerTelemetryEnv(name)
+		return isReservedAIWorkerTelemetryEnv(name) || isReservedAIWorkerCodeExecEnv(name)
 	default:
 		return false
 	}
+}
+
+// isReservedAIWorkerCodeExecEnv reports the code_exec sandbox settings, which
+// the AI worker reads from its own environment. Every name with the prefix is
+// reserved, including ones added later.
+func isReservedAIWorkerCodeExecEnv(name string) bool {
+	return strings.HasPrefix(name, workerenv.CodeExecEnvPrefix)
 }
 
 func isReservedAIWorkerTelemetryEnv(name string) bool {

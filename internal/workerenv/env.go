@@ -122,7 +122,9 @@ const (
 	PodNamespace = "POD_NAMESPACE"
 	Namespace    = "NAMESPACE"
 
-	// Code execution tool env vars.
+	// Code execution tool env vars. Every name starts with CodeExecEnvPrefix,
+	// which the controller reserves from AI Task spec.env.
+	CodeExecEnvPrefix               = "ORKA_CODE_EXEC_"
 	CodeExecBackend                 = "ORKA_CODE_EXEC_BACKEND"
 	CodeExecLocalCPUSeconds         = "ORKA_CODE_EXEC_LOCAL_CPU_SECONDS"
 	CodeExecLocalMemoryKB           = "ORKA_CODE_EXEC_LOCAL_MEMORY_KB"

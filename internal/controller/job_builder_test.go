@@ -3462,6 +3462,74 @@ func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedAITelemetryEnv(t *testing.T)
 	}
 }
 
+// code_exec reads its sandbox settings from the AI worker's environment, so
+// an AI Task's spec.env cannot set any of them, including names added later.
+func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedCodeExecEnv(t *testing.T) {
+	reserved := []string{
+		workerenv.CodeExecBackend,
+		workerenv.CodeExecLocalCPUSeconds,
+		workerenv.CodeExecLocalMemoryKB,
+		workerenv.CodeExecLocalMaxProcesses,
+		workerenv.CodeExecKubernetesImage,
+		workerenv.CodeExecKubernetesPythonImage,
+		workerenv.CodeExecKubernetesNodeImage,
+		workerenv.CodeExecKubernetesBashImage,
+		workerenv.CodeExecKubernetesCPURequest,
+		workerenv.CodeExecKubernetesCPULimit,
+		workerenv.CodeExecKubernetesMemoryRequest,
+		workerenv.CodeExecKubernetesMemoryLimit,
+		workerenv.CodeExecKubernetesNetworkPolicy,
+		workerenv.CodeExecKubernetesRuntimeClass,
+		workerenv.CodeExecKubernetesAppArmor,
+		workerenv.CodeExecEnvPrefix + "NOT_YET_DEFINED",
+	}
+	for _, name := range reserved {
+		t.Run(name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "p",
+					Env: []corev1.EnvVar{
+						{Name: name, Value: "task-value"},
+						{Name: "ORKA_CODE_EXECUTOR", Value: "kept"},
+						{Name: "CUSTOM_ENV", Value: "kept"},
+					},
+				},
+			}
+
+			envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+			if got, ok := findEnvVar(envVars, name); ok {
+				t.Fatalf("task-supplied %s reached the AI worker: %#v", name, got)
+			}
+			for _, kept := range []string{"ORKA_CODE_EXECUTOR", "CUSTOM_ENV"} {
+				if got, ok := findEnvVar(envVars, kept); !ok || got.Value != "kept" {
+					t.Fatalf("%s = %#v, found=%v; want the Task value", kept, got, ok)
+				}
+			}
+		})
+	}
+}
+
+func TestJobBuilder_buildEnvVars_PreservesContainerCodeExecEnv(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox",
+			Command: []string{"true"},
+			Env:     []corev1.EnvVar{{Name: workerenv.CodeExecBackend, Value: "user-value"}},
+		},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	if got, ok := findEnvVar(envVars, workerenv.CodeExecBackend); !ok || got.Value != "user-value" {
+		t.Fatalf("%s = %#v, found=%v", workerenv.CodeExecBackend, got, ok)
+	}
+}
+
 func TestJobBuilder_buildEnvVars_PreservesContainerTelemetryEnv(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
