@@ -105,6 +105,7 @@ func TestExportFamiliesCoverEverySQLiteTable(t *testing.T) {
 				"TIMESTAMP": storagev1.ExportTime, "BLOB": storagev1.ExportBytes,
 			}[strings.ToUpper(declared)]
 			if exportIntegerTimes[schema.Name+"."+name] {
+				require.Equal(t, storagev1.ExportInt, kind, "integer time %s.%s is an INTEGER column", schema.Name, name)
 				kind = storagev1.ExportTime
 			}
 			require.NotZero(t, kind, "%s.%s has declared type %s", schema.Name, name, declared)
@@ -140,10 +141,12 @@ func TestExportFamiliesCoverEverySQLiteTable(t *testing.T) {
 		require.Len(t, schema.Fields, len(columns), "family %s has a field for every column", schema.Name)
 		for _, field := range schema.Fields {
 			column, ok := columns[field.Name]
-			require.True(t, ok, "%s.%s is a column", schema.Name, field.Name)
+			require.True(t, ok, "%s.%s is a column that no other field of the family names", schema.Name, field.Name)
 			require.Equal(t, column.kind, field.Kind, "%s.%s kind", schema.Name, field.Name)
 			require.Equal(t, column.nullable, field.Nullable, "%s.%s nullability", schema.Name, field.Name)
+			delete(columns, field.Name)
 		}
+		require.Empty(t, columns, "family %s has a field for every column", schema.Name)
 	}
 	for column := range exportExcludedColumns {
 		require.True(t, excludedColumns[column], "excluded column %s exists", column)
