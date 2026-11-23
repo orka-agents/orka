@@ -282,6 +282,52 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		require.Zero(t, importedCount(progress, schema.Name), "a refused batch commits nothing")
 	})
 
+	t.Run("an import refuses message content over the target's limit", func(t *testing.T) {
+		target := newProvider(t)
+		info := describe(t, target)
+		if !slices.Contains(info.Contracts, storagev1.StateContract) || info.Limits.MaxMessageContentBytes <= 0 {
+			t.Skip("the provider serves no state.v1 messages with a reported limit")
+		}
+		source := seededSource(t, newProvider, seed)
+		manifest, _ := exportDataset(t, source)
+		session, err := target.BeginImport(t.Context(), beginImportRequest(t, describe(t, source), manifest))
+		require.NoError(t, err)
+		schema, ok := storagev1.LookupExportSchema("messages")
+		require.True(t, ok)
+		message := func(id int64, size int64) storagev1.RawRecord {
+			values := make([]any, len(schema.Fields))
+			for i, field := range schema.Fields {
+				switch {
+				case field.Name == "id":
+					values[i] = id
+				case field.Name == "content":
+					values[i] = strings.Repeat("c", int(size))
+				case !field.Nullable:
+					values[i] = exampleExportValue(field.Kind, i)
+				}
+			}
+			record, err := schema.Encode(values)
+			require.NoError(t, err)
+			return record
+		}
+		progress, err := target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+			SessionID: session.SessionID, Family: schema.Name, Sequence: 1,
+			Records: []storagev1.RawRecord{message(1, info.Limits.MaxMessageContentBytes)},
+		})
+		require.NoError(t, err, "content of MaxMessageContentBytes is imported")
+		require.Equal(t, int64(1), progress.Imported)
+
+		_, err = target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+			SessionID: session.SessionID, Family: schema.Name, Sequence: 2,
+			Records: []storagev1.RawRecord{message(2, info.Limits.MaxMessageContentBytes+1)},
+		})
+		tooLarge := typedError[storagev1.TooLargeError](t, err, "message content over MaxMessageContentBytes cannot be split into smaller batches")
+		require.Equal(t, info.Limits.MaxMessageContentBytes, tooLarge.Limit)
+		after, err := target.GetImportProgress(t.Context(), session.SessionID)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), importedCount(after, schema.Name), "a refused batch commits nothing")
+	})
+
 	t.Run("an import keeps message identifiers within the bound SendMessage enforces", func(t *testing.T) {
 		target := newProvider(t)
 		if !slices.Contains(describe(t, target).Contracts, storagev1.StateContract) {
