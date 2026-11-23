@@ -449,6 +449,33 @@ func TestServeRotatesBearerTokens(t *testing.T) {
 		5*time.Second, 10*time.Millisecond, "with no tokens left every call is refused")
 }
 
+// A token file the adapter cannot inspect is a failed reload, not a removed
+// token: the adapter keeps its last good tokens and reports the failure.
+func TestServeKeepsTokensItCannotInspect(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	f := newFixture(t)
+	running := start(t, f, f.bearerConfig(newMemoryArtifacts()))
+	client := bind(t, running.dial(t, nil, newTokenSource("first-token")))
+	require.NoError(t, client.HealthCheck(t.Context()))
+
+	// A listable directory without search permission: the names can be
+	// read, but no file in it can be inspected.
+	require.NoError(t, os.Chmod(f.tokenDir, 0o400))
+	t.Cleanup(func() { _ = os.Chmod(f.tokenDir, 0o700) })
+	require.Eventually(t, func() bool {
+		_, metrics := running.get(t, "/metrics")
+		return strings.Contains(metrics, `orka_storage_server_credential_reloads_total{credential="bearer-tokens",result="failure"}`)
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, client.HealthCheck(t.Context()), "the last good token is still accepted")
+
+	require.NoError(t, os.Chmod(f.tokenDir, 0o700))
+	require.NoError(t, os.Remove(filepath.Join(f.tokenDir, "token")))
+	require.Eventually(t, func() bool { return errors.Is(client.HealthCheck(t.Context()), storagev1.ErrUnauthenticated) },
+		5*time.Second, 10*time.Millisecond, "a token really removed is refused")
+}
+
 // peerSerial returns the serial of the certificate the adapter presents to a
 // new connection.
 func (a *adapter) peerSerial(t *testing.T) int64 {

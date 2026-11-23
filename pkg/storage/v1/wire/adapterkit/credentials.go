@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -148,7 +149,16 @@ func (c *credentialStore) reloadTokens() error {
 		}
 		path := filepath.Join(c.config.BearerTokenDir, entry.Name())
 		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The file was removed since the directory was listed.
+			continue
+		}
+		if err != nil {
+			// A file the adapter cannot inspect is not a removed token:
+			// keep the last good set rather than refuse every call.
+			return c.failed("bearer-tokens", err)
+		}
+		if !info.Mode().IsRegular() {
 			// Mounted Secrets link each key to a regular file; skip
 			// anything else, such as the projection's own directories.
 			continue
