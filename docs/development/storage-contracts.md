@@ -1723,7 +1723,13 @@ artifact-fence cases run only in process.
   know `OVERLOADED`, is refused with `UNAVAILABLE`. The duration limit covers the whole
   call, including the first description of the providers and every message a
   streaming call receives or sends, so an upload or download whose peer stalls,
-  or never sends its request, is ended as `UNAVAILABLE` and frees its slot. A
+  or never sends its request, is ended as `UNAVAILABLE` and frees its slot.
+  Ending a download frees its slot and handler, not the transport: a message
+  the server already queued for a peer that stopped reading stays on its
+  HTTP/2 stream, and the peer receives the status behind it, until the peer
+  reads, resets the stream or closes the connection. A caller therefore
+  bounds a download with its own deadline, on which the client resets the
+  stream. A
   write whose response cannot be sent in time after its provider ran is
   `OUTCOME_UNKNOWN`, since the provider may have committed. The limit
   reaches a provider only through its context's cancellation: a call whose
