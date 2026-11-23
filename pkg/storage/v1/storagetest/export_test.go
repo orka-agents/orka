@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,22 @@ func TestReferenceProviderCopiesRecordBodies(t *testing.T) {
 	imported, err := target.ExportRecords(ctx, storagev1.ExportRequest{Family: "results", Limit: 1})
 	require.NoError(t, err)
 	require.Equal(t, exported, imported.Records[0].Body, "reusing an imported buffer does not change the stored record")
+}
+
+// A changed value differs from the original without growing, so a record at
+// a size bound, such as a message identifier of MaxControlIdentifierBytes,
+// stays valid and conflicts only through the change.
+func TestChangedExportValueKeepsTheSize(t *testing.T) {
+	field := storagev1.ExportField{Name: "namespace", Kind: storagev1.ExportString}
+	for _, value := range []string{strings.Repeat("w", storagev1.MaxControlIdentifierBytes), "x", "é-x", "é"} {
+		changed, ok := changedExportValue(field, value).(string)
+		require.True(t, ok)
+		require.NotEqual(t, value, changed)
+		require.True(t, utf8.ValidString(changed), "%q stays valid UTF-8", value)
+		if strings.ContainsFunc(value, func(r rune) bool { return r < utf8.RuneSelf }) {
+			require.Len(t, changed, len(value), "%q keeps its length", value)
+		}
+	}
 }
 
 // typedError accepts an error a provider returns as a value or a pointer.

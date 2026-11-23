@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
@@ -691,7 +692,18 @@ func changedRecord(t *testing.T, record storagev1.RawRecord) storagev1.RawRecord
 func changedExportValue(field storagev1.ExportField, value any) any {
 	switch typed := value.(type) {
 	case string:
-		return typed + "-changed"
+		// A changed ASCII byte keeps the length, so an identifier at its
+		// bound stays within it and the change is the only difference.
+		for i := range len(typed) {
+			if typed[i] < utf8.RuneSelf {
+				replacement := byte('x')
+				if typed[i] == 'x' {
+					replacement = 'y'
+				}
+				return typed[:i] + string(replacement) + typed[i+1:]
+			}
+		}
+		return typed + "x"
 	case int64:
 		return typed + 1
 	case bool:
