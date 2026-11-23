@@ -280,6 +280,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		progress, err := target.GetImportProgress(t.Context(), session.SessionID)
 		require.NoError(t, err)
 		require.Zero(t, importedCount(progress, schema.Name), "a refused batch commits nothing")
+		require.Zero(t, importedSequence(progress, schema.Name), "a refused batch does not advance the family's batches")
 	})
 
 	t.Run("an import refuses message content over the target's limit", func(t *testing.T) {
@@ -326,6 +327,13 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		after, err := target.GetImportProgress(t.Context(), session.SessionID)
 		require.NoError(t, err)
 		require.Equal(t, int64(1), importedCount(after, schema.Name), "a refused batch commits nothing")
+		require.Equal(t, int64(1), importedSequence(after, schema.Name), "a refused batch does not advance the family's batches")
+		progress, err = target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+			SessionID: session.SessionID, Family: schema.Name, Sequence: 2,
+			Records: []storagev1.RawRecord{message(2, info.Limits.MaxMessageContentBytes)},
+		})
+		require.NoError(t, err, "the import continues with the batch that was refused")
+		require.Equal(t, int64(2), progress.Imported)
 	})
 
 	t.Run("an import keeps message identifiers within the bound SendMessage enforces", func(t *testing.T) {
@@ -380,7 +388,13 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 			after, err := target.GetImportProgress(t.Context(), session.SessionID)
 			require.NoError(t, err)
 			require.Equal(t, int64(1), importedCount(after, schema.Name), "a refused batch commits nothing")
+			require.Equal(t, int64(1), importedSequence(after, schema.Name), "a refused batch does not advance the family's batches")
 		}
+		progress, err = target.ImportRecords(t.Context(), storagev1.ImportRecordsRequest{
+			SessionID: session.SessionID, Family: schema.Name, Sequence: 2, Records: []storagev1.RawRecord{message(2, "")},
+		})
+		require.NoError(t, err, "the import continues with the batch that was refused")
+		require.Equal(t, int64(2), progress.Imported)
 	})
 
 	t.Run("completion compares the import with the manifest", func(t *testing.T) {
@@ -618,6 +632,17 @@ func requireProgressMatches(t *testing.T, manifest []storagev1.FamilyDigest, pro
 		require.Equal(t, family.Family, progress.Families[i].Family)
 		require.Equal(t, family.Count, progress.Families[i].Imported, family.Family)
 	}
+}
+
+// importedSequence returns the last batch a family committed, or -1 when the
+// progress does not list the family.
+func importedSequence(progress storagev1.ImportProgress, family string) int64 {
+	for _, held := range progress.Families {
+		if held.Family == family {
+			return held.Sequence
+		}
+	}
+	return -1
 }
 
 func importedCount(progress storagev1.ImportProgress, family string) int64 {
