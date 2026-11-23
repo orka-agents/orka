@@ -240,8 +240,9 @@ type ImportRecordsRequest struct {
 	// larger than it accepts at once with ErrTooLarge, committing nothing;
 	// Orka then sends the records in smaller batches. A batch of one record
 	// within the provider's [ProviderLimits] is always accepted. A record
-	// beyond those limits, such as a result over MaxResultBytes or an
-	// artifact over MaxArtifactBytes, returns a [TooLargeError] and commits
+	// beyond those limits, such as a result over MaxResultBytes, a message
+	// whose content is over MaxMessageContentBytes or an artifact over
+	// MaxArtifactBytes, returns a [TooLargeError] and commits
 	// nothing, so a target with lower limits than the source refuses the
 	// import instead of truncating it. A message whose namespace, from_task,
 	// to_task or parent_task is over [MaxControlIdentifierBytes] returns

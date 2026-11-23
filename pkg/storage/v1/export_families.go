@@ -28,7 +28,7 @@ import "slices"
 // An import continues each sequence past both its head and the largest
 // imported value, so a value a client may have seen is never issued again.
 //
-// Two fields carry an order a provider may keep implicitly, so a copy keeps
+// Three fields carry an order a provider may keep implicitly, so a copy keeps
 // it even when record keys sort differently:
 //
 //   - security_scan_runs.admission_seq is the order in which runs were
@@ -38,6 +38,12 @@ import "slices"
 //     provider keeps it as the row's rowid rather than a column. An import
 //     keeps the relative order, and a run admitted after the import is newer
 //     than every imported run.
+//   - auth_sessions.issued_seq is the order in which sign-in sessions were
+//     issued: positive and unique, higher for a later session.
+//     CreateAuthSession keeps a person's most recently issued sessions by it
+//     when their creation times are equal. The embedded SQLite provider
+//     keeps it as the row's rowid. An import keeps the relative order, and a
+//     session issued after the import is newer than every imported session.
 //   - execution_events.session_seq is the event's effective session
 //     sequence. An event in a Session always exports a positive one; a
 //     provider that stored an event before it kept session sequences exports
@@ -465,7 +471,7 @@ var exportSchemas = []ExportFamilySchema{
 	stateFamily("auth_sessions",
 		key(stringField("id")), stringField("token_hash"), stringField("issuer"), stringField("subject"),
 		stringField("username"), stringField("namespace"), timeField("created_at"), timeField("expires_at"),
-		optTime("revoked_at"),
+		optTime("revoked_at"), intField("issued_seq"),
 	),
 	stateFamily("sequence_heads",
 		key(stringField("family")), key(stringField("field")), intField("last_value"),

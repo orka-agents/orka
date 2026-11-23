@@ -130,7 +130,9 @@ func (m *memoryExport) describeLocked() storagev1.ProviderInfo {
 		ContractVersion: storagev1.ContractVersion, Contracts: slices.Clone(memoryExportContracts),
 		DatasetID: m.datasetID, DatasetOrigin: m.origin, SchemaVersion: "memory-1",
 		Capabilities: []string{storagev1.ExportCapability}, Durability: storagev1.DurabilityLocalBuffered,
-		State: m.state, ObservedAt: time.Now().UTC(), Limits: storagev1.ProviderLimits{MaxResultBytes: storagev1.MaxResultBytes},
+		State: m.state, ObservedAt: time.Now().UTC(), Limits: storagev1.ProviderLimits{
+			MaxResultBytes: storagev1.MaxResultBytes, MaxMessageContentBytes: storagev1.MaxMessageContentBytes,
+		},
 		Bootstrap: storagev1.DatasetBootstrap{Empty: !m.holdsRecordsLocked()},
 	}
 	if m.source != nil {
@@ -444,12 +446,19 @@ func (m *memoryExport) ClearMigrationMarker(_ context.Context, request storagev1
 	return nil
 }
 
-// checkMemoryImportLimits refuses a result over MaxResultBytes, which the
-// reference provider reports as its limit.
+// checkMemoryImportLimits refuses a result over MaxResultBytes and message
+// content over MaxMessageContentBytes, which the reference provider reports
+// as its limits, and a message identifier over MaxControlIdentifierBytes.
 func checkMemoryImportLimits(schema storagev1.ExportFamilySchema, values []any) error {
 	if schema.Name == "messages" {
 		for i, field := range schema.Fields {
 			switch field.Name {
+			case "content":
+				if value, ok := values[i].(string); ok && len(value) > storagev1.MaxMessageContentBytes {
+					return storagev1.TooLargeError{
+						What: "message content", Size: int64(len(value)), Limit: storagev1.MaxMessageContentBytes,
+					}
+				}
 			case "namespace", "from_task", "to_task", "parent_task":
 				if value, ok := values[i].(string); ok && len(value) > storagev1.MaxControlIdentifierBytes {
 					return storagev1.ValidationErrorf("message %s exceeds %d bytes", field.Name, storagev1.MaxControlIdentifierBytes)
