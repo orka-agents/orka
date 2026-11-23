@@ -20,7 +20,17 @@ func TestServeReturnsWhenTheShutdownGracePeriodPasses(t *testing.T) {
 	finished := make(chan struct{})
 	t.Cleanup(func() {
 		close(settling)
-		<-finished
+		// Only a call that reached the provider has a handler to wait for.
+		select {
+		case <-entered:
+		default:
+			return
+		}
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("the settling handler did not finish")
+		}
 	})
 	provider.hold = func(ctx context.Context) {
 		defer close(finished)
@@ -39,12 +49,13 @@ func TestServeReturnsWhenTheShutdownGracePeriodPasses(t *testing.T) {
 	running := start(t, f, config)
 	client := bind(t, running.dial(t, nil, newTokenSource("first-token")))
 
+	saved := make(chan error, 1)
 	go func() {
-		_ = client.SaveArtifact(t.Context(), storagev1.SaveArtifactRequest{
+		saved <- client.SaveArtifact(t.Context(), storagev1.SaveArtifactRequest{
 			Owner: storagev1.ArtifactOwner{Namespace: "n", TaskName: "t"}, Filename: "f", Data: []byte("x"),
 		})
 	}()
-	<-entered
+	awaitEntry(t, entered, saved)
 	stopped := time.Now()
 	running.stop()
 	select {

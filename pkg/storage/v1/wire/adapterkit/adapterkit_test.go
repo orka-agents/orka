@@ -371,6 +371,20 @@ func (a *adapter) waitReady(t *testing.T, ready bool) {
 	}, 5*time.Second, 10*time.Millisecond, "readiness %v", ready)
 }
 
+// awaitEntry waits for a call to reach the provider's hold. It fails the
+// test with the call's error if the call ends first, and after a deadline if
+// it never arrives, so a call refused before the provider never hangs a test.
+func awaitEntry(t *testing.T, entered <-chan struct{}, result <-chan error) {
+	t.Helper()
+	select {
+	case <-entered:
+	case err := <-result:
+		t.Fatalf("the call ended before it reached the provider: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call never reached the provider")
+	}
+}
+
 // The adapter serves the artifact store over TLS with bearer
 // authentication, through the generated client. The full artifacts.v1 suite
 // runs over the wire against the SQLite provider.
@@ -583,6 +597,9 @@ func TestServeStopsGracefully(t *testing.T) {
 	f := newFixture(t)
 	provider := newMemoryArtifacts()
 	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
 	provider.hold = func(context.Context) {
 		close(entered)
 		<-release
@@ -597,7 +614,7 @@ func TestServeStopsGracefully(t *testing.T) {
 			Owner: storagev1.ArtifactOwner{Namespace: "n", TaskName: "t"}, Filename: "f", Data: []byte("x"),
 		})
 	}()
-	<-entered
+	awaitEntry(t, entered, saved)
 	running.stop()
 	running.waitReady(t, false)
 	select {
@@ -605,7 +622,7 @@ func TestServeStopsGracefully(t *testing.T) {
 		t.Fatalf("the adapter stopped with a call in progress: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(release)
+	unblock()
 	require.NoError(t, <-saved, "the call in progress finishes")
 	select {
 	case err := <-running.done:
@@ -650,7 +667,7 @@ func TestSettleContextOutlivesTheCaller(t *testing.T) {
 			Owner: storagev1.ArtifactOwner{Namespace: "n", TaskName: "t"}, Filename: "f", Data: []byte("x"),
 		})
 	}()
-	<-entered
+	awaitEntry(t, entered, saved)
 	cancel()
 	got := <-result
 	require.True(t, got.canceled, "the caller's context ended")
