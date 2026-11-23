@@ -33,7 +33,7 @@ func testEnvelope(t *testing.T, method string, args ...any) storagev1.WriteEnvel
 	digest, err := storagev1.RequestDigest(method, args...)
 	require.NoError(t, err)
 	return storagev1.WriteEnvelope{
-		DatasetID:     "dataset-1",
+		DatasetID:     testDataset,
 		Fence:         storagev1.ControllerEpochFence{Name: "orka", Epoch: 7, HolderID: "holder"},
 		OperationID:   "operation-" + method,
 		RequestDigest: digest,
@@ -164,6 +164,33 @@ func TestServerRefusesARequestThatDoesNotMatchItsDigest(t *testing.T) {
 	err = client.SavePlan(storagev1.WithWriteEnvelope(t.Context(), renamed), "n", "t", plan)
 	require.ErrorIs(t, err, storagev1.ErrValidation, "the digest covers the method name")
 	require.Empty(t, provider.callsTo("SavePlan"))
+}
+
+// A write's envelope names the dataset its call names. The client refuses
+// one for another dataset before sending, and the server refuses it before
+// the provider runs, so a write never commits to a dataset other than the one
+// its response names.
+func TestWriteEnvelopeMustNameTheCallsDataset(t *testing.T) {
+	provider := newRecordingProvider()
+	plan := &storagev1.PlanState{Summary: "s"}
+	other := testEnvelope(t, "SavePlan", "n", "t", plan)
+	other.DatasetID = "dataset-other"
+
+	client := wiretest.Serve(t, provider)
+	err := client.SavePlan(storagev1.WithWriteEnvelope(t.Context(), other), "n", "t", plan)
+	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
+	require.ErrorContains(t, err, "other than the client's", "the client refuses it before sending")
+	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "the write was never sent")
+	require.Empty(t, provider.callsTo("SavePlan"))
+
+	encoded, err := proto.Marshal(&storagepb.WriteEnvelope{DatasetId: "dataset-other", OperationId: "operation-1"})
+	require.NoError(t, err)
+	ctx := metadata.AppendToOutgoingContext(contractContext(t.Context()), wire.HeaderEnvelope, string(encoded))
+	_, err = storagepb.NewResultsClient(wiretest.Dial(t, provider)).SavePlan(ctx, &storagepb.SavePlanRequest{Namespace: "n", TaskName: "t"})
+	code, reason := reasonOf(t, err)
+	require.Equal(t, codes.FailedPrecondition, code)
+	require.Equal(t, wire.ReasonDatasetMismatch, reason)
+	require.Empty(t, provider.callsTo("SavePlan"), "the server refuses it before the provider runs")
 }
 
 // Only a write carries an envelope. The client leaves it off other calls,

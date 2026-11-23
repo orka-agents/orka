@@ -1506,7 +1506,10 @@ artifact-fence cases run only in process.
   `orka-storage-envelope-bin`, and the server puts it in the
   provider's context with `WithWriteEnvelope`. A read or an administrative
   call never carries one: the client leaves it off, and the server refuses one
-  (`VALIDATION`). A call made under a Task data fence carries the
+  (`VALIDATION`). A write's envelope names the dataset its call names: the
+  bound client refuses one for another dataset before sending, and the server
+  refuses it before the provider runs (`DATASET_MISMATCH`), so a write never
+  commits to a dataset other than the one its response names. A call made under a Task data fence carries the
   `TaskDataFence` as the binary header `orka-storage-task-data-fence-bin`, and
   the server puts it in the provider's context with `WithTaskDataFence`.
 - **Request digests.** Before the provider runs a write that carries an
