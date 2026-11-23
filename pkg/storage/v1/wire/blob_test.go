@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/stats"
+	"google.golang.org/protobuf/proto"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
@@ -208,6 +209,39 @@ func TestUploadsAreCheckedBeforeTheProviderRuns(t *testing.T) {
 	calls := provider.callsTo("SaveResult")
 	require.Len(t, calls, 1)
 	require.True(t, bytes.Equal(data, calls[0].args[2].([]byte)))
+}
+
+// An upload's envelope names the dataset its call names, as a unary write's
+// does: the client refuses one for another dataset before it streams any of
+// the blob, and the server refuses it before the provider runs.
+func TestUploadEnvelopesMustNameTheCallsDataset(t *testing.T) {
+	provider := newRecordingProvider()
+	request := storagev1.SaveArtifactRequest{
+		Owner:    storagev1.ArtifactOwner{Namespace: "n", TaskName: "t", TaskUID: "uid"},
+		Filename: "report.bin", ContentType: "application/octet-stream", Data: pattern(2*wire.MaxChunkBytes + 3),
+	}
+	other := testEnvelope(t, "SaveArtifact", request)
+	other.DatasetID = "dataset-other"
+
+	client := wiretest.Serve(t, serveBoth(provider))
+	err := client.SaveArtifact(storagev1.WithWriteEnvelope(t.Context(), other), request)
+	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
+	require.ErrorContains(t, err, "other than the client's", "the client refuses it before sending")
+	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "the upload was never sent")
+	require.Empty(t, provider.callsTo("SaveArtifact"))
+
+	encoded, err := proto.Marshal(&storagepb.WriteEnvelope{DatasetId: "dataset-other", OperationId: "operation-1"})
+	require.NoError(t, err)
+	data := pattern(wire.MaxChunkBytes + 1)
+	ctx := metadata.AppendToOutgoingContext(uploadContext(t.Context(), len(data), digestOf(data)),
+		wire.HeaderEnvelope, string(encoded))
+	conn := wiretest.Dial(t, wire.ServerConfig{State: provider, Artifacts: provider})
+	code, reason := reasonOf(t, rawUpload(ctx, conn,
+		&storagepb.SaveResultRequest{Namespace: "n", TaskName: "t", Data: data[:wire.MaxChunkBytes]},
+		&storagepb.SaveResultRequest{Data: data[wire.MaxChunkBytes:]}))
+	require.Equal(t, codes.FailedPrecondition, code)
+	require.Equal(t, wire.ReasonDatasetMismatch, reason)
+	require.Empty(t, provider.callsTo("SaveResult"), "the server refuses it before the provider runs")
 }
 
 // A nested blob belongs to a record the first message carries; a sender
