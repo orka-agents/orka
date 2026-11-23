@@ -191,6 +191,60 @@ func TestServerForgetsItsDatasetWhenTheProvidersDisagree(t *testing.T) {
 	require.Len(t, state.callsTo("SavePlan"), 2)
 }
 
+// gatedProvider describes the dataset it holds when Describe starts and,
+// while gate is set, waits on it before answering.
+type gatedProvider struct {
+	separateProvider
+	gate    *atomic.Pointer[chan struct{}]
+	entered chan struct{}
+}
+
+func (p gatedProvider) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	info, err := p.separateProvider.Describe(ctx)
+	if gate := p.gate.Load(); gate != nil {
+		p.entered <- struct{}{}
+		<-*gate
+	}
+	return info, err
+}
+
+// A read describes the providers before it runs. If a newer description
+// clears the serving dataset meanwhile, the older one no longer admits the
+// read, even though it found the dataset the read names.
+func TestServerRefusesReadsWhoseDescriptionWasSuperseded(t *testing.T) {
+	state := newRecordingProvider()
+	artifacts := gatedProvider{separateProvider: newSeparateProvider(testDataset),
+		gate: &atomic.Pointer[chan struct{}]{}, entered: make(chan struct{}, 1)}
+	server, err := wire.NewServer(wire.ServerConfig{State: state, Artifacts: artifacts})
+	require.NoError(t, err)
+	client := wire.NewClient(serveInsecure(t, server), boundConfig)
+	require.NoError(t, server.Refresh(t.Context()))
+
+	gate := make(chan struct{})
+	artifacts.gate.Store(&gate)
+	read := make(chan error, 1)
+	go func() {
+		_, err := client.GetPlan(t.Context(), "n", "t")
+		read <- err
+	}()
+	select {
+	case <-artifacts.entered:
+	case err := <-read:
+		t.Fatalf("the read ended before its description: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the read never described the providers")
+	}
+	artifacts.gate.Store(nil)
+	artifacts.dataset.Store(new("replacement-artifacts"))
+	require.Error(t, server.Refresh(t.Context()))
+	require.Empty(t, server.DatasetID())
+
+	close(gate)
+	err = <-read
+	require.ErrorIs(t, err, storagev1.ErrUnavailable, "the superseded description admits nothing")
+	require.Empty(t, state.callsTo("GetPlan"))
+}
+
 // A gRPC server built with the storage options authenticates every call and
 // refuses any method the storage protocol does not define, even one another
 // service registered on the same server.

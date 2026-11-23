@@ -697,6 +697,11 @@ func (s *Server) servingDataset(ctx context.Context, m *method, header metadata.
 	if err != nil {
 		return "", err
 	}
+	if current := s.DatasetID(); current != info.DatasetID {
+		// A newer description replaced or cleared the dataset this one
+		// found, so the call is not checked against it.
+		return "", errors.New("a newer description of the storage providers superseded this one")
+	}
 	return info.DatasetID, nil
 }
 
