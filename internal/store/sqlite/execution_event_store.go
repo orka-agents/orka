@@ -349,17 +349,24 @@ func sameExecutionEventIdentity(stored, requested store.ExecutionEvent) bool {
 		same(stored.ToolCallID, requested.ToolCallID)
 }
 
+// executionEventByDedupeKeySQL reads the event a stream's deduplication key
+// names. SQLite uses a partial index only when the query's WHERE clause
+// implies the index's own, and a bound key does not imply dedupe_key <> ”.
+// Without that term the lookup reads every event of the stream, inside the
+// append's write transaction, so each append to a stream costs more than the
+// last.
+const executionEventByDedupeKeySQL = `SELECT id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name,
+ agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at
+ FROM execution_events
+ WHERE namespace = ? AND stream_type = ? AND stream_id = ? AND dedupe_key = ? AND dedupe_key <> ''`
+
 func existingSQLiteExecutionEventByDedupeKey(
 	ctx context.Context,
 	conn taskDataExecutor,
 	event store.ExecutionEvent,
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
-	row := conn.QueryRowContext(ctx,
-		`SELECT id, namespace, stream_type, stream_id, seq, type, severity, task_name, session_name,
-		 agent_name, tool_name, tool_call_id, summary, content_json, content_text, truncation_json, created_at
-		 FROM execution_events
-		 WHERE namespace = ? AND stream_type = ? AND stream_id = ? AND dedupe_key = ?`,
+	row := conn.QueryRowContext(ctx, executionEventByDedupeKeySQL,
 		event.Namespace, event.StreamType, event.StreamID, dedupeKey,
 	)
 	existing, err := scanExecutionEvent(row)

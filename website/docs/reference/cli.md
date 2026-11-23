@@ -369,7 +369,7 @@ ID            STATUS   TOOL               ARGUMENTS                             
 Administrators can run a command in, or copy a single file out of or into, the
 execution workspace of a running class-backed ACP Task. These commands are off
 by default. They need the controller flag, a class opt-in, and dedicated
-`tasks/exec` / `tasks/files` permissions. Every call is audited:
+`tasks/exec` / `tasks/files` permissions. Every authenticated call is audited:
 
 ```bash
 orka task exec my-task -- git status
@@ -433,6 +433,24 @@ These commands need a personal identity (OIDC or context token). A
 ServiceAccount token, such as the one `orka dashboard` creates, has no accounts to
 link; the CLI explains the resulting `403`. `--no-open` prints the consent URL
 without opening a browser and `--no-wait` returns once consent has started.
+
+## Desktop AHP clients
+
+`orka ahp connect` mints an Agent Host Protocol connection token for the
+signed-in person and prints the WebSocket URL a desktop AHP client adds as a
+remote agent host (see [Agent Host Protocol clients](../operations/agent-host-protocol.md#connect-a-desktop-client)).
+Only the URL goes to standard output, so it can be piped to a clipboard tool:
+
+```bash
+orka ahp connect --name work-laptop --url https://orka.example.com --token "$OIDC_TOKEN" | pbcopy
+orka ahp tokens list            # active tokens; --all adds expired and revoked ones
+orka ahp tokens revoke ahpt_<id>
+```
+
+These commands need your own OIDC sign-in; context tokens and ServiceAccount
+tokens are refused. `--name` defaults to this machine's host name, `--ttl` to the server's
+default lifetime (`720h`), and `--url` to `--server`. A plaintext `ws://` URL for
+any host but this machine is refused unless `--insecure` is given.
 
 ## Resource management commands
 

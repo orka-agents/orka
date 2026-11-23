@@ -1,7 +1,10 @@
 package usage_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,5 +170,108 @@ func TestUsageAggregateCacheAvailabilityRequiresEveryMeasurement(t *testing.T) {
 			require.Equal(t, tc.read, report.Summary.CachedInputTokens, "retain the known subtotal even when aggregate coverage is unavailable")
 			require.Equal(t, tc.written, report.Summary.CacheWriteInputTokens)
 		})
+	}
+}
+
+// A session counter spans its turns, so a gain on it may belong to any turn
+// of its session. A counter a hidden turn reported on, or a session counter
+// of a session a hidden turn continued, credits nothing to visible turns and
+// shows the gap; other counters are untouched.
+func TestUsageHiddenTurnsStayOffASharedCounter(t *testing.T) {
+	count := func(n int64) *int64 { return &n }
+	type report struct {
+		task   string
+		status string
+		input  *int64
+	}
+	first := []report{{"first", store.UsageStatusStarted, count(0)}, {"first", store.UsageStatusCompleted, count(100)}}
+	for _, tc := range []struct {
+		name          string
+		hiddenSession string
+		reports       []report
+		visible       int64
+	}{
+		{name: "hidden turn reports on the counter", hiddenSession: "shared", visible: 0, reports: append(slices.Clone(first),
+			report{"hidden", store.UsageStatusCompleted, count(180)}, report{"second", store.UsageStatusCompleted, count(250)})},
+		{name: "hidden turn reports on the counter, recorded in another session", hiddenSession: "elsewhere", visible: 0,
+			reports: append(slices.Clone(first), report{"hidden", store.UsageStatusCompleted, count(180)},
+				report{"second", store.UsageStatusCompleted, count(250)})},
+		{name: "hidden turn reports the first total", hiddenSession: "elsewhere", visible: 0, reports: []report{
+			{"first", store.UsageStatusStarted, nil}, {"hidden", store.UsageStatusCompleted, count(500)}}},
+		{name: "hidden turn in the session never reports", hiddenSession: "shared", visible: 0, reports: append(slices.Clone(first),
+			report{"second", store.UsageStatusCompleted, count(250)})},
+		{name: "hidden turn in the session before a baseline", hiddenSession: " shared ", visible: 0, reports: []report{
+			{"first", store.UsageStatusCompleted, count(500)}}},
+		{name: "hidden turn in another session", hiddenSession: "elsewhere", visible: 250, reports: append(slices.Clone(first),
+			report{"second", store.UsageStatusCompleted, count(250)})},
+		// Retention pruned the reporter's row but kept its usage: its own
+		// usage stays hidden, and the later turn's gain is the later turn's.
+		{name: "pruned reporter", hiddenSession: "elsewhere", visible: 150, reports: []report{
+			{"pruned", store.UsageStatusCompleted, count(100)}, {"second", store.UsageStatusCompleted, count(250)}}},
+		{name: "no hidden turn keeps the baseline", hiddenSession: "elsewhere", visible: 600, reports: []report{
+			{"first", store.UsageStatusCompleted, count(500)}, {"second", store.UsageStatusCompleted, count(600)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, filter := reportFixture()
+			data.Tasks = []store.UsageTask{
+				{Namespace: "team", TaskUID: "first", TaskName: "first", WorkID: "work", Phase: "Succeeded", SessionName: "shared", StartedAt: filter.From},
+				{Namespace: "team", TaskUID: "hidden", TaskName: "hidden", WorkID: "work", Phase: "Succeeded", SessionName: tc.hiddenSession,
+					StartedAt: filter.From},
+				{Namespace: "team", TaskUID: "second", TaskName: "second", WorkID: "work", Phase: "Succeeded", SessionName: "shared", StartedAt: filter.From},
+			}
+			data.HiddenTasks = map[string]bool{"team/hidden": true, "team/pruned": true}
+			for i, r := range tc.reports {
+				data.Observations = append(data.Observations, store.UsageObservation{Namespace: "team", TaskUID: r.task, ID: fmt.Sprint("report-", i),
+					SessionName: "shared", CounterID: "shared", Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: r.status,
+					InputTokens: r.input, ObservedAt: filter.From.Add(time.Duration(i+1) * time.Minute)})
+			}
+			report, err := usage.Build(data, filter)
+			require.NoError(t, err)
+			total := report.Summary.InputTokens
+			for _, other := range report.OtherWork {
+				total += other.Totals.InputTokens
+			}
+			require.Equal(t, tc.visible, total)
+			encoded, err := json.Marshal(report)
+			require.NoError(t, err)
+			require.Equal(t, tc.visible == 0, strings.Contains(string(encoded), "Shared with a Task this report does not show"), "the gap shows")
+			// A visible Task's measurement shows its latest report.
+			for _, work := range report.Works {
+				for _, task := range work.Tasks {
+					if task.TaskUID != "first" || len(task.Measurements) == 0 {
+						continue
+					}
+					last := ""
+					for _, r := range tc.reports {
+						if r.task == "first" {
+							last = r.status
+						}
+					}
+					if last != "" {
+						require.Equal(t, last, task.Measurements[0].Status)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A session whose first total is hidden needs no HiddenTasks from the caller.
+func TestBuildHidesASessionBaselineWithoutHiddenTasks(t *testing.T) {
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	in := int64(4242)
+	data := store.UsageData{
+		Tasks: []store.UsageTask{{Namespace: "default", TaskUID: "turn", TaskName: "turn", SessionName: "ahp-s", Phase: "Succeeded", StartedAt: start}},
+		Observations: []store.UsageObservation{{ID: "o", Namespace: "default", TaskUID: "turn", SessionName: "ahp-s", CounterID: "c",
+			Scope: store.UsageScopeSession, Source: store.UsageSourceAgent, Status: store.UsageStatusCompleted, ObservedAt: start.Add(time.Minute), InputTokens: &in}},
+		HiddenSessionBaselines: map[string]bool{"default/ahp-s": true},
+	}
+	report, err := usage.Build(data, store.UsageFilter{From: start.Add(-time.Hour), Until: start.Add(time.Hour), AsOf: start.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(report)
+	if strings.Contains(string(encoded), "4242") {
+		t.Fatalf("the hidden first total was shown: %s", encoded)
 	}
 }

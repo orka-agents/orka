@@ -106,9 +106,9 @@ metrics-specific endpoint that is not worker-reachable drops supervisor metrics
 rather than falling back to the generic collector; so does a metrics setting the
 supervisor would reject.
 
-Substrate native runtimes accept 32 environment entries per container and Orka's
-own settings use most of them, leaving three for supervisor telemetry. Orka
-therefore passes the fewest settings that keep each signal's SDK meaning:
+Orka passes the fewest settings that keep each signal's SDK meaning, because
+Substrate native runtimes accept only 32 environment entries per container and
+Orka's own settings use most of them:
 
 - One generic endpoint when it resolves to both signals' URLs, otherwise one
   signal-specific endpoint per exported signal. A generic OTLP/HTTP base URL
@@ -117,13 +117,11 @@ therefore passes the fewest settings that keep each signal's SDK meaning:
 - A protocol, insecure or compression value that both signals share, once, under
   its generic name. An explicit `grpc` protocol is the supervisor's default and
   is not passed.
-- When traces and metrics together would need more than three entries, for
-  example separate OTLP/HTTP collectors per signal, supervisor metrics are
-  dropped and traces are kept.
 
-A dropped signal never falls back to a generic endpoint. On a native runtime the
-three-entry budget does not apply: Orka fits telemetry last, from every
-configured signal, into the entries its other settings leave. A runtime whose
+Pod-backed runtimes have no environment limit and receive every configured
+signal. A dropped signal never falls back to a generic endpoint. On a native
+runtime Orka fits telemetry last, from every configured signal, into the entries
+its other settings leave; a runtime that cannot suspend has three. A runtime whose
 workspace can suspend uses two more, and empty model limits are omitted. When
 traces and metrics do not fit, metrics are dropped; when traces alone do not
 fit, supervisor telemetry is left out rather than publishing a workload the
@@ -441,8 +439,11 @@ Validation fails closed. The controller refuses to start, and admission reports
 the pool `Degraded`, when an endpoint is not an absolute `http(s)` URL, names an
 IP address, a single-label or wildcard host, or conflicts with a core origin on
 the same host and port. Native runtimes cannot resolve a short
-`<service>.<namespace>.svc` Service name, so admission also reports the pool
-`Degraded` for one. Use a fully qualified in-cluster name such as
+`<service>.<namespace>.svc` Service name, so the controller also refuses to
+start with one. The rule follows the endpoint scheme, while the OTLP exporters
+apply `OTEL_EXPORTER_OTLP_INSECURE` (or its per-signal form) after it, so the
+controller also refuses to start when that setting contradicts the scheme:
+`true` with `https://`, or `false` with `http://`. Use a fully qualified in-cluster name such as
 `http://otel-collector.otel.svc.cluster.local:4317`, substituting your cluster
 domain if it is not `cluster.local`. Scheme-less gRPC targets
 (`collector:4317`) are rejected because their transport cannot be determined.

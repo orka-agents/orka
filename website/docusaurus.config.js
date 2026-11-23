@@ -37,7 +37,26 @@ const config = {
     },
   },
 
-  themes: ['@docusaurus/theme-mermaid'],
+  themes: [
+    '@docusaurus/theme-mermaid',
+    // Search is built into the static site at build time and runs in the browser, so it needs no
+    // hosted index, API key or third-party request. The index exists only in production builds.
+    [
+      require.resolve('@easyops-cn/docusaurus-search-local'),
+      /** @type {import('@easyops-cn/docusaurus-search-local').PluginOptions} */
+      ({
+        hashed: true,
+        language: ['en'],
+        indexDocs: true,
+        indexBlog: false,
+        indexPages: false,
+        docsRouteBasePath: '/docs',
+        highlightSearchTermsOnTargetPage: true,
+        explicitSearchResultPath: true,
+        searchBarShortcutHint: true,
+      }),
+    ],
+  ],
 
   // Self-hosted Geist and Geist Mono (no runtime font CDN).
   clientModules: [require.resolve('./src/clientModules/fonts.js')],

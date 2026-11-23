@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 )
 
 func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
@@ -40,7 +41,7 @@ func TestToolSchemaPreservedOnProviderWire(t *testing.T) {
 			}
 			captured <- request.Tools[0].InputSchema
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"msg-test","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+			_ = anthropictest.WriteMessage(w, `{"id":"msg-test","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 		}))
 		provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
 		if err != nil {

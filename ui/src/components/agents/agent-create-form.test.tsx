@@ -438,7 +438,7 @@ describe('AgentCreateForm', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Agent created'))
     expect(submitted.spec.runtime).toBeUndefined()
     expect(submitted.spec.providerRef).toEqual({ name: 'anthropic-prod' })
-    expect(submitted.spec.model).toEqual({ name: 'native-model', temperature: 0.7 })
+    expect(submitted.spec.model).toEqual({ name: 'native-model' })
     expect(submitted.spec.systemPrompt).toEqual(withPrompts ? { inline: 'Native AI @role' } : undefined)
     expect(submitted.spec.soul).toEqual(withPrompts ? { inline: 'Native AI @persona' } : undefined)
     expect(mockNavigate).toHaveBeenCalledWith({ to: '/agents' })
