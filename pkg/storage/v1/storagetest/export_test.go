@@ -463,6 +463,9 @@ func (m *memoryExport) MarkDatasetMigrated(_ context.Context, request storagev1.
 	if request.DatasetID != m.datasetID {
 		return storagev1.MigrationMarker{}, storagev1.ErrDatasetMismatch
 	}
+	if m.state == storagev1.DatasetImporting {
+		return storagev1.MigrationMarker{}, fmt.Errorf("%w: the dataset is importing", storagev1.ErrNotReady)
+	}
 	if marker, ok := m.markers[request.Contract]; ok {
 		if marker.TargetDatasetID != request.TargetDatasetID {
 			return storagev1.MigrationMarker{}, storagev1.ConflictErrorf("the contract part was migrated to another dataset")

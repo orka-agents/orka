@@ -430,6 +430,10 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		session, err := target.BeginImport(t.Context(), request)
 		require.NoError(t, err)
 		importDataset(t, target, session.SessionID, manifest, records, false)
+		_, err = target.MarkDatasetMigrated(t.Context(), storagev1.MigrationMarkerRequest{
+			DatasetID: session.DatasetID, Contract: request.Contracts[0], TargetDatasetID: "target-dataset",
+		})
+		require.ErrorIs(t, err, storagev1.ErrNotReady, "an importing dataset is not a migration source")
 		require.NoError(t, target.AbortImport(t.Context(), session.SessionID))
 
 		aborted := describe(t, target)
@@ -437,6 +441,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		require.Equal(t, storagev1.DatasetReady, aborted.State)
 		require.Nil(t, aborted.Source)
 		require.Nil(t, aborted.Binding)
+		require.Empty(t, aborted.MigratedTo, "an aborted import leaves no marker")
 		require.True(t, aborted.Bootstrap.Empty, "an aborted import leaves a dataset that reports itself empty")
 		require.NotEqual(t, session.DatasetID, aborted.DatasetID, "an aborted import's dataset ID is not reused")
 		require.NotEqual(t, empty.DatasetID, aborted.DatasetID)
