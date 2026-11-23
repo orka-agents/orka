@@ -1374,6 +1374,7 @@ func TestSubstrateReleaseWaitsWhenSuspendReturnsAfterStartingTransition(t *testi
 func TestSubstrateDescribeDerivesRetainedFromSuspendedActor(t *testing.T) {
 	control := &recordingSubstrateControlClient{
 		getStatuses: []string{substrateStatusSuspended},
+		templateUID: "template-uid",
 	}
 	executor := &SubstrateWorkspaceExecutor{
 		control:    control,
@@ -1390,6 +1391,10 @@ func TestSubstrateDescribeDerivesRetainedFromSuspendedActor(t *testing.T) {
 	}
 	if !got.Retained || got.Phase != PhaseRetained {
 		t.Fatalf("Describe() = %#v, want retained phase derived from suspended actor", got)
+	}
+	// Callers compare it with the template the name now resolves to.
+	if got.Template.UID != "template-uid" {
+		t.Fatalf("Describe() template = %#v, want the Actor's template identity", got.Template)
 	}
 }
 
@@ -1422,6 +1427,7 @@ type recordingSubstrateControlClient struct {
 	actors            []substrateActor
 	templateName      string
 	templateNamespace string
+	templateUID       string
 	deleted           bool
 	deleteErrs        []error
 	deletedActorIDs   []string
@@ -1453,6 +1459,7 @@ func (c *recordingSubstrateControlClient) GetActor(ctx context.Context, actorID 
 		ActorUID:          "test-actor-uid",
 		TemplateNamespace: templateNamespace,
 		TemplateName:      templateName,
+		TemplateUID:       c.templateUID,
 		Status:            status,
 		PodNamespace:      "ate-demo",
 		PodName:           "ateom-pod-1",

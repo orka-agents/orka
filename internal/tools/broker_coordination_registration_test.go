@@ -188,6 +188,26 @@ func TestRegisterBrokeredCoordinationToolsIsIdempotentAndBounded(t *testing.T) {
 	}
 }
 
+// BrokeredBuiltInToolNames classifies exactly what the three brokered
+// registrations register, so authorization cannot drift from the broker.
+func TestBrokeredBuiltInToolNamesMatchBrokeredRegistrations(t *testing.T) {
+	registry := NewRegistry()
+	if err := RegisterBrokeredCoordinationTools(registry, newFakeClient()); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterBrokeredWebTools(registry); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterBrokeredConnectionTools(registry); err != nil {
+		t.Fatal(err)
+	}
+	got := BrokeredBuiltInToolNames()
+	slices.Sort(got)
+	if want := registry.Names(); !slices.Equal(got, want) {
+		t.Fatalf("BrokeredBuiltInToolNames() = %v, want the registered broker tools %v", got, want)
+	}
+}
+
 func TestBrokeredMemoryToolsUseRequestScopedStores(t *testing.T) {
 	t.Setenv(envOrkaControllerURL, "http://controller-env-must-not-be-used.invalid")
 	t.Setenv(envOrkaTaskNamespace, "wrong-namespace")

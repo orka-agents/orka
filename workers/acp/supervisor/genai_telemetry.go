@@ -31,6 +31,12 @@ const (
 	// plus markers for calls already recorded. Calls past it are not observed.
 	maxPromptGenAITools = harnessv2.MaxRuntimeSessionTombstoneOperations
 
+	// maxGenAIMetricToolNames bounds how many distinct adapter tool names one
+	// supervisor uses as metric labels. Each name is a histogram series, and
+	// MCP and adapter tool names are unbounded. Later names are recorded
+	// under their ACP tool kind, or the fallback; spans keep every name.
+	maxGenAIMetricToolNames = 64
+
 	genAIErrorTypeTool       = "tool_error"
 	genAIErrorTypeIncomplete = "incomplete"
 	genAIErrorTypeCancelled  = "cancelled"
@@ -62,6 +68,10 @@ type supervisorGenAI struct {
 	agentName           string
 	providerName        string
 	requestModel        string
+
+	metricToolNamesMu sync.Mutex
+	// metricToolNames holds the adapter tool names admitted as metric labels.
+	metricToolNames map[string]struct{}
 }
 
 func newSupervisorGenAI(tracer trace.Tracer, meter metric.Meter, providerKind, model string) *supervisorGenAI {
@@ -229,7 +239,7 @@ func (p *promptGenAI) recordToolLocked(id string, tool *promptGenAITool, end tim
 	if p.g.toolDuration != nil {
 		attributes := []attribute.KeyValue{
 			attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
-			attribute.String(genai.AttrToolName, name),
+			attribute.String(genai.AttrToolName, p.g.metricToolName(name, tool.kind)),
 			attribute.String(genai.AttrToolType, toolType),
 		}
 		if errorType != "" {
@@ -244,6 +254,32 @@ func (p *promptGenAI) recordToolLocked(id string, tool *promptGenAITool, end tim
 // tool kind. Titles are free text and are never used.
 func genAIToolName(name, kind string) string {
 	if genAIToolNamePattern.MatchString(name) {
+		return name
+	}
+	if acpToolKinds[kind] {
+		return kind
+	}
+	return genAIToolNameFallback
+}
+
+// metricToolName returns the tool name to use as a metric label: the name
+// itself while this supervisor has admitted fewer than
+// maxGenAIMetricToolNames adapter names, then the ACP tool kind or the
+// fallback. ACP kinds and the fallback are a closed set and always pass.
+func (g *supervisorGenAI) metricToolName(name, kind string) string {
+	if acpToolKinds[name] {
+		return name
+	}
+	g.metricToolNamesMu.Lock()
+	defer g.metricToolNamesMu.Unlock()
+	if _, ok := g.metricToolNames[name]; ok {
+		return name
+	}
+	if len(g.metricToolNames) < maxGenAIMetricToolNames {
+		if g.metricToolNames == nil {
+			g.metricToolNames = make(map[string]struct{})
+		}
+		g.metricToolNames[name] = struct{}{}
 		return name
 	}
 	if acpToolKinds[kind] {

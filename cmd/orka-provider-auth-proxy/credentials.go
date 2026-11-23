@@ -78,11 +78,15 @@ func (s *bearerTokenStore) isReady() bool {
 }
 
 func (s *bearerTokenStore) authorized(values []string) bool {
+	return s.authorizedScheme(values, "Bearer")
+}
+
+func (s *bearerTokenStore) authorizedScheme(values []string, wantScheme string) bool {
 	if len(values) != 1 {
 		return false
 	}
 	scheme, credential, ok := strings.Cut(values[0], " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || credential == "" || strings.ContainsAny(credential, " \t\r\n") {
+	if !ok || !strings.EqualFold(scheme, wantScheme) || credential == "" || strings.ContainsAny(credential, " \t\r\n") {
 		return false
 	}
 	active := s.snapshot.Load()

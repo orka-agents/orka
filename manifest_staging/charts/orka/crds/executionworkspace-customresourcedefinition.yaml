@@ -434,6 +434,22 @@ spec:
                     - instanceID
                     - requestRevision
                     type: object
+                  notAfter:
+                    description: |-
+                      NotAfter is the latest time at which a provider may start the authorized
+                      Suspend. Core sets it when the data-preserving window is bounded, such as
+                      a worker eviction deadline. A provider that has not started the
+                      suspension by NotAfter, less the SDK's SuspendDeadlineClockSkew margin,
+                      must not start it: it stops the exact instance instead, publishes no
+                      retained data, and reports SuspendDeadlineExceeded. A suspension started
+                      earlier may finish. Absent means the authorization does not expire.
+
+                      It is written only with a Suspend authorization. While the action stays
+                      Suspend, core may add it or move it earlier, never remove or extend it.
+                      Superseding Suspend with Delete may keep it unchanged or clear it;
+                      Delete ignores it. A Stop authorization never carries it.
+                    format: date-time
+                    type: string
                   sequence:
                     format: int64
                     minimum: 1
@@ -443,6 +459,9 @@ spec:
                 - identity
                 - sequence
                 type: object
+                x-kubernetes-validations:
+                - message: notAfter bounds only a Suspend authorization
+                  rule: self.action != 'Stop' || !has(self.notAfter)
               service:
                 description: Service declares requested endpoints for Service mode.
                 properties:
@@ -10530,6 +10549,20 @@ spec:
                 && self.retirement.sequence == oldSelf.retirement.sequence && self.retirement.identity
                 == oldSelf.retirement.identity && (self.retirement.action == oldSelf.retirement.action
                 || self.retirement.action == ''Delete''))'
+            - message: retirement.notAfter cannot be removed or extended; only deletion
+                may clear it
+              rule: '!has(oldSelf.retirement) || !has(self.retirement) || self.retirement.sequence
+                != oldSelf.retirement.sequence || !has(oldSelf.retirement.notAfter)
+                || (has(self.retirement.notAfter) ? self.retirement.notAfter <= oldSelf.retirement.notAfter
+                : self.retirement.action == ''Delete'')'
+            - message: retirement.notAfter is written only with Suspend; deletion
+                may only keep it unchanged
+              optionalOldSelf: true
+              rule: '!has(self.retirement) || !has(self.retirement.notAfter) || self.retirement.action
+                == ''Suspend'' || (oldSelf.hasValue() && has(oldSelf.value().retirement)
+                && oldSelf.value().retirement.sequence == self.retirement.sequence
+                && has(oldSelf.value().retirement.notAfter) && self.retirement.notAfter
+                == oldSelf.value().retirement.notAfter)'
           status:
             description: |-
               ExecutionWorkspaceStatus defines adapter-observed state. Exactly one provider adapter owns this status;

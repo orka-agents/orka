@@ -10,11 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/shared"
 
 	"github.com/orka-agents/orka/internal/llm"
 	"github.com/orka-agents/orka/internal/tracing/genai"
@@ -30,8 +32,11 @@ type streamUsageState struct {
 	Provider              string
 }
 
+// providerName is the name the provider registers under and reports in errors.
+const providerName = "anthropic"
+
 func init() {
-	llm.RegisterProvider("anthropic", func(config llm.ProviderConfig) (llm.Provider, error) {
+	llm.RegisterProvider(providerName, func(config llm.ProviderConfig) (llm.Provider, error) {
 		return NewProvider(config)
 	})
 }
@@ -70,57 +75,167 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 
 // Name returns the provider name
 func (p *Provider) Name() string {
-	return "anthropic"
+	return providerName
 }
 
 func (p *Provider) TelemetryProviderName() string {
 	return genai.ProviderAnthropic
 }
 
-// Complete sends a completion request
+// Complete sends a completion request and returns the whole response.
+//
+// It streams the request and assembles the message from the events. The SDK
+// refuses a non-streaming request whose max_tokens could take longer than its
+// ten-minute HTTP timeout (about 21,333 tokens), and proxies such as Vekil
+// give a non-streaming request far less time than a streaming one.
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := buildRequestParams(req)
 
-	// Make the request
-	message, err := p.client.Messages.New(ctx, params)
-	if err != nil {
-		return nil, toProviderError(err)
+	streamCtx, guard := newIdleGuard(ctx)
+	defer guard.stop()
+	stream := p.client.Messages.NewStreaming(streamCtx, params, guard.middleware())
+	defer func() { _ = stream.Close() }()
+
+	acc := completionAccumulator{provider: p.TelemetryProviderName()}
+	for stream.Next() {
+		if err := acc.add(stream.Current()); err != nil {
+			return acc.failed(toProviderError(err))
+		}
+	}
+	if idled(streamCtx) && ctx.Err() == nil {
+		// A stalled connection, like a broken one, has shown the caller
+		// nothing, so the retry layer may try again.
+		return acc.failed(&llm.ProviderError{
+			Provider:   providerName,
+			Message:    "anthropic stream sent nothing for " + streamIdleTimeout.String(),
+			StatusCode: http.StatusBadGateway,
+		})
+	}
+	if err := stream.Err(); err != nil {
+		pe := toProviderError(err)
+		if acc.started && pe.StatusCode == 0 && ctx.Err() == nil {
+			// The connection broke after the stream started. None of the
+			// output has reached the caller, so treat it like a stream that
+			// ends early.
+			pe.StatusCode = http.StatusBadGateway
+		}
+		return acc.failed(pe)
+	}
+	if !acc.completed {
+		// A dropped connection can also end the stream without an error.
+		// Returning the partial message would pass truncated output off as
+		// complete. None of it has reached the caller, so report a gateway
+		// failure, which the retry layer retries.
+		return acc.failed(&llm.ProviderError{
+			Provider:   providerName,
+			Message:    "anthropic stream ended before the message finished",
+			StatusCode: http.StatusBadGateway,
+		})
 	}
 
-	// Convert response
-	resp := &llm.CompletionResponse{
-		Provider:              p.TelemetryProviderName(),
-		ID:                    message.ID,
-		Model:                 message.Model,
-		StopReason:            string(message.StopReason),
-		InputTokens:           int(message.Usage.InputTokens),
-		OutputTokens:          int(message.Usage.OutputTokens),
-		InputExcludesCache:    true,
-		UsageReported:         message.Usage.JSON.InputTokens.Valid() && message.Usage.JSON.OutputTokens.Valid(),
-		CachedInputTokens:     llm.ReportedTokenCount(message.Usage.CacheReadInputTokens, message.Usage.JSON.CacheReadInputTokens.Valid()),
-		CacheWriteInputTokens: llm.ReportedTokenCount(message.Usage.CacheCreationInputTokens, message.Usage.JSON.CacheCreationInputTokens.Valid()),
+	resp := acc.usage()
+	if req.ResponsesInput {
+		// Responses keeps text and tool calls in the order the model wrote
+		// them, as completeViaStream does for a streamed turn.
+		resp.OutputItems = []llm.AssistantOutputItem{}
 	}
-
-	// Extract content and tool calls
-	for _, block := range message.Content {
+	textItemOpen := false
+	for _, block := range acc.message.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:
 			resp.Content += b.Text
+			if req.ResponsesInput && b.Text != "" {
+				if !textItemOpen {
+					resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{})
+					textItemOpen = true
+				}
+				resp.OutputItems[len(resp.OutputItems)-1].Content += b.Text
+			}
 		case anthropic.ToolUseBlock:
-			resp.ToolCalls = append(resp.ToolCalls, llm.ToolCall{
+			call := llm.ToolCall{
 				ID:        b.ID,
 				Name:      b.Name,
 				Arguments: b.Input,
-			})
+			}
+			resp.ToolCalls = append(resp.ToolCalls, call)
+			if req.ResponsesInput {
+				resp.OutputItems = append(resp.OutputItems, llm.AssistantOutputItem{ToolCall: &call})
+				textItemOpen = false
+			}
 		}
 	}
-
 	return resp, nil
+}
+
+// completionAccumulator assembles a streamed message and the usage the
+// stream reported along the way.
+type completionAccumulator struct {
+	provider                                          string
+	message                                           anthropic.Message
+	started, inputReported, outputReported, completed bool
+	cacheRead, cacheWrite                             *int64
+}
+
+func (a *completionAccumulator) add(event anthropic.MessageStreamEventUnion) error {
+	if err := a.message.Accumulate(event); err != nil {
+		return err
+	}
+	switch e := event.AsAny().(type) {
+	case anthropic.MessageStartEvent:
+		u := e.Message.Usage
+		a.started = true
+		a.inputReported = u.JSON.InputTokens.Valid()
+		a.outputReported = u.JSON.OutputTokens.Valid()
+		a.cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, u.JSON.CacheReadInputTokens.Valid())
+		a.cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, u.JSON.CacheCreationInputTokens.Valid())
+	case anthropic.MessageDeltaEvent:
+		u := e.Usage
+		a.inputReported = a.inputReported || u.JSON.InputTokens.Valid()
+		a.outputReported = a.outputReported || u.JSON.OutputTokens.Valid()
+		if u.JSON.CacheReadInputTokens.Valid() {
+			a.cacheRead = llm.ReportedTokenCount(u.CacheReadInputTokens, true)
+		}
+		if u.JSON.CacheCreationInputTokens.Valid() {
+			a.cacheWrite = llm.ReportedTokenCount(u.CacheCreationInputTokens, true)
+		}
+		a.completed = a.completed || e.Delta.StopReason != ""
+	case anthropic.MessageStopEvent:
+		a.completed = true
+	}
+	return nil
+}
+
+// usage returns a response that carries the message's identity and usage
+// but none of its content.
+func (a *completionAccumulator) usage() *llm.CompletionResponse {
+	return &llm.CompletionResponse{
+		Provider:              a.provider,
+		ID:                    a.message.ID,
+		Model:                 a.message.Model,
+		StopReason:            string(a.message.StopReason),
+		InputTokens:           int(a.message.Usage.InputTokens),
+		OutputTokens:          int(a.message.Usage.OutputTokens),
+		InputExcludesCache:    true,
+		UsageReported:         a.inputReported && a.outputReported,
+		CachedInputTokens:     a.cacheRead,
+		CacheWriteInputTokens: a.cacheWrite,
+	}
+}
+
+// failed returns err, with the usage the stream reported before it failed so
+// usage accounting still counts the tokens the attempt was billed for. It
+// leaves out the partial content, which callers must not use.
+func (a *completionAccumulator) failed(err error) (*llm.CompletionResponse, error) {
+	if !a.started {
+		return nil, err
+	}
+	return a.usage(), err
 }
 
 // buildMessages converts llm messages to Anthropic format.
 func buildMessages(msgs []llm.Message) []anthropic.MessageParam {
 	messages := make([]anthropic.MessageParam, 0, len(msgs))
+	prevTool := false
 	for _, msg := range msgs {
 		switch msg.Role {
 		case "user":
@@ -141,12 +256,19 @@ func buildMessages(msgs []llm.Message) []anthropic.MessageParam {
 				messages = append(messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
 			}
 		case "tool":
-			messages = append(messages, anthropic.NewUserMessage(
-				anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
-			))
+			// Return the results of parallel tool calls in one user message.
+			// Splitting them across messages teaches Claude to stop making
+			// parallel calls.
+			result := anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)
+			if n := len(messages); n > 0 && prevTool {
+				messages[n-1].Content = append(messages[n-1].Content, result)
+			} else {
+				messages = append(messages, anthropic.NewUserMessage(result))
+			}
 		case "system":
 			messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
 		}
+		prevTool = msg.Role == "tool"
 	}
 	return messages
 }
@@ -217,7 +339,7 @@ func buildRequestParams(req *llm.CompletionRequest) anthropic.MessageNewParams {
 	}
 	params.Messages = buildMessages(messages)
 
-	if req.HasTemperature() {
+	if req.HasTemperature() && acceptsSamplingParams(req.Model) {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
 
@@ -407,12 +529,33 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 	return ch, nil
 }
 
+// streamErrorStatus maps the type of an error event that arrives inside a
+// stream to the HTTP status the API returns for the same error before a
+// stream starts, so retry and fallback treat both alike.
+var streamErrorStatus = map[shared.ErrorType]int{
+	shared.ErrorTypeInvalidRequestError: http.StatusBadRequest,
+	shared.ErrorTypeAuthenticationError: http.StatusUnauthorized,
+	shared.ErrorTypeBillingError:        http.StatusPaymentRequired,
+	shared.ErrorTypePermissionError:     http.StatusForbidden,
+	shared.ErrorTypeNotFoundError:       http.StatusNotFound,
+	shared.ErrorTypeRateLimitError:      http.StatusTooManyRequests,
+	shared.ErrorTypeAPIError:            http.StatusInternalServerError,
+	// Not 504: llm.ShouldRetry skips 504s, which the SDK has already retried
+	// when they arrive before a stream. One inside a stream it has not.
+	shared.ErrorTypeTimeoutError:    http.StatusBadGateway,
+	shared.ErrorTypeOverloadedError: 529,
+}
+
 // toProviderError wraps an error as a ProviderError, extracting the HTTP status
 // code from the Anthropic SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
-	pe := &llm.ProviderError{Provider: "anthropic", Message: err.Error()}
+	pe := &llm.ProviderError{Provider: providerName, Message: err.Error()}
 	if apiErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode
+		// An error event inside a stream carries the stream's 200 status.
+		if status, known := streamErrorStatus[apiErr.Type()]; known && apiErr.StatusCode < http.StatusBadRequest {
+			pe.StatusCode = status
+		}
 	}
 	return pe
 }

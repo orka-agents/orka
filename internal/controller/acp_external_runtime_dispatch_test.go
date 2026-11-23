@@ -3241,6 +3241,57 @@ func TestACPDispatcherRateLimitedTaskScopedPromptRecordsCleanupBeforeRequeue(t *
 	}
 }
 
+// A controller takeover before the retained task-scoped RuntimeSession is
+// deleted must not drop its binding: recovery returns the Task to admission on
+// the new epoch still naming the unretired session, so the cleanup guard sees
+// it on the next dispatch.
+func TestACPDispatcherRecoveryKeepsUnretiredRateLimitedTaskScopedBinding(t *testing.T) {
+	var rejections atomic.Int32
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
+		rejectPrompt: func() bool { return rejections.Add(1) == 1 },
+		failDelete:   func() bool { return true },
+	})
+	queued := fixture.queueTask(t, "external-rate-limited-takeover", types.UID("external-rate-limited-takeover-uid"), "retry after admission", nil)
+	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+	if err != nil || reserved == nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	created := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
+	go func() { created <- <-fixture.createRequests }()
+	_ = fixture.dispatcher.executeReservedTask(fixture.ctx, reserved, target)
+	first := <-created
+	current := func() *corev1alpha1.Task {
+		t.Helper()
+		task := &corev1alpha1.Task{}
+		if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), task); err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	retainsFirst := func(task *corev1alpha1.Task) bool {
+		execution := task.Status.Execution
+		return execution != nil && execution.RuntimeInstanceID == string(first.Metadata.Fence.RuntimeInstanceID) &&
+			execution.RuntimeSessionUID == string(first.Metadata.Fence.RuntimeSessionUID) &&
+			execution.RuntimeSessionGeneration == int64(first.Metadata.Fence.RuntimeSessionGeneration)
+	}
+	requeued := current()
+	if !retainsFirst(requeued) || !taskScopedRuntimeSessionCleanupUnconfirmed(requeued) {
+		t.Fatalf("requeue dropped the unretired task-scoped binding: %#v", requeued.Status.Execution)
+	}
+	epoch := requeued.Status.Execution.ControllerEpoch + 1
+	successor := archivedSessionRecoveryDispatcher(fixture, fixture.controlStore, epoch)
+	if err := successor.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatalf("takeover recovery: %v", err)
+	}
+	recovered := current()
+	if recovered.Status.Execution.ControllerEpoch != epoch || recovered.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved {
+		t.Fatalf("recovered Task = %#v, want Reserved on epoch %d", recovered.Status.Execution, epoch)
+	}
+	if !retainsFirst(recovered) || !taskScopedRuntimeSessionCleanupUnconfirmed(recovered) {
+		t.Fatalf("takeover recovery dropped the unretired task-scoped binding: %#v", recovered.Status.Execution)
+	}
+}
+
 // When the rejected task-scoped RuntimeSession cannot be proven retired, the
 // requeued Task keeps naming it so its cleanup obligation is not lost. Every
 // later dispatch first retries deleting that exact retained generation: while

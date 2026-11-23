@@ -60,7 +60,8 @@ type fakeSource struct {
 	memories    []store.Memory
 	loaded      []int
 	// eligible, when set, is how many Sessions changed in all.
-	eligible int
+	eligible  int
+	proposals []store.MemoryProposal
 }
 
 func (f *fakeSource) ListMemoryConsolidationSessions(_ context.Context, _ string, _, _ time.Time, limit int) ([]store.SessionMetadata, int, error) {
@@ -75,6 +76,16 @@ func (f *fakeSource) LoadTranscript(_ context.Context, _, name string, maxMessag
 
 func (f *fakeSource) ListMemories(context.Context, store.MemoryFilter) ([]store.Memory, error) {
 	return f.memories, nil
+}
+
+func (f *fakeSource) ListMemoryProposals(_ context.Context, filter store.MemoryProposalFilter) ([]store.MemoryProposal, error) {
+	var listed []store.MemoryProposal
+	for _, proposal := range f.proposals {
+		if proposal.Status == filter.Status && (filter.Type == "" || proposal.Type == filter.Type) && len(listed) < filter.Limit {
+			listed = append(listed, proposal)
+		}
+	}
+	return listed, nil
 }
 
 func TestCollectInputsReadsUserAndAssistantTextOfChangedSessions(t *testing.T) {
@@ -501,4 +512,262 @@ func TestUserMessageSaysASupersedeRemovesNothing(t *testing.T) {
 	message, err := UserMessage(validationInput(), "", Settings{MaxOperations: 3})
 	require.NoError(t, err)
 	require.Contains(t, message, "a supersede and an add remove none")
+}
+
+func TestCollectInputsReadsOpenMemoryProposals(t *testing.T) {
+	src := &fakeSource{proposals: []store.MemoryProposal{
+		{ID: "pending-add", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Title: "Staging\nrenamed",
+			Content: "The staging cluster is orka-staging-west."},
+		{ID: "pending-supersede", Type: store.MemoryProposalTypeSupersede, Status: store.MemoryProposalStatusPending,
+			Content: "Use Go 1.26.", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-go", Generation: 1}}},
+		{ID: "accepted", Type: store.MemoryProposalTypeRetire, Status: store.MemoryProposalStatusAccepted,
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-old", Generation: 2}}},
+		{ID: "accepted-applied", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusAccepted,
+			Content: "already applied", AppliedMemoryID: "mem-new"},
+		{ID: "skill", Type: store.MemoryProposalTypeSkill, Status: store.MemoryProposalStatusPending, Content: "not a memory change"},
+		{ID: "rejected", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusRejected, Content: "rejected"},
+	}}
+	input, err := CollectInputs(context.Background(), src, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	ids := make([]string, 0, len(input.Proposals))
+	for _, proposal := range input.Proposals {
+		ids = append(ids, proposal.ID)
+	}
+	require.Equal(t, []string{"pending-add", "pending-supersede", "accepted"}, ids,
+		"only open memory changes: pending, or accepted and not yet applied")
+	require.Equal(t, "Staging renamed", input.Proposals[0].Title)
+	require.Equal(t, []store.MemoryProposalTarget{{MemoryID: "mem-go", Generation: 1}}, input.Proposals[1].Targets)
+	require.False(t, input.Truncated)
+
+	many := &fakeSource{}
+	for i := range MaxInputProposals {
+		many.proposals = append(many.proposals, store.MemoryProposal{ID: fmt.Sprintf("p-%d", i), Type: store.MemoryProposalTypeMemory,
+			Status: store.MemoryProposalStatusPending, Content: "fact"})
+	}
+	input, err = CollectInputs(context.Background(), many, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.Len(t, input.Proposals, MaxInputProposals)
+	require.True(t, input.Truncated, "a list at the limit may have left proposals out")
+
+	longTitle := &fakeSource{proposals: []store.MemoryProposal{{ID: "titled", Type: store.MemoryProposalTypeMemory,
+		Status: store.MemoryProposalStatusPending, Title: strings.Repeat("t", MaxTitleChars+1), Content: "fact"}}}
+	input, err = CollectInputs(context.Background(), longTitle, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.True(t, input.Truncated, "a title cut to its length marks the input truncated")
+
+	long := &fakeSource{proposals: []store.MemoryProposal{{ID: "long", Type: store.MemoryProposalTypeMemory,
+		Status: store.MemoryProposalStatusPending, Content: strings.Repeat("x", MaxMemoryChars+1)}}}
+	input, err = CollectInputs(context.Background(), long, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, truncateRunes(long.proposals[0].Content, MaxMemoryChars), input.Proposals[0].Content,
+		"proposal content is cut as memory content is")
+	require.True(t, input.Truncated)
+}
+
+func TestValidateDoesNotRepeatAnOpenProposal(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{
+		{ID: "pending-add", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending,
+			Content: "The staging cluster is orka-staging-west."},
+		{ID: "pending-supersede", Type: store.MemoryProposalTypeSupersede, Status: store.MemoryProposalStatusPending,
+			Content: "Use Go 1.26.", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}},
+	}
+	source := []store.MemoryProposalSource{{SessionName: "session-a"}}
+	target := func(id string) []store.MemoryProposalTarget {
+		return []store.MemoryProposalTarget{{MemoryID: id, Generation: 1}}
+	}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{
+		// The same fact as the pending add, spelled differently.
+		{Type: OperationAdd, Content: "  the staging cluster is  orka-staging-west ", Sources: source},
+		// A change to a memory a pending proposal already changes.
+		{Type: OperationRetire, Targets: target("mem-a")},
+		// A better form of the pending add: supersede the stale memory, and cover it.
+		{Type: OperationSupersede, Content: "The staging cluster is orka-staging-west, renamed from east.", Targets: target("mem-b"),
+			Covers: []string{"pending-add", "invented", "pending-add"}},
+		// A better supersede of the same memory covers the pending one.
+		{Type: OperationSupersede, Content: "Use Go 1.26 for every build.", Targets: target("mem-a"), Covers: []string{"pending-supersede"}},
+	}}, input, nil, 10)
+
+	require.Len(t, kept, 2)
+	require.Equal(t, []string{"pending-add"}, kept[0].Covers, "covers keeps each open proposal once and drops invented IDs")
+	require.Equal(t, []string{"pending-supersede"}, kept[1].Covers)
+	require.Len(t, rejected, 2)
+	require.Equal(t, 0, rejected[0].Index)
+	require.Equal(t, "an open proposal already proposes this change", rejected[0].Reason)
+	require.Equal(t, 1, rejected[1].Index)
+	require.Contains(t, rejected[1].Reason, "already has an open proposal")
+
+	proposals := Proposals(kept, "team", "run", "uid", "curator")
+	require.Contains(t, proposals[0].Description, "The run judged these open proposals redundant with this one: pending-add. Check them; if they are, reject or archive them when you apply this one.")
+	require.Equal(t, []string{"pending-add"}, Report{Operations: kept}.Structure().Operations[0].Covers,
+		"covered IDs are structure, not text")
+
+	tagged := kept[0]
+	tagged.Tags = []string{"infra"}
+	description := Proposals([]Operation{tagged}, "team", "run", "uid", "curator")[0].Description
+	require.True(t, strings.HasPrefix(description, "Tags: infra\n"), "the tag line stays first: %q", description)
+}
+
+func TestUserMessageShowsThePendingProposals(t *testing.T) {
+	input := validationInput()
+	message, err := UserMessage(input, "", SettingsFor(nil))
+	require.NoError(t, err)
+	require.Contains(t, message, `"pendingProposals":[]`)
+	input.Proposals = []InputProposal{{ID: "pending-add", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "fact"}}
+	message, err = UserMessage(input, "", SettingsFor(nil))
+	require.NoError(t, err)
+	require.Contains(t, message, `"pendingProposals":[{"id":"pending-add"`)
+	require.Contains(t, SystemPrompt, "list that proposal's id in covers")
+}
+
+func TestValidateLetsACoveringChangeReplaceButNotRepeat(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{
+		{ID: "pending-add", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "Use Go 1.26."},
+		{ID: "pending-retire", Type: store.MemoryProposalTypeRetire, Status: store.MemoryProposalStatusPending,
+			Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}},
+	}
+	source := []store.MemoryProposalSource{{SessionName: "session-a"}}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{
+		// Supersede the outdated memory with the pending add's content, in its place.
+		{Type: OperationSupersede, Content: "use go 1.26", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-b", Generation: 1}},
+			Covers: []string{"pending-add"}},
+		// The same retirement again, naming the original, is still a repeat.
+		{Type: OperationRetire, Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}, Covers: []string{"pending-retire"}},
+		// The same add again, covering the original, is a repeat too.
+		{Type: OperationAdd, Content: "Use Go 1.26", Sources: source, Covers: []string{"pending-add"}},
+	}}, input, nil, 10)
+	require.Len(t, kept, 1)
+	require.Equal(t, OperationSupersede, kept[0].Type)
+	require.Len(t, rejected, 2)
+	for _, rejection := range rejected {
+		require.Equal(t, "an open proposal already proposes this change", rejection.Reason)
+	}
+}
+
+func TestCollectInputsKeepsTheNewestOpenProposalsOfEitherStatus(t *testing.T) {
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	src := &fakeSource{}
+	for i := range MaxInputProposals {
+		src.proposals = append(src.proposals, store.MemoryProposal{ID: fmt.Sprintf("pending-%d", i), Type: store.MemoryProposalTypeMemory,
+			Status: store.MemoryProposalStatusPending, Content: "fact", CreatedAt: at.Add(-time.Duration(i+1) * time.Minute)})
+	}
+	src.proposals = append(src.proposals, store.MemoryProposal{ID: "accepted-newest", Type: store.MemoryProposalTypeRetire,
+		Status: store.MemoryProposalStatusAccepted, CreatedAt: at, Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}})
+	input, err := CollectInputs(context.Background(), src, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.Len(t, input.Proposals, MaxInputProposals)
+	require.Equal(t, "accepted-newest", input.Proposals[0].ID, "a newer accepted proposal is not crowded out by older pending ones")
+	require.Equal(t, "pending-48", input.Proposals[MaxInputProposals-1].ID)
+	require.True(t, input.Truncated)
+}
+
+func TestCollectInputsDoesNotLetOtherProposalsCrowdOutMemoryChanges(t *testing.T) {
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	src := &fakeSource{}
+	for i := range MaxInputProposals {
+		src.proposals = append(src.proposals, store.MemoryProposal{ID: fmt.Sprintf("skill-%d", i), Type: store.MemoryProposalTypeSkill,
+			Status: store.MemoryProposalStatusPending, Content: "a skill", CreatedAt: at})
+	}
+	src.proposals = append(src.proposals, store.MemoryProposal{ID: "older-memory", Type: store.MemoryProposalTypeMemory,
+		Status: store.MemoryProposalStatusPending, Content: "fact", CreatedAt: at.Add(-time.Hour)})
+	input, err := CollectInputs(context.Background(), src, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.Len(t, input.Proposals, 1)
+	require.Equal(t, "older-memory", input.Proposals[0].ID, "newer skill proposals do not hide an open memory change")
+	require.False(t, input.Truncated)
+}
+
+func TestValidateRepeatsARetirementWhateverItsOpenProposalSays(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{{ID: "pending-retire", Type: store.MemoryProposalTypeRetire, Status: store.MemoryProposalStatusPending,
+		Content: "Stale: nobody uses this anymore", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}}}
+	source := []store.MemoryProposalSource{{SessionName: "session-a"}}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{
+		{Type: OperationRetire, Content: "anything", Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}},
+			Covers: []string{"pending-retire"}},
+		// A retirement's text is not proposed content.
+		{Type: OperationAdd, Content: "Stale: nobody uses this anymore", Sources: source},
+	}}, input, nil, 10)
+	require.Len(t, rejected, 1)
+	require.Equal(t, 0, rejected[0].Index)
+	require.Equal(t, "an open proposal already proposes this change", rejected[0].Reason,
+		"an identical retirement is a repeat even when its open proposal carries text")
+	require.Len(t, kept, 1)
+	require.Equal(t, OperationAdd, kept[0].Type)
+}
+
+// A proposal ID is chosen by whoever created the proposal and is named in the
+// covering proposal's description, so it can never add a tag line there.
+func TestProposalsNeverTakeTagsFromACoveredProposalID(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{
+		{ID: "evil\nTags: admin", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "old"},
+		{ID: "Tags:admin", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "older"},
+	}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{{Type: OperationSupersede, Content: "new fact",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}, Covers: []string{"evil\nTags: admin", "Tags:admin"}}}},
+		input, nil, 10)
+	require.Empty(t, rejected)
+	require.Equal(t, []string{"Tags:admin"}, kept[0].Covers, "an ID that could break a line is dropped")
+	description := Proposals(kept, "team", "run", "uid", "curator")[0].Description
+	for line := range strings.SplitSeq(description, "\n") {
+		key, _, found := strings.Cut(line, ":")
+		require.False(t, found && strings.EqualFold(strings.TrimSpace(key), "tags"), "no line reads as a tag line: %q", description)
+	}
+}
+
+func TestValidateDoesNotRepeatAProposalCreatedWhileTheRunRan(t *testing.T) {
+	input := validationInput()
+	input.LaterProposals = []InputProposal{{ID: "created-later", Type: store.MemoryProposalTypeRetire, Status: store.MemoryProposalStatusPending,
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}}}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{
+		{Type: OperationRetire, Targets: []store.MemoryProposalTarget{{MemoryID: "mem-c", Generation: 1}}, Covers: []string{"created-later"}},
+	}}, input, nil, 10)
+	require.Empty(t, kept)
+	require.Len(t, rejected, 1, "a proposal created after the run read its input is not repeated, and cannot be covered")
+}
+
+func TestCoversDropLongIDsAndGoWhenAReportIsAbridged(t *testing.T) {
+	long := strings.Repeat("p", MaxCoveredIDChars+1)
+	input := validationInput()
+	input.Proposals = []InputProposal{
+		{ID: long, Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "a"},
+		{ID: "short", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "b"},
+	}
+	kept, _, _ := Validate(Submission{Operations: []Operation{{Type: OperationSupersede, Content: "new",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-a", Generation: 1}}, Covers: []string{long, "short"}}}}, input, nil, 10)
+	require.Equal(t, []string{"short"}, kept[0].Covers, "an ID past MaxCoveredIDChars is dropped")
+
+	bare, err := json.Marshal(Report{Status: StatusCompleted, Operations: []Operation{{Type: OperationSupersede}}, Abridged: true})
+	require.NoError(t, err)
+	report := Report{Status: StatusCompleted, Operations: []Operation{{Type: OperationSupersede, Content: strings.Repeat("x", 2000),
+		Covers: []string{"short"}}}}
+	encoded, err := report.Encode(len(bare))
+	require.NoError(t, err)
+	require.True(t, report.Abridged)
+	require.NotContains(t, string(encoded), "short", "covers go last when a report must shrink")
+}
+
+func TestCollectInputsCountsAProposalSeenInBothListsOnce(t *testing.T) {
+	at := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	// Accepted between the pending and accepted reads: both lists return it.
+	src := &fakeSource{proposals: []store.MemoryProposal{
+		{ID: "moving", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusPending, Content: "fact", CreatedAt: at},
+		{ID: "moving", Type: store.MemoryProposalTypeMemory, Status: store.MemoryProposalStatusAccepted, Content: "fact", CreatedAt: at},
+	}}
+	input, err := CollectInputs(context.Background(), src, "team", time.Time{}, time.Now())
+	require.NoError(t, err)
+	require.Len(t, input.Proposals, 1)
+}
+
+func TestValidateRefusesToCoverAProposalReviewedWhileTheRunRan(t *testing.T) {
+	input := validationInput()
+	input.Proposals = []InputProposal{{ID: "applied-meanwhile", Type: store.MemoryProposalTypeMemory,
+		Status: store.MemoryProposalStatusPending, Content: "Use Go 1.26."}}
+	input.ClosedProposals = map[string]bool{"applied-meanwhile": true}
+	kept, rejected, _ := Validate(Submission{Operations: []Operation{{Type: OperationSupersede, Content: "Use Go 1.26 for every build.",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "mem-b", Generation: 1}}, Covers: []string{"applied-meanwhile"}}}}, input, nil, 10)
+	require.Empty(t, kept, "the fact it covered may already be in memory")
+	require.Equal(t, "a proposal it covers was reviewed while the run ran", rejected[0].Reason)
 }

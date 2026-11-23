@@ -711,6 +711,55 @@ func TestToolReconcilerDeletesAnActorThatCannotBeSuspended(t *testing.T) {
 	})
 }
 
+// Substrate lets an Actor outlive its template, and a template deleted and
+// created again under the same name may differ in whether its Actors can be
+// suspended. The replacement decides how an Actor is stopped only when the
+// Actor booted from it; otherwise the Actor is stopped as one whose template
+// cannot be read.
+func TestToolReconcilerStopsAnActorOfAReplacedTemplateAsOneWithoutItsTemplate(t *testing.T) {
+	for name, tc := range map[string]struct {
+		actorTemplateUID string
+		wantDeleted      bool
+	}{
+		"booted from the current template": {actorTemplateUID: "template-uid-current", wantDeleted: true},
+		"booted from a replaced template":  {actorTemplateUID: "template-uid-replaced"},
+		"template identity unknown":        {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+			denied := false
+			r, running := runningEgressTestTool(t, executor, func(_ context.Context, _ SubstrateConfig, _ string, rules []workspace.SubstrateEgressRule) error {
+				denied = denied || rules == nil
+				return nil
+			})
+			validate := r.SubstrateTemplateValidator
+			r.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+				request.TemplateUID, request.TemplateSuspendUnsupported = "template-uid-current", true
+				return validate(ctx, request)
+			}
+			actorID := running.Status.Actor.ActorID
+			executor.describePhase = workspace.PhaseReady
+			executor.describeTemplates = map[string]workspace.TemplateRef{
+				actorID: {Namespace: "ate-demo", Name: "mcp-template", UID: tc.actorTemplateUID},
+			}
+			editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+				tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
+			})
+			_, err := r.Reconcile(context.Background(), mcpToolRequest())
+			if tc.wantDeleted {
+				if err != nil || len(executor.deleteReqs) == 0 {
+					t.Fatalf("err=%v deletes=%v, want the actor deleted as its template requires", err, executor.deleteReqs)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "egress is denied") || len(executor.deleteReqs) != 0 || len(executor.releaseReqs) != 0 || !denied {
+				t.Fatalf("err=%v deletes=%v releases=%v denied=%t, want the replacement's suspend support ignored and egress denied",
+					err, executor.deleteReqs, executor.releaseReqs, denied)
+			}
+		})
+	}
+}
+
 // A Tool moved to another template gets a new Actor. Until that one is ready
 // the previous Actor is still running; when the new policy cannot be applied,
 // the previous Actor must stop too.
@@ -861,7 +910,8 @@ func TestToolReconcilerRevokesAProvenActorWhenAnotherLeaseCannotBeRead(t *testin
 	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, dedicated)); err != nil {
 		t.Fatalf("Create dedicated lease: %v", err)
 	}
-	executor.describeTemplates = map[string]workspace.TemplateRef{dedicated: {Namespace: "ate-demo", Name: "mcp-template"}}
+	// The dedicated Actor booted from the template its name still resolves to.
+	executor.describeTemplates = map[string]workspace.TemplateRef{dedicated: {Namespace: "ate-demo", Name: "mcp-template", UID: "validated-native-template-uid"}}
 	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
 		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
 	})

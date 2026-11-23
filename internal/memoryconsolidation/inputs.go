@@ -8,7 +8,9 @@ package memoryconsolidation
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -21,6 +23,7 @@ type Source interface {
 	ListMemoryConsolidationSessions(ctx context.Context, namespace string, after, through time.Time, limit int) ([]store.SessionMetadata, int, error)
 	LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]store.SessionMessage, error)
 	ListMemories(ctx context.Context, filter store.MemoryFilter) ([]store.Memory, error)
+	ListMemoryProposals(ctx context.Context, filter store.MemoryProposalFilter) ([]store.MemoryProposal, error)
 }
 
 const (
@@ -40,7 +43,9 @@ const (
 // releasing its lock does not change it again, so skipping it could miss it
 // for good. Tool messages are dropped, so memory an agent recalled cannot
 // return as new evidence. Each memory, tag and message is cut to its bound,
-// and memories and transcripts each stop growing at their own budget.
+// and memories and transcripts each stop growing at their own budget. The
+// namespace's open memory proposals are read too, so the run does not
+// propose again what already awaits review.
 func CollectInputs(ctx context.Context, src Source, namespace string, start, end time.Time) (Input, error) {
 	sessions, eligible, err := src.ListMemoryConsolidationSessions(ctx, namespace, start, end, MaxInputSessions)
 	if err != nil {
@@ -73,6 +78,9 @@ func CollectInputs(ctx context.Context, src Source, namespace string, start, end
 			break
 		}
 		input.Memories = append(input.Memories, read)
+	}
+	if err := collectProposals(ctx, src, namespace, &input); err != nil {
+		return Input{}, err
 	}
 	budget = MaxTranscriptInputChars
 	for _, session := range sessions {
@@ -143,6 +151,117 @@ func encodedSize(value any) int {
 	}
 	return utf8.RuneCount(data) + 1
 }
+
+// ProposalLister lists a namespace's memory proposals.
+type ProposalLister interface {
+	ListMemoryProposals(ctx context.Context, filter store.MemoryProposalFilter) ([]store.MemoryProposal, error)
+}
+
+// OpenProposals reads the namespace's open memory proposals as CollectInputs
+// does, and reports whether it reached a limit, so some were left out. A
+// completion uses it to see proposals created while the run ran.
+func OpenProposals(ctx context.Context, src ProposalLister, namespace string) ([]InputProposal, bool, error) {
+	var input Input
+	if err := collectProposals(ctx, src, namespace, &input); err != nil {
+		return nil, false, err
+	}
+	return input.Proposals, input.Truncated, nil
+}
+
+// ProposalReader reads one memory proposal.
+type ProposalReader interface {
+	GetMemoryProposal(ctx context.Context, namespace, id string) (*store.MemoryProposal, error)
+}
+
+// ClosedProposals returns which of the proposals a run read are no longer
+// open: applied, rejected, archived or gone. A completion reads each one, so
+// the answer does not depend on a bounded list.
+func ClosedProposals(ctx context.Context, src ProposalReader, namespace string, read []InputProposal) (map[string]bool, error) {
+	closed := map[string]bool{}
+	for _, proposal := range read {
+		current, err := src.GetMemoryProposal(ctx, namespace, proposal.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			closed[proposal.ID] = true
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read memory proposal %q: %w", proposal.ID, err)
+		}
+		open := (current.Status == store.MemoryProposalStatusPending || current.Status == store.MemoryProposalStatusAccepted) &&
+			current.AppliedMemoryID == ""
+		if !open {
+			closed[proposal.ID] = true
+		}
+	}
+	return closed, nil
+}
+
+// collectProposals reads the namespace's open memory proposals, the newest
+// first across both statuses: pending ones, and accepted ones not yet
+// applied. Proposals of other kinds, such as skills, are not memory changes
+// and are never listed.
+func collectProposals(ctx context.Context, src ProposalLister, namespace string, input *Input) error {
+	var open []store.MemoryProposal
+	// Each kind and status is listed on its own, so proposals of other
+	// kinds, such as skills, cannot crowd memory changes out of a list.
+	for _, status := range []string{store.MemoryProposalStatusPending, store.MemoryProposalStatusAccepted} {
+		for _, proposalType := range memoryChangeProposalTypes {
+			proposals, err := src.ListMemoryProposals(ctx, store.MemoryProposalFilter{Namespace: namespace, Type: proposalType,
+				Status: status, Limit: MaxInputProposals})
+			if err != nil {
+				return fmt.Errorf("list %s %s memory proposals: %w", status, proposalType, err)
+			}
+			// A list at the limit may have left older proposals out. Applying
+			// a proposal sets it to applied, so an accepted list holds no
+			// applied ones; a provider that keeps them accepted, with an
+			// AppliedMemoryID, can fill a list with them, and the full list
+			// then marks the input truncated, as any bound reached does.
+			if len(proposals) >= MaxInputProposals {
+				input.Truncated = true
+			}
+			for _, proposal := range proposals {
+				if proposal.Type == proposalType && proposal.AppliedMemoryID == "" && proposal.Status == status {
+					open = append(open, proposal)
+				}
+			}
+		}
+	}
+	// Merge the lists newest first, so the shared limits keep the newest. A
+	// proposal accepted between the two reads is in both lists; it counts once.
+	slices.SortStableFunc(open, func(a, b store.MemoryProposal) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	seen := make(map[string]bool, len(open))
+	open = slices.DeleteFunc(open, func(proposal store.MemoryProposal) bool {
+		duplicate := seen[proposal.ID]
+		seen[proposal.ID] = true
+		return duplicate
+	})
+	budget := MaxProposalInputChars
+	for _, proposal := range open {
+		if len(input.Proposals) >= MaxInputProposals {
+			input.Truncated = true
+			return nil
+		}
+		title := strings.Join(strings.Fields(proposal.Title), " ")
+		if utf8.RuneCountInString(proposal.Content) > MaxMemoryChars || utf8.RuneCountInString(title) > MaxTitleChars {
+			input.Truncated = true
+		}
+		read := InputProposal{ID: proposal.ID, Type: proposal.Type, Status: proposal.Status,
+			Title:   truncateRunes(title, MaxTitleChars),
+			Content: truncateRunes(proposal.Content, MaxMemoryChars),
+			Targets: append([]store.MemoryProposalTarget(nil), proposal.Targets...)}
+		if budget -= encodedSize(read); budget < 0 {
+			input.Truncated = true
+			return nil
+		}
+		input.Proposals = append(input.Proposals, read)
+	}
+	return nil
+}
+
+// memoryChangeProposalTypes are the proposal types that change memory: a
+// new memory, or a merge, supersede or retire.
+var memoryChangeProposalTypes = []string{store.MemoryProposalTypeMemory, store.MemoryProposalTypeMerge,
+	store.MemoryProposalTypeSupersede, store.MemoryProposalTypeRetire}
 
 // boundedTags returns at most MaxTags tags of a memory, each cut to
 // MaxTagChars: memories have no limit of their own.
