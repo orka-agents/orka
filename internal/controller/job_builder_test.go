@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
@@ -3124,6 +3125,225 @@ func TestJobBuilder_buildEnvVars_ConnectorWriteToolsRequireApprovalAndHideOnRead
 	if !strings.Contains(tools.Value, "gh_write") {
 		t.Fatalf("without a link the tool stays visible and fails closed at call time, got %q", tools.Value)
 	}
+}
+
+// The tests below pin the approval contract for native AI Jobs described in
+// docs/development/policy-contract.md (statement 7): a Job's approval set is
+// fixed when the Job is built, from the Agent's approval list plus the
+// connector write tools it is offered, and recovering that Job keeps it.
+
+func TestJobBuilder_BuildWithOptions_NativeApprovalSet(t *testing.T) {
+	f := newConnectorToolFixture(t)
+	f.policy.UID = "policy-uid"
+	f.policy.Generation = 1
+	f.writeTool.UID = "write-tool-uid"
+	f.plainTool.UID = "plain-tool-uid"
+
+	tests := []struct {
+		name          string
+		mode          string
+		autonomous    bool
+		agentRequires []string
+		// dropAgentRequirement rebuilds the Job after removing the Agent's
+		// approval list, keeping the connector write available.
+		dropAgentRequirement bool
+		wantWriteOffered     bool
+		wantWriteRequired    bool
+		wantPlainRequired    bool
+	}{
+		{
+			name: "tool in the agent approval list requires approval", mode: corev1alpha1.ConnectionModeReadWrite, autonomous: true,
+			agentRequires: []string{f.plainTool.Name}, wantWriteOffered: true, wantWriteRequired: true, wantPlainRequired: true,
+		},
+		{
+			name: "offered connector write requires approval", mode: corev1alpha1.ConnectionModeReadWrite, autonomous: true,
+			wantWriteOffered: true, wantWriteRequired: true,
+		},
+		{
+			name: "non-autonomous task is not offered the connector write", mode: corev1alpha1.ConnectionModeReadWrite,
+		},
+		{
+			name: "read-only link hides the connector write", mode: corev1alpha1.ConnectionModeReadOnly, autonomous: true,
+		},
+		{
+			name: "connector write stays required after the agent list drops it", mode: corev1alpha1.ConnectionModeReadWrite, autonomous: true,
+			agentRequires: []string{f.writeTool.Name}, dropAgentRequirement: true, wantWriteOffered: true, wantWriteRequired: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			reader := f.reader(f.connection(tt.mode, true))
+			builder := setupJobBuilder()
+			builder.Client = reader
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Namespace: f.task.Namespace, Name: "agent", UID: "agent-uid", Generation: 1},
+				Spec: corev1alpha1.AgentSpec{
+					Model:        &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "model"},
+					Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: tt.autonomous, ApprovalRequiredTools: tt.agentRequires},
+					Tools:        []corev1alpha1.ToolReference{{Name: f.plainTool.Name}, {Name: f.writeTool.Name}},
+				},
+			}
+			task := f.task.DeepCopy()
+			task.Spec.AgentRef = &corev1alpha1.AgentReference{Name: agent.Name}
+			assertJob := func(wantPlainRequired bool) {
+				t.Helper()
+				require.NoError(t, validateAITaskAgentCompatibility(task, agent))
+				bindings, classification, err := freezeClassifiedRequesterConnections(ctx, reader, NativeWorkerToolRegistry(task, agent), task, aitools.Resolve(task, agent), connectorScope{})
+				require.NoError(t, err)
+				job, err := builder.BuildWithOptions(ctx, task, agent, nil, JobBuildOptions{
+					Reader: reader, ConnectionBindings: taskConnectionBindings(bindings), ConnectionBindingsFrozen: true,
+					ConnectorToolDigests: nativeConnectorToolDigests(classification),
+				})
+				require.NoError(t, err)
+				env := job.Spec.Template.Spec.Containers[0].Env
+				offeredEnv, found := findEnvVar(env, workerenv.AITools)
+				require.True(t, found, "missing %s", workerenv.AITools)
+				approvalsEnv, found := findEnvVar(env, workerenv.ApprovalRequiredTools)
+				require.True(t, found, "missing %s", workerenv.ApprovalRequiredTools)
+				offered, approvals := workerenv.SplitCSV(offeredEnv.Value), workerenv.SplitCSV(approvalsEnv.Value)
+				require.Contains(t, offered, f.plainTool.Name)
+				require.Equal(t, tt.wantWriteOffered, slices.Contains(offered, f.writeTool.Name), "%s offered in %v", f.writeTool.Name, offered)
+				require.Equal(t, tt.wantWriteRequired, slices.Contains(approvals, f.writeTool.Name), "%s required in %v", f.writeTool.Name, approvals)
+				require.Equal(t, wantPlainRequired, slices.Contains(approvals, f.plainTool.Name), "%s required in %v", f.plainTool.Name, approvals)
+			}
+			assertJob(tt.wantPlainRequired)
+			if tt.dropAgentRequirement {
+				agent.Spec.Coordination.ApprovalRequiredTools = nil
+				agent.Generation++
+				task.Status.Attempts++
+				task.Status.Iteration++
+				assertJob(false)
+			}
+		})
+	}
+}
+
+func TestJobBuilder_BuildWithOptions_NewJobUsesCurrentAgentApprovalList(t *testing.T) {
+	tests := []struct {
+		name  string
+		lists [][]string
+	}{
+		{name: "tool added between renders", lists: [][]string{nil, {"review"}}},
+		{name: "tool removed between renders", lists: [][]string{{"review"}, nil}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			tool := &corev1alpha1.Tool{
+				ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "review"},
+				Spec:       corev1alpha1.ToolSpec{Description: "Review", HTTP: &corev1alpha1.HTTPExecution{URL: "https://example.test/review"}},
+			}
+			require.NoError(t, builder.Create(t.Context(), tool))
+			agent := &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "agent", UID: "agent-uid", Generation: 1},
+				Spec: corev1alpha1.AgentSpec{
+					Model:        &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "model"},
+					Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+					Tools:        []corev1alpha1.ToolReference{{Name: tool.Name}},
+				},
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: testTask, UID: "task-uid"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "Review", AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+			}
+			for i, required := range tt.lists {
+				task.Status.Iteration = int32(i)
+				task.Status.Attempts = int32(i)
+				agent.Generation = int64(i + 1)
+				agent.Spec.Coordination.ApprovalRequiredTools = required
+				job, err := builder.BuildWithOptions(t.Context(), task, agent, nil, JobBuildOptions{})
+				require.NoError(t, err)
+				env := job.Spec.Template.Spec.Containers[0].Env
+				offered, found := findEnvVar(env, workerenv.AITools)
+				require.True(t, found, "render %d: missing %s", i, workerenv.AITools)
+				require.Contains(t, workerenv.SplitCSV(offered.Value), tool.Name, "render %d", i)
+				approvals, found := findEnvVar(env, workerenv.ApprovalRequiredTools)
+				require.True(t, found, "render %d: missing %s", i, workerenv.ApprovalRequiredTools)
+				require.Equal(t, slices.Contains(required, tool.Name), slices.Contains(workerenv.SplitCSV(approvals.Value), tool.Name),
+					"render %d: approval set %q, Agent list %v", i, approvals.Value, required)
+			}
+		})
+	}
+}
+
+func TestPrepareAISoul_AgentEditAfterBindingFailsPreparation(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS, UID: "agent-uid", Generation: 1},
+		Spec: corev1alpha1.AgentSpec{
+			Soul:         &corev1alpha1.SoulSource{Inline: "persona"},
+			Coordination: &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true},
+			Tools:        []corev1alpha1.ToolReference{{Name: "dispatch_work_order"}},
+		},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS, UID: "task-uid", Generation: 1},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "iterate", AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent)
+	_, err := r.prepareAISoul(t.Context(), task, agent)
+	require.NoError(t, err)
+
+	// Editing only the approval list advances the Agent's generation, which
+	// the soul binding records, so the next iteration cannot be prepared.
+	agent = agent.DeepCopy()
+	agent.Generation++
+	agent.Spec.Coordination.ApprovalRequiredTools = []string{"dispatch_work_order"}
+	task.Status.Iteration++
+	_, err = r.prepareAISoul(t.Context(), task, agent)
+	require.Error(t, err)
+	require.True(t, isPermanentAISoulConfigurationError(err), "want a permanent soul configuration error, got %v", err)
+	require.ErrorContains(t, err, "create a new Task")
+}
+
+func TestCreateTaskJob_AdoptsRecordedJobWithItsIssuedApprovalSet(t *testing.T) {
+	ctx := t.Context()
+	r, task, agent := newGatewayReplyFreshnessFixture(t)
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Namespace: task.Namespace, Name: "review"},
+		Spec:       corev1alpha1.ToolSpec{Description: "Review", HTTP: &corev1alpha1.HTTPExecution{URL: "https://example.test/review"}},
+	}
+	require.NoError(t, r.Create(ctx, tool))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(agent), agent))
+	agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: tool.Name}}
+	agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, Autonomous: true, ApprovalRequiredTools: []string{tool.Name}}
+	require.NoError(t, r.Update(ctx, agent))
+
+	issued, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, nil, JobBuildOptions{GatewayReplyEligible: true})
+	require.NoError(t, err)
+	issuedApprovals, found := findEnvVar(issued.Spec.Template.Spec.Containers[0].Env, workerenv.ApprovalRequiredTools)
+	require.True(t, found)
+	require.Equal(t, tool.Name, issuedApprovals.Value)
+	issued.UID = "recorded-uid"
+	require.NoError(t, controllerutil.SetControllerReference(task, issued, r.Scheme))
+	require.NoError(t, r.Create(ctx, issued))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(task), task))
+	task.Status.JobName, task.Status.JobUID = issued.Name, string(issued.UID)
+	require.NoError(t, r.Status().Update(ctx, task))
+
+	// The Agent's approval list changes after the Job was issued, so a fresh
+	// candidate would carry an empty approval set.
+	agent.Spec.Coordination.ApprovalRequiredTools = nil
+	agent.Generation++
+	require.NoError(t, r.Update(ctx, agent))
+	candidate, err := r.JobBuilder.BuildWithOptions(ctx, task, agent, nil, JobBuildOptions{GatewayReplyEligible: true})
+	require.NoError(t, err)
+	candidateApprovals, found := findEnvVar(candidate.Spec.Template.Spec.Containers[0].Env, workerenv.ApprovalRequiredTools)
+	require.True(t, found)
+	require.Empty(t, candidateApprovals.Value)
+
+	_, err = r.createTaskJob(ctx, task, agent, nil)
+	require.NoError(t, err)
+	require.Equal(t, corev1alpha1.TaskPhaseRunning, task.Status.Phase)
+	require.Equal(t, string(issued.UID), task.Status.JobUID)
+	jobs := &batchv1.JobList{}
+	require.NoError(t, r.List(ctx, jobs))
+	require.Len(t, jobs.Items, 1)
+	require.Equal(t, issued.UID, jobs.Items[0].UID)
+	recoveredApprovals, found := findEnvVar(jobs.Items[0].Spec.Template.Spec.Containers[0].Env, workerenv.ApprovalRequiredTools)
+	require.True(t, found)
+	require.Equal(t, issuedApprovals.Value, recoveredApprovals.Value)
 }
 
 func TestJobBuilder_buildEnvVars_FreezesConnectionBindingsOnTheJob(t *testing.T) {
