@@ -97,10 +97,18 @@ func (s *validationRecoveryStore) GetControllerEpochFence(context.Context, strin
 
 func validationRecoveryFixture(t *testing.T, git bool) (*ACPDispatcher, *corev1alpha1.Task, *validationRecoveryStore, harnessv2.Fence) {
 	t.Helper()
+	return newValidationRecoveryFixture(t, git, true)
+}
+
+func newValidationRecoveryFixture(t *testing.T, git, sessionBacked bool) (*ACPDispatcher, *corev1alpha1.Task, *validationRecoveryStore, harnessv2.Fence) {
+	t.Helper()
 	ctx := context.Background()
 	task := bindingTestTask()
 	task.Spec.Workspace = nil
-	task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "recovery-conversation", Create: true}
+	task.Spec.SessionRef = nil
+	if sessionBacked {
+		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "recovery-conversation", Create: true}
+	}
 	if git {
 		task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{GitRepo: "https://github.com/orka-agents/orka.git", Branch: "removed-branch", Intent: corev1alpha1.WorkspaceIntentWrite}
 	}
@@ -127,7 +135,10 @@ func validationRecoveryFixture(t *testing.T, git bool) (*ACPDispatcher, *corev1a
 	if err != nil {
 		t.Fatal(err)
 	}
-	control := &validationRecoveryStore{fence: fence, session: &store.SessionControl{Namespace: task.Namespace, SessionName: task.Spec.SessionRef.Name, SessionUID: task.Status.Execution.RuntimeSessionUID}}
+	control := &validationRecoveryStore{fence: fence}
+	if sessionBacked {
+		control.session = &store.SessionControl{Namespace: task.Namespace, SessionName: task.Spec.SessionRef.Name, SessionUID: task.Status.Execution.RuntimeSessionUID}
+	}
 	id, err := promptAttemptIDFromTask(task)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +161,11 @@ func validationRecoveryFixture(t *testing.T, git bool) (*ACPDispatcher, *corev1a
 		workspace = harnessv2.WorkspaceSpec{Intent: harnessv2.WorkspaceIntentWrite, Baseline: harnessv2.WorkspaceBaseline{RepositoryIdentity: prepared.RepositoryID, Revision: prepared.BaselineOID, TreeDigest: prepared.ManifestDigest, Artifact: &prepared.Artifact}}
 		sourceRef = prepared.SourceRef
 	} else {
-		_, workspace, err = emptyRuntimeWorkspace(task, task.Status.Execution.RuntimeSessionUID)
+		scope := string(task.UID)
+		if sessionBacked {
+			scope = task.Status.Execution.RuntimeSessionUID
+		}
+		_, workspace, err = emptyRuntimeWorkspace(task, scope)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -211,9 +226,15 @@ func TestRecoveredValidationWorkspaceRejectsMissingOrChangedEvidence(t *testing.
 }
 
 func TestRecoverAbandonedValidationPreservesOutcomeAndDoesNotPublish(t *testing.T) {
-	for _, scenario := range []string{"read", "write-empty", "write-prepared"} {
+	for _, scenario := range []string{"read", "write-empty", "write-prepared", "task-scoped-legacy"} {
 		t.Run(scenario, func(t *testing.T) {
-			d, task, control, fence := validationRecoveryFixture(t, scenario != "read")
+			git := scenario == "write-empty" || scenario == "write-prepared"
+			d, task, control, fence := newValidationRecoveryFixture(t, git, scenario != "task-scoped-legacy")
+			if scenario == "task-scoped-legacy" {
+				// A task-scoped Task from an earlier controller recorded no
+				// workspace digest; its recovery must still finish.
+				task.Status.Execution.RuntimeSessionWorkspaceDigest = ""
+			}
 			baseline, _, baselineErr := d.recoveredValidationWorkspace(t.Context(), task, task.UID)
 			if baselineErr != nil {
 				t.Fatal(baselineErr)

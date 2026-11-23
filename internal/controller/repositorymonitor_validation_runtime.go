@@ -521,6 +521,12 @@ func defaultRepositoryMonitorValidationContainer(container *corev1.Container) {
 	if container.TerminationMessagePolicy == "" {
 		container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 	}
+	for i := range container.Env {
+		// The API server defaults an env fieldRef's apiVersion to v1.
+		if from := container.Env[i].ValueFrom; from != nil && from.FieldRef != nil && from.FieldRef.APIVersion == "" {
+			from.FieldRef.APIVersion = "v1"
+		}
+	}
 }
 
 func imageUsesLatestTag(image string) bool {
