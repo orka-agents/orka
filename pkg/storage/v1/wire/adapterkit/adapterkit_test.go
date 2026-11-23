@@ -718,7 +718,7 @@ func TestServeNeverLogsProviderReadinessErrors(t *testing.T) {
 	running := start(t, f, config)
 	running.waitReady(t, true)
 
-	failure := fmt.Errorf("dial postgres://orka:health-secret@db: %w", storagev1.ErrUnavailable)
+	failure := fmt.Errorf("backend refused password health-secret: %w", storagev1.ErrUnavailable)
 	provider.healthErr.Store(&failure)
 	running.waitReady(t, false)
 	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "storage adapter not ready") },
