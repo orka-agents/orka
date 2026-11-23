@@ -270,6 +270,38 @@ func TestServerShedsCallsOverTheClassLimit(t *testing.T) {
 	require.Empty(t, provider.callsTo("GetPlan"))
 }
 
+// OVERLOADED arrived with protocol revision 2, so a shed call from a
+// revision 1 client is refused as UNAVAILABLE, which that client takes as a
+// refusal before any work rather than an unknown outcome.
+func TestShedCallsUseAReasonTheClientKnows(t *testing.T) {
+	provider := newRecordingProvider()
+	release := make(chan struct{})
+	provider.block["SavePlan"] = release
+	server, err := wire.NewServer(wire.ServerConfig{State: provider, Limits: wire.Limits{
+		MaxConcurrent: map[storagev1.CallClass]int{storagev1.CallInteractive: 1},
+	}})
+	require.NoError(t, err)
+	conn := serveInsecure(t, server)
+	blocked := make(chan error, 1)
+	go func() {
+		blocked <- wire.NewClient(conn, boundConfig).SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
+	}()
+	provider.waitEntered(t, "SavePlan")
+
+	plans := storagepb.NewResultsClient(conn)
+	for revision, want := range map[string]string{"1": wire.ReasonUnavailable, "2": wire.ReasonOverloaded} {
+		ctx := metadata.AppendToOutgoingContext(t.Context(), wire.HeaderContract, storagev1.ContractVersion,
+			wire.HeaderRevision, revision, wire.HeaderDataset, testDataset)
+		_, err := plans.SavePlan(ctx, &storagepb.SavePlanRequest{Namespace: "n", TaskName: "t"})
+		code, reason := reasonOf(t, err)
+		require.Equal(t, codes.Unavailable, code)
+		require.Equal(t, want, reason, "revision %s", revision)
+	}
+	close(release)
+	require.NoError(t, <-blocked)
+	require.Len(t, provider.callsTo("SavePlan"), 1)
+}
+
 // deadlineProvider records the deadline its GetPlan runs with.
 type deadlineProvider struct {
 	*recordingProvider

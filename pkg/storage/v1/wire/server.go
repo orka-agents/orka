@@ -533,7 +533,14 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 		case slots <- struct{}{}:
 			release = func() { <-slots }
 		default:
-			return nil, nil, errorStatus(codes.Unavailable, ReasonOverloaded,
+			// A revision 1 client does not know OVERLOADED and would take
+			// the refusal of a write as an unknown outcome, so it is told
+			// the server is unavailable, which it does know.
+			reason := ReasonOverloaded
+			if revision, _ := strconv.Atoi(header.Get(HeaderRevision)[0]); revision < overloadedSince {
+				reason = ReasonUnavailable
+			}
+			return nil, nil, errorStatus(codes.Unavailable, reason,
 				"the storage server is at its "+m.class.String()+" call limit", nil)
 		}
 	}
@@ -565,6 +572,10 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 	accepted = true
 	return ctx, free, nil
 }
+
+// overloadedSince is the protocol revision whose clients know the
+// OVERLOADED reason.
+const overloadedSince = 2
 
 // checkContract refuses a call without the orka.storage.v1 contract header
 // and a protocol revision. The server serves every older revision.

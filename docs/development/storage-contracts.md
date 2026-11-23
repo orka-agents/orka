@@ -1719,7 +1719,8 @@ artifact-fence cases run only in process.
   `HealthCheck`, `CallInteractive`, `CallBackground`, and `CallBulk` for
   results, receipts, artifact transfers and every streaming call) and how long each class may run. A call over its
   class's limit is refused with `OVERLOADED` before the provider runs, which
-  the client returns as `ErrUnavailable`. The duration limit covers the whole
+  the client returns as `ErrUnavailable`; a revision 1 client, which does not
+  know `OVERLOADED`, is refused with `UNAVAILABLE`. The duration limit covers the whole
   call, including the first description of the providers and every message a
   streaming call receives or sends, so an upload or download whose peer stalls,
   or never sends its request, is ended as `UNAVAILABLE` and frees its slot. A
