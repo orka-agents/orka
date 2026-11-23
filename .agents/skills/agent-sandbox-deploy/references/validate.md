@@ -110,3 +110,23 @@ repository.
 Together they cover installed-backend persistence and the generic Core handoff.
 Neither proves a model-backed Sandbox Task; use the class-backed smoke above for
 that.
+
+## Model-free class-backed Tasks
+
+When a check needs a real Sandbox-hosted RuntimeSession but no model, for
+example operator access, lifecycle, or exec testing, run the codex runtime with
+orka-workspace's deterministic fixture agent and skip vekil. Its
+`hack/external-workspace-e2e/acp-runtime.Dockerfile` packages an Orka checkout's
+`orka-acp-runtime` and `orka-acp-exec-helper` with
+`hack/external-workspace-e2e/acp-agent` installed as `/usr/bin/node`, with
+`ORKA_ACP_PROVIDER=codex`. Build it the way `scripts/external-workspace-e2e.sh
+prepare-runtime` does, but publish it by digest to a registry this cluster can
+pull from, because that script loads it only into its own cluster. Then add
+`--acp-codex-runtime-image=<repo>@sha256:<digest>` to the controller arguments.
+A `codex` Agent needs only a model name, with no model Secret.
+
+The agent answers each prompt with `External workspace fixture completed.`
+after about two seconds and never contacts a model, repository, or network.
+A Task on it finishes almost at once, and with a `Suspend` class settlement
+suspends its workspace within seconds, so `orka task exec` then returns
+`409 execution workspace is not running`.

@@ -611,3 +611,46 @@ func TestStaticChartAgentHostGitHubRendersFromReusedValues(t *testing.T) {
 		t.Fatalf("provider = %+v", provider)
 	}
 }
+
+// GitHub sign-in rides on the agent-host GitHub App and admits only its
+// allow-list.
+func TestStaticChartGitHubSignIn(t *testing.T) {
+	signIn := agentHostGitHubValues("--set", "controller.agentHosts.github.clientSecret.value=x",
+		"--set", "controller.githubSignIn.enabled=true",
+		"--set", "controller.githubSignIn.allowedOrgs[0]=acme",
+		"--set", "controller.githubSignIn.allowedTeams[0]=beta/agents")
+	rendered := requireHelmRender(t, append(signIn, "--show-only", "templates/deployment.yaml")...)
+	var deployment appsv1.Deployment
+	if err := yaml.Unmarshal([]byte(rendered), &deployment); err != nil {
+		t.Fatal(err)
+	}
+	args := deployment.Spec.Template.Spec.Containers[0].Args
+	for _, want := range []string{
+		"--github-sign-in-enabled=true", "--github-sign-in-provider=github", "--github-sign-in-allowed-orgs=acme",
+		"--github-sign-in-allowed-teams=beta/agents", "--github-sign-in-create-hosts=true",
+	} {
+		if !containsString(args, want) {
+			t.Errorf("controller args lack %s", want)
+		}
+	}
+	noHosts := requireHelmRender(t, append(append(signIn, "--set", "controller.githubSignIn.createHosts=false"),
+		"--show-only", "templates/deployment.yaml")...)
+	if !strings.Contains(noHosts, "--github-sign-in-create-hosts=false") {
+		t.Fatal("createHosts=false must reach the controller")
+	}
+	for name, args := range map[string][]string{
+		"no allow-list": agentHostGitHubValues("--set", "controller.agentHosts.github.clientSecret.value=x",
+			"--set", "controller.githubSignIn.enabled=true"),
+		"no agent-host GitHub App": {
+			"--set", "controller.githubSignIn.enabled=true", "--set", "controller.githubSignIn.allowedOrgs[0]=acme",
+		},
+	} {
+		if _, err := helmTemplateStaticChart(t, args...); err == nil {
+			t.Fatalf("%s: the chart rendered a sign-in it cannot run", name)
+		}
+	}
+	defaults := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Contains(defaults, "github-sign-in") {
+		t.Fatal("sign-in is off by default")
+	}
+}

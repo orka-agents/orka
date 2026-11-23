@@ -946,6 +946,22 @@ func (r *ToolReconciler) stopHeldSubstrateMCPActor(
 	if err != nil {
 		return err
 	}
+	// The template now under that name decides only for an Actor that booted
+	// from it. A template deleted and created again under the same name may
+	// differ in whether its Actors can be suspended, so a placed Actor whose
+	// template identity is unknown or another is stopped as one whose
+	// template cannot be read.
+	description, err := executor.Describe(ctx, workspace.DescribeRequest{Ref: stop.ref})
+	if err != nil {
+		closeWorkspaceExecutor(ctx, executor)
+		return fmt.Errorf("read the actor's template identity: %w", err)
+	}
+	if description.Phase != workspace.PhaseRetained && description.Phase != workspace.PhaseDeleted &&
+		strings.TrimSpace(description.Template.UID) != request.TemplateUID {
+		closeWorkspaceExecutor(ctx, executor)
+		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, stop,
+			fmt.Errorf("the actor's template %s/%s is not the one it booted from", templateNamespace, templateName))
+	}
 	defer closeWorkspaceExecutor(ctx, executor)
 	return r.stopSubstrateMCPActor(ctx, tool, executor, stop, cfg.ClaimTimeout)
 }

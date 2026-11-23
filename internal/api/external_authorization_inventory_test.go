@@ -57,7 +57,7 @@ GET /api/v1/approvals | list core.orka.ai:tasks
 POST /api/v1/tasks/:id/approvals/:approvalID/decision | update core.orka.ai:tasks/approvals protected; patch core.orka.ai:tasks protected
 POST /api/v1/tasks/:id/fork | get core.orka.ai:tasks protected; create core.orka.ai:tasks
 GET /api/v1/tasks/:id/result | get core.orka.ai:tasks protected
-GET /api/v1/tasks/:id/memory-consolidation-report | get core.orka.ai:tasks protected; list core.orka.ai:sessions; get core.orka.ai:sessions; list core.orka.ai:memories
+GET /api/v1/tasks/:id/memory-consolidation-report | get core.orka.ai:tasks protected; list core.orka.ai:sessions; get core.orka.ai:sessions; list core.orka.ai:memories; list core.orka.ai:memoryproposals
 GET /api/v1/tasks/:id/plan | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/children | get core.orka.ai:tasks protected; list core.orka.ai:tasks
 GET /api/v1/tasks/:id/artifacts | get core.orka.ai:tasks protected
@@ -186,9 +186,16 @@ PUT /api/v1/connections/:name | identity
 DELETE /api/v1/connections/:name | identity
 POST /api/v1/connections/:name/authorize | identity
 POST /api/v1/connections/:name/complete | identity
+POST /api/v1/auth/session/renew | identity
+DELETE /api/v1/auth/session | identity
 GET /api/v1/agent-hosts/me | identity
 POST /api/v1/agent-hosts/me/wake | identity
 DELETE /api/v1/agent-hosts/me | identity
+POST /api/v1/agent-hosts/invites | create core.orka.ai:agenthosts
+GET /api/v1/agent-hosts/invites/:id | create core.orka.ai:agenthosts
+POST /api/v1/ahp-tokens | identity
+GET /api/v1/ahp-tokens | identity
+DELETE /api/v1/ahp-tokens/:id | identity
 GET /api/v1/secrets | list :secrets
 POST /api/v1/chat | create core.orka.ai:chats
 GET /api/v1/chat/config | get core.orka.ai:chats/config
@@ -417,6 +424,9 @@ func TestExternalAPIRouteInventory(t *testing.T) {
 		}
 		if key == "GET "+connectors.CallbackPath {
 			continue // The OAuth callback is authenticated by signed single-use state; see connection_handlers_test.go.
+		}
+		if key == "GET /api/v1/auth/config" || key == "POST /api/v1/auth/github" {
+			continue // GitHub sign-in precedes any Orka credential: the GitHub token is checked; see github_signin_test.go.
 		}
 		require.Contains(t, externalAPIPolicies, key, "external route lacks an explicit policy")
 		require.True(t, cases[key], "external route lacks an HTTP authorization test: %s", key)

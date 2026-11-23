@@ -167,7 +167,9 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 		fixture.dispatcher.runtimeContextFactory = nil
 		wantReason, wantMessage, wantCancel = "Cancelled", "prompt cancellation settled", harnessv2.CancelReasonControllerShutdown
 		if cancelRequest != "" {
-			wantMessage = cancelRequest
+			// A recorded cancel request reaches the runtime as the user's,
+			// so it answers pending permission requests as cancelled.
+			wantMessage, wantCancel = cancelRequest, harnessv2.CancelReasonUserRequested
 		}
 		cancelAfterRunning = cancelNativeTaskAfterPromptRunning(ctx, fixture, persistence, timedOut, attemptID, accepted, cancelRequest)
 	} else {

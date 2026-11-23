@@ -304,10 +304,11 @@ func validateAgentRuntimeReasoningEffort(runtimeCfg *corev1alpha1.AgentCLIRuntim
 	switch runtimeCfg.Type {
 	case corev1alpha1.AgentRuntimeCodex:
 		switch effort {
-		case agentReasoningEffortNone, agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh, agentReasoningEffortXHigh:
+		case agentReasoningEffortNone, agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh,
+			agentReasoningEffortXHigh, agentReasoningEffortMax:
 			return nil
 		default:
-			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be none, low, medium, high, or xhigh", effort)
+			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be none, low, medium, high, xhigh, or max", effort)
 		}
 	case corev1alpha1.AgentRuntimeClaude:
 		switch effort {

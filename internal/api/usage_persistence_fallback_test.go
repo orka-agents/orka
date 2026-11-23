@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -173,17 +174,10 @@ func serveUsagePersistenceFixture(w http.ResponseWriter, r *http.Request, anthro
 		http.Error(w, "invalid fixture request", http.StatusBadRequest)
 		return
 	}
-	if anthropic && request.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"fixture\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n"+
-			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n"+
-			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	if anthropic {
+		_ = anthropictest.WriteMessage(w, `{"id":"fixture","type":"message","role":"assistant","model":"fixture","content":[{"type":"text","text":"<ORKA_GOAL_STATE_REACHED>\nOK"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}`)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if anthropic {
-		_, _ = io.WriteString(w, `{"id":"fixture","type":"message","role":"assistant","model":"fixture","content":[{"type":"text","text":"<ORKA_GOAL_STATE_REACHED>\nOK"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}`)
-		return
-	}
 	_, _ = io.WriteString(w, `{"id":"fixture","object":"response","model":"fixture","status":"completed","output":[{"id":"message","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"<ORKA_GOAL_STATE_REACHED>\nOK","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}`)
 }
