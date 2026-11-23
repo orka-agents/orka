@@ -204,7 +204,11 @@ func checkContract(header metadata.MD) error {
 
 // withEnvelope decodes a write's envelope header into ctx, where the provider
 // reads it exactly as it does in process. Only a write carries an envelope,
-// so the server refuses one on a read or an administrative call.
+// so the server refuses one on a read or an administrative call. The server
+// checks a write against the dataset its call names, so it refuses an
+// envelope for any other dataset: the provider could commit it there while
+// the response named the call's dataset. An envelope that names no dataset
+// is invalid, and the provider refuses it as it does in process.
 func withEnvelope(ctx context.Context, m *method, header metadata.MD) (context.Context, error) {
 	var encoded storagepb.WriteEnvelope
 	found, err := decodeHeader(header, HeaderEnvelope, "write envelope", &encoded)
@@ -217,6 +221,10 @@ func withEnvelope(ctx context.Context, m *method, header metadata.MD) (context.C
 	envelope, err := fromWireWriteEnvelope(&encoded, true)
 	if err != nil {
 		return ctx, requestStatus(err)
+	}
+	if named := header.Get(HeaderDataset); envelope.DatasetID != "" && (len(named) != 1 || envelope.DatasetID != named[0]) {
+		return ctx, errorStatus(codes.FailedPrecondition, ReasonDatasetMismatch,
+			"the write envelope names a dataset other than the call's", nil)
 	}
 	return storagev1.WithWriteEnvelope(ctx, envelope), nil
 }

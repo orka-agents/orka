@@ -168,6 +168,12 @@ func (c *Client) invoke(ctx context.Context, m *method, req proto.Message, call 
 		pairs = append(pairs, HeaderDataset, c.dataset)
 	}
 	if envelope, ok := storagev1.WriteEnvelopeFrom(ctx); ok && m.kind == storagev1.MethodWrite {
+		// The server checks a write against the dataset the call names, so
+		// an envelope for another dataset could commit there while the
+		// response names the bound one.
+		if c.dataset != "" && envelope.DatasetID != "" && envelope.DatasetID != c.dataset {
+			return fmt.Errorf("%w: %s write envelope names a dataset other than the client's", storagev1.ErrDatasetMismatch, m.name)
+		}
 		encoded, err := toWireWriteEnvelope(envelope)
 		if err != nil {
 			return err
