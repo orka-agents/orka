@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -451,6 +452,94 @@ func newExternalACPDispatchFixtureWithOptions(
 	}
 }
 
+// newExternalRuntimeTestProxyServer serves a fixture proxy in full-duplex mode.
+// The proxies forward requests with their original bodies. In HTTP/1's
+// default mode, flushing a forwarded response (such as a prompt stream's
+// acceptance) closes that body, and the proxy transport's trailing EOF check
+// then fails and drops the upstream connection mid-stream.
+func newExternalRuntimeTestProxyServer(t *testing.T, name string, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			t.Errorf("enable full-duplex %s proxy: %v", name, err)
+			return
+		}
+		handler(w, request)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// lateEOFCheckBody delays every read after the declared body length, which is
+// the proxy transport's trailing overlong-body check.
+type lateEOFCheckBody struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (b *lateEOFCheckBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	return n, err
+}
+
+// A fixture proxy must forward a whole prompt stream even when the upstream
+// starts streaming before the proxy transport finishes its request-body EOF
+// check. Without full-duplex mode, the first flushed event closes the request
+// body, that check fails, and the stream is cut after acceptance.
+func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *testing.T) {
+	const lines = 5
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", harnessv2.NDJSONMediaType)
+		for sequence := range lines {
+			_, _ = fmt.Fprintf(w, "{\"sequence\":%d}\n", sequence)
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	server := newExternalRuntimeTestProxyServer(t, "late EOF check", func(w http.ResponseWriter, request *http.Request) {
+		request.Body = &lateEOFCheckBody{ReadCloser: request.Body, remaining: request.ContentLength}
+		proxy.ServeHTTP(w, request)
+	})
+	// Past the transport's 4 KiB write buffer, the body reaches the upstream
+	// before the trailing EOF check runs.
+	payload, err := json.Marshal(map[string]string{"prompt": strings.Repeat("x", 16<<10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPut, server.URL+"/v2/runtime-sessions/session/prompts/prompt", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close() //nolint:errcheck
+	received := 0
+	scanner := bufio.NewScanner(response.Body)
+	for scanner.Scan() {
+		received++
+	}
+	if err := scanner.Err(); err != nil || received != lines {
+		t.Fatalf("proxied stream delivered %d of %d events (read error %v)", received, lines, err)
+	}
+}
+
 func newExternalRuntimeStatusProxy(
 	t *testing.T,
 	upstream string,
@@ -481,17 +570,7 @@ func newExternalRuntimeStatusProxy(
 		response.Header.Del("Content-Length")
 		return nil
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Acceptance can flush before the transport's final request-body EOF
-		// check. Keep HTTP/1 from closing that shared body during the flush.
-		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-			t.Errorf("enable full-duplex status proxy: %v", err)
-			return
-		}
-		proxy.ServeHTTP(w, r)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	return newExternalRuntimeTestProxyServer(t, "status", proxy.ServeHTTP)
 }
 
 func newExternalRuntimeCapabilitiesProxy(
@@ -524,17 +603,7 @@ func newExternalRuntimeCapabilitiesProxy(
 		response.Header.Del("Content-Length")
 		return nil
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// This wrapper also forwards prompt streams; flushing acceptance must
-		// not close the transport's shared request body before its EOF check.
-		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-			t.Errorf("enable full-duplex capabilities proxy: %v", err)
-			return
-		}
-		proxy.ServeHTTP(w, r)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	return newExternalRuntimeTestProxyServer(t, "capabilities", proxy.ServeHTTP)
 }
 
 func newExternalRuntimePromptProxy(
@@ -548,7 +617,7 @@ func newExternalRuntimePromptProxy(
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return newExternalRuntimeTestProxyServer(t, "prompt", func(w http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/prompts/") {
 			body, err := io.ReadAll(request.Body)
 			if err != nil {
@@ -565,9 +634,7 @@ func newExternalRuntimePromptProxy(
 			observe(prompt)
 		}
 		proxy.ServeHTTP(w, request)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	})
 }
 
 // newExternalRuntimeFaultProxy rejects prompts with a retryable 429 and
@@ -584,7 +651,7 @@ func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, f
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion, Code: code, Message: message, Retryable: true})
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return newExternalRuntimeTestProxyServer(t, "fault", func(w http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/prompts/") && rejectPrompt != nil && rejectPrompt():
 			_, _ = io.Copy(io.Discard, request.Body)
@@ -595,9 +662,7 @@ func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, f
 		default:
 			proxy.ServeHTTP(w, request)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	})
 }
 
 func newExternalRuntimeWorkspaceDeltaProxy(
@@ -611,7 +676,7 @@ func newExternalRuntimeWorkspaceDeltaProxy(
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return newExternalRuntimeTestProxyServer(t, "workspace delta", func(w http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/workspace-deltas/") {
 			body, err := io.ReadAll(request.Body)
 			if err != nil {
@@ -628,9 +693,7 @@ func newExternalRuntimeWorkspaceDeltaProxy(
 			observe(delta)
 		}
 		proxy.ServeHTTP(w, request)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	})
 }
 
 func testExternalACPCustomTool(name string) *corev1alpha1.Tool {
