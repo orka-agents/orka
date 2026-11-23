@@ -1486,8 +1486,12 @@ artifact-fence cases run only in process.
   `UNAVAILABLE`, `UNAUTHENTICATED` or `INCOMPATIBLE` that `Describe` may
   return, or `UNAVAILABLE` for any other error). The server describes the
   provider again before every read or administrative call that names a
-  dataset, so a provider whose dataset changed while it serves never answers
-  such a call for the dataset it served before. A write is compared against
+  dataset, so a provider whose dataset changed before such a call never
+  answers it for the dataset it served before. A switch while the provider
+  runs the call is not detected: its response can carry records from the new
+  dataset under the dataset the check named. Closing that window is open in
+  the provider contract, either by a provider serving one dataset for its
+  lifetime or by each read checking the dataset it reads. A write is compared against
   the dataset the provider last described, on the first call that names a
   dataset or on any later `Describe` or read, and is still checked by its
   envelope's dataset. A

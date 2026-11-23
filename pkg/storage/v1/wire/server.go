@@ -295,8 +295,9 @@ func (s *Server) checkDigest(ctx context.Context, m *method, args ...any) error 
 
 // servingDataset returns the dataset the server checks a call against. A
 // read or an administrative call that names a dataset describes the provider
-// again before it runs, so a provider whose dataset changed while it serves
-// never answers it for the dataset it served before. A write is checked
+// again before it runs, so a provider whose dataset changed before the call
+// never answers it for the dataset it served before. A switch while the
+// provider runs the call is not detected. A write is checked
 // against the dataset the provider last described, as its envelope's dataset
 // is checked again by the provider itself, and a Describe or HealthCheck that
 // names none needs no dataset. libraryDescribe updates the dataset on every
