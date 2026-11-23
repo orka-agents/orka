@@ -54,9 +54,9 @@ func TestReferenceProviderCopiesRecordBodies(t *testing.T) {
 	require.Equal(t, exported, again.Records[0].Body, "changing an exported body does not change the stored record")
 
 	target := newMemoryExport()
-	manifest := make([]storagev1.FamilyDigest, 0)
 	families, err := source.ExportFamilies(ctx)
 	require.NoError(t, err)
+	manifest := make([]storagev1.FamilyDigest, 0, len(families))
 	for _, family := range families {
 		digest, err := source.ExportDigest(ctx, family.Name)
 		require.NoError(t, err)
