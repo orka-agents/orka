@@ -27,6 +27,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	"github.com/orka-agents/orka/internal/metrics"
 	toolspkg "github.com/orka-agents/orka/internal/tools"
 )
@@ -168,8 +169,7 @@ func TestAnthropicCompat_ContextTokenAllowedToolsFiltersInjectedProxyTools(t *te
 		case captured <- body:
 		default:
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+		_ = anthropictest.WriteMessage(w, `{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 	}))
 	defer mockAPI.Close()
 

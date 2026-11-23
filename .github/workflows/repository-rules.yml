@@ -1,0 +1,38 @@
+name: Repository Rules
+
+# hack/repocheck inspects every tracked file, so this workflow has no path
+# filter: a binary committed under website/ or .agents/ must still fail.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('repository-rules-pr-{0}', github.event.pull_request.number) || format('repository-rules-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  repocheck:
+    name: Repository rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+          check-latest: true
+
+      # Scaffold markers and compiled binaries; each failure says how to fix it.
+      - name: Check repository rules
+        run: go test ./hack/repocheck -count=1 -v

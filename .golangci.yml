@@ -5,6 +5,7 @@ linters:
   default: none
   enable:
     - copyloopvar
+    - depguard
     - dupl
     - errcheck
     - forbidigo
@@ -24,12 +25,33 @@ linters:
     - unparam
     - unused
   settings:
+    depguard:
+      rules:
+        # Separately built providers import api/ types and the
+        # pkg/storage/v1 contract; neither may pull in Orka internals.
+        public-packages:
+          files:
+            - ${base-path}/api/**
+            - ${base-path}/pkg/**
+          deny:
+            - pkg: github.com/orka-agents/orka/internal
+              desc: api/ and pkg/ are imported by separately built providers, which cannot import internal/; move the code you need into pkg/ or api/, or keep this caller in internal/.
     forbidigo:
       analyze-types: true
       forbid:
         - pattern: ^trace\.Span\.RecordError$
           pkg: ^go\.opentelemetry\.io/otel/trace$
           msg: RecordError exports the error message; use tracing.RecordSpanError.
+        # Scoped to internal/ by the exclusion rules below.
+        - pattern: ^log\.(Logger\.)?(Print|Fatal|Panic)(f|ln)?$
+          pkg: ^log$
+          msg: "Unstructured logging: internal/ packages log through controller-runtime; use log := log.FromContext(ctx); log.Info(\"msg\", \"key\", val), or return the error."
+        - pattern: ^fmt\.Print(f|ln)?$
+          pkg: ^fmt$
+          msg: "Unstructured logging: internal/ packages must not print to stdout; use log := log.FromContext(ctx); log.Info(\"msg\", \"key\", val), or write to an injected io.Writer."
+        - pattern: ^(semconv\.(?i:genai)\w*|genaiconv\.\w+)$
+          pkg: ^go\.opentelemetry\.io/otel/semconv/
+          msg: The upstream GenAI conventions are Development-stage and move between semconv versions; use the constants in internal/tracing/genai, adding any you need there.
     revive:
       rules:
         - name: comment-spacings
@@ -65,6 +87,22 @@ linters:
       - linters:
           - goconst
         path: _test\.go$
+      # Only internal/ library code must log through controller-runtime.
+      # Commands, workers, fixtures and tests own their stdout and logger.
+      - linters:
+          - forbidigo
+        text: 'forbidden because "Unstructured logging:'
+        path-except: ^internal/
+      - linters:
+          - forbidigo
+        text: 'forbidden because "Unstructured logging:'
+        path: _test\.go$
+      # The Must* environment helpers run in main packages before a logger
+      # exists and exit the process on a bad value.
+      - linters:
+          - forbidigo
+        text: 'forbidden because "Unstructured logging:'
+        path: ^internal/envutil/envutil\.go$
       # The public provider suite is test code shipped as a library so
       # separately built providers can run it; its fixtures follow the same
       # rules as test files.

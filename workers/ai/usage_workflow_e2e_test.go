@@ -49,6 +49,7 @@ import (
 	"github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
@@ -603,21 +604,23 @@ func (f *usageWorkflowFixture) runDelegatedWorker(
 			http.Error(w, "unexpected provider request", http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		if phase == corev1alpha1.TaskPhaseFailed {
 			if call > 1 {
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(w, `{"type":"error",
 					"error":{"type":"invalid_request_error","message":"fixture request rejected"}}`)
 				return
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"fixture-tool","type":"message","role":"assistant","model":"usage-fixture-model",
+			_ = anthropictest.WriteMessage(w, fmt.Sprintf(`{"id":"fixture-tool","type":"message","role":"assistant",
+				"model":"usage-fixture-model",
 				"content":[{"type":"tool_use","id":"read-fixture","name":"file_read","input":{"path":%q}}],"stop_reason":"tool_use",
 				"usage":{"input_tokens":80,"output_tokens":20,"cache_read_input_tokens":20,"cache_creation_input_tokens":0}}`,
-				missingFile)
+				missingFile))
 			return
 		}
-		_, _ = io.WriteString(w, `{"id":"fixture-message","type":"message","role":"assistant","model":"usage-fixture-model",
+		_ = anthropictest.WriteMessage(w, `{"id":"fixture-message","type":"message","role":"assistant",
+			"model":"usage-fixture-model",
 			"content":[{"type":"text","text":"delegated work complete"}],"stop_reason":"end_turn",
 			"usage":{"input_tokens":80,"output_tokens":20,"cache_read_input_tokens":20,"cache_creation_input_tokens":0}}`)
 	}))

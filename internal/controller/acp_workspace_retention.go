@@ -314,7 +314,17 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 				"class idleTimeout elapsed, but the durable-workspace marker is invalid; failing closed")
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
-		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) && operatoraccess.Tainted(workspace.Annotations) {
+		operatorTainted := false
+		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
+			// The workspace marker and the marker of every Task linked to this
+			// exact incarnation both count; an unreadable Task holds retention.
+			tainted, err := acpWorkspaceOperatorTainted(ctx, r.quotaReader(), workspace)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			operatorTainted = tainted
+		}
+		if operatorTainted {
 			// Operator access forfeits retention: a tainted workspace is never
 			// captured into a data checkpoint for continuation or forks.
 			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "OperatorTaintedIdleExpired",
@@ -1331,9 +1341,14 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
-	if operatoraccess.Tainted(workspace.Annotations) {
-		// Backstop for every suspension path: a tainted workspace is never
-		// checkpointed.
+	// Backstop for every suspension path: a workspace tainted through its own
+	// marker or the marker of any Task linked to this exact incarnation is
+	// never checkpointed, and an unreadable Task refuses the suspension.
+	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace)
+	if err != nil {
+		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, err)
+	}
+	if tainted {
 		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
 	}
 	if settledTaskUID != "" &&

@@ -26,28 +26,34 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/connectors/credential"
+	"github.com/orka-agents/orka/internal/githubauth"
 )
 
 const testHostConnection = "github-alice"
 
 type fakeHostCredentials struct {
-	token       string
-	unavailable bool
+	token string
+	// neverExpires hands out a token without an expiry; unrefreshable, one
+	// whose expiry is Orka's own deadline.
+	neverExpires  bool
+	unrefreshable bool
+	unavailable   bool
 	// broken makes every call fail as a store outage would.
 	broken bool
 	// connection is the Connection that feeds hosts; empty means testHostConnection.
 	connection    string
 	connectionUID string
 	grantSequence int64
-	// neverExpires hands out a token without an expiry.
-	neverExpires bool
 }
 
 func (f *fakeHostCredentials) HostCredential(_ context.Context, namespace, name string, _ time.Duration) (credential.HostCredential, error) {
 	if err := f.CheckHostLink(context.Background(), namespace, name); err != nil {
 		return credential.HostCredential{}, err
 	}
-	held := credential.HostCredential{AccessToken: f.token, ConnectionUID: f.connectionUID, GrantSequence: f.grantSequence}
+	held := credential.HostCredential{
+		AccessToken: f.token, Refreshable: !f.unrefreshable,
+		ConnectionUID: f.connectionUID, GrantSequence: f.grantSequence,
+	}
 	if !f.neverExpires {
 		held.ExpiresAt = time.Now().Add(8 * time.Hour)
 	}
@@ -216,8 +222,17 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("ready = %+v", ready)
 	}
+	// Nor on one whose expiry only Orka set: custody cannot refresh it.
+	credentials.neverExpires, credentials.unrefreshable = false, true
+	h.settle()
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("a token without an expiry GitHub set must not be copied into the host")
+	}
+	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
+		t.Fatalf("unrefreshable: ready = %+v", ready)
+	}
 	// Once the link holds an expiring token, the host runs.
-	credentials.neverExpires = false
+	credentials.unrefreshable = false
 	h.settle()
 	if _, ok := h.pod(); !ok {
 		t.Fatal("an expiring token must start the host")
@@ -462,6 +477,66 @@ func TestAgentHostSuspendsWhileItsLinkCannotBeChecked(t *testing.T) {
 	}
 	if _, ok := h.tokenCopy(); ok {
 		t.Fatal("the token copy must be deleted")
+	}
+}
+
+// With a sign-in allow-list, a refreshed token admits the host only while its
+// account is still a member; GitHub failing to answer is retried.
+func TestAgentHostStopsWhenItsAccountLeavesTheAllowedOrgs(t *testing.T) {
+	h, credentials, accounts := newConnectionHostHarness(t)
+	verdict := error(nil)
+	h.reconciler.Membership = func(context.Context, string, string) error { return verdict }
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatalf("a member's host must run; status = %+v", h.host().Status)
+	}
+
+	credentials.token = "ghu_second"
+	accounts["ghu_second"] = alice
+	verdict = errors.New("GitHub is unavailable")
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testUserNamespace, Name: "alice"}}
+	if _, err := h.reconciler.Reconcile(context.Background(), request); err == nil {
+		t.Fatal("a membership check that could not run must be retried")
+	}
+	if token, _ := h.tokenCopy(); token != "ghu_first" {
+		t.Fatal("no new token may reach the host before its membership is confirmed")
+	}
+	if _, ok := h.pod(); !ok {
+		t.Fatal("GitHub failing to answer must not stop the host")
+	}
+
+	verdict = githubauth.ErrNotMember
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("a host whose account left the allowed orgs must stop")
+	}
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("its token copy must be deleted")
+	}
+	if got := agentHostReady(h.host()); got.Reason != agentHostReasonGitHubMembershipEnded {
+		t.Fatalf("ready = %+v", got)
+	}
+}
+
+// Under a sign-in allow-list, a token that never expires would never bring
+// a membership check, so the host refuses it.
+func TestAgentHostRefusesANeverExpiringTokenUnderAnAllowList(t *testing.T) {
+	h, credentials, _ := newConnectionHostHarness(t)
+	h.reconciler.Membership = func(context.Context, string, string) error { return nil }
+	h.settle()
+	if _, ok := h.pod(); !ok {
+		t.Fatalf("a member's host must run; status = %+v", h.host().Status)
+	}
+	credentials.neverExpires = true
+	h.settle()
+	if _, ok := h.pod(); ok {
+		t.Fatal("a host fed a token that never expires must stop")
+	}
+	if _, ok := h.tokenCopy(); ok {
+		t.Fatal("its token copy must be deleted")
+	}
+	if got := agentHostReady(h.host()); got.Reason != agentHostReasonGitHubTokenNeverExpires {
+		t.Fatalf("ready = %+v", got)
 	}
 }
 

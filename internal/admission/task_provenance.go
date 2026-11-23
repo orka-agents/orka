@@ -75,6 +75,15 @@ var (
 		labels.AnnotationTraceBaggage,
 	}
 
+	// controllerManagedTaskLabelKeys may be set when a Task is created, but
+	// only the controller may change or remove them afterwards. The AHP turn
+	// mark keeps a Task private to the person whose turn created it, and its
+	// delegated children carry it with no session to fall back on, so removing
+	// it would show them to everyone in the namespace.
+	controllerManagedTaskLabelKeys = []string{
+		labels.LabelAHPTurn,
+	}
+
 	controllerManagedTaskAnnotationKeys = []string{
 		labels.AnnotationCancelRequested,
 		labels.AnnotationParentTaskUID,
@@ -363,6 +372,7 @@ func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task, workerTrus
 		fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, managedTransactionAnnotationKeys)...)
 	}
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, controllerManagedTaskAnnotationKeys)...)
+	fields = append(fields, changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, controllerManagedTaskLabelKeys)...)
 	fields = append(fields, changedManagedPrefixFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels)...)
 	fields = append(fields, changedManagedPrefixFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations)...)
 	return fields

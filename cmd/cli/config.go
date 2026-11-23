@@ -29,9 +29,10 @@ func newConfigSetServerCmd() *cobra.Command {
 		Short: "Set the default Orka server URL",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			cfg := loadConfig()
-			cfg.Server = args[0]
-			if err := saveConfig(cfg); err != nil {
+			if err := updateConfig(func(cfg *orkaConfig) error {
+				cfg.Server = args[0]
+				return nil
+			}); err != nil {
 				return fmt.Errorf("save config: %w", err)
 			}
 			fmt.Printf("Server set to %s\n", args[0])
@@ -65,9 +66,11 @@ func newConfigSetTokenCmd() *cobra.Command {
 				return fmt.Errorf("token argument or --file is required")
 			}
 
-			cfg := loadConfig()
-			cfg.Token = value
-			if err := saveConfig(cfg); err != nil {
+			if err := updateConfig(func(cfg *orkaConfig) error {
+				// A token set here is not a session from orka login.
+				cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer = value, "", nil, ""
+				return nil
+			}); err != nil {
 				return fmt.Errorf("save config: %w", err)
 			}
 			fmt.Println("Token saved.")
@@ -98,9 +101,10 @@ func newConfigSetNamespaceCmd() *cobra.Command {
 			if ns == "" {
 				return fmt.Errorf("namespace is required")
 			}
-			cfg := loadConfig()
-			cfg.Namespace = ns
-			if err := saveConfig(cfg); err != nil {
+			if err := updateConfig(func(cfg *orkaConfig) error {
+				cfg.Namespace = ns
+				return nil
+			}); err != nil {
 				return fmt.Errorf("save config: %w", err)
 			}
 			fmt.Printf("Namespace set to %s\n", ns)

@@ -585,6 +585,10 @@ func (h *Handlers) scanAttention(c fiber.Ctx, action string, req attentionReques
 }
 
 func (h *Handlers) attentionTaskVisible(c fiber.Ctx, action string, task *corev1alpha1.Task, cache map[gatewayTaskAuthorizationKey]bool) (bool, error) {
+	// Another person's AHP turn stays hidden here, as from ListTasks.
+	if ahpTaskHidden(GetUserInfo(c), task) {
+		return false, nil
+	}
 	allowed := true
 	if h.contextTokenAuthorization.Enabled() {
 		var err error

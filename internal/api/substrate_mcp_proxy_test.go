@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -813,6 +814,51 @@ func TestSubstrateMCPProxyRoutesHaveAWriteDeadline(t *testing.T) {
 		}
 		require.Equal(t, want, f.server.requestConfig(&header).WriteTimeout, tc.method+" "+tc.target)
 	}
+}
+
+// A proxied request body is bounded by the proxy's own limit, not the API's
+// larger default, and by a read timeout: a body declared past the limit is
+// refused before it is read, without waiting for the upload.
+func TestSubstrateMCPProxyBoundsTheRequestBodyBeforeBufferingIt(t *testing.T) {
+	f := newSubstrateMCPProxyFixture(t)
+	for _, target := range []string{"/api/v1/tools/lookup/mcp?namespace=default", "/API/v1/Tools/lookup/MCP/"} {
+		var header fasthttp.RequestHeader
+		header.SetMethod(http.MethodPost)
+		header.SetRequestURI(target)
+		header.SetHost("orka.test")
+		config := f.server.requestConfig(&header)
+		require.Equal(t, substrateMCPProxyMaxRequestBytes, config.MaxRequestBodySize, target)
+		require.Equal(t, substrateMCPProxyRequestReadTimeout, config.ReadTimeout, target)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	served := make(chan error, 1)
+	go func() { served <- f.server.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() {
+		require.NoError(t, f.server.app.ShutdownWithTimeout(5*time.Second))
+		require.NoError(t, <-served)
+	})
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer worker-sa-token-"+t.Name())
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Content-Length", strconv.Itoa(substrateMCPProxyMaxRequestBytes+1))
+	workerexecutor.SetSubstrateMCPToolBinding(headers, substrateMCPProxyTool())
+	var request strings.Builder
+	request.WriteString("POST /api/v1/tools/lookup/mcp?namespace=default HTTP/1.1\r\nHost: orka\r\n")
+	require.NoError(t, headers.Write(&request))
+	// Only the start of the declared body is ever sent.
+	_, err = fmt.Fprintf(conn, "%s\r\n{%s", request.String(), strings.Repeat(" ", 16<<10))
+	require.NoError(t, err)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err, "the oversized body is refused before the upload ends")
+	defer response.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusRequestEntityTooLarge, response.StatusCode)
+	require.Zero(t, f.upstreamCalls())
 }
 
 // A caller that stops reading must not hold the proxied stream and its Actor

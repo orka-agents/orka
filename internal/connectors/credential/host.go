@@ -35,6 +35,11 @@ type HostCredential struct {
 	// Version changes whenever custody holds new material.
 	Version       int64
 	GrantSequence int64
+	// Refreshable reports whether custody holds a refresh token for the
+	// grant. GitHub issues one only beside a token that expires, so it tells
+	// an expiry GitHub set from a deadline Orka chose for a token it was
+	// handed without one.
+	Refreshable bool
 	// ConnectionUID binds the grant sequence to this incarnation of the link.
 	ConnectionUID string
 }
@@ -82,6 +87,7 @@ func (s *Source) HostCredential(ctx context.Context, namespace, name string, hor
 		ExpiresAt:     credential.ExpiresAt,
 		Version:       credential.Version,
 		GrantSequence: credential.GrantSequence,
+		Refreshable:   credential.RefreshToken != "",
 		ConnectionUID: string(connection.UID),
 	}, nil
 }
