@@ -164,7 +164,7 @@ func rawUpload(ctx context.Context, conn *grpc.ClientConn, messages ...*storagep
 // a broken, oversized or malformed upload never reaches it.
 func TestUploadsAreCheckedBeforeTheProviderRuns(t *testing.T) {
 	provider := newRecordingProvider()
-	conn := wiretest.Dial(t, wire.ServerConfig{State: provider, Artifacts: provider, MaxBlobBytes: 4 * wire.MaxChunkBytes})
+	conn := wiretest.Dial(t, wire.ServerConfig{State: provider, Artifacts: provider, MaxBlobBytes: storagev1.MaxResultBytes})
 	data := pattern(2*wire.MaxChunkBytes + 7)
 	first := &storagepb.SaveResultRequest{Namespace: "n", TaskName: "t", Data: data[:wire.MaxChunkBytes]}
 	second := &storagepb.SaveResultRequest{Data: data[wire.MaxChunkBytes : 2*wire.MaxChunkBytes]}
@@ -179,7 +179,7 @@ func TestUploadsAreCheckedBeforeTheProviderRuns(t *testing.T) {
 		reason   string
 	}{
 		{"no blob headers", contractContext(t.Context()), []*storagepb.SaveResultRequest{first, second, third}, wire.ReasonValidation},
-		{"over the server's limit", uploadContext(t.Context(), 4*wire.MaxChunkBytes+1, digestOf(data)),
+		{"over the server's limit", uploadContext(t.Context(), storagev1.MaxResultBytes+1, digestOf(data)),
 			[]*storagepb.SaveResultRequest{first}, wire.ReasonTooLarge},
 		{"ends early", uploadContext(t.Context(), len(data), digestOf(data)),
 			[]*storagepb.SaveResultRequest{first, second}, wire.ReasonUnavailable},

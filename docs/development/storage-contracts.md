@@ -1694,7 +1694,10 @@ artifact-fence cases run only in process.
   provider's `MaxArtifactBytes` for an artifact) as `TOO_LARGE`, and one that
   breaks the framing as `VALIDATION`, so a refused upload never reaches the
   provider. The client refuses a blob over its own limit, or an artifact over
-  the provider's described limit, without sending it. Given a second
+  the provider's described limit, without sending it. A server with a state
+  provider refuses a blob limit below `MaxResultBytes`, which results and
+  receipts must reach, and describes the smaller of its limit and the
+  provider's result limit. Given a second
   connection (`ClientConfig.Bulk`), the client sends streaming calls over it,
   so a large transfer has its own HTTP/2 flow-control window. Protobuf cannot
   tell empty bytes from absent ones, so decoded bytes are never nil: a

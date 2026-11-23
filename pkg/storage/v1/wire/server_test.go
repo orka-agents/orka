@@ -748,6 +748,27 @@ func TestNewServerRequiresAProvider(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A server serving state.v1 carries results and receipts of the contract's
+// size, so it refuses a smaller blob limit, and it never advertises a result
+// limit above the one it enforces. An artifacts-only server keeps its own
+// limit.
+func TestServerBlobLimitCoversTheResultContract(t *testing.T) {
+	_, err := wire.NewServer(wire.ServerConfig{State: newRecordingProvider(), MaxBlobBytes: wire.MaxChunkBytes})
+	require.ErrorContains(t, err, "below the state contract's")
+	_, err = wire.NewServer(wire.ServerConfig{Artifacts: newRecordingProvider(), MaxBlobBytes: wire.MaxChunkBytes})
+	require.NoError(t, err, "an artifacts-only server is not bound by the result limit")
+
+	provider := newRecordingProvider()
+	larger := describeDefault()
+	larger.Limits.MaxResultBytes = 4 * storagev1.MaxResultBytes
+	provider.set("Describe", []any{larger}, nil)
+	client := wiretest.Serve(t, wire.ServerConfig{State: provider, MaxBlobBytes: storagev1.MaxResultBytes})
+	info, _, err := client.DescribeServer(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int64(storagev1.MaxResultBytes), info.Limits.MaxResultBytes,
+		"the advertised result limit is the server's blob limit")
+}
+
 // serveInsecure serves server on a TCP loopback without TLS. Only tests that
 // inject transport faults below TLS use it; wiretest always uses TLS.
 func serveInsecure(t *testing.T, server *wire.Server) *grpc.ClientConn {
