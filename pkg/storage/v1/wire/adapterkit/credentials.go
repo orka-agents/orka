@@ -280,7 +280,21 @@ func (c *credentialStore) authenticateCertificate(ctx context.Context) error {
 	if !ok || len(info.State.VerifiedChains) == 0 || len(info.State.VerifiedChains[0]) == 0 {
 		return errors.New("the call presents no verified client certificate")
 	}
+	// The handshake verified the chain against the client CAs of its time.
+	// A connection outlives that, so every call verifies the leaf again
+	// against the current bundle and clock: a removed CA or an expired
+	// certificate stops a connection that is already open.
 	leaf := info.State.VerifiedChains[0][0]
+	intermediates := x509.NewCertPool()
+	for _, presented := range info.State.PeerCertificates[1:] {
+		intermediates.AddCert(presented)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots: c.clientCAs.Load(), Intermediates: intermediates, CurrentTime: time.Now(),
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return errors.New("the client certificate is no longer trusted")
+	}
 	for _, uri := range leaf.URIs {
 		if slices.Contains(c.config.AllowedClientURIs, uri.String()) {
 			return nil

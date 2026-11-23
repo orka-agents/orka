@@ -182,11 +182,19 @@ func (a authority) pool() *x509.CertPool {
 // issue returns a PEM certificate and key signed by a.
 func (a authority) issue(t *testing.T, serial int64, usage x509.ExtKeyUsage, dnsNames []string, uris ...string) ([]byte, []byte) {
 	t.Helper()
+	return a.issueUntil(t, time.Now().Add(time.Hour), serial, usage, dnsNames, uris...)
+}
+
+// issueUntil returns a PEM certificate valid until notAfter and its key,
+// signed by a.
+func (a authority) issueUntil(t *testing.T, notAfter time.Time, serial int64, usage x509.ExtKeyUsage, dnsNames []string,
+	uris ...string) ([]byte, []byte) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "adapterkit test"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: notAfter,
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{usage}, DNSNames: dnsNames,
 	}
 	for _, raw := range uris {
@@ -481,6 +489,35 @@ func TestServeAuthenticatesClientCertificates(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "the new CA is trusted once the bundle holds it")
 	require.NoError(t, wire.NewClient(running.dial(t, allowed, nil), wire.ClientConfig{}).HealthCheck(t.Context()),
 		"the old CA stays trusted while the bundle holds both")
+}
+
+// A connection outlives its handshake, so every call verifies the client
+// certificate again: removing its CA from the bundle, or the certificate
+// expiring, stops a connection that is already open.
+func TestServeReverifiesClientCertificatesOnEveryCall(t *testing.T) {
+	f := newFixture(t)
+	running := start(t, f, f.mtlsConfig(newMemoryArtifacts()))
+
+	rotated := newAuthority(t, "rotated client CA")
+	writeFile(t, f.caFile, append(append([]byte(nil), f.clientCA.pem...), rotated.pem...))
+	fromRotated := rotated.clientCertificate(t, f.clientURI)
+	var open *wire.Client
+	require.Eventually(t, func() bool {
+		open = wire.NewClient(running.dial(t, fromRotated, nil), wire.ClientConfig{})
+		return open.HealthCheck(t.Context()) == nil
+	}, 5*time.Second, 10*time.Millisecond, "the rotated CA is trusted once the bundle holds it")
+
+	writeFile(t, f.caFile, f.clientCA.pem)
+	require.Eventually(t, func() bool { return errors.Is(open.HealthCheck(t.Context()), storagev1.ErrUnauthenticated) },
+		5*time.Second, 10*time.Millisecond, "the open connection is refused once its CA leaves the bundle")
+
+	certPEM, keyPEM := f.clientCA.issueUntil(t, time.Now().Add(2*time.Second), 60, x509.ExtKeyUsageClientAuth, nil, f.clientURI)
+	expiring, err := tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+	short := wire.NewClient(running.dial(t, &expiring, nil), wire.ClientConfig{})
+	require.NoError(t, short.HealthCheck(t.Context()))
+	require.Eventually(t, func() bool { return errors.Is(short.HealthCheck(t.Context()), storagev1.ErrUnauthenticated) },
+		10*time.Second, 50*time.Millisecond, "the open connection is refused once its certificate expires")
 }
 
 // With both methods configured, a call must pass both.

@@ -1765,7 +1765,9 @@ key from files, reloaded when they change, and at least one client
 authentication method: bearer tokens from a mounted directory (every file named
 `token*` is accepted, so a token rotates by adding a second key, moving clients
 to it and removing the first), an mTLS client CA bundle with the client URI or
-DNS names it allows, or both, in which case a call must pass both. It applies
+DNS names it allows, or both, in which case a call must pass both. Every call
+verifies the client certificate again against the current CA bundle and clock,
+so removing a CA or a certificate expiring stops a connection already open. It applies
 per-class concurrency and duration limits, serves `/healthz`, `/readyz` (the
 providers describe a dataset and pass their health checks) and `/metrics` on a
 separate plain HTTP port that carries no stored data, and on shutdown reports
