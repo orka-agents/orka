@@ -270,10 +270,11 @@ func Serve(ctx context.Context, config Config) error {
 	)...)
 	server.Register(grpcServer)
 
-	listener, probeListener, err := listen(&config)
+	rawListener, probeListener, err := listen(&config)
 	if err != nil {
 		return err
 	}
+	listener := newTrackedListener(rawListener)
 	serving = true
 	readiness := &readiness{config: &config, server: server, metrics: metrics, logger: logger}
 	probe := &http.Server{
@@ -312,7 +313,7 @@ func Serve(ctx context.Context, config Config) error {
 	}
 	readiness.drain()
 	cancel()
-	forced := stopGracefully(grpcServer, config.ShutdownTimeout)
+	forced := stopGracefully(grpcServer, listener, config.ShutdownTimeout)
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancelShutdown()
 	_ = probe.Shutdown(shutdownCtx)
@@ -368,9 +369,11 @@ func closeListeners(listeners ...net.Listener) {
 // closes every connection and returns. It does not wait for handlers that
 // outlive their connections: GracefulStop waits for every handler while
 // holding the server's lock, so even Stop can block behind it, and both run
-// on in the background until the remaining handlers return.
+// on in the background until the remaining handlers return. Stop also waits
+// for connections still in their handshake before it closes any, so the
+// forced stop closes every connection the listener accepted itself.
 // It reports whether the timeout forced the stop.
-func stopGracefully(server *grpc.Server, timeout time.Duration) bool {
+func stopGracefully(server *grpc.Server, listener *trackedListener, timeout time.Duration) bool {
 	stopped := make(chan struct{})
 	go func() {
 		server.GracefulStop()
@@ -383,8 +386,66 @@ func stopGracefully(server *grpc.Server, timeout time.Duration) bool {
 		return false
 	case <-timer.C:
 		go server.Stop()
+		listener.closeAll()
 		return true
 	}
+}
+
+// trackedListener records the connections it accepts, so a forced stop can
+// close each of them, including one whose handshake has not finished.
+type trackedListener struct {
+	net.Listener
+	mu     sync.Mutex
+	conns  map[*trackedConn]struct{}
+	closed bool
+}
+
+func newTrackedListener(listener net.Listener) *trackedListener {
+	return &trackedListener{Listener: listener, conns: map[*trackedConn]struct{}{}}
+}
+
+func (l *trackedListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	tracked := &trackedConn{Conn: conn, listener: l}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	}
+	l.conns[tracked] = struct{}{}
+	return tracked, nil
+}
+
+// closeAll closes every accepted connection still open, and any the
+// listener accepts later.
+func (l *trackedListener) closeAll() {
+	l.mu.Lock()
+	l.closed = true
+	conns := make([]*trackedConn, 0, len(l.conns))
+	for conn := range l.conns {
+		conns = append(conns, conn)
+	}
+	l.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+// trackedConn removes itself from its listener when it closes.
+type trackedConn struct {
+	net.Conn
+	listener *trackedListener
+}
+
+func (c *trackedConn) Close() error {
+	c.listener.mu.Lock()
+	delete(c.listener.conns, c)
+	c.listener.mu.Unlock()
+	return c.Conn.Close()
 }
 
 // readiness tracks whether the adapter can serve: its providers describe a

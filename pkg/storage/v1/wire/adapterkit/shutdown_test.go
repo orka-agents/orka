@@ -2,6 +2,9 @@ package adapterkit_test
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -66,4 +69,34 @@ func TestServeReturnsWhenTheShutdownGracePeriodPasses(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Serve waited for a settling handler past its shutdown grace period")
 	}
+}
+
+// A forced stop closes every connection before Serve returns, including one
+// still in its TLS handshake, which the gRPC server's Stop would wait for
+// rather than close.
+func TestServeClosesHandshakingConnectionsOnAForcedStop(t *testing.T) {
+	f := newFixture(t)
+	config := f.bearerConfig(newMemoryArtifacts())
+	config.ShutdownTimeout = 300 * time.Millisecond
+	running := start(t, f, config)
+	running.waitReady(t, true)
+
+	stalled, err := net.Dial("tcp", running.address)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = stalled.Close() })
+	// The connection never sends its ClientHello, so its handshake stays
+	// open until the gRPC server's connection timeout.
+	time.Sleep(50 * time.Millisecond)
+	running.stop()
+	select {
+	case err := <-running.done:
+		require.NoError(t, err)
+		running.done <- nil
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+	require.NoError(t, stalled.SetReadDeadline(time.Now().Add(2*time.Second)))
+	_, err = io.Copy(io.Discard, stalled)
+	var timeout net.Error
+	require.False(t, errors.As(err, &timeout) && timeout.Timeout(), "Serve returned with the connection still open")
 }
