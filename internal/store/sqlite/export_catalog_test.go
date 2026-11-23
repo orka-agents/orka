@@ -36,6 +36,7 @@ var exportExcludedColumns = map[string]string{
 // implicit rowid rather than a column, each with the reason.
 var exportRowIDFields = map[string]string{
 	"security_scan_runs.admission_seq": "admission order; ListScanRuns and the newer-run guard of UpdateScanRun order by rowid",
+	"auth_sessions.issued_seq":         "issuance order; CreateAuthSession keeps the most recently issued sessions by rowid when creation times tie",
 }
 
 // exportIntegerTimes are INTEGER columns that hold Unix nanoseconds, which

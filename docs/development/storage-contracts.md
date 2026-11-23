@@ -1357,13 +1357,17 @@ capability, so it does not raise `ContractRevision`.
   never issues a value a client may have seen. Agent Host Protocol
   connection tokens and sign-in sessions are copied with their token hashes,
   so one issued before a migration stays valid after it; no family holds a
-  raw token. Two fields carry an order a
+  raw token. Three fields carry an order a
   provider may keep implicitly, so a copy keeps it even when keys sort
   differently. `security_scan_runs.admission_seq` is the order runs were
   admitted in, which `ListScanRuns` and the newer-run guard of
   `UpdateScanRun` follow; the embedded store keeps it as the rowid. An import
   keeps that order, and a run admitted later is newer than every imported
-  run. `execution_events.session_seq` is the effective session sequence, so
+  run. `auth_sessions.issued_seq` is the order sign-in sessions were
+  issued in, which `CreateAuthSession` follows to keep a person's most
+  recently issued sessions when creation times are equal; the embedded store
+  keeps it as the rowid, and a session issued after an import is newer than
+  every imported one. `execution_events.session_seq` is the effective session sequence, so
   an event stored before session sequences existed exports the sequence it
   is listed under. A test pins the families to
   SQLite's layout: every table is a family with the same columns and primary

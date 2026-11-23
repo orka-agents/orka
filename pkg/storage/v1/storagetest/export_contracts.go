@@ -1,6 +1,7 @@
 package storagetest
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -224,6 +225,32 @@ func runStateExportImport(t *testing.T, newProvider StateFactory) {
 		listed, _, err = target.ListScanRuns(ctx, workflowNamespace, workflowScan, 10, "")
 		require.NoError(t, err)
 		require.Equal(t, []string{"run-0", "run-a", "run-z"}, scanRunIDs(listed), "a run admitted after the import is newer than every imported run")
+	})
+
+	t.Run("an imported dataset keeps the issuance order of sign-in sessions", func(t *testing.T) {
+		source := newProvider(t)
+		ctx := t.Context()
+		// Every session has the same creation time and the IDs sort opposite
+		// to issuance, so only the issuance order says which one the next
+		// sign-in ends.
+		at := time.Date(2026, 10, 22, 8, 0, 0, 0, time.UTC)
+		last := storagev1.MaxAuthSessionsPerSubject - 1
+		for i := range storagev1.MaxAuthSessionsPerSubject {
+			id := fmt.Sprintf("sess-%02d", last-i)
+			require.NoError(t, source.CreateAuthSession(ctx, testAuthSession(id, "hash-"+id, at)))
+		}
+		target := newProvider(t)
+		copyDataset(t, exporter(source), exporter(target))
+
+		require.NoError(t, target.CreateAuthSession(ctx, testAuthSession("sess-new", "hash-sess-new", at)))
+		_, err := target.GetAuthSessionByHash(ctx, fmt.Sprintf("hash-sess-%02d", last))
+		require.ErrorIs(t, err, storagev1.ErrNotFound, "a sign-in beyond the bound ends the least recently issued session")
+		for i := range last {
+			_, err := target.GetAuthSessionByHash(ctx, fmt.Sprintf("hash-sess-%02d", i))
+			require.NoError(t, err, "a more recently issued session stays")
+		}
+		_, err = target.GetAuthSessionByHash(ctx, "hash-sess-new")
+		require.NoError(t, err, "a session issued after the import is newer than every imported session")
 	})
 
 	t.Run("an importing dataset refuses writes", func(t *testing.T) {
