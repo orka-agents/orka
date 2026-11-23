@@ -74,7 +74,10 @@ const (
 	AIDeprecatedMemoryTools = "ORKA_AI_DEPRECATED_MEMORY_TOOLS"
 	GatewayReplyEnabled     = "ORKA_GATEWAY_REPLY_ENABLED"
 	AIFallbackCount         = "ORKA_AI_FALLBACK_COUNT"
-	ControllerMode          = "ORKA_CONTROLLER_MODE"
+	// AIFallbackEnvPrefix starts every fallback provider env var, including
+	// AIFallbackCount.
+	AIFallbackEnvPrefix = "ORKA_AI_FALLBACK_"
+	ControllerMode      = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -343,7 +346,7 @@ type FallbackProviderEnv struct {
 
 // FallbackPrefix returns the prefix for fallback provider i.
 func FallbackPrefix(i int) string {
-	return fmt.Sprintf("ORKA_AI_FALLBACK_%d", i)
+	return fmt.Sprintf("%s%d", AIFallbackEnvPrefix, i)
 }
 
 func FallbackProviderKey(i int) string        { return FallbackPrefix(i) + "_PROVIDER" }

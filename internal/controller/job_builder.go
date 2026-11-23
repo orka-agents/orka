@@ -851,7 +851,9 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	// controller injection so workload authors cannot bypass default-off telemetry
 	// policy or redirect GenAI metadata to arbitrary collectors. code_exec
 	// sandbox settings are reserved too, so the backend, image, NetworkPolicy,
-	// runtime class, AppArmor profile and limits keep their defaults. Restore
+	// runtime class, AppArmor profile and limits keep their defaults. Provider
+	// endpoint settings are reserved so the Provider and Agent alone choose
+	// where provider requests go. Restore
 	// controller-owned identity and approval env vars so task authors cannot
 	// spoof execution identity or approval state.
 	envVars = appendTaskEnvVars(envVars, task)
@@ -1054,7 +1056,9 @@ func isReservedTaskEnv(task *corev1alpha1.Task, name string) bool {
 	}
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
-		return isReservedAIWorkerTelemetryEnv(name) || isReservedAIWorkerCodeExecEnv(name)
+		return isReservedAIWorkerTelemetryEnv(name) ||
+			isReservedAIWorkerCodeExecEnv(name) ||
+			isReservedAIWorkerProviderConnectionEnv(name)
 	default:
 		return false
 	}
@@ -1065,6 +1069,23 @@ func isReservedTaskEnv(task *corev1alpha1.Task, name string) bool {
 // reserved, including ones added later.
 func isReservedAIWorkerCodeExecEnv(name string) bool {
 	return strings.HasPrefix(name, workerenv.CodeExecEnvPrefix)
+}
+
+// isReservedAIWorkerProviderConnectionEnv reports the provider endpoint
+// settings that the controller derives from the Provider and Agent. The
+// controller omits them when unset, and the AI worker and the provider SDKs
+// then read them from the environment, so a Task value would choose where the
+// Provider credential is sent. Fallback provider settings are reserved as a
+// prefix, including the fallback count.
+func isReservedAIWorkerProviderConnectionEnv(name string) bool {
+	switch name {
+	case workerenv.AIBaseURL,
+		workerenv.AIAzureAPIVersion,
+		workerenv.AnthropicBaseURL,
+		workerenv.OpenAIBaseURL:
+		return true
+	}
+	return strings.HasPrefix(name, workerenv.AIFallbackEnvPrefix)
 }
 
 func isReservedAIWorkerTelemetryEnv(name string) bool {

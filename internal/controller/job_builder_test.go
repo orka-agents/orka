@@ -3530,6 +3530,88 @@ func TestJobBuilder_buildEnvVars_PreservesContainerCodeExecEnv(t *testing.T) {
 	}
 }
 
+// The AI worker and the provider SDKs read provider endpoint settings from the
+// environment when the Provider and Agent leave them unset, so an AI Task's
+// spec.env cannot set any of them.
+func TestJobBuilder_buildEnvVars_IgnoresTaskSuppliedProviderConnectionEnv(t *testing.T) {
+	reserved := []string{
+		workerenv.AIBaseURL,
+		workerenv.AIAzureAPIVersion,
+		workerenv.AnthropicBaseURL,
+		workerenv.OpenAIBaseURL,
+		workerenv.AIFallbackCount,
+		workerenv.FallbackProviderKey(0),
+		workerenv.FallbackAPIKeyKey(0),
+		workerenv.FallbackModelKey(0),
+		workerenv.FallbackBaseURLKey(0),
+		workerenv.FallbackAzureAPIVersionKey(0),
+		workerenv.FallbackAzureDeploymentNameKey(0),
+		workerenv.FallbackBaseURLKey(3),
+		workerenv.AIFallbackEnvPrefix + "NOT_YET_DEFINED",
+	}
+	kept := []string{"ORKA_AI_BASE_URL_NOTE", "ANTHROPIC_VERSION", "OPENAI_BASE", "CUSTOM_ENV"}
+	for _, name := range reserved {
+		t.Run(name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			env := make([]corev1.EnvVar, 0, 1+len(kept))
+			env = append(env, corev1.EnvVar{Name: name, Value: "task-value"})
+			for _, keptName := range kept {
+				env = append(env, corev1.EnvVar{Name: keptName, Value: "kept"})
+			}
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+				Spec: corev1alpha1.TaskSpec{
+					Type:   corev1alpha1.TaskTypeAI,
+					Prompt: "p",
+					Env:    env,
+				},
+			}
+
+			envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+			if got, ok := findEnvVar(envVars, name); ok {
+				t.Fatalf("task-supplied %s reached the AI worker: %#v", name, got)
+			}
+			for _, keptName := range kept {
+				if got, ok := findEnvVar(envVars, keptName); !ok || got.Value != "kept" {
+					t.Fatalf("%s = %#v, found=%v; want the Task value", keptName, got, ok)
+				}
+			}
+		})
+	}
+}
+
+func TestJobBuilder_buildEnvVars_PreservesContainerProviderConnectionEnv(t *testing.T) {
+	names := []string{
+		workerenv.AIBaseURL,
+		workerenv.AIAzureAPIVersion,
+		workerenv.AnthropicBaseURL,
+		workerenv.OpenAIBaseURL,
+		workerenv.AIFallbackCount,
+		workerenv.FallbackBaseURLKey(0),
+	}
+	env := make([]corev1.EnvVar, 0, len(names))
+	for _, name := range names {
+		env = append(env, corev1.EnvVar{Name: name, Value: "user-value"})
+	}
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type:    corev1alpha1.TaskTypeContainer,
+			Image:   "busybox",
+			Command: []string{"true"},
+			Env:     env,
+		},
+	}
+
+	envVars := builder.buildEnvVars(context.Background(), task, nil, nil)
+	for _, name := range names {
+		if got, ok := findEnvVar(envVars, name); !ok || got.Value != "user-value" {
+			t.Fatalf("%s = %#v, found=%v", name, got, ok)
+		}
+	}
+}
+
 func TestJobBuilder_buildEnvVars_PreservesContainerTelemetryEnv(t *testing.T) {
 	builder := setupJobBuilder()
 	task := &corev1alpha1.Task{
