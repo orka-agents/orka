@@ -211,6 +211,27 @@ func TestUploadsAreCheckedBeforeTheProviderRuns(t *testing.T) {
 	require.True(t, bytes.Equal(data, calls[0].args[2].([]byte)))
 }
 
+// A write's envelope digest covers its arguments as the caller wrote them,
+// and the server hands the provider empty blobs as empty slices. Nil and
+// empty bytes digest alike, so a write of nil data that carries an envelope
+// passes the server's digest check.
+func TestNilBlobWritesPassTheDigestCheck(t *testing.T) {
+	provider := newRecordingProvider()
+	client := wiretest.Serve(t, serveBoth(provider))
+
+	result := testEnvelope(t, "SaveResult", "n", "t", []byte(nil))
+	require.NoError(t, client.SaveResult(storagev1.WithWriteEnvelope(t.Context(), result), "n", "t", nil))
+	saved := provider.callsTo("SaveResult")
+	require.Len(t, saved, 1)
+	require.NotNil(t, saved[0].args[2], "the provider receives an empty slice")
+
+	request := storagev1.SaveArtifactRequest{Owner: storagev1.ArtifactOwner{Namespace: "n", TaskName: "t", TaskUID: "uid"},
+		Filename: "empty.bin", ContentType: "application/octet-stream"}
+	artifact := testEnvelope(t, "SaveArtifact", request)
+	require.NoError(t, client.SaveArtifact(storagev1.WithWriteEnvelope(t.Context(), artifact), request))
+	require.Len(t, provider.callsTo("SaveArtifact"), 1)
+}
+
 // An upload's envelope names the dataset its call names, as a unary write's
 // does: the client refuses one for another dataset before it streams any of
 // the blob, and the server refuses it before the provider runs.
