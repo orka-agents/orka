@@ -16,6 +16,12 @@ import "slices"
 // column names, which also serve as the canonical names; other providers map
 // their own layout to them.
 //
+// Agent Host Protocol connection tokens (ahp_tokens) and sign-in sessions
+// (auth_sessions) are copied with their token hashes, so a token or session
+// issued before a migration stays valid after it; no family holds a raw
+// token. An AHP user's server sequence is ahp_users.server_seq, so a copy
+// continues it past every imported journal entry.
+//
 // sequence_heads holds the last value each provider-assigned sequence issued
 // ("family" and "field" name the sequence, such as messages and id), which can
 // be higher than the largest value still stored after records were deleted.
@@ -428,6 +434,38 @@ var exportSchemas = []ExportFamilySchema{
 	),
 	stateFamily("usage_retention",
 		key(intField("id")), timeField("retained_since"),
+	),
+	stateFamily("ahp_users",
+		key(stringField("user_key")), intField("server_seq"), timeField("updated_at"),
+	),
+	stateFamily("ahp_tokens",
+		key(stringField("id")), stringField("token_hash"), stringField("user_key"), stringField("issuer"),
+		stringField("subject"), stringField("username"), stringField("namespace"), stringField("description"),
+		timeField("created_at"), timeField("expires_at"), optTime("revoked_at"),
+	),
+	stateFamily("ahp_clients",
+		key(stringField("client_id")), stringField("user_key"), stringField("protocol_version"), stringField("dialect"),
+		timeField("created_at"), timeField("updated_at"),
+	),
+	stateFamily("ahp_journal",
+		key(stringField("user_key")), key(intField("seq")), stringField("channel"), bytesField("envelope"),
+		intField("size"),
+	),
+	stateFamily("ahp_channel_states",
+		key(stringField("user_key")), key(stringField("channel")), bytesField("state"), intField("from_seq"),
+	),
+	stateFamily("ahp_sessions",
+		key(stringField("user_key")), key(stringField("session")), stringField("backend"), bytesField("summary"),
+		timeField("created_at"), timeField("modified_at"),
+	),
+	stateFamily("ahp_records",
+		key(stringField("user_key")), key(stringField("kind")), key(stringField("key")), bytesField("value"),
+		timeField("updated_at"),
+	),
+	stateFamily("auth_sessions",
+		key(stringField("id")), stringField("token_hash"), stringField("issuer"), stringField("subject"),
+		stringField("username"), stringField("namespace"), timeField("created_at"), timeField("expires_at"),
+		optTime("revoked_at"),
 	),
 	stateFamily("sequence_heads",
 		key(stringField("family")), key(stringField("field")), intField("last_value"),
