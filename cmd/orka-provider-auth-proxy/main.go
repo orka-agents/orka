@@ -51,6 +51,8 @@ func main() {
 	}
 	proxy, err := newProviderAuthProxyWithTokenStore(proxyConfig{
 		UpstreamBaseURL:       *upstreamBaseURL,
+		Codex429RetryBaseURL:  os.Getenv("ORKA_PROVIDER_AUTH_PROXY_CODEX_429_RETRY_BASE_URL"),
+		Codex429RetryModel:    os.Getenv("ORKA_PROVIDER_AUTH_PROXY_CODEX_429_RETRY_MODEL"),
 		MaxRequestBytes:       *maxRequestBytes,
 		MaxResponseBytes:      *maxResponseBytes,
 		ResponseHeaderTimeout: *responseHeaderTimeout,

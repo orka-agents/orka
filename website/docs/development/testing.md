@@ -68,6 +68,11 @@ return history, unchanged source bytes, and runtime cleanup. It explicitly enabl
 `ORKA_NATIVE_CODEX_TEST=1` and requires the named test to pass, so a skipped test
 cannot satisfy the job. This verifies the native integration, not live-model recall.
 
+On one continuation the gate requests `max` for `gpt-6-astra` and checks
+`model` and `reasoning.effort` in the actual `POST /v1/responses` body. This
+verifies what the pinned client sends, not which live models or Azure
+deployments accept it.
+
 ### Local environment notes
 
 - **Script test suites need bash >= 4.** The suites under `scripts/tests/`

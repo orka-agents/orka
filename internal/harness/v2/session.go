@@ -221,9 +221,8 @@ func validateAgentExecutionControls(providerKind string, maxTurns int32, reasoni
 	}
 	switch providerKind {
 	case providerKindCodex:
-		if reasoningEffort == reasoningEffortMax {
-			return fmt.Errorf("codex provider does not support reasoning effort %q", reasoningEffort)
-		}
+		// Codex accepts the full enum; the selected model may support a subset.
+		return nil
 	case providerKindClaude:
 		if reasoningEffort == "none" {
 			return fmt.Errorf("claude provider does not support reasoning effort %q", reasoningEffort)

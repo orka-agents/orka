@@ -59,11 +59,13 @@ const sidebars = {
           label: 'Connect people and tools',
           collapsed: false,
           items: [
+            'guides/copilot-app',
             'guides/chat',
             'guides/ui',
             'reference/openai-compat',
             'reference/anthropic-compat',
             'operations/shared-compatibility-api',
+            'operations/agent-host-protocol',
             'guides/mcp-server',
             'guides/gateways',
           ],

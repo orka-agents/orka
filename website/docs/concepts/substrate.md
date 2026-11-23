@@ -49,6 +49,25 @@ pod-certificate SPIFFE IDs (`spiffe://cluster.local/ns/<namespace>/sa/<serviceac
 to `--ingress-allowed-spiffe-ids`; no other Orka workload needs router access.
 Namespaces whose Pods call the native API need the `ate.dev/api-access=true` label.
 
+With the default Envoy dataplane (`--atenet-dataplane=envoy`), the router limits
+each request's total duration with `--route-timeout`, 5 minutes by default. Its
+stream idle timeout is 30 seconds longer. Because the limit covers the whole
+response, streamed updates do not extend it. Each ACP prompt is one streamed
+request, so a turn that runs longer is reset mid-stream, and Core logs
+`runtime prompt stream disconnected`. Because the runtime had already accepted
+the prompt, Core can't tell whether the turn finished, so it marks the Task
+`OutcomeUnknown` and doesn't replay it. If Core can't record the stream-failure
+event, the Task fails with `ExecutionEventPersistenceFailed` instead. Set
+`--route-timeout` above the longest turn your Tasks may run. The agentgateway
+dataplane ignores this flag and takes its routes from its static configuration,
+so set the equivalent timeout there. Orka cannot set either.
+
+Router rollouts also cut long turns. On shutdown, the Envoy router drains
+established streams for a fixed window of about 15 seconds. `--drain-timeout`
+bounds only the later drain of parked requests and doesn't extend that window.
+A turn still streaming when a router Pod stops is reset the same way, so roll
+the router when no long turns are running.
+
 Actor, ActorTemplate, Atespace, Worker, and Tag are native API resources. WorkerPool
 is a Kubernetes CRD. Create infrastructure templates through the native API, such
 as `kubectl ate create actor-template -f`, rather than applying an ActorTemplate
@@ -334,7 +353,10 @@ keeps data, and the next successful reconcile resumes it. A template that
 snapshots `VOLUMES` and mounts no durable directory cannot be suspended by
 Substrate, so its Actor is deleted and created again later. Substrate also lets
 an Actor outlive its template. When the template cannot be read, the controller
-cannot suspend the Actor (Substrate refuses without it), so it replaces the
+cannot suspend the Actor (Substrate refuses without it). A template deleted and
+created again under the same name is treated the same way for a running Actor
+that booted from the old one, since the new one does not say whether that Actor
+can be suspended. In both cases the controller replaces the
 Actor's egress policy with one that denies all egress and keeps retrying the
 stop. While the gateway may still apply the previous rules from its cache (see
 below), a running Actor is deleted instead, which discards any data on its

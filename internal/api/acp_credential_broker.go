@@ -139,10 +139,21 @@ func (s *Server) authorizePublicationCredential(
 	if execution.State != corev1alpha1.TaskExecutionStateSucceeded {
 		return nil, nil, "", "", fmt.Errorf("publication credential request is not bound to the settled task")
 	}
-	if request.ParentOperation == publisherservice.OperationPublicationPublish && operatoraccess.Tainted(task.Annotations) {
+	if request.ParentOperation == publisherservice.OperationPublicationPublish {
 		// Backstop for the controller's pre-publishing gate: a session tainted
-		// by operator access never receives forge write credentials.
-		return nil, nil, "", "", fmt.Errorf("publication credential is unavailable for an operator-tainted task")
+		// by operator access never receives forge write credentials. The taint
+		// may sit on the Task, on its linked workspace incarnation, or on
+		// another Task that shared that incarnation, so check all three, and
+		// fail closed when they cannot be read.
+		tainted := operatoraccess.Tainted(task.Annotations)
+		if !tainted {
+			if tainted, err = controller.ACPTaskOperatorTainted(ctx, s.authorizationReader(), task); err != nil {
+				return nil, nil, "", "", fmt.Errorf("publication credential is unavailable")
+			}
+		}
+		if tainted {
+			return nil, nil, "", "", fmt.Errorf("publication credential is unavailable for an operator-tainted task")
+		}
 	}
 	kind, expectedState, expectedCredentialKind := publicationCredentialOperation(request.ParentOperation)
 	credentialRole := request.Reference.Role
