@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -12,10 +13,11 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task, configuration harnessv2.MCPPolicyConfiguration) (*gatewayruntime.TaskGrant, error) {
+func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, configuration harnessv2.MCPPolicyConfiguration) (*gatewayruntime.TaskGrant, error) {
 	var grant *gatewayruntime.TaskGrant
 	var err error
 	if r.GatewayService != nil {
@@ -43,6 +45,22 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 		passTools = append(passTools, tool)
 		names = append(names, tool.Name)
 	}
+	// Delegated tools join the grant so children can inherit them, but stay
+	// out of the tool policy, so the broker never lets this Task call them.
+	// A root Task with no gateway grant has nothing to pass on.
+	if coordination := agent.Spec.Coordination; coordination != nil && coordination.Enabled && (grant != nil || namesDelegatingTask(task)) {
+		for _, name := range coordination.DelegatedGatewayTools {
+			if slices.Contains(names, name) {
+				continue
+			}
+			tool, err := r.delegatedGatewayTool(ctx, task.Namespace, name)
+			if err != nil {
+				return nil, err
+			}
+			passTools = append(passTools, tool)
+			names = append(names, tool.Name)
+		}
+	}
 	if len(names) > 0 && namesDelegatingTask(task) {
 		grant, err = r.inheritGatewayTaskGrant(ctx, task)
 		if err != nil {
@@ -69,6 +87,25 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 		grant.Deadline = deadline
 	}
 	return grant, nil
+}
+
+// delegatedGatewayTool loads a Tool named in coordination.delegatedGatewayTools;
+// a name that isn't a valid gateway task pass Tool fails permanently.
+func (r *TaskReconciler) delegatedGatewayTool(ctx context.Context, namespace, name string) (*corev1alpha1.Tool, error) {
+	tool := &corev1alpha1.Tool{}
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, permanentACPAgentConfiguration(fmt.Errorf("delegated gateway tool %q not found", name))
+		}
+		return nil, err
+	}
+	if tool.Spec.HTTP == nil || !tool.Spec.HTTP.GatewayTaskPass {
+		return nil, permanentACPAgentConfiguration(fmt.Errorf("delegated gateway tool %q is not a gateway task pass tool", name))
+	}
+	if err := workerexecutor.ValidateGatewayTaskPassTool(tool); err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
+	return tool, nil
 }
 
 // inheritGatewayTaskGrant returns the grant a delegated child inherits: its
