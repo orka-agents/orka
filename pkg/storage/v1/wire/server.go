@@ -570,7 +570,11 @@ func checkContract(header metadata.MD) error {
 
 // withEnvelope decodes a write's envelope header into ctx, where the provider
 // reads it exactly as it does in process. Only a write carries an envelope,
-// so the server refuses one on a read or an administrative call.
+// so the server refuses one on a read or an administrative call. The server
+// checks a write against the dataset its call names, so it refuses an
+// envelope for any other dataset: the provider could commit it there while
+// the response named the call's dataset. An envelope that names no dataset
+// is invalid, and the provider refuses it as it does in process.
 func withEnvelope(ctx context.Context, m *method, header metadata.MD) (context.Context, error) {
 	var encoded storagepb.WriteEnvelope
 	found, err := decodeHeader(header, HeaderEnvelope, "write envelope", &encoded)
@@ -583,6 +587,10 @@ func withEnvelope(ctx context.Context, m *method, header metadata.MD) (context.C
 	envelope, err := fromWireWriteEnvelope(&encoded, true)
 	if err != nil {
 		return ctx, requestStatus(err)
+	}
+	if named := header.Get(HeaderDataset); envelope.DatasetID != "" && (len(named) != 1 || envelope.DatasetID != named[0]) {
+		return ctx, errorStatus(codes.FailedPrecondition, ReasonDatasetMismatch,
+			"the write envelope names a dataset other than the call's", nil)
 	}
 	return storagev1.WithWriteEnvelope(ctx, envelope), nil
 }
@@ -646,12 +654,12 @@ func (s *Server) checkDigest(ctx context.Context, m *method, args ...any) error 
 
 // servingDataset returns the dataset the server checks a call against. A
 // read or an administrative call that names a dataset describes the
-// providers again before it runs, so a provider whose dataset changed while
-// it serves never answers it for the dataset it served before. A write is
-// checked against the dataset the providers last described, as its
-// envelope's dataset is checked again by the provider itself, and a Describe
-// or HealthCheck that names none needs no dataset. Describe and Refresh
-// update the dataset too.
+// providers again before it runs, so a provider whose dataset changed before
+// the call never answers it for the dataset it served before. A switch while
+// the providers run the call is not detected. A write is checked against the
+// dataset the providers last described, as its envelope's dataset is checked
+// again by the provider itself, and a Describe or HealthCheck that names none
+// needs no dataset. Describe and Refresh update the dataset too.
 func (s *Server) servingDataset(ctx context.Context, m *method, header metadata.MD) (string, error) {
 	known := s.DatasetID()
 	omitted := m.mayOmitDataset() && len(header.Get(HeaderDataset)) == 0
