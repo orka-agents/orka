@@ -24,7 +24,7 @@ Both inputs are enforce-only: neither has an audit mode, and there is no namespa
 
 | | |
 | --- | --- |
-| Input | A code rule over connector tools of class `write` (`ConnectorProvider.spec.tools[].class`, `api/v1alpha1/connector_provider_types.go:157-159`), plus the mode of the requester's `Connection` |
+| Input | A code rule over connector-backed tools of class `write`, plus the mode of the requester's `Connection`. On native AI a Tool is connector-backed when its `spec.http.outboundAccessPolicyRef` names an OutboundAccessPolicy with a `connection` provider, and its class is `Tool.spec.brokeredToolClass` (`internal/controller/connection_freeze.go:322-353`, `api/v1alpha1/tool_types.go:39-42`). |
 | Controls | Write-class connector tools are hidden for a read-only link and on any execution that cannot hold a call for approval. On native AI, the offered ones are added to the approval set. |
 | Level | Code, not configurable. The person who owns the Connection sets its mode. |
 | Takes effect | Native AI: when the Job is built, from the Connection bindings frozen for it (`internal/controller/job_builder.go:1294-1315`) |
@@ -38,7 +38,7 @@ Both inputs are enforce-only: neither has an audit mode, and there is no namespa
 
 ## Where the sources differ
 
-The `ConnectorProvider` API comment says write tools "default into the Agent's approval-required set" (`api/v1alpha1/connector_provider_types.go:157-158`). That describes the native AI path. Other paths treat them differently:
+The `ConnectorProvider` API comment says write tools "default into the Agent's approval-required set" (`api/v1alpha1/connector_provider_types.go:157-158`). On native AI, write-class connector-backed Tools (classified as in the table above) are added to the approval set as that comment says. Other paths treat them differently:
 
 - Built-in coding-agent runtimes are not offered connector write tools (`internal/controller/acp_mcp_policy.go:268-275`).
 - An external `runtimeRef` runtime requires each linked write tool to be listed in the registration's `approvalRequiredTools`, or the Task fails with a configuration error (`internal/controller/agent_execution_binding.go:1711-1722`).
