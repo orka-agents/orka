@@ -161,6 +161,14 @@ var file_orka_storage_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 		Tag:           "varint,51035,opt,name=blob",
 		Filename:      "orka/storage/v1/options.proto",
 	},
+	{
+		ExtendedType:  (*descriptorpb.FieldOptions)(nil),
+		ExtensionType: (*bool)(nil),
+		Field:         51036,
+		Name:          "orka.storage.v1.list",
+		Tag:           "varint,51036,opt,name=list",
+		Filename:      "orka/storage/v1/options.proto",
+	},
 }
 
 // Extension fields to descriptorpb.ServiceOptions.
@@ -225,6 +233,14 @@ var (
 	//
 	// optional bool blob = 51035;
 	E_Blob = &file_orka_storage_v1_options_proto_extTypes[8]
+	// list marks the repeated field a server-streaming read splits across its
+	// response messages, so a list too large for one message still crosses the
+	// wire. The field sits at the top level of the response, which then carries
+	// no blob; every response message after the first carries only the next
+	// part of the list.
+	//
+	// optional bool list = 51036;
+	E_List = &file_orka_storage_v1_options_proto_extTypes[9]
 )
 
 var File_orka_storage_v1_options_proto protoreflect.FileDescriptor
@@ -247,7 +263,8 @@ const file_orka_storage_v1_options_proto_rawDesc = "" +
 	"\alibrary\x12\x1d.google.protobuf.FieldOptions\x18َ\x03 \x01(\bR\alibrary:>\n" +
 	"\n" +
 	"write_back\x12\x1d.google.protobuf.FieldOptions\x18ڎ\x03 \x01(\bR\twriteBack:3\n" +
-	"\x04blob\x12\x1d.google.protobuf.FieldOptions\x18ێ\x03 \x01(\bR\x04blobBEZCgithub.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepbb\x06proto3"
+	"\x04blob\x12\x1d.google.protobuf.FieldOptions\x18ێ\x03 \x01(\bR\x04blob:3\n" +
+	"\x04list\x12\x1d.google.protobuf.FieldOptions\x18\u070e\x03 \x01(\bR\x04listBEZCgithub.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepbb\x06proto3"
 
 var (
 	file_orka_storage_v1_options_proto_rawDescOnce sync.Once
@@ -279,11 +296,12 @@ var file_orka_storage_v1_options_proto_depIdxs = []int32{
 	4,  // 6: orka.storage.v1.library:extendee -> google.protobuf.FieldOptions
 	4,  // 7: orka.storage.v1.write_back:extendee -> google.protobuf.FieldOptions
 	4,  // 8: orka.storage.v1.blob:extendee -> google.protobuf.FieldOptions
-	0,  // 9: orka.storage.v1.kind:type_name -> orka.storage.v1.MethodKind
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	9,  // [9:10] is the sub-list for extension type_name
-	0,  // [0:9] is the sub-list for extension extendee
+	4,  // 9: orka.storage.v1.list:extendee -> google.protobuf.FieldOptions
+	0,  // 10: orka.storage.v1.kind:type_name -> orka.storage.v1.MethodKind
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	10, // [10:11] is the sub-list for extension type_name
+	0,  // [0:10] is the sub-list for extension extendee
 	0,  // [0:0] is the sub-list for field type_name
 }
 
@@ -299,7 +317,7 @@ func file_orka_storage_v1_options_proto_init() {
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_orka_storage_v1_options_proto_rawDesc), len(file_orka_storage_v1_options_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   0,
-			NumExtensions: 9,
+			NumExtensions: 10,
 			NumServices:   0,
 		},
 		GoTypes:           file_orka_storage_v1_options_proto_goTypes,

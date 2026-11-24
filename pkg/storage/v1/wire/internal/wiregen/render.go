@@ -325,6 +325,8 @@ func streamName(stream streamShape) string {
 		return "streamUpload"
 	case streamDownload:
 		return "streamDownload"
+	case streamList:
+		return "streamList"
 	default:
 		return "streamNone"
 	}
@@ -504,10 +506,15 @@ func renderClientMethod(f *goFile, method *rpcMethod) {
 	}
 	f.printf("_ = err\n")
 	switch method.stream {
-	case streamUpload, streamDownload:
+	case streamUpload, streamDownload, streamList:
 		helper, open := "upload", fmt.Sprintf("client.bulk.%s.%s(ctx, opts...)", stub, method.name)
-		if method.stream == streamDownload {
+		switch method.stream {
+		case streamDownload:
 			helper, open = "download", fmt.Sprintf("client.bulk.%s.%s(ctx, wireRequest, opts...)", stub, method.name)
+		case streamList:
+			// A list is metadata, not a blob, so it streams on the
+			// connection of the call's own class.
+			helper, open = "list", fmt.Sprintf("client.stubs.%s.%s(ctx, wireRequest, opts...)", stub, method.name)
 		}
 		f.printf("wireResponse := &%s{}\n", wireMessage(f, method.desc.Output()))
 		f.printf("if err := client.%s(ctx, &method%s, wireRequest, wireResponse, "+
@@ -569,7 +576,7 @@ func renderServer(f *goFile, svc *service) {
 				lowerFirst(svc.name), method.name, request, response)
 			f.printf("ctx := stream.Context()\nwireRequest := &%s{}\n", request)
 			f.printf("if err := service.server.receiveUpload(stream, &method%s, wireRequest); err != nil {\nreturn err\n}\n", method.name)
-		case streamDownload:
+		case streamDownload, streamList:
 			fail = "return %s"
 			f.printf("func (service *%sService) %s(wireRequest *%s, stream grpc.ServerStreamingServer[%s]) error {\n",
 				lowerFirst(svc.name), method.name, request, response)
@@ -619,6 +626,8 @@ func renderServer(f *goFile, svc *service) {
 			f.printf("return stream.SendAndClose(wireResponse)\n}\n\n")
 		case streamDownload:
 			f.printf("return service.server.sendDownload(stream, &method%s, wireResponse)\n}\n\n", method.name)
+		case streamList:
+			f.printf("return service.server.sendList(stream, &method%s, wireResponse)\n}\n\n", method.name)
 		default:
 			f.printf("return wireResponse, nil\n}\n\n")
 		}

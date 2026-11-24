@@ -34,7 +34,7 @@ const (
 type ArtifactsClient interface {
 	SaveArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SaveArtifactRequest, SaveArtifactResponse], error)
 	GetArtifact(ctx context.Context, in *GetArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetArtifactResponse], error)
-	ListArtifacts(ctx context.Context, in *ListArtifactsRequest, opts ...grpc.CallOption) (*ListArtifactsResponse, error)
+	ListArtifacts(ctx context.Context, in *ListArtifactsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListArtifactsResponse], error)
 	DeleteArtifacts(ctx context.Context, in *DeleteArtifactsRequest, opts ...grpc.CallOption) (*DeleteArtifactsResponse, error)
 }
 
@@ -78,15 +78,24 @@ func (c *artifactsClient) GetArtifact(ctx context.Context, in *GetArtifactReques
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Artifacts_GetArtifactClient = grpc.ServerStreamingClient[GetArtifactResponse]
 
-func (c *artifactsClient) ListArtifacts(ctx context.Context, in *ListArtifactsRequest, opts ...grpc.CallOption) (*ListArtifactsResponse, error) {
+func (c *artifactsClient) ListArtifacts(ctx context.Context, in *ListArtifactsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListArtifactsResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListArtifactsResponse)
-	err := c.cc.Invoke(ctx, Artifacts_ListArtifacts_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[2], Artifacts_ListArtifacts_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[ListArtifactsRequest, ListArtifactsResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Artifacts_ListArtifactsClient = grpc.ServerStreamingClient[ListArtifactsResponse]
 
 func (c *artifactsClient) DeleteArtifacts(ctx context.Context, in *DeleteArtifactsRequest, opts ...grpc.CallOption) (*DeleteArtifactsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -107,7 +116,7 @@ func (c *artifactsClient) DeleteArtifacts(ctx context.Context, in *DeleteArtifac
 type ArtifactsServer interface {
 	SaveArtifact(grpc.ClientStreamingServer[SaveArtifactRequest, SaveArtifactResponse]) error
 	GetArtifact(*GetArtifactRequest, grpc.ServerStreamingServer[GetArtifactResponse]) error
-	ListArtifacts(context.Context, *ListArtifactsRequest) (*ListArtifactsResponse, error)
+	ListArtifacts(*ListArtifactsRequest, grpc.ServerStreamingServer[ListArtifactsResponse]) error
 	DeleteArtifacts(context.Context, *DeleteArtifactsRequest) (*DeleteArtifactsResponse, error)
 	mustEmbedUnimplementedArtifactsServer()
 }
@@ -125,8 +134,8 @@ func (UnimplementedArtifactsServer) SaveArtifact(grpc.ClientStreamingServer[Save
 func (UnimplementedArtifactsServer) GetArtifact(*GetArtifactRequest, grpc.ServerStreamingServer[GetArtifactResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method GetArtifact not implemented")
 }
-func (UnimplementedArtifactsServer) ListArtifacts(context.Context, *ListArtifactsRequest) (*ListArtifactsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListArtifacts not implemented")
+func (UnimplementedArtifactsServer) ListArtifacts(*ListArtifactsRequest, grpc.ServerStreamingServer[ListArtifactsResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method ListArtifacts not implemented")
 }
 func (UnimplementedArtifactsServer) DeleteArtifacts(context.Context, *DeleteArtifactsRequest) (*DeleteArtifactsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteArtifacts not implemented")
@@ -170,23 +179,16 @@ func _Artifacts_GetArtifact_Handler(srv interface{}, stream grpc.ServerStream) e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Artifacts_GetArtifactServer = grpc.ServerStreamingServer[GetArtifactResponse]
 
-func _Artifacts_ListArtifacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListArtifactsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _Artifacts_ListArtifacts_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ListArtifactsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(ArtifactsServer).ListArtifacts(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Artifacts_ListArtifacts_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ArtifactsServer).ListArtifacts(ctx, req.(*ListArtifactsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(ArtifactsServer).ListArtifacts(m, &grpc.GenericServerStream[ListArtifactsRequest, ListArtifactsResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Artifacts_ListArtifactsServer = grpc.ServerStreamingServer[ListArtifactsResponse]
 
 func _Artifacts_DeleteArtifacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DeleteArtifactsRequest)
@@ -214,10 +216,6 @@ var Artifacts_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*ArtifactsServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "ListArtifacts",
-			Handler:    _Artifacts_ListArtifacts_Handler,
-		},
-		{
 			MethodName: "DeleteArtifacts",
 			Handler:    _Artifacts_DeleteArtifacts_Handler,
 		},
@@ -231,6 +229,11 @@ var Artifacts_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "GetArtifact",
 			Handler:       _Artifacts_GetArtifact_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "ListArtifacts",
+			Handler:       _Artifacts_ListArtifacts_Handler,
 			ServerStreams: true,
 		},
 	},

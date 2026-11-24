@@ -34,6 +34,9 @@ const (
 	// as response headers.
 	HeaderBlobSize   = "orka-storage-blob-size"
 	HeaderBlobSHA256 = "orka-storage-blob-sha256"
+	// HeaderListCount is the number of list items a list stream carries in
+	// all its messages.
+	HeaderListCount = "orka-storage-list-count"
 )
 
 // unknownName names a kind, class or version this library cannot name.
@@ -62,6 +65,9 @@ const (
 	streamUpload
 	// streamDownload is a server-streaming RPC whose response carries a blob.
 	streamDownload
+	// streamList is a server-streaming RPC whose response splits a list
+	// across its messages.
+	streamList
 )
 
 // method describes one RPC. The generated method table holds one per

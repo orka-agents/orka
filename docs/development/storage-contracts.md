@@ -1618,8 +1618,8 @@ carries back the record a pointer parameter of the same name points to, so
 the ID `SendMessage` assigns reaches the caller's `Message` as it does in
 process. Each RPC declares its kind (`READ`, `WRITE` or `ADMIN`), which must
 be the kind and contract part the method catalog (`storagev1.LookupMethod`)
-gives it; a streaming RPC must be in the catalog's `CallBulk` class, an upload
-a write and a download a read. Generation fails when a method of a Go interface a service names
+gives it; an RPC that streams a blob must be in the catalog's `CallBulk`
+class, an upload a write and a download or list stream a read. Generation fails when a method of a Go interface a service names
 (`go_interface`) has no RPC or an RPC no method, when an RPC's kind or contract
 part differs from the catalog, when any parameter, result or record field,
 including a `json:"-"` field, has no wire field or the reverse, when two Go
@@ -1704,11 +1704,22 @@ artifact-fence cases run only in process.
   limit below `MaxResultBytes` with a state provider and below
   `MaxArtifactBytes` with an artifacts provider, the sizes the contract
   requires, and describes the smaller of its limit and each provider's. Given a second
-  connection (`ClientConfig.Bulk`), the client sends streaming calls over it,
+  connection (`ClientConfig.Bulk`), the client sends blob streams over it,
   so a large transfer has its own HTTP/2 flow-control window. Protobuf cannot
   tell empty bytes from absent ones, so decoded bytes are never nil: a
   provider receives an empty result, receipt or artifact as an empty slice,
   as it would in process.
+- **List streaming.** `ListArtifacts` returns a list the contract does not
+  bound in length, so it is a server-streaming read whose response field
+  marked with the `list` option crosses in parts of at most 1 MiB of encoded
+  items (a single larger item travels alone). The header
+  `orka-storage-list-count` declares the number of items in all parts; the
+  first message carries every other response field and the first part, and
+  each later message only the next part, with at least one item. The client
+  joins the parts in order and refuses, as `ErrIncompatible`, a stream that
+  carries more or fewer items than it declared or breaks the framing; a
+  stream that ends with an error fails the call. A partial list is never
+  returned. A list stream keeps its method's call class.
 - **Unknown fields.** The server refuses a request with a field it does not
   know anywhere in its message tree, including any message of a stream
   (`UNSUPPORTED_FIELD`), so an older server
@@ -1723,7 +1734,7 @@ artifact-fence cases run only in process.
 - **Server limits.** A server can cap the calls it runs at once per call
   class of the method catalog (`CallControl` for `Describe` and
   `HealthCheck`, `CallInteractive`, `CallBackground`, and `CallBulk` for
-  results, receipts, artifact transfers and every streaming call) and how long each class may run. A call over its
+  results, receipts, artifact transfers and every blob stream) and how long each class may run. A call over its
   class's limit is refused with `OVERLOADED` before the provider runs, which
   the client returns as `ErrUnavailable`; a revision 1 client, which does not
   know `OVERLOADED`, is refused with `UNAVAILABLE`. The duration limit covers the whole
@@ -1780,9 +1791,10 @@ artifact-fence cases run only in process.
   The client refuses invalid UTF-8, out-of-range times and requests over the
   16 MiB message limit before sending anything. The server reports a
   response over that limit as `PROVIDER_ERROR`, since gRPC would otherwise
-  fail it with a status that reads as a transport failure; the message byte
-  budgets and identifier bounds keep a contract-conforming provider's message
-  batches well under it.
+  fail it with a status that reads as a transport failure. The message byte
+  budgets and identifier bounds keep a contract-conforming provider's unary
+  responses well under it, and a list the contract does not bound, such as
+  `ListArtifacts`, streams in parts instead.
 
 `pkg/storage/v1/wire/adapterkit` serves a provider as a separately deployed
 adapter. `adapterkit.Serve` requires TLS 1.3 with a serving certificate and

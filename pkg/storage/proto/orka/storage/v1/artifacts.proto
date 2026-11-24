@@ -20,7 +20,7 @@ service Artifacts {
     option (kind) = METHOD_KIND_READ;
     option (rpc_since) = 2;
   }
-  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse) {
+  rpc ListArtifacts(ListArtifactsRequest) returns (stream ListArtifactsResponse) {
     option (kind) = METHOD_KIND_READ;
     option (rpc_since) = 2;
   }
@@ -72,8 +72,10 @@ message ListArtifactsRequest {
   ArtifactOwner owner = 1;
 }
 
+// ListArtifactsResponse streams a Task's artifact metadata in parts, since a
+// Task's artifacts are not bounded in number.
 message ListArtifactsResponse {
-  repeated ArtifactMetadata artifacts = 1;
+  repeated ArtifactMetadata artifacts = 1 [(list) = true];
 }
 
 message DeleteArtifactsRequest {

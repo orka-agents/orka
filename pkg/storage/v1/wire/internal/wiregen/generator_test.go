@@ -501,6 +501,31 @@ func TestGenerationFailsOnInconsistentStreams(t *testing.T) {
 		"orka.storage.v1.Results.GetPromptResultReceipt streams in both directions")
 }
 
+func setList(field *descriptorpb.FieldDescriptorProto) {
+	if field.Options == nil {
+		field.Options = &descriptorpb.FieldOptions{}
+	}
+	proto.SetExtension(field.Options, storagepb.E_List, true)
+}
+
+// A list stream marks exactly one repeated message field of its response as
+// the list, and no other RPC or request marks one.
+func TestGenerationFailsOnInconsistentLists(t *testing.T) {
+	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
+		// A unary RPC with a list, and a request field marked as one.
+		methodProto(t, protos, "artifacts.proto", "ListArtifacts").ServerStreaming = new(false)
+		setList(field(t, message(t, protos, "artifacts.proto", "ListArtifactsRequest"), "owner"))
+		// A list that is not a repeated message field, on a blob stream.
+		setList(field(t, message(t, protos, "artifacts.proto", "GetArtifactResponse"), "content_type"))
+	})
+	expectProblem(t, testContractDir, files,
+		"orka.storage.v1.Artifacts.ListArtifacts marks orka.storage.v1.ListArtifactsResponse.artifacts as a list, "+
+			"but only a server-streaming read streams a list",
+		"orka.storage.v1.Artifacts.ListArtifacts marks request field orka.storage.v1.ListArtifactsRequest.owner as a list",
+		"list field orka.storage.v1.GetArtifactResponse.content_type must be a repeated message field",
+		"orka.storage.v1.Artifacts.GetArtifact has 0 blob fields in its request and 1 in its response")
+}
+
 // A blob field must be the blob of a streaming RPC.
 func TestGenerationFailsOnABlobOutsideAStream(t *testing.T) {
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {

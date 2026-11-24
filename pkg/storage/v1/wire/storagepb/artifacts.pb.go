@@ -448,6 +448,8 @@ func (x *ListArtifactsRequest) GetOwner() *ArtifactOwner {
 	return nil
 }
 
+// ListArtifactsResponse streams a Task's artifact metadata in parts, since a
+// Task's artifacts are not bounded in number.
 type ListArtifactsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Artifacts     []*ArtifactMetadata    `protobuf:"bytes,1,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
@@ -602,16 +604,16 @@ const file_orka_storage_v1_artifacts_proto_rawDesc = "" +
 	"\x04data\x18\x01 \x01(\fB\x04\xd8\xf5\x18\x01R\x04data\x12!\n" +
 	"\fcontent_type\x18\x02 \x01(\tR\vcontentType\"L\n" +
 	"\x14ListArtifactsRequest\x124\n" +
-	"\x05owner\x18\x01 \x01(\v2\x1e.orka.storage.v1.ArtifactOwnerR\x05owner\"X\n" +
-	"\x15ListArtifactsResponse\x12?\n" +
-	"\tartifacts\x18\x01 \x03(\v2!.orka.storage.v1.ArtifactMetadataR\tartifacts\"N\n" +
+	"\x05owner\x18\x01 \x01(\v2\x1e.orka.storage.v1.ArtifactOwnerR\x05owner\"^\n" +
+	"\x15ListArtifactsResponse\x12E\n" +
+	"\tartifacts\x18\x01 \x03(\v2!.orka.storage.v1.ArtifactMetadataB\x04\xe0\xf5\x18\x01R\tartifacts\"N\n" +
 	"\x16DeleteArtifactsRequest\x124\n" +
 	"\x05owner\x18\x01 \x01(\v2\x1e.orka.storage.v1.ArtifactOwnerR\x05owner\"\x19\n" +
-	"\x17DeleteArtifactsResponse2\xc7\x03\n" +
+	"\x17DeleteArtifactsResponse2\xc9\x03\n" +
 	"\tArtifacts\x12g\n" +
 	"\fSaveArtifact\x12$.orka.storage.v1.SaveArtifactRequest\x1a%.orka.storage.v1.SaveArtifactResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x02(\x01\x12d\n" +
-	"\vGetArtifact\x12#.orka.storage.v1.GetArtifactRequest\x1a$.orka.storage.v1.GetArtifactResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x020\x01\x12h\n" +
-	"\rListArtifacts\x12%.orka.storage.v1.ListArtifactsRequest\x1a&.orka.storage.v1.ListArtifactsResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x02\x12n\n" +
+	"\vGetArtifact\x12#.orka.storage.v1.GetArtifactRequest\x1a$.orka.storage.v1.GetArtifactResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x020\x01\x12j\n" +
+	"\rListArtifacts\x12%.orka.storage.v1.ListArtifactsRequest\x1a&.orka.storage.v1.ListArtifactsResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x020\x01\x12n\n" +
 	"\x0fDeleteArtifacts\x12'.orka.storage.v1.DeleteArtifactsRequest\x1a(.orka.storage.v1.DeleteArtifactsResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x02\x1a\x11\xca\xf3\x18\rArtifactStoreBEZCgithub.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepbb\x06proto3"
 
 var (

@@ -48,6 +48,9 @@ const (
 	streamUpload
 	// streamDownload is a server-streaming RPC whose response carries a blob.
 	streamDownload
+	// streamList is a server-streaming RPC whose response splits a list
+	// across its messages.
+	streamList
 )
 
 type rpcMethod struct {
@@ -221,6 +224,22 @@ func blobField(field protoreflect.FieldDescriptor) bool {
 	return value
 }
 
+func listField(field protoreflect.FieldDescriptor) bool {
+	value, _ := proto.GetExtension(field.Options(), storagepb.E_List).(bool)
+	return value
+}
+
+// listFields returns the fields of message marked as streamed lists.
+func listFields(message protoreflect.MessageDescriptor) []protoreflect.FieldDescriptor {
+	var found []protoreflect.FieldDescriptor
+	for index := range message.Fields().Len() {
+		if field := message.Fields().Get(index); listField(field) {
+			found = append(found, field)
+		}
+	}
+	return found
+}
+
 func fieldGoName(field protoreflect.FieldDescriptor) string {
 	value, _ := proto.GetExtension(field.Options(), storagepb.E_GoName).(string)
 	return value
@@ -318,6 +337,8 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 		return nil
 	case rpc.IsStreamingClient():
 		method.stream = streamUpload
+	case rpc.IsStreamingServer() && len(listFields(rpc.Output())) > 0:
+		method.stream = streamList
 	case rpc.IsStreamingServer():
 		method.stream = streamDownload
 	}
@@ -330,7 +351,7 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 	if method.stream == streamUpload && method.kind != storagev1.MethodWrite {
 		b.problemf("%s streams its request, so it must be a write", where)
 	}
-	if method.stream == streamDownload && method.kind != storagev1.MethodRead {
+	if (method.stream == streamDownload || method.stream == streamList) && method.kind != storagev1.MethodRead {
 		b.problemf("%s streams its response, so it must be a read", where)
 	}
 	since, _ := proto.GetExtension(rpc.Options(), storagepb.E_RpcSince).(int32)
@@ -352,8 +373,8 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 
 // checkCatalog sets the method's kind from its wire annotation and requires
 // the contract's method catalog to give the same kind and contract part. It
-// takes the method's call class from the catalog, and requires a streaming
-// RPC to be a bulk call.
+// takes the method's call class from the catalog, and requires an RPC that
+// streams a blob to be a bulk call.
 func (b *builder) checkCatalog(method *rpcMethod, rpc protoreflect.MethodDescriptor) {
 	where := string(rpc.FullName())
 	wireKind, _ := proto.GetExtension(rpc.Options(), storagepb.E_Kind).(storagepb.MethodKind)
@@ -371,8 +392,8 @@ func (b *builder) checkCatalog(method *rpcMethod, rpc protoreflect.MethodDescrip
 		b.problemf("%s declares kind %s but the method catalog gives %s", where, kind, info.Kind)
 	}
 	method.class = info.Class
-	if method.stream != streamNone && info.Class != storagev1.CallBulk {
-		b.problemf("%s streams, but the method catalog gives class %s rather than bulk", where, info.Class)
+	if (method.stream == streamUpload || method.stream == streamDownload) && info.Class != storagev1.CallBulk {
+		b.problemf("%s streams a blob, but the method catalog gives class %s rather than bulk", where, info.Class)
 	}
 	part := map[string]string{contractState: storagev1.StateContract, contractArtifacts: storagev1.ArtifactsContract}[method.service.contract]
 	if info.Contract != part {
@@ -392,10 +413,35 @@ func (b *builder) checkBlobs(method *rpcMethod) {
 			b.problemf("%s: %s", where, path.problem)
 		}
 	}
-	want := map[streamShape][2]int{streamNone: {0, 0}, streamUpload: {1, 0}, streamDownload: {0, 1}}[method.stream]
+	want := map[streamShape][2]int{streamNone: {0, 0}, streamUpload: {1, 0}, streamDownload: {0, 1}, streamList: {0, 0}}[method.stream]
 	if len(request) != want[0] || len(response) != want[1] {
-		b.problemf("%s has %d blob fields in its request and %d in its response; a unary RPC has none, "+
-			"and a streaming RPC exactly one, in the direction it streams", where, len(request), len(response))
+		b.problemf("%s has %d blob fields in its request and %d in its response; a unary RPC and a list stream "+
+			"have none, and a blob stream exactly one, in the direction it streams", where, len(request), len(response))
+	}
+	b.checkLists(method)
+}
+
+// checkLists requires a list stream's response to mark exactly one repeated
+// message field as its list, and every other RPC to mark none. Nested
+// messages never carry a list.
+func (b *builder) checkLists(method *rpcMethod) {
+	where := string(method.desc.FullName())
+	if found := listFields(method.desc.Input()); len(found) > 0 {
+		b.problemf("%s marks request field %s as a list, which only a response streams", where, found[0].FullName())
+	}
+	lists := listFields(method.desc.Output())
+	if method.stream != streamList {
+		if len(lists) > 0 {
+			b.problemf("%s marks %s as a list, but only a server-streaming read streams a list", where, lists[0].FullName())
+		}
+		return
+	}
+	if len(lists) != 1 {
+		b.problemf("%s marks %d list fields; a list stream has exactly one", where, len(lists))
+		return
+	}
+	if field := lists[0]; !field.IsList() || field.Kind() != protoreflect.MessageKind {
+		b.problemf("list field %s must be a repeated message field", field.FullName())
 	}
 }
 

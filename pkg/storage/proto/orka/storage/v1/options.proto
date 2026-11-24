@@ -66,4 +66,10 @@ extend google.protobuf.FieldOptions {
   // server-streaming RPC exactly one in its response, either at the top level
   // or inside singular message fields. A unary RPC has none.
   bool blob = 51035;
+  // list marks the repeated field a server-streaming read splits across its
+  // response messages, so a list too large for one message still crosses the
+  // wire. The field sits at the top level of the response, which then carries
+  // no blob; every response message after the first carries only the next
+  // part of the list.
+  bool list = 51036;
 }

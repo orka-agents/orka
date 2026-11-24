@@ -12,7 +12,7 @@ import (
 var (
 	methodDeleteArtifacts         = method{name: "DeleteArtifacts", fullName: "/orka.storage.v1.Artifacts/DeleteArtifacts", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 2, stream: streamNone, contract: storagev1.ArtifactsContract}
 	methodGetArtifact             = method{name: "GetArtifact", fullName: "/orka.storage.v1.Artifacts/GetArtifact", kind: storagev1.MethodRead, class: storagev1.CallBulk, since: 2, stream: streamDownload, contract: storagev1.ArtifactsContract}
-	methodListArtifacts           = method{name: "ListArtifacts", fullName: "/orka.storage.v1.Artifacts/ListArtifacts", kind: storagev1.MethodRead, class: storagev1.CallInteractive, since: 2, stream: streamNone, contract: storagev1.ArtifactsContract}
+	methodListArtifacts           = method{name: "ListArtifacts", fullName: "/orka.storage.v1.Artifacts/ListArtifacts", kind: storagev1.MethodRead, class: storagev1.CallInteractive, since: 2, stream: streamList, contract: storagev1.ArtifactsContract}
 	methodSaveArtifact            = method{name: "SaveArtifact", fullName: "/orka.storage.v1.Artifacts/SaveArtifact", kind: storagev1.MethodWrite, class: storagev1.CallBulk, since: 2, stream: streamUpload, contract: storagev1.ArtifactsContract}
 	methodDescribe                = method{name: "Describe", fullName: "/orka.storage.v1.Dataset/Describe", kind: storagev1.MethodRead, class: storagev1.CallControl, since: 1, stream: streamNone, contract: ""}
 	methodHealthCheck             = method{name: "HealthCheck", fullName: "/orka.storage.v1.Dataset/HealthCheck", kind: storagev1.MethodRead, class: storagev1.CallControl, since: 1, stream: streamNone, contract: ""}
@@ -130,11 +130,9 @@ func (client *Client) ListArtifacts(ctx context.Context, owner storagev1.Artifac
 		return nil, err
 	}
 	_ = err
-	var wireResponse *storagepb.ListArtifactsResponse
-	if err := client.invoke(ctx, &methodListArtifacts, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
-		var callErr error
-		wireResponse, callErr = client.stubs.artifacts.ListArtifacts(ctx, wireRequest, opts...)
-		return callErr
+	wireResponse := &storagepb.ListArtifactsResponse{}
+	if err := client.list(ctx, &methodListArtifacts, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.stubs.artifacts.ListArtifacts(ctx, wireRequest, opts...)
 	}); err != nil {
 		return nil, err
 	}
@@ -539,26 +537,27 @@ func (service *artifactsService) GetArtifact(wireRequest *storagepb.GetArtifactR
 	return service.server.sendDownload(stream, &methodGetArtifact, wireResponse)
 }
 
-func (service *artifactsService) ListArtifacts(ctx context.Context, wireRequest *storagepb.ListArtifactsRequest) (*storagepb.ListArtifactsResponse, error) {
+func (service *artifactsService) ListArtifacts(wireRequest *storagepb.ListArtifactsRequest, stream grpc.ServerStreamingServer[storagepb.ListArtifactsResponse]) error {
+	ctx := stream.Context()
 	var err error
 	var a0 storagev1.ArtifactOwner
 	if a0, err = fromWireArtifactOwner(wireRequest.Owner, true); err != nil {
-		return nil, requestStatus(err)
+		return requestStatus(err)
 	}
 	var r0 []storagev1.ArtifactMetadata
 	r0, err = service.provider.ListArtifacts(ctx, a0)
 	if err != nil {
-		return nil, service.server.providerError(ctx, &methodListArtifacts, err)
+		return service.server.providerError(ctx, &methodListArtifacts, err)
 	}
 	wireResponse := &storagepb.ListArtifactsResponse{}
 	for _, e10 := range r0 {
 		w11, err := toWireArtifactMetadata(e10)
 		if err != nil {
-			return nil, service.server.encodeError(ctx, &methodListArtifacts, err)
+			return service.server.encodeError(ctx, &methodListArtifacts, err)
 		}
 		wireResponse.Artifacts = append(wireResponse.Artifacts, w11)
 	}
-	return wireResponse, nil
+	return service.server.sendList(stream, &methodListArtifacts, wireResponse)
 }
 
 func (service *artifactsService) SaveArtifact(stream grpc.ClientStreamingServer[storagepb.SaveArtifactRequest, storagepb.SaveArtifactResponse]) error {
