@@ -578,6 +578,9 @@ func TestServeRefusesPartlyInvalidCABundles(t *testing.T) {
 func TestServeReverifiesClientCertificatesOnEveryCall(t *testing.T) {
 	f := newFixture(t)
 	running := start(t, f, f.mtlsConfig(newMemoryArtifacts()))
+	// The adapter loads the bundle as it starts; rewriting it before then
+	// could hand the startup load a partly written file.
+	running.waitReady(t, true)
 
 	rotated := newAuthority(t, "rotated client CA")
 	writeFile(t, f.caFile, append(append([]byte(nil), f.clientCA.pem...), rotated.pem...))
