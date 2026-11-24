@@ -362,25 +362,30 @@ func repositoryMonitorCommandRunIDFromCommand(commandID string) string {
 // It reports whether recordings still inside their grace period remain, so the
 // reconcile can requeue for them.
 func (r *RepositoryMonitorReconciler) recoverInterruptedRepositoryMonitorCommandRecordings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
-	pending := false
+	// The store's cursor is an offset, and settling a recording removes it
+	// from the filter, so read every page before changing any status.
+	var recordings []store.CommandEvent
 	cursor := ""
 	for {
 		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Status: repositoryMonitorCommandRecording, Limit: 100, Cursor: cursor})
 		if err != nil {
-			return pending, err
+			return false, err
 		}
-		for i := range commands {
-			settled, err := r.recoverRepositoryMonitorCommandRecording(ctx, monitor, &commands[i])
-			if err != nil {
-				return pending, err
-			}
-			pending = pending || !settled
-		}
+		recordings = append(recordings, commands...)
 		if next == "" {
-			return pending, nil
+			break
 		}
 		cursor = next
 	}
+	pending := false
+	for i := range recordings {
+		settled, err := r.recoverRepositoryMonitorCommandRecording(ctx, monitor, &recordings[i])
+		if err != nil {
+			return pending, err
+		}
+		pending = pending || !settled
+	}
+	return pending, nil
 }
 
 // recoverRepositoryMonitorCommandRecording settles one recording command. It

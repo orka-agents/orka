@@ -358,3 +358,27 @@ func TestRepositoryMonitorRecoveryDrainsRecordingsBeyondOnePage(t *testing.T) {
 		t.Fatalf("old recording = %#v err = %v, want it recovered behind a page of fresh ones", got, err)
 	}
 }
+
+func TestRepositoryMonitorRecoverySettlesSeveralPagesOfExpiredRecordings(t *testing.T) {
+	ctx := context.Background()
+	reconciler, monitor, monitorStore := commandContextTestReconciler(t)
+	old := time.Now().Add(-repositoryMonitorCommandRecordingGrace - time.Minute)
+	const total = 250
+	for i := range total {
+		id := fmt.Sprintf("cmd-expired-%03d", i)
+		command := &store.CommandEvent{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 77,
+			Source: "github_comment", CommentID: id, Command: "triage", Intent: "triage", Status: repositoryMonitorCommandRecording, CreatedAt: old.Add(time.Duration(i) * time.Millisecond)}
+		if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+			t.Fatalf("CreateCommandEvent() error = %v", err)
+		}
+		commandContextTestWorkAction(t, monitorStore, monitor, command, RepositoryMonitorCommandContextMetadata(SanitizeRepositoryMonitorCommandContext(fmt.Sprintf("look %d", i)), "maintainer", ""))
+	}
+	pending, err := reconciler.recoverInterruptedRepositoryMonitorCommandRecordings(ctx, monitor)
+	if err != nil || pending {
+		t.Fatalf("recover pending=%v err=%v, want everything settled", pending, err)
+	}
+	left, _, err := monitorStore.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Status: repositoryMonitorCommandRecording, Limit: total})
+	if err != nil || len(left) != 0 {
+		t.Fatalf("recordings left = %d err = %v, want every page of expired recordings settled in one pass", len(left), err)
+	}
+}
