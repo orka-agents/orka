@@ -82,6 +82,7 @@ type githubWebhookLabel struct {
 
 type githubWebhookUser struct {
 	Login string `json:"login"`
+	Type  string `json:"type,omitempty"`
 }
 
 type githubWebhookRepository struct {
@@ -173,6 +174,9 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 			apiFieldStatus:  "ok",
 			apiFieldMessage: "GitHub webhook signature verified",
 		})
+	}
+	if event == githubEventIssueComment {
+		return h.handleGitHubIssueCommentWebhook(c, body)
 	}
 	if event != githubEventIssues && event != githubEventPullRequest {
 		return githubWebhookIgnored(c, fmt.Sprintf("unsupported GitHub event %q", event))

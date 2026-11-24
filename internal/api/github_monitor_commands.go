@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +36,8 @@ const (
 
 const (
 	githubAPIBaseURLEnv           = "ORKA_GITHUB_API_BASE_URL"
+	githubAPIDefaultBaseURL       = "https://api.github.com"
+	githubAuthorizationBearer     = "Bearer"
 	commandIntentStop             = finishReasonStop
 	commandIntentResume           = "resume"
 	commandIntentDecompose        = "decompose"
@@ -104,7 +107,17 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 }
 
 func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, intent string) bool {
-	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || !monitor.Spec.Triggers.GitHub.Labels.Enabled {
+	if monitor == nil || !monitor.Spec.Triggers.GitHub.Labels.Enabled {
+		return false
+	}
+	return repositoryMonitorAcceptsCommandTarget(monitor, repo, target, intent)
+}
+
+// repositoryMonitorAcceptsCommandTarget reports whether a command for intent
+// on target is within the monitor's repository and target scope, whatever
+// source it came from.
+func repositoryMonitorAcceptsCommandTarget(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, intent string) bool {
+	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) {
 		return false
 	}
 	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)
@@ -177,23 +190,53 @@ func repositoryMonitorCommandIntentForLabel(monitor *corev1alpha1.RepositoryMoni
 	return "", false
 }
 
+// repositoryMonitorCommandIntake describes one command from any intake source.
+type repositoryMonitorCommandIntake struct {
+	Source            string
+	Label             string
+	Command           string
+	CommentID         string
+	CommentURL        string
+	Author            string
+	AuthorAssociation string
+	DedupeKey         string
+	// PermissionAllowed decides whether the author's live permission may issue the command.
+	PermissionAllowed func(permission string) bool
+	// Metadata is frozen into the command's work action when it is first created.
+	Metadata map[string]any
+}
+
 func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, intent, delivery string) (*store.CommandEvent, bool, error) {
-	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, payload.Label.Name, delivery)
+	return h.recordRepositoryMonitorCommand(c, monitor, payload.Repository, target, intent, delivery, repositoryMonitorCommandIntake{
+		Source:    githubCommandEventSourceLabel,
+		Label:     payload.Label.Name,
+		Command:   payload.Label.Name,
+		CommentID: delivery,
+		Author:    payload.Sender.Login,
+		DedupeKey: repositoryMonitorCommandDedupeKey(monitor, target, payload.Label.Name, delivery),
+		PermissionAllowed: func(permission string) bool {
+			return repositoryMonitorPermissionAllowedForIntent(monitor, permission, intent)
+		},
+	})
+}
+
+func (h *Handlers) recordRepositoryMonitorCommand(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, intent, delivery string, intake repositoryMonitorCommandIntake) (*store.CommandEvent, bool, error) {
+	dedupe := intake.DedupeKey
 	commandID := repositoryMonitorCommandID(dedupe)
 	if existing, err := h.repositoryMonitorStore.GetCommandEvent(c.Context(), monitor.Namespace, commandID); err == nil {
 		return existing, true, nil
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect repository monitor command: %v", err))
 	}
-	permission, permissionErr := h.repositoryMonitorCommandActorPermission(c.Context(), monitor, payload.Repository, payload.Sender.Login)
+	permission, permissionErr := h.repositoryMonitorCommandActorPermission(c.Context(), monitor, repo, intake.Author)
 	status := githubCommandStatusAccepted
 	errorMessage := ""
 	if permissionErr != nil {
 		return nil, false, fiber.NewError(fiber.StatusServiceUnavailable, fmt.Sprintf("failed to verify GitHub actor permission: %v", permissionErr))
 	}
-	if !repositoryMonitorPermissionAllowedForIntent(monitor, permission, intent) {
+	if intake.PermissionAllowed == nil || !intake.PermissionAllowed(permission) {
 		status = githubCommandStatusRejected
-		errorMessage = fmt.Sprintf("sender %q has GitHub permission %q, which is not allowed for RepositoryMonitor commands", payload.Sender.Login, permission)
+		errorMessage = fmt.Sprintf("sender %q has GitHub permission %q, which is not allowed for RepositoryMonitor commands", intake.Author, permission)
 	} else if !repositoryMonitorControlCommandIntent(intent) {
 		if guard := repositoryMonitorCommandGuardLabel(monitor, target.Labels); guard != "" {
 			status = githubCommandStatusBlocked
@@ -206,19 +249,21 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 		ID:                  commandID,
 		MonitorNamespace:    monitor.Namespace,
 		MonitorName:         monitor.Name,
-		Repo:                payload.Repository.FullName,
+		Repo:                repo.FullName,
 		Kind:                target.Kind,
 		Number:              int64(target.Number),
-		Source:              githubCommandEventSourceLabel,
+		Source:              intake.Source,
 		DeliveryID:          delivery,
-		Label:               payload.Label.Name,
+		Label:               intake.Label,
 		MonitorGeneration:   monitor.Generation,
 		DedupeKey:           dedupe,
 		IdempotencyKey:      dedupe,
-		CommentID:           delivery,
-		Author:              payload.Sender.Login,
+		CommentID:           intake.CommentID,
+		CommentURL:          intake.CommentURL,
+		Author:              intake.Author,
+		AuthorAssociation:   intake.AuthorAssociation,
 		Permission:          permission,
-		Command:             payload.Label.Name,
+		Command:             intake.Command,
 		Intent:              intent,
 		HeadSHA:             target.HeadSHA,
 		IssueSnapshotDigest: githubIssueSnapshotDigest(monitor, target),
@@ -295,14 +340,14 @@ func (h *Handlers) consumeRepositoryMonitorCommandLabel(ctx context.Context, mon
 	}
 	baseURL := strings.TrimRight(osGetenv(githubAPIBaseURLEnv), "/")
 	if baseURL == "" {
-		baseURL = "https://api.github.com"
+		baseURL = githubAPIDefaultBaseURL
 	}
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%d/labels/%s", baseURL, url.PathEscape(owner), url.PathEscape(repository), target.Number, url.PathEscape(label))
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{githubAuthorizationBearer, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -325,6 +370,10 @@ func (h *Handlers) consumeRepositoryMonitorCommandLabel(ctx context.Context, mon
 }
 
 func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, target githubLabelTarget) (*store.MonitorRun, bool, error) {
+	return h.queueRepositoryMonitorCommandRunWithMetadata(c, monitor, command, target, nil)
+}
+
+func (h *Handlers) queueRepositoryMonitorCommandRunWithMetadata(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, target githubLabelTarget, metadata map[string]any) (*store.MonitorRun, bool, error) {
 	run := &store.MonitorRun{
 		ID:               repositoryMonitorCommandRunID(command),
 		MonitorNamespace: monitor.Namespace,
@@ -337,7 +386,7 @@ func (h *Handlers) queueRepositoryMonitorCommandRun(c fiber.Ctx, monitor *corev1
 		Phase:            repositoryMonitorRunPhaseQueued,
 		StartedAt:        time.Now(),
 	}
-	if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, run.ID); err != nil {
+	if err := h.upsertRepositoryMonitorCommandWorkActionWithMetadata(c.Context(), monitor, command, run.ID, metadata); err != nil {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to link monitor workflow action to run: %v", err))
 	}
 	if command.Status != githubCommandStatusAccepted {
@@ -423,14 +472,14 @@ func (h *Handlers) repositoryMonitorCommandActorPermission(ctx context.Context, 
 	}
 	baseURL := strings.TrimRight(osGetenv(githubAPIBaseURLEnv), "/")
 	if baseURL == "" {
-		baseURL = "https://api.github.com"
+		baseURL = githubAPIDefaultBaseURL
 	}
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/collaborators/%s/permission", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(actor))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", strings.Join([]string{"Bearer", token}, " "))
+	req.Header.Set("Authorization", strings.Join([]string{githubAuthorizationBearer, token}, " "))
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -622,8 +671,16 @@ func slicesSortStringsFold(values []string) {
 
 func osGetenv(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 
-//nolint:gocyclo // Durable command/action coalescing keeps each terminal and race outcome explicit.
 func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string) error {
+	return h.upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx, monitor, command, runID, nil)
+}
+
+// upsertRepositoryMonitorCommandWorkActionWithMetadata records the command's
+// work action. extra is written only when the action is first created, so a
+// redelivered or duplicate command can never replace it.
+//
+//nolint:gocyclo // Durable command/action coalescing keeps each terminal and race outcome explicit.
+func (h *Handlers) upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, runID string, extra map[string]any) error {
 	if monitor == nil || command == nil || h.repositoryMonitorStore == nil {
 		return nil
 	}
@@ -696,7 +753,12 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 			return h.persistRepositoryMonitorCoalescedWorkAction(ctx, monitor, command, desiredAction, dedupe, candidate)
 		}
 	}
-	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID})
+	metadataFields := map[string]any{}
+	maps.Copy(metadataFields, extra)
+	metadataFields["source"] = command.Source
+	metadataFields[apiFieldLabel] = command.Label
+	metadataFields["deliveryID"] = command.DeliveryID
+	metadata, _ := json.Marshal(metadataFields)
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, status)
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, &store.WorkAction{
 		ID:                   id,
