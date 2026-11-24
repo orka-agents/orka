@@ -64,6 +64,10 @@ func SanitizeRepositoryMonitorCommandContext(raw string) RepositoryMonitorComman
 		truncated = true
 	}
 	raw = strings.ToValidUTF8(raw, "")
+	// Invisible runes and escapes go first, so none of them can split a link,
+	// a URL, or a hidden comment past the filters below.
+	raw = repositoryMonitorANSIEscapePattern.ReplaceAllString(raw, "")
+	raw = repositoryMonitorEvidenceStripRunes(raw)
 	raw = repositoryMonitorCommandContextHTMLCommentPattern.ReplaceAllString(raw, "")
 	raw = repositoryMonitorCommandContextImagePattern.ReplaceAllString(raw, "$1")
 	raw = repositoryMonitorCommandContextLinkPattern.ReplaceAllString(raw, "$1")

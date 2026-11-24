@@ -15,6 +15,8 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -133,6 +135,7 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 	result := githubRepositoryMonitorEventResult{Matched: 1}
 	commentID := strconv.FormatInt(payload.Comment.ID, 10)
 	author := strings.TrimSpace(payload.Comment.User.Login)
+	metadata := controller.RepositoryMonitorCommandContextMetadata(controller.SanitizeRepositoryMonitorCommandContext(parsed.Context), author, payload.Comment.HTMLURL)
 	command, duplicate, err := h.recordRepositoryMonitorCommand(c, monitor, payload.Repository, target, intent, delivery, repositoryMonitorCommandIntake{
 		Source:            githubCommandEventSourceComment,
 		Command:           parsed.Word,
@@ -144,6 +147,7 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 		PermissionAllowed: func(permission string) bool {
 			return repositoryMonitorCommentPermissionAllowed(monitor, permission)
 		},
+		Metadata: metadata,
 	})
 	if err != nil {
 		return result, err
@@ -152,10 +156,14 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 		result.Duplicate++
 	}
 	result.CommandIDs = append(result.CommandIDs, command.ID)
+	if command.Status == githubCommandStatusRecording {
+		if err := h.finishRepositoryMonitorCommandRecording(c.Context(), monitor, command, metadata); err != nil {
+			return result, err
+		}
+	}
 	if command.Status != githubCommandStatusAccepted {
 		return result, h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, "")
 	}
-	metadata := controller.RepositoryMonitorCommandContextMetadata(controller.SanitizeRepositoryMonitorCommandContext(parsed.Context), author, payload.Comment.HTMLURL)
 	run, queued, err := h.queueRepositoryMonitorCommandRunWithMetadata(c, monitor, command, target, metadata)
 	if err != nil {
 		return result, err
@@ -167,6 +175,29 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 		result.SkippedActive++
 	}
 	return result, nil
+}
+
+// finishRepositoryMonitorCommandRecording creates the work action that
+// freezes a recording command's context, then accepts the command. The
+// controller only acts on accepted commands, so it can never start one before
+// its context exists. A redelivery of a command left recording by an
+// interrupted intake finishes it the same way.
+func (h *Handlers) finishRepositoryMonitorCommandRecording(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, metadata map[string]any) error {
+	command.Status = githubCommandStatusAccepted
+	if err := h.upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx, monitor, command, "", metadata); err != nil {
+		command.Status = githubCommandStatusRecording
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command context: %v", err))
+	}
+	if command.Status != githubCommandStatusAccepted {
+		// The work action coalesced the command and already settled it.
+		return nil
+	}
+	if err := h.repositoryMonitorStore.UpdateCommandEvent(ctx, command); err != nil {
+		command.Status = githubCommandStatusRecording
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to accept repository monitor command: %v", err))
+	}
+	metrics.RecordRepositoryMonitorCommand(command.Intent, command.Status)
+	return nil
 }
 
 // parseRepositoryMonitorCommentCommand parses "<prefix> <command>" on the

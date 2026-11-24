@@ -202,7 +202,9 @@ type repositoryMonitorCommandIntake struct {
 	DedupeKey         string
 	// PermissionAllowed decides whether the author's live permission may issue the command.
 	PermissionAllowed func(permission string) bool
-	// Metadata is frozen into the command's work action when it is first created.
+	// Metadata is frozen into the command's work action when it is first
+	// created. A command with metadata is stored as recording, not accepted,
+	// until that work action exists; see finishRepositoryMonitorCommandRecording.
 	Metadata map[string]any
 }
 
@@ -242,6 +244,9 @@ func (h *Handlers) recordRepositoryMonitorCommand(c fiber.Ctx, monitor *corev1al
 			status = githubCommandStatusBlocked
 			errorMessage = fmt.Sprintf("target has guard label %q", guard)
 		}
+	}
+	if status == githubCommandStatusAccepted && intake.Metadata != nil {
+		status = githubCommandStatusRecording
 	}
 
 	processedAt := time.Now()

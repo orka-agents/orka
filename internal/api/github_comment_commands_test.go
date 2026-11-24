@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -62,6 +64,11 @@ type commentTestEnv struct {
 
 func newCommentTestEnv(t *testing.T, configure func(*corev1alpha1.RepositoryMonitor)) *commentTestEnv {
 	t.Helper()
+	return newCommentTestEnvWithStore(t, configure, nil)
+}
+
+func newCommentTestEnvWithStore(t *testing.T, configure func(*corev1alpha1.RepositoryMonitor), wrap func(store.RepositoryMonitorStore) store.RepositoryMonitorStore) *commentTestEnv {
+	t.Helper()
 	github := &commentTestGitHub{permission: githubPermissionMaintain, selfLogin: "orka-monitor"}
 	githubServer := github.serve(t)
 	monitorStore := setupGitHubWebhookMonitorStore(t)
@@ -76,8 +83,12 @@ func newCommentTestEnv(t *testing.T, configure func(*corev1alpha1.RepositoryMoni
 	}
 	secret := configureGitHubWebhookTest(t, map[string]string{githubAPIBaseURLEnv: githubServer.URL})
 	fc := newGitHubWebhookFakeClient(t, monitor, githubWebhookGitSecret())
+	serverStore := monitorStore
+	if wrap != nil {
+		serverStore = wrap(monitorStore)
+	}
 	return &commentTestEnv{
-		server:  NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: monitorStore}),
+		server:  NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: serverStore}),
 		store:   monitorStore,
 		monitor: monitor,
 		github:  github,
@@ -509,5 +520,80 @@ func TestGitHubCommentCommand_UnsignedPayloadIsRejected(t *testing.T) {
 	}
 	if len(env.commands(t)) != 0 || env.github.permissionCalls.Load() != 0 || env.github.identityCalls.Load() != 0 {
 		t.Fatal("a payload with a bad signature must record nothing and call nothing")
+	}
+}
+
+// contextBeforeAcceptStore checks that no comment command is ever stored as
+// accepted before its work action holds the frozen context.
+type contextBeforeAcceptStore struct {
+	store.RepositoryMonitorStore
+	t        *testing.T
+	accepted int
+}
+
+func (s *contextBeforeAcceptStore) checkAccepted(ctx context.Context, command *store.CommandEvent) {
+	if command.Status != githubCommandStatusAccepted {
+		return
+	}
+	s.accepted++
+	action, err := s.GetWorkAction(ctx, command.MonitorNamespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+	if err != nil || !strings.Contains(action.MetadataJSON, controller.RepositoryMonitorCommandContextDigestMetadataKey) {
+		s.t.Errorf("command %s became accepted before its context was stored: action=%#v err=%v", command.ID, action, err)
+	}
+}
+
+func (s *contextBeforeAcceptStore) CreateCommandEvent(ctx context.Context, command *store.CommandEvent) error {
+	s.checkAccepted(ctx, command)
+	return s.RepositoryMonitorStore.CreateCommandEvent(ctx, command)
+}
+
+func (s *contextBeforeAcceptStore) UpdateCommandEvent(ctx context.Context, command *store.CommandEvent) error {
+	s.checkAccepted(ctx, command)
+	return s.RepositoryMonitorStore.UpdateCommandEvent(ctx, command)
+}
+
+func TestGitHubCommentCommand_ContextIsStoredBeforeTheCommandIsAccepted(t *testing.T) {
+	var guard *contextBeforeAcceptStore
+	env := newCommentTestEnvWithStore(t, nil, func(inner store.RepositoryMonitorStore) store.RepositoryMonitorStore {
+		guard = &contextBeforeAcceptStore{RepositoryMonitorStore: inner, t: t}
+		return guard
+	})
+	if status, response := env.deliver(t, "delivery-ordered", commentTestPayload{body: "/orka plan keep the API stable"}); status != http.StatusCreated {
+		t.Fatalf("status = %d response = %#v", status, response)
+	}
+	if guard.accepted != 1 {
+		t.Fatalf("accepted writes = %d, want the command accepted once", guard.accepted)
+	}
+	if commands := env.commands(t); len(commands) != 1 || commands[0].Status != githubCommandStatusAccepted {
+		t.Fatalf("commands = %#v, want one accepted command", commands)
+	}
+}
+
+func TestGitHubCommentCommand_RedeliveryFinishesAnInterruptedIntake(t *testing.T) {
+	env := newCommentTestEnv(t, nil)
+	payload := commentTestPayload{commentID: 808, body: "/orka plan keep the API stable"}
+	commentID := "808"
+	dedupe := repositoryMonitorCommentCommandDedupeKey(env.monitor, githubWebhookRepository{FullName: "sozercan/vekil"}, commentID)
+	now := time.Now()
+	if err := env.store.CreateCommandEvent(t.Context(), &store.CommandEvent{
+		ID: repositoryMonitorCommandID(dedupe), MonitorNamespace: env.monitor.Namespace, MonitorName: env.monitor.Name, Repo: "sozercan/vekil",
+		Kind: repositoryMonitorTargetKindIssue, Number: commentTestIssue, Source: githubCommandEventSourceComment, CommentID: commentID,
+		Author: commentTestAuthor, Command: commandIntentPlan, Intent: commandIntentPlan, DedupeKey: dedupe, IdempotencyKey: dedupe,
+		Status: githubCommandStatusRecording, CreatedAt: now, ProcessedAt: &now,
+	}); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	if status, response := env.deliver(t, "delivery-retry", payload); status != http.StatusCreated {
+		t.Fatalf("status = %d response = %#v, want the interrupted command finished and queued", status, response)
+	}
+	commands := env.commands(t)
+	if len(commands) != 1 || commands[0].Status != githubCommandStatusAccepted {
+		t.Fatalf("commands = %#v, want the recording command accepted", commands)
+	}
+	if text := env.workActionMetadata(t, commands[0])[controller.RepositoryMonitorCommandContextMetadataKey]; text != "keep the API stable" {
+		t.Fatalf("command context = %q, want it recovered from the redelivery", text)
+	}
+	if runs := env.runs(t); len(runs) != 1 {
+		t.Fatalf("runs = %#v, want one queued run", runs)
 	}
 }

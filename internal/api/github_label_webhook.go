@@ -56,6 +56,7 @@ const (
 	githubMonitorTriggerLabelCommand           = "github_label_command"
 	githubCommandEventSourceLabel              = "github_label"
 	githubCommandStatusAccepted                = "accepted"
+	githubCommandStatusRecording               = "recording"
 	githubCommandStatusRejected                = "rejected"
 	githubCommandStatusBlocked                 = "blocked"
 	githubCommandStatusCompleted               = "completed"
