@@ -25,11 +25,13 @@ const (
 	githubCommandEventSourceComment    = "github_comment"
 	githubWebhookUserTypeBot           = "Bot"
 	githubCommentCommandMaxCommandWord = 32
+	commandIntentAsk                   = "ask"
 )
 
 // repositoryMonitorCommentIntents lists the intents a comment command may
 // start, in the order the default command words are offered.
 var repositoryMonitorCommentIntents = []string{
+	commandIntentAsk,
 	githubActionTriage,
 	githubActionResearch,
 	commandIntentPlan,
@@ -73,9 +75,6 @@ func (h *Handlers) handleGitHubIssueCommentWebhook(c fiber.Ctx, body []byte) err
 	if payload.Issue == nil || payload.Comment.ID <= 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "GitHub issue_comment payload has no issue or comment")
 	}
-	if payload.Issue.PullRequest != nil {
-		return githubWebhookIgnored(c, "comment commands on pull requests are not supported")
-	}
 	if githubCommentFromBot(payload) {
 		return githubWebhookIgnored(c, "comment author is a bot")
 	}
@@ -108,7 +107,11 @@ func (h *Handlers) handleGitHubIssueCommentWebhook(c fiber.Ctx, body []byte) err
 			ignoredReason = fmt.Sprintf("unknown comment command %q", parsed.Word)
 			continue
 		}
-		if !repositoryMonitorAcceptsCommandTarget(monitor, payload.Repository, target, intent) {
+		if target.IsPR && intent != commandIntentAsk {
+			ignoredReason = fmt.Sprintf("comment command %q is not supported on pull requests", parsed.Word)
+			continue
+		}
+		if !repositoryMonitorAcceptsCommentTarget(monitor, payload.Repository, target, intent) {
 			continue
 		}
 		self, err := h.repositoryMonitorCommentFromMonitorIdentity(c.Context(), monitor, payload.Comment.User.Login)
@@ -163,6 +166,17 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 	}
 	if command.Status != githubCommandStatusAccepted {
 		return result, h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, command, "")
+	}
+	if intent == commandIntentAsk {
+		// An ask runs in the controller's ask lane, not as a monitor run. Its
+		// work action, with the frozen question, exists before it is accepted.
+		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, &store.MonitorRun{ID: command.ID}); err != nil {
+			return result, err
+		}
+		if !duplicate {
+			result.Queued++
+		}
+		return result, nil
 	}
 	run, queued, err := h.queueRepositoryMonitorCommandRunWithMetadata(c, monitor, command, target, metadata)
 	if err != nil {
@@ -252,7 +266,7 @@ func repositoryMonitorCommentIntent(monitor *corev1alpha1.RepositoryMonitor, wor
 	if len(commands) == 0 {
 		for _, intent := range repositoryMonitorCommentIntents {
 			if word == intent {
-				return intent, true
+				return intent, repositoryMonitorCommentIntentSupported(monitor, intent)
 			}
 		}
 		return "", false
@@ -260,14 +274,40 @@ func repositoryMonitorCommentIntent(monitor *corev1alpha1.RepositoryMonitor, wor
 	for _, command := range commands {
 		if strings.EqualFold(strings.TrimSpace(command.Name), word) {
 			intent := strings.TrimSpace(command.Intent)
-			return intent, repositoryMonitorCommentIntentSupported(intent)
+			return intent, repositoryMonitorCommentIntentSupported(monitor, intent)
 		}
 	}
 	return "", false
 }
 
-func repositoryMonitorCommentIntentSupported(intent string) bool {
-	return slices.Contains(repositoryMonitorCommentIntents, intent)
+// repositoryMonitorCommentIntentSupported reports whether a comment may start
+// intent. ask needs the researcher agent that answers it.
+func repositoryMonitorCommentIntentSupported(monitor *corev1alpha1.RepositoryMonitor, intent string) bool {
+	if !slices.Contains(repositoryMonitorCommentIntents, intent) {
+		return false
+	}
+	if intent == commandIntentAsk {
+		researcher := monitor.Spec.Agents.Researcher
+		return researcher != nil && strings.TrimSpace(researcher.Name) != ""
+	}
+	return true
+}
+
+// repositoryMonitorAcceptsCommentTarget applies the issue command scope to
+// issue intents. An ask may also target an open pull request when the monitor
+// watches pull requests; the controller checks its base branch and labels
+// once it reads the pull request.
+func repositoryMonitorAcceptsCommentTarget(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, intent string) bool {
+	if intent != commandIntentAsk || !target.IsPR {
+		return repositoryMonitorAcceptsCommandTarget(monitor, repo, target, intent)
+	}
+	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || !repositoryMonitorWebhookRepositoryMatches(monitor, repo) {
+		return false
+	}
+	if strings.TrimSpace(target.State) != "" && !strings.EqualFold(strings.TrimSpace(target.State), "open") {
+		return false
+	}
+	return repositoryMonitorPullRequestsEnabled(monitor.Spec)
 }
 
 // repositoryMonitorCommentPermissionAllowed applies the comment minimum, which

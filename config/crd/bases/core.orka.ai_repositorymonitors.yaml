@@ -689,15 +689,19 @@ spec:
                           commands:
                             description: |-
                               Commands maps command words to intents. When empty, each supported
-                              intent is available under its own name.
+                              intent is available under its own name; ask is available only when
+                              spec.agents.researcher is set.
                             items:
                               description: RepositoryMonitorGitHubCommentCommand maps
                                 one comment command word to an intent.
                               properties:
                                 intent:
-                                  description: Intent is the issue workflow intent
-                                    the command starts.
+                                  description: |-
+                                    Intent is the intent the command starts: an issue workflow intent, or
+                                    ask, which answers the comment with a reply on the issue or pull
+                                    request from a read-only Task run by spec.agents.researcher.
                                   enum:
+                                  - ask
                                   - triage
                                   - research
                                   - plan

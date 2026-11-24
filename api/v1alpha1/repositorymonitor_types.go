@@ -214,8 +214,9 @@ type RepositoryMonitorGitHubTriggers struct {
 
 // RepositoryMonitorGitHubCommentTriggers configures issue comment command intake.
 //
-// Only newly created issue comments are commands; edited and deleted comments
-// are ignored. A comment is a command only when its first line is
+// Only newly created issue and pull request comments are commands; edited and
+// deleted comments are ignored. Comments on pull requests can only start ask.
+// A comment is a command only when its first line is
 // "<prefix> <command>", where the prefix and command match this spec exactly.
 // The remaining text is stored, sanitized and bounded, as untrusted context
 // for the run the command starts. It never selects the intent, the agent, the
@@ -242,7 +243,8 @@ type RepositoryMonitorGitHubCommentTriggers struct {
 	RequireActorPermission string `json:"requireActorPermission,omitempty"`
 
 	// Commands maps command words to intents. When empty, each supported
-	// intent is available under its own name.
+	// intent is available under its own name; ask is available only when
+	// spec.agents.researcher is set.
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=16
@@ -257,8 +259,10 @@ type RepositoryMonitorGitHubCommentCommand struct {
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,31}$`
 	Name string `json:"name"`
 
-	// Intent is the issue workflow intent the command starts.
-	// +kubebuilder:validation:Enum=triage;research;plan;implement;decompose;stop;resume
+	// Intent is the intent the command starts: an issue workflow intent, or
+	// ask, which answers the comment with a reply on the issue or pull
+	// request from a read-only Task run by spec.agents.researcher.
+	// +kubebuilder:validation:Enum=ask;triage;research;plan;implement;decompose;stop;resume
 	Intent string `json:"intent"`
 }
 

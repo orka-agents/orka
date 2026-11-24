@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -748,7 +749,13 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx cont
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	dedupe := store.RepositoryMonitorWorkActionDedupeKey(monitor.Namespace, monitor.Name, monitor.Generation, command.Kind, command.Number, command.HeadSHA, command.IssueSnapshotDigest, desiredAction)
+	snapshot := command.IssueSnapshotDigest
+	if command.Intent == commandIntentAsk {
+		// Asks with different text are different work; identical ones coalesce.
+		digest, _ := extra[controller.RepositoryMonitorCommandContextDigestMetadataKey].(string)
+		snapshot += "|ask:" + digest
+	}
+	dedupe := store.RepositoryMonitorWorkActionDedupeKey(monitor.Namespace, monitor.Name, monitor.Generation, command.Kind, command.Number, command.HeadSHA, snapshot, desiredAction)
 	if command.Status == githubCommandStatusAccepted && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
 		candidate, err := h.repositoryMonitorActiveWorkActionByDedupe(ctx, monitor, dedupe)
 		if err != nil {

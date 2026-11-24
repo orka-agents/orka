@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
@@ -55,6 +56,7 @@ func (g *commentTestGitHub) serve(t *testing.T) *httptest.Server {
 }
 
 type commentTestEnv struct {
+	client  crclient.Client
 	server  *Server
 	store   store.RepositoryMonitorStore
 	monitor *corev1alpha1.RepositoryMonitor
@@ -88,6 +90,7 @@ func newCommentTestEnvWithStore(t *testing.T, configure func(*corev1alpha1.Repos
 		serverStore = wrap(monitorStore)
 	}
 	return &commentTestEnv{
+		client:  fc,
 		server:  NewServer(fc, nil, ServerConfig{RepositoryMonitorStore: serverStore}),
 		store:   monitorStore,
 		monitor: monitor,
@@ -455,7 +458,7 @@ func TestGitHubCommentCommand_TargetScopeIsEnforced(t *testing.T) {
 		payload   commentTestPayload
 		reason    string
 	}{
-		{name: "pull request comment", payload: commentTestPayload{pullRequest: true}, reason: "pull requests are not supported"},
+		{name: "pull request comment", payload: commentTestPayload{pullRequest: true}, reason: `comment command "implement" is not supported on pull requests`},
 		{name: "comments disabled", configure: func(m *corev1alpha1.RepositoryMonitor) { m.Spec.Triggers.GitHub.Comments.Enabled = false }, reason: "not a configured"},
 		{name: "suspended monitor", configure: func(m *corev1alpha1.RepositoryMonitor) {
 			suspend := true
@@ -595,5 +598,82 @@ func TestGitHubCommentCommand_RedeliveryFinishesAnInterruptedIntake(t *testing.T
 	}
 	if runs := env.runs(t); len(runs) != 1 {
 		t.Fatalf("runs = %#v, want one queued run", runs)
+	}
+}
+
+func withResearcher(monitor *corev1alpha1.RepositoryMonitor) {
+	monitor.Spec.Agents.Researcher = &corev1alpha1.AgentReference{Name: "researcher"}
+}
+
+func TestGitHubCommentCommand_AskRecordsQueuedActionWithoutRun(t *testing.T) {
+	for _, pullRequest := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pullRequest=%v", pullRequest), func(t *testing.T) {
+			env := newCommentTestEnv(t, func(monitor *corev1alpha1.RepositoryMonitor) {
+				withResearcher(monitor)
+				pullRequestsEnabled := true
+				monitor.Spec.Targets.PullRequests.Enabled = &pullRequestsEnabled
+			})
+			status, response := env.deliver(t, "delivery-ask", commentTestPayload{pullRequest: pullRequest, body: "/orka ask what does it do?"})
+			if status != http.StatusCreated {
+				t.Fatalf("status = %d response = %#v, want created", status, response)
+			}
+			commands := env.commands(t)
+			if len(commands) != 1 || commands[0].Intent != commandIntentAsk || commands[0].Status != githubCommandStatusAccepted {
+				t.Fatalf("commands = %#v, want one accepted ask", commands)
+			}
+			wantKind := repositoryMonitorTargetKindIssue
+			if pullRequest {
+				wantKind = repositoryMonitorTargetKindPullRequest
+			}
+			if commands[0].Kind != wantKind {
+				t.Fatalf("command kind = %q, want %q", commands[0].Kind, wantKind)
+			}
+			if runs := env.runs(t); len(runs) != 0 {
+				t.Fatalf("runs = %#v, want none: asks run in the controller's ask lane", runs)
+			}
+			var signalled corev1alpha1.RepositoryMonitor
+			if err := env.client.Get(t.Context(), crclient.ObjectKeyFromObject(env.monitor), &signalled); err != nil {
+				t.Fatalf("get monitor: %v", err)
+			}
+			if signalled.Annotations[repositoryMonitorRunRequestAnnotation] != commands[0].ID {
+				t.Fatalf("monitor annotations = %#v, want the ask to signal the controller", signalled.Annotations)
+			}
+			action, err := env.store.GetWorkAction(t.Context(), env.monitor.Namespace, store.RepositoryMonitorWorkActionID(commands[0].ID, commandIntentAsk))
+			if err != nil || action.Status != store.RepositoryMonitorWorkActionStatusQueued {
+				t.Fatalf("work action = %#v err = %v, want a queued ask", action, err)
+			}
+			if text := env.workActionMetadata(t, commands[0])[controller.RepositoryMonitorCommandContextMetadataKey]; text != "what does it do?" {
+				t.Fatalf("ask context = %q", text)
+			}
+		})
+	}
+}
+
+func TestGitHubCommentCommand_AskNeedsResearcherAndPullRequestMonitoring(t *testing.T) {
+	env := newCommentTestEnv(t, nil)
+	status, response := env.deliver(t, "delivery-ask-no-agent", commentTestPayload{body: "/orka ask what is this"})
+	requireIgnored(t, status, response, `unknown comment command "ask"`)
+
+	env = newCommentTestEnv(t, withResearcher)
+	status, response = env.deliver(t, "delivery-ask-pr-off", commentTestPayload{pullRequest: true, body: "/orka ask what is this"})
+	requireIgnored(t, status, response, "not a configured")
+	if len(env.commands(t)) != 0 {
+		t.Fatal("an ask on an unmonitored pull request must record nothing")
+	}
+}
+
+func TestGitHubCommentCommand_AsksCoalesceOnlyWhenIdentical(t *testing.T) {
+	env := newCommentTestEnv(t, withResearcher)
+	for i, body := range []string{"/orka ask first question", "/orka ask second question", "/orka ask first question"} {
+		if status, response := env.deliver(t, fmt.Sprintf("delivery-%d", i), commentTestPayload{commentID: int64(700 + i), body: body}); status >= 300 {
+			t.Fatalf("delivery %d status = %d response = %#v", i, status, response)
+		}
+	}
+	statuses := map[string]string{}
+	for _, command := range env.commands(t) {
+		statuses[command.CommentID] = command.Status
+	}
+	if statuses["700"] != githubCommandStatusAccepted || statuses["701"] != githubCommandStatusAccepted || statuses["702"] != githubCommandStatusCompleted {
+		t.Fatalf("command statuses = %#v, want a different ask to run and an identical one to coalesce", statuses)
 	}
 }

@@ -58,6 +58,17 @@ type RepositoryMonitorCommandContext struct {
 // bounded to RepositoryMonitorCommandContextMaxLines lines and
 // RepositoryMonitorCommandContextMaxBytes bytes.
 func SanitizeRepositoryMonitorCommandContext(raw string) RepositoryMonitorCommandContext {
+	text, truncated := sanitizeRepositoryMonitorUntrustedText(raw, RepositoryMonitorCommandContextMaxLines, RepositoryMonitorCommandContextMaxBytes)
+	if text == "" {
+		return RepositoryMonitorCommandContext{Truncated: truncated}
+	}
+	return RepositoryMonitorCommandContext{Text: text, Truncated: truncated, Digest: repositoryMonitorCommandContextDigest(text)}
+}
+
+// sanitizeRepositoryMonitorUntrustedText removes hidden HTML comments, images,
+// links and URLs, strips control and format runes, redacts credentials, and
+// bounds the result to maxLines lines and maxBytes bytes.
+func sanitizeRepositoryMonitorUntrustedText(raw string, maxLines, maxBytes int) (string, bool) {
 	truncated := false
 	if len(raw) > repositoryMonitorCommandContextRawBytes {
 		raw = repositoryMonitorEvidenceCutRaw(raw, repositoryMonitorCommandContextRawBytes)
@@ -85,19 +96,16 @@ func SanitizeRepositoryMonitorCommandContext(raw string) RepositoryMonitorComman
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
 		lines = lines[:len(lines)-1]
 	}
-	if len(lines) > RepositoryMonitorCommandContextMaxLines {
-		lines = lines[:RepositoryMonitorCommandContextMaxLines]
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
 		truncated = true
 	}
 	text := strings.Join(lines, "\n")
-	if len(text) > RepositoryMonitorCommandContextMaxBytes {
-		text = repositoryMonitorCommandContextCut(text, RepositoryMonitorCommandContextMaxBytes)
+	if len(text) > maxBytes {
+		text = repositoryMonitorCommandContextCut(text, maxBytes)
 		truncated = true
 	}
-	if text == "" {
-		return RepositoryMonitorCommandContext{Truncated: truncated}
-	}
-	return RepositoryMonitorCommandContext{Text: text, Truncated: truncated, Digest: repositoryMonitorCommandContextDigest(text)}
+	return text, truncated
 }
 
 func repositoryMonitorCommandContextCut(text string, limit int) string {
@@ -234,6 +242,10 @@ func ValidateRepositoryMonitorCommentTriggers(spec corev1alpha1.RepositoryMonito
 		}
 		seen[command.Name] = struct{}{}
 		switch command.Intent {
+		case repositoryMonitorCommandIntentAsk:
+			if spec.Agents.Researcher == nil || strings.TrimSpace(spec.Agents.Researcher.Name) == "" {
+				return fmt.Errorf("spec.agents.researcher is required for the ask comment command %q", command.Name)
+			}
 		case repositoryMonitorCommandIntentTriage, repositoryMonitorCommandIntentResearch, repositoryMonitorCommandIntentPlan, repositoryMonitorCommandIntentImplement, repositoryMonitorCommandIntentDecompose, repositoryMonitorCommandIntentStop, repositoryMonitorCommandIntentResume:
 		default:
 			return fmt.Errorf("spec.triggers.github.comments.commands intent %q is not supported", command.Intent)

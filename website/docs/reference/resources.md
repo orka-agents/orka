@@ -900,10 +900,10 @@ spec:
 | `triggers.github.labels.consumeCommandLabels` | bool | No | Remove an accepted command label after durable intake. |
 | `triggers.github.labels.requireActorPermission` | string | No | Minimum GitHub permission of the person applying a command label: `write` (default), `maintain`, or `admin`. |
 | `triggers.github.labels.issues.implement` | string | No | Label that starts the issue workflow. Defaults to `orka:implement`. |
-| `triggers.github.comments.enabled` | bool | No | Accept issue comment commands from signed GitHub webhooks. Requires `forgeCredentialRef`. |
+| `triggers.github.comments.enabled` | bool | No | Accept issue and pull request comment commands from signed GitHub webhooks. Requires `forgeCredentialRef`. |
 | `triggers.github.comments.prefix` | string | When comments are enabled | First word of a command comment, such as `/orka`. Matched case-insensitively. |
 | `triggers.github.comments.requireActorPermission` | string | No | Minimum GitHub permission of the comment author for every comment command: `write`, `maintain` (default), or `admin`. |
-| `triggers.github.comments.commands` | list | No | Command words (`name`) and the issue intents they start (`intent`: `triage`, `research`, `plan`, `implement`, `decompose`, `stop`, or `resume`). When empty, each intent is its own word. |
+| `triggers.github.comments.commands` | list | No | Command words (`name`) and the intents they start (`intent`: `ask`, `triage`, `research`, `plan`, `implement`, `decompose`, `stop`, or `resume`). When empty, each intent is its own word; `ask` needs `agents.researcher`. |
 | `agents.reviewer` | AgentReference | When PR monitoring is enabled | Agent for read-only pull request review. It must use a built-in `claude`, `codex`, or `opencode` runtime and omit `spec.secretRef`; the runtime proxy supplies model credentials. |
 | `agents.triager`, `agents.researcher`, `agents.planner` | AgentReference | No | Agents for read-only issue triage, research, and planning. |
 | `agents.implementer` | AgentReference | No | Agent for issue implementation, a write workflow. |

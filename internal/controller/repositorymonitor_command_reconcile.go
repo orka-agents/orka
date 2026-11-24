@@ -46,7 +46,7 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 		}
 		for i := range commands {
 			command := commands[i]
-			if strings.TrimSpace(command.Kind) == "" || command.Number == 0 {
+			if strings.TrimSpace(command.Kind) == "" || command.Number == 0 || command.Intent == repositoryMonitorCommandIntentAsk {
 				continue
 			}
 			if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {

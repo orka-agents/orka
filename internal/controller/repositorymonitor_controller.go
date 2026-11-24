@@ -521,6 +521,12 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		logger.Error(err, "failed to enqueue accepted repository monitor commands")
 		return ctrl.Result{}, err
 	}
+	pendingAsks, err := r.reconcileRepositoryMonitorAskCommands(ctx, monitor, state.owner, state.repository)
+	if err != nil {
+		logger.Error(err, "failed to reconcile repository monitor ask commands")
+		return ctrl.Result{}, err
+	}
+	pendingReviews = pendingReviews || pendingAsks
 
 	processedRun, runningRunRequeueAfter, err := r.processNextQueuedMonitorRun(ctx, monitor, state.owner, state.repository)
 	if err != nil {

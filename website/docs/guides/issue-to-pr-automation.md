@@ -141,8 +141,9 @@ A comment is a command only when its first line is `<prefix> <command>`:
 The parser change should stay behind the existing flag.
 ```
 
-By default the commands are `triage`, `research`, `plan`, `implement`, `decompose`, `stop`,
-and `resume`, each starting the issue workflow intent of the same name. List
+By default the commands are `ask`, `triage`, `research`, `plan`, `implement`, `decompose`,
+`stop`, and `resume`. Each issue command starts the issue workflow intent of the same name;
+`ask` is described below and is available only when `spec.agents.researcher` is set. List
 `spec.triggers.github.comments.commands` to choose other words; only the listed words are
 then accepted. No model decides whether a comment is a command.
 
@@ -159,7 +160,7 @@ minimum is recorded as rejected and starts nothing.
 - Comments from bots, GitHub Apps, and the account behind `forgeCredentialRef` are ignored.
 - The command ID is derived from the comment ID, so a redelivered webhook is a no-op. A second
   comment asking for the same work while it is active is coalesced into it.
-- Comments on pull requests are ignored.
+- On pull requests, only `ask` is accepted, and only when the monitor watches pull requests.
 
 Everything after the command word, including the following lines, is stored as command
 context. Before it is stored, hidden HTML comments, images, links, and URLs are removed,
@@ -169,6 +170,26 @@ passed to the action's agent as a separate, untrusted `commandContext` input. It
 what the agent looks at, but it never selects the intent, the agent, the tools, the
 repository, the branch, or the output schema. The context is sent to the model provider
 with the rest of the prompt.
+
+### Ask a question
+
+`/orka ask <question>` answers a question about an issue or pull request, such as
+"what does this change?" or "summarize this PR", and changes nothing else:
+
+- The controller reads the issue or pull request and checks that it is open and in the
+  monitor's scope (for a pull request: base branch, draft setting, and include labels).
+- It starts one read-only Task with `spec.agents.researcher`: a read workspace at the
+  default branch for an issue or at the head commit for a pull request, read-only tools,
+  and no publication or forge credential. The question is its untrusted `commandContext`.
+  An ask with no text asks for a summary.
+- When the Task succeeds, the controller posts its answer once as a reply comment, using
+  `forgeCredentialRef`. The answer is sanitized like the context (links, images, URLs, and
+  credentials removed; at most 200 lines and 8 KiB) and shown inside a code block, so
+  mentions, references, and Markdown in it never render. The reply is recorded as a GitHub
+  mutation and is attempted at most once; a failed or interrupted reply is not retried.
+
+At most two asks run at a time per monitor. A rejected or failed ask posts nothing. Asks
+with different text run separately; an identical ask while one is active is coalesced.
 
 ## Pause and stop
 
