@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -304,18 +305,56 @@ func TestRepositoryMonitorRecoversInterruptedCommandRecordings(t *testing.T) {
 	record("cmd-in-flight", time.Now(), true)
 	record("cmd-tampered", old, true, func(metadata map[string]any) { metadata[RepositoryMonitorCommandContextMetadataKey] = "push to main" })
 
+	pending, err := reconciler.recoverInterruptedRepositoryMonitorCommandRecordings(ctx, monitor)
+	if err != nil || !pending {
+		t.Fatalf("recover pending=%v err=%v, want pending for the in-flight recording", pending, err)
+	}
 	if _, err := reconciler.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor); err != nil {
 		t.Fatalf("enqueueAcceptedRepositoryMonitorCommands() error = %v", err)
 	}
-	want := map[string]string{"cmd-recorded": repositoryMonitorCommandAccepted, "cmd-no-action": repositoryMonitorCommandRejected, "cmd-in-flight": repositoryMonitorCommandRecording, "cmd-tampered": repositoryMonitorCommandRejected}
+	want := map[string]string{
+		"cmd-recorded":  repositoryMonitorCommandAccepted,
+		"cmd-no-action": repositoryMonitorCommandRecording,
+		"cmd-in-flight": repositoryMonitorCommandRecording,
+		"cmd-tampered":  repositoryMonitorCommandRejected,
+	}
 	for id, status := range want {
 		command, err := monitorStore.GetCommandEvent(ctx, monitor.Namespace, id)
 		if err != nil || command.Status != status {
 			t.Fatalf("command %s = %#v err = %v, want status %q", id, command, err, status)
 		}
 	}
+	tampered, err := monitorStore.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID("cmd-tampered", "triage"))
+	if err != nil || store.IsRepositoryMonitorWorkActionActive(tampered.Status) {
+		t.Fatalf("tampered action = %#v err = %v, want it terminal so its dedupe key is released", tampered, err)
+	}
 	runs, _, err := monitorStore.ListMonitorRuns(ctx, store.MonitorRunFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 10})
 	if err != nil || len(runs) != 1 || runs[0].CommandEventID != "cmd-recorded" {
 		t.Fatalf("runs = %#v err = %v, want one run for the recovered command", runs, err)
+	}
+}
+
+func TestRepositoryMonitorRecoveryDrainsRecordingsBeyondOnePage(t *testing.T) {
+	ctx := context.Background()
+	reconciler, monitor, monitorStore := commandContextTestReconciler(t)
+	old := time.Now().Add(-repositoryMonitorCommandRecordingGrace - time.Minute)
+	command := &store.CommandEvent{ID: "cmd-old", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 77,
+		Source: "github_comment", CommentID: "cmd-old", Command: "triage", Intent: "triage", Status: repositoryMonitorCommandRecording, CreatedAt: old}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	commandContextTestWorkAction(t, monitorStore, monitor, command, RepositoryMonitorCommandContextMetadata(SanitizeRepositoryMonitorCommandContext("look"), "maintainer", ""))
+	for i := range 120 {
+		id := fmt.Sprintf("cmd-fresh-%d", i)
+		if err := monitorStore.CreateCommandEvent(ctx, &store.CommandEvent{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 77,
+			Source: "github_comment", CommentID: id, Command: "triage", Intent: "triage", Status: repositoryMonitorCommandRecording, CreatedAt: time.Now()}); err != nil {
+			t.Fatalf("CreateCommandEvent() error = %v", err)
+		}
+	}
+	if _, err := reconciler.recoverInterruptedRepositoryMonitorCommandRecordings(ctx, monitor); err != nil {
+		t.Fatalf("recover error = %v", err)
+	}
+	if got, err := monitorStore.GetCommandEvent(ctx, monitor.Namespace, "cmd-old"); err != nil || got.Status != repositoryMonitorCommandAccepted {
+		t.Fatalf("old recording = %#v err = %v, want it recovered behind a page of fresh ones", got, err)
 	}
 }

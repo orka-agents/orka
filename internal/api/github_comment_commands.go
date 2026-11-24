@@ -157,6 +157,11 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 	}
 	result.CommandIDs = append(result.CommandIDs, command.ID)
 	if command.Status == githubCommandStatusRecording {
+		// Wake the controller first: if intake stops before the command is
+		// accepted, the controller still sees the recording and recovers it.
+		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, &store.MonitorRun{ID: command.ID}); err != nil {
+			return result, err
+		}
 		if err := h.finishRepositoryMonitorCommandRecording(c.Context(), monitor, command, metadata); err != nil {
 			return result, err
 		}

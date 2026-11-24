@@ -34,9 +34,6 @@ const (
 )
 
 func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
-	if err := r.recoverInterruptedRepositoryMonitorCommandRecordings(ctx, monitor); err != nil {
-		return false, err
-	}
 	queued := false
 	cursor := ""
 	for {
@@ -352,47 +349,78 @@ func repositoryMonitorCommandRunIDFromCommand(commandID string) string {
 // recoverInterruptedRepositoryMonitorCommandRecordings settles comment commands
 // whose intake stopped between recording the command and accepting it. GitHub
 // does not redeliver a webhook on its own, so without this a recording command
-// would hold its work action's dedupe key indefinitely. A command whose work
-// action holds verifiable context is accepted; one whose action was coalesced
-// completes; any other is rejected.
-func (r *RepositoryMonitorReconciler) recoverInterruptedRepositoryMonitorCommandRecordings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) error {
-	commands, _, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Status: repositoryMonitorCommandRecording, Limit: 100})
-	if err != nil {
-		return err
-	}
-	for i := range commands {
-		command := &commands[i]
-		if time.Since(command.CreatedAt) < repositoryMonitorCommandRecordingGrace {
-			continue
+// would leave its queued work action holding the action's dedupe key.
+//
+// Once the grace period has passed, a command whose work action holds
+// verifiable context is accepted. One whose action was coalesced completes.
+// One whose action cannot run is rejected, and a queued action it owns is
+// failed so its dedupe key is released. A recording with no work action
+// holds nothing and is left for a redelivery to finish. Every transition is
+// one a concurrent redelivery would also make, or leaves the command unable to
+// run, so recovery cannot race intake into running work twice.
+//
+// It reports whether recordings still inside their grace period remain, so the
+// reconcile can requeue for them.
+func (r *RepositoryMonitorReconciler) recoverInterruptedRepositoryMonitorCommandRecordings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
+	pending := false
+	cursor := ""
+	for {
+		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Status: repositoryMonitorCommandRecording, Limit: 100, Cursor: cursor})
+		if err != nil {
+			return pending, err
 		}
-		action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			command.Status = repositoryMonitorCommandRejected
-			command.Error = repositoryMonitorCommandRecordingInterrupted
-		case err != nil:
-			return err
-		case action.CommandEventID != command.ID:
-			command.Status = repositoryMonitorCommandRejected
-			command.Error = repositoryMonitorCommandRecordingInterrupted
-		case action.Status == store.RepositoryMonitorWorkActionStatusCompleted && action.Phase == "coalesced":
-			command.Status = repositoryMonitorCommandCompleted
-			command.Error = store.RepositoryMonitorCoalescedCommandError(action.DependsOnActionID)
-		case action.Status != store.RepositoryMonitorWorkActionStatusQueued:
-			command.Status = repositoryMonitorCommandRejected
-			command.Error = repositoryMonitorCommandRecordingInterrupted
-		default:
-			if _, contextErr := repositoryMonitorCommandContextFromMetadata(action.MetadataJSON); contextErr != nil {
-				command.Status = repositoryMonitorCommandRejected
-				command.Error = repositoryMonitorCommandRecordingInterrupted
-			} else {
-				command.Status = repositoryMonitorCommandAccepted
-				command.Error = ""
+		for i := range commands {
+			settled, err := r.recoverRepositoryMonitorCommandRecording(ctx, monitor, &commands[i])
+			if err != nil {
+				return pending, err
 			}
+			pending = pending || !settled
 		}
-		if err := r.Store.UpdateCommandEvent(ctx, command); err != nil {
-			return err
+		if next == "" {
+			return pending, nil
+		}
+		cursor = next
+	}
+}
+
+// recoverRepositoryMonitorCommandRecording settles one recording command. It
+// reports false while the command is still inside its grace period.
+func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorCommandRecording(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) (bool, error) {
+	if time.Since(command.CreatedAt) < repositoryMonitorCommandRecordingGrace {
+		return false, nil
+	}
+	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case action.CommandEventID != command.ID:
+		return true, nil
+	case action.Status == store.RepositoryMonitorWorkActionStatusCompleted && action.Phase == "coalesced":
+		command.Status = repositoryMonitorCommandCompleted
+		command.Error = store.RepositoryMonitorCoalescedCommandError(action.DependsOnActionID)
+	case action.Status != store.RepositoryMonitorWorkActionStatusQueued:
+		command.Status = repositoryMonitorCommandRejected
+		command.Error = repositoryMonitorCommandRecordingInterrupted
+	default:
+		if _, contextErr := repositoryMonitorCommandContextFromMetadata(action.MetadataJSON); contextErr != nil {
+			now := time.Now()
+			action.Status = store.RepositoryMonitorWorkActionStatusFailed
+			action.Phase = repositoryMonitorCommandRejected
+			action.BlockedReason = repositoryMonitorCommandRecordingInterrupted
+			action.CompletedAt = &now
+			if err := r.Store.UpdateWorkAction(ctx, action); err != nil {
+				return false, err
+			}
+			command.Status = repositoryMonitorCommandRejected
+			command.Error = repositoryMonitorCommandRecordingInterrupted
+		} else {
+			command.Status = repositoryMonitorCommandAccepted
+			command.Error = ""
 		}
 	}
-	return nil
+	return true, r.Store.UpdateCommandEvent(ctx, command)
 }
