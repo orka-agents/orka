@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -675,5 +676,33 @@ func TestGitHubCommentCommand_AsksCoalesceOnlyWhenIdentical(t *testing.T) {
 	}
 	if statuses["700"] != githubCommandStatusAccepted || statuses["701"] != githubCommandStatusAccepted || statuses["702"] != githubCommandStatusCompleted {
 		t.Fatalf("command statuses = %#v, want a different ask to run and an identical one to coalesce", statuses)
+	}
+}
+
+type failWorkActionCreateStore struct {
+	store.RepositoryMonitorStore
+}
+
+func (s failWorkActionCreateStore) CreateWorkAction(context.Context, *store.WorkAction) error {
+	return errors.New("injected work action create failure")
+}
+
+func TestGitHubCommentCommand_InterruptedIntakeStillWakesTheController(t *testing.T) {
+	env := newCommentTestEnvWithStore(t, nil, func(inner store.RepositoryMonitorStore) store.RepositoryMonitorStore {
+		return failWorkActionCreateStore{RepositoryMonitorStore: inner}
+	})
+	if status, _ := env.deliver(t, "delivery-interrupted", commentTestPayload{body: "/orka plan"}); status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want the failed intake reported", status)
+	}
+	commands := env.commands(t)
+	if len(commands) != 1 || commands[0].Status != githubCommandStatusRecording {
+		t.Fatalf("commands = %#v, want one command left recording", commands)
+	}
+	var signalled corev1alpha1.RepositoryMonitor
+	if err := env.client.Get(t.Context(), crclient.ObjectKeyFromObject(env.monitor), &signalled); err != nil {
+		t.Fatalf("get monitor: %v", err)
+	}
+	if signalled.Annotations[repositoryMonitorRunRequestAnnotation] != commands[0].ID {
+		t.Fatalf("monitor annotations = %#v, want the controller woken for the recording", signalled.Annotations)
 	}
 }

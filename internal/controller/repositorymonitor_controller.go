@@ -516,6 +516,12 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorRuns(ctx context
 		logger.Error(err, "failed to publish pending repository monitor review")
 		return ctrl.Result{}, err
 	}
+	pendingRecordings, err := r.recoverInterruptedRepositoryMonitorCommandRecordings(ctx, monitor)
+	if err != nil {
+		logger.Error(err, "failed to recover interrupted repository monitor commands")
+		return ctrl.Result{}, err
+	}
+	pendingReviews = pendingReviews || pendingRecordings
 	queuedCommands, err := r.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor)
 	if err != nil {
 		logger.Error(err, "failed to enqueue accepted repository monitor commands")
