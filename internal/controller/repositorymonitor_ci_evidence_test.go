@@ -578,6 +578,78 @@ func TestRepositoryMonitorCIRepairRecoversPreEvidenceTask(t *testing.T) {
 	}
 }
 
+// A fix_ci repair Task created by a controller whose CI-trust sentence had
+// the prior wording is adopted on a retried handoff after an upgrade, with
+// CI evidence and log excerpts disabled; an edit to that wording is not.
+func TestRepositoryMonitorCIRepairRecoversPriorCITrustWording(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	run := repositoryMonitorEvidenceTestRun(304, "unit", "completed", "failure", 1)
+	run["head_sha"] = "head34"
+	github := &repositoryMonitorRepairLabelsGitHub{runs: map[string][]map[string]any{"head34": {run}}}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-evidence-prior")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	configureRepositoryMonitorTestWriteCredentials(monitor)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
+	command := &store.CommandEvent{ID: "cmd-ci-evidence-prior", Intent: repositoryMonitorCommandIntentFixCI, Source: "api"}
+	pr := repositoryMonitorPullRequest{Number: 34, HeadSHA: "head34", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "34", Number: 34, HeadSHA: pr.HeadSHA}
+	monitorRun := &store.MonitorRun{ID: "run-ci-evidence-prior"}
+	if monitor.Spec.Repair.CIEvidence.Logs {
+		t.Fatal("log excerpts must be disabled for this test")
+	}
+	if created, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1); err != nil || created != 1 {
+		t.Fatalf("first handoff = (%d, %v)", created, err)
+	}
+	key := types.NamespacedName{Namespace: monitor.Namespace, Name: repositoryMonitorRepairTaskName(monitor, pr, command)}
+	var task corev1alpha1.Task
+	if err := cl.Get(ctx, key, &task); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(task.Spec.Prompt, repositoryMonitorRepairPromptCITrust) {
+		t.Fatalf("new prompt lacks the current CI-trust wording: %q", task.Spec.Prompt)
+	}
+	setPrompt := func(prompt string) {
+		var current corev1alpha1.Task
+		if err := cl.Get(ctx, key, &current); err != nil {
+			t.Fatal(err)
+		}
+		current.Spec.Prompt = prompt
+		if err := cl.Update(ctx, &current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prior := strings.Replace(task.Spec.Prompt, repositoryMonitorRepairPromptCITrust, repositoryMonitorRepairPromptPriorCITrust, 1)
+
+	edited := strings.Replace(prior, "reproduce the failures from the checkout", "skip the failing tests", 1)
+	setPrompt(edited)
+	if _, _, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1); err == nil {
+		t.Fatal("a prompt with edited prior instructions was adopted")
+	}
+
+	setPrompt(prior)
+	created, input, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1)
+	if err != nil || created != 0 || input == nil {
+		t.Fatalf("retried handoff = (%d, %v, %v), want the prior-wording Task recovered with its evidence", created, input, err)
+	}
+	var recovered corev1alpha1.Task
+	if err := cl.Get(ctx, key, &recovered); err != nil || recovered.Spec.Prompt != prior {
+		t.Fatalf("recovered Task prompt changed: err=%v", err)
+	}
+}
+
 // repositoryMonitorAssertRepairEvidenceRecorded checks that the attempt's
 // work action and audit event record the evidence it used.
 func repositoryMonitorAssertRepairEvidenceRecorded(t *testing.T, reconciler *RepositoryMonitorReconciler, monitorStore *storageclient.Client, monitor *corev1alpha1.RepositoryMonitor, monitorRun *store.MonitorRun, command *store.CommandEvent, pr repositoryMonitorPullRequest, taskName string, input *repositoryMonitorRepairCIInput) {

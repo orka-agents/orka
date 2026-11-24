@@ -143,6 +143,9 @@ type repositoryMonitorCheckEvidence struct {
 	Availability    string                                  `json:"availability"`
 	Reason          string                                  `json:"reason,omitempty"`
 	Truncated       []string                                `json:"truncated,omitempty"`
+	// Log is a GitHub Actions job log excerpt, present only when
+	// spec.repair.ciEvidence.logs is enabled.
+	Log *repositoryMonitorCheckLogEvidence `json:"log,omitempty"`
 }
 
 // repositoryMonitorCheckAnnotationEntry is one bounded check run annotation.
@@ -286,7 +289,7 @@ type repositoryMonitorEvidenceFetch struct {
 func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repo string, pr repositoryMonitorPullRequest, failures repositoryMonitorCIFailures) repositoryMonitorCIEvidence {
 	evidence := newRepositoryMonitorCIEvidence(repo, pr)
 	evidence.ChecksIncomplete = failures.headIncomplete
-	ctx, cancel := context.WithTimeout(ctx, repositoryMonitorCIEvidenceFetchBudget)
+	annotationCtx, cancel := context.WithTimeout(ctx, repositoryMonitorCIEvidenceFetchBudget)
 	defer cancel()
 	fetch := &repositoryMonitorEvidenceFetch{text: monitor.Spec.Repair.CIEvidence.Text}
 	evidence.TextOmitted = !fetch.text
@@ -307,7 +310,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context
 			evidence.OmittedChecks += len(failures.introduced) - i
 			break
 		}
-		entry := r.repositoryMonitorCheckEvidenceFor(ctx, fetch, failure, pr.HeadSHA)
+		entry := r.repositoryMonitorCheckEvidenceFor(annotationCtx, fetch, failure, pr.HeadSHA)
 		entry = fitRepositoryMonitorCheckEvidence(entry, repositoryMonitorCIEvidenceEntryEncodedBytes)
 		size := repositoryMonitorEvidenceEncodedSize(entry)
 		if size > repositoryMonitorCIEvidenceEntryEncodedBytes || used+size+repositoryMonitorCIEvidenceEntrySeparatorBytes > repositoryMonitorCIEvidenceTotalEncodedBytes {
@@ -316,6 +319,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context
 		}
 		used += size + repositoryMonitorCIEvidenceEntrySeparatorBytes
 		evidence.Checks = append(evidence.Checks, entry)
+	}
+	// Log excerpts have their own limits and time budget, outside the
+	// entry and total limits above.
+	if monitor.Spec.Repair.CIEvidence.Logs {
+		r.repositoryMonitorAddCILogs(ctx, fetch, &evidence, pr.HeadSHA)
 	}
 	// Pending checks share the total entry budget, after the failing checks.
 	for i, pending := range failures.pending {

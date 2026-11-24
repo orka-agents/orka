@@ -86,6 +86,9 @@ type RepositoryMonitorReconciler struct {
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool
+	// ciLogBlobClient replaces the client for signed GitHub Actions log
+	// blobs in tests.
+	ciLogBlobClient *http.Client
 
 	// activeRunsMu guards activeRuns, the monitor runs this process is
 	// executing right now, keyed by repositoryMonitorRunKey. A running run
