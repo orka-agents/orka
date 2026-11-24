@@ -49,19 +49,27 @@ func listFieldOf(desc protoreflect.MessageDescriptor) protoreflect.FieldDescript
 // within MaxListPartBytes unless one item alone exceeds it.
 func splitList(response proto.Message, field protoreflect.FieldDescriptor) []proto.Message {
 	items := response.ProtoReflect().Get(field).List()
-	first := proto.Clone(response)
-	first.ProtoReflect().Clear(field)
-	parts := []proto.Message{first}
-	part, size := first.ProtoReflect(), 0
+	// The first message shares every other field with response rather than
+	// copying it, and the parts share response's items, so splitting a long
+	// list allocates only the parts.
+	first := response.ProtoReflect().New()
+	response.ProtoReflect().Range(func(populated protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if populated.Number() != field.Number() {
+			first.Set(populated, value)
+		}
+		return true
+	})
+	parts := []proto.Message{first.Interface()}
+	part, size := first.Mutable(field).List(), 0
 	for index := range items.Len() {
 		item := items.Get(index)
 		itemSize := protowire.SizeTag(field.Number()) + protowire.SizeBytes(proto.Size(item.Message().Interface()))
 		if size > 0 && size+itemSize > MaxListPartBytes {
 			next := response.ProtoReflect().New()
 			parts = append(parts, next.Interface())
-			part, size = next, 0
+			part, size = next.Mutable(field).List(), 0
 		}
-		part.Mutable(field).List().Append(item)
+		part.Append(item)
 		size += itemSize
 	}
 	return parts
