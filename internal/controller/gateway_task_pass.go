@@ -45,14 +45,25 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 		passTools = append(passTools, tool)
 		names = append(names, tool.Name)
 	}
+	var delegated []string
+	if coordination := agent.Spec.Coordination; coordination != nil && coordination.Enabled {
+		delegated = slices.DeleteFunc(slices.Clone(coordination.DelegatedGatewayTools), func(name string) bool { return slices.Contains(names, name) })
+	}
+	inherited := false
+	if (len(names) > 0 || len(delegated) > 0) && namesDelegatingTask(task) {
+		parentGrant, err := r.inheritGatewayTaskGrant(ctx, task)
+		switch {
+		case err == nil:
+			grant, inherited = parentGrant, true
+		case len(names) > 0 || !noInheritableGatewayGrant(err):
+			return nil, err
+		}
+	}
 	// Delegated tools join the grant so children can inherit them, but stay
 	// out of the tool policy, so the broker never lets this Task call them.
-	// A root Task with no gateway grant has nothing to pass on.
-	if coordination := agent.Spec.Coordination; coordination != nil && coordination.Enabled && (grant != nil || namesDelegatingTask(task)) {
-		for _, name := range coordination.DelegatedGatewayTools {
-			if slices.Contains(names, name) {
-				continue
-			}
+	// Without a root or inherited grant there is nothing to pass on.
+	if grant != nil {
+		for _, name := range delegated {
 			tool, err := r.delegatedGatewayTool(ctx, task.Namespace, name)
 			if err != nil {
 				return nil, err
@@ -61,11 +72,7 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 			names = append(names, tool.Name)
 		}
 	}
-	if len(names) > 0 && namesDelegatingTask(task) {
-		grant, err = r.inheritGatewayTaskGrant(ctx, task)
-		if err != nil {
-			return nil, err
-		}
+	if inherited {
 		names = slices.DeleteFunc(names, func(name string) bool { return !slices.Contains(grant.Tools, name) })
 	}
 	for _, tool := range passTools {
@@ -108,12 +115,23 @@ func (r *TaskReconciler) delegatedGatewayTool(ctx context.Context, namespace, na
 	return tool, nil
 }
 
+var (
+	errNoParentGatewayGrant          = errors.New("parent has no frozen gateway grant")
+	errChildGatewayPassesUnprotected = errors.New("child gateway task passes require Task provenance admission")
+)
+
+// noInheritableGatewayGrant reports whether a child has no gateway grant to
+// inherit, as opposed to a broken or not yet linked one.
+func noInheritableGatewayGrant(err error) bool {
+	return errors.Is(err, errNoParentGatewayGrant) || errors.Is(err, errChildGatewayPassesUnprotected)
+}
+
 // inheritGatewayTaskGrant returns the grant a delegated child inherits: its
 // parent's frozen grant, bounded by every waiting ancestor's deadline and
 // linked to that parent.
 func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task) (*gatewayruntime.TaskGrant, error) {
 	if !r.TaskProvenanceProtected {
-		return nil, permanentACPAgentConfiguration(errors.New("child gateway task passes require Task provenance admission"))
+		return nil, permanentACPAgentConfiguration(errChildGatewayPassesUnprotected)
 	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	parent, err := gatewayPassParent(ctx, reader, task)
@@ -126,14 +144,14 @@ func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *core
 	// A parent binds before it runs, so one that could delegate but has no
 	// binding, such as a native AI-worker Task, never will.
 	if parent.Status.AgentExecutionBinding == nil {
-		return nil, permanentACPAgentConfiguration(errors.New("parent has no frozen gateway grant"))
+		return nil, permanentACPAgentConfiguration(errNoParentGatewayGrant)
 	}
 	inherited, err := loadGatewayPassSnapshot(ctx, reader, r.AgentExecutionSnapshots, parent)
 	if err != nil {
 		return nil, err
 	}
 	if inherited == nil {
-		return nil, permanentACPAgentConfiguration(errors.New("parent has no frozen gateway grant"))
+		return nil, permanentACPAgentConfiguration(errNoParentGatewayGrant)
 	}
 	chain, err := gatewayPassChain(ctx, reader, r.AgentExecutionSnapshots, r.GatewayService, parent, inherited, "", task)
 	if err != nil {

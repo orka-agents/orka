@@ -124,4 +124,38 @@ func TestGatewayTaskPassDelegatedTools(t *testing.T) {
 	require.Len(t, g.issued, 2)
 	require.Len(t, g.called, 1)
 	g.Unlock()
+
+	childOf := func(name string, of *corev1alpha1.Task) *corev1alpha1.Task {
+		child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: of.Namespace, Annotations: map[string]string{
+			labels.AnnotationParentTaskName: of.Name, labels.AnnotationParentTaskNamespace: of.Namespace, labels.AnnotationParentTaskUID: string(of.UID),
+		}}, Spec: *parent.Spec.DeepCopy()}
+		require.NoError(t, r.Create(t.Context(), child))
+		return child
+	}
+	// A child that only routes passes the list on when its parent's grant holds the tool.
+	router := childOf("router-child", parent)
+	grant, err = r.freezeGatewayTaskGrant(t.Context(), router, agent, *parentBody.MCPConfiguration)
+	require.NoError(t, err)
+	require.Equal(t, []string{"lookup"}, grant.Tools)
+	require.Equal(t, string(parent.UID), grant.Parent.UID)
+	// A name in both the policy and the list appears once.
+	grant, err = r.freezeGatewayTaskGrant(t.Context(), parent, agent, *gatewayBoundBody(t, r, with).MCPConfiguration)
+	require.NoError(t, err)
+	require.Equal(t, []string{"forbidden", "lookup"}, grant.Tools)
+	// Under a parent with no gateway grant, such as a native AI-worker Task,
+	// it has nothing to pass on and still runs, with or without provenance admission.
+	native := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "native-parent", Namespace: parent.Namespace}, Spec: *parent.Spec.DeepCopy()}
+	require.NoError(t, r.Create(t.Context(), native))
+	nativeRouter := childOf("native-router-child", native)
+	for _, protected := range []bool{true, false} {
+		r.TaskProvenanceProtected = protected
+		grant, err = r.freezeGatewayTaskGrant(t.Context(), nativeRouter, agent, *parentBody.MCPConfiguration)
+		require.NoError(t, err, "provenance protected: %v", protected)
+		require.Nil(t, grant)
+	}
+	r.TaskProvenanceProtected = true
+	// A child that calls a gateway tool itself still fails there.
+	_, err = r.freezeGatewayTaskGrant(t.Context(), nativeRouter, childAgent, *gatewayBoundBody(t, r, with).MCPConfiguration)
+	require.ErrorContains(t, err, "parent has no frozen gateway grant")
+	require.True(t, isPermanentACPAgentConfigurationError(err))
 }
