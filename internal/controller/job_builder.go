@@ -849,19 +849,17 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	// Add task-level env vars. AI worker telemetry env vars are reserved for
 	// controller injection so workload authors cannot bypass default-off telemetry
-	// policy or redirect GenAI metadata to arbitrary collectors. Restore
+	// policy or redirect GenAI metadata to arbitrary collectors. code_exec
+	// sandbox settings are reserved too, so the backend, image, NetworkPolicy,
+	// runtime class, AppArmor profile and limits keep their defaults. Provider
+	// endpoint settings are reserved so the Provider and Agent alone choose
+	// where provider requests go. Restore
 	// controller-owned identity and approval env vars so task authors cannot
 	// spoof execution identity or approval state.
 	envVars = appendTaskEnvVars(envVars, task)
 	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
 	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
 	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
-	envVars = append(removeControllerEnv(envVars, workerenv.ServiceAccountName), corev1.EnvVar{
-		Name: workerenv.ServiceAccountName,
-		ValueFrom: &corev1.EnvVarSource{
-			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.serviceAccountName"},
-		},
-	})
 	if agent != nil {
 		envVars = setControllerEnv(envVars, workerenv.AgentName, agent.Name)
 	}
@@ -1044,7 +1042,7 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 		return envVars
 	}
 	for _, envVar := range task.Spec.Env {
-		if isReservedTaskTelemetryEnv(task, envVar.Name) {
+		if isReservedTaskEnv(task, envVar.Name) {
 			continue
 		}
 		envVars = append(envVars, envVar)
@@ -1052,16 +1050,42 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 	return envVars
 }
 
-func isReservedTaskTelemetryEnv(task *corev1alpha1.Task, name string) bool {
+func isReservedTaskEnv(task *corev1alpha1.Task, name string) bool {
 	if task == nil {
 		return false
 	}
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
-		return isReservedAIWorkerTelemetryEnv(name)
+		return isReservedAIWorkerTelemetryEnv(name) ||
+			isReservedAIWorkerCodeExecEnv(name) ||
+			isReservedAIWorkerProviderConnectionEnv(name)
 	default:
 		return false
 	}
+}
+
+// isReservedAIWorkerCodeExecEnv reports the code_exec sandbox settings, which
+// the AI worker reads from its own environment. Every name with the prefix is
+// reserved, including ones added later.
+func isReservedAIWorkerCodeExecEnv(name string) bool {
+	return strings.HasPrefix(name, workerenv.CodeExecEnvPrefix)
+}
+
+// isReservedAIWorkerProviderConnectionEnv reports the provider endpoint
+// settings that the controller derives from the Provider and Agent. The
+// controller omits them when unset, and the AI worker and the provider SDKs
+// then read them from the environment, so a Task value would choose where the
+// Provider credential is sent. Fallback provider settings are reserved as a
+// prefix, including the fallback count.
+func isReservedAIWorkerProviderConnectionEnv(name string) bool {
+	switch name {
+	case workerenv.AIBaseURL,
+		workerenv.AIAzureAPIVersion,
+		workerenv.AnthropicBaseURL,
+		workerenv.OpenAIBaseURL:
+		return true
+	}
+	return strings.HasPrefix(name, workerenv.AIFallbackEnvPrefix)
 }
 
 func isReservedAIWorkerTelemetryEnv(name string) bool {
