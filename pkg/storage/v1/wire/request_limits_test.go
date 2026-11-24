@@ -41,15 +41,18 @@ func TestServerEndsDownloadsThatNeverSendTheirRequest(t *testing.T) {
 }
 
 // A server describes the artifact limit it enforces, which its own blob
-// limit can lower below the provider's.
+// limit can lower below the provider's, though never below the contract's.
 func TestServerDescribesTheArtifactLimitItEnforces(t *testing.T) {
 	provider := newRecordingProvider()
-	client := wiretest.Serve(t, wire.ServerConfig{Artifacts: provider, MaxBlobBytes: wire.MaxChunkBytes})
+	larger := describeDefault()
+	larger.Limits.MaxArtifactBytes = 2 * storagev1.MaxArtifactBytes
+	provider.set("Describe", []any{larger}, nil)
+	client := wiretest.Serve(t, wire.ServerConfig{Artifacts: provider, MaxBlobBytes: storagev1.MaxArtifactBytes})
 	info, err := client.Describe(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, int64(wire.MaxChunkBytes), info.Limits.MaxArtifactBytes)
+	require.Equal(t, int64(storagev1.MaxArtifactBytes), info.Limits.MaxArtifactBytes)
 
-	err = client.SaveArtifact(t.Context(), storagev1.SaveArtifactRequest{Filename: "f", Data: make([]byte, wire.MaxChunkBytes+1)})
+	err = client.SaveArtifact(t.Context(), storagev1.SaveArtifactRequest{Filename: "f", Data: make([]byte, storagev1.MaxArtifactBytes+1)})
 	var tooLarge storagev1.TooLargeError
 	require.ErrorAs(t, err, &tooLarge, "the client refuses what the server describes it would refuse")
 	require.Empty(t, provider.callsTo("SaveArtifact"))

@@ -92,9 +92,10 @@ type ServerConfig struct {
 	// Limits bounds concurrency and call duration per class.
 	Limits Limits
 	// MaxBlobBytes caps the blob an upload may carry. Zero means
-	// DefaultMaxBlobBytes. With a state provider it must be at least
-	// storagev1.MaxResultBytes. An artifact is also capped at the artifacts
-	// provider's own MaxArtifactBytes.
+	// DefaultMaxBlobBytes. It must be at least storagev1.MaxResultBytes with
+	// a state provider and storagev1.MaxArtifactBytes with an artifacts
+	// provider. An artifact is also capped at the artifacts provider's own
+	// MaxArtifactBytes.
 	MaxBlobBytes int64
 	// Observer, when set, receives every call's outcome.
 	Observer CallObserver
@@ -149,6 +150,12 @@ func NewServer(config ServerConfig) (*Server, error) {
 		// MaxResultBytes, which a smaller cap would refuse on the wire.
 		return nil, fmt.Errorf("storage server blob limit of %d bytes is below the state contract's %d byte result limit",
 			maxBlob, storagev1.MaxResultBytes)
+	}
+	if config.Artifacts != nil && maxBlob < storagev1.MaxArtifactBytes {
+		// An artifacts.v1 provider stores artifacts of at least
+		// MaxArtifactBytes, which a smaller cap would refuse on the wire.
+		return nil, fmt.Errorf("storage server blob limit of %d bytes is below the artifacts contract's %d byte artifact limit",
+			maxBlob, storagev1.MaxArtifactBytes)
 	}
 	s := &Server{
 		state: config.State, artifacts: config.Artifacts, info: info, authenticator: config.Authenticator,

@@ -772,14 +772,15 @@ func TestNewServerRequiresAProvider(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A server serving state.v1 carries results and receipts of the contract's
-// size, so it refuses a smaller blob limit, and it never advertises a result
-// limit above the one it enforces. An artifacts-only server keeps its own
-// limit.
+// A server carries results, receipts and artifacts of the contract's sizes,
+// so it refuses a smaller blob limit for each contract part it serves, and it
+// never advertises a result limit above the one it enforces.
 func TestServerBlobLimitCoversTheResultContract(t *testing.T) {
 	_, err := wire.NewServer(wire.ServerConfig{State: newRecordingProvider(), MaxBlobBytes: wire.MaxChunkBytes})
 	require.ErrorContains(t, err, "below the state contract's")
 	_, err = wire.NewServer(wire.ServerConfig{Artifacts: newRecordingProvider(), MaxBlobBytes: wire.MaxChunkBytes})
+	require.ErrorContains(t, err, "below the artifacts contract's", "an artifacts-only server must carry contract-sized artifacts")
+	_, err = wire.NewServer(wire.ServerConfig{Artifacts: newRecordingProvider(), MaxBlobBytes: storagev1.MaxArtifactBytes})
 	require.NoError(t, err, "an artifacts-only server is not bound by the result limit")
 
 	provider := newRecordingProvider()
