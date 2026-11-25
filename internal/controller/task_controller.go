@@ -1420,53 +1420,56 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 		}
 	}
 
-	// Enforce maxConcurrentChildren (requeue if at limit). Siblings are listed
-	// from the API server, not the informer cache: the cache can still show a
-	// sibling admitted by the previous reconcile without its Job or binding, so
-	// every child created in a burst would pass the check. Task reconciles are
-	// serialized (taskControllerMaxConcurrentReconciles), so a live read sees
-	// every slot an earlier admission recorded before this check runs.
-	//
-	// Before hitting the API server, check the informer cache first: if the
-	// cache already shows active marked siblings at or above the limit (none of
-	// which are this task), we can short-circuit and requeue without a live
-	// sibling list. Admission still always performs a live read.
+	// Enforce maxConcurrentChildren (requeue if at limit).
 	if coord.MaxConcurrentChildren > 0 {
-		var cachedSiblings corev1alpha1.TaskList
-		if err := r.List(ctx, &cachedSiblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err == nil {
-			cachedActive := int32(0)
-			for i := range cachedSiblings.Items {
-				s := &cachedSiblings.Items[i]
-				if s.Name == task.Name {
-					continue
-				}
-				if childTaskHoldsConcurrencySlot(s) {
-					if cachedActive++; cachedActive >= coord.MaxConcurrentChildren {
-						log.Info("coordination concurrency limit reached (cached)", "active", cachedActive, "max", coord.MaxConcurrentChildren)
-						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
-					}
-				}
-			}
-		}
+		return r.enforceMaxConcurrentChildren(ctx, task, parentName, coord.MaxConcurrentChildren)
+	}
 
-		var siblings corev1alpha1.TaskList
-		if err := r.taskMetadataReader().List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
-			log.Error(err, "failed to list sibling tasks")
-			return ctrl.Result{}, err, true
-		}
-		active, err := r.countChildSiblingSlots(ctx, task, siblings.Items, coord.MaxConcurrentChildren)
-		if err != nil {
-			log.Error(err, "failed to count sibling task jobs")
-			return ctrl.Result{}, err, true
-		}
-		if active >= coord.MaxConcurrentChildren {
-			log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+	return ctrl.Result{}, nil, false
+}
+
+// enforceMaxConcurrentChildren checks whether parentName already has at least
+// limit active children. It short-circuits via the informer cache when active
+// marked siblings already fill the limit, and always performs a live API read
+// before admitting a child (relying on serialized Task reconciliation).
+func (r *TaskReconciler) enforceMaxConcurrentChildren(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	parentName string,
+	limit int32,
+) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	var cachedSiblings corev1alpha1.TaskList
+	if err := r.List(ctx, &cachedSiblings, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err == nil {
+		cachedActive := int32(0)
+		for i := range cachedSiblings.Items {
+			s := &cachedSiblings.Items[i]
+			if s.Name == task.Name || !childTaskHoldsConcurrencySlot(s) {
+				continue
+			}
+			if cachedActive++; cachedActive >= limit {
+				log.Info("coordination concurrency limit reached (cached)", "active", cachedActive, "max", limit)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+			}
 		}
 	}
 
+	var siblings corev1alpha1.TaskList
+	if err := r.taskMetadataReader().List(ctx, &siblings, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
+		log.Error(err, "failed to list sibling tasks")
+		return ctrl.Result{}, err, true
+	}
+	active, err := r.countChildSiblingSlots(ctx, task, siblings.Items, limit)
+	if err != nil {
+		log.Error(err, "failed to count sibling task jobs")
+		return ctrl.Result{}, err, true
+	}
+	if active >= limit {
+		log.Info("coordination concurrency limit reached", "active", active, "max", limit)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+	}
 	return ctrl.Result{}, nil, false
 }
 
