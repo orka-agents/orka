@@ -288,3 +288,30 @@ type ProducersResponse struct {
 	Declared  bool           `json:"declared"`
 	Producers []ProducerInfo `json:"producers"`
 }
+
+// CharterBound is one bound of a charter, as the charter states it.
+type CharterBound struct {
+	ID       string `json:"id"`
+	Sentence string `json:"sentence"`
+	// Highlight marks a bound an operator wants shown first.
+	Highlight bool `json:"highlight,omitempty"`
+}
+
+// CharterDeclaration is the text of one charter revision. Phase 0 reads it
+// from an operator-owned declaration; nothing here enforces a bound.
+type CharterDeclaration struct {
+	Revision string `json:"revision"`
+	Title    string `json:"title,omitempty"`
+	// Preview marks a charter whose rules are a preview check, audit only.
+	Preview bool           `json:"preview,omitempty"`
+	Bounds  []CharterBound `json:"bounds"`
+}
+
+// ConfigResponse is GET /api/v1/oversight/config.
+type ConfigResponse struct {
+	QueryKeys       []string `json:"queryKeys"`
+	MaxBulkFeedback int      `json:"maxBulkFeedback"`
+	// DemoCharterRevisions lists the preview charter revisions.
+	DemoCharterRevisions []string             `json:"demoCharterRevisions"`
+	Charters             []CharterDeclaration `json:"charters"`
+}

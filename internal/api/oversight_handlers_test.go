@@ -400,3 +400,25 @@ func TestOversightIngestStaysInTheWatchedNamespace(t *testing.T) {
 	status, _ := e.do(t, http.MethodPost, "/internal/v1/oversight/other/decisions", "system:serviceaccount:other:oversight-ingest", batch)
 	require.Equal(t, http.StatusForbidden, status)
 }
+
+func TestOversightConfigServesDeclaredCharters(t *testing.T) {
+	e := newOversightTestEnv(t, true, viewerGrants...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	e.h.client = ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: oversightProducersConfigMap},
+		Data: map[string]string{
+			oversightChartersKey: `[{"revision":"rev-1","title":"Team charter","preview":true,
+				"bounds":[{"id":"R1","sentence":"Images may be pushed only to registry.example/team-a/*.","highlight":true}]}]`,
+			oversightPreviewChartersKey: "rev-0",
+		},
+	}).Build()
+	status, body := e.do(t, http.MethodGet, "/api/v1/oversight/config?namespace=team", viewer, nil)
+	require.Equal(t, http.StatusOK, status, string(body))
+	var config oversightv1.ConfigResponse
+	require.NoError(t, json.Unmarshal(body, &config))
+	require.Equal(t, []string{"rev-0", "rev-1"}, config.DemoCharterRevisions)
+	require.Len(t, config.Charters, 1)
+	require.True(t, config.Charters[0].Bounds[0].Highlight)
+	require.Contains(t, config.QueryKeys, "dest")
+}

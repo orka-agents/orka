@@ -446,27 +446,56 @@ func (h *Handlers) GetOversightPosture(c fiber.Ctx) error {
 }
 
 // GetOversightConfig handles GET /api/v1/oversight/config: the search keys a
-// client may offer, and the charter revisions the operator declared as
-// previews (labelled "preview rule check, audit only"), read from the
-// producer declarations ConfigMap's previewCharterRevisions key.
+// client may offer and the operator's charter declarations, read from the
+// producer declarations ConfigMap: charters.json holds a JSON list of
+// CharterDeclaration, and previewCharterRevisions a comma-separated list of
+// revisions labelled "preview rule check, audit only".
 func (h *Handlers) GetOversightConfig(c fiber.Ctx) error {
 	namespace, err := h.authorizeOversightRead(c, "getOversightConfig", "list")
 	if err != nil {
 		return err
 	}
-	previews := []string{}
-	if cm, found, err := h.oversightProducersConfigMap(c.Context(), namespace); err != nil {
+	response := oversightv1.ConfigResponse{
+		QueryKeys: oversight.QueryKeys(), MaxBulkFeedback: oversightv1.MaxBulkFeedback,
+		DemoCharterRevisions: []string{}, Charters: []oversightv1.CharterDeclaration{},
+	}
+	cm, found, err := h.oversightProducersConfigMap(c.Context(), namespace)
+	if err != nil {
 		return err
-	} else if found {
-		for revision := range strings.SplitSeq(cm.Data[oversightPreviewChartersKey], ",") {
-			if revision = strings.TrimSpace(revision); revision != "" && len(previews) < maxOversightProducers {
-				previews = append(previews, revision)
-			}
+	}
+	if !found {
+		return c.JSON(response)
+	}
+	previews := map[string]bool{}
+	for revision := range strings.SplitSeq(cm.Data[oversightPreviewChartersKey], ",") {
+		if revision = strings.TrimSpace(revision); revision != "" {
+			previews[revision] = true
 		}
 	}
-	return c.JSON(fiber.Map{
-		"queryKeys": oversight.QueryKeys(), "maxBulkFeedback": oversightv1.MaxBulkFeedback, "demoCharterRevisions": previews,
-	})
+	if raw := cm.Data[oversightChartersKey]; raw != "" {
+		var charters []oversightv1.CharterDeclaration
+		if err := json.Unmarshal([]byte(raw), &charters); err != nil {
+			return fiber.NewError(fiber.StatusUnprocessableEntity,
+				fmt.Sprintf("%s/%s %s is not a JSON list of charters", namespace, oversightProducersConfigMap, oversightChartersKey))
+		}
+		for _, charter := range charters {
+			if charter.Revision == "" || len(response.Charters) >= maxOversightProducers {
+				continue
+			}
+			if len(charter.Bounds) > maxOversightProducers {
+				charter.Bounds = charter.Bounds[:maxOversightProducers]
+			}
+			if charter.Preview {
+				previews[charter.Revision] = true
+			}
+			response.Charters = append(response.Charters, charter)
+		}
+	}
+	for revision := range previews {
+		response.DemoCharterRevisions = append(response.DemoCharterRevisions, revision)
+	}
+	slices.Sort(response.DemoCharterRevisions)
+	return c.JSON(response)
 }
 
 // RecordOversightFeedback handles POST /api/v1/oversight/decisions/{id}/feedback.
@@ -663,6 +692,7 @@ const (
 	oversightProducersConfigMap = "orka-oversight-producers"
 	oversightProducersKey       = "producers.json"
 	oversightPreviewChartersKey = "previewCharterRevisions"
+	oversightChartersKey        = "charters.json"
 	maxOversightProducers       = 64
 )
 
