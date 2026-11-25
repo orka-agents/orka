@@ -250,6 +250,8 @@ export interface PostureBasis {
   realProblems: number
   coverage: PostureCoverage
   lastObservedAt?: string
+  /** Observed action → recorded by Orka; backfilled history is left out. */
+  decisionLatency?: LatencySummary
 }
 
 export interface PostureProducer {
@@ -350,6 +352,16 @@ export type ContextLabel = z.infer<typeof contextLabelSchema>
 export type ConcernDeclaration = z.infer<typeof concernDeclarationSchema>
 /** The config as parsed: every list is present. */
 export type OversightConfig = z.output<typeof oversightConfigSchema>
+
+/** How long decisions took from the observed action to being recorded; absent on an older server or with no live records. */
+export const latencySummarySchema = z.object({
+  count: z.number(),
+  p50Seconds: z.number(),
+  p95Seconds: z.number(),
+  maxSeconds: z.number(),
+})
+
+export type LatencySummary = z.infer<typeof latencySummarySchema>
 
 /** Posture coverage as parsed: observedEvents defaults to 0 on an older server. */
 export const postureCoverageSchema = z.object({

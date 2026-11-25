@@ -5,7 +5,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useOversightConfig, useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { demoCharterRevisions as demoRevisions, excludedText, reasonText } from '@/lib/oversight'
+import { demoCharterRevisions as demoRevisions, excludedText, latencyText, reasonText } from '@/lib/oversight'
 import { formatTimestamp, timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
@@ -82,6 +82,7 @@ export function PostureView({ posture, demoCharterRevisions = [] }: { posture: P
             <p className={cn('text-sm tabular-nums', coverage.unattributedEvents > 0 ? 'font-medium text-status-failed' : 'text-muted-foreground')}>
               {coverage.unattributedEvents} unattributed events
             </p>
+            <p className="text-sm tabular-nums text-muted-foreground" data-testid="decision-latency">{latencyText(basis.decisionLatency)}</p>
             {coverage.maxEvidenceLevel && (
               <p className="text-xs text-muted-foreground">Strongest evidence: {coverage.maxEvidenceLevel}</p>
             )}

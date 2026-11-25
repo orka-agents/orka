@@ -5,6 +5,8 @@ import { formatTimestamp, timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import type { DecisionView } from '@/schemas/oversight'
 import { TONE_BADGE, TONE_ROW } from './tones'
+import { PendingRow } from './pending-row'
+import type { PendingToolCall } from '@/hooks/use-pending-tool-calls'
 
 /** The single most severe badge a row or incident carries, always in words. */
 export function RowBadge({ kind, className }: { kind: RowBadgeKind; className?: string }) {
@@ -27,6 +29,8 @@ export interface DecisionTableProps {
   onToggleSelect?: (id: string) => void
   onToggleAll?: (select: boolean) => void
   label?: string
+  /** Provisional "seen, scoring…" rows, shown first; never selectable or clickable. */
+  pending?: PendingToolCall[]
 }
 
 /**
@@ -34,7 +38,7 @@ export interface DecisionTableProps {
  * from its fields, and when. Raw tool text and IDs are on hover and in the
  * drawer.
  */
-export function DecisionTable({ decisions, onOpen, selectedIds, onToggleSelect, onToggleAll, label = 'Oversight decisions' }: DecisionTableProps) {
+export function DecisionTable({ decisions, onOpen, selectedIds, onToggleSelect, onToggleAll, label = 'Oversight decisions', pending = [] }: DecisionTableProps) {
   const { data: config } = useOversightConfig()
   const selectable = Boolean(selectedIds && onToggleSelect)
   const allSelected = selectable && decisions.length > 0 && decisions.every((d) => selectedIds!.has(d.id))
@@ -53,6 +57,7 @@ export function DecisionTable({ decisions, onOpen, selectedIds, onToggleSelect, 
         </TableRow>
       </TableHeader>
       <TableBody>
+        {pending.map((call) => <PendingRow key={call.key} call={call} columns={selectable ? 4 : 3} />)}
         {decisions.map((decision) => {
           const kind = rowBadgeKind(decision)
           const tone = rowBadge(kind).tone

@@ -9,6 +9,8 @@ import {
   draftConcernYaml,
   formatBytes,
   distributionRepo,
+  formatSeconds,
+  latencyText,
   groupIncidents,
   parseImageRef,
   rowSummary,
@@ -259,5 +261,14 @@ describe('excluded events', () => {
     })
     expect(credentialStory([{ ...lookup, id: 'r@1', seq: 2 }, read]))
       .toBe('read a token, then tried to send it out (name lookup blocked by policy)')
+  })
+
+  it('formats decision latency in seconds below two minutes and m s above', () => {
+    expect(formatSeconds(0.84)).toBe('0.8s')
+    expect(formatSeconds(41.4)).toBe('41s')
+    expect(formatSeconds(119)).toBe('119s')
+    expect(formatSeconds(281)).toBe('4m 41s')
+    expect(latencyText({ count: 120, p50Seconds: 4, p95Seconds: 41, maxSeconds: 281 })).toBe('Decision latency: p50 4s · p95 41s · max 4m 41s (n=120)')
+    expect(latencyText(undefined)).toBe('Decision latency: no live records in this window')
   })
 })

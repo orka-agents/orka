@@ -7,7 +7,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { ShieldAlert } from 'lucide-react'
 import { useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { confidenceReasons, excludedSummary, reasonText, type Incident } from '@/lib/oversight'
+import { confidenceReasons, excludedSummary, formatSeconds, latencyText, reasonText, type Incident } from '@/lib/oversight'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
 
@@ -47,6 +47,7 @@ export interface CharterSummary {
 export function PostureLineView({ posture, incidents, charter }: { posture: PostureResponse; incidents: Incident[]; charter?: CharterSummary }) {
   const [open, setOpen] = useState<Item | null>(null)
   const { basis } = posture
+  const latency = basis.decisionLatency
   const coverage = basis.coverage
   const seen = basis.actions > 0 ? Math.round((coverage.sensorAttributed / basis.actions) * 100) : 0
   const blindSpots = Object.entries(coverage.blindSpots ?? {}).sort(([a], [b]) => a.localeCompare(b))
@@ -84,6 +85,14 @@ export function PostureLineView({ posture, incidents, charter }: { posture: Post
         {part('blind', `${blindSpots.length} ${blindSpots.length === 1 ? 'blind spot' : 'blind spots'}`, blindSpots.length > 0 ? 'font-medium text-status-failed' : 'text-muted-foreground')}
         {dot}
         {part('control', enforced ? 'enforced' : 'audit mode', 'text-muted-foreground')}
+        {latency && latency.count > 0 && (
+          <>
+            {dot}
+            <span className="px-1 text-muted-foreground" title={latencyText(latency)} data-testid="posture-latency">
+              decided within ~{formatSeconds(latency.p95Seconds)}
+            </span>
+          </>
+        )}
         {charter && (
           <>
             {dot}

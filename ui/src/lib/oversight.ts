@@ -746,3 +746,20 @@ export function charterBreaks(decisions: DecisionView[], config: OversightConfig
   for (const [number, count] of byRule) if (!top || count > top.count || (count === top.count && number < top.number)) top = { number, count }
   return { broken: bounds.size, top }
 }
+
+// --- Latency --------------------------------------------------------------------
+
+/** "0.8s", "41s", "4m 41s": seconds below two minutes, minutes and seconds above. */
+export function formatSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '?'
+  if (seconds < 10) return `${Number(seconds.toFixed(1))}s`
+  if (seconds < 120) return `${Math.round(seconds)}s`
+  const total = Math.round(seconds)
+  return `${Math.floor(total / 60)}m ${total % 60}s`
+}
+
+/** "Decision latency: p50 4s · p95 41s · max 4m 41s (n=120)". */
+export function latencyText(latency: { count: number; p50Seconds: number; p95Seconds: number; maxSeconds: number } | undefined): string {
+  if (!latency || latency.count <= 0) return 'Decision latency: no live records in this window'
+  return `Decision latency: p50 ${formatSeconds(latency.p50Seconds)} · p95 ${formatSeconds(latency.p95Seconds)} · max ${formatSeconds(latency.maxSeconds)} (n=${latency.count.toLocaleString()})`
+}

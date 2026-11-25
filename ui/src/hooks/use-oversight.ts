@@ -15,7 +15,7 @@ import type {
   ProducersResponse,
   SimilarResponse,
 } from '@/schemas/oversight'
-import { oversightConfigSchema, postureCoverageSchema } from '@/schemas/oversight'
+import { latencySummarySchema, oversightConfigSchema, postureCoverageSchema } from '@/schemas/oversight'
 
 const BASE = '/oversight'
 
@@ -77,7 +77,15 @@ export function useOversightPosture(window = '24h', refetchInterval: number | fa
     queryFn: async () => {
       const posture = await api.get<PostureResponse>(`${BASE}/posture`, { namespace, window })
       const coverage = postureCoverageSchema.safeParse(posture?.basis?.coverage ?? {})
-      return coverage.success ? { ...posture, basis: { ...posture.basis, coverage: coverage.data } } : posture
+      const latency = latencySummarySchema.safeParse(posture?.basis?.decisionLatency)
+      return {
+        ...posture,
+        basis: {
+          ...posture.basis,
+          coverage: coverage.success ? coverage.data : posture.basis.coverage,
+          decisionLatency: latency.success ? latency.data : undefined,
+        },
+      }
     },
     retry: retryOversight,
     refetchInterval: pollOversight(refetchInterval),

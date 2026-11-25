@@ -28,6 +28,8 @@ import { PostureLine } from './posture-line'
 import { ConcernsPanel } from './concerns-panel'
 import { ContextPills } from './context-pills'
 import { FunnelStrip } from './funnel-strip'
+import { PendingNote } from './pending-row'
+import { usePendingToolCalls } from '@/hooks/use-pending-tool-calls'
 import { DecisionInspector } from './decision-inspector'
 import { DecisionTable } from './decision-table'
 import { HistoryPanel } from './history-panel'
@@ -173,6 +175,14 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
   const needsList = useOversightDecisions({ q: [q, NEEDS_QUERY].filter(Boolean).join(' '), window: postureWindow, limit: 200, enabled: !terminal && !grammarError })
   const needsRows = mergeRows(stream.decisions, [...(needsList.data?.pages ?? []).flatMap((page) => page.items ?? []), ...listed]).map((d) => withOverride(d, overrides))
   const incidents = groupIncidents(needsRows, config)
+
+  // "Seen, scoring…": completed tool calls from Orka's own Task events that
+  // have no decision yet. Only while the live stream runs, without a search.
+  const pendingCalls = usePendingToolCalls({
+    enabled: view !== 'charter' && view !== 'monitors' && stream.status === 'live' && !q,
+    decisions: [...stream.decisions, ...rows, ...needsRows],
+  })
+  const pendingNote = <PendingNote pending={pendingCalls.pending.length} expired={pendingCalls.expired} watching={pendingCalls.watching} candidates={pendingCalls.candidates} />
   const breaks = charterBreaks(needsRows, config)
   const declaredRules = (config?.charters ?? []).reduce((n, c) => n + (c.bounds?.length ?? 0), 0)
   const charterSummary = (config?.charters?.length ?? 0) > 0 ? {
@@ -260,6 +270,7 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
               hold: incidents.filter((i) => i.badge === 'would_hold').length,
             }}
           />
+          {pendingNote}
           {q && (
             <p className="text-xs text-muted-foreground" role="status">
               Filtered by the search <span className="font-mono">{q}</span>.{' '}
@@ -314,7 +325,7 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
                 <p className="py-6 text-center text-sm text-muted-foreground">Fix the search to see results.</p>
               ) : listError && rows.length === 0 ? (
                 <ListAccessError error={listError} resource="oversight decisions" />
-              ) : rows.length === 0 ? (
+              ) : rows.length === 0 && pendingCalls.pending.length === 0 ? (
                 <EmptyState
                   icon={Eye}
                   headline={q ? 'No actions match this search' : 'No actions recorded yet'}
@@ -325,6 +336,7 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
               ) : (
                 <DecisionTable
                   decisions={rows}
+                  pending={pendingCalls.pending}
                   onOpen={onOpen}
                   selectedIds={selected}
                   onToggleSelect={toggle}
@@ -332,6 +344,7 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
                 />
               ))}
 
+              {pendingNote}
               {list.hasNextPage && !terminal && (
                 <div className="flex justify-center">
                   <Button variant="outline" size="sm" onClick={() => list.fetchNextPage()} disabled={list.isFetchingNextPage}>

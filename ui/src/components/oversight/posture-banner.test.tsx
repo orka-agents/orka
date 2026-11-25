@@ -89,6 +89,18 @@ describe('PostureView', () => {
   })
 })
 
+describe('decision latency', () => {
+  it('shows p50, p95 and max in the coverage section', () => {
+    render(<PostureView posture={makePosture({ basis: { ...makePosture().basis, decisionLatency: { count: 12, p50Seconds: 3.2, p95Seconds: 45, maxSeconds: 281 } } })} />)
+    expect(screen.getByTestId('decision-latency')).toHaveTextContent('Decision latency: p50 3.2s · p95 45s · max 4m 41s (n=12)')
+  })
+
+  it('says when there are no live records', () => {
+    render(<PostureView posture={makePosture()} />)
+    expect(screen.getByTestId('decision-latency')).toHaveTextContent('Decision latency: no live records in this window')
+  })
+})
+
 describe('PostureBanner', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'default' })
