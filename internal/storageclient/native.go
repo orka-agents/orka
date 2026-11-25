@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/orka-agents/orka/internal/codexstate"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/nativesession"
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
@@ -81,14 +81,18 @@ func validateNativeRecord(ctx context.Context, record store.NativeSessionRecord,
 	if !inspect {
 		return nil
 	}
-	summary, err := codexstate.Inspect(ctx, record.Snapshot.Data, maxBytes)
+	format, ok := nativesession.For(record.Snapshot.ProviderKind)
+	if !ok {
+		return store.ValidationErrorf("native provider does not match the verified bundle")
+	}
+	summary, err := format.Inspect(ctx, record.Snapshot.Data, maxBytes)
 	if err != nil {
 		return store.ValidationErrorf("invalid native session bundle")
 	}
-	if summary.DataDigest != record.Snapshot.DataDigest || summary.ThreadID != record.Snapshot.ProviderSessionID {
+	if summary.DataDigest != record.Snapshot.DataDigest || summary.ProviderSessionID != record.Snapshot.ProviderSessionID {
 		return store.ValidationErrorf("native session bundle identity or digest mismatch")
 	}
-	if record.Snapshot.ProviderKind != "codex" || record.Snapshot.ProviderVersion != summary.Manifest.SourceCLIVersion {
+	if record.Snapshot.ProviderVersion != summary.ProviderVersion {
 		return store.ValidationErrorf("native provider does not match the verified bundle")
 	}
 	return nil

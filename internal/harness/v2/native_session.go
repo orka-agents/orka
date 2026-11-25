@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -61,12 +62,11 @@ func (s NativeSessionSnapshot) Validate() error {
 	if s.DataDigest != "sha256:"+hex.EncodeToString(digest[:]) {
 		return fmt.Errorf("native session data digest does not match data")
 	}
-	if s.ProviderKind != providerKindCodex {
-		return fmt.Errorf("native session provider must be codex")
+	if err := requireIdentifier("native provider kind", s.ProviderKind); err != nil {
+		return err
 	}
-	id, err := uuid.Parse(s.ProviderSessionID)
-	if err != nil || id == uuid.Nil || id.String() != s.ProviderSessionID {
-		return fmt.Errorf("native provider session ID must be a canonical UUID")
+	if err := validateNativeProviderSessionID(s.ProviderKind, s.ProviderSessionID); err != nil {
+		return err
 	}
 	if err := validateBoundedString("native provider version", s.ProviderVersion, true, 128); err != nil {
 		return err
@@ -118,9 +118,26 @@ func (r NativeSessionRestoration) Validate() error {
 	if !r.Loaded {
 		return fmt.Errorf("native restoration must confirm ACP session load")
 	}
-	id, err := uuid.Parse(r.ProviderSessionID)
-	if err != nil || id == uuid.Nil || id.String() != r.ProviderSessionID {
-		return fmt.Errorf("native restoration provider session ID must be a canonical UUID")
+	if !nativeProviderSessionIDPattern.MatchString(r.ProviderSessionID) {
+		return fmt.Errorf("native restoration provider session ID is invalid")
+	}
+	return nil
+}
+
+// nativeProviderSessionIDPattern keeps provider session IDs safe to use as a
+// single path component. Each provider's format checks its exact ID shape.
+var nativeProviderSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+
+func validateNativeProviderSessionID(providerKind, id string) error {
+	if providerKind == providerKindCodex {
+		parsed, err := uuid.Parse(id)
+		if err != nil || parsed == uuid.Nil || parsed.String() != id {
+			return fmt.Errorf("native provider session ID must be a canonical UUID")
+		}
+		return nil
+	}
+	if !nativeProviderSessionIDPattern.MatchString(id) {
+		return fmt.Errorf("native provider session ID is invalid")
 	}
 	return nil
 }

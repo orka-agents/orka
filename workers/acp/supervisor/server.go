@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
-	"github.com/orka-agents/orka/internal/codexstate"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/nativesession"
 	"github.com/orka-agents/orka/internal/workspacedelta"
 )
 
@@ -1380,12 +1380,16 @@ func (s *Server) createSession(
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
-		if !s.cfg.Capabilities.SupportsNativeSessions || s.cfg.Provider.Kind != providerKindCodex || snapshot.ProviderVersion != acp.CodexCLIVersion {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session compatibility", fmt.Errorf("native session requires the pinned Codex provider"))
+		format, supported := nativesession.For(s.cfg.Provider.Kind)
+		if !s.cfg.Capabilities.SupportsNativeSessions || !supported || snapshot.ProviderKind != s.cfg.Provider.Kind {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session compatibility", fmt.Errorf("native session requires this runtime's provider"))
 		}
-		summary, inspectErr := codexstate.Inspect(ctx, snapshot.Data, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes())
-		if inspectErr != nil || summary.ThreadID != snapshot.ProviderSessionID || summary.DataDigest != snapshot.DataDigest {
+		summary, inspectErr := format.Inspect(ctx, snapshot.Data, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes())
+		if inspectErr != nil || summary.ProviderSessionID != snapshot.ProviderSessionID || summary.DataDigest != snapshot.DataDigest {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session validation", fmt.Errorf("native bundle does not match restore metadata"))
+		}
+		if summary.ProviderVersion != snapshot.ProviderVersion {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session compatibility", fmt.Errorf("native session requires the pinned provider version"))
 		}
 		nativeJournalDir = filepath.Join(s.cfg.SessionBaseDir, ".native-install", pathID)
 		_, journalErr := os.Lstat(nativeJournalDir)
@@ -1393,7 +1397,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session journal inspection", journalErr)
 		}
 		ownsNativeJournal = errors.Is(journalErr, os.ErrNotExist)
-		if _, installErr := codexstate.Install(ctx, snapshot.Data, filepath.Join(paths.Home, ".codex"), paths.Workspace, nativeJournalDir, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes()); installErr != nil {
+		if installErr := format.Install(ctx, snapshot.Data, nativeSessionDirs(format, paths), nativeJournalDir, s.cfg.Capabilities.Limits.EffectiveMaxNativeSessionBytes()); installErr != nil {
 			if isNativeInstallUnknown(installErr) {
 				cleanup = false
 				return nil, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)

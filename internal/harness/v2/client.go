@@ -1001,6 +1001,11 @@ func validateSuccessClassification(operation string, classification Classificati
 	return fmt.Errorf("%s returned unsupported success classification %q", operation, classification.Class)
 }
 
+// writeReportGrace bounds how long evidence waits, once a response has
+// arrived, for the transport to report the request write. net/http can return
+// a response before its write loop reports a write it already finished.
+const writeReportGrace = 250 * time.Millisecond
+
 type requestTrace struct {
 	traceReliable bool
 	bodyBytesRead atomic.Int64
@@ -1008,10 +1013,13 @@ type requestTrace struct {
 	wroteRequest  atomic.Bool
 	wroteReqError atomic.Bool
 	gotFirstByte  atomic.Bool
+	// reported is closed once the transport reports the request write.
+	reported   chan struct{}
+	reportOnce sync.Once
 }
 
 func newRequestTrace(reliable bool) *requestTrace {
-	return &requestTrace{traceReliable: reliable}
+	return &requestTrace{traceReliable: reliable, reported: make(chan struct{})}
 }
 
 func (t *requestTrace) clientTrace() *httptrace.ClientTrace {
@@ -1022,6 +1030,7 @@ func (t *requestTrace) clientTrace() *httptrace.ClientTrace {
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			t.wroteRequest.Store(info.Err == nil)
 			t.wroteReqError.Store(info.Err != nil)
+			t.reportOnce.Do(func() { close(t.reported) })
 		},
 		GotFirstResponseByte: func() {
 			t.gotFirstByte.Store(true)
@@ -1032,6 +1041,14 @@ func (t *requestTrace) clientTrace() *httptrace.ClientTrace {
 func (t *requestTrace) evidence() RequestWriteEvidence {
 	if t == nil {
 		return RequestWriteEvidence{State: RequestWriteUnknown}
+	}
+	if t.gotFirstByte.Load() {
+		timer := time.NewTimer(writeReportGrace)
+		select {
+		case <-t.reported:
+		case <-timer.C:
+		}
+		timer.Stop()
 	}
 	evidence := RequestWriteEvidence{
 		State:                RequestWriteAmbiguous,

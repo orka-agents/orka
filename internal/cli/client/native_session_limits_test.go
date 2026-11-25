@@ -36,9 +36,9 @@ func TestNativeSessionClientConfiguredLimit(t *testing.T) {
 	exported, err := client.ExportNativeSession(t.Context(), "test")
 	require.NoError(t, err)
 	require.Equal(t, data, exported.Data)
-	_, err = client.ImportNativeSession(t.Context(), "test", "operation", data)
+	_, err = client.ImportNativeSession(t.Context(), "test", "operation", "codex", data)
 	require.NoError(t, err)
-	_, err = client.ImportNativeSession(t.Context(), "test", "operation", append(bytes.Clone(data), 'x'))
+	_, err = client.ImportNativeSession(t.Context(), "test", "operation", "codex", append(bytes.Clone(data), 'x'))
 	require.Error(t, err)
 	require.Equal(t, 2, calls, "oversized import must not be sent")
 	client.NativeSessionMaxBytes = limit - 1
@@ -49,7 +49,7 @@ func TestNativeSessionClientConfiguredLimit(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, 3, calls)
 	client.NativeSessionMaxBytes = harnessv2.MaxNativeSessionBytes + 1
-	_, err = client.ImportNativeSession(t.Context(), "test", "operation", data)
+	_, err = client.ImportNativeSession(t.Context(), "test", "operation", "codex", data)
 	require.Error(t, err)
 	require.Equal(t, 3, calls)
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/envutil"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/nativesession"
 )
 
 const (
@@ -352,7 +353,7 @@ func LoadConfigFromEnv() (Config, error) {
 		RuntimeProfileDigest: profileDigest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 		AdapterDigests: profile.AdapterDigests, Limits: limits, SupportsDrain: true, SupportsPublicationFinalization: true,
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
-		SupportsNativeSessions:            providerKind == providerKindCodex,
+		SupportsNativeSessions:            nativesession.Supported(providerKind),
 		SupportsFoundryRecovery:           foundryRecovery,
 		// Built-in supervisors serve operator access; whether a session may
 		// use it is decided by the controller-side API's class opt-in,

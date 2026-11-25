@@ -13,6 +13,7 @@ import (
 )
 
 type NativeSessionExport struct {
+	ProviderKind      string `json:"providerKind"`
 	Data              []byte `json:"data"`
 	DataDigest        string `json:"dataDigest"`
 	ProviderSessionID string `json:"providerSessionID"`
@@ -81,7 +82,7 @@ func (c *Client) ExportNativeSession(ctx context.Context, name string) (*NativeS
 	return &response, nil
 }
 
-func (c *Client) ImportNativeSession(ctx context.Context, name, operationID string, data []byte) (*NativeSessionImportReceipt, error) {
+func (c *Client) ImportNativeSession(ctx context.Context, name, operationID, providerKind string, data []byte) (*NativeSessionImportReceipt, error) {
 	limit, err := harnessv2.NormalizeNativeSessionMaxBytes(c.NativeSessionMaxBytes)
 	if err != nil {
 		return nil, err
@@ -90,9 +91,10 @@ func (c *Client) ImportNativeSession(ctx context.Context, name, operationID stri
 		return nil, fmt.Errorf("native session bundle must contain 1 through %d bytes", limit)
 	}
 	body, err := json.Marshal(struct {
-		OperationID string `json:"operationID"`
-		Data        []byte `json:"data"`
-	}{operationID, data})
+		OperationID  string `json:"operationID"`
+		ProviderKind string `json:"providerKind"`
+		Data         []byte `json:"data"`
+	}{operationID, providerKind, data})
 	if err != nil {
 		return nil, err
 	}

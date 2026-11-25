@@ -57,7 +57,7 @@ func TestNativeSessionRequestsRejectRedirects(t *testing.T) {
 				c := NewWithNamespace(server.URL, "", "team")
 				var err error
 				if method == http.MethodPost {
-					_, err = c.ImportNativeSession(t.Context(), "session", "operation", []byte("private-history"))
+					_, err = c.ImportNativeSession(t.Context(), "session", "operation", "codex", []byte("private-history"))
 				} else {
 					_, err = c.ExportNativeSession(t.Context(), "session")
 				}
@@ -89,7 +89,7 @@ func TestNativeSessionRedirectPolicyPreservesSharedClient(t *testing.T) {
 		redirects.Add(1)
 		return nil
 	}
-	_, err := c.ImportNativeSession(t.Context(), "session", "operation", []byte("private-history"))
+	_, err := c.ImportNativeSession(t.Context(), "session", "operation", "codex", []byte("private-history"))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 307") {
 		t.Fatalf("configured TLS transport was not preserved or redirect was accepted: %v", err)
 	}

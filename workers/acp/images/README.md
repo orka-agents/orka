@@ -169,8 +169,49 @@ resume rejects creation without falling back to `session/new`.
 The supervisor also sets `MODEL_PROVIDER` to the destination provider ID;
 `CODEX_CONFIG.model_provider` alone does not select the provider passed to
 `thread/resume` in this adapter release. See the
-[Codex session migration guide](../../../website/docs/guides/codex-session-migration.md)
+[native session migration guide](../../../website/docs/guides/native-session-migration.md)
 for supported history, import/export commands, and recovery limits.
+
+For native OpenCode restoration, the supervisor captures the stopped session's
+`$XDG_DATA_HOME/opencode/opencode.db` with a consistent SQLite copy, keeping
+only that session's `project`, `session`, `message` and `part` rows plus the
+`migration` tables, and carries the `tool-output` files its tool calls spilled.
+It drops the duplicate `event` log, persisted permission grants, and credential
+tables; rows in any other table fall back to the canonical transcript. Before starting
+OpenCode in the fresh RuntimeSession it installs that database, rewrites
+`session.directory`, `session.path` and recorded paths to the new workspace and
+data directory, because OpenCode resumes in the session's saved directory
+rather than the `cwd` given to `session/resume`, and then resumes the session.
+
+For native Claude restoration, the supervisor captures the stopped session's
+transcript, `$CLAUDE_CONFIG_DIR/projects/<folder>/<session-id>.jsonl`, and the
+tool results it spilled to `<session-id>/tool-results/`. Claude Code finds a
+session by ID in any project folder and resumes it in the `cwd` given to
+`session/resume`, so before starting the adapter the supervisor installs the
+transcript under the new workspace's project folder and rewrites only the
+spilled tool results' paths. The adapter applies the projected
+`_meta.claudeCode.options` on resume as on `session/new`. Answering
+`session/resume` sends one "Hi" request to the model; the supervisor resumes
+before granting any prompt provider access, so the provider proxy refuses it.
+
+For native Copilot restoration, the supervisor captures the stopped session's
+`$COPILOT_HOME/session-state/<session-id>/events.jsonl` and installs it before
+starting Copilot. Copilot cannot resume, so Orka restores the session with
+`session/load` in the new working directory. Copilot replays the history as
+`session/update` notifications before answering; no prompt is active then, so
+the supervisor discards them. The restore fails unless at least one replayed
+update names the loaded session, every one names it, and the replay stays
+within its byte budget.
+
+Every built-in runtime saves a native checkpoint after each successful turn and
+starts the next turn in a fresh RuntimeSession when the controller keeps native
+Sessions, so the idle-adapter restart below applies only when it does not. A
+failed or cancelled turn saves nothing: the Session carries its previous
+checkpoint forward, so the next turn resumes without the unfinished turn's
+partial history. If a Session's first capture is unsupported or exceeds the
+size limit, Orka saves no checkpoint, records a `NativeSessionCaptureSkipped`
+warning, and continues from the canonical transcript. Once a Session has a
+checkpoint, such a capture blocks settlement instead.
 
 When the agent advertises `sessionCapabilities.close`, Orka sends
 `session/close` before the bounded process stop on deletion. When an adapter
@@ -191,9 +232,10 @@ transcript, and an idle exit the agent cannot resume retires the session the
 same way. Before any ACP prompt write, the supervisor returns non-retryable
 `prompt_not_accepted` for that idle-exit retirement; the controller records
 `Failed`/`RuntimeLost` without automatic replay, and the next continuation
-rebuilds from the canonical transcript. Orka does not use `session/load`
-(removed in the ACP v2 draft in favor of `session/resume` with `replayFrom`),
-`session/list`, or the still-unstable `session/fork`.
+rebuilds from the canonical transcript. Orka uses `session/load` only for
+native Copilot restoration, because Copilot cannot resume; the ACP v2 draft
+removes `session/load` in favor of `session/resume` with `replayFrom`. Orka
+does not use `session/list` or the still-unstable `session/fork`.
 
 Session-lifecycle capabilities advertised by the pinned runtimes, verified by
 driving each adapter over stdio (`initialize`, `session/new`, `session/prompt`,

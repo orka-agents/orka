@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
-	"github.com/orka-agents/orka/internal/codexstate"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/nativesession"
 	"github.com/orka-agents/orka/internal/store"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -27,10 +27,13 @@ func isNativeSessionImportPath(path string) bool {
 
 type nativeSessionImportRequest struct {
 	OperationID string `json:"operationID"`
-	Data        []byte `json:"data"`
+	// ProviderKind names the bundle's format; empty means Codex.
+	ProviderKind string `json:"providerKind,omitempty"`
+	Data         []byte `json:"data"`
 }
 
 type nativeSessionExportResponse struct {
+	ProviderKind      string `json:"providerKind"`
 	Data              []byte `json:"data"`
 	DataDigest        string `json:"dataDigest"`
 	ProviderSessionID string `json:"providerSessionID"`
@@ -96,7 +99,14 @@ func (h *Handlers) ImportNativeSession(c fiber.Ctx) error {
 	if len(request.Data) == 0 || len(request.Data) > h.nativeSessionMaxBytes {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("native session bundle must contain 1 through %d bytes", h.nativeSessionMaxBytes))
 	}
-	summary, err := codexstate.Inspect(c.Context(), request.Data, h.nativeSessionMaxBytes)
+	if request.ProviderKind == "" {
+		request.ProviderKind = "codex"
+	}
+	format, ok := nativesession.For(request.ProviderKind)
+	if !ok {
+		return fiber.NewError(fiber.StatusBadRequest, "native session provider kind is unsupported")
+	}
+	summary, err := format.Inspect(c.Context(), request.Data, h.nativeSessionMaxBytes)
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid native session bundle")
 	}
@@ -104,8 +114,8 @@ func (h *Handlers) ImportNativeSession(c fiber.Ctx) error {
 		Namespace: namespace, SessionName: name, OperationID: request.OperationID,
 		RequestDigest: store.NativeSessionImportDigest(namespace, name, summary.DataDigest),
 		Snapshot: harnessv2.NativeSessionSnapshot{
-			Data: request.Data, DataDigest: summary.DataDigest, ProviderSessionID: summary.ThreadID,
-			ProviderKind: "codex", ProviderVersion: summary.Manifest.SourceCLIVersion,
+			Data: request.Data, DataDigest: summary.DataDigest, ProviderSessionID: summary.ProviderSessionID,
+			ProviderKind: request.ProviderKind, ProviderVersion: summary.ProviderVersion,
 		},
 	})
 	if err != nil {
@@ -152,7 +162,7 @@ func (h *Handlers) ExportNativeSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, fmt.Sprintf("native session bundle exceeds configured export limit of %d bytes", h.nativeSessionMaxBytes))
 	}
 	return c.JSON(nativeSessionExportResponse{
-		Data: record.Snapshot.Data, DataDigest: record.Snapshot.DataDigest, ProviderSessionID: record.Snapshot.ProviderSessionID,
+		ProviderKind: record.Snapshot.ProviderKind, Data: record.Snapshot.Data, DataDigest: record.Snapshot.DataDigest, ProviderSessionID: record.Snapshot.ProviderSessionID,
 	})
 }
 

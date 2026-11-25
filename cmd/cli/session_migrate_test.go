@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/codexstate"
+	"github.com/orka-agents/orka/internal/nativesession"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
 )
@@ -72,7 +73,7 @@ func TestMigrateImportRetriesFrozenRequest(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"operationID": operation, "namespace": "test", "sessionName": "new", "providerSessionID": thread, "dataDigest": codexstate.DataDigest(first)})
 	}))
 	defer server.Close()
-	args := []string{"import", "new", "--codex-home", home, "--thread", thread, "--journal-dir", journal, "--source-stopped"}
+	args := []string{"import", "new", "--agent", "codex", "--state-dir", home, "--session-id", thread, "--journal-dir", journal, "--source-stopped"}
 	if err := migrationCommand(t, server.URL, args...); err == nil {
 		t.Fatal("lost response accepted")
 	}
@@ -181,7 +182,7 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 	_, err = fmt.Sscanf(cached.URL, "http://127.0.0.1:%d", &cachedPort)
 	require.NoError(t, err)
 	savePortForwardCache(&portForwardCache{Port: cachedPort, Service: "other-orka", Namespace: "other"})
-	args := []string{"import", "new", "--codex-home", home, "--thread", thread, "--journal-dir", journal, "--source-stopped"}
+	args := []string{"import", "new", "--agent", "codex", "--state-dir", home, "--session-id", thread, "--journal-dir", journal, "--source-stopped"}
 	run := func() error {
 		cmd := newRootCmd()
 		cmd.SetOut(new(bytes.Buffer))
@@ -206,7 +207,7 @@ func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Query().Get("namespace") != "test" {
 			t.Errorf("request: %s %s", r.Method, r.URL)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": snapshot.Data, "dataDigest": snapshot.DataDigest, "providerSessionID": snapshot.ProviderSessionID})
+		_ = json.NewEncoder(w).Encode(map[string]any{"providerKind": "codex", "data": snapshot.Data, "dataDigest": snapshot.DataDigest, "providerSessionID": snapshot.ProviderSessionID})
 	}))
 	defer server.Close()
 	home, cwd, journal := t.TempDir(), t.TempDir(), t.TempDir()
@@ -220,7 +221,7 @@ func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'codex-cli 0.160.0\\n'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"export", "source", "--codex-home", home, "--cwd", cwd, "--journal-dir", journal, "--codex-bin", binary}
+	args := []string{"export", "source", "--agent", "codex", "--state-dir", home, "--cwd", cwd, "--journal-dir", journal, "--agent-bin", binary}
 	if err := migrationCommand(t, server.URL, args...); err != nil {
 		t.Fatal(err)
 	}
@@ -309,8 +310,8 @@ func TestMigrateExportRejectsExternalSQLiteHomeBeforeAPI(t *testing.T) {
 			require.NoError(t, err)
 			binary := filepath.Join(t.TempDir(), "codex")
 			require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'codex-cli 0.160.0\\n'\n"), 0o700))
-			err = migrationCommand(t, server.URL, "export", "source", "--codex-home", home, "--cwd", t.TempDir(),
-				"--journal-dir", journal, "--codex-bin", binary)
+			err = migrationCommand(t, server.URL, "export", "source", "--agent", "codex", "--state-dir", home, "--cwd", t.TempDir(),
+				"--journal-dir", journal, "--agent-bin", binary)
 			require.ErrorContains(t, err, "CODEX_SQLITE_HOME must be unset or an absolute path without surrounding whitespace resolving to the destination CODEX_HOME")
 			require.Zero(t, serverCalls)
 			for _, name := range []string{"request.json", "plan.json", "receipt.json"} {
@@ -327,7 +328,7 @@ func TestMigrateExportRejectsExternalSQLiteHomeBeforeAPI(t *testing.T) {
 }
 
 func TestMigrateRequiresStoppedSourceAndPrivateJournal(t *testing.T) {
-	if err := migrationCommand(t, "http://unused", "import", "new", "--codex-home", t.TempDir(), "--thread", "id", "--journal-dir", t.TempDir()); err == nil {
+	if err := migrationCommand(t, "http://unused", "import", "new", "--agent", "codex", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", t.TempDir()); err == nil {
 		t.Fatal("active source was accepted")
 	}
 	dir := t.TempDir()
@@ -367,7 +368,7 @@ func TestMigrateExportRejectsPublicHomeBeforeAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, destination := range []string{home, link} {
-		if err := migrationCommand(t, server.URL, "export", "source", "--codex-home", destination, "--cwd", t.TempDir(), "--journal-dir", t.TempDir(), "--codex-bin", binary); err == nil {
+		if err := migrationCommand(t, server.URL, "export", "source", "--agent", "codex", "--state-dir", destination, "--cwd", t.TempDir(), "--journal-dir", t.TempDir(), "--agent-bin", binary); err == nil {
 			t.Fatal("public destination accepted")
 		}
 	}
@@ -387,10 +388,144 @@ func TestMigrateRejectsWrongDestinationVersion(t *testing.T) {
 	}))
 	defer server.Close()
 	cmd := newRootCmd()
-	cmd.SetArgs([]string{"--server", server.URL, "--namespace", "test", "--token", "test-only", "session", "migrate", "export", "source", "--codex-home", t.TempDir(), "--cwd", t.TempDir(), "--journal-dir", t.TempDir(), "--codex-bin", "missing"})
+	cmd.SetArgs([]string{"--server", server.URL, "--namespace", "test", "--token", "test-only", "session", "migrate", "export", "source", "--agent", "codex", "--state-dir", t.TempDir(), "--cwd", t.TempDir(), "--journal-dir", t.TempDir(), "--agent-bin", "missing"})
 	// Version mismatch is caught before contacting the API.
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("unsupported destination accepted")
+	}
+}
+
+func TestMigrateSelectsTheAgentFormat(t *testing.T) {
+	serverCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		serverCalls++
+		snapshot := storetest.NativeSessionSnapshot(t, "codex-context")
+		_ = json.NewEncoder(w).Encode(map[string]any{"providerKind": "codex", "data": snapshot.Data, "dataDigest": snapshot.DataDigest, "providerSessionID": snapshot.ProviderSessionID})
+	}))
+	defer server.Close()
+	private := func() string {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700))
+		return dir
+	}
+	err := migrationCommand(t, server.URL, "import", "new", "--agent", "agentkit", "--state-dir", t.TempDir(), "--session-id", "id", "--journal-dir", private(), "--source-stopped")
+	require.ErrorContains(t, err, "--agent must be one of: claude, codex, copilot, opencode")
+
+	// OpenCode's own database records where the session ran, so import needs
+	// no --cwd and reads XDG_DATA_HOME/opencode.
+	err = migrationCommand(t, server.URL, "import", "new", "--agent", "opencode", "--state-dir", t.TempDir(), "--session-id", "ses_fixture", "--journal-dir", private(), "--source-stopped")
+	require.ErrorContains(t, err, filepath.Join("opencode", "opencode.db"))
+
+	binary := filepath.Join(t.TempDir(), "opencode")
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nprintf '1.19.0\\n'\n"), 0o700))
+	destination := private()
+	err = migrationCommand(t, server.URL, "export", "source", "--agent", "opencode", "--state-dir", destination, "--cwd", t.TempDir(), "--journal-dir", private(), "--agent-bin", binary)
+	require.ErrorContains(t, err, "session source holds a codex conversation, not opencode")
+	require.Equal(t, 1, serverCalls)
+	entries, err := os.ReadDir(destination)
+	require.NoError(t, err)
+	require.Empty(t, entries, "a mismatched export changed its destination")
+}
+
+// Without path flags, import reads the agent's own state directory, export
+// installs under ~/.orka/sessions into the current directory, and both keep a
+// journal under ~/.orka/migrations that a plain re-run reuses until the
+// migration completes.
+func TestMigrateDefaultsToKnownPaths(t *testing.T) {
+	const thread = "01a10020-1222-76e3-977d-d5165792ae72"
+	const name = "rollout-2026-10-02T21-57-44-" + thread + ".jsonl"
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_SQLITE_HOME", "")
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	rollout := filepath.Join(codexHome, "sessions", "2026", "10", "02", name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(rollout), 0o700))
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "internal", "codexstate", "testdata", name))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(rollout, fixture, 0o600))
+
+	imports := 0
+	snapshot := storetest.NativeSessionSnapshot(t, "default-path-context")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"providerKind": "codex", "data": snapshot.Data, "dataDigest": snapshot.DataDigest, "providerSessionID": snapshot.ProviderSessionID})
+			return
+		}
+		var request struct {
+			OperationID string `json:"operationID"`
+			Data        []byte `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		if imports++; imports == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"operationID": request.OperationID, "namespace": "test", "sessionName": "new", "providerSessionID": thread, "dataDigest": codexstate.DataDigest(request.Data)})
+	}))
+	defer server.Close()
+
+	importJournal := filepath.Join(home, ".orka", "migrations", "test", "new", "import")
+	importArgs := []string{"import", "new", "--agent", "codex", "--session-id", thread, "--source-stopped"}
+	require.Error(t, migrationCommand(t, server.URL, importArgs...))
+	require.FileExists(t, filepath.Join(importJournal, "request.json"), "an uncertain import keeps its default journal")
+	require.NoError(t, migrationCommand(t, server.URL, importArgs...))
+	require.Equal(t, 2, imports)
+	require.NoDirExists(t, importJournal, "a completed import removes its default journal")
+
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Chdir(cwd)
+	binary := filepath.Join(t.TempDir(), "codex")
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'codex-cli 0.160.0\\n'\n"), 0o700))
+	exportArgs := []string{"export", "source", "--agent", "codex", "--agent-bin", binary}
+	cmd := newRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(append([]string{"--server", server.URL, "--namespace", "test", "--token", "test-only", "session", "migrate"}, exportArgs...))
+	require.NoError(t, cmd.Execute())
+	destination := filepath.Join(home, ".orka", "sessions", "test", "source", "codex")
+	require.Contains(t, out.String(), "in "+destination+". Set CODEX_HOME")
+	require.Contains(t, out.String(), "from "+cwd+".")
+	require.DirExists(t, filepath.Join(destination, "sessions"))
+	require.NoDirExists(t, filepath.Join(home, ".orka", "migrations", "test", "source", "export"))
+	// A later export must not silently reuse or overwrite the earlier one.
+	require.ErrorContains(t, migrationCommand(t, server.URL, exportArgs...), "holds an earlier export")
+}
+
+func TestLocalStateDirFollowsTheAgentsVariable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	claude, _ := nativesession.For("claude")
+	codex, _ := nativesession.For("codex")
+	copilot, _ := nativesession.For("copilot")
+	opencode, _ := nativesession.For("opencode")
+	for _, test := range []struct {
+		local         nativesession.Local
+		value, expect string
+	}{
+		{claude.Local(), "", filepath.Join(home, ".claude")},
+		{claude.Local(), "relative/claude", filepath.Join(cwd, "relative", "claude")},
+		{codex.Local(), "/custom/codex", "/custom/codex"},
+		{codex.Local(), "", filepath.Join(home, ".codex")},
+		{codex.Local(), "relative/codex", filepath.Join(cwd, "relative", "codex")},
+		{copilot.Local(), "", filepath.Join(home, ".copilot")},
+		{copilot.Local(), "relative/copilot", filepath.Join(cwd, "relative", "copilot")},
+		{opencode.Local(), "", filepath.Join(home, ".local", "share")},
+		// OpenCode reads XDG_DATA_HOME through xdg-basedir, which keeps a
+		// relative value.
+		{opencode.Local(), "relative/data", filepath.Join(cwd, "relative", "data")},
+	} {
+		t.Setenv(test.local.StateVar, test.value)
+		dir, err := localStateDir(test.local)
+		require.NoError(t, err)
+		require.Equal(t, test.expect, dir, "%s=%q", test.local.StateVar, test.value)
 	}
 }
 
@@ -410,7 +545,7 @@ func TestMigrationTargetFailsClosedWithoutExplicitServer(t *testing.T) {
 			cmd := newRootCmd()
 			cmd.SetOut(new(bytes.Buffer))
 			cmd.SetErr(new(bytes.Buffer))
-			cmd.SetArgs([]string{"--kubeconfig", path, "session", "migrate", "import", "private", "--codex-home", home, "--thread", "thread", "--journal-dir", journal, "--source-stopped"})
+			cmd.SetArgs([]string{"--kubeconfig", path, "session", "migrate", "import", "private", "--agent", "codex", "--state-dir", home, "--session-id", "thread", "--journal-dir", journal, "--source-stopped"})
 			require.ErrorContains(t, cmd.Execute(), "explicit --server")
 		})
 	}
@@ -435,7 +570,7 @@ func TestMigrateImportRequiresAPIAuthBeforeCapture(t *testing.T) {
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--server", "http://explicit.example", "--kubeconfig", "/missing/config", "session", "migrate", "import", "private",
-		"--codex-home", home, "--thread", "missing-thread", "--journal-dir", journal, "--source-stopped"})
+		"--agent", "codex", "--state-dir", home, "--session-id", "missing-thread", "--journal-dir", journal, "--source-stopped"})
 	require.ErrorContains(t, cmd.Execute(), "requires API authentication")
 	require.NoFileExists(t, filepath.Join(journal, "request.json"))
 }
@@ -483,7 +618,7 @@ func TestMigrateImportRequiresNamespaceBeforeCapture(t *testing.T) {
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--server", "http://explicit.example", "--token", "test-only", "--kubeconfig", "/missing/config",
 		"session", "migrate", "import", "private",
-		"--codex-home", home, "--thread", "missing-thread", "--journal-dir", journal, "--source-stopped"})
+		"--agent", "codex", "--state-dir", home, "--session-id", "missing-thread", "--journal-dir", journal, "--source-stopped"})
 	require.ErrorContains(t, cmd.Execute(), "requires a namespace")
 	require.NoFileExists(t, filepath.Join(journal, "request.json"))
 }

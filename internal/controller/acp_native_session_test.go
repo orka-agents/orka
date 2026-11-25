@@ -33,9 +33,14 @@ func TestNativeRestoreRequiresExactResumeAndRebindsCurrentPolicy(t *testing.T) {
 	request := harnessv2.CreateRuntimeSessionRequest{Profile: harnessv2.RuntimeProfile{ProviderKind: "codex"}, Metadata: harnessv2.MutationMetadata{Fence: harnessv2.Fence{
 		RuntimeSessionUID: "new-owner", RuntimeProfileDigest: harnessv2.ProfileDigest("sha256:" + strings.Repeat("b", 64)),
 	}}}
-	_, err := nativeRestoreForTask(session, request, false)
+	_, err := nativeRestoreForTask(session, request, "")
 	require.ErrorIs(t, err, store.ErrConflict)
-	restore, err := nativeRestoreForTask(session, request, true)
+	// A runtime restores only checkpoints its own provider saved.
+	_, err = nativeRestoreForTask(session, request, "opencode")
+	require.ErrorIs(t, err, errNativeSessionRuntimeUnsupported)
+	require.False(t, nativeCheckpointRestorable("opencode", session.NativeSession))
+	require.True(t, nativeCheckpointRestorable("codex", session.NativeSession))
+	restore, err := nativeRestoreForTask(session, request, "codex")
 	require.NoError(t, err)
 	require.Equal(t, request.Metadata.Fence.RuntimeSessionUID, restore.Snapshot.RuntimeSessionUID)
 	require.Equal(t, request.Metadata.Fence.RuntimeProfileDigest, restore.Snapshot.RuntimeProfileDigest)
