@@ -51,6 +51,10 @@ func (g *idleGuard) touch() {
 	g.timer.Reset(streamIdleTimeout)
 }
 
+func (g *idleGuard) pause() {
+	g.timer.Stop()
+}
+
 func idled(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errStreamIdle)
 }
