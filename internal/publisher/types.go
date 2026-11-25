@@ -49,8 +49,12 @@ type PrepareRequest struct {
 	DeltaArtifact         []byte     `json:"-"`
 	DeltaArtifactDigest   string     `json:"deltaArtifactDigest"`
 	RelativeRoot          string     `json:"relativeRoot,omitempty"`
+	CommitAuthorName      string     `json:"commitAuthorName,omitempty"`
+	CommitAuthorEmail     string     `json:"commitAuthorEmail,omitempty"`
 	CommitMessage         string     `json:"commitMessage"`
 	CommitTimestamp       time.Time  `json:"commitTimestamp"`
+	SigningKey            []byte     `json:"-"`
+	SigningKeyFingerprint string     `json:"signingKeyFingerprint,omitempty"`
 }
 
 type ReclaimRequest struct {

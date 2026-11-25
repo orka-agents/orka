@@ -476,6 +476,14 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		if err != nil {
 			return "", false, err
 		}
+		signingCredentialRef, err := r.repositoryMonitorCommitSigningCredentialRef(ctx, monitor)
+		if err != nil {
+			return "", false, err
+		}
+		commitAuthorName, commitAuthorEmail := "", ""
+		if strings.TrimSpace(monitor.Spec.Commit.AuthorName) != "" || strings.TrimSpace(monitor.Spec.Commit.AuthorEmail) != "" {
+			commitAuthorName, commitAuthorEmail = repositoryMonitorCommitAuthor(monitor)
+		}
 		allowedTools = nil
 		workspace.Intent = corev1alpha1.WorkspaceIntentWrite
 		workspace.PublicationGitRepo = workspace.GitRepo
@@ -483,6 +491,12 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		workspace.PublicationReadCredentialRef = workspaceCredentialReference(credentialRefs.publicationRead)
 		workspace.PublicationCredentialRef = workspaceCredentialReference(credentialRefs.publication)
 		workspace.ForgeCredentialRef = workspaceCredentialReference(credentialRefs.forge)
+		workspace.CommitSigningCredentialRef = signingCredentialRef
+		workspace.CommitAuthorName = commitAuthorName
+		workspace.CommitAuthorEmail = commitAuthorEmail
+		if signOff := repositoryMonitorCommitSignOffTrailer(monitor); signOff != "" {
+			workspace.CommitMessage = fmt.Sprintf("feat: implement #%d\n\nOrka-Task: %s\n%s", item.Number, taskName, signOff)
+		}
 		workspace.PRBaseBranch = effectiveRepositoryMonitorBranch(monitor)
 		workspace.PushBranch = repositoryMonitorIssueImplementationBranch(monitor, item, command)
 		maxChangedFiles := int32(repositoryMonitorImplementationMaxChangedFiles(monitor)) //nolint:gosec // CRD field is int32-bounded.

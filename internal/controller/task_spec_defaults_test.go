@@ -63,6 +63,7 @@ func TestTaskSpecWithServerDefaultsMatchesCRD(t *testing.T) {
 			PublicationReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "pr"},
 			PublicationCredentialRef:     &corev1alpha1.WorkspaceCredentialReference{Name: "p"},
 			ForgeCredentialRef:           &corev1alpha1.WorkspaceCredentialReference{Name: "f"},
+			CommitSigningCredentialRef:   &corev1alpha1.WorkspaceCredentialReference{Name: "cs"},
 		},
 		Execution: &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{}},
 		AI:        &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}},
