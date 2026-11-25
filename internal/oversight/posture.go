@@ -80,6 +80,9 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 	for i := range views {
 		v := &views[i]
 		basis.Actions++
+		if v.Replayed {
+			basis.ReplayedActions++
+		}
 		tasks[v.TaskName] = true
 		if v.AgentName != "" {
 			agents[v.AgentName] = true
@@ -168,8 +171,10 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 			}
 			excluded[kind][v.TaskName] = max(excluded[kind][v.TaskName], n)
 		}
-		for _, n := range v.Action.Effects.Counts {
-			basis.Coverage.ObservedEvents += max(n, 0)
+		if !v.Replayed {
+			for _, n := range v.Action.Effects.Counts {
+				basis.Coverage.ObservedEvents += max(n, 0)
+			}
 		}
 		if c.UnattributedEvents > 0 {
 			visibility[ReasonUnattributedEvents] = true

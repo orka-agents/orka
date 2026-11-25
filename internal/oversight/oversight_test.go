@@ -262,6 +262,9 @@ func TestPostureIsHonestByConstruction(t *testing.T) {
 		mixed := append(slices.Clone(replays), at("l@0", -5*time.Minute, -5*time.Minute+3*time.Second, false))
 		require.Equal(t, &oversightv1.LatencySummary{Count: 1, ReplayedCount: 2, P50Seconds: 3, P95Seconds: 3, MaxSeconds: 3},
 			ComputePosture("team", "24h", testNow, mixed, false).Basis.DecisionLatency)
+		require.Equal(t, 2, ComputePosture("team", "24h", testNow, mixed, false).Basis.ReplayedActions)
+		require.Equal(t, 1, ComputePosture("team", "24h", testNow, mixed, false).Basis.Coverage.ObservedEvents,
+			"only the live action's exec counts as an observed event")
 		var missing oversightv1.OversightDecision
 		require.NoError(t, json.Unmarshal([]byte(`{"id":"x@0"}`), &missing))
 		require.False(t, missing.Replayed, "a record without the field is live")

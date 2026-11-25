@@ -210,7 +210,11 @@ type PostureState struct {
 
 // PostureBasis is the evidence behind a posture.
 type PostureBasis struct {
-	Actions         int             `json:"actions"`
+	Actions int `json:"actions"`
+	// ReplayedActions counts the actions that came from a replay, such as
+	// seeded history, rather than from live monitoring. They are part of
+	// Actions.
+	ReplayedActions int             `json:"replayedActions,omitempty"`
 	Tasks           int             `json:"tasks"`
 	Agents          int             `json:"agents"`
 	Dispositions    map[string]int  `json:"dispositions"`
@@ -246,7 +250,8 @@ type PostureCoverage struct {
 	SensorAttributed   int           `json:"sensorAttributed"`
 	UnattributedEvents int           `json:"unattributedEvents"`
 	// ObservedEvents sums the effect counts the sensor attributed to the
-	// window's actions: the raw events behind them.
+	// window's live actions: the raw events behind them. Replayed actions
+	// are left out.
 	ObservedEvents int `json:"observedEvents"`
 	// CleanlyCovered counts attributed actions with no blind spot that marks
 	// their kernel evidence incomplete; it is the basis for clean coverage.

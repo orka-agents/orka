@@ -245,6 +245,8 @@ export interface PostureCoverage {
 
 export interface PostureBasis {
   actions: number
+  /** Actions that came from a replay, such as seeded history; part of actions. Absent on an older server. */
+  replayedActions?: number
   tasks: number
   agents: number
   dispositions: Record<string, number>

@@ -319,6 +319,16 @@ describe('OversightDashboard', () => {
         '12,408 kernel events → 1,314 actions → 1 need you (0 charter breaks · 1 would-pause · 0 would-hold)'))
     })
 
+    it('counts live actions only and names replayed ones apart', async () => {
+      server.use(http.get('/api/v1/oversight/posture', () => HttpResponse.json({
+        ...makePosture(), basis: { ...makePosture().basis, actions: 490, replayedActions: 79, coverage: { ...makePosture().basis.coverage, observedEvents: 523 } },
+      })))
+      serveList([pause(1)])
+      renderDashboard()
+      await waitFor(() => expect(screen.getByTestId('funnel-strip')).toHaveTextContent(
+        '523 kernel events → 411 live actions → 1 need you (0 charter breaks · 1 would-pause · 0 would-hold) · 79 replayed actions not counted'))
+    })
+
     it('says what the monitor set aside on the posture line', async () => {
       server.use(http.get('/api/v1/oversight/posture', () => HttpResponse.json({
         ...makePosture(), basis: { ...makePosture().basis, coverage: { ...makePosture().basis.coverage, excluded: { platform_traffic: 69, container_setup: 140 } } },
