@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -903,6 +905,9 @@ func providerProfile(
 				}, nil
 			},
 			PrepareSession: prepareCodexHome,
+			BindProviderProxy: func(paths acp.SessionPaths, proxy ProviderProxyBinding) error {
+				return writeCodexHomeConfig(paths, proxy.BaseURL)
+			},
 		}, nil
 	case providerKindClaude:
 		return ProviderProfile{
@@ -1468,11 +1473,45 @@ func openCodeAdapterDigest() string {
 }
 
 func prepareCodexHome(paths acp.SessionPaths) error {
+	return writeCodexHomeConfig(paths, "")
+}
+
+// writeCodexHomeConfig writes CODEX_HOME/config.toml. With a provider base URL
+// it also makes the session's provider proxy the default provider, so a Codex
+// thread started without the per-session CODEX_CONFIG override still uses the
+// proxy rather than Codex's built-in OpenAI provider.
+func writeCodexHomeConfig(paths acp.SessionPaths, baseURL string) error {
+	if strings.TrimSpace(paths.Home) == "" {
+		return fmt.Errorf("codex session home is required")
+	}
 	dir := filepath.Join(paths.Home, ".codex")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "config.toml"), []byte(codexHomeConfigTOML), 0o600)
+	config := codexHomeConfigTOML
+	if baseURL != "" {
+		provider, err := codexDefaultProviderTOML(baseURL)
+		if err != nil {
+			return err
+		}
+		config += provider
+	}
+	return os.WriteFile(filepath.Join(dir, "config.toml"), []byte(config), 0o600)
+}
+
+func codexDefaultProviderTOML(baseURL string) (string, error) {
+	var builder strings.Builder
+	builder.WriteString("model_provider = \"" + codexProviderID + "\"\n")
+	definition := codexProviderDefinition(baseURL)
+	keys := slices.Sorted(maps.Keys(definition))
+	for _, key := range keys {
+		encoded, err := json.Marshal(definition[key])
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&builder, "model_providers.%s.%s = %s\n", codexProviderID, key, encoded)
+	}
+	return builder.String(), nil
 }
 
 // codexHomeConfigTOML is the static CODEX_HOME/config.toml; the per-session

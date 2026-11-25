@@ -1340,6 +1340,45 @@ func TestPrepareCodexHomeDisablesResponsesWebSockets(t *testing.T) {
 	}
 }
 
+func TestCodexProjectionMakesProviderProxyTheDefaultProvider(t *testing.T) {
+	paths := acp.SessionPaths{Home: t.TempDir()}
+	if err := prepareCodexHome(paths); err != nil {
+		t.Fatal(err)
+	}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "local-session-credential"}
+	codex, err := providerProfile(providerKindCodex, "gpt-test", harnessv2.WorkspaceIntentWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := codex.BindProviderProxy(acp.SessionPaths{}, proxy); err == nil {
+		t.Fatal("binding the provider proxy without a session home succeeded")
+	}
+	if err := codex.BindProviderProxy(paths, proxy); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(paths.Home, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range []string{
+		"check_for_update_on_startup = false",
+		`model_provider = "orka"`,
+		`model_providers.orka.base_url = "` + proxy.BaseURL + `"`,
+		`model_providers.orka.wire_api = "responses"`,
+		`model_providers.orka.env_key = "CODEX_API_KEY"`,
+		"model_providers.orka.request_max_retries = 0",
+		"model_providers.orka.stream_max_retries = 0",
+	} {
+		if !slices.Contains(lines, line) {
+			t.Fatalf("config.toml lacks %q:\n%s", line, data)
+		}
+	}
+	if strings.Contains(string(data), proxy.Credential) {
+		t.Fatalf("config.toml contains the provider credential:\n%s", data)
+	}
+}
+
 func TestPermissionTimeoutFromEnv(t *testing.T) {
 	for _, test := range []struct {
 		value   string
