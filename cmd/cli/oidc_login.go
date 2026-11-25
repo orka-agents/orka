@@ -332,7 +332,7 @@ func parseUnverifiedJWTClaims(token string) (unverifiedJWTClaims, bool) {
 }
 
 func jwtMatchesTarget(claims unverifiedJWTClaims, expectedIssuer, expectedAudience string) bool {
-	if expectedIssuer != "" && strings.TrimRight(claims.Issuer, "/") != strings.TrimRight(expectedIssuer, "/") {
+	if expectedIssuer != "" && claims.Issuer != expectedIssuer {
 		return false
 	}
 	if expectedAudience != "" && !slices.Contains(claims.Audience, expectedAudience) {
@@ -395,7 +395,7 @@ func fetchOIDCDiscovery(ctx context.Context, issuer string) (oidcDiscoveryDoc, e
 	if err := plainJSON(ctx, http.MethodGet, discoveryURL, "", nil, &doc); err != nil {
 		return oidcDiscoveryDoc{}, fmt.Errorf("fetch OIDC discovery document: %w", err)
 	}
-	if strings.TrimSpace(doc.Issuer) == "" || strings.TrimRight(doc.Issuer, "/") != strings.TrimRight(issuer, "/") {
+	if doc.Issuer == "" || doc.Issuer != issuer {
 		return oidcDiscoveryDoc{}, fmt.Errorf("OIDC discovery issuer mismatch: got %q, want %q", doc.Issuer, issuer)
 	}
 	return doc, nil

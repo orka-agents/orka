@@ -225,6 +225,27 @@ func TestFetchOIDCDiscoveryRejectsIssuerMismatch(t *testing.T) {
 	}
 }
 
+func TestFetchOIDCDiscoveryAndJWTRejectTrailingSlashMismatch(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"issuer":                        srv.URL + "/",
+			"device_authorization_endpoint": srv.URL + "/device",
+			"token_endpoint":                srv.URL + "/token",
+		})
+	}))
+	defer srv.Close()
+
+	if _, err := fetchOIDCDiscovery(t.Context(), srv.URL); err == nil || !strings.Contains(err.Error(), "issuer mismatch") {
+		t.Fatalf("expected trailing-slash issuer mismatch error, got %v", err)
+	}
+
+	tok := testCompactJWT(t, srv.URL+"/", "orka-api", time.Now().Add(time.Hour).Unix())
+	if _, _, err := selectOIDCBearerToken(oidcTokenResponse{AccessToken: tok}, srv.URL, "orka-api"); err == nil {
+		t.Fatal("expected selectOIDCBearerToken to reject JWT whose iss differs by a trailing slash")
+	}
+}
+
 func TestOIDCRefreshDoesNotAdoptReplacedAccount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
