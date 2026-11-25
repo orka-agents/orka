@@ -139,6 +139,96 @@ func TestListAgentIdentityAuditFiltersAndScopesNamespace(t *testing.T) {
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&outcome=bogus", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	// Records whose Task cannot be resolved in the namespace are omitted (fail closed).
+	buf.Record(outboundaccess.AgentIdentityAuditRecord{
+		Timestamp:       now.Add(3 * time.Minute),
+		Event:           "agent_identity_use",
+		Outcome:         "issued",
+		Mode:            "Self",
+		PolicyNamespace: "team-a",
+		PolicyName:      "graph-policy",
+		Tool:            "orphan_tool",
+		TaskUID:         "uid-missing-task",
+		AgentNamespace:  "team-a",
+		AgentName:       "entra-agent",
+	})
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&taskUID=uid-missing-task", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body.Items = nil
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Empty(t, body.Items)
+}
+
+func TestListAgentIdentityAuditEnforcesContextTokenTaskScope(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+
+	taskAllowed := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-allowed", Namespace: "team-a", UID: types.UID("uid-allowed")},
+	}
+	taskOther := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-other", Namespace: "team-a", UID: types.UID("uid-other")},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(taskAllowed, taskOther).Build()
+
+	buf := outboundaccess.NewAgentIdentityAuditBuffer(10)
+	now := time.Now().UTC()
+	buf.Record(outboundaccess.AgentIdentityAuditRecord{
+		Timestamp: now, Event: "agent_identity_use", Outcome: "issued", Mode: "Self",
+		PolicyNamespace: "team-a", PolicyName: "p", Tool: "allowed_tool", TaskUID: "uid-allowed",
+	})
+	buf.Record(outboundaccess.AgentIdentityAuditRecord{
+		Timestamp: now.Add(time.Second), Event: "agent_identity_use", Outcome: "issued", Mode: "Self",
+		PolicyNamespace: "team-a", PolicyName: "p", Tool: "other_tool", TaskUID: "uid-other",
+	})
+
+	authzCfg := ContextTokenAuthorizationConfig{
+		Mode:           ContextTokenAuthorizationModeEnforce,
+		TaskListScopes: []string{ContextTokenScopeTaskList},
+	}
+	handlers := NewHandlers(HandlersConfig{
+		Client:                    kube,
+		ContextTokenAuthorization: authzCfg,
+		AgentIdentityAudit:        buf,
+	})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username:  "alice",
+			Namespace: "team-a",
+			AuthType:  AuthTypeContextToken,
+			ContextToken: &ContextToken{
+				Scopes: []string{ContextTokenScopeTaskList},
+				TransactionContext: map[string]any{
+					"namespace": "team-a",
+					"task":      "task-allowed",
+				},
+			},
+		})
+		return c.Next()
+	})
+	app.Get("/api/v1/audit/identity", handlers.ListAgentIdentityAudit)
+
+	// Unfiltered query only returns the record for task-allowed.
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var body struct {
+		Items []outboundaccess.AgentIdentityAuditRecord `json:"items"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Len(t, body.Items, 1)
+	require.Equal(t, "allowed_tool", body.Items[0].Tool)
+
+	// Filtering directly by taskUID of another task returns empty.
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&taskUID=uid-other", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body.Items = nil
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Empty(t, body.Items)
 }
 
 func TestAgentIdentityAuditBufferRedactionFromResolver(t *testing.T) {

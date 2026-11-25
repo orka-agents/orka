@@ -165,4 +165,49 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 	if updated.Token != "oidc-access-2" || updated.OIDCRefreshToken != "oidc-refresh-2" {
 		t.Fatalf("updated config = %+v", updated)
 	}
+	if updated.SessionSubject == "" || updated.SessionSubject != cfg.SessionSubject {
+		t.Fatalf("login ID changed across refresh: got %q, want %q", updated.SessionSubject, cfg.SessionSubject)
+	}
+}
+
+func TestOIDCRefreshDoesNotAdoptReplacedAccount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Persist account B's fresh OIDC session on disk (same server and clientID,
+	// different SessionSubject login ID).
+	freshExpiry := time.Now().UTC().Add(time.Hour)
+	if err := saveConfig(orkaConfig{
+		Server:            "https://orka.example",
+		Token:             "account-b-token",
+		TokenKind:         tokenKindOIDC,
+		TokenExpiresAt:    &freshExpiry,
+		SessionServer:     "https://orka.example",
+		SessionSubject:    "oidc-account-b",
+		OIDCClientID:      "orka-client",
+		OIDCTokenEndpoint: "https://idp.example/token",
+		OIDCRefreshToken:  "refresh-b",
+	}); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	// Simulate an in-flight command that read account A's expired config before
+	// acquiring the config lock.
+	expired := time.Now().UTC().Add(-time.Minute)
+	accountA := orkaConfig{
+		Server:            "https://orka.example",
+		Token:             "account-a-expired-token",
+		TokenKind:         tokenKindOIDC,
+		TokenExpiresAt:    &expired,
+		SessionServer:     "https://orka.example",
+		SessionSubject:    "oidc-account-a",
+		OIDCClientID:      "orka-client",
+		OIDCTokenEndpoint: "https://idp.example/token",
+		OIDCRefreshToken:  "refresh-a",
+	}
+
+	cmd := newRootCmd()
+	got := configuredOIDCToken(cmd, "https://orka.example", accountA)
+	if got != "account-a-expired-token" {
+		t.Fatalf("configuredOIDCToken adopted replaced account token: got %q, want account-a-expired-token", got)
+	}
 }

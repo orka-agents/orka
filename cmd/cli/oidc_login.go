@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -203,6 +205,10 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 		expiresAt = &exp
 	}
 
+	loginID, err := newOIDCLoginID()
+	if err != nil {
+		return fmt.Errorf("generate login ID: %w", err)
+	}
 	if err := updateConfig(func(cfg *orkaConfig) error {
 		cfg.Server = server
 		cfg.Token = token
@@ -210,7 +216,7 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 		cfg.TokenExpiresAt = expiresAt
 		cfg.SessionServer = server
 		cfg.SessionLogin = ""
-		cfg.SessionSubject = ""
+		cfg.SessionSubject = loginID
 		cfg.OIDCIssuer = issuer
 		cfg.OIDCClientID = clientID
 		cfg.OIDCTokenEndpoint = discovery.TokenEndpoint
@@ -389,7 +395,9 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 	defer unlock()
 
 	saved := loadConfig()
-	if saved.TokenKind != tokenKindOIDC || saved.SessionServer != cfg.SessionServer || saved.OIDCClientID != cfg.OIDCClientID {
+	if !holdsOIDCSession(saved, cfg) {
+		// Another login replaced or cleared this OIDC session while waiting for
+		// the lock; never adopt another account's credentials for this command.
 		return cfg.Token
 	}
 	cfg = saved
@@ -435,4 +443,22 @@ func oidcTokenNeedsRefresh(cfg orkaConfig) bool {
 		return false
 	}
 	return time.Until(*cfg.TokenExpiresAt) <= oidcRefreshWindow
+}
+
+// holdsOIDCSession reports whether saved holds the same OIDC login as read
+// (the same per-login identifier on the same server and client), analogous to
+// holdsSession for GitHub sessions.
+func holdsOIDCSession(saved, read orkaConfig) bool {
+	return saved.TokenKind == tokenKindOIDC && saved.Token != "" &&
+		saved.SessionServer == read.SessionServer &&
+		saved.OIDCClientID == read.OIDCClientID &&
+		read.SessionSubject != "" && saved.SessionSubject == read.SessionSubject
+}
+
+func newOIDCLoginID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return "oidc-" + hex.EncodeToString(raw[:]), nil
 }
