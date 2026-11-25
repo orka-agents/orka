@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -259,12 +260,7 @@ func hasTrailingLine(message, want string) bool {
 	if len(paragraphs) == 0 {
 		return false
 	}
-	for _, line := range strings.Split(paragraphs[len(paragraphs)-1], "\n") {
-		if line == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(paragraphs[len(paragraphs)-1], "\n"), want)
 }
 
 func validateRebaseBranchRequest(request RebaseBranchRequest) error {

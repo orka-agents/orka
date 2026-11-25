@@ -490,6 +490,19 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 	if repositoryMonitorUpdateBranchUsesRebase(monitor) {
 		return r.submitRepositoryMonitorUpdateBranchRebase(ctx, monitor, run, command, owner, repository, pr, item, mutation)
 	}
+	return r.submitRepositoryMonitorUpdateBranchGitHub(ctx, monitor, run, command, owner, repository, token, pr, item, mutation)
+}
+
+func (r *RepositoryMonitorReconciler) submitRepositoryMonitorUpdateBranchGitHub(
+	ctx context.Context,
+	monitor *corev1alpha1.RepositoryMonitor,
+	run *store.MonitorRun,
+	command *store.CommandEvent,
+	owner, repository, token string,
+	pr repositoryMonitorPullRequest,
+	item *store.MonitorItem,
+	mutation *store.GitHubMutationRecord,
+) (bool, int, error) {
 	requestID, err := r.updateRepositoryMonitorPullRequestBranch(ctx, owner, repository, token, pr.Number, command.HeadSHA)
 	if err != nil {
 		return r.recordRepositoryMonitorUpdateBranchSubmissionError(ctx, monitor, run, command, item, mutation, pr, err)
