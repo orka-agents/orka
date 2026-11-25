@@ -472,10 +472,12 @@ var _ = Describe("Controller Feature Tests", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			By("sampling child phases until two children have run in turn")
-			// Sample while the children run, so overlapping admission fails the
-			// spec even if both children finish between reads. Requiring two
-			// Succeeded children also proves waiting children are admitted.
+			By("sampling child phases until all three children have run in turn")
+			// Sample while the children run and also verify their recorded
+			// startTime/completionTime intervals do not overlap, so concurrent
+			// execution is caught even if children finish between polls.
+			// Requiring all three Succeeded children also proves waiting
+			// children are admitted and checked.
 			deadline := time.Now().Add(3 * time.Minute)
 			maxRunning, admitted := 0, false
 			for {
@@ -495,7 +497,7 @@ var _ = Describe("Controller Feature Tests", func() {
 					"At most 1 child should be Running with maxConcurrentChildren=1")
 				Expect(output).NotTo(ContainSubstring("=Failed"),
 					"coordinated children should wait for a slot, not fail admission")
-				if succeededCount >= 2 {
+				if succeededCount >= 3 {
 					break
 				}
 				if time.Now().After(deadline) {
@@ -503,6 +505,48 @@ var _ = Describe("Controller Feature Tests", func() {
 						admitted, maxRunning, output))
 				}
 				time.Sleep(time.Second)
+			}
+
+			By("verifying succeeded children did not overlap in execution time")
+			timingJSONPath := "jsonpath={range .items[*]}{.metadata.name}|{.status.phase}|" +
+				"{.status.startTime}|{.status.completionTime}\n{end}"
+			cmd = exec.Command("kubectl", "get", "tasks",
+				"-l", fmt.Sprintf("orka.ai/parent-task=%s", parentTaskName),
+				"-o", timingJSONPath,
+				"-n", namespace)
+			timingOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			type taskInterval struct {
+				name  string
+				start time.Time
+				end   time.Time
+			}
+			var intervals []taskInterval
+			for line := range strings.SplitSeq(strings.TrimSpace(timingOutput), "\n") {
+				if line == "" {
+					continue
+				}
+				parts := strings.Split(line, "|")
+				Expect(parts).To(HaveLen(4), "unexpected task timing line: %s", line)
+				if parts[1] != "Succeeded" {
+					continue
+				}
+				start, err := time.Parse(time.RFC3339, parts[2])
+				Expect(err).NotTo(HaveOccurred(), "parse startTime for %s", parts[0])
+				end, err := time.Parse(time.RFC3339, parts[3])
+				Expect(err).NotTo(HaveOccurred(), "parse completionTime for %s", parts[0])
+				intervals = append(intervals, taskInterval{name: parts[0], start: start, end: end})
+			}
+			Expect(intervals).To(HaveLen(3), "expected all 3 children to succeed")
+			for i := 0; i < len(intervals); i++ {
+				for j := i + 1; j < len(intervals); j++ {
+					a, b := intervals[i], intervals[j]
+					overlaps := a.start.Before(b.end) && b.start.Before(a.end)
+					Expect(overlaps).To(BeFalse(),
+						"children %s [%s, %s] and %s [%s, %s] overlapped with maxConcurrentChildren=1",
+						a.name, a.start.Format(time.RFC3339), a.end.Format(time.RFC3339),
+						b.name, b.start.Format(time.RFC3339), b.end.Format(time.RFC3339))
+				}
 			}
 		})
 	})
