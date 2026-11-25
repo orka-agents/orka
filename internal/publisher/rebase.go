@@ -165,7 +165,7 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		origAuthorName, origAuthorEmail, origAuthorDate, origMessage := parts[0], parts[1], strings.TrimSpace(parts[2]), strings.TrimRight(parts[3], "\n")+"\n"
 		if request.SignOff {
 			signOffLine := fmt.Sprintf("Signed-off-by: %s <%s>", committerName, committerEmail)
-			if !strings.Contains(origMessage, signOffLine) {
+			if !hasTrailingLine(origMessage, signOffLine) {
 				origMessage += "\n" + signOffLine + "\n"
 			}
 		}
@@ -251,6 +251,20 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		NewHeadOID:   currentParent,
 		RebasedCount: rebasedCount,
 	}, nil
+}
+
+func hasTrailingLine(message, want string) bool {
+	trimmed := strings.TrimRight(message, "\n")
+	paragraphs := strings.Split(trimmed, "\n\n")
+	if len(paragraphs) == 0 {
+		return false
+	}
+	for _, line := range strings.Split(paragraphs[len(paragraphs)-1], "\n") {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRebaseBranchRequest(request RebaseBranchRequest) error {

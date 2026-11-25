@@ -552,13 +552,28 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorActionsJobLog(ctx co
 	return string(body), nil
 }
 
-// repositoryMonitorEvidenceTailText sanitizes the full bounded CI log text
-// first (so multiline credential blocks cannot lose their header context), then
+// repositoryMonitorEvidenceTailText strips GitHub Actions runner timestamp
+// prefixes so line-anchored multiline credential headers (e.g. `password: |`)
+// are recognized by the sanitizer, sanitizes the full bounded CI log text, and
 // keeps the trailing lines within maxBytes and maxLines.
 func repositoryMonitorEvidenceTailText(value string, maxBytes, maxLines int) (string, bool) {
+	value = stripActionsLogTimestamps(value)
 	lines, sanitizeCut := repositoryMonitorEvidenceSanitizedLines(value, len(value)+1)
 	text, bounded := repositoryMonitorEvidenceBoundTail(lines, maxBytes, maxLines)
 	return text, sanitizeCut || bounded
+}
+
+func stripActionsLogTimestamps(value string) string {
+	rawLines := strings.Split(value, "\n")
+	for i, line := range rawLines {
+		trimmed := strings.TrimPrefix(line, "\ufeff")
+		if space := strings.IndexByte(trimmed, ' '); space >= 20 && space <= 35 {
+			if _, err := time.Parse(time.RFC3339Nano, trimmed[:space]); err == nil {
+				rawLines[i] = trimmed[space+1:]
+			}
+		}
+	}
+	return strings.Join(rawLines, "\n")
 }
 
 func repositoryMonitorEvidenceBoundTail(lines []string, maxBytes, maxLines int) (string, bool) {

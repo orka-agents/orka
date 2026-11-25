@@ -21,7 +21,7 @@ func TestRepositoryMonitorCIEvidenceActionsJobLogTail(t *testing.T) {
 	blobServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		blobAuthHeader = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("line 1 ok\nline 2 secret=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n\nFAIL TestFoo (0.01s)\n    foo_test.go:12: expected 2, got 1\n"))
+		_, _ = w.Write([]byte("2026-11-25T04:00:00.1234567Z line 1 ok\n2026-11-25T04:00:01.0000000Z password: |\n2026-11-25T04:00:01.0000001Z   super-secret-multiline-value\n2026-11-25T04:00:02.0000000Z line 2 secret=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n\n2026-11-25T04:00:03.0000000Z FAIL TestFoo (0.01s)\n2026-11-25T04:00:03.0000001Z     foo_test.go:12: expected 2, got 1\n"))
 	}))
 	defer blobServer.Close()
 
@@ -71,8 +71,8 @@ func TestRepositoryMonitorCIEvidenceActionsJobLogTail(t *testing.T) {
 	if !strings.Contains(logTail, "FAIL TestFoo") || !strings.Contains(logTail, "foo_test.go:12") {
 		t.Fatalf("expected failure lines in logTail, got:\n%s", logTail)
 	}
-	if strings.Contains(logTail, "ghp_0123456789") {
-		t.Fatalf("secret token was not redacted in logTail:\n%s", logTail)
+	if strings.Contains(logTail, "ghp_0123456789") || strings.Contains(logTail, "super-secret-multiline-value") {
+		t.Fatalf("secret token or multiline credential was not redacted in logTail:\n%s", logTail)
 	}
 
 	// Verify jobLogs=false leaves LogTail empty.
