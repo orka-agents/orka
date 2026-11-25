@@ -62,11 +62,11 @@ const (
 )
 
 // OversightFacetMatch matches decisions with a facet of Kind whose value is
-// Value, or, with Prefix, starts with Value.
+// Value or, with Glob, matches Value where each "*" stands for any text.
 type OversightFacetMatch struct {
-	Kind   string
-	Value  string
-	Prefix bool
+	Kind  string
+	Value string
+	Glob  bool
 }
 
 // Feedback filters for OversightDecisionFilter.Feedback.

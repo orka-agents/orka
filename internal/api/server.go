@@ -97,17 +97,22 @@ type ServerConfig struct {
 	SecurityStore            store.SecurityStore
 	RepositoryMonitorStore   store.RepositoryMonitorStore
 	ExecutionEventStore      store.ExecutionEventStore
-	GatewayEventStore        store.GatewayEventStore
-	GatewayDeliveryStore     store.GatewayDeliveryStore
-	GatewayService           *gatewayruntime.Service
-	HealthChecker            store.HealthChecker
-	Clientset                kubernetes.Interface
-	APIReader                client.Reader
-	TaskProvenanceProtected  bool
-	ControllerEpochs         ControllerEpochFenceSource
-	E2EPromptFaultEnabled    bool
-	Connectors               ConnectorConfig
-	ConnectorTools           ConnectorToolExecutionConfig
+	// OversightStore keeps oversight decisions. OversightEnabled mirrors
+	// --oversight-enabled: without it every oversight route answers 501 and
+	// the dashboard hides the Oversight page.
+	OversightStore          store.OversightStore
+	OversightEnabled        bool
+	GatewayEventStore       store.GatewayEventStore
+	GatewayDeliveryStore    store.GatewayDeliveryStore
+	GatewayService          *gatewayruntime.Service
+	HealthChecker           store.HealthChecker
+	Clientset               kubernetes.Interface
+	APIReader               client.Reader
+	TaskProvenanceProtected bool
+	ControllerEpochs        ControllerEpochFenceSource
+	E2EPromptFaultEnabled   bool
+	Connectors              ConnectorConfig
+	ConnectorTools          ConnectorToolExecutionConfig
 	// GitHubSignIn signs people in with GitHub and issues Orka sessions.
 	GitHubSignIn GitHubSignInConfig
 	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
@@ -181,6 +186,7 @@ type Server struct {
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
+	config.Chat.OversightEnabled = config.OversightEnabled && config.OversightStore != nil
 	agentUseAuthorization.Store(config.AgentUseAuthorization)
 	providerUseAuthorization.Store(config.ProviderUseAuthorization)
 	app := fiber.New(fiber.Config{
@@ -230,6 +236,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
+		OversightStore:            config.OversightStore,
+		OversightEnabled:          config.OversightEnabled,
 		LiveEvents:                config.LiveEvents,
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
@@ -509,6 +517,16 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/stream", s.handlers.ahpTaskPrivate(s.handlers.StreamTaskEvents))
 	api.Get("/tasks/:id/trace", s.handlers.ahpTaskPrivate(s.handlers.GetTaskTrace))
 	api.Get("/tasks/:id/approvals", s.handlers.ahpTaskPrivate(s.handlers.ListTaskApprovals))
+	// Oversight: read-only decision records for one namespace.
+	api.Get("/oversight/config", s.handlers.GetOversightConfig)
+	api.Get("/oversight/posture", s.handlers.GetOversightPosture)
+	api.Get("/oversight/decisions", s.handlers.ListOversightDecisions)
+	api.Get("/oversight/decisions/stream", s.handlers.StreamOversightDecisions)
+	api.Get("/oversight/decisions/groups", s.handlers.GroupOversightDecisions)
+	api.Post("/oversight/decisions/bulk-feedback", s.handlers.BulkOversightFeedback)
+	api.Get("/oversight/decisions/:id", s.handlers.GetOversightDecision)
+	api.Get("/oversight/decisions/:id/similar", s.handlers.SimilarOversightDecisions)
+	api.Post("/oversight/decisions/:id/feedback", s.handlers.RecordOversightFeedback)
 	// Cross-Task attention read models, computed on read for one namespace.
 	api.Get("/attention", s.handlers.ListAttention)
 	api.Get("/approvals", s.handlers.ListPendingApprovals)
@@ -774,6 +792,7 @@ func (s *Server) setupRoutes() {
 		internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
 		internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
 		internal.Post("/events/:namespace/:streamType/:streamID", s.internalHandlers.SubmitExecutionEvent)
+		internal.Post("/oversight/:namespace/decisions", s.handlers.IngestOversightDecisions)
 		internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
 		internal.Get("/memories/:namespace", s.internalHandlers.ListMemories)
 		internal.Post("/memories/:namespace", s.internalHandlers.CreateMemory)
@@ -802,6 +821,7 @@ func (s *Server) hasInternalStores() bool {
 		s.MemoryStore != nil ||
 		s.MemoryProposalStore != nil ||
 		s.ExecutionEventStore != nil ||
+		s.config.OversightStore != nil ||
 		s.config.GatewayService != nil
 }
 

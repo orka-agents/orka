@@ -234,10 +234,20 @@ func (s *Store) GetOversightDecision(ctx context.Context, namespace, id string) 
 
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
+// globPattern turns a glob whose "*" stands for any text into a LIKE
+// pattern that matches everything else literally.
+func globPattern(glob string) string {
+	parts := strings.Split(glob, "*")
+	for i, part := range parts {
+		parts[i] = likeEscaper.Replace(part)
+	}
+	return strings.Join(parts, "%")
+}
+
 func facetCondition(match storagev1.OversightFacetMatch) (string, []any) {
-	if match.Prefix {
+	if match.Glob {
 		return `EXISTS (SELECT 1 FROM oversight_decision_facets f WHERE f.namespace = d.namespace AND f.seq = d.seq
-			AND f.kind = ? AND f.value LIKE ? ESCAPE '\')`, []any{match.Kind, likeEscaper.Replace(match.Value) + "%"}
+			AND f.kind = ? AND f.value LIKE ? ESCAPE '\')`, []any{match.Kind, globPattern(match.Value)}
 	}
 	return `EXISTS (SELECT 1 FROM oversight_decision_facets f WHERE f.namespace = d.namespace AND f.seq = d.seq
 		AND f.kind = ? AND f.value = ?)`, []any{match.Kind, match.Value}

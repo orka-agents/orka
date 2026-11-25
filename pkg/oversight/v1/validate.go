@@ -210,7 +210,7 @@ func (a *ActionEnvelope) validate() error {
 			return invalid("action.effects.notableEvents entries need a bounded id and kind")
 		}
 	}
-	if e.BlockedCount < 0 || e.OmittedEvents < 0 {
+	if e.BlockedCount < 0 || e.OmittedEvents < 0 || e.BytesSent != nil && *e.BytesSent < 0 {
 		return invalid("action.effects counts must not be negative")
 	}
 	return nil

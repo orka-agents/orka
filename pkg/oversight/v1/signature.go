@@ -39,8 +39,8 @@ func (f Feature) String() string { return f.Kind + ":" + f.Value }
 
 // Signature returns the action's normalized behavioural features, sorted and
 // unique: the tool, each effect kind seen, binary basenames, path prefixes,
-// destinations with IP addresses widened to their /24, triggered concerns and
-// taint. Two actions that did the same kind of thing share a signature even
+// destinations with IP addresses widened to their /24, destination domains,
+// triggered concerns and taint. Two actions that did the same kind of thing share a signature even
 // when file names, addresses or Task names differ.
 func (d *OversightDecision) Signature() []Feature {
 	set := map[Feature]bool{}
@@ -63,6 +63,7 @@ func (d *OversightDecision) Signature() []Feature {
 	}
 	for _, dest := range d.Action.Effects.Destinations {
 		add(FeatureDest, DestinationClass(dest.Value))
+		add(FeatureDestDomain, DestinationDomain(dest.Value))
 	}
 	for _, concern := range d.TriggeredConcerns() {
 		add(FeatureConcern, concern)

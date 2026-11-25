@@ -340,6 +340,7 @@ func main() {
 	var ahpBackendConfig api.AHPBackendConfig
 	var ahpWorkspaceConnectorProvider string
 	var dashboardEnabled bool
+	var oversightEnabled bool
 	var mcpServerEnabled bool
 	var mcpMaxConcurrent int
 	var connectorCallbackBaseURL string
@@ -611,6 +612,8 @@ func main() {
 		"Remove an AHP workspace this long after its last use when no shell or turn runs and nothing in it is unpushed. Zero keeps workspaces until their user's last session and shell end.")
 	flag.StringVar(&ahpWorkspaceConnectorProvider, "ahp-workspace-connector-provider", os.Getenv("ORKA_AHP_WORKSPACE_CONNECTOR_PROVIDER"),
 		"ConnectorProvider, in each user's namespace, whose github.com links give that user's AHP workspace read access to their private repositories. Requires --connectors-enabled. Empty keeps workspaces to public repositories.")
+	flag.BoolVar(&oversightEnabled, "oversight-enabled", envBool("ORKA_OVERSIGHT_ENABLED"),
+		"Serve read-only oversight decisions (ingest, search, stream) and the dashboard's Oversight page.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.BoolVar(&mcpServerEnabled, "mcp-server-enabled", envBool("ORKA_MCP_SERVER_ENABLED"),
@@ -2587,6 +2590,8 @@ func main() {
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
 		ExecutionEventStore:       appStorage,
+		OversightStore:            appStorage,
+		OversightEnabled:          oversightEnabled,
 		LiveEvents:                liveEvents,
 		GatewayEventStore:         appStorage,
 		GatewayDeliveryStore:      appStorage,

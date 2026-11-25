@@ -170,12 +170,15 @@ type ActionEnvelope struct {
 type ObservedEffects struct {
 	// Counts maps an effect kind, such as "exec" or "net_connect", to how
 	// often it was seen.
-	Counts        map[string]int `json:"counts,omitempty"`
-	Binaries      []CountedValue `json:"binaries,omitempty"`
-	Paths         []CountedValue `json:"paths,omitempty"`
-	Destinations  []CountedValue `json:"destinations,omitempty"`
-	BlockedCount  int            `json:"blockedCount,omitempty"`
-	NotableEvents []EffectEvent  `json:"notableEvents,omitempty"`
+	Counts       map[string]int `json:"counts,omitempty"`
+	Binaries     []CountedValue `json:"binaries,omitempty"`
+	Paths        []CountedValue `json:"paths,omitempty"`
+	Destinations []CountedValue `json:"destinations,omitempty"`
+	BlockedCount int            `json:"blockedCount,omitempty"`
+	// BytesSent is the payload bytes the sensor saw delivered outbound. Nil
+	// means the sensor did not observe sends, which is not the same as zero.
+	BytesSent     *int64        `json:"bytesSent,omitempty"`
+	NotableEvents []EffectEvent `json:"notableEvents,omitempty"`
 	// OmittedEvents counts events left out of NotableEvents.
 	OmittedEvents int `json:"omittedEvents,omitempty"`
 }
@@ -323,6 +326,21 @@ func (d *OversightDecision) TriggeredConcerns() []string {
 		}
 	}
 	return sortedKeys(seen)
+}
+
+// MonitorFailed reports whether any scorer or advisor gave no usable answer.
+func (d *OversightDecision) MonitorFailed() bool {
+	for _, scorer := range d.Scorers {
+		if scorer.Status != EvaluationStatusOK {
+			return true
+		}
+	}
+	for _, advisor := range d.Advisors {
+		if advisor.Status != EvaluationStatusOK {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxProbability returns the highest probability any scorer gave any
