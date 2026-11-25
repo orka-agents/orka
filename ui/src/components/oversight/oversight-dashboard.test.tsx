@@ -314,7 +314,8 @@ describe('OversightDashboard', () => {
       })))
       serveList([pause(1)])
       renderDashboard()
-      await waitFor(() => expect(screen.getByTestId('funnel-strip')).toHaveTextContent('12,408 kernel events → 1,314 actions → 1 need you'))
+      await waitFor(() => expect(screen.getByTestId('funnel-strip')).toHaveTextContent(
+        '12,408 kernel events → 1,314 actions → 1 need you (0 charter breaks · 1 would-pause · 0 would-hold)'))
     })
 
     it('omits the kernel step when no events were observed, or from an older server', async () => {

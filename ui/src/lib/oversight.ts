@@ -646,7 +646,10 @@ function incidentText(actor: string, decisions: DecisionView[], badge: RowBadgeK
       }
     }
   }
-  const story = credentialStory(decisions) ?? incidentPhrase(decisions)
+  // Say what the breaking actions did: the phrase comes from the decisions
+  // that carry a finding, not from another action of the same run.
+  const breaking = decisions.filter((d) => (d.charterFindings?.length ?? 0) > 0)
+  const story = credentialStory(decisions) ?? incidentPhrase(breaking.length > 0 ? breaking : decisions)
   const who = decisions[0].agentName?.trim()
   // actionPhrase already names the agent for "ran" lines.
   const subject = who && story.startsWith(`${who} `) ? story : `${actor} ${story}`

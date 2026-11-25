@@ -123,6 +123,19 @@ describe('oversight helpers', () => {
     expect(incidents[0].detail).toBe('Rule 3: Never send workspace data to undeclared hosts.\nRule 2: Never write outside the workspace.')
   })
 
+  it('titles a charter incident from the decision that broke the rule, not another action of the run', () => {
+    const run = { taskName: 'docs-1', agentName: 'docs-builder' }
+    const incidents = groupIncidents([
+      makeDecision({ ...run, id: 'd1', seq: 1, signal: 'against_charter',
+        charterFindings: [{ producerRef: 'r', boundID: 'B0', sentence: 's' }],
+        action: { toolName: 'code_exec', requestSummary: 'Build the docs site', effects: { binaries: [{ value: '/usr/local/bin/python3', count: 1 }] } } }),
+      makeDecision({ ...run, id: 'd2', seq: 2, wouldHavePaused: true, signal: 'risky',
+        action: { toolName: 'code_exec', effects: { destinations: [{ value: 'model.demo.svc:1337', count: 1 }] } } }),
+    ], charterConfig)
+    expect(incidents).toHaveLength(1)
+    expect(incidents[0].title).toBe('docs-builder ran python3 — Build the docs site — breaks rule 1')
+  })
+
   it('reads image references generically', () => {
     expect(parseImageRef('push registry.demo.svc/prod/api:latest')).toEqual({ host: 'registry.demo.svc', path: 'prod', name: 'api', tag: 'latest' })
     expect(parseImageRef('push oci://reg:5000/a/b/c:v1')).toEqual({ host: 'reg:5000', path: 'a/b', name: 'c', tag: 'v1' })

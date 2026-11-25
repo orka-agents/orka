@@ -251,7 +251,15 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
 
       {view === 'needs' && (
         <div className="space-y-3">
-          <FunnelStrip window={postureWindow} needYou={incidents.length} />
+          <FunnelStrip
+            window={postureWindow}
+            needYou={incidents.length}
+            breakdown={{
+              charter: incidents.filter((i) => i.badge === 'against_charter').length,
+              pause: incidents.filter((i) => i.badge === 'would_pause').length,
+              hold: incidents.filter((i) => i.badge === 'would_hold').length,
+            }}
+          />
           {q && (
             <p className="text-xs text-muted-foreground" role="status">
               Filtered by the search <span className="font-mono">{q}</span>.{' '}
