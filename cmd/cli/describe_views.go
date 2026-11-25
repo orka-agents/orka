@@ -135,18 +135,75 @@ func agentDescribeRows(agent map[string]any) []describeRow {
 			instructions = "from ConfigMap " + joinNonEmpty(firstString(ref, "name"), firstString(ref, "key"), "/")
 		}
 	}
+	readyValue := readinessString(status["ready"])
+	if readyValue == "false" {
+		if readyCond := findStatusCondition(status, "Ready"); readyCond != nil {
+			if detail := firstNonEmpty(firstString(readyCond, "message"), firstString(readyCond, "reason")); detail != "" {
+				readyValue = fmt.Sprintf("false (%s)", detail)
+			}
+		}
+	}
+	identityValue := agentIdentitySummary(spec, status)
+	identityVerifiedValue := agentIdentityVerifiedSummary(status)
 	return []describeRow{
 		{Label: labelName, Value: nestedString(agent, "metadata", "name")},
 		{Label: labelNamespace, Value: nestedString(agent, "metadata", "namespace")},
 		{Label: "Model", Value: nestedString(spec, "model", "name")},
 		{Label: labelProvider, Value: provider},
 		{Label: "Runtime", Value: runtimeLabel},
-		{Label: labelReady, Value: readinessString(status["ready"])},
+		{Label: "Identity", Value: identityValue},
+		{Label: "Identity Verified", Value: identityVerifiedValue},
+		{Label: labelReady, Value: readyValue},
 		{Label: "Active tasks", Value: anyString(status["activeTasks"])},
 		{Label: "Tools", Value: nameList(spec["tools"])},
 		{Label: "Skills", Value: nameList(spec["skills"])},
 		{Label: "Instructions", Value: instructions},
 	}
+}
+
+func findStatusCondition(status map[string]any, condType string) map[string]any {
+	conditions, _ := status["conditions"].([]any)
+	for _, item := range conditions {
+		cond, _ := item.(map[string]any)
+		if firstString(cond, "type") == condType {
+			return cond
+		}
+	}
+	return nil
+}
+
+func agentIdentitySummary(spec, status map[string]any) string {
+	if claim := nestedMap(status, "identityClaim"); len(claim) > 0 {
+		ref := joinNonEmpty(firstString(claim, "issuer"), firstString(claim, "id"), "/")
+		if releasing, ok := claim["releasing"].(bool); ok && releasing && ref != "" {
+			return ref + " (releasing)"
+		}
+		if ref != "" {
+			return ref
+		}
+	}
+	if entraID := strings.ToLower(strings.TrimSpace(nestedString(spec, "identity", "entra", "agentIdentityID"))); entraID != "" {
+		return "entra/" + entraID + " (unclaimed)"
+	}
+	return ""
+}
+
+func agentIdentityVerifiedSummary(status map[string]any) string {
+	cond := findStatusCondition(status, "IdentityVerified")
+	if cond == nil {
+		return ""
+	}
+	condStatus := firstString(cond, "status")
+	reason := firstString(cond, "reason")
+	message := firstString(cond, "message")
+	summary := condStatus
+	if reason != "" {
+		summary = joinNonEmpty(summary, reason, " / ")
+	}
+	if message != "" {
+		summary = joinNonEmpty(summary, message, " — ")
+	}
+	return summary
 }
 
 func providerDescribeRows(provider map[string]any) []describeRow {

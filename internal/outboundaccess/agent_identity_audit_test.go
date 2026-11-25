@@ -79,6 +79,34 @@ func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
 	}
 }
 
+func TestAgentIdentityAuditSinkRedactsIssuerError(t *testing.T) {
+	now := time.Now()
+	buf := NewAgentIdentityAuditBuffer(10)
+	var lines []string
+	resolver := auditedResolver(t, now, &fakeAgentIdentitySource{
+		err: errors.New("AADSTS50013: assertion user-assertion-secret rejected"),
+	}, &lines)
+	resolver.AuditSink = buf
+
+	_, err := resolver.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+	if err == nil {
+		t.Fatal("expected issuer refusal error")
+	}
+	records := buf.List(AgentIdentityAuditFilter{Namespace: "tenant"})
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	rec := records[0]
+	if rec.Outcome != "refused" || rec.Reason != agentIdentityRefusalIssuer {
+		t.Fatalf("record = %+v, want refused/issuer", rec)
+	}
+	for _, secret := range []string{"user-assertion-secret", "AADSTS50013"} {
+		if strings.Contains(rec.Reason, secret) || strings.Contains(rec.Requester, secret) || strings.Contains(rec.Tool, secret) {
+			t.Fatalf("audit sink record leaked %q: %+v", secret, rec)
+		}
+	}
+}
+
 // auditedResolver returns a Delegated-mode resolver whose identity use
 // records are captured in lines.
 func auditedResolver(t *testing.T, now time.Time, source AgentIdentityTokenSource, lines *[]string) *KubernetesResolver {

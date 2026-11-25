@@ -76,6 +76,13 @@ type orkaConfig struct {
 	// A renewal keeps it, so a successor is told from another person's
 	// session: a login can be renamed and reused, the ID cannot.
 	SessionSubject string `yaml:"sessionSubject,omitempty"`
+	// OIDC login metadata saved by `orka auth login` for automatic token refresh.
+	OIDCIssuer        string `yaml:"oidcIssuer,omitempty"`
+	OIDCAudience      string `yaml:"oidcAudience,omitempty"`
+	OIDCClientID      string `yaml:"oidcClientID,omitempty"`
+	OIDCTokenEndpoint string `yaml:"oidcTokenEndpoint,omitempty"`
+	OIDCRefreshToken  string `yaml:"oidcRefreshToken,omitempty"`
+	OIDCScope         string `yaml:"oidcScope,omitempty"`
 }
 
 // portForwardCache holds cached port-forward connection info to avoid re-creating on every command.
@@ -235,6 +242,8 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 	session := false
 	if saved && cfg.TokenKind == tokenKindGitHubSession {
 		token, session = configuredSession(cmd, server, cfg), true
+	} else if saved && cfg.TokenKind == tokenKindOIDC {
+		token, session = configuredOIDCToken(cmd, server, cfg), true
 	}
 	txnToken, err := configuredTxnToken(cmd)
 	if err != nil {

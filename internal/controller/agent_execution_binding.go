@@ -483,7 +483,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		}
 	}
 
-	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, mcpConfiguration)
+	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, agent, mcpConfiguration)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +655,7 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 			AllowBash:           agent.Spec.Runtime.DefaultAllowBash,
 		}
 	}
-	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, mcpConfiguration)
+	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, agent, mcpConfiguration)
 	if err != nil {
 		return nil, err
 	}
