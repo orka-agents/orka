@@ -86,7 +86,7 @@ describe('DecisionTable', () => {
     ]} onOpen={() => {}} />)
     expect(screen.getByRole('button', { name: 'pushed api:latest to registry.demo.svc/prod (2 MB) — breaks an undeclared rule' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'pushed tool:v1.2 to registry.demo.svc:5000/team (2 MB) — breaks an undeclared rule' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'uploaded to registry.demo.svc/v2/prod/api/blobs/uploads/ (2 MB) — breaks an undeclared rule' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'uploaded to registry.demo.svc/prod/api (2 MB) — breaks an undeclared rule' })).toBeInTheDocument()
     // A file:line argument is not an image: the bytes and destination wording stays.
     expect(screen.getByRole('button', { name: 'sent 2 MB to registry.demo.svc:443 — breaks an undeclared rule' })).toBeInTheDocument()
   })

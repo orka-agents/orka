@@ -4,6 +4,7 @@ import {
   destinationDomain,
   draftConcernYaml,
   formatBytes,
+  distributionRepo,
   groupIncidents,
   parseImageRef,
   rowSummary,
@@ -124,5 +125,43 @@ describe('oversight helpers', () => {
     expect(parseImageRef('push localhost/app:dev')).toEqual({ host: 'localhost', path: '', name: 'app', tag: 'dev' })
     expect(parseImageRef('vim src/app.ts:12')).toBeUndefined()
     expect(parseImageRef('team/app:1')).toBeUndefined()
+  })
+
+  it('reads an OCI distribution path as its repository', () => {
+    expect(distributionRepo('/v2/prod/api/blobs/uploads/')).toBe('prod/api')
+    expect(distributionRepo('/v2/prod/api/blobs/uploads/7a1c-uuid')).toBe('prod/api')
+    expect(distributionRepo('/v2/prod/api/manifests/latest')).toBe('prod/api')
+    expect(distributionRepo('/upload/here/')).toBe('upload/here')
+  })
+
+  it('says a token was read on a row with a credential read', () => {
+    const read = makeDecision({
+      agentName: 'report-agent',
+      signal: 'against_charter',
+      charterFindings: [{ producerRef: 'rules-a', boundID: 'B2', sentence: 's' }],
+      action: {
+        toolName: 'code_exec',
+        requestSummary: 'Write the weekly status report',
+        effects: { counts: { credential_read: 1 }, binaries: [{ value: '/usr/bin/python3', count: 1 }], paths: [{ value: '/var/run/secrets/token', count: 1 }] },
+      },
+    })
+    expect(rowSummary(read, charterConfig)).toBe('report-agent read a token — breaks rule 3')
+  })
+
+  it('titles an incident from its most descriptive decision and sums bytes only when all have them', () => {
+    const base = { taskName: 'push-1', agentName: 'registry-pusher', signal: 'against_charter' as const, charterFindings: [{ producerRef: 'r', boundID: 'B0', sentence: 's' }] }
+    const upload = (seq: number, bytes?: number) => makeDecision({
+      ...base, id: `u${seq}`, seq,
+      action: { toolName: 'code_exec', effects: { bytesSent: bytes, destinations: [{ value: 'registry.demo.svc:443', count: 1 }], notableEvents: [{ id: 'e', kind: 'exec', args: 'curl -X PUT /v2/prod/api/blobs/uploads/' }] } },
+    })
+    const push = (seq: number, bytes?: number) => makeDecision({
+      ...base, id: `p${seq}`, seq,
+      action: { toolName: 'code_exec', effects: { bytesSent: bytes, destinations: [{ value: 'registry.demo.svc:443', count: 1 }], notableEvents: [{ id: 'e', kind: 'exec', args: 'crane push registry.demo.svc/prod/api:latest' }] } },
+    })
+    const all = groupIncidents([push(1, 1024 * 1024), upload(2, 1024 * 1024)], charterConfig)
+    expect(all).toHaveLength(1)
+    expect(all[0].title).toBe('registry-pusher pushed api:latest to registry.demo.svc/prod (2 MB) — breaks rule 1')
+    const partial = groupIncidents([push(1, 1024 * 1024), upload(2)], charterConfig)
+    expect(partial[0].title).toBe('registry-pusher pushed api:latest to registry.demo.svc/prod — breaks rule 1')
   })
 })

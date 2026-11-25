@@ -376,35 +376,81 @@ const hostOf = (dest: string) => {
  * destination when a send was seen, else "<agent> ran <binary> — <request>".
  * The Task name never appears.
  */
-export function actionPhrase(decision: DecisionView): string {
+export function actionPhrase(decision: DecisionView, { bytes = true }: { bytes?: boolean } = {}): string {
+  return describeAction(decision, bytes).text
+}
+
+/** The OCI distribution path without its /v2/ prefix and blob or manifest suffix: "/v2/prod/api/blobs/uploads/" → "prod/api". */
+export function distributionRepo(path: string): string {
+  return path
+    .replace(/^\/+/, '')
+    .replace(/^v2\//, '')
+    .replace(/\/(?:blobs\/uploads(?:\/[^/]*)?|manifests\/[^/]+)\/?$/, '')
+    .replace(/\/+$/, '')
+}
+
+type ActionKind = 'push' | 'upload' | 'credential' | 'send' | 'connect' | 'ran'
+
+/** How descriptive each phrase is, for choosing an incident's title. */
+const ACTION_RANK: Record<ActionKind, number> = { push: 5, upload: 4, credential: 3, send: 2, connect: 1, ran: 0 }
+
+function describeAction(decision: DecisionView, bytes: boolean): { kind: ActionKind; text: string } {
   const effects = decision.action.effects ?? {}
   const dest = effects.destinations?.[0]?.value
-  const size = hasBytes(decision) ? ` (${formatBytes(effects.bytesSent!)})` : ''
+  const size = bytes && hasBytes(decision) ? ` (${formatBytes(effects.bytesSent!)})` : ''
+  const who = decision.agentName?.trim()
   const execs = (effects.notableEvents ?? []).filter((e) => e.args)
   for (const event of [...execs].reverse()) {
     const image = parseImageRef(event.args)
-    if (image) return `pushed ${image.name}:${image.tag} to ${image.host}${image.path ? `/${image.path}` : ''}${size}`
+    if (image) return { kind: 'push', text: `pushed ${image.name}:${image.tag} to ${image.host}${image.path ? `/${image.path}` : ''}${size}` }
   }
   for (const event of execs) {
     const put = parsePutPath(event.args)
     const target = event.dest || dest
-    if (put && target) return `uploaded to ${hostOf(target)}${put.replace(/^\/+/, '/')}${size}`
+    if (put && target) {
+      const repo = distributionRepo(put)
+      return { kind: 'upload', text: `uploaded to ${hostOf(target)}${repo ? `/${repo}` : ''}${size}` }
+    }
   }
-  if (dest && hasBytes(decision)) return `sent ${formatBytes(effects.bytesSent!)} to ${dest}`
-  if (dest) return `connected to ${dest}`
+  const story = credentialStory([decision])
+  if (story) return { kind: 'credential', text: who ? `${who} ${story}` : story }
+  if (dest && hasBytes(decision)) return { kind: 'send', text: bytes ? `sent ${formatBytes(effects.bytesSent!)} to ${dest}` : `sent data to ${dest}` }
+  if (dest) return { kind: 'connect', text: `connected to ${dest}` }
   const binary = effects.binaries?.[0]?.value ?? effects.notableEvents?.find((e) => e.binary)?.binary
   const ran = binary ? binaryName(binary) : decision.action.toolName
   const request = stripSynthetic(decision.action.requestSummary?.trim() ?? '').trim()
-  const who = decision.agentName?.trim()
-  return `${who ? `${who} ran` : 'ran'} ${ran}${request ? ` — ${request}` : ''}`
+  return { kind: 'ran', text: `${who ? `${who} ran` : 'ran'} ${ran}${request ? ` — ${request}` : ''}` }
+}
+
+/**
+ * An incident's phrase from its most descriptive decision (a push over an
+ * upload over the newest), with bytes summed only when every decision has them.
+ */
+export function incidentPhrase(decisions: DecisionView[]): string {
+  let best = decisions[0]
+  let bestRank = -1
+  for (const d of decisions) {
+    const rank = ACTION_RANK[describeAction(d, false).kind]
+    if (rank > bestRank) {
+      best = d
+      bestRank = rank
+    }
+  }
+  const described = describeAction(best, false)
+  const all = decisions.every(hasBytes)
+  const total = all ? decisions.reduce((sum, d) => sum + (d.action.effects?.bytesSent ?? 0), 0) : 0
+  if (!all) return described.text
+  if (described.kind === 'send') return described.text.replace(/^sent data to/, `sent ${formatBytes(total)} to`)
+  if (described.kind === 'push' || described.kind === 'upload') return `${described.text} (${formatBytes(total)})`
+  return described.text
 }
 
 /**
  * One plain line per row: "sent 2.6 MB to host:443 — breaks charter rule 1",
  * "scorer unavailable — would hold · summarizer ran python3 — Summarize the log".
  */
-export function rowSummary(decision: DecisionView, config: OversightConfig | undefined): string {
-  const phrase = actionPhrase(decision)
+export function rowSummary(decision: DecisionView, config: OversightConfig | undefined, phraseOverride?: string): string {
+  const phrase = phraseOverride ?? actionPhrase(decision)
   const finding = decision.charterFindings?.[0]
   if (finding) {
     const rule = findCharterRule(config, decision.charterRevision, finding.boundID)
@@ -522,7 +568,7 @@ export interface IncidentText {
 
 /** An incident's one-line title: what happened, then the rules it broke in the order first broken. */
 function incidentText(actor: string, decisions: DecisionView[], badge: RowBadgeKind, config: OversightConfig | undefined): IncidentText {
-  if (badge !== 'against_charter') return { title: rowSummary(decisions[0], config) }
+  if (badge !== 'against_charter') return { title: rowSummary(decisions[0], config, incidentPhrase(decisions)) }
   const oldestFirst = [...decisions].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0) || a.observedAt.localeCompare(b.observedAt))
   const numbers: number[] = []
   const sentences: string[] = []
@@ -539,7 +585,7 @@ function incidentText(actor: string, decisions: DecisionView[], badge: RowBadgeK
       }
     }
   }
-  const story = credentialStory(decisions) ?? actionPhrase(decisions[0])
+  const story = credentialStory(decisions) ?? incidentPhrase(decisions)
   const who = decisions[0].agentName?.trim()
   // actionPhrase already names the agent for "ran" lines.
   const subject = who && story.startsWith(`${who} `) ? story : `${actor} ${story}`
