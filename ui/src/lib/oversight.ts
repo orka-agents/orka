@@ -189,8 +189,9 @@ export const FEATURE_QUERY_KEY: Record<string, string> = {
 }
 
 /** Why a similar action matched, in words: "same tool code_exec", "concern K10". */
-export function featureReason(feature: SignatureFeature): string {
+export function featureReason(feature: SignatureFeature, config?: OversightConfig): string {
   if (feature.kind === 'tool') return `same tool ${feature.value}`
+  if (feature.kind === 'concern') return `concern ${concernName(feature.value, config)}`
   return `${feature.kind} ${feature.value}`
 }
 
@@ -294,7 +295,16 @@ export function findCharterRule(config: OversightConfig | undefined, revision: s
 }
 
 /** "Rule 2", or the bound ID when the charter does not declare it. */
-export const ruleName = (rule: CharterRule | undefined, boundID: string) => (rule ? `Rule ${rule.bound.number}` : `rule ${boundID}`)
+/** "Rule 2"; a bound the declared charter does not list is an undeclared rule, never its bare ID. */
+export const ruleName = (rule: CharterRule | undefined) => (rule ? `Rule ${rule.bound.number}` : 'Undeclared rule')
+
+/**
+ * A concern's display name: the operator's declared name, else the score's
+ * own label, else the ID as a last resort.
+ */
+export function concernName(id: string, config: OversightConfig | undefined, label?: string): string {
+  return config?.concerns?.find((c) => c.id === id)?.name?.trim() || label?.trim() || id
+}
 
 export const charterName = (charter: CharterDeclaration) => charter.title?.trim() || charter.revision
 
@@ -318,30 +328,89 @@ export function formatBytes(bytes: number): string {
 
 const hasBytes = (decision: DecisionView) => typeof decision.action.effects?.bytesSent === 'number'
 
-/** What the action did, from its fields: bytes and destination, else the narrative, else its effects. */
+export interface ImageRef {
+  host: string
+  /** The repository path without its last element; empty for host/name:tag. */
+  path: string
+  name: string
+  tag: string
+}
+
+const IMAGE_REF = /^([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d+)?)\/((?:[a-z0-9._-]+\/)*)([a-z0-9._-]+):([\w][\w.-]{0,127})$/i
+
+/**
+ * The last argument that reads as a registry image reference
+ * (host/.../name:tag, or anything after oci://). The host must look like a
+ * host (a dot, a port or localhost), so "dir/file:line" is not taken.
+ */
+export function parseImageRef(args: string | undefined): ImageRef | undefined {
+  if (!args) return undefined
+  const tokens = args.split(/\s+/).map((t) => t.replace(/^['"]|['"]$/g, '')).filter(Boolean)
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const oci = tokens[i].startsWith('oci://')
+    const ref = oci ? tokens[i].slice('oci://'.length) : tokens[i]
+    const match = IMAGE_REF.exec(ref)
+    if (!match) continue
+    const [, host, dirs, name, tag] = match
+    if (!oci && !/[.:]/.test(host) && host !== 'localhost') continue
+    return { host, path: dirs.replace(/\/$/, ''), name, tag }
+  }
+  return undefined
+}
+
+/** The path of a raw HTTP PUT in an event's args ("PUT /v2/x/blobs/uploads/"). */
+export function parsePutPath(args: string | undefined): string | undefined {
+  const match = args ? /\bPUT\s+(\/\S*)/.exec(args) : null
+  return match ? match[1] : undefined
+}
+
+const hostOf = (dest: string) => {
+  const trimmed = dest.trim()
+  const colon = trimmed.lastIndexOf(':')
+  return colon > 0 && trimmed.indexOf(':') === colon ? trimmed.slice(0, colon) : trimmed
+}
+
+/**
+ * What the action did, built from fields only, never from the free-text
+ * narrative (which can carry Task names and markers mid-string): bytes and
+ * destination when a send was seen, else "<agent> ran <binary> — <request>".
+ * The Task name never appears.
+ */
 export function actionPhrase(decision: DecisionView): string {
   const effects = decision.action.effects ?? {}
   const dest = effects.destinations?.[0]?.value
+  const size = hasBytes(decision) ? ` (${formatBytes(effects.bytesSent!)})` : ''
+  const execs = (effects.notableEvents ?? []).filter((e) => e.args)
+  for (const event of [...execs].reverse()) {
+    const image = parseImageRef(event.args)
+    if (image) return `pushed ${image.name}:${image.tag} to ${image.host}${image.path ? `/${image.path}` : ''}${size}`
+  }
+  for (const event of execs) {
+    const put = parsePutPath(event.args)
+    const target = event.dest || dest
+    if (put && target) return `uploaded to ${hostOf(target)}${put.replace(/^\/+/, '/')}${size}`
+  }
   if (dest && hasBytes(decision)) return `sent ${formatBytes(effects.bytesSent!)} to ${dest}`
   if (dest) return `connected to ${dest}`
-  const narrative = decision.actionNarrative?.trim()
-  if (narrative) return stripSynthetic(narrative)
-  const path = effects.paths?.[0]?.value
-  if (path) return `touched ${path}`
-  const binary = effects.binaries?.[0]?.value
-  if (binary) return `ran ${binaryName(binary)}`
-  return `called ${decision.action.toolName}`
+  const binary = effects.binaries?.[0]?.value ?? effects.notableEvents?.find((e) => e.binary)?.binary
+  const ran = binary ? binaryName(binary) : decision.action.toolName
+  const request = stripSynthetic(decision.action.requestSummary?.trim() ?? '').trim()
+  const who = decision.agentName?.trim()
+  return `${who ? `${who} ran` : 'ran'} ${ran}${request ? ` — ${request}` : ''}`
 }
 
-/** "sent 2.6 MB to host:443 — breaks charter rule 1". */
+/**
+ * One plain line per row: "sent 2.6 MB to host:443 — breaks charter rule 1",
+ * "scorer unavailable — would hold · summarizer ran python3 — Summarize the log".
+ */
 export function rowSummary(decision: DecisionView, config: OversightConfig | undefined): string {
   const phrase = actionPhrase(decision)
   const finding = decision.charterFindings?.[0]
   if (finding) {
     const rule = findCharterRule(config, decision.charterRevision, finding.boundID)
-    return `${phrase} — breaks charter rule ${rule ? rule.bound.number : finding.boundID}`
+    return `${phrase} — ${rule ? `breaks rule ${rule.bound.number}` : 'breaks an undeclared rule'}`
   }
-  if (decision.signal === 'monitor_unavailable' || decision.disposition === 'fail_closed') return `${phrase} — scorer unavailable, would hold`
+  if (decision.signal === 'monitor_unavailable' || decision.disposition === 'fail_closed') return `scorer unavailable — would hold · ${phrase}`
   if (decision.wouldHavePaused) return `${phrase} — would pause`
   return phrase
 }
@@ -397,21 +466,91 @@ export const needsHuman = (decision: DecisionView) => rowBadgeKind(decision) !==
 export interface Incident {
   key: string
   actor: string
-  /** A bound ID for a charter break, else "would-pause" or "would-hold". */
-  kind: string
+  taskName: string
+  /** The most severe badge's kind, for styling and tests. */
+  kind: RowBadgeKind
   badge: RowBadgeKind
   title: string
+  /** The broken rules' sentences, shown on hover. */
+  detail?: string
   decisions: DecisionView[]
   lastSeen: string
 }
 
-const shorten = (text: string, max = 90) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text)
+/** "rules 4 and 3", "rule 2", "rules 1, 2 and 5", in the order given. */
+function ruleList(numbers: number[]): string {
+  if (numbers.length === 1) return `rule ${numbers[0]}`
+  return `rules ${numbers.slice(0, -1).join(', ')} and ${numbers[numbers.length - 1]}`
+}
+
+const CREDENTIAL_WORDS = /credential|secret|token|password|key/i
 
 /**
- * Groups the decisions that need a person into incidents by actor (agent,
- * else Task) and kind, most severe first and then most recent. Titles are
- * built from the data: the actor, then the broken rule or the newest
- * decision's own account of what it did.
+ * A story across an incident's decisions, oldest first, built from fields:
+ * a credential read ("read a token") and a later connection ("then sent it
+ * to host"). Undefined when the fields tell no such story.
+ */
+export function credentialStory(decisions: DecisionView[]): string | undefined {
+  const oldestFirst = [...decisions].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0) || a.observedAt.localeCompare(b.observedAt))
+  let readAt = -1
+  let what = 'a credential'
+  oldestFirst.forEach((d, i) => {
+    if (readAt >= 0) return
+    const effects = d.action.effects ?? {}
+    const counted = (effects.counts?.credential_read ?? 0) > 0
+    const tainted = [...(d.action.taintFlags ?? [])].find((t) => CREDENTIAL_WORDS.test(t))
+    if (!counted && !tainted) return
+    readAt = i
+    const hint = [tainted ?? '', ...(effects.paths ?? []).map((p) => p.value)].join(' ')
+    if (/token/i.test(hint)) what = 'a token'
+  })
+  if (readAt < 0) return undefined
+  for (const d of oldestFirst.slice(readAt)) {
+    const effects = d.action.effects ?? {}
+    const connected = (effects.counts?.net_connect ?? 0) > 0 || (effects.destinations?.length ?? 0) > 0
+    const dest = effects.destinations?.[0]?.value ?? effects.notableEvents?.find((e) => e.dest)?.dest
+    if (connected && dest) return `read ${what}, then sent it to ${hostOf(dest)}`
+  }
+  return `read ${what}`
+}
+
+export interface IncidentText {
+  title: string
+  /** The broken rules' sentences, for a title attribute. */
+  detail?: string
+}
+
+/** An incident's one-line title: what happened, then the rules it broke in the order first broken. */
+function incidentText(actor: string, decisions: DecisionView[], badge: RowBadgeKind, config: OversightConfig | undefined): IncidentText {
+  if (badge !== 'against_charter') return { title: rowSummary(decisions[0], config) }
+  const oldestFirst = [...decisions].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0) || a.observedAt.localeCompare(b.observedAt))
+  const numbers: number[] = []
+  const sentences: string[] = []
+  let undeclared = false
+  for (const d of oldestFirst) {
+    for (const f of d.charterFindings ?? []) {
+      const rule = findCharterRule(config, d.charterRevision, f.boundID)
+      if (rule && !numbers.includes(rule.bound.number)) {
+        numbers.push(rule.bound.number)
+        sentences.push(`Rule ${rule.bound.number}: ${rule.bound.sentence}`)
+      } else if (!rule && !sentences.includes(f.sentence)) {
+        undeclared = true
+        sentences.push(f.sentence)
+      }
+    }
+  }
+  const story = credentialStory(decisions) ?? actionPhrase(decisions[0])
+  const who = decisions[0].agentName?.trim()
+  // actionPhrase already names the agent for "ran" lines.
+  const subject = who && story.startsWith(`${who} `) ? story : `${actor} ${story}`
+  const rules = [numbers.length > 0 ? ruleList(numbers) : '', undeclared ? 'an undeclared rule' : ''].filter(Boolean).join(' and ')
+  return { title: `${subject} — breaks ${rules}`, detail: sentences.join('\n') }
+}
+
+/**
+ * Groups the decisions that need a person into incidents, one per agent run
+ * (agent and Task), carrying the most severe badge among them; most severe
+ * first, then most recent.
  */
 export function groupIncidents(decisions: DecisionView[], config: OversightConfig | undefined): Incident[] {
   const groups = new Map<string, Incident>()
@@ -419,24 +558,46 @@ export function groupIncidents(decisions: DecisionView[], config: OversightConfi
   for (const decision of newestFirst) {
     if (!needsHuman(decision)) continue
     const badge = rowBadgeKind(decision)
-    const finding = decision.charterFindings?.[0]
-    const kind = badge === 'against_charter' && finding ? finding.boundID : badge === 'would_pause' ? 'would-pause' : 'would-hold'
     const actor = decision.agentName || decision.taskName
-    const key = `${actor}\u0000${kind}`
+    const key = `${actor}\u0000${decision.taskName}`
     const existing = groups.get(key)
     if (existing) {
       existing.decisions.push(decision)
+      if (rowBadge(badge).rank > rowBadge(existing.badge).rank) {
+        existing.badge = badge
+        existing.kind = badge
+      }
       continue
     }
-    let title: string
-    if (finding) {
-      const rule = findCharterRule(config, decision.charterRevision, finding.boundID)
-      const sentence = rule?.bound.sentence ?? finding.sentence
-      title = `${actor} broke charter rule ${rule ? rule.bound.number : finding.boundID}: ${shorten(sentence)}`
-    } else {
-      title = `${actor} ${shorten(actionPhrase(decision))}`
-    }
-    groups.set(key, { key, actor, kind, badge, title, decisions: [decision], lastSeen: decision.observedAt })
+    groups.set(key, { key, actor, taskName: decision.taskName, kind: badge, badge, title: '', decisions: [decision], lastSeen: decision.observedAt })
   }
+  for (const incident of groups.values()) Object.assign(incident, incidentText(incident.actor, incident.decisions, incident.badge, config))
   return [...groups.values()].sort((a, b) => rowBadge(b.badge).rank - rowBadge(a.badge).rank || b.lastSeen.localeCompare(a.lastSeen))
+}
+
+export interface CharterBreaks {
+  /** Distinct bounds broken. */
+  broken: number
+  /** The most-broken declared rule and how many decisions broke it. */
+  top?: { number: number; count: number }
+}
+
+/** Which rules these decisions broke, by declared rule number. */
+export function charterBreaks(decisions: DecisionView[], config: OversightConfig | undefined): CharterBreaks {
+  const bounds = new Set<string>()
+  const byRule = new Map<number, number>()
+  for (const d of decisions) {
+    const seen = new Set<number>()
+    for (const f of d.charterFindings ?? []) {
+      bounds.add(f.boundID)
+      const rule = findCharterRule(config, d.charterRevision, f.boundID)
+      if (rule && !seen.has(rule.bound.number)) {
+        seen.add(rule.bound.number)
+        byRule.set(rule.bound.number, (byRule.get(rule.bound.number) ?? 0) + 1)
+      }
+    }
+  }
+  let top: CharterBreaks['top']
+  for (const [number, count] of byRule) if (!top || count > top.count || (count === top.count && number < top.number)) top = { number, count }
+  return { broken: bounds.size, top }
 }

@@ -1,6 +1,6 @@
 import { toast } from 'sonner'
 import { useOversightConfig } from '@/hooks/use-oversight'
-import { findCharterRule, charterName } from '@/lib/oversight'
+import { findCharterRule, charterName, ruleName } from '@/lib/oversight'
 import { useOversightAlerts } from '@/stores/oversight-alerts'
 import { useUIStore } from '@/stores/ui'
 import type { DecisionView } from '@/schemas/oversight'
@@ -13,7 +13,7 @@ import type { DecisionView } from '@/schemas/oversight'
  * scorer-unavailable decisions stay rows only. The wording is audit-only:
  * nothing is held.
  */
-export function useCharterAlertHandler(onOpen: (id: string) => void, initialIDs: Set<string>) {
+export function useCharterAlertHandler(onOpen: (id: string) => void, initialIDs: Set<string>, onOpenCharter?: () => void) {
   const { data: config } = useOversightConfig()
   const namespace = useUIStore((s) => s.namespace)
   const add = useOversightAlerts((s) => s.add)
@@ -30,14 +30,15 @@ export function useCharterAlertHandler(onOpen: (id: string) => void, initialIDs:
       taskName: decision.taskName,
       agentName: decision.agentName,
       observedAt: decision.observedAt,
-      rule: rule ? `Rule ${rule.bound.number}` : `Rule ${finding.boundID}`,
+      rule: ruleName(rule),
       charter: rule ? charterName(rule.charter) : decision.charterRevision,
       sentence,
     })
     if (!isNew) return
-    toast(`Charter rule ${rule ? rule.bound.number : finding.boundID} broken by ${who}, would pause (audit mode)`, {
+    toast(`${rule ? `Charter rule ${rule.bound.number}` : 'An undeclared charter rule'} broken by ${who}, would pause (audit mode)`, {
       description: sentence,
       action: { label: 'Inspect', onClick: () => onOpen(decision.id) },
+      ...(onOpenCharter ? { cancel: { label: 'Charter', onClick: () => onOpenCharter() } } : {}),
     })
   }
 }

@@ -51,7 +51,7 @@ describe('oversight renders API strings as text', () => {
     expect(screen.getByText(`title ${SCRIPT}`)).toBeInTheDocument()
     expect(await screen.findByTestId('charter-rule')).toHaveTextContent(`Rule 1 of title ${SCRIPT}`)
     // The story is plain text too, then the record under Details.
-    expect(await screen.findByRole('heading', { name: `narrative ${IMG} — breaks charter rule 1` })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: `agent-a ran ${IMG} — summary ${IMG} — breaks rule 1` })).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Details' }))
     expect(await screen.findByTestId('request-summary')).toHaveTextContent(`summary ${IMG}`)
     expect(screen.getByTestId('advisor-summary')).toHaveTextContent(`advisor ${IMG}`)

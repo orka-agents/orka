@@ -18,13 +18,16 @@ import { useOversightStream, type OversightStreamStatus } from '@/hooks/use-over
 import { useCharterAlertHandler } from '@/hooks/use-charter-alerts'
 import { ApiError, isNotImplementedError } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
-import { groupIncidents, type Incident } from '@/lib/oversight'
+import { charterBreaks, groupIncidents, queryTerm, type Incident } from '@/lib/oversight'
 import type { DecisionView } from '@/schemas/oversight'
 import { AlertsButton } from './alerts-button'
 import { CharterPanel } from './charter-panel'
 import { CharterDisclosure } from './charter-disclosure'
 import { NeedsYouList } from './needs-you'
 import { PostureLine } from './posture-line'
+import { ConcernsPanel } from './concerns-panel'
+import { ContextPills } from './context-pills'
+import { FunnelStrip } from './funnel-strip'
 import { DecisionInspector } from './decision-inspector'
 import { DecisionTable } from './decision-table'
 import { HistoryPanel } from './history-panel'
@@ -35,7 +38,7 @@ import { SearchBox } from './search-box'
 import { SelectionBar } from './selection-bar'
 
 /** needs: what needs a person (default); activity/matrix: everything; monitors: operator material. */
-export type OversightView = 'needs' | 'activity' | 'matrix' | 'monitors'
+export type OversightView = 'needs' | 'activity' | 'matrix' | 'charter' | 'monitors'
 
 /** The tab a search shows: an explicit view, else results for a search, else Needs you. */
 const effectiveView = (search: OversightSearch): OversightView => search.view ?? (search.q ? 'activity' : 'needs')
@@ -89,6 +92,9 @@ export function OversightDashboard({ search, onSearchChange }: OversightDashboar
 
   const postureWindow = search.window && search.window !== 'all' ? search.window : '24h'
   // A pivot is a search across all time, shown with its results.
+  const openCharter = () => onSearchChange({ ...search, view: 'charter', decision: undefined })
+  // A rule's break count opens the actions that broke it, in the same window.
+  const openBound = (id: string) => onSearchChange({ q: queryTerm('bound', id), window: postureWindow, decision: undefined, view: 'activity' })
   const pivot = (query: string) => onSearchChange({ q: query, window: undefined, decision: undefined, view: search.view === 'matrix' ? 'matrix' : 'activity' })
 
   return (
@@ -96,8 +102,9 @@ export function OversightDashboard({ search, onSearchChange }: OversightDashboar
       <PageHeader
         title="Oversight"
         description="Read-only: what agents did, what the monitors made of it, and how much of it was seen."
-        action={<AlertsButton onOpenDecision={(id) => onSearchChange({ ...search, decision: id })} />}
+        action={<AlertsButton onOpenDecision={(id) => onSearchChange({ ...search, decision: id })} onOpenCharter={openCharter} />}
       />
+      <ContextPills />
       <Results
         key={`${q}\u0000${search.window ?? ''}`}
         q={q}
@@ -112,6 +119,8 @@ export function OversightDashboard({ search, onSearchChange }: OversightDashboar
         onOpen={(id) => onSearchChange({ ...search, decision: id })}
         onClose={() => onSearchChange({ ...search, decision: undefined })}
         onPivot={pivot}
+        onOpenCharter={openCharter}
+        onOpenBound={openBound}
       />
     </div>
   )
@@ -130,10 +139,12 @@ interface ResultsProps {
   onOpen: (id: string) => void
   onClose: () => void
   onPivot: (q: string) => void
+  onOpenCharter: () => void
+  onOpenBound: (id: string) => void
 }
 
 /** The search box, history, and the live table or matrix for one query. */
-function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindowChange, onViewChange, decision, onOpen, onClose, onPivot }: ResultsProps) {
+function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindowChange, onViewChange, decision, onOpen, onClose, onPivot, onOpenCharter, onOpenBound }: ResultsProps) {
   const { data: config } = useOversightConfig()
   const list = useOversightDecisions({ q, window })
   const overrides = useFeedbackOverrides()
@@ -150,7 +161,7 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
   const seedSeq = pages[0]?.items?.reduce((highest, d) => Math.max(highest, d.seq ?? 0), 0) ?? 0
 
   const initialIDs = new Set(listed.map((d) => d.id))
-  const onStreamed = useCharterAlertHandler(onOpen, initialIDs)
+  const onStreamed = useCharterAlertHandler(onOpen, initialIDs, onOpenCharter)
   const stream = useOversightStream({ q, enabled: following && list.isSuccess && !terminal, after: seedSeq, cap: STREAM_CAP, onDecision: onStreamed })
   const streamShown = pausedAtSeq === null ? stream.decisions : stream.decisions.filter((d) => (d.seq ?? 0) <= pausedAtSeq)
   const heldBack = stream.decisions.length - streamShown.length
@@ -162,6 +173,12 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
   const needsList = useOversightDecisions({ q: [q, NEEDS_QUERY].filter(Boolean).join(' '), window: postureWindow, limit: 200, enabled: !terminal && !grammarError })
   const needsRows = mergeRows(stream.decisions, [...(needsList.data?.pages ?? []).flatMap((page) => page.items ?? []), ...listed]).map((d) => withOverride(d, overrides))
   const incidents = groupIncidents(needsRows, config)
+  const breaks = charterBreaks(needsRows, config)
+  const declaredRules = (config?.charters ?? []).reduce((n, c) => n + (c.bounds?.length ?? 0), 0)
+  const charterSummary = (config?.charters?.length ?? 0) > 0 ? {
+    label: `${breaks.top ? `Charter: rule ${breaks.top.number} broken ×${breaks.top.count}` : 'Charter: no rule broken'} · ${breaks.broken} of ${declaredRules} rules broken`,
+    onOpen: onOpenCharter,
+  } : undefined
   const [incident, setIncident] = useState<Incident | null>(null)
   const openIncident = (next: Incident) => {
     setIncident(next)
@@ -213,7 +230,7 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
 
   return (
     <>
-      <PostureLine window={postureWindow} incidents={incidents} />
+      <PostureLine window={postureWindow} incidents={incidents} charter={charterSummary} />
 
       <Tabs value={view === 'matrix' ? 'activity' : view} onValueChange={(next) => onViewChange(next as OversightView)}>
         <TabsList>
@@ -227,13 +244,14 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
             )}
           </TabsTrigger>
           <TabsTrigger value="activity">All activity</TabsTrigger>
+          <TabsTrigger value="charter">Charter</TabsTrigger>
           <TabsTrigger value="monitors">Monitors</TabsTrigger>
         </TabsList>
       </Tabs>
 
       {view === 'needs' && (
         <div className="space-y-3">
-          <CharterDisclosure window={postureWindow} onPivot={onPivot} />
+          <FunnelStrip window={postureWindow} needYou={incidents.length} />
           {q && (
             <p className="text-xs text-muted-foreground" role="status">
               Filtered by the search <span className="font-mono">{q}</span>.{' '}
@@ -246,6 +264,13 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
               {listState ?? (needsList.isLoading ? <Skeleton className="h-24 w-full" /> : <NeedsYouList incidents={incidents} onOpen={openIncident} />)}
             </CardContent>
           </Card>
+          <CharterDisclosure window={postureWindow} broken={breaks.broken} onPivot={onPivot} onOpenBound={onOpenBound} />
+        </div>
+      )}
+
+      {view === 'charter' && (
+        <div id="charter" className="space-y-4">
+          <CharterPanel window={postureWindow} onPivot={onPivot} onOpenBound={onOpenBound} />
         </div>
       )}
 
@@ -320,7 +345,10 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="min-w-0 space-y-4">
             <PostureBanner window={postureWindow} />
-            <CharterPanel window={postureWindow} onPivot={onPivot} />
+            <div className="grid gap-4 xl:grid-cols-2">
+              <CharterPanel window={postureWindow} onPivot={onPivot} onOpenBound={onOpenBound} />
+              <ConcernsPanel />
+            </div>
           </div>
           <aside className="space-y-4">
             <ProducersPanel />

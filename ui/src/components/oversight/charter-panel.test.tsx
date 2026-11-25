@@ -29,7 +29,8 @@ describe('CharterPanel', () => {
       }),
     )
     const onPivot = vi.fn()
-    render(<CharterPanel window="24h" onPivot={onPivot} />)
+    const onOpenBound = vi.fn()
+    render(<CharterPanel window="24h" onPivot={onPivot} onOpenBound={onOpenBound} />)
     const rules = await screen.findByRole('list', { name: 'Rules of Workspace charter' })
     const items = within(rules).getAllByRole('listitem')
     expect(items.map((li) => li.querySelector('span')?.textContent)).toEqual(['Rule 3', 'Rule 1', 'Rule 2'])
@@ -39,8 +40,13 @@ describe('CharterPanel', () => {
     expect(await screen.findByTestId('bound-count-B1')).toHaveTextContent('3 actions broke it in the last 24h')
     expect(await screen.findByTestId('bound-count-B0')).toHaveTextContent('0 actions broke it')
     expect(queries).toContain('bound:B1@24h')
-    await userEvent.click(screen.getByRole('button', { name: 'Search all time for bound:B2' }))
-    expect(onPivot).toHaveBeenCalledWith('bound:B2')
+    // Bound ids stay out of the visible list; the count opens the matching actions.
+    expect(rules).not.toHaveTextContent(/B0|B1|B2/)
+    expect(within(items[0]).getByText('Rule 3')).toHaveAttribute('title', 'Never send workspace data to undeclared hosts.')
+    expect(screen.getByText('audit mode · 3 rules')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Show the 3 actions that broke rule 2 in the last 24h' }))
+    expect(onOpenBound).toHaveBeenCalledWith('B1')
+    expect(onPivot).not.toHaveBeenCalled()
   })
 
   it('labels a non-preview charter watched, not enforced, unless the config lists it as a demo', async () => {

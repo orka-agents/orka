@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ListAccessError } from '@/components/ui/list-access-error'
-import { useFeedbackOverrides, useOversightSimilar, withOverride } from '@/hooks/use-oversight'
+import { useFeedbackOverrides, useOversightConfig, useOversightSimilar, withOverride } from '@/hooks/use-oversight'
 import { FEATURE_QUERY_KEY, featureReason, queryTerm, signalPresentation } from '@/lib/oversight'
 import { timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -12,6 +12,7 @@ import { SelectionBar } from './selection-bar'
 export function SimilarPanel({ decisionId, onOpenDecision, onPivot }: { decisionId: string; onOpenDecision: (id: string) => void; onPivot: (q: string) => void }) {
   const { data, error, isLoading } = useOversightSimilar(decisionId, true)
   const overrides = useFeedbackOverrides()
+  const { data: config } = useOversightConfig()
   const [selected, setSelected] = useState<Set<string>>(new Set())
   if (isLoading) return <Skeleton className="h-24 w-full" />
   if (error) return <ListAccessError error={error} resource="similar decisions" />
@@ -63,7 +64,7 @@ export function SimilarPanel({ decisionId, onOpenDecision, onPivot }: { decision
                     <span className="text-xs text-muted-foreground">Shares</span>
                     {shared!.map((feature) => {
                       const key = FEATURE_QUERY_KEY[feature.kind]
-                      const reason = featureReason(feature)
+                      const reason = featureReason(feature, config)
                       return key ? (
                         <PivotButton key={`${feature.kind}:${feature.value}`} query={queryTerm(key, feature.value)} onPivot={onPivot}>{reason}</PivotButton>
                       ) : (

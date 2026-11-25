@@ -31,7 +31,13 @@ type Item = 'confidence' | 'incidents' | 'seen' | 'blind' | 'control'
  * The 10-second answer as one line; every part opens its evidence. Coverage
  * is a share of actions seen, never "warranted".
  */
-export function PostureLineView({ posture, incidents }: { posture: PostureResponse; incidents: Incident[] }) {
+export interface CharterSummary {
+  /** "Demo charter charter-r4 · 8 rules · 2 broken". */
+  label: string
+  onOpen: () => void
+}
+
+export function PostureLineView({ posture, incidents, charter }: { posture: PostureResponse; incidents: Incident[]; charter?: CharterSummary }) {
   const [open, setOpen] = useState<Item | null>(null)
   const { basis } = posture
   const coverage = basis.coverage
@@ -71,6 +77,18 @@ export function PostureLineView({ posture, incidents }: { posture: PostureRespon
         {part('blind', `${blindSpots.length} ${blindSpots.length === 1 ? 'blind spot' : 'blind spots'}`, blindSpots.length > 0 ? 'font-medium text-status-failed' : 'text-muted-foreground')}
         {dot}
         {part('control', enforced ? 'enforced' : 'audit mode', 'text-muted-foreground')}
+        {charter && (
+          <>
+            {dot}
+            <button
+              type="button"
+              onClick={charter.onOpen}
+              className="rounded px-1 underline-offset-2 decoration-dotted hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
+              {charter.label}
+            </button>
+          </>
+        )}
       </p>
 
       {open === 'confidence' && (
@@ -127,7 +145,7 @@ export function PostureLineView({ posture, incidents }: { posture: PostureRespon
   )
 }
 
-export function PostureLine({ window = '24h', incidents }: { window?: string; incidents: Incident[] }) {
+export function PostureLine({ window = '24h', incidents, charter }: { window?: string; incidents: Incident[]; charter?: CharterSummary }) {
   const { data, error, isLoading } = useOversightPosture(window)
   if (isLoading) return <Skeleton className="h-6 w-96 max-w-full" />
   if (error) {
@@ -144,5 +162,5 @@ export function PostureLine({ window = '24h', incidents }: { window?: string; in
     )
   }
   if (!data) return null
-  return <PostureLineView posture={data} incidents={incidents} />
+  return <PostureLineView posture={data} incidents={incidents} charter={charter} />
 }

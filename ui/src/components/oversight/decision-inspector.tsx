@@ -20,7 +20,9 @@ import {
   MONITOR_FAILURE_STATUSES,
   binaryName,
   charterName,
+  concernName,
   destinationDomain,
+  ruleName,
   findCharterRule,
   feedbackLabelText,
   isSyntheticText,
@@ -40,6 +42,7 @@ import {
   OVERSIGHT_FEEDBACK_LABELS,
   type AdvisorEvaluation,
   type DecisionView,
+  type OversightConfig,
   type ProducerInfo,
   type ScorerEvaluation,
 } from '@/schemas/oversight'
@@ -157,7 +160,7 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
           {finding && (
             <div className="space-y-1 rounded-md border border-status-failed/40 bg-status-failed-bg p-3 text-sm">
               <p className="text-xs font-medium" data-testid="charter-rule">
-                {rule ? <>Rule {rule.bound.number} of {charterName(rule.charter)}</> : <>Bound {finding.boundID}</>}
+                {rule ? <>Rule {rule.bound.number} of {charterName(rule.charter)}</> : <>Undeclared rule</>}
               </p>
               <blockquote className="border-l-2 border-status-failed pl-2">{rule?.bound.sentence ?? finding.sentence}</blockquote>
               <p className="text-xs text-muted-foreground">{finding.enforced ? 'Enforced.' : 'Audit only: would pause, nothing was held.'}</p>
@@ -279,7 +282,12 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
                   {decision.charterFindings!.map((finding, i) => (
                     <li key={`${finding.boundID}-${i}`} className="space-y-1 rounded-md border border-status-failed/40 bg-status-failed-bg p-3 text-sm">
                       <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                        <PivotButton query={queryTerm('bound', finding.boundID)} onPivot={onPivot}>bound {finding.boundID}</PivotButton>
+                        <span title={finding.sentence}>
+                          <PivotButton query={queryTerm('bound', finding.boundID)} onPivot={onPivot}>
+                            {ruleName(findCharterRule(config, decision.charterRevision, finding.boundID))}
+                          </PivotButton>
+                        </span>
+                        <Code>{finding.boundID}</Code>
                         <PivotButton query={queryTerm('producer', finding.producerRef)} onPivot={onPivot}>
                           {producerLabel(finding.producerRef, producers)}
                         </PivotButton>
@@ -296,7 +304,7 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
             {decision.tier0 && ((decision.tier0.rules?.length ?? 0) > 0 || decision.tier0.highStakesClass) && (
               <Section title="Deterministic rules">
                 <div className="flex flex-wrap gap-1.5 text-xs">
-                  {decision.tier0.rules?.map((rule) => <Chip key={rule} className="font-mono">{rule}</Chip>)}
+                  {decision.tier0.rules?.map((rule) => <Code key={rule}>{rule}</Code>)}
                   {decision.tier0.highStakesClass && <Chip>high-stakes class {decision.tier0.highStakesClass}</Chip>}
                 </div>
               </Section>
@@ -308,10 +316,10 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
               ) : (
                 <div className="space-y-3">
                   {decision.scorers?.map((scorer, i) => (
-                    <ScorerCard key={`s-${scorer.providerRef}-${i}`} scorer={scorer} producers={producers} onPivot={onPivot} onCite={cite} />
+                    <ScorerCard key={`s-${scorer.providerRef}-${i}`} scorer={scorer} config={config} producers={producers} onPivot={onPivot} onCite={cite} />
                   ))}
                   {decision.advisors?.map((advisor, i) => (
-                    <AdvisorCard key={`a-${advisor.providerRef}-${i}`} advisor={advisor} producers={producers} onPivot={onPivot} onCite={cite} />
+                    <AdvisorCard key={`a-${advisor.providerRef}-${i}`} advisor={advisor} config={config} producers={producers} onPivot={onPivot} onCite={cite} />
                   ))}
                 </div>
               )}
@@ -390,6 +398,11 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
       </div>
     </>
   )
+}
+
+/** A machine code, shown only in Details: small and muted beside its name. */
+function Code({ children }: { children: React.ReactNode }) {
+  return <span className="font-mono text-[10px] text-muted-foreground/80">{children}</span>
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -473,7 +486,7 @@ function FailureCallout({ status }: { status: string }) {
   )
 }
 
-function ScorerCard({ scorer, producers, onPivot, onCite }: { scorer: ScorerEvaluation; producers: ProducerInfo[]; onPivot: (q: string) => void; onCite: (ids: string[]) => void }) {
+function ScorerCard({ scorer, config, producers, onPivot, onCite }: { scorer: ScorerEvaluation; config?: OversightConfig; producers: ProducerInfo[]; onPivot: (q: string) => void; onCite: (ids: string[]) => void }) {
   return (
     <div className="space-y-2 rounded-md border p-3" data-testid="scorer-card">
       <ProducerHeader role="Scorer" evaluation={scorer} producers={producers} onPivot={onPivot} />
@@ -484,18 +497,22 @@ function ScorerCard({ scorer, producers, onPivot, onCite }: { scorer: ScorerEval
             const over = score.threshold !== undefined && score.probability >= score.threshold
             const hot = Boolean(score.triggered) || over
             const pct = Math.max(0, Math.min(1, score.probability)) * 100
+            const name = concernName(score.questionID, config, score.label)
             return (
               <li key={score.questionID} className="grid grid-cols-[minmax(4rem,auto)_1fr_auto] items-center gap-2 text-xs" data-triggered={hot || undefined}>
-                <PivotButton query={queryTerm('concern', score.questionID)} onPivot={onPivot} className={cn(hot && 'border-status-pending text-status-pending')}>
-                  {score.questionID}
-                </PivotButton>
+                <span className="min-w-0">
+                  <PivotButton query={queryTerm('concern', score.questionID)} onPivot={onPivot} className={cn('font-sans', hot && 'text-status-pending')}>
+                    {name}
+                  </PivotButton>
+                  {name !== score.questionID && <> <Code>{score.questionID}</Code></>}
+                </span>
                 <div
                   className="relative h-2 rounded-full bg-muted"
                   role="meter"
                   aria-valuemin={0}
                   aria-valuemax={1}
                   aria-valuenow={score.probability}
-                  aria-label={`${score.questionID}${score.label ? ` ${score.label}` : ''} probability`}
+                  aria-label={`${name} probability`}
                 >
                   <div className={cn('h-full rounded-full', hot ? 'bg-status-pending' : 'bg-muted-foreground/40')} style={{ width: `${pct}%` }} />
                   {score.threshold !== undefined && (
@@ -511,7 +528,6 @@ function ScorerCard({ scorer, producers, onPivot, onCite }: { scorer: ScorerEval
                   {score.threshold !== undefined && <> {over ? '≥' : '<'} {formatProbability(score.threshold)}</>}
                   {hot && ' triggered'}
                 </span>
-                {score.label && <span className="col-span-3 -mt-1 pl-1 text-muted-foreground">{score.label}</span>}
               </li>
             )
           })}
@@ -522,7 +538,7 @@ function ScorerCard({ scorer, producers, onPivot, onCite }: { scorer: ScorerEval
   )
 }
 
-function AdvisorCard({ advisor, producers, onPivot, onCite }: { advisor: AdvisorEvaluation; producers: ProducerInfo[]; onPivot: (q: string) => void; onCite: (ids: string[]) => void }) {
+function AdvisorCard({ advisor, config, producers, onPivot, onCite }: { advisor: AdvisorEvaluation; config?: OversightConfig; producers: ProducerInfo[]; onPivot: (q: string) => void; onCite: (ids: string[]) => void }) {
   return (
     <div className="space-y-2 rounded-md border p-3" data-testid="advisor-card">
       <ProducerHeader role="Advisor" evaluation={advisor} producers={producers} onPivot={onPivot} />
@@ -532,9 +548,15 @@ function AdvisorCard({ advisor, producers, onPivot, onCite }: { advisor: Advisor
       {(advisor.concerns?.length ?? 0) > 0 && (
         <div className="flex flex-wrap items-center gap-1 text-xs">
           <span className="text-muted-foreground">Concerns</span>
-          {advisor.concerns!.map((concern) => (
-            <PivotButton key={concern} query={queryTerm('concern', concern)} onPivot={onPivot}>{concern}</PivotButton>
-          ))}
+          {advisor.concerns!.map((concern) => {
+            const name = concernName(concern, config)
+            return (
+              <span key={concern}>
+                <PivotButton query={queryTerm('concern', concern)} onPivot={onPivot} className="font-sans">{name}</PivotButton>
+                {name !== concern && <> <Code>{concern}</Code></>}
+              </span>
+            )
+          })}
         </div>
       )}
       {advisor.releaseRequested && (

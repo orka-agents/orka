@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 // Response shapes of the read-only oversight API (/api/v1/oversight/*). The
 // Go types in pkg/oversight/v1 are the source of truth; every string here is
 // data from the server and is rendered as plain text only.
@@ -227,6 +229,8 @@ export interface PostureCoverage {
   streamOK: number
   sensorAttributed: number
   unattributedEvents: number
+  /** Sum of effect counts across the window's actions; 0 when not reported. */
+  observedEvents?: number
   blindSpots?: Record<string, number>
 }
 
@@ -300,28 +304,59 @@ export interface ProducersResponse {
   producers: ProducerInfo[] | null
 }
 
-export interface CharterBound {
-  id: string
-  sentence: string
-  /** An operator wants this bound shown first. */
-  highlight?: boolean
-}
+// The config is parsed, not just cast: every list defaults to empty so an
+// older server that lacks a field still parses.
+export const charterBoundSchema = z.object({
+  id: z.string(),
+  sentence: z.string().default(''),
+  highlight: z.boolean().optional(),
+})
 
-export interface CharterDeclaration {
-  revision: string
-  title?: string
-  /** The charter's rules are a preview check, audit only. */
-  preview?: boolean
-  bounds: CharterBound[] | null
-}
+export const charterDeclarationSchema = z.object({
+  revision: z.string(),
+  title: z.string().optional(),
+  preview: z.boolean().optional(),
+  bounds: z.array(charterBoundSchema).nullish().transform((v) => v ?? []),
+})
 
-export interface OversightConfig {
-  queryKeys: string[]
-  maxBulkFeedback: number
+export const contextLabelSchema = z.object({ name: z.string(), value: z.string() })
+
+export const concernDeclarationSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  meaning: z.string().optional(),
+})
+
+const list = <T extends z.ZodTypeAny>(item: T) => z.array(item).nullish().transform((v) => v ?? [])
+
+export const oversightConfigSchema = z.object({
+  queryKeys: list(z.string()),
+  maxBulkFeedback: z.number().default(200),
   /** Charter revisions an operator marked as a demo (preview) charter. */
-  demoCharterRevisions?: string[] | null
-  charters?: CharterDeclaration[] | null
-}
+  demoCharterRevisions: list(z.string()),
+  charters: list(charterDeclarationSchema),
+  /** Operator-declared facts about the environment; Orka checks none of them. */
+  context: list(contextLabelSchema),
+  /** The names of the questions the monitor asks. */
+  concerns: list(concernDeclarationSchema),
+})
+
+export type CharterBound = z.infer<typeof charterBoundSchema>
+export type CharterDeclaration = z.infer<typeof charterDeclarationSchema>
+export type ContextLabel = z.infer<typeof contextLabelSchema>
+export type ConcernDeclaration = z.infer<typeof concernDeclarationSchema>
+/** The config as parsed: every list is present. */
+export type OversightConfig = z.output<typeof oversightConfigSchema>
+
+/** Posture coverage as parsed: observedEvents defaults to 0 on an older server. */
+export const postureCoverageSchema = z.object({
+  maxEvidenceLevel: z.string().optional(),
+  streamOK: z.number().default(0),
+  sensorAttributed: z.number().default(0),
+  unattributedEvents: z.number().default(0),
+  observedEvents: z.number().default(0),
+  blindSpots: z.record(z.number()).optional(),
+})
 
 /** Cheap shape check for a decision frame read off the stream. */
 export function isDecisionView(value: unknown): value is DecisionView {

@@ -5,6 +5,7 @@ import {
   draftConcernYaml,
   formatBytes,
   groupIncidents,
+  parseImageRef,
   rowSummary,
   stripSynthetic,
   strongestEvidence,
@@ -80,22 +81,48 @@ describe('oversight helpers', () => {
       charterFindings: [{ producerRef: 'rules-a', boundID: 'B0', sentence: 'x' }],
       signal: 'against_charter',
     })
-    expect(rowSummary(push, charterConfig)).toBe('sent 2.6 MB to registry.demo.svc:443 — breaks charter rule 1')
+    expect(rowSummary(push, charterConfig)).toBe('sent 2.6 MB to registry.demo.svc:443 — breaks rule 1')
     expect(strongestEvidence(push)).toBe('kernel saw 2.6 MB sent to registry.demo.svc:443')
     expect(strongestEvidence(makeDecision())).toBeUndefined()
   })
 
-  it('groups only what needs a person into incidents, most severe first', () => {
+  it('groups what needs a person into one incident per agent run, most severe first', () => {
     const pause = (id: string, seq: number) => makeDecision({ id, seq, wouldHavePaused: true, signal: 'risky' })
     const incidents = groupIncidents([
-      pause('p1', 1), pause('p2', 2), charterDecision, unavailableDecision,
+      pause('p1', 1), pause('p2', 2), { ...charterDecision, agentName: 'agent-b' }, { ...unavailableDecision, agentName: 'agent-c' },
       makeDecision({ id: 'r', signal: 'risky' }), makeDecision({ id: 'c' }),
     ], charterConfig)
-    expect(incidents.map((i) => [i.kind, i.decisions.map((d) => d.id)])).toEqual([
-      ['B1', ['build-2@1']],
-      ['would-hold', ['build-3@1']],
-      ['would-pause', ['p2', 'p1']],
+    expect(incidents.map((i) => [i.actor, i.badge, i.decisions.map((d) => d.id)])).toEqual([
+      ['agent-b', 'against_charter', ['build-2@1']],
+      ['agent-c', 'would_hold', ['build-3@1']],
+      ['agent-a', 'would_pause', ['p2', 'p1']],
     ])
-    expect(incidents[0].title).toBe('agent-a broke charter rule 2: Never write outside the workspace.')
+    expect(incidents[2].title).toBe('agent-a ran code_exec — run the tests — would pause')
+    expect(incidents[1].title).toBe('scorer unavailable — would hold · agent-c ran code_exec — run the tests')
+  })
+
+  it('makes one card of an agent run that broke two rules, in the order first broken', () => {
+    const run = (id: string, seq: number, bound: string, effects: object, taintFlags: string[] = []) => makeDecision({
+      id, seq, taskName: 'report-7', agentName: 'report-agent', signal: 'against_charter',
+      charterFindings: [{ producerRef: 'rules-a', boundID: bound, sentence: `sentence ${bound}` }],
+      action: { toolName: 'code_exec', effects, taintFlags },
+    })
+    const incidents = groupIncidents([
+      run('r1', 1, 'B2', { counts: { credential_read: 1 }, paths: [{ value: '/var/run/secrets/token', count: 1 }] }, ['credential_read']),
+      run('r2', 2, 'B1', { counts: { net_connect: 1 }, destinations: [{ value: 'sink.demo.svc:443', count: 1 }] }),
+      makeDecision({ id: 'other-run', seq: 3, taskName: 'report-8', agentName: 'report-agent', wouldHavePaused: true, signal: 'risky' }),
+    ], charterConfig)
+    expect(incidents).toHaveLength(2)
+    expect(incidents[0].decisions.map((d) => d.id)).toEqual(['r2', 'r1'])
+    expect(incidents[0].title).toBe('report-agent read a token, then sent it to sink.demo.svc — breaks rules 3 and 2')
+    expect(incidents[0].detail).toBe('Rule 3: Never send workspace data to undeclared hosts.\nRule 2: Never write outside the workspace.')
+  })
+
+  it('reads image references generically', () => {
+    expect(parseImageRef('push registry.demo.svc/prod/api:latest')).toEqual({ host: 'registry.demo.svc', path: 'prod', name: 'api', tag: 'latest' })
+    expect(parseImageRef('push oci://reg:5000/a/b/c:v1')).toEqual({ host: 'reg:5000', path: 'a/b', name: 'c', tag: 'v1' })
+    expect(parseImageRef('push localhost/app:dev')).toEqual({ host: 'localhost', path: '', name: 'app', tag: 'dev' })
+    expect(parseImageRef('vim src/app.ts:12')).toBeUndefined()
+    expect(parseImageRef('team/app:1')).toBeUndefined()
   })
 })

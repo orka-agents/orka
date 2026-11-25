@@ -8,7 +8,7 @@ export const Route = createFileRoute('/oversight')({
     q: str(search.q),
     window: str(search.window),
     decision: str(search.decision),
-    view: search.view === 'needs' || search.view === 'activity' || search.view === 'matrix' || search.view === 'monitors'
+    view: search.view === 'needs' || search.view === 'activity' || search.view === 'matrix' || search.view === 'charter' || search.view === 'monitors'
       ? search.view
       : search.view === 'stream' ? 'activity' : undefined,
   }),

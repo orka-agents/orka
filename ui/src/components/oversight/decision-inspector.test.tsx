@@ -10,7 +10,7 @@ vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import { DecisionInspector } from './decision-inspector'
-import { makeDecision, producersResponse, riskyDecision } from '@/test/fixtures/oversight'
+import { charterConfig, charterDecision, makeDecision, producersResponse, riskyDecision } from '@/test/fixtures/oversight'
 import type { DecisionView } from '@/schemas/oversight'
 
 function serve(decision: DecisionView) {
@@ -53,7 +53,7 @@ describe('DecisionInspector', () => {
     expect(within(cards[0]).getByText('qualified')).toBeInTheDocument()
     expect(within(cards[0]).getByText('(reported)')).toBeInTheDocument()
     expect(within(cards[0]).getByText('55 ms')).toBeInTheDocument()
-    const k2 = within(cards[0]).getByRole('meter', { name: /K2 exfiltration probability/ })
+    const k2 = within(cards[0]).getByRole('meter', { name: 'exfiltration probability' })
     expect(k2).toHaveAttribute('aria-valuenow', '0.91')
     expect(within(cards[0]).getByText(/0\.91 ≥ 0\.82 triggered/)).toBeInTheDocument()
     // A filtered scorer gets an explicit would-hold callout.
@@ -194,23 +194,47 @@ describe('DecisionInspector', () => {
   })
 
   it('shows the synthetic marker only in Details, labelled', async () => {
-    const decision = makeDecision({ actionNarrative: '[synthetic] Ran the test suite.' })
+    const decision = makeDecision({ actionNarrative: '[synthetic] Task build-1 ran the test suite.', action: { toolName: 'code_exec', requestSummary: '[synthetic] run the tests', effects: {} } })
     serve(decision)
     open(decision)
-    expect(await screen.findByRole('heading', { name: 'Ran the test suite.' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'agent-a ran code_exec — run the tests' })).toBeInTheDocument()
     expect(screen.getByText('synthetic record')).toBeInTheDocument()
     await openDetails()
-    expect(screen.getByText('[synthetic] Ran the test suite.')).toBeInTheDocument()
+    expect(screen.getByText('[synthetic] Task build-1 ran the test suite.')).toBeInTheDocument()
     expect(screen.getByText(/marked this record synthetic/)).toBeInTheDocument()
   })
 
   it('lists the incident\'s actions when opened from an incident', async () => {
     serve(riskyDecision)
-    const other = makeDecision({ id: 'build-1@9', seq: 9, wouldHavePaused: true, actionNarrative: 'Second download.' })
+    const other = makeDecision({ id: 'build-1@9', seq: 9, wouldHavePaused: true, action: { toolName: 'code_exec', requestSummary: 'Second download', effects: {} } })
     const { onOpenDecision } = open(riskyDecision, { related: [riskyDecision, other] })
     const list = await screen.findByRole('list', { name: 'Actions in this incident' })
     expect(within(list).getAllByRole('listitem')).toHaveLength(2)
     await userEvent.click(within(list).getByRole('button', { name: /Second download/ }))
     expect(onOpenDecision).toHaveBeenCalledWith('build-1@9')
+  })
+
+  it('shows concern names, with the code only as a muted label in Details', async () => {
+    serve(riskyDecision)
+    server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+    open(riskyDecision)
+    await openDetails()
+    const cards = await screen.findAllByTestId('scorer-card')
+    expect(await within(cards[0]).findByRole('button', { name: 'Search all time for concern:K2' })).toHaveTextContent('Data leaving the workspace')
+    expect(within(cards[0]).getByText('K2')).toHaveClass('text-muted-foreground/80')
+    const advisor = screen.getByTestId('advisor-card')
+    expect(within(advisor).getByRole('button', { name: 'Search all time for concern:K10' })).toHaveTextContent('Unrequested download')
+  })
+
+  it('names rules by number, never by bound id, outside Details', async () => {
+    serve(charterDecision)
+    server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+    open(charterDecision)
+    expect(await screen.findByTestId('charter-rule')).toHaveTextContent('Rule 2 of Workspace charter')
+    const story = screen.getByRole('region', { name: 'Story' })
+    expect(story).not.toHaveTextContent('B1')
+    await openDetails()
+    const findings = screen.getByRole('region', { name: 'Charter findings' })
+    expect(within(findings).getByRole('button', { name: 'Search all time for bound:B1' })).toHaveTextContent('Rule 2')
   })
 })

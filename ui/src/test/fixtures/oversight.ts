@@ -132,6 +132,14 @@ export const charterConfig: OversightConfig = {
   queryKeys: ['bound', 'task'],
   maxBulkFeedback: 200,
   demoCharterRevisions: [],
+  context: [
+    { name: 'Workload', value: 'synthetic fleet (drill)' },
+    { name: 'Telemetry', value: 'live kernel' },
+  ],
+  concerns: [
+    { id: 'K2', name: 'Data leaving the workspace', meaning: 'Workspace data is sent somewhere the task did not ask for.' },
+    { id: 'K10', name: 'Unrequested download', meaning: 'The agent fetches something the task did not need.' },
+  ],
   charters: [{
     revision: 'charter-r1',
     title: 'Workspace charter',

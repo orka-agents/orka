@@ -234,10 +234,11 @@ describe('OversightDashboard', () => {
       await waitFor(() => expect(within(list).getAllByRole('button')).toHaveLength(3))
       const cards = within(list).getAllByRole('button')
       // Most severe first: charter break, would hold, would pause.
-      expect(cards[0]).toHaveTextContent('agent-b broke charter rule 2: Never write outside the workspace.')
+      expect(cards[0]).toHaveTextContent('agent-b ran code_exec — run the tests — breaks rule 2')
+      expect(cards[0]).toHaveAttribute('title', 'Rule 2: Never write outside the workspace.')
       expect(cards[0].querySelectorAll('[data-badge]')).toHaveLength(1)
       expect(cards[1]).toHaveTextContent('Scorer unavailable → would hold')
-      expect(cards[2]).toHaveTextContent('agent-a pushed images to a forbidden path #3')
+      expect(cards[2]).toHaveTextContent('agent-a ran code_exec — run the tests — would pause')
       expect(cards[2]).not.toHaveTextContent('[synthetic]')
       expect(within(cards[2]).getByLabelText('3 actions')).toHaveTextContent('×3')
       expect(screen.queryByRole('table', { name: 'Oversight decisions' })).not.toBeInTheDocument()
@@ -295,25 +296,103 @@ describe('OversightDashboard', () => {
       expect(screen.queryByText('Canary basis')).not.toBeInTheDocument()
     })
 
-    it('shows the charter collapsed under the posture line, open when a rule is highlighted', async () => {
+    it('puts the cards first and the charter after them as one collapsed line', async () => {
       server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
-      serveList([])
+      serveList([{ ...charterDecision, agentName: 'agent-b' }])
       renderDashboard()
-      const toggle = await screen.findByRole('button', { name: /Demo charter · Rule 3 highlighted/ })
-      expect(toggle).toHaveAttribute('aria-expanded', 'true')
-      expect(screen.getByRole('list', { name: 'Rules of Workspace charter' })).toBeInTheDocument()
+      const toggle = await screen.findByRole('button', { name: /Demo charter · Rule 3 highlighted · 1 broken/ })
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      const list = await screen.findByRole('list', { name: 'Incidents that need you' })
+      expect(list.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       await userEvent.click(toggle)
-      expect(screen.queryByRole('list', { name: 'Rules of Workspace charter' })).not.toBeInTheDocument()
+      expect(screen.getByRole('list', { name: 'Rules of Workspace charter' })).toBeInTheDocument()
     })
 
-    it('keeps the charter collapsed when nothing is highlighted', async () => {
-      const plain = { ...charterConfig, charters: [{ ...charterConfig.charters![0], preview: false, bounds: [{ id: 'B1', sentence: 'One rule.' }] }] }
-      server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(plain)))
+    it('shows the funnel from kernel events to what needs you', async () => {
+      server.use(http.get('/api/v1/oversight/posture', () => HttpResponse.json({
+        ...makePosture(), basis: { ...makePosture().basis, actions: 1314, coverage: { ...makePosture().basis.coverage, observedEvents: 12408 } },
+      })))
+      serveList([pause(1)])
+      renderDashboard()
+      await waitFor(() => expect(screen.getByTestId('funnel-strip')).toHaveTextContent('12,408 kernel events → 1,314 actions → 1 need you'))
+    })
+
+    it('omits the kernel step when no events were observed, or from an older server', async () => {
+      server.use(http.get('/api/v1/oversight/posture', () => HttpResponse.json(makePosture())))
       serveList([])
       renderDashboard()
-      const toggle = await screen.findByRole('button', { name: /Workspace charter · 1 rules/ })
-      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(await screen.findByTestId('funnel-strip')).toHaveTextContent(/^10 actions → 0 need you/)
     })
+  })
+
+  describe('charter view', () => {
+    beforeEach(() => {
+      server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+    })
+
+    it('opens from the posture line, which names the most-broken rule', async () => {
+      serveList([{ ...charterDecision, agentName: 'agent-b' }, { ...charterDecision, id: 'build-2@2', seq: 4, agentName: 'agent-b' }])
+      const { onSearchChange } = renderDashboard()
+      const item = await screen.findByRole('button', { name: 'Charter: rule 2 broken ×2 · 1 of 3 rules broken' })
+      await userEvent.click(item)
+      expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ view: 'charter' }))
+    })
+
+    it('says no rule is broken when none is', async () => {
+      serveList([])
+      renderDashboard()
+      expect(await screen.findByRole('button', { name: 'Charter: no rule broken · 0 of 3 rules broken' })).toBeInTheDocument()
+    })
+
+    it('lists every rule and opens the breaking actions in the same window', async () => {
+      serveList([])
+      server.use(http.get('/api/v1/oversight/decisions/groups', () => HttpResponse.json({ namespace: 'default', by: 'agent', groups: [], searched: 2 })))
+      const { onSearchChange } = renderDashboard({ view: 'charter' })
+      const rules = await screen.findByRole('list', { name: 'Rules of Workspace charter' })
+      expect(within(rules).getAllByRole('listitem')).toHaveLength(3)
+      expect(within(rules).getAllByRole('listitem')[0]).toHaveAttribute('data-highlight', 'true')
+      await userEvent.click(await screen.findByRole('button', { name: 'Show the 2 actions that broke rule 1 in the last 24h' }))
+      expect(onSearchChange).toHaveBeenLastCalledWith({ q: 'bound:B0', window: '24h', decision: undefined, view: 'activity' })
+    })
+
+    it('opens from a charter alert, in the toast and in the alerts list', async () => {
+      serveList([makeDecision()])
+      server.use(http.get('/api/v1/oversight/decisions/stream', () => new HttpResponse(
+        `event: ready\ndata: {}\n\nid: 20\nevent: decision\ndata: ${JSON.stringify({ ...charterDecision, id: 'x@1', seq: 20 })}\n\n`,
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      )))
+      const { onSearchChange } = renderDashboard()
+      await waitFor(() => expect(toastMock).toHaveBeenCalledTimes(1))
+      toastMock.mock.calls[0][1].cancel.onClick()
+      expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ view: 'charter' }))
+      await userEvent.click(screen.getByRole('button', { name: 'Alerts, 1 unread' }))
+      await userEvent.click(await screen.findByRole('button', { name: 'Rule 2' }))
+      expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ view: 'charter' }))
+    })
+  })
+
+  it('shows declared context as pills, and nothing when none is declared', async () => {
+    server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+    serveList([])
+    const { unmount } = render(<OversightDashboard search={{}} onSearchChange={() => {}} />)
+    const pills = await screen.findByRole('list', { name: 'Declared environment' })
+    const pill = within(pills).getByText('Workload: synthetic fleet (drill)')
+    expect(pill).toHaveAttribute('title', 'Declared by the operator, not verified by Orka')
+    unmount()
+    server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json({ queryKeys: [], maxBulkFeedback: 200 })))
+    render(<OversightDashboard search={{}} onSearchChange={() => {}} />)
+    await screen.findByTestId('posture-line')
+    expect(screen.queryByRole('list', { name: 'Declared environment' })).not.toBeInTheDocument()
+  })
+
+  it('lists what the monitor asks on the Monitors tab', async () => {
+    server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+    serveList([])
+    renderDashboard({ view: 'monitors' })
+    const panel = await screen.findByRole('region', { name: 'What the monitor asks' })
+    expect(await within(panel).findByText('Data leaving the workspace')).toBeInTheDocument()
+    expect(within(panel).getByText(/Workspace data is sent somewhere the task did not ask for/)).toBeInTheDocument()
+    expect(panel).not.toHaveTextContent('K2')
   })
 
   it('puts operator material on the Monitors tab', async () => {

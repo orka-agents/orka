@@ -4,31 +4,35 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useOversightConfig, useOversightGroups } from '@/hooks/use-oversight'
 import { charterName, isDemoCharter, orderedBounds, queryTerm, type NumberedBound } from '@/lib/oversight'
 import { cn } from '@/lib/utils'
-import { PivotButton } from './signal'
 
-function BoundCount({ id, window }: { id: string; window: string }) {
+function BoundCount({ id, number, window, onOpen }: { id: string; number: number; window: string; onOpen: (id: string) => void }) {
   const { data, isLoading, error } = useOversightGroups(queryTerm('bound', id), 'agent', window, true)
   if (isLoading) return <span className="text-xs text-muted-foreground">counting…</span>
   if (error || !data) return <span className="text-xs text-muted-foreground">count unavailable</span>
   const n = data.searched
   return (
-    <span className={cn('text-xs tabular-nums', n > 0 ? 'font-medium text-status-failed' : 'text-muted-foreground')} data-testid={`bound-count-${id}`}>
+    <button
+      type="button"
+      onClick={() => onOpen(id)}
+      aria-label={`Show the ${data.truncated ? 'at least ' : ''}${n} ${n === 1 ? 'action' : 'actions'} that broke rule ${number} in the last ${window}`}
+      className={cn('text-xs tabular-nums underline-offset-2 decoration-dotted hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none', n > 0 ? 'font-medium text-status-failed' : 'text-muted-foreground')}
+      data-testid={`bound-count-${id}`}
+    >
       {data.truncated ? 'at least ' : ''}{n} {n === 1 ? 'action' : 'actions'} broke it in the last {window}
-    </span>
+    </button>
   )
 }
 
-function BoundItem({ bound, window, onPivot }: { bound: NumberedBound; window: string; onPivot: (q: string) => void }) {
+function BoundItem({ bound, window, onOpenBound }: { bound: NumberedBound; window: string; onOpenBound: (id: string) => void }) {
   return (
     <li
       data-highlight={bound.highlight || undefined}
       className={cn('space-y-1 rounded-md border p-2.5', bound.highlight && 'border-foreground/60 bg-accent')}
     >
       <div className="flex flex-wrap items-center gap-1.5 text-xs">
-        <span className="font-semibold">Rule {bound.number}</span>
-        <PivotButton query={queryTerm('bound', bound.id)} onPivot={onPivot}>{bound.id}</PivotButton>
+        <span className="font-semibold" title={bound.sentence}>Rule {bound.number}</span>
         {bound.highlight && <span className="rounded-full border border-foreground/40 px-1.5 font-medium">highlighted</span>}
-        <BoundCount id={bound.id} window={window} />
+        <BoundCount id={bound.id} number={bound.number} window={window} onOpen={onOpenBound} />
       </div>
       <blockquote className="border-l-2 pl-2 text-sm whitespace-pre-wrap break-words">{bound.sentence}</blockquote>
     </li>
@@ -36,7 +40,13 @@ function BoundItem({ bound, window, onPivot }: { bound: NumberedBound; window: s
 }
 
 /** The declared charters and their bounds, quoted as written. Watched, not enforced. */
-export function CharterPanel({ window = '24h', onPivot }: { window?: string; onPivot: (q: string) => void }) {
+export function CharterPanel({ window = '24h', onPivot, onOpenBound }: {
+  window?: string
+  onPivot: (q: string) => void
+  /** Opens the actions that broke one bound; defaults to an all-time search. */
+  onOpenBound?: (id: string) => void
+}) {
+  const openBound = onOpenBound ?? ((id: string) => onPivot(queryTerm('bound', id)))
   const { data: config, isLoading, error } = useOversightConfig()
   const charters = config?.charters ?? []
   if (isLoading) return <Skeleton className="h-24 w-full" />
@@ -61,13 +71,14 @@ export function CharterPanel({ window = '24h', onPivot }: { window?: string; onP
                 <span className="rounded-full border border-status-pending/50 px-2 py-0.5 text-xs text-status-pending">
                   {isDemoCharter(charter, config) ? 'Demo charter: preview rule check, audit only' : 'Watched, not enforced'}
                 </span>
+                <span className="text-xs text-muted-foreground">audit mode · {charter.bounds?.length ?? 0} rules</span>
               </div>
               {(charter.bounds?.length ?? 0) === 0 ? (
                 <p className="text-xs text-muted-foreground">This charter declares no rules.</p>
               ) : (
                 <ol className="space-y-2" aria-label={`Rules of ${charterName(charter)}`}>
                   {orderedBounds(charter).map((bound) => (
-                    <BoundItem key={bound.id} bound={bound} window={window} onPivot={onPivot} />
+                    <BoundItem key={bound.id} bound={bound} window={window} onOpenBound={openBound} />
                   ))}
                 </ol>
               )}

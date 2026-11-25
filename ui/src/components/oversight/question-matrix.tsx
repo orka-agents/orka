@@ -1,5 +1,6 @@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatProbability, matrixCell, questionColumns } from '@/lib/oversight'
+import { useOversightConfig } from '@/hooks/use-oversight'
+import { concernName, formatProbability, matrixCell, questionColumns } from '@/lib/oversight'
 import { cn } from '@/lib/utils'
 import type { DecisionView } from '@/schemas/oversight'
 import { SignalBadge } from './signal'
@@ -9,7 +10,11 @@ import { SignalBadge } from './signal'
  * Cells stay muted unless the score was triggered or at its threshold.
  */
 export function QuestionMatrix({ decisions, onOpen }: { decisions: DecisionView[]; onOpen: (id: string) => void }) {
+  const { data: config } = useOversightConfig()
   const columns = questionColumns(decisions)
+  const labels = new Map<string, string | undefined>()
+  for (const d of decisions) for (const sc of d.scorers ?? []) for (const score of sc.scores ?? []) if (score.label && !labels.has(score.questionID)) labels.set(score.questionID, score.label)
+  const nameOf = (id: string) => concernName(id, config, labels.get(id))
   if (decisions.length === 0) return null
   if (columns.length === 0) {
     return <p className="py-6 text-center text-sm text-muted-foreground">No scorer asked any question about these actions.</p>
@@ -21,7 +26,7 @@ export function QuestionMatrix({ decisions, onOpen }: { decisions: DecisionView[
           <TableHead>Action</TableHead>
           <TableHead>Signal</TableHead>
           {columns.map((id) => (
-            <TableHead key={id} className="text-center font-mono">{id}</TableHead>
+            <TableHead key={id} className="text-center">{nameOf(id)}</TableHead>
           ))}
         </TableRow>
       </TableHeader>
@@ -47,8 +52,8 @@ export function QuestionMatrix({ decisions, onOpen }: { decisions: DecisionView[
               const empty = cell.probability === undefined && !cell.advisorNamed
               const text = cell.probability !== undefined ? formatProbability(cell.probability) : cell.advisorNamed ? 'named' : '·'
               const description = empty
-                ? `${id}: not asked`
-                : `${id}: ${text}${cell.threshold !== undefined ? ` against threshold ${formatProbability(cell.threshold)}` : ''}${cell.triggered ? ', triggered' : ''}`
+                ? `${nameOf(id)}: not asked`
+                : `${nameOf(id)}: ${text}${cell.threshold !== undefined ? ` against threshold ${formatProbability(cell.threshold)}` : ''}${cell.triggered ? ', triggered' : ''}`
               return (
                 <TableCell
                   key={id}

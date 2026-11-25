@@ -34,7 +34,7 @@ export function NeedsYouList({ incidents, onOpen }: { incidents: Incident[]; onO
               <button
                 type="button"
                 onClick={() => onOpen(incident)}
-                title={rowTooltip(newest)}
+                title={incident.detail ?? rowTooltip(newest)}
                 data-incident={incident.kind}
                 className={cn(
                   'flex w-full items-center gap-3 rounded-md border px-3 py-2 text-left hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none',

@@ -8,7 +8,7 @@ import { useOversightAlerts } from '@/stores/oversight-alerts'
 import { useUIStore } from '@/stores/ui'
 
 /** The session's charter alerts, with an unread count. Read marks stay in this browser. */
-export function AlertsButton({ onOpenDecision }: { onOpenDecision: (id: string) => void }) {
+export function AlertsButton({ onOpenDecision, onOpenCharter }: { onOpenDecision: (id: string) => void; onOpenCharter?: () => void }) {
   const namespace = useUIStore((s) => s.namespace)
   const all = useOversightAlerts((s) => s.alerts)
   const markAllRead = useOversightAlerts((s) => s.markAllRead)
@@ -42,7 +42,21 @@ export function AlertsButton({ onOpenDecision }: { onOpenDecision: (id: string) 
                   <div className="min-w-0 space-y-0.5 text-sm">
                     <p>
                       {!alert.read && <span className="sr-only">Unread: </span>}
-                      <span className="font-medium">{alert.rule}</span>
+                      {onOpenCharter ? (
+                        <button
+                          type="button"
+                          title={alert.sentence}
+                          className="font-medium underline-offset-2 decoration-dotted hover:underline"
+                          onClick={() => {
+                            setOpen(false)
+                            onOpenCharter()
+                          }}
+                        >
+                          {alert.rule}
+                        </button>
+                      ) : (
+                        <span className="font-medium">{alert.rule}</span>
+                      )}
                       {alert.charter && <span className="text-muted-foreground"> of {alert.charter}</span>}
                       {' '}broken by <span className="font-mono text-xs">{alert.agentName || alert.taskName}</span>, would pause (audit mode)
                     </p>

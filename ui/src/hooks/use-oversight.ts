@@ -10,12 +10,12 @@ import type {
   DecisionView,
   FeedbackResponse,
   GroupsResponse,
-  OversightConfig,
   OversightFeedbackLabel,
   PostureResponse,
   ProducersResponse,
   SimilarResponse,
 } from '@/schemas/oversight'
+import { oversightConfigSchema, postureCoverageSchema } from '@/schemas/oversight'
 
 const BASE = '/oversight'
 
@@ -62,7 +62,7 @@ export function useOversightConfig() {
   return useQuery({
     queryKey: ['oversight', 'config', namespace],
     enabled: Boolean(token),
-    queryFn: () => api.get<OversightConfig>(`${BASE}/config`, { namespace }),
+    queryFn: async () => oversightConfigSchema.parse(await api.get<unknown>(`${BASE}/config`, { namespace })),
     retry: retryOversight,
     staleTime: 5 * 60 * 1000,
   })
@@ -74,7 +74,11 @@ export function useOversightPosture(window = '24h', refetchInterval: number | fa
   return useQuery({
     queryKey: ['oversight', 'posture', namespace, window],
     enabled: Boolean(token),
-    queryFn: () => api.get<PostureResponse>(`${BASE}/posture`, { namespace, window }),
+    queryFn: async () => {
+      const posture = await api.get<PostureResponse>(`${BASE}/posture`, { namespace, window })
+      const coverage = postureCoverageSchema.safeParse(posture?.basis?.coverage ?? {})
+      return coverage.success ? { ...posture, basis: { ...posture.basis, coverage: coverage.data } } : posture
+    },
     retry: retryOversight,
     refetchInterval: pollOversight(refetchInterval),
   })
