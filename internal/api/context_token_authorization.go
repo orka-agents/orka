@@ -1805,6 +1805,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 		{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 		{role: "target-write", ref: workspace.PublicationCredentialRef},
 		{role: "forge", ref: workspace.ForgeCredentialRef},
+		{role: "commit-sign", ref: workspace.CommitSigningCredentialRef},
 	}
 	hasCredential := false
 	for _, credential := range credentials {

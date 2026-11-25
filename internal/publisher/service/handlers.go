@@ -235,6 +235,12 @@ func (s *Server) handlePublicationPrepare(writer http.ResponseWriter, request *h
 			if err := validateCredentialReference(value.SourceCredentialRef, CredentialHTTPExtraHeader); err != nil {
 				return value.Metadata, nil, err
 			}
+			if err := validateCredentialReference(value.SigningCredentialRef, CredentialSSHSigningKey); err != nil {
+				return value.Metadata, nil, err
+			}
+			if _, _, err := publisher.ValidateCommitIdentity(value.Request.CommitAuthorName, value.Request.CommitAuthorEmail); err != nil {
+				return value.Metadata, nil, invalidRequest("commit identity is invalid", err)
+			}
 			return value.Metadata, value, nil
 		},
 		func(ctx context.Context, metadata OperationMetadata, digest string, _ journalRecord, decoded any) (int, any, error) {
@@ -248,6 +254,19 @@ func (s *Server) handlePublicationPrepare(writer http.ResponseWriter, request *h
 				return 0, nil, err
 			}
 			value.Request.DeltaArtifact = delta
+			if value.SigningCredentialRef != nil {
+				signingKey, clearSigningKey, signCredErr := s.credentials.signingKeyCredential(ctx, OperationPublicationPrepare, metadata, value.SigningCredentialRef)
+				if signCredErr != nil {
+					return 0, nil, signCredErr
+				}
+				defer clearSigningKey()
+				fingerprint, fpErr := publisher.SSHSigningKeyFingerprint(signingKey)
+				if fpErr != nil {
+					return 0, nil, apiError(ErrCredential, "invalid_credential_ref", "signing key credential is invalid", 400, false, nil)
+				}
+				value.Request.SigningKey = signingKey
+				value.Request.SigningKeyFingerprint = fingerprint
+			}
 			credential, runtime, err := s.publisherFor(ctx, OperationPublicationPrepare, metadata, value.Request.Source, value.SourceCredentialRef)
 			if err != nil {
 				return 0, nil, err

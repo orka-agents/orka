@@ -86,11 +86,13 @@ type CredentialRole string
 const (
 	CredentialHTTPExtraHeader CredentialKind = "http-extra-header"
 	CredentialForgeToken      CredentialKind = "forge-token"
+	CredentialSSHSigningKey   CredentialKind = "ssh-signing-key"
 
 	CredentialRoleSourceRead  CredentialRole = "SourceRead"
 	CredentialRoleTargetRead  CredentialRole = "TargetRead"
 	CredentialRoleTargetWrite CredentialRole = "TargetWrite"
 	CredentialRoleForge       CredentialRole = "Forge"
+	CredentialRoleCommitSign  CredentialRole = "CommitSign"
 )
 
 // CredentialReference names a mounted file below the configured credential
@@ -160,10 +162,11 @@ type PublicationPreflightResponse struct {
 }
 
 type PublicationPrepareRequest struct {
-	Metadata            OperationMetadata           `json:"metadata"`
-	SourceCredentialRef *CredentialReference        `json:"sourceCredentialRef,omitempty"`
-	DeltaArtifact       harnessv2.ArtifactReference `json:"deltaArtifact"`
-	Request             publisher.PrepareRequest    `json:"request"`
+	Metadata             OperationMetadata           `json:"metadata"`
+	SourceCredentialRef  *CredentialReference        `json:"sourceCredentialRef,omitempty"`
+	SigningCredentialRef *CredentialReference        `json:"signingCredentialRef,omitempty"`
+	DeltaArtifact        harnessv2.ArtifactReference `json:"deltaArtifact"`
+	Request              publisher.PrepareRequest    `json:"request"`
 }
 
 // PreparedPublication deliberately omits the publisher's local BundlePath.

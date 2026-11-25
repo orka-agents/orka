@@ -387,6 +387,11 @@ func validateRepositoryMonitorCredentialRoleRefs(spec corev1alpha1.RepositoryMon
 		}
 		seen[name] = credential.field
 	}
+	if signingName := repositoryMonitorCredentialRefName(spec.Commit.SigningCredentialRef); signingName != "" {
+		if previous := seen[signingName]; previous != "" {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s and spec.commit.signingCredentialRef must reference distinct Secrets", previous))
+		}
+	}
 	return nil
 }
 
@@ -636,6 +641,7 @@ func (h *Handlers) authorizeContextTokenRepositoryMonitorCredentialSecrets(c fib
 		{role: "publicationRead", field: publicationReadCredentialRefPath, ref: spec.PublicationReadCredentialRef},
 		{role: "publication", field: publicationCredentialRefPath, ref: spec.PublicationCredentialRef},
 		{role: "forge", field: forgeCredentialRefPath, ref: spec.ForgeCredentialRef},
+		{role: "commitSigning", field: "spec.commit.signingCredentialRef", ref: spec.Commit.SigningCredentialRef},
 	}
 	for _, credential := range refs {
 		name := repositoryMonitorCredentialRefName(credential.ref)

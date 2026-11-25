@@ -26,6 +26,7 @@ type persistedPublicationRecoveryContext struct {
 	targetReadCredential *publisherservice.CredentialReference
 	writeCredential      *publisherservice.CredentialReference
 	forgeCredential      *publisherservice.CredentialReference
+	signingCredential    *publisherservice.CredentialReference
 	claim                *store.BranchClaim
 	artifact             harnessv2.ArtifactReference
 }
@@ -131,6 +132,7 @@ func (d *ACPDispatcher) loadPersistedPublicationRecovery(
 		targetReadCredential: publisherCredentialReference(workspace.PublicationReadCredentialRef, publisherservice.CredentialRoleTargetRead),
 		writeCredential:      publisherCredentialReference(workspace.PublicationCredentialRef, publisherservice.CredentialRoleTargetWrite),
 		forgeCredential:      publisherForgeCredentialReference(workspace.ForgeCredentialRef),
+		signingCredential:    publisherCommitSigningCredentialReference(workspace.CommitSigningCredentialRef),
 		claim:                claim,
 		artifact: harnessv2.ArtifactReference{
 			ArtifactID: harnessv2.ArtifactID(publication.ArtifactID), Digest: publication.ArtifactDigest,
@@ -167,17 +169,24 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 		return nil, err
 	}
 	operation := publicationOperationID("prepare", recovery.task)
+	commitAuthorName, commitAuthorEmail, err := taskPublicationCommitIdentity(recovery.task)
+	if err != nil {
+		return nil, err
+	}
 	request := publisherservice.PublicationPrepareRequest{
-		Metadata:            publisherservice.OperationMetadata{Namespace: recovery.task.Namespace, PublicationID: publication.ID, OperationID: operation},
-		SourceCredentialRef: recovery.sourceCredential,
-		DeltaArtifact:       recovery.artifact,
+		Metadata:             publisherservice.OperationMetadata{Namespace: recovery.task.Namespace, PublicationID: publication.ID, OperationID: operation},
+		SourceCredentialRef:  recovery.sourceCredential,
+		SigningCredentialRef: recovery.signingCredential,
+		DeltaArtifact:        recovery.artifact,
 		Request: publisher.PrepareRequest{
 			PublicationID: publication.ID, PublicationGeneration: publication.Generation, OperationID: operation,
 			Source: recovery.source, SourceRef: publication.SourceRef, Target: recovery.target, TargetRef: publication.TargetRef,
 			BranchClaimGeneration: publication.BranchClaimGeneration, BaselineOID: publication.SourceBaselineSHA,
 			RemoteBefore: publisherRemoteRef(publication.Baseline), DeltaArtifactDigest: publication.ArtifactDigest,
-			RelativeRoot:  strings.TrimSpace(recovery.workspace.SubPath),
-			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
+			RelativeRoot:      strings.TrimSpace(recovery.workspace.SubPath),
+			CommitAuthorName:  commitAuthorName,
+			CommitAuthorEmail: commitAuthorEmail,
+			CommitMessage:     publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}
 	identity := store.ExternalEffectIdentity{

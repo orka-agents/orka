@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"os"
@@ -116,6 +117,73 @@ func (m *credentialManager) forgeCredential(ctx context.Context, parent Operatio
 		return operationCredential{}, apiError(ErrCredential, "credential_unavailable", "operation credential could not be materialized", 503, true, err)
 	}
 	return operationCredential{filePath: path, cleanup: cleanup}, nil
+}
+
+// signingKeyCredential fetches an operation-scoped OpenSSH private key in
+// memory only (never written to disk) and returns its PEM bytes plus a cleanup
+// closure that zeroes the key buffer.
+func (m *credentialManager) signingKeyCredential(ctx context.Context, parent Operation, metadata OperationMetadata, reference *CredentialReference) ([]byte, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, func() {}, err
+	}
+	if reference == nil {
+		return nil, func() {}, nil
+	}
+	if err := validateCredentialReference(reference, CredentialSSHSigningKey); err != nil {
+		return nil, func() {}, err
+	}
+	if m.provider == nil {
+		return nil, func() {}, apiError(ErrCredential, "credential_unavailable", "credential provider is not configured", 503, false, nil)
+	}
+	raw, _, err := m.provider.Read(ctx, CredentialMaterialRequest{ParentOperation: parent, Metadata: metadata, Reference: *reference})
+	if err != nil {
+		return nil, func() {}, err
+	}
+	// Broker transport base64-encodes multi-line PEM keys into a single line;
+	// local-file providers return the PEM directly.
+	var keyPEM []byte
+	if bytes.Contains(raw, []byte("-----BEGIN ")) {
+		keyPEM = raw
+	} else {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+		clear(raw)
+		if decodeErr != nil || len(bytes.TrimSpace(decoded)) == 0 {
+			clear(decoded)
+			return nil, func() {}, apiError(ErrCredential, "invalid_credential_ref", "signing key credential is invalid", 400, false, nil)
+		}
+		keyPEM = decoded
+	}
+	if _, _, parseErr := publisher.ParseSSHSigningKey(keyPEM); parseErr != nil {
+		clear(keyPEM)
+		return nil, func() {}, apiError(ErrCredential, "invalid_credential_ref", "signing key credential must be an unencrypted OpenSSH private key", 400, false, nil)
+	}
+	return keyPEM, func() { clear(keyPEM) }, nil
+}
+
+func readMultilineCredentialFile(root, name string, limit int64) ([]byte, error) {
+	if root == "" {
+		return nil, apiError(ErrCredential, "credential_unavailable", "credential storage is not configured", 503, false, nil)
+	}
+	if !credentialNamePattern.MatchString(name) {
+		return nil, apiError(ErrCredential, "invalid_credential_ref", "credential reference name is invalid", 400, false, nil)
+	}
+	path := filepath.Join(root, name)
+	if filepath.Dir(path) != root {
+		return nil, apiError(ErrCredential, "invalid_credential_ref", "credential reference escapes the configured root", 400, false, nil)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > limit || info.Mode().Perm()&0o077 != 0 {
+		return nil, apiError(ErrCredential, "credential_unavailable", "credential file is missing or unsafe", 503, false, err)
+	}
+	value, err := os.ReadFile(path)
+	if err != nil {
+		return nil, apiError(ErrCredential, "credential_unavailable", "credential file could not be read", 503, true, err)
+	}
+	if len(bytes.TrimSpace(value)) == 0 || bytes.ContainsAny(value, "\x00") {
+		clear(value)
+		return nil, apiError(ErrCredential, "invalid_credential_ref", "credential file is empty or contains NUL bytes", 400, false, nil)
+	}
+	return value, nil
 }
 
 func readCredentialFile(root, name string, limit int64) ([]byte, error) {

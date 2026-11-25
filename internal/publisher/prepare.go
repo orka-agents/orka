@@ -119,23 +119,53 @@ func (p *Publisher) Prepare(ctx context.Context, request PrepareRequest) (Prepar
 	if treeOID == baselineTreeOID {
 		return PreparedPublication{}, operationError(ErrUnsupportedDelta, "prepare publication", "delta does not change the Git tree (for example, it only changes empty directories)", nil)
 	}
-	commitEnv := map[string]string{
-		"GIT_AUTHOR_NAME":     CommitAuthorName,
-		"GIT_AUTHOR_EMAIL":    CommitAuthorEmail,
-		"GIT_AUTHOR_DATE":     gitDate(request.CommitTimestamp),
-		"GIT_COMMITTER_NAME":  CommitAuthorName,
-		"GIT_COMMITTER_EMAIL": CommitAuthorEmail,
-		"GIT_COMMITTER_DATE":  gitDate(request.CommitTimestamp),
-	}
-	committed, err := p.runGit(ctx, box, box.root, commitEnv, []byte(request.CommitMessage), "--git-dir="+repositoryPath, "commit-tree", treeOID, "-p", request.BaselineOID, "-F", "-")
+	authorName, authorEmail, err := ValidateCommitIdentity(request.CommitAuthorName, request.CommitAuthorEmail)
 	if err != nil {
-		return PreparedPublication{}, fmt.Errorf("create deterministic Orka commit: %w", err)
+		return PreparedPublication{}, err
 	}
-	commitOID := strings.TrimSpace(committed.stdout)
+	var commitOID string
+	if len(request.SigningKey) > 0 {
+		signer, fingerprint, signErr := ParseSSHSigningKey(request.SigningKey)
+		if signErr != nil {
+			return PreparedPublication{}, signErr
+		}
+		if request.SigningKeyFingerprint != "" && request.SigningKeyFingerprint != fingerprint {
+			return PreparedPublication{}, invalid("commit signing key", "signing key fingerprint does not match private key")
+		}
+		commitDate := gitCommitObjectDate(request.CommitTimestamp)
+		unsignedPayload := buildUnsignedCommitObject(treeOID, request.BaselineOID, authorName, authorEmail, commitDate, request.CommitMessage)
+		armoredSig, signErr := SignGitCommitPayload(signer, unsignedPayload)
+		if signErr != nil {
+			return PreparedPublication{}, fmt.Errorf("sign deterministic Orka commit: %w", signErr)
+		}
+		if verifyErr := VerifyGitCommitSignature(signer.PublicKey(), unsignedPayload, armoredSig); verifyErr != nil {
+			return PreparedPublication{}, operationError(ErrPreparedArtifactCorrupt, "verify prepared commit signature", "", verifyErr)
+		}
+		signedPayload := buildSignedCommitObject(treeOID, request.BaselineOID, authorName, authorEmail, commitDate, armoredSig, request.CommitMessage)
+		committed, hashErr := p.runGit(ctx, box, box.root, nil, signedPayload, "--git-dir="+repositoryPath, "hash-object", "-t", "commit", "-w", "--stdin")
+		if hashErr != nil {
+			return PreparedPublication{}, fmt.Errorf("create signed deterministic Orka commit: %w", hashErr)
+		}
+		commitOID = strings.TrimSpace(committed.stdout)
+	} else {
+		commitEnv := map[string]string{
+			"GIT_AUTHOR_NAME":     authorName,
+			"GIT_AUTHOR_EMAIL":    authorEmail,
+			"GIT_AUTHOR_DATE":     gitDate(request.CommitTimestamp),
+			"GIT_COMMITTER_NAME":  authorName,
+			"GIT_COMMITTER_EMAIL": authorEmail,
+			"GIT_COMMITTER_DATE":  gitDate(request.CommitTimestamp),
+		}
+		committed, commitErr := p.runGit(ctx, box, box.root, commitEnv, []byte(request.CommitMessage), "--git-dir="+repositoryPath, "commit-tree", treeOID, "-p", request.BaselineOID, "-F", "-")
+		if commitErr != nil {
+			return PreparedPublication{}, fmt.Errorf("create deterministic Orka commit: %w", commitErr)
+		}
+		commitOID = strings.TrimSpace(committed.stdout)
+	}
 	if err := validateObjectID("prepared commit", commitOID); err != nil {
 		return PreparedPublication{}, err
 	}
-	if err := p.verifyPreparedCommit(ctx, box, repositoryPath, commitOID, treeOID, request); err != nil {
+	if err := p.verifyPreparedCommit(ctx, box, repositoryPath, commitOID, treeOID, authorName, authorEmail, request); err != nil {
 		return PreparedPublication{}, err
 	}
 	bundleRef := "refs/orka/publications/" + strings.TrimPrefix(digestBytes([]byte(request.PublicationID)), DigestPrefix)
@@ -229,10 +259,33 @@ func validatePrepareRequest(request PrepareRequest) error {
 	if request.CommitTimestamp.Location() != time.UTC || request.CommitTimestamp.Nanosecond() != 0 || request.CommitTimestamp.IsZero() {
 		return invalid("commit timestamp", "must be a non-zero whole-second UTC timestamp")
 	}
+	if _, _, err := ValidateCommitIdentity(request.CommitAuthorName, request.CommitAuthorEmail); err != nil {
+		return err
+	}
+	if len(request.SigningKey) > 0 {
+		_, fingerprint, err := ParseSSHSigningKey(request.SigningKey)
+		if err != nil {
+			return err
+		}
+		if request.SigningKeyFingerprint != "" && request.SigningKeyFingerprint != fingerprint {
+			return invalid("commit signing key", "signing key fingerprint does not match private key")
+		}
+	}
 	return nil
 }
 
 func prepareRequestDigest(request PrepareRequest) (string, error) {
+	authorName, authorEmail, err := ValidateCommitIdentity(request.CommitAuthorName, request.CommitAuthorEmail)
+	if err != nil {
+		return "", err
+	}
+	fingerprint := request.SigningKeyFingerprint
+	if fingerprint == "" && len(request.SigningKey) > 0 {
+		fingerprint, err = SSHSigningKeyFingerprint(request.SigningKey)
+		if err != nil {
+			return "", err
+		}
+	}
 	return digestCanonical(struct {
 		Domain                string     `json:"domain"`
 		PublicationID         string     `json:"publicationId"`
@@ -250,13 +303,15 @@ func prepareRequestDigest(request PrepareRequest) (string, error) {
 		CommitAuthorEmail     string     `json:"commitAuthorEmail"`
 		CommitMessage         string     `json:"commitMessage"`
 		CommitTimestamp       time.Time  `json:"commitTimestamp"`
+		SigningKeyFingerprint string     `json:"signingKeyFingerprint,omitempty"`
 	}{
 		Domain: "orka.publisher.prepare.v1", PublicationID: request.PublicationID,
 		PublicationGeneration: request.PublicationGeneration, Source: request.Source, SourceRef: request.SourceRef,
 		Target: request.Target, TargetRef: request.TargetRef, BranchClaimGeneration: request.BranchClaimGeneration,
 		BaselineOID: request.BaselineOID, RemoteBefore: request.RemoteBefore,
-		DeltaArtifactDigest: request.DeltaArtifactDigest, RelativeRoot: request.RelativeRoot, CommitAuthorName: CommitAuthorName,
-		CommitAuthorEmail: CommitAuthorEmail, CommitMessage: request.CommitMessage, CommitTimestamp: request.CommitTimestamp,
+		DeltaArtifactDigest: request.DeltaArtifactDigest, RelativeRoot: request.RelativeRoot, CommitAuthorName: authorName,
+		CommitAuthorEmail: authorEmail, CommitMessage: request.CommitMessage, CommitTimestamp: request.CommitTimestamp,
+		SigningKeyFingerprint: fingerprint,
 	})
 }
 
@@ -394,7 +449,7 @@ func (p *Publisher) applyDelta(ctx context.Context, box *sandbox, repositoryPath
 	return nil
 }
 
-func (p *Publisher) verifyPreparedCommit(ctx context.Context, box *sandbox, repositoryPath, commitOID, treeOID string, request PrepareRequest) error {
+func (p *Publisher) verifyPreparedCommit(ctx context.Context, box *sandbox, repositoryPath, commitOID, treeOID, authorName, authorEmail string, request PrepareRequest) error {
 	resolvedTree, err := p.revParse(ctx, box, repositoryPath, commitOID+"^{tree}")
 	if err != nil || resolvedTree != treeOID {
 		return operationError(ErrPreparedArtifactCorrupt, "verify prepared commit tree", fmt.Sprintf("expected %s, resolved %s", treeOID, resolvedTree), err)
@@ -408,10 +463,16 @@ func (p *Publisher) verifyPreparedCommit(ctx context.Context, box *sandbox, repo
 		return operationError(ErrPreparedArtifactCorrupt, "verify prepared commit identity", "", err)
 	}
 	parts := strings.SplitN(identity.stdout, "\x00", 7)
-	if len(parts) != 7 || parts[0] != CommitAuthorName || parts[1] != CommitAuthorEmail || parts[2] != CommitAuthorName ||
-		parts[3] != CommitAuthorEmail || parts[4] != strconv.FormatInt(request.CommitTimestamp.Unix(), 10) ||
+	if len(parts) != 7 || parts[0] != authorName || parts[1] != authorEmail || parts[2] != authorName ||
+		parts[3] != authorEmail || parts[4] != strconv.FormatInt(request.CommitTimestamp.Unix(), 10) ||
 		parts[5] != strconv.FormatInt(request.CommitTimestamp.Unix(), 10) || strings.TrimSuffix(parts[6], "\n") != request.CommitMessage {
 		return operationError(ErrPreparedArtifactCorrupt, "verify prepared commit identity", fmt.Sprintf("commit metadata differs from immutable request: %#v", parts), nil)
+	}
+	if len(request.SigningKey) > 0 {
+		rawCommit, err := p.runGit(ctx, box, box.root, nil, nil, "--git-dir="+repositoryPath, "cat-file", "commit", commitOID)
+		if err != nil || !strings.Contains(rawCommit.stdout, "gpgsig "+sshSigArmorHeader) {
+			return operationError(ErrPreparedArtifactCorrupt, "verify prepared commit signature", "signed commit is missing gpgsig header", err)
+		}
 	}
 	return nil
 }
@@ -441,6 +502,10 @@ func (p *Publisher) fsckCommit(ctx context.Context, box *sandbox, repositoryPath
 
 func gitDate(value time.Time) string {
 	return "@" + strconv.FormatInt(value.Unix(), 10) + " +0000"
+}
+
+func gitCommitObjectDate(value time.Time) string {
+	return strconv.FormatInt(value.Unix(), 10) + " +0000"
 }
 
 func formatRemoteRef(value RemoteRef) string {

@@ -64,7 +64,7 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 			ciFirst = true
 		}
 	}
-	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst, ciFirst)
+	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, owner, repo, pr, item, full, reviewFirst, ciFirst)
 	if err != nil || intent == "" {
 		return false, err
 	}
@@ -111,24 +111,25 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 }
 
 // repositoryMonitorAutomaticRepairIntent picks the repair for the pull
-// request's head, or "" for none. A full repair of a dirty head updates the
-// branch. Otherwise a repair label fixes the review's findings before CI, and
-// automatic repair fixes CI first. ciFirst allows only a CI fix, for a head
-// whose review waits for green CI.
-func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full, reviewFirst, ciFirst bool) (string, error) {
+// request's head, or "" for none. A full repair of a behind head updates the
+// branch via GitHub's update-branch API; conflicted (dirty) heads cannot be
+// updated by GitHub and require human resolution. Otherwise a repair label
+// fixes the review's findings before CI, and automatic repair fixes CI first.
+// ciFirst allows only a CI fix, for a head whose review waits for green CI.
+func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem, full, reviewFirst, ciFirst bool) (string, error) {
 	// An exhaustive review of this head must finish its passes before any
 	// repair moves the head.
 	if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr); err != nil || pending {
 		return "", err
 	}
-	if full && !ciFirst && pr.MergeableState == repositoryMonitorMergeableStateDirty {
+	if full && !ciFirst && pr.MergeableState == repositoryMonitorMergeableStateBehind {
 		return repositoryMonitorCommandIntentUpdateBranch, nil
 	}
 	if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
 		return "", nil
 	}
 	if reviewFirst && !ciFirst {
-		fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
+		fix, err := r.repositoryMonitorFixWorkPending(ctx, monitor, owner, repo, pr, item, full)
 		if err != nil {
 			return "", err
 		}
@@ -146,11 +147,29 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx
 	if reviewFirst {
 		return "", nil
 	}
-	fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
+	fix, err := r.repositoryMonitorFixWorkPending(ctx, monitor, owner, repo, pr, item, full)
 	if err != nil || !fix {
 		return "", err
 	}
 	return repositoryMonitorCommandIntentFix, nil
+}
+
+// repositoryMonitorFixWorkPending reports whether a full repair has actionable
+// work: either open findings from Orka's own review or eligible unresolved
+// external review threads (when spec.repair.externalComments.enabled is true).
+func (r *RepositoryMonitorReconciler) repositoryMonitorFixWorkPending(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem, full bool) (bool, error) {
+	fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
+	if err != nil || fix {
+		return fix, err
+	}
+	if !full || !repositoryMonitorExternalCommentsEnabled(monitor) {
+		return false, nil
+	}
+	threads, err := r.fetchRepositoryMonitorExternalReviewThreads(ctx, monitor, owner, repo, pr)
+	if err != nil {
+		return false, err
+	}
+	return len(threads) > 0, nil
 }
 
 // repositoryMonitorReviewFindingsRepairable reports whether a full repair can

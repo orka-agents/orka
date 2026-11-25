@@ -68,6 +68,11 @@ type RepositoryMonitorSpec struct {
 	// +optional
 	ForgeCredentialRef *corev1.LocalObjectReference `json:"forgeCredentialRef,omitempty"`
 
+	// Commit configures Git commit author identity, DCO sign-off trailers, and
+	// optional SSH commit signing for commits published by this monitor.
+	// +optional
+	Commit RepositoryMonitorCommitSpec `json:"commit,omitempty"`
+
 	// Schedule is the cron expression for background monitor runs.
 	// +optional
 	Schedule string `json:"schedule,omitempty"`
@@ -111,6 +116,35 @@ type RepositoryMonitorSpec struct {
 	// Validation configures isolated validation for pull request reviews.
 	// +optional
 	Validation RepositoryMonitorValidationSpec `json:"validation,omitempty"`
+}
+
+// RepositoryMonitorCommitSpec configures Git commit author identity, DCO
+// sign-off trailers, and clean-room SSH commit signing for commits created by
+// monitor repair and implementation workflows.
+type RepositoryMonitorCommitSpec struct {
+	// AuthorName overrides the Git author and committer name on commits created
+	// by this monitor. Defaults to "Orka Publisher".
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	AuthorName string `json:"authorName,omitempty"`
+
+	// AuthorEmail overrides the Git author and committer email on commits
+	// created by this monitor. Defaults to "publisher@orka.ai".
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	AuthorEmail string `json:"authorEmail,omitempty"`
+
+	// SignOff appends a DCO "Signed-off-by: <authorName> <<authorEmail>>"
+	// trailer to every commit message created by this monitor.
+	// +optional
+	SignOff bool `json:"signOff,omitempty"`
+
+	// SigningCredentialRef references a Kubernetes Secret in the monitor's
+	// namespace containing an unencrypted OpenSSH private key (key "signingKey"
+	// or "key" or "id_ed25519") used inside the clean-room publisher to produce
+	// Git SSH signatures (SSHSIG). Must be distinct from SCM/forge Secrets.
+	// +optional
+	SigningCredentialRef *corev1.LocalObjectReference `json:"signingCredentialRef,omitempty"`
 }
 
 // RepositoryMonitorTargets configures monitored repository item types.
@@ -519,6 +553,55 @@ type RepositoryMonitorRepairSpec struct {
 	// CIEvidence configures the CI evidence fix_ci repair prompts carry.
 	// +optional
 	CIEvidence RepositoryMonitorRepairCIEvidenceSpec `json:"ciEvidence,omitempty"`
+
+	// ExternalComments configures reading, repairing, replying to, and
+	// optionally resolving unresolved pull request review threads written by
+	// human reviewers and allowlisted review bots (such as coderabbitai[bot]).
+	// +optional
+	ExternalComments RepositoryMonitorRepairExternalCommentsSpec `json:"externalComments,omitempty"`
+}
+
+// RepositoryMonitorRepairExternalCommentsSpec configures trust-gated ingestion
+// and reply/resolution for external pull request review threads.
+type RepositoryMonitorRepairExternalCommentsSpec struct {
+	// Enabled enables reading unresolved external review threads, triggering
+	// fix repairs when eligible threads exist, and posting replies after the
+	// repair commit is verified.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// RequireAuthorPermission is the minimum GitHub repository permission a
+	// human review-thread author must hold for their thread to enter repair
+	// prompts. Supported values are write, maintain, and admin. Defaults to write.
+	// +kubebuilder:validation:Enum=write;maintain;admin
+	// +kubebuilder:default=write
+	// +optional
+	RequireAuthorPermission string `json:"requireAuthorPermission,omitempty"`
+
+	// AllowedBots lists exact GitHub logins of review bots whose unresolved
+	// review threads are trusted as repair input (for example, "coderabbitai[bot]").
+	// Bot accounts do not have collaborator permissions and are admitted only
+	// when explicitly listed here.
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	AllowedBots []string `json:"allowedBots,omitempty"`
+
+	// ReplyOnFix posts a reply on each addressed review thread after the repair
+	// commit is verified on the PR branch. Defaults to true when Enabled is true.
+	// +optional
+	ReplyOnFix *bool `json:"replyOnFix,omitempty"`
+
+	// ResolveBots resolves allowlisted bot review threads after replying when
+	// the repairer reports them fixed. Defaults to false.
+	// +optional
+	ResolveBots bool `json:"resolveBots,omitempty"`
+
+	// ResolveOnFix resolves human reviewer threads after replying when the
+	// repairer reports them fixed. Defaults to false so humans verify fixes
+	// themselves unless explicitly opted in.
+	// +optional
+	ResolveOnFix bool `json:"resolveOnFix,omitempty"`
 }
 
 // RepositoryMonitorRepairCIEvidenceSpec configures the CI evidence fix_ci

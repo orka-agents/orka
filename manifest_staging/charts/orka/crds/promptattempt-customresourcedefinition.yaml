@@ -95,6 +95,7 @@ spec:
                       - TargetRead
                       - TargetWrite
                       - Forge
+                      - CommitSign
                       type: string
                     secretKey:
                       maxLength: 253
