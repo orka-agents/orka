@@ -620,7 +620,7 @@ func changesParsing(call *syntax.CallExpr) bool {
 			wrapped = true
 		case wrapped && strings.HasPrefix(name, "-"):
 		default:
-			return name == "alias" || name == "source" || name == "." || name == "eval"
+			return name == "" || name == "alias" || name == "source" || name == "." || name == "eval"
 		}
 	}
 	return false

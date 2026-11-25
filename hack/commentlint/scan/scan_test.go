@@ -480,14 +480,24 @@ func TestSourcedAliasesBlockDeletion(t *testing.T) {
 		"quoted.sh":  "#!/bin/sh\nal''ias emit='cat <<EOF'\nemit\n# payload\nEOF\n",
 		"escaped.sh": "#!/bin/sh\na\\lias emit='cat <<EOF'\nemit\n# payload\nEOF\n",
 		"ansi.sh":    "#!/bin/bash\n$'\\x61lias' emit='cat <<EOF'\nemit\n# payload\nEOF\n",
+		"var.sh":     "#!/bin/sh\nloader=.\n$loader ./defs\nemit\n# payload\nEOF\n",
+		"wrapvar.sh": "#!/bin/sh\nloader=.\ncommand $loader ./defs\nemit\n# payload\nEOF\n",
+		"subst.sh":   "#!/bin/sh\n$(printf .) ./defs\nemit\n# payload\nEOF\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"main.sh", "cond.sh", "cmd.sh", "quoted.sh", "escaped.sh", "ansi.sh"} {
-		if err := Delete(root, []Target{{File: name, Line: 4}}); err == nil {
+	for name := range files {
+		if name == "defs" {
+			continue
+		}
+		line := 4
+		if strings.Count(files[name], "\n") == 6 {
+			line = 5
+		}
+		if err := Delete(root, []Target{{File: name, Line: line}}); err == nil {
 			t.Fatalf("deleting comments in %s, which sources aliases, should be refused", name)
 		}
 	}
