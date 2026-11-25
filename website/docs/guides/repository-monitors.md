@@ -170,7 +170,7 @@ spec:
 | Label | Review | Fixes |
 | --- | --- | --- |
 | `orka:review` | Yes | None |
-| `orka:fix` | Yes | Review findings, CI the pull request broke, and merge conflicts |
+| `orka:fix` | Yes | Review findings, CI the pull request broke, and behind branches (via GitHub update-branch; merge conflicts fail readiness and require human resolution) |
 | `orka:fix-ci` | No | CI the pull request broke |
 
 A pull request with a `repair.includeLabels` label is reviewed even when `targets.pullRequests.includeLabels` does not list that label. Each head is reviewed before it is repaired, so the label runs a review-fix loop: findings from a `needs_changes` review are fixed first, CI is fixed once the review has nothing to fix, and every pushed fix is reviewed again. The loop stops when the review passes and no check the pull request broke is failing, or when the repair limits are reached.
@@ -440,6 +440,46 @@ Evidence limits:
 | Time for annotation reads | 20 seconds |
 
 The repair Task's prompt freezes the evidence for that attempt. If Orka retries the handoff after the Task was created, it reuses the evidence in the Task's prompt rather than reading GitHub again. The repair work action's metadata records `ciEvidenceDigest`, `ciEvidenceIDs`, and `ciEvidenceAvailability`, and so does the `repair_task_created` monitor event. Reading check runs and annotations uses the `forgeCredentialRef` token and needs Checks read access.
+
+### Commit identity, DCO sign-off, and SSH commit signing
+
+By default, Orka's clean-room publisher commits as `Orka Publisher <publisher@orka.ai>` without a signature or DCO trailer. For repositories that enforce DCO (`Signed-off-by`) or verified commit signatures, configure `spec.commit`:
+
+```yaml
+spec:
+  commit:
+    authorName: "Orka Bot"
+    authorEmail: "orka-bot@example.com"
+    signOff: true
+    signingCredentialRef:
+      name: repo-monitor-commit-signing-key
+```
+
+- `authorName` and `authorEmail` override the Git author and committer identity on repair and implementation commits.
+- `signOff: true` appends `Signed-off-by: <authorName> <<authorEmail>>` to every commit message.
+- `signingCredentialRef` references a distinct Kubernetes Secret in the monitor namespace containing an unencrypted OpenSSH private key (`ssh-ed25519` or `ssh-rsa`) under `signingKey` (or `key` / `id_ed25519`). Register the matching public key as a GitHub SSH signing key for the bot account. The controller validates and binds the Secret reference in memory, and the clean-room publisher fetches the key in memory during `publication.prepare` to produce deterministic OpenSSH `SSHSIG` signatures — it never enters the ACP runtime Pod or disk.
+
+### External review comments (humans and review bots)
+
+By default, `fix` repairs address only Orka's own review findings. To also read, fix, reply to, and optionally resolve unresolved review threads from human reviewers and allowlisted review bots (such as `coderabbitai[bot]`), enable `spec.repair.externalComments`:
+
+```yaml
+spec:
+  repair:
+    enabled: true
+    externalComments:
+      enabled: true
+      requireAuthorPermission: write
+      allowedBots:
+        - coderabbitai[bot]
+      replyOnFix: true
+      resolveBots: true
+      resolveOnFix: false
+```
+
+- Human review-thread authors must hold at least `requireAuthorPermission` (`write`, `maintain`, or `admin`, default `write`) on the repository. Unaffiliated accounts are ignored before any comment enters a repair prompt.
+- Bot accounts are admitted only when explicitly listed in `allowedBots`.
+- After the repair commit is verified (`VerifiedExact`), Orka posts an idempotent reply referencing the pushed commit SHA on each addressed thread, and resolves threads only when allowed (`resolveBots` for allowlisted bots, `resolveOnFix` for human reviewers).
 
 ### Pull requests from forks
 

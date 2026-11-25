@@ -65,7 +65,7 @@ func validateCredentialReference(reference *CredentialReference, expected Creden
 		return apiError(ErrCredential, "invalid_credential_ref", "credential reference kind is invalid for this operation", 400, false, nil)
 	}
 	switch reference.Role {
-	case "", CredentialRoleSourceRead, CredentialRoleTargetRead, CredentialRoleTargetWrite, CredentialRoleForge:
+	case "", CredentialRoleSourceRead, CredentialRoleTargetRead, CredentialRoleTargetWrite, CredentialRoleForge, CredentialRoleCommitSign:
 	default:
 		return apiError(ErrCredential, "invalid_credential_ref", "credential reference role is invalid", 400, false, nil)
 	}

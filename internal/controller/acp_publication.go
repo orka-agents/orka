@@ -223,17 +223,24 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 		return acpPublicationResult{}, err
 	}
 	prepareOperation := publicationOperationID("prepare", task)
+	commitAuthorName, commitAuthorEmail, err := taskPublicationWireCommitIdentity(task)
+	if err != nil {
+		return acpPublicationResult{}, err
+	}
 	prepareRequest := publisherservice.PublicationPrepareRequest{
-		Metadata:            publisherservice.OperationMetadata{Namespace: task.Namespace, PublicationID: publication.ID, OperationID: prepareOperation},
-		SourceCredentialRef: sourceCredential,
-		DeltaArtifact:       *delta.Artifact,
+		Metadata:             publisherservice.OperationMetadata{Namespace: task.Namespace, PublicationID: publication.ID, OperationID: prepareOperation},
+		SourceCredentialRef:  sourceCredential,
+		SigningCredentialRef: publisherCommitSigningCredentialReference(workspace.CommitSigningCredentialRef),
+		DeltaArtifact:        *delta.Artifact,
 		Request: publisher.PrepareRequest{
 			PublicationID: publication.ID, PublicationGeneration: publication.Generation, OperationID: prepareOperation,
 			Source: source, SourceRef: sourceRef, Target: target, TargetRef: targetRef,
 			BranchClaimGeneration: claim.Generation, BaselineOID: baseline.Revision,
 			RemoteBefore: publisherRemoteRef(claim.LastVerified), DeltaArtifactDigest: delta.Artifact.Digest,
-			RelativeRoot:  delta.RelativeRoot,
-			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
+			RelativeRoot:      delta.RelativeRoot,
+			CommitAuthorName:  commitAuthorName,
+			CommitAuthorEmail: commitAuthorEmail,
+			CommitMessage:     publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}
 	prepareIdentity := store.ExternalEffectIdentity{
@@ -858,19 +865,61 @@ func taskPublicationCommitMessage(task *corev1alpha1.Task) string {
 	return "orka: apply agent task " + task.Name + "\n"
 }
 
+// taskPublicationCommitIdentity returns the validated Git commit author name
+// and email for task's publication, defaulting to the publisher's built-in
+// identity when omitted.
+func taskPublicationCommitIdentity(task *corev1alpha1.Task) (string, string, error) {
+	if task == nil || task.Spec.Workspace == nil {
+		return publisher.CommitAuthorName, publisher.CommitAuthorEmail, nil
+	}
+	return publisher.ValidateCommitIdentity(task.Spec.Workspace.CommitAuthorName, task.Spec.Workspace.CommitAuthorEmail)
+}
+
+// taskPublicationWireCommitIdentity returns explicit author overrides for the
+// publisher prepare request, or empty strings when the Task uses the built-in
+// default identity so older publishers with strict JSON decoding accept
+// ordinary unsigned publications during mixed-version rollouts.
+func taskPublicationWireCommitIdentity(task *corev1alpha1.Task) (string, string, error) {
+	name, email, err := taskPublicationCommitIdentity(task)
+	if err != nil {
+		return "", "", err
+	}
+	if name == publisher.CommitAuthorName && email == publisher.CommitAuthorEmail {
+		return "", "", nil
+	}
+	return name, email, nil
+}
+
+func formatCommitIdentity(name, email string) string {
+	return name + " <" + email + ">"
+}
+
 func (d *ACPDispatcher) ensurePublication(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, sessionUID string, source publisher.Repository, sourceRef string, target publisher.Repository, targetRef string, claim store.BranchClaim, delta harnessv2.WorkspaceDeltaDescriptor) (*store.Publication, error) {
 	id := publicationID(task)
 	commitAt := task.CreationTimestamp.Time.UTC().Truncate(time.Second)
 	if commitAt.IsZero() {
 		commitAt = time.Now().UTC().Truncate(time.Second)
 	}
+	authorName, authorEmail, err := taskPublicationCommitIdentity(task)
+	if err != nil {
+		return nil, err
+	}
+	commitIdentity := formatCommitIdentity(authorName, authorEmail)
 	message := taskPublicationCommitMessage(task)
-	requestDigest, err := acpDomainDigest("publication", map[string]any{
+	digestPayload := map[string]any{
 		"id": id, attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
 		"baseline": claim.LastVerified, artifactDigestField: delta.Artifact.Digest, "relativeRoot": delta.RelativeRoot,
 		"commitMessage": message, "commitTimestamp": commitAt,
-	})
+	}
+	if authorName != publisher.CommitAuthorName || authorEmail != publisher.CommitAuthorEmail {
+		digestPayload["commitIdentity"] = commitIdentity
+	}
+	if task.Spec.Workspace != nil && task.Spec.Workspace.CommitSigningCredentialRef != nil &&
+		strings.TrimSpace(task.Spec.Workspace.CommitSigningCredentialRef.Name) != "" {
+		digestPayload["commitSigningCredentialRef"] = strings.TrimSpace(task.Spec.Workspace.CommitSigningCredentialRef.Name)
+	}
+	requestDigest, err := acpDomainDigest("publication", digestPayload)
 	if err != nil {
 		return nil, err
 	}
@@ -883,7 +932,7 @@ func (d *ACPDispatcher) ensurePublication(ctx context.Context, task *corev1alpha
 		Baseline: claim.LastVerified, ArtifactID: string(delta.Artifact.ArtifactID), ArtifactDigest: delta.Artifact.Digest,
 		ArtifactSizeBytes: delta.Artifact.SizeBytes, ArtifactMediaType: delta.Artifact.MediaType,
 		PublicationCredentialRef: task.Spec.Workspace.PublicationCredentialRef.Name,
-		CommitIdentity:           publisher.CommitAuthorName + " <" + publisher.CommitAuthorEmail + ">",
+		CommitIdentity:           commitIdentity,
 		CommitMessage:            message, CommitTimestamp: commitAt, RequestDigest: requestDigest, CreatedAt: time.Now().UTC(),
 	}, fence)
 }
@@ -911,13 +960,26 @@ func publicationMatchesCreation(
 			return false
 		}
 	}
+	authorName, authorEmail, err := taskPublicationCommitIdentity(task)
+	if err != nil {
+		return false
+	}
+	commitIdentity := formatCommitIdentity(authorName, authorEmail)
 	message := taskPublicationCommitMessage(task)
-	expectedDigest, err := acpDomainDigest("publication", map[string]any{
+	digestPayload := map[string]any{
 		"id": publicationIDForTask(task), attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
 		"baseline": claim.LastVerified, artifactDigestField: delta.Artifact.Digest, "relativeRoot": delta.RelativeRoot,
 		"commitMessage": message, "commitTimestamp": commitAt,
-	})
+	}
+	if authorName != publisher.CommitAuthorName || authorEmail != publisher.CommitAuthorEmail {
+		digestPayload["commitIdentity"] = commitIdentity
+	}
+	if task.Spec.Workspace != nil && task.Spec.Workspace.CommitSigningCredentialRef != nil &&
+		strings.TrimSpace(task.Spec.Workspace.CommitSigningCredentialRef.Name) != "" {
+		digestPayload["commitSigningCredentialRef"] = strings.TrimSpace(task.Spec.Workspace.CommitSigningCredentialRef.Name)
+	}
+	expectedDigest, err := acpDomainDigest("publication", digestPayload)
 	if err != nil {
 		return false
 	}
@@ -936,7 +998,7 @@ func publicationMatchesCreation(
 		publication.ArtifactID == string(delta.Artifact.ArtifactID) &&
 		publication.ArtifactDigest == delta.Artifact.Digest && publication.ArtifactSizeBytes == delta.Artifact.SizeBytes &&
 		publication.ArtifactMediaType == delta.Artifact.MediaType && publication.PublicationCredentialRef == credentialName &&
-		publication.CommitIdentity == publisher.CommitAuthorName+" <"+publisher.CommitAuthorEmail+">" &&
+		publication.CommitIdentity == commitIdentity &&
 		publication.CommitMessage == message && publication.RequestDigest == expectedDigest
 }
 

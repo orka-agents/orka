@@ -148,6 +148,47 @@ spec:
                 description: Branch is the default base branch for repository-wide
                   monitoring decisions.
                 type: string
+              commit:
+                description: |-
+                  Commit configures Git commit author identity, DCO sign-off trailers, and
+                  optional SSH commit signing for commits published by this monitor.
+                properties:
+                  authorEmail:
+                    description: |-
+                      AuthorEmail overrides the Git author and committer email on commits
+                      created by this monitor. Defaults to "publisher@orka.ai".
+                    maxLength: 256
+                    type: string
+                  authorName:
+                    description: |-
+                      AuthorName overrides the Git author and committer name on commits created
+                      by this monitor. Defaults to "Orka Publisher".
+                    maxLength: 256
+                    type: string
+                  signOff:
+                    description: |-
+                      SignOff appends a DCO "Signed-off-by: <authorName> <<authorEmail>>"
+                      trailer to every commit message created by this monitor.
+                    type: boolean
+                  signingCredentialRef:
+                    description: |-
+                      SigningCredentialRef references a Kubernetes Secret in the monitor's
+                      namespace containing an unencrypted OpenSSH private key (key "signingKey"
+                      or "key" or "id_ed25519") used inside the clean-room publisher to produce
+                      Git SSH signatures (SSHSIG). Must be distinct from SCM/forge Secrets.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
               forgeCredentialRef:
                 description: |-
                   ForgeCredentialRef references the GitHub API credential used only for
@@ -391,6 +432,57 @@ spec:
                   enabled:
                     description: Enabled enables repair jobs.
                     type: boolean
+                  externalComments:
+                    description: |-
+                      ExternalComments configures reading, repairing, replying to, and
+                      optionally resolving unresolved pull request review threads written by
+                      human reviewers and allowlisted review bots (such as coderabbitai[bot]).
+                    properties:
+                      allowedBots:
+                        description: |-
+                          AllowedBots lists exact GitHub logins of review bots whose unresolved
+                          review threads are trusted as repair input (for example, "coderabbitai[bot]").
+                          Bot accounts do not have collaborator permissions and are admitted only
+                          when explicitly listed here.
+                        items:
+                          type: string
+                        maxItems: 32
+                        type: array
+                        x-kubernetes-list-type: set
+                      enabled:
+                        description: |-
+                          Enabled enables reading unresolved external review threads, triggering
+                          fix repairs when eligible threads exist, and posting replies after the
+                          repair commit is verified.
+                        type: boolean
+                      replyOnFix:
+                        description: |-
+                          ReplyOnFix posts a reply on each addressed review thread after the repair
+                          commit is verified on the PR branch. Defaults to true when Enabled is true.
+                        type: boolean
+                      requireAuthorPermission:
+                        default: write
+                        description: |-
+                          RequireAuthorPermission is the minimum GitHub repository permission a
+                          human review-thread author must hold for their thread to enter repair
+                          prompts. Supported values are write, maintain, and admin. Defaults to write.
+                        enum:
+                        - write
+                        - maintain
+                        - admin
+                        type: string
+                      resolveBots:
+                        description: |-
+                          ResolveBots resolves allowlisted bot review threads after replying when
+                          the repairer reports them fixed. Defaults to false.
+                        type: boolean
+                      resolveOnFix:
+                        description: |-
+                          ResolveOnFix resolves human reviewer threads after replying when the
+                          repairer reports them fixed. Defaults to false so humans verify fixes
+                          themselves unless explicitly opted in.
+                        type: boolean
+                    type: object
                   includeLabels:
                     description: |-
                       IncludeLabels limits automatic repair to pull requests with any of these

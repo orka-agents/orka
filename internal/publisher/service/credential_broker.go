@@ -35,8 +35,13 @@ func (r CredentialMaterialRequest) Validate() error {
 		return err
 	}
 	expected := CredentialHTTPExtraHeader
-	if r.ParentOperation == OperationPullRequestReconcile {
+	switch r.ParentOperation {
+	case OperationPullRequestReconcile:
 		expected = CredentialForgeToken
+	case OperationPublicationPrepare:
+		if r.Reference.Kind == CredentialSSHSigningKey || r.Reference.Role == CredentialRoleCommitSign {
+			expected = CredentialSSHSigningKey
+		}
 	}
 	if err := validateCredentialReference(&r.Reference, expected); err != nil {
 		return err
@@ -49,7 +54,11 @@ func (r CredentialMaterialRequest) Validate() error {
 	case OperationWorkspaceResolve, OperationWorkspacePrepare:
 		allowed = r.Reference.Role == CredentialRoleSourceRead || r.Reference.Role == CredentialRoleTargetRead
 	case OperationPublicationPrepare:
-		allowed = r.Reference.Role == CredentialRoleSourceRead || r.Reference.Role == CredentialRoleTargetRead
+		if r.Reference.Kind == CredentialSSHSigningKey {
+			allowed = r.Reference.Role == CredentialRoleCommitSign
+		} else {
+			allowed = r.Reference.Role == CredentialRoleSourceRead || r.Reference.Role == CredentialRoleTargetRead
+		}
 	case OperationPublicationPreflight, OperationPublicationVerify:
 		allowed = r.Reference.Role == CredentialRoleTargetRead
 	case OperationPublicationPublish:
@@ -79,6 +88,10 @@ type fileCredentialProvider struct{ root string }
 func (p *fileCredentialProvider) Read(_ context.Context, request CredentialMaterialRequest) ([]byte, string, error) {
 	if err := request.Validate(); err != nil {
 		return nil, "", err
+	}
+	if request.Reference.Kind == CredentialSSHSigningKey {
+		value, err := readMultilineCredentialFile(p.root, request.Reference.Name, 32<<10)
+		return value, "local-file", err
 	}
 	value, err := readCredentialFile(p.root, request.Reference.Name, 32<<10)
 	return value, "local-file", err
