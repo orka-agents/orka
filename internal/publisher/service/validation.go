@@ -37,7 +37,7 @@ func (m OperationMetadata) validateFor(operation Operation) error {
 			return invalidRequest("workspace operation requires exactly one Task identity", nil)
 		}
 	case OperationPublicationPreflight, OperationPublicationPrepare, OperationPublicationPublish,
-		OperationPublicationVerify, OperationPublicationReclaim, OperationPullRequestReconcile:
+		OperationPublicationVerify, OperationPublicationReclaim, OperationPullRequestReconcile, OperationBranchRebase:
 		if m.PublicationID == "" || m.TaskID != "" {
 			return invalidRequest("publication operation requires exactly one Publication identity", nil)
 		}

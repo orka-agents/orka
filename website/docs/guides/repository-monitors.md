@@ -396,7 +396,7 @@ Every entry has an `availability`: `available`, `truncated` (the `truncated` lis
 
 By default, evidence is structured only and `failingCheckEvidence.textOmitted` is `true`. CI tools write check output, annotation text, and commit status descriptions, and they can print credentials that GitHub does not mask, such as a password in a shell trace or a registry config dump. So none of that free text reaches the prompt: no `output.title`, `output.summary`, or `output.text`, no annotation title, message, or `raw_details`, and no status description. Links are kept only when they point to a check run or GitHub Actions run, attempt, or job of the monitored repository on `github.com` (`https://github.com/OWNER/REPO/runs/ID` or `https://github.com/OWNER/REPO/actions/runs/ID[/attempts/N][/job/ID]`), without their query or fragment. Any other link is left out whole, path included, in every mode: a commit status `target_url` on an external CI server, or a link on a GitHub Enterprise host.
 
-To include the free text, set `spec.repair.ciEvidence.text: true`:
+To include the free text, set `spec.repair.ciEvidence.text: true` (and optionally `spec.repair.ciEvidence.jobLogs: true` to also fetch bounded, redacted tail excerpts from failing GitHub Actions job logs; requires Actions read permission on `spec.forgeCredentialRef`):
 
 ```yaml
 spec:
@@ -404,6 +404,7 @@ spec:
     enabled: true
     ciEvidence:
       text: true
+      jobLogs: true
 ```
 
 With `text: true`, check runs also carry `title`, `summary`, and annotation `title` and `message`, and commit statuses carry `description`.
@@ -480,6 +481,20 @@ spec:
 - Human review-thread authors must hold at least `requireAuthorPermission` (`write`, `maintain`, or `admin`, default `write`) on the repository. Unaffiliated accounts are ignored before any comment enters a repair prompt.
 - Bot accounts are admitted only when explicitly listed in `allowedBots`.
 - After the repair commit is verified (`VerifiedExact`), Orka posts an idempotent reply referencing the pushed commit SHA on each addressed thread, and resolves threads only when allowed (`resolveBots` for allowlisted bots, `resolveOnFix` for human reviewers).
+- For immediate pickup without waiting for the polling interval, also subscribe your GitHub webhook to `Pull request reviews` (`pull_request_review`) and `Pull request review comments` (`pull_request_review_comment`) events.
+
+### Clean-room rebase for `update_branch`
+
+By default, `update_branch` calls GitHub's `PUT /pulls/{number}/update-branch` endpoint (`spec.repair.updateBranchStrategy: merge`). For repositories that require linear history without merge commits, set `spec.repair.updateBranchStrategy: rebase`:
+
+```yaml
+spec:
+  repair:
+    enabled: true
+    updateBranchStrategy: rebase
+```
+
+In `rebase` mode, Orka replays the PR's linear commit chain onto the base commit inside the clean-room publisher (preserving commit authors, optionally appending DCO `Signed-off-by` trailers and re-signing with `spec.commit.signingCredentialRef`) and pushes with exact `--force-with-lease`. If any commit conflicts or contains a merge commit, the rebase aborts fail-closed without mutating the remote branch.
 
 ### Pull requests from forks
 

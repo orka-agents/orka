@@ -487,6 +487,9 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 		}
 	}
 
+	if repositoryMonitorUpdateBranchUsesRebase(monitor) {
+		return r.submitRepositoryMonitorUpdateBranchRebase(ctx, monitor, run, command, owner, repository, pr, item, mutation)
+	}
 	requestID, err := r.updateRepositoryMonitorPullRequestBranch(ctx, owner, repository, token, pr.Number, command.HeadSHA)
 	if err != nil {
 		return r.recordRepositoryMonitorUpdateBranchSubmissionError(ctx, monitor, run, command, item, mutation, pr, err)

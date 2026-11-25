@@ -86,6 +86,9 @@ type RepositoryMonitorReconciler struct {
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool
+	// BranchRebaser optionally executes clean-room rebases when a monitor
+	// configures spec.repair.updateBranchStrategy: rebase.
+	BranchRebaser RepositoryMonitorBranchRebaser
 
 	// activeRunsMu guards activeRuns, the monitor runs this process is
 	// executing right now, keyed by repositoryMonitorRunKey. A running run

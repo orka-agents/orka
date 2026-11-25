@@ -46,6 +46,8 @@ const (
 	githubSignature256Prefix                   = "sha256="
 	githubEventIssues                          = "issues"
 	githubEventPullRequest                     = "pull_request"
+	githubEventPullRequestReview               = "pull_request_review"
+	githubEventPullRequestReviewComment        = "pull_request_review_comment"
 	githubEventPing                            = "ping"
 	githubWebhookCreatedBy                     = "github-label"
 	githubActionImplement                      = "implement"
@@ -174,6 +176,21 @@ func (h *Handlers) HandleGitHubWebhook(c fiber.Ctx) error {
 			apiFieldMessage: "GitHub webhook signature verified",
 		})
 	}
+	if event == githubEventPullRequestReview || event == githubEventPullRequestReviewComment {
+		var payload githubLabelWebhookPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid GitHub webhook payload")
+		}
+		delivery := strings.TrimSpace(c.Get(githubDeliveryHeader))
+		reviewResult, err := h.enqueueRepositoryMonitorPullRequestReviewEventRuns(c, body, delivery, event, payload)
+		if err != nil {
+			return err
+		}
+		if reviewResult.Matched > 0 {
+			return githubRepositoryMonitorEventResponse(c, reviewResult)
+		}
+		return githubWebhookIgnored(c, fmt.Sprintf("ignored %s action %q", event, payload.Action))
+	}
 	if event != githubEventIssues && event != githubEventPullRequest {
 		return githubWebhookIgnored(c, fmt.Sprintf("unsupported GitHub event %q", event))
 	}
@@ -276,6 +293,96 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 			removed = payload.Label.Name
 		}
 		if !repositoryMonitorAcceptsPullRequestEvent(monitor, payload.Repository, target, removed) {
+			continue
+		}
+		result.Matched++
+		runID := githubRepositoryMonitorExactRunID(monitor, deliveryKey)
+		run := &store.MonitorRun{
+			ID:               runID,
+			MonitorNamespace: monitor.Namespace,
+			MonitorName:      monitor.Name,
+			Trigger:          githubMonitorTriggerPullRequestEvent,
+			TargetKind:       repositoryMonitorTargetKindPullRequest,
+			TargetNumber:     int64(target.Number),
+			TargetSHA:        target.HeadSHA,
+			Phase:            repositoryMonitorRunPhaseQueued,
+			StartedAt:        time.Now(),
+		}
+		duplicate, err := h.queuedRepositoryMonitorPullRequestEventRunExists(c, monitor, run)
+		if err != nil {
+			return result, err
+		}
+		if duplicate {
+			result.Duplicate++
+			continue
+		}
+		if err := h.repositoryMonitorStore.CreateMonitorRun(c.Context(), run); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				retryQueued, retryErr := h.requeueFailedRepositoryMonitorEventRun(c, run)
+				if retryErr != nil {
+					return result, retryErr
+				}
+				if !retryQueued {
+					result.SkippedActive++
+					continue
+				}
+			} else {
+				return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create repository monitor event run: %v", err))
+			}
+		}
+		if err := h.annotateRepositoryMonitorRunRequest(c, monitor, run); err != nil {
+			if failErr := h.markRepositoryMonitorRunSignalFailed(c, run, err); failErr != nil {
+				return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("%v; additionally failed to mark monitor run failed: %v", err, failErr))
+			}
+			return result, err
+		}
+		if err := h.createRepositoryMonitorEventRunAudit(c, monitor, run, payload, target, deliveryKey, githubMonitorEventTypeExactRunQueued); err != nil {
+			return result, err
+		}
+		result.Queued++
+		result.RunIDs = append(result.RunIDs, runID)
+	}
+	return result, nil
+}
+
+func repositoryMonitorExternalCommentReviewEventAction(event, action string) bool {
+	switch event {
+	case githubEventPullRequestReview:
+		return action == "submitted"
+	case githubEventPullRequestReviewComment:
+		return action == "created"
+	default:
+		return false
+	}
+}
+
+func repositoryMonitorAcceptsExternalReviewCommentEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
+	if monitor == nil || !monitor.Spec.Repair.Enabled || !monitor.Spec.Repair.ExternalComments.Enabled {
+		return false
+	}
+	return repositoryMonitorAcceptsPullRequestEvent(monitor, repo, target, "")
+}
+
+func (h *Handlers) enqueueRepositoryMonitorPullRequestReviewEventRuns(c fiber.Ctx, body []byte, delivery, event string, payload githubLabelWebhookPayload) (githubRepositoryMonitorEventResult, error) {
+	var result githubRepositoryMonitorEventResult
+	if h.repositoryMonitorStore == nil || !repositoryMonitorExternalCommentReviewEventAction(event, payload.Action) || payload.PullRequest == nil {
+		return result, nil
+	}
+	target, ok := payload.target()
+	if !ok || !target.IsPR || target.IncompletePR || target.HeadSHA == "" {
+		return result, nil
+	}
+	monitors := &corev1alpha1.RepositoryMonitorList{}
+	if err := h.client.List(c.Context(), monitors, h.githubWebhookMonitorListOptions()...); err != nil {
+		return result, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list repository monitors: %v", err))
+	}
+	deliveryKey := strings.TrimSpace(delivery)
+	if deliveryKey == "" {
+		deliveryKey = githubWebhookReplayKey(body)
+	}
+	for i := range monitors.Items {
+		monitor := &monitors.Items[i]
+		if !repositoryMonitorAcceptsExternalReviewCommentEvent(monitor, payload.Repository, target) {
 			continue
 		}
 		result.Matched++

@@ -124,6 +124,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+PublicationVerifyPath, s.handlePublicationVerify)
 	mux.HandleFunc("POST "+PublicationReclaimPath, s.handlePublicationReclaim)
 	mux.HandleFunc("POST "+PullRequestReconcilePath, s.handlePullRequestReconcile)
+	mux.HandleFunc("POST "+BranchRebasePath, s.handleBranchRebase)
 	return securityHeaders(mux)
 }
 
