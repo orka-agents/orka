@@ -122,7 +122,7 @@ decision_count() {
 files_in() {
   local dir="$1"
   [[ -d "${dir}" ]] || return 0
-  find "${dir}" -maxdepth 1 -name '*.jsonl' | sort
+  find "${dir}/" -maxdepth 1 -name '*.jsonl' | sort
 }
 
 cmd_up() {
