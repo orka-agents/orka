@@ -320,18 +320,24 @@ func rejectClientProposalProvenance(memory store.Memory) error {
 
 // rejectClientProposalSourceUpdate keeps the source server-owned on update. An
 // update cannot relabel a memory as applied from a proposal, and cannot change
-// the source of a memory that carries apply's provenance: the memory_proposal
-// source together with the proposal it came from. Omitting the source or
-// repeating the stored one unchanged is accepted, so a client can send back a
-// memory it read. Update never changes sourceProposalId.
+// the source of a memory that carries apply's provenance (a non-blank
+// sourceProposalId). Omitting the source or repeating the stored one unchanged
+// is accepted, so a client can send back a memory it read. For a legacy applied
+// memory whose source was relabeled before this guard existed, restoring the
+// canonical memory_proposal source is allowed while changing to another source
+// is rejected. Update never changes sourceProposalId.
 func rejectClientProposalSourceUpdate(stored *store.Memory, req store.Memory) error {
 	if req.Source == "" || req.Source == stored.Source {
 		return nil
 	}
+	hasProposalLink := strings.TrimSpace(stored.SourceProposalID) != ""
 	if isProposalSource(req.Source) {
+		if hasProposalLink && req.Source == store.MemorySourceProposal {
+			return nil
+		}
 		return errClientProposalSource()
 	}
-	if stored.SourceProposalID != "" && isProposalSource(stored.Source) {
+	if hasProposalLink {
 		return fiber.NewError(fiber.StatusBadRequest, "source of a memory applied from a proposal cannot be changed by clients")
 	}
 	return nil
