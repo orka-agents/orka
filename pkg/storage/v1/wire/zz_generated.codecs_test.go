@@ -11,6 +11,17 @@ import (
 
 var recordCodecs = []recordCodec{
 	{
+		name:    "AdvanceControllerEpochRequest",
+		goType:  reflect.TypeFor[storagev1.AdvanceControllerEpochRequest](),
+		newWire: func() proto.Message { return &storagepb.AdvanceControllerEpochRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireAdvanceControllerEpochRequest(value.(storagev1.AdvanceControllerEpochRequest))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireAdvanceControllerEpochRequest(message.(*storagepb.AdvanceControllerEpochRequest), exact)
+		},
+	},
+	{
 		name:    "ArtifactKey",
 		goType:  reflect.TypeFor[storagev1.ArtifactKey](),
 		newWire: func() proto.Message { return &storagepb.ArtifactKey{} },
@@ -40,6 +51,17 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "BindDatasetRequest",
+		goType:  reflect.TypeFor[storagev1.BindDatasetRequest](),
+		newWire: func() proto.Message { return &storagepb.BindDatasetRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireBindDatasetRequest(value.(storagev1.BindDatasetRequest))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireBindDatasetRequest(message.(*storagepb.BindDatasetRequest), exact)
+		},
+	},
+	{
 		name:    "BindingConflictError",
 		goType:  reflect.TypeFor[storagev1.BindingConflictError](),
 		newWire: func() proto.Message { return &storagepb.BindingConflictError{} },
@@ -62,6 +84,17 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "ControllerEpoch",
+		goType:  reflect.TypeFor[storagev1.ControllerEpoch](),
+		newWire: func() proto.Message { return &storagepb.ControllerEpoch{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireControllerEpoch(value.(storagev1.ControllerEpoch))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireControllerEpoch(message.(*storagepb.ControllerEpoch), exact)
+		},
+	},
+	{
 		name:    "ControllerEpochFence",
 		goType:  reflect.TypeFor[storagev1.ControllerEpochFence](),
 		newWire: func() proto.Message { return &storagepb.ControllerEpochFence{} },
@@ -70,6 +103,17 @@ var recordCodecs = []recordCodec{
 		},
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireControllerEpochFence(message.(*storagepb.ControllerEpochFence), exact)
+		},
+	},
+	{
+		name:    "ControllerEpochMirrorState",
+		goType:  reflect.TypeFor[storagev1.ControllerEpochMirrorState](),
+		newWire: func() proto.Message { return &storagepb.ControllerEpochMirrorState{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireControllerEpochMirrorState(value.(storagev1.ControllerEpochMirrorState))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireControllerEpochMirrorState(message.(*storagepb.ControllerEpochMirrorState), exact)
 		},
 	},
 	{
@@ -108,6 +152,17 @@ var recordCodecs = []recordCodec{
 		toWire:  func(value any) (proto.Message, error) { return toWireDatasetUsage(value.(storagev1.DatasetUsage)) },
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireDatasetUsage(message.(*storagepb.DatasetUsage), exact)
+		},
+	},
+	{
+		name:    "DetachDatasetRequest",
+		goType:  reflect.TypeFor[storagev1.DetachDatasetRequest](),
+		newWire: func() proto.Message { return &storagepb.DetachDatasetRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireDetachDatasetRequest(value.(storagev1.DetachDatasetRequest))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireDetachDatasetRequest(message.(*storagepb.DetachDatasetRequest), exact)
 		},
 	},
 	{
@@ -195,6 +250,17 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "OperationOutcome",
+		goType:  reflect.TypeFor[storagev1.OperationOutcome](),
+		newWire: func() proto.Message { return &storagepb.OperationOutcome{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireOperationOutcome(value.(storagev1.OperationOutcome))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireOperationOutcome(message.(*storagepb.OperationOutcome), exact)
+		},
+	},
+	{
 		name:    "PlanState",
 		goType:  reflect.TypeFor[storagev1.PlanState](),
 		newWire: func() proto.Message { return &storagepb.PlanState{} },
@@ -230,6 +296,17 @@ var recordCodecs = []recordCodec{
 		toWire:  func(value any) (proto.Message, error) { return toWireProviderLimits(value.(storagev1.ProviderLimits)) },
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireProviderLimits(message.(*storagepb.ProviderLimits), exact)
+		},
+	},
+	{
+		name:    "ResolveOperationRequest",
+		goType:  reflect.TypeFor[storagev1.ResolveOperationRequest](),
+		newWire: func() proto.Message { return &storagepb.ResolveOperationRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireResolveOperationRequest(value.(storagev1.ResolveOperationRequest))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireResolveOperationRequest(message.(*storagepb.ResolveOperationRequest), exact)
 		},
 	},
 	{
@@ -286,6 +363,17 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "UpdateBindingKeyRequest",
+		goType:  reflect.TypeFor[storagev1.UpdateBindingKeyRequest](),
+		newWire: func() proto.Message { return &storagepb.UpdateBindingKeyRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireUpdateBindingKeyRequest(value.(storagev1.UpdateBindingKeyRequest))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireUpdateBindingKeyRequest(message.(*storagepb.UpdateBindingKeyRequest), exact)
+		},
+	},
+	{
 		name:    "UsageObservation",
 		goType:  reflect.TypeFor[storagev1.UsageObservation](),
 		newWire: func() proto.Message { return &storagepb.UsageObservation{} },
@@ -303,6 +391,15 @@ var recordCodecs = []recordCodec{
 		toWire:  func(value any) (proto.Message, error) { return toWireWriteEnvelope(value.(storagev1.WriteEnvelope)) },
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireWriteEnvelope(message.(*storagepb.WriteEnvelope), exact)
+		},
+	},
+	{
+		name:    "WriteWatermark",
+		goType:  reflect.TypeFor[storagev1.WriteWatermark](),
+		newWire: func() proto.Message { return &storagepb.WriteWatermark{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireWriteWatermark(value.(storagev1.WriteWatermark)) },
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireWriteWatermark(message.(*storagepb.WriteWatermark), exact)
 		},
 	},
 }

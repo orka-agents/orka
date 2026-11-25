@@ -443,7 +443,9 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 		"DeleteResult", "SavePromptResultReceipt", "GetPromptResultReceipt", "SaveArtifact", "GetArtifact",
 		"ListArtifacts", "DeleteArtifacts", "AppendExecutionEvent", "ListExecutionEvents", "ListSessionExecutionEvents",
 		"GetLatestExecutionEventSeq", "GetLatestExecutionEventSeqs", "DeleteExecutionEvents", "AppendExecutionEventIfAbsent",
-		"AppendExecutionEventWithPlanIfAbsent", "AppendExecutionEventsIfAbsent"} {
+		"AppendExecutionEventWithPlanIfAbsent", "AppendExecutionEventsIfAbsent", "ResolveOperation", "PruneOperationReceipts",
+		"AdvanceControllerEpoch", "GetControllerEpochMirror", "BindDataset", "GetDatasetBinding", "DetachDatasetBinding",
+		"UpdateBindingKeyFingerprint", "CompleteDatasetBootstrap", "AdvanceWriteWatermark", "GetWriteWatermark"} {
 		if !methods[name] {
 			t.Errorf("method %s has no RPC", name)
 		}
@@ -456,7 +458,8 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 		"DatasetBootstrap", "DatasetUsage", "DatasetBinding", "BindingConflictError", "WriteEnvelope",
 		"ControllerEpochFence", "TaskDataFence", "TaskJobIdentity", "PromptResultReceipt", "ArtifactOwner",
 		"ArtifactKey", "ArtifactMetadata", "SaveArtifactRequest", "ExecutionEvent", "SessionExecutionEvent",
-		"ExecutionEventUsage", "UsageObservation", "ExecutionEventAppend", "ExecutionEventAppendResult"} {
+		"ExecutionEventUsage", "UsageObservation", "ExecutionEventAppend", "ExecutionEventAppendResult", "OperationOutcome",
+		"ControllerEpoch", "ControllerEpochMirrorState", "DetachDatasetRequest", "UpdateBindingKeyRequest", "WriteWatermark"} {
 		if !records[name] {
 			t.Errorf("record %s is not mapped", name)
 		}
