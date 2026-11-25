@@ -703,9 +703,26 @@ func (d *ACPDispatcher) readRecoverableTask(
 //     terminal projection keeps the frozen runtime identity, so runtime
 //     cleanup keeps its authority even when it has not finished yet.
 func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 ||
-		acpTaskHasRestoredSourceIdentityBinding(task) {
+	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 {
 		return false, nil
+	}
+	if acpTaskHasRestoredSourceIdentityBinding(task) {
+		if meta.FindStatusCondition(task.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) == nil {
+			return false, nil
+		}
+		attemptID, err := promptAttemptIDFromTaskUID(task, task.Status.AgentExecutionBinding.Task.UID)
+		if err != nil {
+			return false, err
+		}
+		attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return attempt.ExecutionState == store.PromptExecutionSettling ||
+			store.IsTerminalPromptExecutionState(attempt.ExecutionState), nil
 	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
@@ -1317,7 +1334,25 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 			hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
 			return d.settleSettlingReceiptHold(ctx, task, observed, hold)
 		}
-		if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
+		if validating {
+			// When workspace validation already replaced the attempt's settling
+			// operation, the attempt no longer carries the settling digest to
+			// cross-check the receipt. Keep an existing Task result intact if
+			// one is already present rather than overwriting it with an
+			// unverified receipt; only repair when the result is missing.
+			existing, getErr := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+			if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+				return settlingWithoutReceipt, getErr
+			}
+			if getErr == nil {
+				if !bytes.Equal(existing, receipt.Data) {
+					hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+					return d.settleSettlingReceiptHold(ctx, task, observed, hold)
+				}
+			} else if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
+				return settlingWithoutReceipt, err
+			}
+		} else if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
 			return settlingWithoutReceipt, err
 		}
 	case errors.Is(receiptErr, store.ErrNotFound):

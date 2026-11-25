@@ -296,6 +296,9 @@ type datasetService struct {
 }
 
 func (service *datasetService) Describe(ctx context.Context, wireRequest *storagepb.DescribeRequest) (*storagepb.DescribeResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var r0 storagev1.ProviderInfo
 	r0, err = service.provider.Describe(ctx)
@@ -311,6 +314,9 @@ func (service *datasetService) Describe(ctx context.Context, wireRequest *storag
 }
 
 func (service *datasetService) HealthCheck(ctx context.Context, wireRequest *storagepb.HealthCheckRequest) (*storagepb.HealthCheckResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	err = service.provider.HealthCheck(ctx)
 	if err != nil {
@@ -330,6 +336,9 @@ type messagesService struct {
 }
 
 func (service *messagesService) ConsumeMessages(ctx context.Context, wireRequest *storagepb.ConsumeMessagesRequest) (*storagepb.ConsumeMessagesResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 storagev1.ConsumeMessagesRequest
 	if a0, err = fromWireConsumeMessagesRequest(wireRequest, true); err != nil {
@@ -355,6 +364,9 @@ func (service *messagesService) ConsumeMessages(ctx context.Context, wireRequest
 }
 
 func (service *messagesService) DeleteParentMessages(ctx context.Context, wireRequest *storagepb.DeleteParentMessagesRequest) (*storagepb.DeleteParentMessagesResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 string
 	a0 = wireRequest.Namespace
@@ -372,6 +384,9 @@ func (service *messagesService) DeleteParentMessages(ctx context.Context, wireRe
 }
 
 func (service *messagesService) DeleteTaskMessages(ctx context.Context, wireRequest *storagepb.DeleteTaskMessagesRequest) (*storagepb.DeleteTaskMessagesResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 string
 	a0 = wireRequest.Namespace
@@ -389,6 +404,9 @@ func (service *messagesService) DeleteTaskMessages(ctx context.Context, wireRequ
 }
 
 func (service *messagesService) ListUnreadMessages(ctx context.Context, wireRequest *storagepb.ListUnreadMessagesRequest) (*storagepb.ListUnreadMessagesResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 string
 	a0 = wireRequest.Namespace
@@ -415,6 +433,9 @@ func (service *messagesService) ListUnreadMessages(ctx context.Context, wireRequ
 }
 
 func (service *messagesService) SendMessage(ctx context.Context, wireRequest *storagepb.SendMessageRequest) (*storagepb.SendMessageResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 *storagev1.Message
 	if wireRequest.Msg != nil {
@@ -450,6 +471,9 @@ type resultsService struct {
 }
 
 func (service *resultsService) DeletePlan(ctx context.Context, wireRequest *storagepb.DeletePlanRequest) (*storagepb.DeletePlanResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 string
 	a0 = wireRequest.Namespace
@@ -467,6 +491,9 @@ func (service *resultsService) DeletePlan(ctx context.Context, wireRequest *stor
 }
 
 func (service *resultsService) GetPlan(ctx context.Context, wireRequest *storagepb.GetPlanRequest) (*storagepb.GetPlanResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 string
 	a0 = wireRequest.Namespace
@@ -487,6 +514,9 @@ func (service *resultsService) GetPlan(ctx context.Context, wireRequest *storage
 }
 
 func (service *resultsService) SavePlan(ctx context.Context, wireRequest *storagepb.SavePlanRequest) (*storagepb.SavePlanResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
 	var err error
 	var a0 string
 	a0 = wireRequest.Namespace
