@@ -22,6 +22,7 @@ vi.mock('@tanstack/react-router', async () => {
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { Sidebar } from './sidebar'
+import { useOversightAlerts } from '@/stores/oversight-alerts'
 
 describe('Sidebar', () => {
   beforeEach(() => {
@@ -109,6 +110,15 @@ describe('Sidebar', () => {
     render(<Sidebar />)
     await waitFor(() => expect(probed).toBe(true))
     expect(screen.getByText('Oversight')).toBeInTheDocument()
+  })
+
+  it('shows the unread charter alert count next to Oversight', async () => {
+    server.use(http.get('/api/v1/chat/config', () => HttpResponse.json(chatConfig({ oversightEnabled: true }))))
+    useOversightAlerts.getState().reset()
+    useOversightAlerts.getState().add({ decisionID: 'd1', namespace: 'default', taskName: 't', observedAt: '2026-11-25T00:00:00Z', rule: 'Rule 1', sentence: 's' })
+    render(<Sidebar />)
+    expect(await screen.findByTestId('oversight-unread')).toHaveTextContent('1')
+    useOversightAlerts.getState().reset()
   })
 
   it('active nav item has correct styling', () => {

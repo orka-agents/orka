@@ -25,6 +25,8 @@ export interface OversightStreamOptions {
   /** Most decisions kept; older ones drop off the end. */
   cap?: number
   reconnectDelayMs?: number
+  /** Called once per newly accepted decision (never for a replayed seq). */
+  onDecision?: (decision: DecisionView) => void
 }
 
 export interface OversightStreamResult {
@@ -78,7 +80,7 @@ const MAX_ERROR_STEPS = 5
  * so the body is read with fetch. Decisions are deduplicated by seq, the
  * cursor survives reconnects, and errors back off exponentially up to a cap.
  */
-export function useOversightStream({ q, enabled, after, cap = 500, reconnectDelayMs = DEFAULT_RECONNECT_DELAY }: OversightStreamOptions): OversightStreamResult {
+export function useOversightStream({ q, enabled, after, cap = 500, reconnectDelayMs = DEFAULT_RECONNECT_DELAY, onDecision }: OversightStreamOptions): OversightStreamResult {
   const namespace = useUIStore((s) => s.namespace)
   const [decisions, setDecisions] = useState<DecisionView[]>([])
   const [status, setStatus] = useState<OversightStreamStatus>('idle')
@@ -89,6 +91,10 @@ export function useOversightStream({ q, enabled, after, cap = 500, reconnectDela
   useEffect(() => {
     afterRef.current = after
   }, [after])
+  const onDecisionRef = useRef(onDecision)
+  useEffect(() => {
+    onDecisionRef.current = onDecision
+  }, [onDecision])
   const cursorRef = useRef(after)
   const seenRef = useRef<Set<number>>(new Set())
   const generationRef = useRef(0)
@@ -106,6 +112,7 @@ export function useOversightStream({ q, enabled, after, cap = 500, reconnectDela
       }
     }
     setDecisions((prev) => [decision, ...prev.filter((d) => d.id !== decision.id)].slice(0, cap))
+    onDecisionRef.current?.(decision)
   }, [cap])
 
   const connect = useCallback(async (generation: number): Promise<Disposition> => {

@@ -5,12 +5,16 @@ import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
 
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
-vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }))
+const { toastMock } = vi.hoisted(() => ({
+  toastMock: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), info: vi.fn() }),
+}))
+vi.mock('sonner', () => ({ toast: toastMock }))
 
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
+import { useOversightAlerts } from '@/stores/oversight-alerts'
 import { OversightDashboard, type OversightSearch } from './oversight-dashboard'
-import { makeDecision, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
+import { charterConfig, charterDecision, makeDecision, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
 import type { DecisionView } from '@/schemas/oversight'
 
 function serveList(items: DecisionView[], query?: { key: string; value: string }[]) {
@@ -33,6 +37,8 @@ describe('OversightDashboard', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'default' })
     useAuthStore.setState({ token: 'test-token' })
+    useOversightAlerts.getState().reset()
+    toastMock.mockClear()
   })
 
   it('streams new decisions on top, resuming after the newest listed seq', async () => {
@@ -144,5 +150,62 @@ describe('OversightDashboard', () => {
     await screen.findByRole('table', { name: 'Oversight decisions' })
     await userEvent.click(screen.getByRole('tab', { name: 'Question × action' }))
     expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ view: 'matrix' }))
+  })
+
+  describe('charter alerts', () => {
+    const streamOf = (...decisions: DecisionView[]) =>
+      http.get('/api/v1/oversight/decisions/stream', () => new HttpResponse(
+        `event: ready\ndata: {}\n\n${decisions.map((d) => `id: ${d.seq}\nevent: decision\ndata: ${JSON.stringify(d)}\n\n`).join('')}`,
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      ))
+    const streamedCharter = { ...charterDecision, id: 'build-9@1', seq: 20, taskName: 'build-9', agentName: 'agent-z' }
+
+    beforeEach(() => {
+      server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+    })
+
+    it('toasts and counts a streamed charter decision once, and opens it from the toast', async () => {
+      serveList([makeDecision()])
+      // The same decision twice (a replay) and a risky and an unavailable one, which never alert.
+      server.use(streamOf(streamedCharter, { ...riskyDecision, seq: 21 }, { ...unavailableDecision, seq: 22 }, streamedCharter))
+      const { onSearchChange } = renderDashboard()
+      await waitFor(() => expect(toastMock).toHaveBeenCalledTimes(1))
+      const [message, options] = toastMock.mock.calls[0]
+      expect(message).toBe('Charter rule 2 broken by agent-z, would pause (audit mode)')
+      expect(options.description).toBe('Never write outside the workspace.')
+      expect(await screen.findByTestId('alerts-unread')).toHaveTextContent('1')
+      options.action.onClick()
+      expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ decision: 'build-9@1' }))
+    })
+
+    it('does not alert for charter decisions already in the initial page', async () => {
+      serveList([charterDecision])
+      server.use(streamOf({ ...riskyDecision, seq: 30 }))
+      renderDashboard()
+      await screen.findByText('Looks risky')
+      expect(toastMock).not.toHaveBeenCalled()
+      expect(screen.queryByTestId('alerts-unread')).not.toBeInTheDocument()
+    })
+
+    it('lists the alerts with links to the drawer and marks them read locally', async () => {
+      serveList([makeDecision()])
+      server.use(streamOf(streamedCharter))
+      const { onSearchChange } = renderDashboard()
+      await screen.findByTestId('alerts-unread')
+      await userEvent.click(screen.getByRole('button', { name: 'Alerts, 1 unread' }))
+      const list = await screen.findByRole('list', { name: 'Charter alerts' })
+      expect(list).toHaveTextContent('Rule 2 of Workspace charter broken by agent-z, would pause (audit mode)')
+      expect(list).not.toHaveTextContent(/blocked|stopped/i)
+      await userEvent.click(screen.getByRole('button', { name: 'Mark all read' }))
+      expect(screen.queryByTestId('alerts-unread')).not.toBeInTheDocument()
+      await userEvent.click(within(list).getByRole('button', { name: 'Inspect build-9@1' }))
+      expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ decision: 'build-9@1' }))
+    })
+
+    it('names the declared rule in the drawer', async () => {
+      serveList([charterDecision])
+      renderDashboard({ decision: charterDecision.id })
+      expect(await screen.findByTestId('charter-rule')).toHaveTextContent('Rule 2 of Workspace charter')
+    })
   })
 })

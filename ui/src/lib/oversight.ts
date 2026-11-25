@@ -1,6 +1,9 @@
 import { stringify } from 'yaml'
 import type {
+  CharterBound,
+  CharterDeclaration,
   ConcernScore,
+  OversightConfig,
   DecisionView,
   OversightFeedbackLabel,
   OversightSignal,
@@ -247,3 +250,50 @@ export function draftConcernYaml(query: string, selected: DecisionView[], result
   }
   return `# Draft only: replace the id and review every line before use.\n${stringify(draft)}`
 }
+
+// --- Charters -----------------------------------------------------------------
+
+/** Revisions labelled "Demo charter": listed by the config, or a preview charter. */
+export function demoCharterRevisions(config: OversightConfig | undefined): string[] {
+  const out = new Set(config?.demoCharterRevisions ?? [])
+  for (const charter of config?.charters ?? []) if (charter.preview) out.add(charter.revision)
+  return [...out]
+}
+
+export const isDemoCharter = (charter: CharterDeclaration, config: OversightConfig | undefined) =>
+  Boolean(charter.preview) || (config?.demoCharterRevisions ?? []).includes(charter.revision)
+
+export interface NumberedBound extends CharterBound {
+  /** 1-based position in the charter as declared; stable whatever is highlighted. */
+  number: number
+}
+
+/** A charter's bounds numbered in declared order, highlighted bounds first. */
+export function orderedBounds(charter: CharterDeclaration): NumberedBound[] {
+  const numbered = (charter.bounds ?? []).map((bound, i) => ({ ...bound, number: i + 1 }))
+  return [...numbered.filter((b) => b.highlight), ...numbered.filter((b) => !b.highlight)]
+}
+
+export interface CharterRule {
+  charter: CharterDeclaration
+  bound: NumberedBound
+}
+
+/**
+ * The declared rule a finding names: the bound in the decision's own charter
+ * revision first, else in any declared charter. Undefined when undeclared.
+ */
+export function findCharterRule(config: OversightConfig | undefined, revision: string | undefined, boundID: string): CharterRule | undefined {
+  const charters = config?.charters ?? []
+  const ordered = [...charters.filter((c) => c.revision === revision), ...charters.filter((c) => c.revision !== revision)]
+  for (const charter of ordered) {
+    const index = (charter.bounds ?? []).findIndex((b) => b.id === boundID)
+    if (index >= 0) return { charter, bound: { ...charter.bounds![index], number: index + 1 } }
+  }
+  return undefined
+}
+
+/** "Rule 2", or the bound ID when the charter does not declare it. */
+export const ruleName = (rule: CharterRule | undefined, boundID: string) => (rule ? `Rule ${rule.bound.number}` : `rule ${boundID}`)
+
+export const charterName = (charter: CharterDeclaration) => charter.title?.trim() || charter.revision

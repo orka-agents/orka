@@ -9,6 +9,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import { DecisionInspector } from './decision-inspector'
 import { DecisionTable } from './decision-table'
+import { CharterPanel } from './charter-panel'
 import { makeDecision } from '@/test/fixtures/oversight'
 
 const IMG = '<img src=x onerror="window.__pwned=1">'
@@ -32,12 +33,22 @@ describe('oversight renders API strings as text', () => {
     useUIStore.setState({ namespace: 'default' })
     useAuthStore.setState({ token: 'test-token' })
     ;(window as unknown as { __pwned?: number }).__pwned = undefined
-    server.use(http.get('/api/v1/oversight/decisions/:id', () => HttpResponse.json(hostile)))
+    server.use(
+      http.get('/api/v1/oversight/decisions/:id', () => HttpResponse.json(hostile)),
+      http.get('/api/v1/oversight/config', () => HttpResponse.json({
+        queryKeys: [], maxBulkFeedback: 200, demoCharterRevisions: [],
+        charters: [{ revision: 'charter-r1', title: `title ${SCRIPT}`, bounds: [{ id: 'B1', sentence: `bound ${IMG}` }] }],
+      })),
+    )
   })
 
   it('never turns markup in a decision into elements', async () => {
     render(<DecisionTable decisions={[hostile]} onOpen={() => {}} />)
     render(<DecisionInspector decisionId="x@1" onClose={() => {}} onPivot={() => {}} onOpenDecision={() => {}} />)
+    render(<CharterPanel onPivot={() => {}} />)
+    expect(await screen.findByText(`bound ${IMG}`)).toBeInTheDocument()
+    expect(screen.getByText(`title ${SCRIPT}`)).toBeInTheDocument()
+    expect(await screen.findByTestId('charter-rule')).toHaveTextContent(`Rule 1 of title ${SCRIPT}`)
     expect(await screen.findByTestId('request-summary')).toHaveTextContent(`summary ${IMG}`)
     expect(screen.getByTestId('advisor-summary')).toHaveTextContent(`advisor ${IMG}`)
     expect(screen.getAllByText(`sentence ${SCRIPT}`).length).toBeGreaterThan(0)

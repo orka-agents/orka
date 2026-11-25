@@ -300,14 +300,27 @@ export interface ProducersResponse {
   producers: ProducerInfo[] | null
 }
 
+export interface CharterBound {
+  id: string
+  sentence: string
+  /** An operator wants this bound shown first. */
+  highlight?: boolean
+}
+
+export interface CharterDeclaration {
+  revision: string
+  title?: string
+  /** The charter's rules are a preview check, audit only. */
+  preview?: boolean
+  bounds: CharterBound[] | null
+}
+
 export interface OversightConfig {
   queryKeys: string[]
   maxBulkFeedback: number
-  /**
-   * Not served yet: charter revisions an operator marked as a demo. Only a
-   * revision listed here is labelled as a demo charter.
-   */
-  demoCharterRevisions?: string[]
+  /** Charter revisions an operator marked as a demo (preview) charter. */
+  demoCharterRevisions?: string[] | null
+  charters?: CharterDeclaration[] | null
 }
 
 /** Cheap shape check for a decision frame read off the stream. */

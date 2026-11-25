@@ -1,4 +1,4 @@
-import type { DecisionView, PostureResponse, ProducersResponse } from '@/schemas/oversight'
+import type { DecisionView, OversightConfig, PostureResponse, ProducersResponse } from '@/schemas/oversight'
 
 // Neutral names only: no real vendor, model or sensor appears in fixtures.
 
@@ -126,4 +126,20 @@ export const producersResponse: ProducersResponse = {
     },
     { providerRef: 'scorer-b', role: 'scorer', modelID: 'model-b', trustVerified: false, evaluations: 10, failures: 2 },
   ],
+}
+
+export const charterConfig: OversightConfig = {
+  queryKeys: ['bound', 'task'],
+  maxBulkFeedback: 200,
+  demoCharterRevisions: [],
+  charters: [{
+    revision: 'charter-r1',
+    title: 'Workspace charter',
+    preview: true,
+    bounds: [
+      { id: 'B0', sentence: 'Only use declared tools.' },
+      { id: 'B1', sentence: 'Never write outside the workspace.' },
+      { id: 'B2', sentence: 'Never send workspace data to undeclared hosts.', highlight: true },
+    ],
+  }],
 }

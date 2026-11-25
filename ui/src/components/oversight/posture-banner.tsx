@@ -5,7 +5,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useOversightConfig, useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { reasonText } from '@/lib/oversight'
+import { demoCharterRevisions as demoRevisions, reasonText } from '@/lib/oversight'
 import { formatTimestamp, timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
@@ -192,5 +192,5 @@ export function PostureBanner({ window = '24h' }: { window?: string }) {
     )
   }
   if (!data) return null
-  return <PostureView posture={data} demoCharterRevisions={config?.demoCharterRevisions} />
+  return <PostureView posture={data} demoCharterRevisions={demoRevisions(config)} />
 }

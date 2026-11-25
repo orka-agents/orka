@@ -15,9 +15,12 @@ import {
   withOverride,
 } from '@/hooks/use-oversight'
 import { useOversightStream, type OversightStreamStatus } from '@/hooks/use-oversight-stream'
+import { useCharterAlertHandler } from '@/hooks/use-charter-alerts'
 import { ApiError, isNotImplementedError } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import type { DecisionView } from '@/schemas/oversight'
+import { AlertsButton } from './alerts-button'
+import { CharterPanel } from './charter-panel'
 import { DecisionInspector } from './decision-inspector'
 import { DecisionTable } from './decision-table'
 import { HistoryPanel } from './history-panel'
@@ -73,6 +76,7 @@ export function OversightDashboard({ search, onSearchChange }: OversightDashboar
   const view: OversightView = search.view === 'matrix' ? 'matrix' : 'stream'
   const { data: config } = useOversightConfig()
 
+  const postureWindow = search.window && search.window !== 'all' ? search.window : '24h'
   const pivot = (query: string) => onSearchChange({ q: query, window: undefined, decision: undefined, view: search.view })
 
   return (
@@ -80,8 +84,10 @@ export function OversightDashboard({ search, onSearchChange }: OversightDashboar
       <PageHeader
         title="Oversight"
         description="Read-only: what agents did, what the monitors made of it, and how much of it was seen."
+        action={<AlertsButton onOpenDecision={(id) => onSearchChange({ ...search, decision: id })} />}
       />
-      <PostureBanner window={search.window && search.window !== 'all' ? search.window : '24h'} />
+      <PostureBanner window={postureWindow} />
+      <CharterPanel window={postureWindow} onPivot={pivot} />
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="min-w-0 space-y-4">
@@ -138,7 +144,9 @@ function Results({ q, window, view, queryKeys, onSearch, onWindowChange, onViewC
   const terms = pages[0]?.query
   const seedSeq = pages[0]?.items?.reduce((highest, d) => Math.max(highest, d.seq ?? 0), 0) ?? 0
 
-  const stream = useOversightStream({ q, enabled: following && list.isSuccess && !terminal, after: seedSeq, cap: STREAM_CAP })
+  const initialIDs = new Set(listed.map((d) => d.id))
+  const onStreamed = useCharterAlertHandler(onOpen, initialIDs)
+  const stream = useOversightStream({ q, enabled: following && list.isSuccess && !terminal, after: seedSeq, cap: STREAM_CAP, onDecision: onStreamed })
   const streamShown = pausedAtSeq === null ? stream.decisions : stream.decisions.filter((d) => (d.seq ?? 0) <= pausedAtSeq)
   const heldBack = stream.decisions.length - streamShown.length
 

@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { ListAccessError } from '@/components/ui/list-access-error'
 import {
   useFeedbackOverrides,
+  useOversightConfig,
   useOversightDecision,
   useOversightFeedback,
   useOversightProducers,
@@ -18,7 +19,9 @@ import {
   FEEDBACK_LABEL_TEXT,
   MONITOR_FAILURE_STATUSES,
   binaryName,
+  charterName,
   destinationDomain,
+  findCharterRule,
   feedbackLabelText,
   formatProbability,
   isMonitorFailure,
@@ -74,6 +77,7 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial }: { decis
   const { data, error, isLoading } = useOversightDecision(decisionId)
   const overrides = useFeedbackOverrides()
   const { data: producersResp } = useOversightProducers()
+  const { data: config } = useOversightConfig()
   const producers = producersResp?.producers ?? []
   const [highlighted, setHighlighted] = useState<Set<string>>(new Set())
   const [showSimilar, setShowSimilar] = useState(false)
@@ -175,6 +179,14 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial }: { decis
                     </PivotButton>
                     <Chip>{finding.enforced ? 'enforced' : 'audit only'}</Chip>
                   </div>
+                  {(() => {
+                    const rule = findCharterRule(config, decision.charterRevision, finding.boundID)
+                    return rule ? (
+                      <p className="text-xs font-medium" data-testid="charter-rule">
+                        Rule {rule.bound.number} of {charterName(rule.charter)}
+                      </p>
+                    ) : null
+                  })()}
                   <blockquote className="border-l-2 border-status-failed pl-2 italic">{finding.sentence}</blockquote>
                   <CitedEvents ids={finding.citedEventIDs} onCite={cite} />
                 </li>

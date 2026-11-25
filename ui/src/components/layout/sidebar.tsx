@@ -8,6 +8,7 @@ import { useUIStore } from '@/stores/ui'
 import { useIsMobile } from '@/hooks/use-media-query'
 import { useChatConfig } from '@/hooks/use-chat'
 import { useOversightAvailability } from '@/hooks/use-oversight'
+import { unreadAlertCount, useOversightAlerts } from '@/stores/oversight-alerts'
 import { api, isNotImplementedError } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
 import { OrcaMark } from '@/components/ui/orca-mark'
@@ -53,6 +54,8 @@ export function Sidebar() {
   // Oversight follows the same rule: the chat config's flag, or a 501 from
   // the posture API when the config cannot say.
   const oversightOff = useOversightAvailability() === false
+  const namespace = useUIStore((s) => s.namespace)
+  const oversightUnread = useOversightAlerts((s) => unreadAlertCount(s, namespace))
   const navItems = NAV_ITEMS.filter((item) =>
     (item.to !== '/settings/connectors' || !connectorsOff) && (item.to !== '/oversight' || !oversightOff))
   const { sidebarCollapsed: desktopCollapsed, toggleSidebar, mobileSidebarOpen, setMobileSidebarOpen } = useUIStore()
@@ -181,6 +184,18 @@ export function Sidebar() {
             >
               <Icon className="h-4 w-4 shrink-0" />
               {!sidebarCollapsed && <span>{label}</span>}
+              {to === '/oversight' && oversightUnread > 0 && (
+                <span
+                  data-testid="oversight-unread"
+                  className={cn(
+                    'rounded-full bg-status-failed-bg px-1.5 text-xs font-semibold tabular-nums text-status-failed',
+                    sidebarCollapsed ? 'absolute top-0.5 right-0.5 px-1 text-[10px]' : 'ml-auto',
+                  )}
+                >
+                  <span aria-hidden="true">{oversightUnread}</span>
+                  <span className="sr-only">{oversightUnread} unread charter alerts</span>
+                </span>
+              )}
             </Link>
           )
         })}
