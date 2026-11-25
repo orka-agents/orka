@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -301,7 +302,11 @@ func (h *Handlers) GetOversightDecision(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	view, err := h.oversightDecision(c.Context(), namespace, c.Params("id"))
+	id, err := oversightDecisionIDParam(c)
+	if err != nil {
+		return err
+	}
+	view, err := h.oversightDecision(c.Context(), namespace, id)
 	if err != nil {
 		return err
 	}
@@ -332,7 +337,11 @@ func (h *Handlers) SimilarOversightDecisions(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	source, err := h.oversightDecision(c.Context(), namespace, c.Params("id"))
+	id, err := oversightDecisionIDParam(c)
+	if err != nil {
+		return err
+	}
+	source, err := h.oversightDecision(c.Context(), namespace, id)
 	if err != nil {
 		return err
 	}
@@ -536,7 +545,21 @@ func (h *Handlers) RecordOversightFeedback(c fiber.Ctx) error {
 	if err := json.Unmarshal(c.Body(), &req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
-	return h.recordOversightFeedback(c, []string{c.Params("id")}, req.Label, req.Note)
+	id, err := oversightDecisionIDParam(c)
+	if err != nil {
+		return err
+	}
+	return h.recordOversightFeedback(c, []string{id}, req.Label, req.Note)
+}
+
+// oversightDecisionIDParam returns the decision ID path segment, decoded:
+// clients escape the "@" between a Task name and its action sequence.
+func oversightDecisionIDParam(c fiber.Ctx) (string, error) {
+	id, err := url.PathUnescape(c.Params("id"))
+	if err != nil {
+		return "", fiber.NewError(fiber.StatusBadRequest, "invalid decision id")
+	}
+	return id, nil
 }
 
 // BulkOversightFeedback handles POST /api/v1/oversight/decisions/bulk-feedback.

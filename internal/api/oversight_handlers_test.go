@@ -208,7 +208,7 @@ func TestOversightIngestIsIdempotentRedactedAndBounded(t *testing.T) {
 	status, _ := e.do(t, http.MethodPost, "/internal/v1/oversight/team/decisions", ingestSA, oversightv1.IngestRequest{Decisions: []oversightv1.OversightDecision{changed}})
 	require.Equal(t, http.StatusConflict, status)
 
-	status, body := e.do(t, http.MethodGet, "/api/v1/oversight/decisions/a@0?namespace=team", viewer, nil)
+	status, body := e.do(t, http.MethodGet, "/api/v1/oversight/decisions/a%400?namespace=team", viewer, nil)
 	require.Equal(t, http.StatusOK, status, string(body))
 	require.NotContains(t, string(body), "sekret-token-value")
 	require.NotContains(t, string(body), "token=abc")
@@ -279,7 +279,8 @@ func TestOversightSearchSimilarGroupsAndFeedback(t *testing.T) {
 	status, _ := e.do(t, http.MethodGet, "/api/v1/oversight/decisions?namespace=team&q=disposition:bogus", viewer, nil)
 	require.Equal(t, http.StatusBadRequest, status)
 
-	status, body := e.do(t, http.MethodGet, "/api/v1/oversight/decisions/a@0/similar?namespace=team", viewer, nil)
+	// Clients escape the "@" in a decision ID.
+	status, body := e.do(t, http.MethodGet, "/api/v1/oversight/decisions/a%400/similar?namespace=team", viewer, nil)
 	require.Equal(t, http.StatusOK, status, string(body))
 	var similar oversightv1.SimilarResponse
 	require.NoError(t, json.Unmarshal(body, &similar))
