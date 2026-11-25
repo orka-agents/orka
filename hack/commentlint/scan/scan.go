@@ -638,6 +638,11 @@ func staticWord(word *syntax.Word) string {
 	if dynamic {
 		return ""
 	}
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[") {
+			return ""
+		}
+	}
 	fields, err := expand.Fields(&expand.Config{}, word)
 	if err != nil || len(fields) != 1 {
 		return ""

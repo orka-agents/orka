@@ -483,6 +483,8 @@ func TestSourcedAliasesBlockDeletion(t *testing.T) {
 		"var.sh":     "#!/bin/sh\nloader=.\n$loader ./defs\nemit\n# payload\nEOF\n",
 		"wrapvar.sh": "#!/bin/sh\nloader=.\ncommand $loader ./defs\nemit\n# payload\nEOF\n",
 		"subst.sh":   "#!/bin/sh\n$(printf .) ./defs\nemit\n# payload\nEOF\n",
+		"glob.sh":    "#!/bin/sh\n[.] ./defs\nemit\n# payload\nEOF\n",
+		"star.sh":    "#!/bin/bash\nsourc? ./defs\nemit\n# payload\nEOF\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
