@@ -63,6 +63,7 @@ func (d *OversightDecision) Validate() error {
 		"taskUID": d.TaskUID, "agentName": d.AgentName, "workloadIdentity": d.WorkloadIdentity, "runID": d.RunID,
 		"charterRevision": d.CharterRevision, "concernsRef": d.ConcernsRef,
 		"concernsRevision": d.ConcernsRevision, "concernsDigest": d.ConcernsDigest, "approvalRef": d.ApprovalRef,
+		"policyRevision": d.PolicyRevision,
 	} {
 		if len(value) > MaxShortTextBytes {
 			return invalid("%s is longer than %d bytes", name, MaxShortTextBytes)

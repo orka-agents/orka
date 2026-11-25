@@ -144,6 +144,7 @@ export interface DecisionView {
   concernsRef?: string
   concernsRevision?: string
   concernsDigest?: string
+  policyRevision?: string
   action: ActionEnvelope
   evidenceLevel: string
   coverage: ActionCoverage

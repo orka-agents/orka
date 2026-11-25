@@ -65,6 +65,14 @@ describe('DecisionInspector', () => {
     expect(within(advisor).getByText('Looks like a download.')).toBeInTheDocument()
   })
 
+  it('shows the monitor policy revision in Details when the record has one', async () => {
+    const decision = { ...riskyDecision, policyRevision: 'policy-r1' }
+    serve(decision)
+    open(decision)
+    await openDetails()
+    expect(await screen.findByText('policy policy-r1')).toBeInTheDocument()
+  })
+
   it('shows bytes sent only when the sensor observed sends', async () => {
     serve(riskyDecision)
     open(riskyDecision)

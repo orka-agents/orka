@@ -130,6 +130,9 @@ type OversightDecision struct {
 	ConcernsRef      string         `json:"concernsRef,omitempty"`
 	ConcernsRevision string         `json:"concernsRevision,omitempty"`
 	ConcernsDigest   string         `json:"concernsDigest,omitempty"`
+	// PolicyRevision names the monitor policy that mapped scores to this
+	// disposition, such as its thresholds and escalation rules.
+	PolicyRevision string `json:"policyRevision,omitempty"`
 
 	Action        ActionEnvelope `json:"action"`
 	EvidenceLevel EvidenceLevel  `json:"evidenceLevel"`

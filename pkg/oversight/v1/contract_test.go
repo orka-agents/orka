@@ -93,6 +93,9 @@ func TestValidateRefusesMalformedDecisions(t *testing.T) {
 			d.Action.Effects.Binaries = make([]oversightv1.CountedValue, oversightv1.MaxCountedValues+1)
 		},
 		"missing observedAt": func(d *oversightv1.OversightDecision) { d.ObservedAt = time.Time{} },
+		"long policyRevision": func(d *oversightv1.OversightDecision) {
+			d.PolicyRevision = strings.Repeat("p", oversightv1.MaxShortTextBytes+1)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			d := validDecision()

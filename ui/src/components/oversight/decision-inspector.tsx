@@ -245,6 +245,7 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
                 <Chip>disposition {decision.disposition}</Chip>
                 <Chip>{decision.mode === 'gate' ? 'gate mode' : 'audit mode'}</Chip>
                 <Chip>evidence {decision.evidenceLevel}</Chip>
+                {decision.policyRevision && <Chip>policy {decision.policyRevision}</Chip>}
                 {decision.wouldHavePaused && <Chip>would pause in gate mode</Chip>}
               </div>
             </Section>
