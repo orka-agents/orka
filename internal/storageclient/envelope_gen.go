@@ -46,6 +46,16 @@ func (p envelopedState) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 	return r0, r1, err
 }
 
+func (p envelopedState) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	err := p.ops.run(ctx, writeCall{method: "AdvanceWriteWatermark", contract: storagev1.StateContract, args: []any{}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.AdvanceWriteWatermark(ctx)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) AppendAHPJournal(ctx context.Context, a1 string, a2 int64, a3 []storagev1.AHPJournalEntry, a4 []storagev1.AHPChannelState, a5 storagev1.AHPJournalLimits) error {
 	return p.ops.run(ctx, writeCall{method: "AppendAHPJournal", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
 		return p.StateProvider.AppendAHPJournal(ctx, a1, a2, a3, a4, a5)
@@ -1538,6 +1548,16 @@ func (p envelopedState) UpsertReviewSlice(ctx context.Context, a1 *storagev1.Rev
 		writeBack(a1, w1)
 	}
 	return err
+}
+
+func (p envelopedArtifacts) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	err := p.ops.run(ctx, writeCall{method: "AdvanceWriteWatermark", contract: storagev1.ArtifactsContract, args: []any{}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.ArtifactProvider.AdvanceWriteWatermark(ctx)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedArtifacts) DeleteArtifacts(ctx context.Context, a1 storagev1.ArtifactOwner) error {

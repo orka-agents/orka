@@ -113,7 +113,6 @@ type ACPDispatcher struct {
 	Store                    store.DurableControlStore
 	ResultStore              store.ResultStore
 	EventStore               store.ExecutionEventStore
-	PlanStore                store.PlanStore
 	Snapshots                store.AgentExecutionSnapshotStore
 	Epochs                   *ControllerEpochManager
 	Sessions                 *ACPSessionContinuity
@@ -160,8 +159,8 @@ type ACPDispatcher struct {
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
 
 func (d *ACPDispatcher) Start(ctx context.Context) error {
-	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.EventStore == nil || d.PlanStore == nil || d.Snapshots == nil || d.Epochs == nil {
-		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, execution event store, plan store, immutable snapshot store, and epoch manager")
+	if d.Client == nil || d.Store == nil || d.ResultStore == nil || d.EventStore == nil || d.Snapshots == nil || d.Epochs == nil {
+		return fmt.Errorf("ACP dispatcher requires Kubernetes client, durable control store, result store, execution event store, immutable snapshot store, and epoch manager")
 	}
 	if _, ok := d.EventStore.(store.DeduplicatingExecutionEventStore); !ok {
 		return fmt.Errorf("ACP dispatcher requires an execution event store with atomic deduplication")
@@ -204,6 +203,63 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		d.staleRecoveryMu.Lock()
 		d.staleRecoveryMu.Unlock() //nolint:staticcheck // SA2001: acquisition waits for the recovery worker to finish.
 	}()
+	ticker := time.NewTicker(d.Interval)
+	defer ticker.Stop()
+	// A controller that starts while the installation is held for storage
+	// recovery waits for the release, which needs this process running,
+	// instead of failing the manager and restarting into the same hold.
+	for waiting := false; ; waiting = true {
+		err := d.recoverAtStart(ctx)
+		if err == nil {
+			break
+		}
+		hold, held := errors.AsType[*store.StorageHoldError](err)
+		if !held {
+			return err
+		}
+		if !waiting {
+			logf.FromContext(ctx).Info("Storage is held for recovery; the ACP dispatcher recovers stale attempts and dispatches once the hold is released",
+				"hold", hold.Hold.ID, "reason", hold.Hold.Reason)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+	heldBy := ""
+	for {
+		logACPScanError(ctx, d.dispatchOnce(ctx), &heldBy)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+// logACPScanError logs the error a dispatcher scan returned. A scan stopped
+// by a storage recovery hold raised while the dispatcher runs is logged once
+// per hold, at Info, because dispatch resumes once the hold is released;
+// heldBy names the hold logged last.
+func logACPScanError(ctx context.Context, err error, heldBy *string) {
+	if hold, held := errors.AsType[*store.StorageHoldError](err); held {
+		if hold.Hold.ID != *heldBy {
+			*heldBy = hold.Hold.ID
+			logf.FromContext(ctx).Info("Storage is held for recovery; the ACP dispatcher dispatches once the hold is released",
+				"hold", hold.Hold.ID, "reason", hold.Hold.Reason, "error", err.Error())
+		}
+		return
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		logf.FromContext(ctx).Error(err, "ACP dispatcher scan failed")
+	}
+}
+
+// recoverAtStart waits for the controller fence and recovers stale attempts
+// before the first dispatch. An ACP Task whose recovery is blocked is logged
+// and retried later, so independent work proceeds.
+func (d *ACPDispatcher) recoverAtStart(ctx context.Context) error {
 	if _, err := d.Epochs.CurrentFence(ctx); err != nil {
 		return err
 	}
@@ -213,18 +269,7 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		}
 		logf.FromContext(ctx).Error(err, "ACP Tasks remain blocked on recovery; independent work may proceed")
 	}
-	ticker := time.NewTicker(d.Interval)
-	defer ticker.Stop()
-	for {
-		if err := d.dispatchOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logf.FromContext(ctx).Error(err, "ACP dispatcher scan failed")
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		}
-	}
+	return nil
 }
 
 func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
@@ -1981,7 +2026,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				admitOnce.Do(func() { close(admitted) })
 				runtimeSessionSettlementRequired = true
 				if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, event); err != nil {
-					return acpUpdatePersistenceError(err, nil)
+					return acpUpdatePersistenceError(err)
 				}
 				if !accepted {
 					if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionSubmitting, store.PromptExecutionAccepted, "accepted", nil); err != nil {
@@ -2032,7 +2077,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					}
 				}
 				var planState *store.PlanState
-				var planErr error
 				if event.Update != nil && event.Update.Plan != nil {
 					projection := journalState.ProjectPlanUpdate(*event.Update.Plan)
 					planState = &store.PlanState{
@@ -2044,18 +2088,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				var journalErr error
 				if planState == nil {
 					_, _, journalErr = journalState.AppendUpdateIfNew(ctx, event)
-				} else if _, ok := d.EventStore.(store.AtomicExecutionEventPlanStore); ok {
-					_, _, journalErr = journalState.AppendPlanUpdateIfNew(ctx, event, planState)
 				} else {
-					// Direct unit tests may use separate fake stores without starting
-					// the dispatcher. Production startup requires the atomic path above.
-					planErr = saveACPPlanUpdateWithRetry(ctx, d.PlanStore, task.Namespace, task.Name, planState)
-					_, _, journalErr = journalState.AppendUpdateIfNew(ctx, event)
-					planErr = reconcileACPPlanUpdateAfterJournal(
-						ctx, d.PlanStore, task.Namespace, task.Name, planState, planErr, journalErr,
-					)
+					// The event and its plan update commit in one transaction,
+					// so neither is visible without the other.
+					_, _, journalErr = journalState.AppendPlanUpdateIfNew(ctx, event, planState)
 				}
-				if persistenceErr := acpUpdatePersistenceError(journalErr, planErr); persistenceErr != nil {
+				if persistenceErr := acpUpdatePersistenceError(journalErr); persistenceErr != nil {
 					return persistenceErr
 				}
 			case harnessv2.EventPermissionRequested:
@@ -2174,7 +2212,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpInterruptedOutputFlushTimeout)
 		if persistErr := flushInterruptedOutput(flushCtx); persistErr != nil {
-			streamErr = acpUpdatePersistenceError(persistErr, nil)
+			streamErr = acpUpdatePersistenceError(persistErr)
 		}
 		cancel()
 		settlementErr := d.handlePromptStreamError(
@@ -2552,46 +2590,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	return d.completeSuccessWithDelivery(ctx, task, deliveryStatus, "ACP task completed")
 }
 
-func saveACPPlanUpdateWithRetry(
-	ctx context.Context,
-	planStore store.PlanStore,
-	namespace,
-	taskName string,
-	plan *store.PlanState,
-) error {
-	if err := planStore.SavePlan(ctx, namespace, taskName, plan); err != nil {
-		if retryErr := planStore.SavePlan(ctx, namespace, taskName, plan); retryErr != nil {
-			return errors.Join(
-				fmt.Errorf("save ACP plan update: %w", err),
-				fmt.Errorf("retry ACP plan update: %w", retryErr),
-			)
-		}
-	}
-	return nil
-}
-
-func reconcileACPPlanUpdateAfterJournal(
-	ctx context.Context,
-	planStore store.PlanStore,
-	namespace,
-	taskName string,
-	plan *store.PlanState,
-	planErr,
-	journalErr error,
-) error {
-	if planErr == nil || journalErr != nil {
-		return planErr
-	}
-	if err := planStore.SavePlan(ctx, namespace, taskName, plan); err != nil {
-		return errors.Join(planErr, fmt.Errorf("reconcile ACP plan update after journal append: %w", err))
-	}
-	return nil
-}
-
+// acpExecutionUpdatePersistenceError marks a failure to persist an execution
+// update, including a plan update, which commits with its event.
 type acpExecutionUpdatePersistenceError struct {
-	err        error
-	journalErr error
-	planErr    error
+	err error
 }
 
 const acpExecutionEventPersistenceFailureReason = "ExecutionEventPersistenceFailed"
@@ -2610,26 +2612,11 @@ func (e *acpExecutionUpdatePersistenceError) Unwrap() error {
 	return e.err
 }
 
-func (e *acpExecutionUpdatePersistenceError) journalFailed() bool {
-	return e != nil && e.journalErr != nil
-}
-
-func acpUpdatePersistenceError(journalErr, planErr error) error {
-	persistenceErr := &acpExecutionUpdatePersistenceError{}
-	var failures []error
-	if journalErr != nil {
-		persistenceErr.journalErr = fmt.Errorf("persist ACP execution update: %w", journalErr)
-		failures = append(failures, persistenceErr.journalErr)
-	}
-	if planErr != nil {
-		persistenceErr.planErr = fmt.Errorf("persist ACP plan update: %w", planErr)
-		failures = append(failures, persistenceErr.planErr)
-	}
-	if len(failures) == 0 {
+func acpUpdatePersistenceError(journalErr error) error {
+	if journalErr == nil {
 		return nil
 	}
-	persistenceErr.err = errors.Join(failures...)
-	return persistenceErr
+	return &acpExecutionUpdatePersistenceError{err: fmt.Errorf("persist ACP execution update: %w", journalErr)}
 }
 
 func assistantTranscriptForPersistence(streamed string, overflow bool) (string, bool) {
@@ -5874,7 +5861,9 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
-		if err := d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if err := admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		}); err != nil {
 			return err
 		}
 		task.Status = latest.Status
@@ -6808,10 +6797,9 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		// plan write, so record it once here before the Task is failed.
 		logf.FromContext(ctx).Error(persistenceErr, "ACP execution update persistence failed",
 			"namespace", task.Namespace, "task", task.Name,
-			"journalFailed", persistenceErr.journalFailed(),
 		)
 		return d.handlePromptUpdatePersistenceFailure(
-			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, journalState, accepted, persistenceErr, cancellation,
+			ctx, runtimeClient, sessionID, task, attemptID, fence, runtimeFence, accepted, cancellation,
 		)
 	}
 	if rejection, ok := errors.AsType[*harnessv2.ClientError](err); !accepted && ok &&
@@ -6956,6 +6944,10 @@ func (d *ACPDispatcher) handlePromptStreamError(
 	)
 }
 
+// handlePromptUpdatePersistenceFailure settles a prompt whose execution update
+// could not be persisted. The journal itself failed, so no further lifecycle
+// record is attempted: the prompt is failed when its settlement is proven and
+// otherwise recorded as OutcomeUnknown.
 func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -6964,9 +6956,7 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 	attemptID string,
 	fence store.ControllerEpochFence,
 	runtimeFence harnessv2.Fence,
-	journalState *v2eventjournal.State,
 	accepted bool,
-	persistenceErr *acpExecutionUpdatePersistenceError,
 	cancellation *acpPromptCancellationResult,
 ) error {
 	if !accepted {
@@ -6982,29 +6972,11 @@ func (d *ACPDispatcher) handlePromptUpdatePersistenceFailure(
 	}
 	response, cancelErr := cancellation.response, cancellation.err
 	if cancelErr == nil && response.SettlementProven {
-		if !persistenceErr.journalFailed() {
-			if lifecycleErr := appendPromptSettlementLifecycleDetached(
-				ctx, journalState, response.Settlement, cancellation.reason,
-			); lifecycleErr != nil {
-				logf.FromContext(ctx).Error(lifecycleErr, "persist ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
-				return d.failPromptForExecutionEventPersistence(
-					ctx, task, attemptID, fence, "prompt settlement lifecycle persistence failed after plan persistence failure",
-				)
-			}
-		}
 		return d.failPromptForExecutionEventPersistence(
 			ctx, task, attemptID, fence, "prompt was settled after execution update persistence failed",
 		)
 	}
 	logACPCancelSettlementUnknown(ctx, task, cancellation.reason, response, cancelErr)
-	if !persistenceErr.journalFailed() {
-		if lifecycleErr := appendPromptStreamFailureLifecycleDetached(ctx, journalState, persistenceErr); lifecycleErr != nil {
-			logf.FromContext(ctx).Error(lifecycleErr, "persist unknown ACP prompt settlement after plan persistence failure", "namespace", task.Namespace, "task", task.Name)
-			return d.failPromptForExecutionEventPersistence(
-				ctx, task, attemptID, fence, "unknown prompt settlement lifecycle persistence failed after plan persistence failure",
-			)
-		}
-	}
 	return d.markOutcomeUnknown(
 		ctx, task, attemptID, fence, acpExecutionEventPersistenceFailureReason,
 		"prompt settlement is unknown after execution update persistence failed",
@@ -7619,7 +7591,9 @@ func (d *ACPDispatcher) failTaskWithProjection(
 		latest.Status.Execution.LastTransitionTime = &now
 		latest.Status.Phase = phase
 		latest.Status.Message = message
-		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		return admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		})
 	})
 }
 

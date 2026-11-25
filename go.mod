@@ -22,6 +22,7 @@ require (
 	github.com/openai/openai-go/v3 v3.50.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/orka-agents/orka-workspace v0.1.0-alpha.7
+	github.com/orka-agents/orka/pkg/storage v0.0.0-00010101000000-000000000000
 	github.com/orka-agents/sessionkit v0.0.0-20261009211105-8c7dfc5d9553
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
@@ -59,7 +60,7 @@ require (
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	modernc.org/sqlite v1.60.1
 	oras.land/oras-go/v2 v2.6.2
-	sigs.k8s.io/controller-runtime v0.25.2
+	sigs.k8s.io/controller-runtime v0.25.3
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730
 	sigs.k8s.io/yaml v1.6.0
 )
@@ -197,3 +198,5 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
 )
+
+replace github.com/orka-agents/orka/pkg/storage => ./pkg/storage

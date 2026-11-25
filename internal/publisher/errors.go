@@ -19,6 +19,7 @@ var (
 	ErrPreparedArtifactMissing = errors.New("prepared publication artifact is missing")
 	ErrPreparedArtifactCorrupt = errors.New("prepared publication artifact is corrupt")
 	ErrCASRejected             = errors.New("exact publication compare-and-swap was rejected")
+	ErrRebaseRefused           = errors.New("automated rebase was refused")
 	ErrPublicationUnknown      = errors.New("publication outcome is unknown")
 	ErrVerificationUnknown     = errors.New("remote publication state could not be observed")
 )

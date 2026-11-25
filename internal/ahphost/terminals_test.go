@@ -205,6 +205,9 @@ func TestEndedTerminalsNothingFollowsGoWithTheNextTerminal(t *testing.T) {
 	backend.onReap = nil
 	require.NoError(t, client.Unsubscribe(ctx, "ahp-terminal:/three"))
 	require.NoError(t, other.Unsubscribe(ctx, "ahp-terminal:/two"))
+	// Unsubscribing is a notification, and the terminal is created on the
+	// other connection: a reply on this one shows the host has handled it.
+	require.NoError(t, other.Request(ctx, "ping", map[string]any{}, nil))
 	looks := 0
 	backend.onTerminals = func() {
 		looks++

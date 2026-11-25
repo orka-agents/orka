@@ -31,6 +31,15 @@ type writeCase[P any] struct {
 	// that differs from the envelope's is checked too.
 	explicitFence bool
 	observe       func(t *testing.T, provider P) any
+	// observeWrites marks a case whose observe calls a method the catalog
+	// lists as a write, such as IsLocked. For a provider that refuses such a
+	// method while its dataset is migrating, the maintenance cases compare
+	// observeReads instead while the dataset is migrating.
+	observeWrites bool
+	// observeReads observes, through catalog reads alone, what it can of
+	// what observe does, for a case that sets observeWrites. It is nil when
+	// no catalog read serves those records.
+	observeReads func(t *testing.T, provider P) any
 	// afterCommit, when set, changes what the write changed, such as writing
 	// a deleted record again, after the first call commits. The receipt check
 	// then proves that a replay returns the original outcome without running
@@ -167,11 +176,11 @@ func requireSameOutcome(t testingT, want, got writeOutcome) {
 }
 
 // runWriteCatalog runs the commit-time checks for every case.
-func runWriteCatalog[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P]) {
+func runWriteCatalog[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], settings suiteOptions) {
 	for _, c := range cases {
 		t.Run(c.method, func(t *testing.T) {
 			t.Run("refusals", func(t *testing.T) { runWriteRefusals(t, newProvider(t), c) })
-			t.Run("receipts", func(t *testing.T) { runWriteReceipts(t, newProvider(t), c) })
+			t.Run("receipts", func(t *testing.T) { runWriteReceipts(t, newProvider(t), c, settings) })
 			t.Run("aborted", func(t *testing.T) { runWriteAborted(t, newProvider(t), c) })
 			t.Run("detached", func(t *testing.T) { runWriteDetached(t, newProvider(t), c) })
 		})
@@ -258,8 +267,10 @@ func runWriteRefusals[P writeCaseProvider](t *testing.T, provider P, c writeCase
 // runWriteReceipts checks that a lost response is safe to retry: a replay of
 // the same envelope returns the original outcome without a second change,
 // even after the controller was replaced, and a reused operation ID with a
-// different request is refused.
-func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase[P]) {
+// different request digest is refused. Behind a transport that recomputes
+// request digests (see RecomputesRequestDigests), the transport refuses that
+// digest with ErrValidation before the provider compares it with the receipt.
+func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase[P], settings suiteOptions) {
 	dataset, _ := prepareWriteCase(t, provider, c)
 	ctx := t.Context()
 	envelope := envelopeFor(t, dataset, c, suiteFence)
@@ -276,7 +287,11 @@ func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase
 	other := envelope
 	other.RequestDigest = controlDigest("a different request")
 	outcome := callWrite(ctx, t, provider, c, other, suiteFence)
-	require.ErrorIs(t, outcome.err, storagev1.ErrDuplicateMismatch)
+	if settings.recomputedDigests[c.method] {
+		require.ErrorIs(t, outcome.err, storagev1.ErrValidation)
+	} else {
+		require.ErrorIs(t, outcome.err, storagev1.ErrDuplicateMismatch)
+	}
 	require.Equal(t, after, c.observe(t, provider))
 
 	resolved, err := provider.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
@@ -382,6 +397,12 @@ func runConcurrentReplays[P writeCaseProvider](t *testing.T, provider P, c write
 	return outcomes
 }
 
+// servesContract reports whether contract's provider serves a method: a
+// method of that part, or one every part serves.
+func servesContract(info storagev1.MethodInfo, contract string) bool {
+	return info.Contract == "" || info.Contract == contract
+}
+
 // uncoveredWrites checks cases against the method catalog and returns, sorted,
 // the write methods of contract that no case covers. A case for an unknown
 // method, for a method that is not a write of contract, or for a method that
@@ -393,7 +414,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 		switch {
 		case !ok:
 			return nil, fmt.Errorf("write case %q names no contract method", c.method)
-		case info.Kind != storagev1.MethodWrite || info.Contract != contract:
+		case info.Kind != storagev1.MethodWrite || !servesContract(info, contract):
 			return nil, fmt.Errorf("write case %q is not a %s write", c.method, contract)
 		case covered[c.method]:
 			return nil, fmt.Errorf("write case %q is listed twice", c.method)
@@ -402,7 +423,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 	}
 	var uncovered []string
 	for name, info := range storagev1.Methods() {
-		if info.Kind == storagev1.MethodWrite && info.Contract == contract && !covered[name] {
+		if info.Kind == storagev1.MethodWrite && servesContract(info, contract) && !covered[name] {
 			uncovered = append(uncovered, name)
 		}
 	}

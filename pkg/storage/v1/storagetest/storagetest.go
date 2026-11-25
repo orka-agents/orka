@@ -8,7 +8,9 @@
 // and namespace isolation, the typed errors providers return, idempotent
 // replays, atomic grouped writes, bounded queries, one winner among
 // concurrent callers, conditional commands that refuse a changed target or a
-// stale fence, exact nanosecond times and the provider description.
+// stale fence, exact nanosecond times, the provider description, the store
+// halves of the Kubernetes control protocols and, for a provider that reports
+// the export capability, export and import.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
 //
@@ -48,6 +50,7 @@ var stateFamilies = []stateFamily{
 	{"results", runResults},
 	{"plans", runPlans},
 	{"messages", runMessages},
+	{"message-budget", runMessageBudget},
 	{"sessions", runSessions},
 	{"session-locks", runSessionLocks},
 	{"chat-turns", runChatTurns},
@@ -93,54 +96,166 @@ var stateFamilies = []stateFamily{
 		})
 	}},
 	{"lost-responses", runLostResponses},
-	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
-		runWriteCatalog(t, newProvider, stateWriteCases)
+	{"grouped-writes", runGroupedWrites},
+	{"protocols", runProtocols},
+	{"write-watermark", func(t *testing.T, newProvider StateFactory) {
+		runWriteWatermark(t, newProvider)
 	}},
+	{"installations", func(t *testing.T, newProvider StateFactory) {
+		runInstallations(t, newProvider)
+	}},
+	{"export-import", runStateExportImport},
 }
 
-// RunState runs every state.v1 case against providers from newProvider. Raw
-// writes without envelopes must be rejected; ordinary cases get suite
-// envelopes. ProviderAttachesEnvelopes delegates envelope attachment to the
-// provider and skips the raw-write rejection cases.
+// RunState runs every state.v1 case against providers from newProvider, and
+// the optional cases that options enable. Raw writes without envelopes must
+// be rejected; ordinary cases get suite envelopes. ProviderAttachesEnvelopes
+// delegates envelope attachment to the provider and skips the raw-write
+// rejection cases.
 func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	t.Helper()
 	settings := collectOptions(options)
 	if !settings.providerAttachesEnvelopes {
-		t.Run("missing-envelopes", func(t *testing.T) {
+		settings.run(t, "missing-envelopes", func(t *testing.T) {
 			runMissingEnvelopes(t, newProvider, wrapState, stateWriteCases)
 		})
 	}
-	newProvider = stateFactory(newProvider, settings)
+	wrapped := stateFactory(newProvider, settings)
 	for _, family := range stateFamilies {
-		t.Run(family.name, func(t *testing.T) {
-			family.run(t, newProvider)
+		settings.run(t, family.name, func(t *testing.T) {
+			family.run(t, wrapped)
 		})
 	}
+	settings.run(t, "write-envelopes", func(t *testing.T) {
+		runWriteCatalog(t, wrapped, stateWriteCases, settings)
+	})
+	runOptionalFamilies(t, wrapped, stateWriteCases, settings)
 }
 
 // RunArtifacts runs every artifacts.v1 case against providers from
-// newProvider, attaching envelopes as RunState does.
+// newProvider, and the optional cases that options enable, attaching
+// envelopes as RunState does.
 func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) {
 	t.Helper()
 	settings := collectOptions(options)
 	if !settings.providerAttachesEnvelopes {
-		t.Run("missing-envelopes", func(t *testing.T) {
+		settings.run(t, "missing-envelopes", func(t *testing.T) {
 			runMissingEnvelopes(t, newProvider, wrapArtifacts, artifactWriteCases)
 		})
 	}
-	newProvider = artifactFactory(newProvider, settings)
-	t.Run("artifacts", func(t *testing.T) {
-		runArtifacts(t, newProvider)
+	wrapped := artifactFactory(newProvider, settings)
+	settings.run(t, "artifacts", func(t *testing.T) {
+		runArtifacts(t, wrapped)
 	})
-	t.Run("artifact-write-order", func(t *testing.T) {
-		runArtifactWriteOrder(t, newProvider)
+	settings.run(t, "artifact-write-order", func(t *testing.T) {
+		runArtifactWriteOrder(t, wrapped)
 	})
-	t.Run("write-envelopes", func(t *testing.T) {
-		runWriteCatalog(t, newProvider, artifactWriteCases)
+	settings.run(t, "write-envelopes", func(t *testing.T) {
+		runWriteCatalog(t, wrapped, artifactWriteCases, settings)
 	})
-	t.Run("dataset-binding", func(t *testing.T) {
-		runDatasetBinding(t, newProvider, func(t *testing.T, provider storagev1.ArtifactProvider) {
+	settings.run(t, "dataset-binding", func(t *testing.T) {
+		runDatasetBinding(t, wrapped, func(t *testing.T, provider storagev1.ArtifactProvider) {
 			saveArtifact(t, provider, artifactOwner("tenant-a", "task-1"), "report.txt", "text/plain", []byte("report"))
 		})
 	})
+	settings.run(t, "write-watermark", func(t *testing.T) {
+		runWriteWatermark(t, wrapped)
+	})
+	settings.run(t, "installations", func(t *testing.T) {
+		runInstallations(t, wrapped)
+	})
+	settings.run(t, "export-import", func(t *testing.T) {
+		runArtifactsExportImport(t, wrapped)
+	})
+	runOptionalFamilies(t, wrapped, artifactWriteCases, settings)
+}
+
+// runOptionalFamilies runs the cases the options enable over every write
+// case of a contract.
+func runOptionalFamilies[P suiteProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], selected suiteOptions) {
+	t.Helper()
+	if selected.maintenance != nil {
+		selected.run(t, "maintenance", func(t *testing.T) {
+			runMaintenance(t, newProvider, cases, *selected.maintenance)
+		})
+	}
+	if selected.durability != nil {
+		selected.run(t, "durability", func(t *testing.T) {
+			runDurability(t, newProvider, cases, *selected.durability)
+		})
+	}
+}
+
+// run runs one family as a subtest, in parallel with the other families when
+// the Parallel option is set.
+func (o suiteOptions) run(t *testing.T, name string, family func(t *testing.T)) {
+	t.Helper()
+	t.Run(name, func(t *testing.T) {
+		if o.parallel {
+			t.Parallel()
+		}
+		family(t)
+	})
+}
+
+// harnessProvider returns the provider a harness is given: the one the
+// factory returned, which the suite may have wrapped to attach envelopes.
+func harnessProvider(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if wrapped, ok := provider.(suiteWrapped); ok {
+		return wrapped.unwrapped()
+	}
+	return provider
+}
+
+// rewrapHarnessProvider wraps a provider a harness returned in place of
+// replaced, as the suite wrapped replaced.
+func rewrapHarnessProvider(replaced, returned storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if wrapped, ok := replaced.(suiteWrapped); ok {
+		return wrapped.rewrap(returned)
+	}
+	return returned
+}
+
+// suiteWrapped is a provider the suite wrapped to attach envelopes.
+type suiteWrapped interface {
+	unwrapped() storagev1.ProviderDescriber
+	rewrap(storagev1.ProviderDescriber) storagev1.ProviderDescriber
+}
+
+func (e envelopedState) unwrapped() storagev1.ProviderDescriber { return e.StateProvider }
+
+func (e envelopedState) rewrap(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if state, ok := provider.(storagev1.StateProvider); ok {
+		return wrapState(state)
+	}
+	return provider
+}
+
+func (e envelopedArtifacts) unwrapped() storagev1.ProviderDescriber { return e.ArtifactProvider }
+
+// A state provider that also serves artifacts is wrapped twice, as wrapState
+// does it, and unwrapped through its state wrapper.
+func (e stateWithArtifacts) unwrapped() storagev1.ProviderDescriber {
+	return harnessProvider(e.StateProvider)
+}
+
+func (e stateWithArtifacts) rewrap(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if state, ok := provider.(storagev1.StateProvider); ok {
+		return wrapState(state)
+	}
+	return provider
+}
+
+func (e envelopedArtifacts) rewrap(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if artifacts, ok := provider.(storagev1.ArtifactProvider); ok {
+		return wrapArtifacts(artifacts)
+	}
+	return provider
+}
+
+// suiteProvider is what the cases that every contract shares need from a
+// provider.
+type suiteProvider interface {
+	writeCaseProvider
+	storagev1.WriteWatermarkStore
 }

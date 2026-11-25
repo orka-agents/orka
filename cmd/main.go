@@ -1599,13 +1599,18 @@ func main() {
 	// consumers reach storage only through the storage client, which holds
 	// the snapshot key; the SQLite store is its in-process provider and a
 	// manager runnable.
+	sqliteSynchronous, err := sqlite.ParseSynchronous(storageFlags.SQLiteSynchronous)
+	if err != nil {
+		setupLog.Error(err, "invalid --store-sqlite-synchronous")
+		os.Exit(1)
+	}
 	sqliteStore, appStorage, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
 		if agentExecutionSnapshotSecretOpts.enabled() {
 			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
 		}
 		return loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
-	})
+	}, sqlite.WithSynchronous(sqliteSynchronous))
 	if err != nil {
 		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)
@@ -2147,9 +2152,8 @@ func main() {
 		Identity:        agentIdentityConfig,
 		SubstrateRouter: runtimePoolSubstrateRouter,
 		Client:          mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
-		EventStore: appStorage, PlanStore: appStorage,
-		Snapshots: agentExecutionSnapshotStore,
-		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
+		EventStore: appStorage, Snapshots: agentExecutionSnapshotStore,
+		Epochs: controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
 		ArtifactReservations: artifactRetentionWiring.collector,
 		AdmissionGate:        acpAdmissionGate,
@@ -2474,6 +2478,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	var branchRebaser controller.RepositoryMonitorBranchRebaser
+	if publisherClient != nil {
+		branchRebaser = publisherClient
+	}
 	if err := (&controller.RepositoryMonitorReconciler{
 		Client:                    mgr.GetClient(),
 		Scheme:                    mgr.GetScheme(),
@@ -2483,6 +2491,7 @@ func main() {
 		DurableControlStore:       kubeControlStore,
 		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		BranchRebaser:             branchRebaser,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)

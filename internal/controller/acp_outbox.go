@@ -345,7 +345,9 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 				Reason: "Task" + string(payload.Phase), Message: taskTerminalMessage,
 			})
 		}
-		if err := p.Client.Status().Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if err := admitTaskStatus(ctx, p.Epochs, taskSuccessOf(base), task, func(ctx context.Context) error {
+			return p.Client.Status().Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		}); err != nil {
 			return err
 		}
 		deliveredResourceVersion = task.ResourceVersion
