@@ -223,10 +223,10 @@ func selectUnreadMessages(
 }
 
 // scanMessageBatch reads an inbox selection in ID order and stops before the
-// message that would take the batch's content past store.MaxMessageBatchBytes,
-// keeping at least one message, so a consuming read never marks a message it
-// cannot return in one response. Content length counts bytes, as the contract
-// does.
+// message that would take the batch past store.MaxMessageBatchBytes, keeping
+// at least one message unless that message alone exceeds the wire-safe budget.
+// Counting both content and identifier bytes protects legacy pre-upgrade rows
+// whose identifiers or content were stored before the send-time caps existed.
 func scanMessageBatch(rows *sql.Rows, namespace string) ([]store.Message, error) {
 	var messages []store.Message
 	var batchBytes int
@@ -235,14 +235,25 @@ func scanMessageBatch(rows *sql.Rows, namespace string) ([]store.Message, error)
 		if err := rows.Scan(&m.ID, &m.FromTask, &m.ToTask, &m.ParentTask, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
-		if len(messages) > 0 && batchBytes+len(m.Content) > store.MaxMessageBatchBytes {
+		rowBytes := len(m.Content)
+		idBytes := len(m.Namespace) + len(m.FromTask) + len(m.ToTask) + len(m.ParentTask)
+		if idBytes > 4*store.MaxControlIdentifierBytes {
+			// Legacy row with oversized identifiers: charge the excess against
+			// the batch budget so a consuming read never commits a batch that
+			// cannot fit in one wire response.
+			rowBytes += idBytes - 4*store.MaxControlIdentifierBytes
+		}
+		if len(messages) > 0 && batchBytes+rowBytes > store.MaxMessageBatchBytes {
 			break
+		}
+		if len(messages) == 0 && rowBytes > store.MaxMessageBatchBytes {
+			return nil, store.TooLargeError{What: "message batch", Size: int64(rowBytes), Limit: store.MaxMessageBatchBytes}
 		}
 		if messages == nil {
 			messages = make([]store.Message, 0, initialMessageBatchCapacity)
 		}
 		m.CreatedAt = m.CreatedAt.UTC()
-		batchBytes += len(m.Content)
+		batchBytes += rowBytes
 		messages = append(messages, m)
 	}
 	if err := rows.Err(); err != nil {

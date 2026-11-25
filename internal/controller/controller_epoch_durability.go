@@ -322,15 +322,24 @@ func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.Stor
 			}
 			t.endAttempt()
 			cancel()
+			if result.hold != nil {
+				// Return immediately so the caller closes all fences and
+				// publishes the hold without waiting on a potentially stuck
+				// maintenance provider call for an already-opened dataset.
+				return result.hold, nil
+			}
 			<-maintained
-			return result.hold, result.err
+			return nil, result.err
 		case hold := <-maintained:
 			t.endAttempt()
 			cancel()
+			if hold != nil {
+				return hold, nil
+			}
 			if opened != nil {
 				<-opened
 			}
-			return hold, nil
+			return nil, nil
 		}
 	}
 }
