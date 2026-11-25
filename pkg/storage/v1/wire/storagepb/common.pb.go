@@ -399,14 +399,15 @@ func (x *TaskDataFence) GetJobs() []*TaskJobIdentity {
 
 // ProviderLimits states a provider's size limits.
 type ProviderLimits struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	MaxArtifactBytes      int64                  `protobuf:"varint,1,opt,name=max_artifact_bytes,json=maxArtifactBytes,proto3" json:"max_artifact_bytes,omitempty"`
-	MaxResultBytes        int64                  `protobuf:"varint,2,opt,name=max_result_bytes,json=maxResultBytes,proto3" json:"max_result_bytes,omitempty"`
-	MaxValueBytes         int64                  `protobuf:"varint,3,opt,name=max_value_bytes,json=maxValueBytes,proto3" json:"max_value_bytes,omitempty"`
-	ReceiptRetention      *durationpb.Duration   `protobuf:"bytes,4,opt,name=receipt_retention,json=receiptRetention,proto3" json:"receipt_retention,omitempty"`
-	MaxReceiptResultBytes int64                  `protobuf:"varint,5,opt,name=max_receipt_result_bytes,json=maxReceiptResultBytes,proto3" json:"max_receipt_result_bytes,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	MaxArtifactBytes       int64                  `protobuf:"varint,1,opt,name=max_artifact_bytes,json=maxArtifactBytes,proto3" json:"max_artifact_bytes,omitempty"`
+	MaxResultBytes         int64                  `protobuf:"varint,2,opt,name=max_result_bytes,json=maxResultBytes,proto3" json:"max_result_bytes,omitempty"`
+	MaxValueBytes          int64                  `protobuf:"varint,3,opt,name=max_value_bytes,json=maxValueBytes,proto3" json:"max_value_bytes,omitempty"`
+	ReceiptRetention       *durationpb.Duration   `protobuf:"bytes,4,opt,name=receipt_retention,json=receiptRetention,proto3" json:"receipt_retention,omitempty"`
+	MaxReceiptResultBytes  int64                  `protobuf:"varint,5,opt,name=max_receipt_result_bytes,json=maxReceiptResultBytes,proto3" json:"max_receipt_result_bytes,omitempty"`
+	MaxMessageContentBytes int64                  `protobuf:"varint,6,opt,name=max_message_content_bytes,json=maxMessageContentBytes,proto3" json:"max_message_content_bytes,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ProviderLimits) Reset() {
@@ -470,6 +471,13 @@ func (x *ProviderLimits) GetReceiptRetention() *durationpb.Duration {
 func (x *ProviderLimits) GetMaxReceiptResultBytes() int64 {
 	if x != nil {
 		return x.MaxReceiptResultBytes
+	}
+	return 0
+}
+
+func (x *ProviderLimits) GetMaxMessageContentBytes() int64 {
+	if x != nil {
+		return x.MaxMessageContentBytes
 	}
 	return 0
 }
@@ -979,13 +987,14 @@ const file_orka_storage_v1_common_proto_rawDesc = "" +
 	"\n" +
 	"generation\x18\x03 \x01(\x03R\n" +
 	"generation\x124\n" +
-	"\x04jobs\x18\x04 \x03(\v2 .orka.storage.v1.TaskJobIdentityR\x04jobs\"\x91\x02\n" +
+	"\x04jobs\x18\x04 \x03(\v2 .orka.storage.v1.TaskJobIdentityR\x04jobs\"\xcc\x02\n" +
 	"\x0eProviderLimits\x12,\n" +
 	"\x12max_artifact_bytes\x18\x01 \x01(\x03R\x10maxArtifactBytes\x12(\n" +
 	"\x10max_result_bytes\x18\x02 \x01(\x03R\x0emaxResultBytes\x12&\n" +
 	"\x0fmax_value_bytes\x18\x03 \x01(\x03R\rmaxValueBytes\x12F\n" +
 	"\x11receipt_retention\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x10receiptRetention\x127\n" +
-	"\x18max_receipt_result_bytes\x18\x05 \x01(\x03R\x15maxReceiptResultBytes\"D\n" +
+	"\x18max_receipt_result_bytes\x18\x05 \x01(\x03R\x15maxReceiptResultBytes\x129\n" +
+	"\x19max_message_content_bytes\x18\x06 \x01(\x03R\x16maxMessageContentBytes\"D\n" +
 	"\x10DatasetBootstrap\x12\x1a\n" +
 	"\bcomplete\x18\x01 \x01(\bR\bcomplete\x12\x14\n" +
 	"\x05empty\x18\x02 \x01(\bR\x05empty\"3\n" +

@@ -49,6 +49,7 @@ var stateFamilies = []stateFamily{
 	{"results", runResults},
 	{"plans", runPlans},
 	{"messages", runMessages},
+	{"message-budget", runMessageBudget},
 	{"sessions", runSessions},
 	{"session-locks", runSessionLocks},
 	{"chat-turns", runChatTurns},
