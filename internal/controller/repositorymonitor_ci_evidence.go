@@ -532,7 +532,10 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorActionsJobLog(ctx co
 		if len(via) >= 3 {
 			return fmt.Errorf("too many redirects")
 		}
-		if !strings.EqualFold(next.URL.Host, req.URL.Host) {
+		if strings.EqualFold(req.URL.Scheme, "https") && !strings.EqualFold(next.URL.Scheme, "https") {
+			return fmt.Errorf("refusing redirect from https to %s", next.URL.Scheme)
+		}
+		if !strings.EqualFold(next.URL.Scheme, req.URL.Scheme) || !strings.EqualFold(next.URL.Host, req.URL.Host) {
 			next.Header.Del("Authorization")
 		}
 		return nil
