@@ -176,8 +176,9 @@ const (
 	// [MaxControlIdentifierBytes], [MessageStore.ListUnreadMessages] and
 	// [MessageStore.ConsumeMessages] stop a batch before its content passes
 	// [MaxMessageBatchBytes], and the limit is reported in
-	// [ProviderLimits.MaxMessageContentBytes].
-	ContractRevision = 16
+	// [ProviderLimits.MaxMessageContentBytes]. Revision 17 adds
+	// [OversightStore] to [StateProvider].
+	ContractRevision = 17
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -260,6 +261,7 @@ type StateProvider interface {
 
 	AHPStore
 	AuthSessionStore
+	OversightStore
 }
 
 // ArtifactProvider is the provider side of artifacts.v1. Artifact bytes and

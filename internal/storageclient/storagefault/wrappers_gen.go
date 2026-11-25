@@ -189,6 +189,22 @@ func (p *stateProvider) AppendMessagesWithLock(ctx context.Context, a1 storagev1
 	return err
 }
 
+func (p *stateProvider) AppendOversightDecisions(ctx context.Context, a1 string, a2 []storagev1.OversightDecisionRecord) ([]storagev1.OversightAppendResult, error) {
+	var r0 []storagev1.OversightAppendResult
+	injected, err := p.injector.call(ctx, p.contract, "AppendOversightDecisions", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
+		r0, err = p.inner.AppendOversightDecisions(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.OversightAppendResult
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) ArchiveMemoryProposal(ctx context.Context, a1 string, a2 string) error {
 	_, err := p.injector.call(ctx, p.contract, "ArchiveMemoryProposal", func(ctx context.Context) error {
 		return p.inner.ArchiveMemoryProposal(ctx, a1, a2)
@@ -1421,6 +1437,19 @@ func (p *stateProvider) GetOutboxProjection(ctx context.Context, a1 string) (*st
 	return r0, err
 }
 
+func (p *stateProvider) GetOversightDecision(ctx context.Context, a1 string, a2 string) (storagev1.OversightDecisionRecord, error) {
+	var r0 storagev1.OversightDecisionRecord
+	injected, err := p.injector.call(ctx, p.contract, "GetOversightDecision", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetOversightDecision(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 storagev1.OversightDecisionRecord
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) GetPlan(ctx context.Context, a1 string, a2 string) (*storagev1.PlanState, error) {
 	var r0 *storagev1.PlanState
 	injected, err := p.injector.call(ctx, p.contract, "GetPlan", func(ctx context.Context) (err error) {
@@ -2057,6 +2086,22 @@ func (p *stateProvider) ListImplementationJobs(ctx context.Context, a1 storagev1
 	return r0, r1, err
 }
 
+func (p *stateProvider) ListLatestOversightFeedback(ctx context.Context, a1 string, a2 []string) (map[string]storagev1.OversightFeedbackRecord, error) {
+	var r0 map[string]storagev1.OversightFeedbackRecord
+	injected, err := p.injector.call(ctx, p.contract, "ListLatestOversightFeedback", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
+		r0, err = p.inner.ListLatestOversightFeedback(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 map[string]storagev1.OversightFeedbackRecord
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) ListMemories(ctx context.Context, a1 storagev1.MemoryFilter) ([]storagev1.Memory, error) {
 	var r0 []storagev1.Memory
 	injected, err := p.injector.call(ctx, p.contract, "ListMemories", func(ctx context.Context) (err error) {
@@ -2144,6 +2189,22 @@ func (p *stateProvider) ListMonitorRuns(ctx context.Context, a1 storagev1.Monito
 		return z0, z1, err
 	}
 	return r0, r1, err
+}
+
+func (p *stateProvider) ListOversightDecisions(ctx context.Context, a1 storagev1.OversightDecisionFilter) ([]storagev1.OversightDecisionRecord, error) {
+	var r0 []storagev1.OversightDecisionRecord
+	injected, err := p.injector.call(ctx, p.contract, "ListOversightDecisions", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		r0, err = p.inner.ListOversightDecisions(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.OversightDecisionRecord
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) ListPatchProposals(ctx context.Context, a1 string, a2 string) ([]storagev1.PatchProposal, error) {
@@ -2764,6 +2825,22 @@ func (p *stateProvider) RecordMemoryRecall(ctx context.Context, a1 storagev1.Mem
 		return p.inner.RecordMemoryRecall(ctx, a1)
 	})
 	return err
+}
+
+func (p *stateProvider) RecordOversightFeedback(ctx context.Context, a1 string, a2 []storagev1.OversightFeedbackRecord, a3 time.Time) ([]storagev1.OversightFeedbackRecord, error) {
+	var r0 []storagev1.OversightFeedbackRecord
+	injected, err := p.injector.call(ctx, p.contract, "RecordOversightFeedback", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
+		r0, err = p.inner.RecordOversightFeedback(ctx, a1, a2, a3)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.OversightFeedbackRecord
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) RecordUsage(ctx context.Context, a1 storagev1.UsageObservation) error {

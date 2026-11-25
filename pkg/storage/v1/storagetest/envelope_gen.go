@@ -147,6 +147,16 @@ func (p envelopedState) AppendMessagesWithLock(ctx context.Context, a1 storagev1
 	})
 }
 
+func (p envelopedState) AppendOversightDecisions(ctx context.Context, a1 string, a2 []storagev1.OversightDecisionRecord) ([]storagev1.OversightAppendResult, error) {
+	var r0 []storagev1.OversightAppendResult
+	err := p.ops.run(ctx, writeCall{method: "AppendOversightDecisions", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.AppendOversightDecisions(ctx, a1, a2)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) ArchiveMemoryProposal(ctx context.Context, a1 string, a2 string) error {
 	return p.ops.run(ctx, writeCall{method: "ArchiveMemoryProposal", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
 		return p.StateProvider.ArchiveMemoryProposal(ctx, a1, a2)
@@ -989,6 +999,16 @@ func (p envelopedState) RecordMemoryRecall(ctx context.Context, a1 storagev1.Mem
 	return p.ops.run(ctx, writeCall{method: "RecordMemoryRecall", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.RecordMemoryRecall(ctx, a1)
 	})
+}
+
+func (p envelopedState) RecordOversightFeedback(ctx context.Context, a1 string, a2 []storagev1.OversightFeedbackRecord, a3 time.Time) ([]storagev1.OversightFeedbackRecord, error) {
+	var r0 []storagev1.OversightFeedbackRecord
+	err := p.ops.run(ctx, writeCall{method: "RecordOversightFeedback", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.RecordOversightFeedback(ctx, a1, a2, a3)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) RecordUsage(ctx context.Context, a1 storagev1.UsageObservation) error {

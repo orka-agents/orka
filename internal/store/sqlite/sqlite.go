@@ -1076,7 +1076,8 @@ func currentSchemaStatements() []string {
 	statements = append(statements, connectorSchemaStatements()...)
 	statements = append(statements, operationReceiptSchemaStatements()...)
 	statements = append(statements, ahpSchemaStatements()...)
-	return append(statements, authSessionSchemaStatements()...)
+	statements = append(statements, authSessionSchemaStatements()...)
+	return append(statements, oversightSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.

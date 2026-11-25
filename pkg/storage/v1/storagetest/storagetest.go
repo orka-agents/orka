@@ -71,6 +71,7 @@ var stateFamilies = []stateFamily{
 	{"memories", runMemories},
 	{"ahp", runAHP},
 	{"auth-sessions", runAuthSessions},
+	{"oversight", runOversight},
 	{"sealed-snapshots", runSealedSnapshots},
 	{"sealed-native-sessions", runSealedNativeSessions},
 	{"session-turn-records", runSessionTurnRecords},

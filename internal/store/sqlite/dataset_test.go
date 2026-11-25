@@ -134,6 +134,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	before = runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, before)))
 	addAHPTables(t, before)
 	addSignInTables(t, before)
+	addOversightTables(t, before)
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })

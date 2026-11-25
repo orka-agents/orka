@@ -55,13 +55,14 @@ func TestSchemaVersion6StoreUpgradesInPlace(t *testing.T) {
 			rows := runTableApplicationRows(applicationRows(t, db))
 			addAHPTables(t, rows)
 			addSignInTables(t, rows)
+			addOversightTables(t, rows)
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema177,
+					fingerprint:  schema178,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -137,7 +138,7 @@ func TestSchemaVersion6UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema177, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema178, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)

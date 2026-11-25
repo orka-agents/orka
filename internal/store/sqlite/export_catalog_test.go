@@ -21,6 +21,9 @@ var exportExcludedTables = map[string]string{
 	"branch_claims":               "duplicate SQL control record",
 	"publications":                "duplicate SQL control record",
 	"external_effects":            "duplicate SQL control record",
+	"oversight_decisions":         "oversight records are not part of the export contract yet",
+	"oversight_decision_facets":   "derived search index of oversight_decisions",
+	"oversight_feedback":          "oversight records are not part of the export contract yet",
 }
 
 // exportExcludedColumns are the columns of exported tables that no family
