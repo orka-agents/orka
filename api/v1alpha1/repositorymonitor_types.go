@@ -559,6 +559,18 @@ type RepositoryMonitorRepairSpec struct {
 	// human reviewers and allowlisted review bots (such as coderabbitai[bot]).
 	// +optional
 	ExternalComments RepositoryMonitorRepairExternalCommentsSpec `json:"externalComments,omitempty"`
+
+	// UpdateBranchStrategy selects how update_branch repairs bring a behind PR
+	// branch up to date with its base branch.
+	// - "merge" (default): calls GitHub's PUT /pulls/{number}/update-branch API.
+	// - "rebase": replays the PR's commits cleanly onto the base commit inside
+	//   the clean-room publisher (re-signing commits when spec.commit.signingCredentialRef
+	//   is configured) and pushes with exact --force-with-lease CAS; aborts fail-closed
+	//   if any commit conflicts.
+	// +kubebuilder:validation:Enum=merge;rebase
+	// +kubebuilder:default=merge
+	// +optional
+	UpdateBranchStrategy string `json:"updateBranchStrategy,omitempty"`
 }
 
 // RepositoryMonitorRepairExternalCommentsSpec configures trust-gated ingestion
@@ -620,6 +632,15 @@ type RepositoryMonitorRepairCIEvidenceSpec struct {
 	// +kubebuilder:default=false
 	// +optional
 	Text bool `json:"text,omitempty"`
+
+	// JobLogs fetches bounded, sanitized tail excerpts from failing GitHub
+	// Actions job logs (GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs)
+	// when Text is also true. Requires Actions read permission on
+	// spec.forgeCredentialRef. Off by default because job logs can contain
+	// unmasked CI output.
+	// +kubebuilder:default=false
+	// +optional
+	JobLogs bool `json:"jobLogs,omitempty"`
 }
 
 // RepositoryMonitorPolicySpec configures monitor safety policy.

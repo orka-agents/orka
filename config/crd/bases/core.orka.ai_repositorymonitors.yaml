@@ -406,6 +406,15 @@ spec:
                     description: CIEvidence configures the CI evidence fix_ci repair
                       prompts carry.
                     properties:
+                      jobLogs:
+                        default: false
+                        description: |-
+                          JobLogs fetches bounded, sanitized tail excerpts from failing GitHub
+                          Actions job logs (GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs)
+                          when Text is also true. Requires Actions read permission on
+                          spec.forgeCredentialRef. Off by default because job logs can contain
+                          unmasked CI output.
+                        type: boolean
                       text:
                         default: false
                         description: |-
@@ -516,6 +525,20 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  updateBranchStrategy:
+                    default: merge
+                    description: |-
+                      UpdateBranchStrategy selects how update_branch repairs bring a behind PR
+                      branch up to date with its base branch.
+                      - "merge" (default): calls GitHub's PUT /pulls/{number}/update-branch API.
+                      - "rebase": replays the PR's commits cleanly onto the base commit inside
+                        the clean-room publisher (re-signing commits when spec.commit.signingCredentialRef
+                        is configured) and pushes with exact --force-with-lease CAS; aborts fail-closed
+                        if any commit conflicts.
+                    enum:
+                    - merge
+                    - rebase
+                    type: string
                 type: object
               repoURL:
                 description: RepoURL is the repository URL to monitor.

@@ -38,7 +38,7 @@ func (r CredentialMaterialRequest) Validate() error {
 	switch r.ParentOperation {
 	case OperationPullRequestReconcile:
 		expected = CredentialForgeToken
-	case OperationPublicationPrepare:
+	case OperationPublicationPrepare, OperationBranchRebase:
 		if r.Reference.Kind == CredentialSSHSigningKey || r.Reference.Role == CredentialRoleCommitSign {
 			expected = CredentialSSHSigningKey
 		}
@@ -63,6 +63,12 @@ func (r CredentialMaterialRequest) Validate() error {
 		allowed = r.Reference.Role == CredentialRoleTargetRead
 	case OperationPublicationPublish:
 		allowed = r.Reference.Role == CredentialRoleTargetWrite
+	case OperationBranchRebase:
+		if r.Reference.Kind == CredentialSSHSigningKey {
+			allowed = r.Reference.Role == CredentialRoleCommitSign
+		} else {
+			allowed = r.Reference.Role == CredentialRoleTargetWrite
+		}
 	case OperationPullRequestReconcile:
 		allowed = r.Reference.Role == CredentialRoleForge
 	}
