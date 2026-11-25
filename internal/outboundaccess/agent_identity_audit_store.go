@@ -98,13 +98,14 @@ func (b *AgentIdentityAuditBuffer) Record(record AgentIdentityAuditRecord) {
 	b.records = append(b.records, record)
 }
 
-// List returns matching records ordered newest-first.
+// List returns matching records ordered newest-first. A zero Limit defaults to
+// 100; a negative Limit returns all retained matching records.
 func (b *AgentIdentityAuditBuffer) List(filter AgentIdentityAuditFilter) []AgentIdentityAuditRecord {
 	if b == nil {
 		return []AgentIdentityAuditRecord{}
 	}
 	limit := filter.Limit
-	if limit <= 0 {
+	if limit == 0 {
 		limit = 100
 	}
 	ns := strings.TrimSpace(filter.Namespace)
@@ -114,9 +115,12 @@ func (b *AgentIdentityAuditBuffer) List(filter AgentIdentityAuditFilter) []Agent
 
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	out := make([]AgentIdentityAuditRecord, 0, min(limit, len(b.records)))
+	capHint := len(b.records)
+	if limit > 0 {
+		capHint = min(limit, len(b.records))
+	}
+	out := make([]AgentIdentityAuditRecord, 0, capHint)
 	for _, rec := range slices.Backward(b.records) {
-
 		if ns != "" && rec.PolicyNamespace != ns && rec.AgentNamespace != ns {
 			continue
 		}
@@ -130,7 +134,7 @@ func (b *AgentIdentityAuditBuffer) List(filter AgentIdentityAuditFilter) []Agent
 			continue
 		}
 		out = append(out, rec)
-		if len(out) >= limit {
+		if limit > 0 && len(out) >= limit {
 			break
 		}
 	}

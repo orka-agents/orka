@@ -88,14 +88,15 @@ func (h *Handlers) ListAgentIdentityAudit(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{apiFieldItems: []outboundaccess.AgentIdentityAuditRecord{}})
 	}
 
-	// Read unbounded up to buffer capacity before applying per-Task visibility
-	// filtering so hidden Tasks do not truncate visible records below limit.
+	// Read all retained matching candidates before applying per-Task visibility
+	// filtering so hidden or unresolvable Tasks never truncate visible records
+	// below the requested limit.
 	candidates := h.agentIdentityAudit.List(outboundaccess.AgentIdentityAuditFilter{
 		Namespace: namespace,
 		TaskUID:   taskUID,
 		AgentName: agentName,
 		Outcome:   outcome,
-		Limit:     maxIdentityAuditLimit,
+		Limit:     -1,
 	})
 	if len(candidates) == 0 {
 		return c.JSON(fiber.Map{apiFieldItems: []outboundaccess.AgentIdentityAuditRecord{}})
