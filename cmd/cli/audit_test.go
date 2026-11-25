@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +17,14 @@ func TestNewAuditCmd(t *testing.T) {
 	if cmd.Use != "audit" {
 		t.Fatalf("Use = %q, want audit", cmd.Use)
 	}
-	if len(cmd.Commands()) != 1 || cmd.Commands()[0].Use != "trace <transaction-id>" {
-		t.Fatalf("audit subcommands = %#v, want trace", cmd.Commands())
+	subNames := map[string]bool{}
+	for _, sub := range cmd.Commands() {
+		subNames[sub.Use] = true
+	}
+	for _, want := range []string{"trace <transaction-id>", "identity"} {
+		if !subNames[want] {
+			t.Fatalf("audit subcommands = %#v, missing %q", subNames, want)
+		}
 	}
 }
 
@@ -106,5 +113,61 @@ func TestNewAuditTraceCmd_ScansPaginatedResults(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "trace-task") {
 		t.Fatalf("stdout = %q, want paginated matching task", stdout)
+	}
+}
+
+func TestAuditIdentityCmd_TableAndJSON(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/audit/identity" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		gotQuery = r.URL.RawQuery
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{
+					"timestamp":      "2026-11-25T04:01:00Z",
+					"outcome":        "refused",
+					"reason":         "delegation",
+					"mode":           "Delegated",
+					"tool":           "graph_mail",
+					"agentName":      "entra-agent",
+					"identityIssuer": "entra",
+					"identityID":     "33333333-3333-3333-3333-33333333aaaa",
+					"taskUID":        "uid-task-1",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{
+		"audit", "identity",
+		"--server", srv.URL,
+		"--task", "my-task",
+		"--agent", "entra-agent",
+		"--outcome", "refused",
+		"--limit", "25",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"task=my-task", "agent=entra-agent", "outcome=refused", "limit=25"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Errorf("query %q missing %q", gotQuery, want)
+		}
+	}
+	got := out.String()
+	for _, want := range []string{"OUTCOME", "refused", "delegation", "Delegated", "graph_mail", "entra-agent", "entra/33333333-3333-3333-3333-33333333aaaa", "uid-task-1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
 	}
 }

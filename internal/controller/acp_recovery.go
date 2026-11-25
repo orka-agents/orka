@@ -1315,66 +1315,12 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 	receipt, receiptErr := receipts.GetPromptResultReceipt(ctx, attempt.ID)
 	switch {
 	case receiptErr == nil:
-		version := receiptVersion
-		if validating {
-			parsed, parsedOK := acpSettlingOperationVersion(receipt.OperationID)
-			if !parsedOK || parsed >= attempt.Version {
-				hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
-				return d.settleSettlingReceiptHold(ctx, task, observed, hold)
-			}
-			version = parsed
-		}
-		digest, err := acpSettlingTransitionDigest(attempt.ID, version, receipt.Data)
-		if err != nil {
-			return settlingWithoutReceipt, err
-		}
-		if receipt.Namespace != task.Namespace || receipt.TaskName != task.Name ||
-			receipt.OperationID != acpSettlingOperationID(version) || receipt.OperationDigest != digest ||
-			(settledLast && attempt.LastOperationDigest != digest) {
-			hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
-			return d.settleSettlingReceiptHold(ctx, task, observed, hold)
-		}
-		if validating {
-			// When workspace validation already replaced the attempt's settling
-			// operation, the attempt no longer carries the settling digest to
-			// cross-check the receipt. Keep an existing Task result intact if
-			// one is already present rather than overwriting it with an
-			// unverified receipt; only repair when the result is missing.
-			existing, getErr := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-			if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
-				return settlingWithoutReceipt, getErr
-			}
-			if getErr == nil {
-				if !bytes.Equal(existing, receipt.Data) {
-					hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
-					return d.settleSettlingReceiptHold(ctx, task, observed, hold)
-				}
-			} else if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
-				return settlingWithoutReceipt, err
-			}
-		} else if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
-			return settlingWithoutReceipt, err
+		if state, done, err := d.verifyPresentSettlingResultReceipt(ctx, task, attempt, receipt, receiptVersion, settledLast, validating, observed, hold); done || err != nil {
+			return state, err
 		}
 	case errors.Is(receiptErr, store.ErrNotFound):
-		matched := false
-		if settledLast {
-			result, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return settlingWithoutReceipt, err
-			}
-			if err == nil {
-				digest, digestErr := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
-				if digestErr != nil {
-					return settlingWithoutReceipt, digestErr
-				}
-				matched = attempt.LastOperationDigest == digest
-			}
-		}
-		if !matched {
-			// The result the receipt protected cannot stand in for it; once
-			// the attempt records a later operation, nothing can check it.
-			hold.reason = corev1alpha1.StorageRecoveryMissingRecordReason
-			return d.settleSettlingReceiptHold(ctx, task, observed, hold)
+		if state, done, err := d.verifyMissingSettlingResultReceipt(ctx, task, attempt, receiptVersion, settledLast, observed, hold); done || err != nil {
+			return state, err
 		}
 	default:
 		return settlingWithoutReceipt, receiptErr
@@ -1383,6 +1329,96 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 		return settlingWithoutReceipt, err
 	}
 	return settlingReceiptVerified, nil
+}
+
+func (d *ACPDispatcher) verifyPresentSettlingResultReceipt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	receipt *store.PromptResultReceipt,
+	receiptVersion int64,
+	settledLast bool,
+	validating bool,
+	observed taskStorageRecordObservation,
+	hold taskStorageRecordHold,
+) (settlingReceiptState, bool, error) {
+	version := receiptVersion
+	if validating {
+		parsed, parsedOK := acpSettlingOperationVersion(receipt.OperationID)
+		if !parsedOK || parsed >= attempt.Version {
+			hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+			state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+			return state, true, err
+		}
+		version = parsed
+	}
+	digest, err := acpSettlingTransitionDigest(attempt.ID, version, receipt.Data)
+	if err != nil {
+		return settlingWithoutReceipt, true, err
+	}
+	if receipt.Namespace != task.Namespace || receipt.TaskName != task.Name ||
+		receipt.OperationID != acpSettlingOperationID(version) || receipt.OperationDigest != digest ||
+		(settledLast && attempt.LastOperationDigest != digest) {
+		hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+		state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+		return state, true, err
+	}
+	if validating {
+		// When workspace validation already replaced the attempt's settling
+		// operation, the attempt no longer carries the settling digest to
+		// cross-check the receipt. Keep an existing Task result intact if
+		// one is already present rather than overwriting it with an
+		// unverified receipt; only repair when the result is missing.
+		existing, getErr := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+			return settlingWithoutReceipt, true, getErr
+		}
+		if getErr == nil {
+			if !bytes.Equal(existing, receipt.Data) {
+				hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+				state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+				return state, true, err
+			}
+			return settlingWithoutReceipt, false, nil
+		}
+	}
+	if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
+		return settlingWithoutReceipt, true, err
+	}
+	return settlingWithoutReceipt, false, nil
+}
+
+func (d *ACPDispatcher) verifyMissingSettlingResultReceipt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	receiptVersion int64,
+	settledLast bool,
+	observed taskStorageRecordObservation,
+	hold taskStorageRecordHold,
+) (settlingReceiptState, bool, error) {
+	matched := false
+	if settledLast {
+		result, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return settlingWithoutReceipt, true, err
+		}
+		if err == nil {
+			digest, digestErr := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
+			if digestErr != nil {
+				return settlingWithoutReceipt, true, digestErr
+			}
+			matched = attempt.LastOperationDigest == digest
+		}
+	}
+	if !matched {
+		// The result the receipt protected cannot stand in for it; once
+		// the attempt records a later operation, nothing can check it.
+		hold.reason = corev1alpha1.StorageRecoveryMissingRecordReason
+		state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+		return state, true, err
+	}
+	return settlingWithoutReceipt, false, nil
 }
 
 // acpSettlingOperationID is the operation the settling transition records at

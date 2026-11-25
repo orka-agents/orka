@@ -37,6 +37,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
@@ -137,13 +138,16 @@ type Handlers struct {
 	// oidcEnabled says whether OIDC sign-in is configured, for clients
 	// choosing how to sign in.
 	oidcEnabled        bool
+	oidcIssuer         string
+	oidcAudience       string
 	ahp                *ahphost.Host
 	completionLocks    *completionLocks
 	substrateMCPRouter *workerexecutor.SubstrateMCPRouter
 	// chatTurns stops a chat Session's in-flight request on session cancel.
 	chatTurns chatTurnStopper
 	// attentionBounds overrides the attention scan bounds; zero uses defaults.
-	attentionBounds attentionBounds
+	attentionBounds    attentionBounds
+	agentIdentityAudit outboundaccess.AgentIdentityAuditReader
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -176,9 +180,12 @@ type HandlersConfig struct {
 	Connectors               ConnectorConfig
 	GitHubSignIn             GitHubSignInConfig
 	OIDCEnabled              bool
+	OIDCIssuer               string
+	OIDCAudience             string
 	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
-	AHP               *ahphost.Host
-	SubstrateMCPProxy SubstrateMCPProxyConfig
+	AHP                *ahphost.Host
+	SubstrateMCPProxy  SubstrateMCPProxyConfig
+	AgentIdentityAudit outboundaccess.AgentIdentityAuditReader
 }
 
 // NewHandlers creates a new Handlers instance
@@ -220,9 +227,12 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		signInLimiter:             newGitHubSignInLimiter(),
 		invites:                   &githubInvites{},
 		oidcEnabled:               cfg.OIDCEnabled,
+		oidcIssuer:                cfg.OIDCIssuer,
+		oidcAudience:              cfg.OIDCAudience,
 		ahp:                       cfg.AHP,
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
+		agentIdentityAudit:        cfg.AgentIdentityAudit,
 	}
 }
 
