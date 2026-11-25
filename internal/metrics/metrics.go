@@ -131,8 +131,6 @@ var (
 		[]string{"action", labelReason},
 	)
 
-	// StorageRecoveryHold is 1 while the installation is held for storage
-	// recovery, labeled by the reason the hold records, and 0 otherwise.
 	StorageRecoveryHold = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "orka_storage_recovery_hold",
