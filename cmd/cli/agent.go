@@ -10,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -64,8 +63,19 @@ func newAgentListCmd() *cobra.Command {
 				return nil
 			}
 
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tMODEL\tRUNTIME\tACTIVE TASKS") //nolint:errcheck
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+			hasIdentity := false
+			for _, a := range agents {
+				if a.Identity != "" {
+					hasIdentity = true
+					break
+				}
+			}
+			if hasIdentity {
+				fmt.Fprintln(w, "NAME\tMODEL\tRUNTIME\tIDENTITY\tREADY\tACTIVE TASKS") //nolint:errcheck
+			} else {
+				fmt.Fprintln(w, "NAME\tMODEL\tRUNTIME\tREADY\tACTIVE TASKS") //nolint:errcheck
+			}
 			for _, a := range agents {
 				model := a.Model
 				if model == "" {
@@ -75,7 +85,15 @@ func newAgentListCmd() *cobra.Command {
 				if rt == "" {
 					rt = "-"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d\n", a.Name, model, rt, a.Active) //nolint:errcheck
+				if hasIdentity {
+					identity := a.Identity
+					if identity == "" {
+						identity = "-"
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\t%d\n", a.Name, model, rt, identity, a.Ready, a.Active) //nolint:errcheck
+				} else {
+					fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%d\n", a.Name, model, rt, a.Ready, a.Active) //nolint:errcheck
+				}
 			}
 			w.Flush() //nolint:errcheck
 			return nil
