@@ -1500,6 +1500,7 @@ func main() {
 		registerAdmissionWebhooks()
 	}
 
+	agentIdentityAuditBuffer := outboundaccess.NewAgentIdentityAuditBuffer(0)
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
 		Reader:                 mgr.GetAPIReader(),
@@ -1508,6 +1509,7 @@ func main() {
 		Trust:                  outboundAccessTrust,
 		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
 		AuditLog:               agentIdentityAuditLog,
+		AuditSink:              agentIdentityAuditBuffer,
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
@@ -2607,6 +2609,7 @@ func main() {
 		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
 		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
 		TaskWebhookKeys:          taskWebhookKeys,
+		AgentIdentityAudit:       agentIdentityAuditBuffer,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
