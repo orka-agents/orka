@@ -388,3 +388,97 @@ func TestCompleteKeepsOutputOrderForResponses(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultMaxTokens(t *testing.T) {
+	for model, want := range map[string]int64{
+		"claude-opus-5-5":                      recentMaxTokens,
+		"claude-sonnet-5":                      recentMaxTokens,
+		"claude-haiku-5-5":                     recentMaxTokens,
+		"claude-opus-4-8":                      recentMaxTokens,
+		"claude-opus-4.7":                      recentMaxTokens,
+		"claude-sonnet-4-6":                    recentMaxTokens,
+		"claude-opus-4-5@20251101":             recentMaxTokens,
+		"claude-sonnet-4-5-20250929":           recentMaxTokens,
+		"claude-haiku-4-5":                     recentMaxTokens,
+		"anthropic.claude-opus-5-5":            recentMaxTokens,
+		"claude-fable-5-2":                     recentMaxTokens,
+		"claude-mythos-preview":                recentMaxTokens,
+		"claude-opus-4-1-20250805":             legacyMaxTokens,
+		"claude-opus-4-20250514":               legacyMaxTokens,
+		"claude-sonnet-4":                      legacyMaxTokens,
+		"claude-3-7-sonnet-20250219":           legacyMaxTokens,
+		"claude-3":                             legacyMaxTokens,
+		"claude-opus":                          legacyMaxTokens,
+		"glm-4.6":                              legacyMaxTokens,
+		"":                                     legacyMaxTokens,
+		"us.anthropic.claude-sonnet-4-5-v1:0":  recentMaxTokens,
+		"global.anthropic.claude-haiku-4-5-v1": recentMaxTokens,
+	} {
+		if got := defaultMaxTokens(model); got != want {
+			t.Errorf("defaultMaxTokens(%q) = %d, want %d", model, got, want)
+		}
+	}
+	params := buildRequestParams(&llm.CompletionRequest{Model: "claude-opus-5-5", MaxTokens: 512})
+	if params.MaxTokens != 512 {
+		t.Errorf("MaxTokens = %d, want the request's 512", params.MaxTokens)
+	}
+}
+
+func readStream(t *testing.T, chunks <-chan llm.StreamChunk, pause time.Duration) (string, error) {
+	t.Helper()
+	var text string
+	var err error
+	for chunk := range chunks {
+		text += chunk.Content
+		if chunk.Error != nil {
+			err = chunk.Error
+		}
+		time.Sleep(pause)
+	}
+	return text, err
+}
+
+func TestStreamAbandonsStalledStream(t *testing.T) {
+	shortenStreamIdleTimeout(t, 200*time.Millisecond)
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, messageStartEvent)
+		_, _ = fmt.Fprint(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done() // stall without closing the connection
+	})
+	chunks, err := provider.Stream(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	text, err := readStream(t, chunks, 0)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Stream() took %s to end a stalled stream", elapsed)
+	}
+	if text != "partial" {
+		t.Errorf("text = %q, want the delta sent before the stall", text)
+	}
+	pe, ok := errors.AsType[*llm.ProviderError](err)
+	if !ok || pe.StatusCode != http.StatusBadGateway {
+		t.Errorf("error = %v (%T), want a 502 ProviderError", err, err)
+	}
+}
+
+// The idle timer measures the upstream, not how fast the caller reads.
+func TestStreamWaitsForSlowReader(t *testing.T) {
+	shortenStreamIdleTimeout(t, 100*time.Millisecond)
+	provider := newStreamTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		if err := anthropictest.WriteMessage(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"a"},{"type":"tool_use","id":"t1","name":"f","input":{}},{"type":"tool_use","id":"t2","name":"g","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":3}}`); err != nil {
+			t.Error(err)
+		}
+	})
+	chunks, err := provider.Stream(context.Background(), &llm.CompletionRequest{Model: "m", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStream(t, chunks, 150*time.Millisecond); err != nil {
+		t.Errorf("stream error = %v; a reader slower than the idle bound must not end the stream", err)
+	}
+}
