@@ -87,6 +87,12 @@ func (r *RepositoryMonitorReconciler) submitRepositoryMonitorUpdateBranchRebase(
 			Role: publisherservice.CredentialRoleCommitSign,
 		}
 	}
+	// Reuse the captured base SHA stored on the mutation so retries submit the
+	// exact same immutable ExternalEffect digest even if base advances.
+	baseOID := strings.TrimSpace(mutation.ExternalID)
+	if baseOID == "" {
+		baseOID = strings.TrimSpace(pr.BaseSHA)
+	}
 	serviceReq := publisherservice.BranchRebaseRequest{
 		Metadata: metadata,
 		CredentialRef: &publisherservice.CredentialReference{
@@ -100,7 +106,7 @@ func (r *RepositoryMonitorReconciler) submitRepositoryMonitorUpdateBranchRebase(
 			Target:            publisher.Repository{Provider: workspaceRepositoryProviderGitHub, ID: "github.com/" + strings.ToLower(targetRepoSlug), URL: repositoryMonitorHTTPSCloneURL(targetOwner, targetName)},
 			TargetRef:         "refs/heads/" + strings.TrimPrefix(strings.TrimSpace(pr.HeadBranch), "refs/heads/"),
 			BaseRef:           "refs/heads/" + strings.TrimPrefix(strings.TrimSpace(pr.BaseBranch), "refs/heads/"),
-			BaseOID:           strings.TrimSpace(pr.BaseSHA),
+			BaseOID:           baseOID,
 			HeadOID:           strings.TrimSpace(command.HeadSHA),
 			CommitAuthorName:  authorName,
 			CommitAuthorEmail: authorEmail,

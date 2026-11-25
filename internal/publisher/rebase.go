@@ -115,14 +115,8 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		return RebaseBranchResult{}, fmt.Errorf("enumerate commits to rebase: %w", err)
 	}
 	lines := strings.Split(strings.TrimSpace(revList.stdout), "\n")
-	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
-		return RebaseBranchResult{
-			OperationID: request.OperationID,
-			PreviousOID: request.HeadOID,
-			BaseOID:     request.BaseOID,
-			NewHeadOID:  request.HeadOID,
-			NoChange:    true,
-		}, nil
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
 	}
 	if len(lines) > maxRebaseCommits {
 		return RebaseBranchResult{}, operationError(ErrRebaseRefused, "rebase branch", fmt.Sprintf("PR has %d commits to rebase (max %d)", len(lines), maxRebaseCommits), nil)

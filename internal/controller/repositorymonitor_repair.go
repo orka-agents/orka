@@ -453,7 +453,7 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestUpdateBranchCommand(
 		if err != nil {
 			return true, 0, err
 		}
-		if cancelled || strings.TrimSpace(mutation.Error) != "" || pr.HeadSHA != mutation.TargetSHA {
+		if cancelled || pr.HeadSHA != mutation.TargetSHA || (strings.TrimSpace(mutation.Error) != "" && !repositoryMonitorUpdateBranchUsesRebase(monitor)) {
 			return r.waitForRepositoryMonitorUpdateBranch(ctx, monitor, run, command, item, mutation, pr, repositoryMonitorUpdateBranchSubmitting)
 		}
 	case repositoryMonitorAutomergeStateStarted:
