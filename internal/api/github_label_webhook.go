@@ -357,10 +357,23 @@ func repositoryMonitorExternalCommentReviewEventAction(event, action string) boo
 }
 
 func repositoryMonitorAcceptsExternalReviewCommentEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
-	if monitor == nil || !monitor.Spec.Repair.Enabled || !monitor.Spec.Repair.ExternalComments.Enabled {
+	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || !monitor.Spec.Repair.Enabled || !monitor.Spec.Repair.ExternalComments.Enabled || !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
 		return false
 	}
-	return repositoryMonitorAcceptsPullRequestEvent(monitor, repo, target, "")
+	if target.BaseBranch != "" && !strings.EqualFold(target.BaseBranch, effectiveRepositoryMonitorBranch(monitor)) {
+		return false
+	}
+	if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 {
+		scope := slices.Concat(include, monitor.Spec.Repair.IncludeLabels, monitor.Spec.Repair.CIOnlyLabels)
+		if repositoryMonitorWebhookMatchingLabel(scope, target.Labels) == "" {
+			return false
+		}
+	}
+	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(repo.FullName), owner+"/"+repository)
 }
 
 func (h *Handlers) enqueueRepositoryMonitorPullRequestReviewEventRuns(c fiber.Ctx, body []byte, delivery, event string, payload githubLabelWebhookPayload) (githubRepositoryMonitorEventResult, error) {

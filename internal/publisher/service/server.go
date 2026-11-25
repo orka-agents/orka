@@ -144,9 +144,9 @@ func (s *Server) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleCapabilities(writer http.ResponseWriter, request *http.Request) {
 	operations := []Operation{
 		OperationWorkspaceResolve, OperationWorkspacePrepare, OperationPublicationPreflight, OperationPublicationPrepare,
-		OperationPublicationPublish, OperationPublicationVerify, OperationPublicationReclaim,
+		OperationPublicationPublish, OperationPublicationVerify, OperationPublicationReclaim, OperationBranchRebase,
 	}
-	credentialKinds := []CredentialKind{CredentialHTTPExtraHeader}
+	credentialKinds := []CredentialKind{CredentialHTTPExtraHeader, CredentialSSHSigningKey}
 	if s.config.PRFactory != nil {
 		operations = append(operations, OperationPullRequestReconcile)
 		credentialKinds = append(credentialKinds, CredentialForgeToken)
