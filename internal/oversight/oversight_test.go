@@ -85,6 +85,12 @@ func TestTruncateBytesKeepsWholeRunes(t *testing.T) {
 	require.Equal(t, "ab", truncateBytes("abc", 2))
 	require.Equal(t, "é", truncateBytes("éé", 3))
 	require.Empty(t, truncateBytes("é", 1))
+	// A run of 3-byte characters loses only the one that straddles the limit.
+	require.Equal(t, "€€", truncateBytes("€€€", 7))
+	require.Equal(t, "€€", truncateBytes("€€€", 8))
+	require.Equal(t, "€€€", truncateBytes("€€€€", 9))
+	require.Equal(t, "日本", truncateBytes("日本語テキスト", 8))
+	require.Equal(t, "a😀", truncateBytes("a😀😀", 7))
 }
 
 func TestParseQuery(t *testing.T) {

@@ -245,11 +245,13 @@ func truncateBytes(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
-	s = s[:limit]
-	for len(s) > 0 && !utf8.ValidString(s[max(0, len(s)-utf8.UTFMax):]) {
-		s = s[:len(s)-1]
+	// Back up to the start of the character that straddles the limit, so
+	// only that one character is dropped.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return s
+	return s[:cut]
 }
 
 // RedactNote redacts and bounds a person's feedback note.
