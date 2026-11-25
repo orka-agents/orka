@@ -247,8 +247,14 @@ type PostureCoverage struct {
 	UnattributedEvents int           `json:"unattributedEvents"`
 	// ObservedEvents sums the effect counts the sensor attributed to the
 	// window's actions: the raw events behind them.
-	ObservedEvents int            `json:"observedEvents"`
-	BlindSpots     map[string]int `json:"blindSpots,omitempty"`
+	ObservedEvents int `json:"observedEvents"`
+	// CleanlyCovered counts attributed actions with no blind spot that marks
+	// their kernel evidence incomplete; it is the basis for clean coverage.
+	CleanlyCovered int `json:"cleanlyCovered"`
+	// EvidenceIncomplete counts actions carrying a blind spot that starts
+	// with "evidence-incomplete:", attributed or not.
+	EvidenceIncomplete int            `json:"evidenceIncomplete,omitempty"`
+	BlindSpots         map[string]int `json:"blindSpots,omitempty"`
 	// Excluded counts what a monitor saw and deliberately left out of the
 	// actions, such as the platform's own traffic, keyed by the attribution
 	// count name after its "excluded_" prefix. Counts are per execution, so

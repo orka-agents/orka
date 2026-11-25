@@ -83,7 +83,7 @@ describe('PostureView', () => {
       visibility: { state: 'blind', summary: 'No decisions were recorded in this window, so nothing was seen.', reasons: ['no_decisions_in_window'] },
       basis: { ...makePosture().basis, actions: 0, coverage: { streamOK: 0, sensorAttributed: 0, unattributedEvents: 0 } },
     })} />)
-    expect(screen.getByTestId('posture-coverage')).toHaveTextContent('0% attributed')
+    expect(screen.getByTestId('posture-coverage')).toHaveTextContent('0% cleanly seen')
     expect(screen.getByTestId('coverage-gaps')).toHaveTextContent('No blind spot was declared.')
     expect(screen.getByText(/No canary evidence is reported yet/)).toBeInTheDocument()
   })

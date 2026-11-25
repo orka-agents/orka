@@ -1,3 +1,4 @@
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@/test/test-utils'
 import { PostureLineView } from './posture-line'
@@ -21,5 +22,24 @@ describe('PostureLineView latency', () => {
       decisionLatency: { count: 3, replayedCount: 20, p50Seconds: 2, p95Seconds: 3, maxSeconds: 3 } } })} incidents={[]} />)
     expect(screen.getByTestId('posture-latency')).toHaveTextContent('decided within ~3s')
     expect(screen.getByTestId('posture-latency')).toHaveAttribute('title', 'Decision latency: p50 2s · p95 3s · max 3s (n=3 live; 20 replayed left out)')
+  })
+})
+
+describe('PostureLineView incomplete kernel evidence', () => {
+  it('leaves incomplete-evidence actions out of "% seen" and names them', async () => {
+    const base = makePosture().basis
+    const posture = makePosture({ basis: { ...base, actions: 10,
+      coverage: { ...base.coverage, sensorAttributed: 10, cleanlyCovered: 6, evidenceIncomplete: 4 } } })
+    render(<PostureLineView posture={posture} incidents={[]} />)
+    const seen = screen.getByRole('button', { name: /60% seen/ })
+    await userEvent.click(seen)
+    expect(screen.getByTestId('evidence-incomplete')).toHaveTextContent('4 actions with incomplete kernel evidence; not counted as seen')
+  })
+
+  it('falls back to attribution when the server reports no clean count', () => {
+    const base = makePosture().basis
+    render(<PostureLineView posture={makePosture({ basis: { ...base, actions: 10, coverage: { ...base.coverage, sensorAttributed: 8 } } })} incidents={[]} />)
+    expect(screen.getByRole('button', { name: /80% seen/ })).toBeInTheDocument()
+    expect(screen.queryByTestId('evidence-incomplete')).not.toBeInTheDocument()
   })
 })

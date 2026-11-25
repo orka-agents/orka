@@ -7,7 +7,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { ShieldAlert } from 'lucide-react'
 import { useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { confidenceReasons, excludedSummary, formatSeconds, type Incident, latencyText, onlyReplayed, reasonText } from '@/lib/oversight'
+import { cleanlyCovered, confidenceReasons, excludedSummary, formatSeconds, incompleteEvidenceText, type Incident, latencyText, onlyReplayed, reasonText } from '@/lib/oversight'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
 
@@ -49,7 +49,8 @@ export function PostureLineView({ posture, incidents, charter }: { posture: Post
   const { basis } = posture
   const latency = basis.decisionLatency
   const coverage = basis.coverage
-  const seen = basis.actions > 0 ? Math.round((coverage.sensorAttributed / basis.actions) * 100) : 0
+  const seen = basis.actions > 0 ? Math.round((cleanlyCovered(coverage) / basis.actions) * 100) : 0
+  const incompleteText = incompleteEvidenceText(coverage.evidenceIncomplete)
   const blindSpots = Object.entries(coverage.blindSpots ?? {}).sort(([a], [b]) => a.localeCompare(b))
   const enforced = posture.control.state === 'enforced'
   const toggle = (item: Item) => setOpen((prev) => (prev === item ? null : item))
@@ -134,6 +135,9 @@ export function PostureLineView({ posture, incidents, charter }: { posture: Post
       {open === 'seen' && (
         <div id="posture-seen" className="rounded-md border p-3 text-sm tabular-nums">
           <p>{coverage.sensorAttributed} of {basis.actions} actions attributed in the last {posture.window || '24h'}</p>
+          {incompleteText && (
+            <p className="font-medium text-status-pending" data-testid="evidence-incomplete">{incompleteText}; not counted as seen</p>
+          )}
           <p className="text-muted-foreground">{coverage.streamOK} of {basis.actions} action streams complete · {coverage.unattributedEvents} unattributed events</p>
           <p className="text-xs text-muted-foreground">{posture.visibility.summary}</p>
         </div>

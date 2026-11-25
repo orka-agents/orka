@@ -5,7 +5,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useOversightConfig, useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { demoCharterRevisions as demoRevisions, excludedText, latencyText, reasonText } from '@/lib/oversight'
+import { cleanlyCovered, demoCharterRevisions as demoRevisions, excludedText, incompleteEvidenceText, latencyText, reasonText } from '@/lib/oversight'
 import { formatTimestamp, timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
@@ -75,9 +75,14 @@ export function PostureView({ posture, demoCharterRevisions = [] }: { posture: P
             <h3 className="flex items-center gap-1.5 text-sm font-semibold">
               {posture.visibility.state !== 'full' && <EyeOff className="size-4 text-status-failed" aria-hidden="true" />}
               {COVERAGE[posture.visibility.state] ?? 'Coverage unknown'}
-              <span className="font-normal text-muted-foreground">· {percent(coverage.sensorAttributed, basis.actions)} attributed</span>
+              <span className="font-normal text-muted-foreground">· {percent(cleanlyCovered(coverage), basis.actions)} cleanly seen</span>
             </h3>
             <p className="text-sm tabular-nums">{coverage.sensorAttributed} of {basis.actions} actions attributed</p>
+            {incompleteEvidenceText(coverage.evidenceIncomplete) && (
+              <p className="text-sm font-medium tabular-nums text-status-pending" data-testid="coverage-evidence-incomplete">
+                {incompleteEvidenceText(coverage.evidenceIncomplete)}
+              </p>
+            )}
             <p className="text-sm tabular-nums text-muted-foreground">{coverage.streamOK} of {basis.actions} action streams complete</p>
             <p className={cn('text-sm tabular-nums', coverage.unattributedEvents > 0 ? 'font-medium text-status-failed' : 'text-muted-foreground')}>
               {coverage.unattributedEvents} unattributed events

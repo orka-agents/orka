@@ -789,3 +789,14 @@ export function latencyText(latency: Latency | undefined): string {
   const leftOut = replayed > 0 ? `; ${replayed.toLocaleString()} replayed left out` : ''
   return `Decision latency: p50 ${formatSeconds(latency.p50Seconds)} · p95 ${formatSeconds(latency.p95Seconds)} · max ${formatSeconds(latency.maxSeconds)} (n=${latency.count.toLocaleString()} live${leftOut})`
 }
+
+/** Actions counted as cleanly seen: attributed with complete kernel evidence. An older server reports only attribution. */
+export function cleanlyCovered(coverage: { sensorAttributed: number; cleanlyCovered?: number }): number {
+  return coverage.cleanlyCovered ?? coverage.sensorAttributed
+}
+
+/** "N actions with incomplete kernel evidence", or nothing when there are none. */
+export function incompleteEvidenceText(n: number | undefined): string | undefined {
+  if (!n || n <= 0) return undefined
+  return `${n} ${n === 1 ? 'action' : 'actions'} with incomplete kernel evidence`
+}

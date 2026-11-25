@@ -203,6 +203,28 @@ func TestPostureIsHonestByConstruction(t *testing.T) {
 		require.Equal(t, 2, p.Basis.Coverage.ObservedEvents, "one exec in each of the two actions")
 		require.Nil(t, p.Basis.Coverage.Excluded)
 	})
+	t.Run("incomplete kernel evidence is counted and left out of clean coverage", func(t *testing.T) {
+		gap := func(id string, spots ...string) oversightv1.DecisionView {
+			return view(t, 6, decision(id, "gap", func(d *oversightv1.OversightDecision) { d.Coverage.BlindSpots = spots }), "")
+		}
+		views := []oversightv1.DecisionView{
+			clean,
+			gap("g@0", "evidence-incomplete:no-workload-exec"),
+			gap("g@1", "evidence-incomplete:no-workload-exec", "evidence-incomplete:late-exec"),
+			gap("g@2", "shared_runtime_pool"),
+		}
+		p := ComputePosture("team", "24h", testNow, views, false)
+		require.Equal(t, 4, p.Basis.Coverage.SensorAttributed)
+		require.Equal(t, 2, p.Basis.Coverage.EvidenceIncomplete, "counted once per action")
+		require.Equal(t, 2, p.Basis.Coverage.CleanlyCovered)
+		require.Equal(t, 2, p.Basis.Coverage.BlindSpots["evidence-incomplete:no-workload-exec"])
+		require.Contains(t, p.Visibility.Reasons, ReasonBlindSpots)
+		require.Contains(t, p.Visibility.Summary, "2 actions with incomplete kernel evidence")
+
+		p = ComputePosture("team", "24h", testNow, []oversightv1.DecisionView{clean}, false)
+		require.Equal(t, 1, p.Basis.Coverage.CleanlyCovered)
+		require.Zero(t, p.Basis.Coverage.EvidenceIncomplete)
+	})
 	t.Run("decision latency leaves backfilled records out", func(t *testing.T) {
 		at := func(id string, observed, recorded time.Duration) oversightv1.DecisionView {
 			v := view(t, 4, decision(id, "lat", func(d *oversightv1.OversightDecision) {

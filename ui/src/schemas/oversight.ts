@@ -234,6 +234,10 @@ export interface PostureCoverage {
   unattributedEvents: number
   /** Sum of effect counts across the window's actions; 0 when not reported. */
   observedEvents?: number
+  /** Attributed actions whose kernel evidence is complete; absent on an older server. */
+  cleanlyCovered?: number
+  /** Actions with a blind spot marking their kernel evidence incomplete. */
+  evidenceIncomplete?: number
   blindSpots?: Record<string, number>
   /** Events a monitor deliberately left out of every action, by kind. */
   excluded?: Record<string, number>
@@ -374,6 +378,8 @@ export const postureCoverageSchema = z.object({
   sensorAttributed: z.number().default(0),
   unattributedEvents: z.number().default(0),
   observedEvents: z.number().default(0),
+  cleanlyCovered: z.number().optional(),
+  evidenceIncomplete: z.number().default(0),
   blindSpots: z.record(z.number()).optional(),
   excluded: z.record(z.number()).optional(),
 })

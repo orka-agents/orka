@@ -20,6 +20,12 @@ import (
 // deliberately left out of every action.
 const ExcludedAttributionPrefix = "excluded_"
 
+// EvidenceIncompletePrefix marks a blind spot for an action the sensor
+// attributed but whose kernel evidence is known to be incomplete, such as a
+// workload exec that arrived after the record was built. Such an action is
+// counted as attributed but not as cleanly covered.
+const EvidenceIncompletePrefix = "evidence-incomplete:"
+
 // Posture reasons. They are machine codes a client may translate.
 const (
 	ReasonNoDecisions         = "no_decisions_in_window"
@@ -132,9 +138,18 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 		default:
 			visibility[ReasonStreamPartial] = true
 		}
+		evidenceGap := slices.ContainsFunc(c.BlindSpots, func(spot string) bool {
+			return strings.HasPrefix(spot, EvidenceIncompletePrefix)
+		})
+		if evidenceGap {
+			basis.Coverage.EvidenceIncomplete++
+		}
 		switch c.SensorState {
 		case oversightv1.SensorStateEvents:
 			basis.Coverage.SensorAttributed++
+			if !evidenceGap {
+				basis.Coverage.CleanlyCovered++
+			}
 		case oversightv1.SensorStateUnavailable:
 			visibility[ReasonSensorUnavailable] = true
 		case oversightv1.SensorStateNone:
@@ -286,6 +301,9 @@ func visibilitySummary(basis oversightv1.PostureBasis) string {
 	parts := []string{fmt.Sprintf("%d of %d actions attributed", basis.Coverage.SensorAttributed, basis.Actions)}
 	if basis.Coverage.UnattributedEvents > 0 {
 		parts = append(parts, fmt.Sprintf("%d unattributed events", basis.Coverage.UnattributedEvents))
+	}
+	if n := basis.Coverage.EvidenceIncomplete; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d actions with incomplete kernel evidence", n))
 	}
 	if n := len(basis.Coverage.BlindSpots); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d known blind spots", n))
