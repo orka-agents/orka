@@ -20,9 +20,12 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	oversightv1 "github.com/orka-agents/orka/pkg/oversight/v1"
@@ -76,6 +79,7 @@ func newOversightTestEnv(t *testing.T, enabled bool, grants ...string) *oversigh
 	app.Post("/internal/v1/oversight/:namespace/decisions", h.IngestOversightDecisions)
 	app.Get("/api/v1/oversight/posture", h.GetOversightPosture)
 	app.Get("/api/v1/oversight/config", h.GetOversightConfig)
+	app.Get("/api/v1/oversight/producers", h.ListOversightProducers)
 	app.Get("/api/v1/oversight/decisions", h.ListOversightDecisions)
 	app.Get("/api/v1/oversight/decisions/stream", h.StreamOversightDecisions)
 	app.Get("/api/v1/oversight/decisions/groups", h.GroupOversightDecisions)
@@ -356,4 +360,35 @@ func TestOversightStreamReplaysAfterTheCursorAndFollows(t *testing.T) {
 	require.Contains(t, stream, `"id":"a@2"`, "new decisions stream without reconnecting")
 	require.Contains(t, stream, ": heartbeat")
 	require.Less(t, strings.Index(stream, `"id":"a@1"`), strings.Index(stream, `"id":"a@2"`))
+}
+
+func TestOversightProducersMergeDeclarationsWithoutVerifyingTrust(t *testing.T) {
+	e := newOversightTestEnv(t, true, append(viewerGrants, ingestSA+"|create|oversightdecisions")...)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	e.h.client = ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: oversightProducersConfigMap},
+		Data: map[string]string{oversightProducersKey: `[{"providerRef":"scorer-a","label":"Scorer A","declaredTrustState":"qualified",
+			"trustVerified":true,"evalRunID":"run-1","sampleSize":26,"metrics":[{"name":"auroc","value":0.9}]}]`},
+	}).Build()
+	e.h.apiReader = e.h.client
+	d := testOversightDecision("a@0", "a", "agent", "", time.Now().UTC())
+	d.Scorers = append(d.Scorers, oversightv1.ScorerEvaluation{ProviderRef: "scorer-b", ModelID: "model-b", Status: "timeout", TrustState: "shadow"})
+	e.ingest(t, d)
+
+	status, body := e.do(t, http.MethodGet, "/api/v1/oversight/producers?namespace=team", viewer, nil)
+	require.Equal(t, http.StatusOK, status, string(body))
+	var response oversightv1.ProducersResponse
+	require.NoError(t, json.Unmarshal(body, &response))
+	require.True(t, response.Declared)
+	require.Len(t, response.Producers, 2)
+	declared := response.Producers[0]
+	require.Equal(t, "Scorer A", declared.Label)
+	require.False(t, declared.TrustVerified, "a declaration never verifies its own trust")
+	require.Equal(t, 26, declared.SampleSize)
+	require.Equal(t, 1, declared.Evaluations)
+	observed := response.Producers[1]
+	require.Equal(t, "scorer-b", observed.ProviderRef)
+	require.Equal(t, 1, observed.Failures)
+	require.Equal(t, []string{"shadow"}, observed.ObservedTrustStates)
 }

@@ -520,6 +520,7 @@ func (s *Server) setupRoutes() {
 	// Oversight: read-only decision records for one namespace.
 	api.Get("/oversight/config", s.handlers.GetOversightConfig)
 	api.Get("/oversight/posture", s.handlers.GetOversightPosture)
+	api.Get("/oversight/producers", s.handlers.ListOversightProducers)
 	api.Get("/oversight/decisions", s.handlers.ListOversightDecisions)
 	api.Get("/oversight/decisions/stream", s.handlers.StreamOversightDecisions)
 	api.Get("/oversight/decisions/groups", s.handlers.GroupOversightDecisions)

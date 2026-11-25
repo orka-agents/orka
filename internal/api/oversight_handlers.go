@@ -14,11 +14,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/oversight"
@@ -629,4 +633,115 @@ func cloneOversightFilter(f storagev1.OversightDecisionFilter) storagev1.Oversig
 	f.Text = cloneAll(f.Text)
 	f.Facets, f.AnyFacets = cloneMatches(f.Facets), cloneMatches(f.AnyFacets)
 	return f
+}
+
+// oversightProducersConfigMap is the operator-owned ConfigMap, in each
+// namespace, that declares oversight producers under producersKey as a JSON
+// list of ProducerInfo declarations. It is provisional: the eventual home is
+// an admin-owned provider resource with Orka-earned trust states.
+const (
+	oversightProducersConfigMap = "orka-oversight-producers"
+	oversightProducersKey       = "producers.json"
+	maxOversightProducers       = 64
+)
+
+// ListOversightProducers handles GET /api/v1/oversight/producers: the
+// declared producers merged with those seen in the last 24 hours. Declared
+// trust states are never reported as verified.
+func (h *Handlers) ListOversightProducers(c fiber.Ctx) error {
+	namespace, err := h.authorizeOversightRead(c, "listOversightProducers", "list")
+	if err != nil {
+		return err
+	}
+	response := oversightv1.ProducersResponse{Namespace: namespace, Producers: []oversightv1.ProducerInfo{}}
+	index := map[string]int{}
+	declared, found, err := h.declaredOversightProducers(c.Context(), namespace)
+	if err != nil {
+		return err
+	}
+	response.Declared = found
+	for _, producer := range declared {
+		if producer.ProviderRef == "" || len(response.Producers) >= maxOversightProducers {
+			continue
+		}
+		producer.TrustVerified, producer.Evaluations, producer.Failures, producer.ObservedTrustStates = false, 0, 0, nil
+		if _, dup := index[producer.ProviderRef]; dup {
+			continue
+		}
+		index[producer.ProviderRef] = len(response.Producers)
+		response.Producers = append(response.Producers, producer)
+	}
+	records, err := h.oversightStore.ListOversightDecisions(c.Context(), storagev1.OversightDecisionFilter{
+		Namespace: namespace, ObservedSince: time.Now().UTC().Add(-oversightDefaultPostureRange),
+		Descending: true, Limit: storagev1.MaxOversightListLimit,
+	})
+	if err != nil {
+		return oversightStorageError("list oversight producers", err)
+	}
+	views, err := oversight.Views(records, nil)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to decode oversight decisions")
+	}
+	observe := func(role, ref, model, family, digest, trust, status string) {
+		i, ok := index[ref]
+		if !ok {
+			if len(response.Producers) >= maxOversightProducers {
+				return
+			}
+			i = len(response.Producers)
+			index[ref] = i
+			response.Producers = append(response.Producers, oversightv1.ProducerInfo{ProviderRef: ref, Role: role})
+		}
+		p := &response.Producers[i]
+		p.Evaluations++
+		if status != oversightv1.EvaluationStatusOK {
+			p.Failures++
+		}
+		if p.ModelID == "" {
+			p.ModelID, p.ModelFamily, p.ModelDigest = model, family, digest
+		}
+		if trust != "" && !slices.Contains(p.ObservedTrustStates, trust) {
+			p.ObservedTrustStates = append(p.ObservedTrustStates, trust)
+		}
+	}
+	for i := range views {
+		for _, s := range views[i].Scorers {
+			observe("scorer", s.ProviderRef, s.ModelID, s.ModelFamily, s.ModelDigest, s.TrustState, s.Status)
+		}
+		for _, a := range views[i].Advisors {
+			observe("advisor", a.ProviderRef, a.ModelID, a.ModelFamily, a.ModelDigest, a.TrustState, a.Status)
+		}
+		for _, f := range views[i].CharterFindings {
+			observe("rules", f.ProducerRef, "", "", "", "", oversightv1.EvaluationStatusOK)
+		}
+	}
+	return c.JSON(response)
+}
+
+func (h *Handlers) declaredOversightProducers(ctx context.Context, namespace string) ([]oversightv1.ProducerInfo, bool, error) {
+	reader := h.apiReader
+	if reader == nil {
+		reader = h.client
+	}
+	if reader == nil {
+		return nil, false, nil
+	}
+	var cm corev1.ConfigMap
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: oversightProducersConfigMap}, &cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		log.Error(err, "read oversight producer declarations", "namespace", namespace)
+		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to read oversight producer declarations")
+	}
+	raw := cm.Data[oversightProducersKey]
+	if raw == "" {
+		return nil, true, nil
+	}
+	var declared []oversightv1.ProducerInfo
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil {
+		return nil, true, fiber.NewError(fiber.StatusUnprocessableEntity,
+			fmt.Sprintf("%s/%s %s is not a JSON list of producers", namespace, oversightProducersConfigMap, oversightProducersKey))
+	}
+	return declared, true, nil
 }

@@ -242,3 +242,49 @@ type PostureProducer struct {
 	Evaluations int    `json:"evaluations"`
 	Failures    int    `json:"failures"`
 }
+
+// ProducerMetric is one measured number an operator declared for a producer,
+// such as a held-out catch rate. Names and units come from the declaration.
+type ProducerMetric struct {
+	Name  string  `json:"name"`
+	Value float64 `json:"value"`
+	Unit  string  `json:"unit,omitempty"`
+}
+
+// ProducerInfo is one scorer, advisor or rule producer: how the operator
+// declared it, and how it behaved in the posture window.
+//
+// Phase 0 reads declarations from an operator-owned ConfigMap. That is
+// provisional: the eventual home is an admin-owned provider resource whose
+// trust state Orka earns through qualification. Until then a declared trust
+// state is only the operator's claim, and TrustVerified is always false.
+type ProducerInfo struct {
+	ProviderRef string `json:"providerRef"`
+	// Label is the operator's display name; clients fall back to ProviderRef.
+	Label       string `json:"label,omitempty"`
+	Role        string `json:"role,omitempty"`
+	ModelID     string `json:"modelID,omitempty"`
+	ModelFamily string `json:"modelFamily,omitempty"`
+	ModelDigest string `json:"modelDigest,omitempty"`
+	// DeclaredTrustState is what the declaration claims; TrustVerified says
+	// whether Orka verified it.
+	DeclaredTrustState string `json:"declaredTrustState,omitempty"`
+	TrustVerified      bool   `json:"trustVerified"`
+	// ObservedTrustStates are the trust states decisions in the window carried.
+	ObservedTrustStates []string         `json:"observedTrustStates,omitempty"`
+	EvalRunID           string           `json:"evalRunID,omitempty"`
+	SampleSize          int              `json:"sampleSize,omitempty"`
+	Metrics             []ProducerMetric `json:"metrics,omitempty"`
+	Note                string           `json:"note,omitempty"`
+	// Evaluations and Failures count the window's decisions it took part in.
+	Evaluations int `json:"evaluations"`
+	Failures    int `json:"failures"`
+}
+
+// ProducersResponse lists the namespace's producers.
+type ProducersResponse struct {
+	Namespace string `json:"namespace"`
+	// Declared says whether an operator declaration was found.
+	Declared  bool           `json:"declared"`
+	Producers []ProducerInfo `json:"producers"`
+}
