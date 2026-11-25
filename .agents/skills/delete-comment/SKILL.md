@@ -17,7 +17,7 @@ Both fail when a file gains a comment and when a file loses one without the base
 being lowered. `make comment-baseline` lowers both and refuses to raise either.
 
 Exempt, never counted: compiler and tool directives (`//go:`, `//nolint`, `// +kubebuilder`
-and other `// +` markers, `#nosec`, `# shellcheck`, `# noqa`, `eslint-disable`, `@ts-expect-error`,
+and other `// +` markers, `#nosec`, `# shellcheck`, `# noqa`, `eslint-disable`, ESLint `/* eslint */` and `/* global */` config, `@ts-expect-error`,
 `/// <reference>`), license headers, `Deprecated:` notices, cgo preambles, Go example `Output:` blocks, generated files, `testdata/`, the vendored `.agents/skills/autoreview`, and doc
 comments on types and fields under `api/`, because controller-gen turns those into CRD
 descriptions that `kubectl explain` shows users.
