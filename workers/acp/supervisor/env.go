@@ -915,6 +915,8 @@ func providerProfile(
 				return map[string]string{
 					"CLAUDE_CONFIG_DIR": filepath.Join(paths.Home, ".claude"), "CLAUDE_CODE_EXECUTABLE": "/opt/claude/bin/claude",
 					noBrowserEnv: "1", "DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_INSTALLATION_CHECKS": "1",
+					"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+					"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 					"ANTHROPIC_BASE_URL": proxy.BaseURL, "ANTHROPIC_API_KEY": proxy.Credential, "ANTHROPIC_MODEL": model,
 				}, nil
 			},
@@ -1476,7 +1478,19 @@ func prepareCodexHome(paths acp.SessionPaths) error {
 // codexHomeConfigTOML is the static CODEX_HOME/config.toml; the per-session
 // provider definition travels in CODEX_CONFIG (see codexBaseConfig).
 // Codex 0.160.0's connection retry loop is independent of stream_max_retries.
-const codexHomeConfigTOML = "check_for_update_on_startup = false\nfeatures.unbounded_connection_retries = false\n"
+// The app server reads this file before any session override arrives, so the
+// vendor traffic it would otherwise start on its own is turned off here:
+// analytics, the OTEL metrics exporter (on by default), and the plugin and app
+// catalog syncs.
+const codexHomeConfigTOML = `check_for_update_on_startup = false
+analytics.enabled = false
+features.unbounded_connection_retries = false
+features.plugins = false
+features.apps = false
+otel.exporter = "none"
+otel.trace_exporter = "none"
+otel.metrics_exporter = "none"
+`
 
 func openAIProxyURL(base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
