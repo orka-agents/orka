@@ -239,6 +239,18 @@ describe('blocked attempts', () => {
   })
 })
 
+describe('strongest evidence', () => {
+  it('names the event that matters, not the first routine read', () => {
+    const read = makeDecision({
+      action: { toolName: 'code_exec', effects: { counts: { config_read: 1, credential_read: 1 }, notableEvents: [
+        { id: 'e1', kind: 'config_read', path: '/etc/localtime', outcome: 'failed(-2)' },
+        { id: 'e2', kind: 'credential_read', path: '/var/run/secrets/kubernetes.io/serviceaccount/token' },
+      ] } },
+    })
+    expect(strongestEvidence(read)).toBe('kernel saw credential_read /var/run/secrets/kubernetes.io/serviceaccount/token')
+  })
+})
+
 describe('excluded events', () => {
   it('says what the monitor set aside, and nothing when it set nothing aside', () => {
     expect(excludedSummary({ platform_traffic: 69, container_setup: 140, other_kind: 1 }))

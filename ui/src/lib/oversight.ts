@@ -544,6 +544,18 @@ export function rowSummary(decision: DecisionView, config: OversightConfig | und
 }
 
 /** The kernel-observed fact that best backs the story, or undefined when nothing was observed. */
+// Event kinds by how much they tell a person, most first; routine reads last.
+const TELLING_KINDS = ['credential', 'blocked', 'write_outside', 'http', 'net_connect', 'connect', 'exec']
+
+/** The notable event that says most about the action, else the first. */
+function mostTellingEvent<T extends { kind: string }>(events: T[]): T | undefined {
+  for (const kind of TELLING_KINDS) {
+    const hit = events.find((e) => e.kind.includes(kind))
+    if (hit) return hit
+  }
+  return events[0]
+}
+
 export function strongestEvidence(decision: DecisionView): string | undefined {
   const effects = decision.action.effects ?? {}
   const dest = effects.destinations?.[0]?.value
@@ -553,7 +565,7 @@ export function strongestEvidence(decision: DecisionView): string | undefined {
     const where = blocked?.dest || dest
     return `kernel saw a blocked connection${where ? ` to ${where}` : ''}; no data seen leaving`
   }
-  const event = effects.notableEvents?.[0]
+  const event = mostTellingEvent(effects.notableEvents ?? [])
   if (event) {
     const what = event.dest || event.path || (event.binary && binaryName(event.binary))
     return `kernel saw ${event.kind}${what ? ` ${what}` : ''}${event.outcome ? ` (${event.outcome})` : ''}`
