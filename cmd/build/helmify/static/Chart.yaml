@@ -2,8 +2,8 @@ apiVersion: v2
 name: orka
 description: Kubernetes-native task execution platform with AI agent support
 type: application
-version: 0.0.0-dev
-appVersion: "v0.0.0-dev"
+version: 0.4.0
+appVersion: "v0.4.0"
 keywords:
   - kubernetes
   - task-execution

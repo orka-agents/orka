@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "orka.fullname" . }}-store
+  name: {{ include "orka.storeName" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
     app.kubernetes.io/component: store
