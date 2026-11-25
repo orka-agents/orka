@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,22 @@ import (
 	"testing"
 	"time"
 )
+
+func testCompactJWT(t *testing.T, iss, aud string, exp int64) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	claimsMap := map[string]any{"iss": iss, "aud": aud, "sub": "alice"}
+	if exp > 0 {
+		claimsMap["exp"] = exp
+	}
+	payloadBytes, err := json.Marshal(claimsMap)
+	if err != nil {
+		t.Fatalf("marshal jwt claims: %v", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	sig := base64.RawURLEncoding.EncodeToString([]byte("sig"))
+	return header + "." + payload + "." + sig
+}
 
 func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -70,7 +87,7 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 					return
 				}
 				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-					"access_token":  "oidc-access-1",
+					"access_token":  testCompactJWT(t, idp.URL, "orka-client-id", time.Now().Add(time.Hour).Unix()),
 					"refresh_token": "oidc-refresh-1",
 					"expires_in":    3600,
 				})
@@ -79,8 +96,11 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 				if got := r.Form.Get("refresh_token"); got != "oidc-refresh-1" {
 					t.Errorf("refresh_token = %q, want oidc-refresh-1", got)
 				}
+				if gotScope := r.Form.Get("scope"); gotScope != "" {
+					t.Errorf("refresh scope = %q, want empty when provider did not return granted scope", gotScope)
+				}
 				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-					"access_token":  "oidc-access-2",
+					"access_token":  testCompactJWT(t, idp.URL, "orka-client-id", time.Now().Add(2*time.Hour).Unix()),
 					"refresh_token": "oidc-refresh-2",
 					"expires_in":    3600,
 				})
@@ -136,9 +156,10 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 	}
 
 	cfg := loadConfig()
-	if cfg.Token != "oidc-access-1" || cfg.TokenKind != tokenKindOIDC || cfg.OIDCRefreshToken != "oidc-refresh-1" {
+	if cfg.Token == "" || cfg.TokenKind != tokenKindOIDC || cfg.OIDCRefreshToken != "oidc-refresh-1" {
 		t.Fatalf("saved config = %+v", cfg)
 	}
+	firstToken := cfg.Token
 
 	// Expire the saved access token and verify the next command refreshes it automatically.
 	expired := time.Now().UTC().Add(-time.Minute)
@@ -158,15 +179,48 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 	if refreshCalls != 1 {
 		t.Fatalf("refreshCalls = %d, want 1", refreshCalls)
 	}
-	if gotAuthHeader != "Bearer oidc-access-2" {
-		t.Fatalf("Authorization = %q, want Bearer oidc-access-2", gotAuthHeader)
-	}
 	updated := loadConfig()
-	if updated.Token != "oidc-access-2" || updated.OIDCRefreshToken != "oidc-refresh-2" {
+	if updated.Token == "" || updated.Token == firstToken || updated.OIDCRefreshToken != "oidc-refresh-2" {
 		t.Fatalf("updated config = %+v", updated)
+	}
+	if gotAuthHeader != "Bearer "+updated.Token {
+		t.Fatalf("Authorization = %q, want Bearer %s", gotAuthHeader, updated.Token)
 	}
 	if updated.SessionSubject == "" || updated.SessionSubject != cfg.SessionSubject {
 		t.Fatalf("login ID changed across refresh: got %q, want %q", updated.SessionSubject, cfg.SessionSubject)
+	}
+}
+
+func TestSelectOIDCBearerTokenFallsBackToIDTokenWhenAccessTokenOpaque(t *testing.T) {
+	expUnix := time.Now().UTC().Add(30 * time.Minute).Unix()
+	idTok := testCompactJWT(t, "https://issuer.example", "orka-api", expUnix)
+	tok, exp, err := selectOIDCBearerToken(oidcTokenResponse{
+		AccessToken: "opaque-access-token",
+		IDToken:     idTok,
+	}, "https://issuer.example", "orka-api")
+	if err != nil {
+		t.Fatalf("selectOIDCBearerToken error: %v", err)
+	}
+	if tok != idTok {
+		t.Fatalf("selected token = %q, want id_token", tok)
+	}
+	if exp == nil || exp.Unix() != expUnix {
+		t.Fatalf("derived expiry = %v, want %d", exp, expUnix)
+	}
+}
+
+func TestFetchOIDCDiscoveryRejectsIssuerMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"issuer":                        "https://evil.example",
+			"device_authorization_endpoint": "https://evil.example/device",
+			"token_endpoint":                "https://evil.example/token",
+		})
+	}))
+	defer srv.Close()
+
+	if _, err := fetchOIDCDiscovery(t.Context(), srv.URL); err == nil || !strings.Contains(err.Error(), "issuer mismatch") {
+		t.Fatalf("expected issuer mismatch error, got %v", err)
 	}
 }
 

@@ -78,6 +78,7 @@ type orkaConfig struct {
 	SessionSubject string `yaml:"sessionSubject,omitempty"`
 	// OIDC login metadata saved by `orka auth login` for automatic token refresh.
 	OIDCIssuer        string `yaml:"oidcIssuer,omitempty"`
+	OIDCAudience      string `yaml:"oidcAudience,omitempty"`
 	OIDCClientID      string `yaml:"oidcClientID,omitempty"`
 	OIDCTokenEndpoint string `yaml:"oidcTokenEndpoint,omitempty"`
 	OIDCRefreshToken  string `yaml:"oidcRefreshToken,omitempty"`

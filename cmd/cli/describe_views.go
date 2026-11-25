@@ -138,8 +138,8 @@ func agentDescribeRows(agent map[string]any) []describeRow {
 	readyValue := readinessString(status["ready"])
 	if readyValue == "false" {
 		if readyCond := findStatusCondition(status, "Ready"); readyCond != nil {
-			if msg := firstString(readyCond, "message"); msg != "" {
-				readyValue = fmt.Sprintf("false (%s)", msg)
+			if detail := firstNonEmpty(firstString(readyCond, "message"), firstString(readyCond, "reason")); detail != "" {
+				readyValue = fmt.Sprintf("false (%s)", detail)
 			}
 		}
 	}

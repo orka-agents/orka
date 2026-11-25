@@ -150,7 +150,7 @@ func newLoginCmd() *cobra.Command {
 				cfg.Server, cfg.Token, cfg.TokenKind, cfg.Namespace = server, session.Token, tokenKindGitHubSession, session.Namespace
 				expires := session.ExpiresAt
 				cfg.SessionServer, cfg.TokenExpiresAt, cfg.SessionLogin, cfg.SessionSubject = server, &expires, session.Login, session.Subject
-				cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCTokenEndpoint, cfg.OIDCRefreshToken, cfg.OIDCScope = "", "", "", "", ""
+				cfg.OIDCIssuer, cfg.OIDCAudience, cfg.OIDCClientID, cfg.OIDCTokenEndpoint, cfg.OIDCRefreshToken, cfg.OIDCScope = "", "", "", "", "", ""
 				return nil
 			}); err != nil {
 				return fmt.Errorf("save the session: %w", err)
@@ -196,7 +196,7 @@ func newLogoutCmd() *cobra.Command {
 			cfg := loadConfig()
 			if cfg.TokenKind == tokenKindOIDC && cfg.Token != "" {
 				cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer, cfg.SessionLogin, cfg.SessionSubject = "", "", nil, "", "", ""
-				cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCTokenEndpoint, cfg.OIDCRefreshToken, cfg.OIDCScope = "", "", "", "", ""
+				cfg.OIDCIssuer, cfg.OIDCAudience, cfg.OIDCClientID, cfg.OIDCTokenEndpoint, cfg.OIDCRefreshToken, cfg.OIDCScope = "", "", "", "", "", ""
 				if err := saveConfig(cfg); err != nil {
 					return err
 				}

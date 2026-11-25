@@ -583,7 +583,7 @@ Use "orka auth [command] --help" for more information about a command.
 ## `orka auth login`
 
 ```text
-Sign in to Orka using OpenID Connect device-code flow. By default, discovers the OIDC issuer and audience from the Orka server (/api/v1/auth/config), requests a device code, saves the access token (and refresh token when issued) in your Orka config, and automatically refreshes it before expiry.
+Sign in to Orka using OpenID Connect device-code flow. By default, discovers the OIDC issuer and audience from the Orka server (/api/v1/auth/config), requests a device code, saves an Orka-compatible JWT (and refresh token when issued) in your Orka config, and automatically refreshes it before expiry.
 
 Usage:
   orka auth login [flags]

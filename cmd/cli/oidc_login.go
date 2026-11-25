@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -58,6 +60,7 @@ type oidcTokenResponse struct {
 	IDToken          string `json:"id_token"`
 	RefreshToken     string `json:"refresh_token"`
 	TokenType        string `json:"token_type"`
+	Scope            string `json:"scope"`
 	ExpiresIn        int    `json:"expires_in"`
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description"`
@@ -78,8 +81,8 @@ func newAuthLoginCmd() *cobra.Command {
 		Use:   cliLoginUse,
 		Short: "Sign in to Orka with OIDC (device-code flow)",
 		Long: "Sign in to Orka using OpenID Connect device-code flow. By default, discovers the OIDC issuer and " +
-			"audience from the Orka server (/api/v1/auth/config), requests a device code, saves the access token " +
-			"(and refresh token when issued) in your Orka config, and automatically refreshes it before expiry.",
+			"audience from the Orka server (/api/v1/auth/config), requests a device code, saves an Orka-compatible " +
+			"JWT (and refresh token when issued) in your Orka config, and automatically refreshes it before expiry.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runOIDCLogin(cmd, opts)
@@ -94,36 +97,49 @@ func newAuthLoginCmd() *cobra.Command {
 	return cmd
 }
 
-func resolveOIDCLoginTargets(ctx context.Context, server, issuer, clientID string) (string, string, error) {
+type oidcLoginTargets struct {
+	issuer   string
+	audience string
+	clientID string
+}
+
+func resolveOIDCLoginTargets(ctx context.Context, server, issuer, clientID string) (oidcLoginTargets, error) {
 	issuer = strings.TrimSpace(issuer)
 	clientID = strings.TrimSpace(clientID)
-	if issuer == "" || clientID == "" {
-		var options authConfigView
-		if err := plainJSON(ctx, http.MethodGet, server+"/api/v1/auth/config", "", nil, &options); err != nil {
-			return "", "", fmt.Errorf("read auth config from %s: %w", server, err)
+	audience := ""
+
+	var options authConfigView
+	if err := plainJSON(ctx, http.MethodGet, server+"/api/v1/auth/config", "", nil, &options); err != nil {
+		if issuer == "" || clientID == "" {
+			return oidcLoginTargets{}, fmt.Errorf("read auth config from %s: %w", server, err)
 		}
-		if !options.OIDC {
-			return "", "", fmt.Errorf("%s does not have OIDC authentication enabled", server)
+	} else {
+		if !options.OIDC && (issuer == "" || clientID == "") {
+			return oidcLoginTargets{}, fmt.Errorf("%s does not have OIDC authentication enabled", server)
 		}
 		if options.OIDCConfig != nil {
+			audience = strings.TrimSpace(options.OIDCConfig.Audience)
 			if issuer == "" {
 				issuer = strings.TrimSpace(options.OIDCConfig.Issuer)
 			}
 			if clientID == "" {
-				clientID = strings.TrimSpace(options.OIDCConfig.Audience)
+				clientID = audience
 			}
 		}
 	}
 	if issuer == "" {
-		return "", "", errors.New("OIDC issuer is required (pass --issuer or configure --oidc-issuer on the server)")
+		return oidcLoginTargets{}, errors.New("OIDC issuer is required (pass --issuer or configure --oidc-issuer on the server)")
 	}
 	if clientID == "" {
-		return "", "", errors.New("OIDC client ID is required (pass --client-id or configure --oidc-audience on the server)")
+		return oidcLoginTargets{}, errors.New("OIDC client ID is required (pass --client-id or configure --oidc-audience on the server)")
+	}
+	if audience == "" {
+		audience = clientID
 	}
 	if err := oidcEndpointAllowed(issuer); err != nil {
-		return "", "", err
+		return oidcLoginTargets{}, err
 	}
-	return issuer, clientID, nil
+	return oidcLoginTargets{issuer: issuer, audience: audience, clientID: clientID}, nil
 }
 
 func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
@@ -134,20 +150,20 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()
 
-	issuer, clientID, err := resolveOIDCLoginTargets(ctx, server, opts.issuer, opts.clientID)
+	targets, err := resolveOIDCLoginTargets(ctx, server, opts.issuer, opts.clientID)
 	if err != nil {
 		return err
 	}
 
-	discovery, err := fetchOIDCDiscovery(ctx, issuer)
+	discovery, err := fetchOIDCDiscovery(ctx, targets.issuer)
 	if err != nil {
 		return err
 	}
 	if discovery.DeviceAuthorizationEndpoint == "" {
-		return fmt.Errorf("OIDC provider %s does not advertise device_authorization_endpoint", issuer)
+		return fmt.Errorf("OIDC provider %s does not advertise device_authorization_endpoint", targets.issuer)
 	}
 	if discovery.TokenEndpoint == "" {
-		return fmt.Errorf("OIDC provider %s does not advertise token_endpoint", issuer)
+		return fmt.Errorf("OIDC provider %s does not advertise token_endpoint", targets.issuer)
 	}
 	if err := oidcEndpointAllowed(discovery.DeviceAuthorizationEndpoint); err != nil {
 		return err
@@ -158,7 +174,7 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 
 	scope := strings.TrimSpace(opts.scope)
 	if scope == "" {
-		scope = defaultOIDCLoginScope(issuer, clientID)
+		scope = defaultOIDCLoginScope(targets.issuer, targets.audience)
 	}
 
 	out := cmd.OutOrStdout()
@@ -167,7 +183,7 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 			"Press Ctrl-C now to keep it; after signing in, pass another token with --token.")
 	}
 
-	deviceAuth, err := startOIDCDeviceFlow(ctx, discovery.DeviceAuthorizationEndpoint, clientID, scope)
+	deviceAuth, err := startOIDCDeviceFlow(ctx, discovery.DeviceAuthorizationEndpoint, targets.clientID, scope)
 	if err != nil {
 		return err
 	}
@@ -187,22 +203,13 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 		}
 	}
 
-	tokens, err := pollOIDCDeviceFlow(ctx, discovery.TokenEndpoint, clientID, deviceAuth)
+	tokens, err := pollOIDCDeviceFlow(ctx, discovery.TokenEndpoint, targets.clientID, deviceAuth)
 	if err != nil {
 		return err
 	}
-	token := tokens.AccessToken
-	if token == "" {
-		token = tokens.IDToken
-	}
-	if token == "" {
-		return errors.New("OIDC provider returned neither access_token nor id_token")
-	}
-
-	var expiresAt *time.Time
-	if tokens.ExpiresIn > 0 {
-		exp := time.Now().UTC().Add(time.Duration(tokens.ExpiresIn) * time.Second)
-		expiresAt = &exp
+	token, expiresAt, err := selectOIDCBearerToken(tokens, targets.issuer, targets.audience)
+	if err != nil {
+		return err
 	}
 
 	loginID, err := newOIDCLoginID()
@@ -210,6 +217,11 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 		return fmt.Errorf("generate login ID: %w", err)
 	}
 	if err := updateConfig(func(cfg *orkaConfig) error {
+		if cfg.TokenKind == tokenKindGitHubSession {
+			// Clear the GitHub session's saved namespace so OIDC namespace
+			// isolation is not tripped by a stale session namespace.
+			cfg.Namespace = ""
+		}
 		cfg.Server = server
 		cfg.Token = token
 		cfg.TokenKind = tokenKindOIDC
@@ -217,11 +229,14 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 		cfg.SessionServer = server
 		cfg.SessionLogin = ""
 		cfg.SessionSubject = loginID
-		cfg.OIDCIssuer = issuer
-		cfg.OIDCClientID = clientID
+		cfg.OIDCIssuer = targets.issuer
+		cfg.OIDCAudience = targets.audience
+		cfg.OIDCClientID = targets.clientID
 		cfg.OIDCTokenEndpoint = discovery.TokenEndpoint
 		cfg.OIDCRefreshToken = tokens.RefreshToken
-		cfg.OIDCScope = scope
+		// Record only what the provider actually granted; omitting scope on
+		// refresh reuses the granted scope per RFC 6749 §6.
+		cfg.OIDCScope = strings.TrimSpace(tokens.Scope)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("save OIDC token: %w", err)
@@ -234,13 +249,110 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 	return nil
 }
 
-func defaultOIDCLoginScope(issuer, clientID string) string {
+// selectOIDCBearerToken picks an Orka-compatible compact JWT (preferring
+// access_token, then id_token) matching expectedIssuer and expectedAudience,
+// and derives its expiry from expires_in or the JWT's exp claim.
+func selectOIDCBearerToken(tokens oidcTokenResponse, expectedIssuer, expectedAudience string) (string, *time.Time, error) {
+	candidates := []string{strings.TrimSpace(tokens.AccessToken), strings.TrimSpace(tokens.IDToken)}
+	var nonEmpty []string
+	for _, cand := range candidates {
+		if cand != "" {
+			nonEmpty = append(nonEmpty, cand)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return "", nil, errors.New("OIDC provider returned neither access_token nor id_token")
+	}
+
+	var fallbackJWT string
+	var fallbackExp *time.Time
+	for _, cand := range nonEmpty {
+		claims, ok := parseUnverifiedJWTClaims(cand)
+		if !ok {
+			continue
+		}
+		exp := resolveTokenExpiry(tokens.ExpiresIn, claims.Exp)
+		if fallbackJWT == "" {
+			fallbackJWT, fallbackExp = cand, exp
+		}
+		if jwtMatchesTarget(claims, expectedIssuer, expectedAudience) {
+			return cand, exp, nil
+		}
+	}
+	if fallbackJWT != "" && expectedIssuer == "" && expectedAudience == "" {
+		return fallbackJWT, fallbackExp, nil
+	}
+	return "", nil, fmt.Errorf("OIDC provider returned no compact JWT matching issuer %q and audience %q", expectedIssuer, expectedAudience)
+}
+
+type unverifiedJWTClaims struct {
+	Issuer   string
+	Audience []string
+	Exp      int64
+}
+
+func parseUnverifiedJWTClaims(token string) (unverifiedJWTClaims, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return unverifiedJWTClaims{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return unverifiedJWTClaims{}, false
+	}
+	var raw struct {
+		Iss string `json:"iss"`
+		Aud any    `json:"aud"`
+		Exp int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return unverifiedJWTClaims{}, false
+	}
+	var aud []string
+	switch v := raw.Aud.(type) {
+	case string:
+		if v != "" {
+			aud = []string{v}
+		}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				aud = append(aud, s)
+			}
+		}
+	}
+	return unverifiedJWTClaims{Issuer: raw.Iss, Audience: aud, Exp: raw.Exp}, true
+}
+
+func jwtMatchesTarget(claims unverifiedJWTClaims, expectedIssuer, expectedAudience string) bool {
+	if expectedIssuer != "" && strings.TrimRight(claims.Issuer, "/") != strings.TrimRight(expectedIssuer, "/") {
+		return false
+	}
+	if expectedAudience != "" && !slices.Contains(claims.Audience, expectedAudience) {
+		return false
+	}
+	return true
+}
+
+func resolveTokenExpiry(expiresIn int, jwtExp int64) *time.Time {
+	if expiresIn > 0 {
+		exp := time.Now().UTC().Add(time.Duration(expiresIn) * time.Second)
+		return &exp
+	}
+	if jwtExp > 0 {
+		exp := time.Unix(jwtExp, 0).UTC()
+		return &exp
+	}
+	return nil
+}
+
+func defaultOIDCLoginScope(issuer, audience string) string {
 	// Microsoft Entra v2 requires a resource scope (such as <app-id>/.default or
 	// api://<app-id>/...) to issue an access token with the app's audience, plus
 	// offline_access for refresh tokens.
 	if strings.Contains(strings.ToLower(issuer), "login.microsoftonline.com") ||
 		strings.Contains(strings.ToLower(issuer), "sts.windows.net") {
-		return fmt.Sprintf("openid profile email offline_access %s/.default", clientID)
+		return fmt.Sprintf("openid profile email offline_access %s/.default", audience)
 	}
 	return "openid profile email offline_access"
 }
@@ -264,6 +376,9 @@ func fetchOIDCDiscovery(ctx context.Context, issuer string) (oidcDiscoveryDoc, e
 	var doc oidcDiscoveryDoc
 	if err := plainJSON(ctx, http.MethodGet, discoveryURL, "", nil, &doc); err != nil {
 		return oidcDiscoveryDoc{}, fmt.Errorf("fetch OIDC discovery document: %w", err)
+	}
+	if strings.TrimSpace(doc.Issuer) == "" || strings.TrimRight(doc.Issuer, "/") != strings.TrimRight(issuer, "/") {
+		return oidcDiscoveryDoc{}, fmt.Errorf("OIDC discovery issuer mismatch: got %q, want %q", doc.Issuer, issuer)
 	}
 	return doc, nil
 }
@@ -415,22 +530,30 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 	}
 	var refreshed oidcTokenResponse
 	status, err := postOIDCForm(ctx, cfg.OIDCTokenEndpoint, form, &refreshed)
-	if err != nil || status >= 300 || refreshed.Error != "" || (refreshed.AccessToken == "" && refreshed.IDToken == "") {
+	if err != nil || status >= 300 || refreshed.Error != "" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Could not refresh your OIDC token; run 'orka auth login'.") //nolint:errcheck
 		return cfg.Token
 	}
 
-	newToken := refreshed.AccessToken
-	if newToken == "" {
-		newToken = refreshed.IDToken
+	audience := cfg.OIDCAudience
+	if audience == "" {
+		audience = cfg.OIDCClientID
 	}
+	newToken, expiresAt, err := selectOIDCBearerToken(refreshed, cfg.OIDCIssuer, audience)
+	if err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Could not refresh your OIDC token; run 'orka auth login'.") //nolint:errcheck
+		return cfg.Token
+	}
+
 	cfg.Token = newToken
 	if refreshed.RefreshToken != "" {
 		cfg.OIDCRefreshToken = refreshed.RefreshToken
 	}
-	if refreshed.ExpiresIn > 0 {
-		exp := time.Now().UTC().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
-		cfg.TokenExpiresAt = &exp
+	if strings.TrimSpace(refreshed.Scope) != "" {
+		cfg.OIDCScope = strings.TrimSpace(refreshed.Scope)
+	}
+	if expiresAt != nil {
+		cfg.TokenExpiresAt = expiresAt
 	}
 	if err := saveConfig(cfg); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not save the refreshed OIDC token: %v\n", err) //nolint:errcheck
@@ -439,10 +562,13 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 }
 
 func oidcTokenNeedsRefresh(cfg orkaConfig) bool {
-	if cfg.TokenExpiresAt == nil {
-		return false
+	if cfg.TokenExpiresAt != nil {
+		return time.Until(*cfg.TokenExpiresAt) <= oidcRefreshWindow
 	}
-	return time.Until(*cfg.TokenExpiresAt) <= oidcRefreshWindow
+	if claims, ok := parseUnverifiedJWTClaims(cfg.Token); ok && claims.Exp > 0 {
+		return time.Until(time.Unix(claims.Exp, 0).UTC()) <= oidcRefreshWindow
+	}
+	return false
 }
 
 // holdsOIDCSession reports whether saved holds the same OIDC login as read

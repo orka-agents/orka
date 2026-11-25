@@ -229,6 +229,11 @@ func TestListAgentIdentityAuditEnforcesContextTokenTaskScope(t *testing.T) {
 	body.Items = nil
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Empty(t, body.Items)
+
+	// Filtering by another task name returns 403.
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&task=task-other", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestAgentIdentityAuditBufferRedactionFromResolver(t *testing.T) {
