@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -294,6 +295,7 @@ func selectOIDCBearerToken(tokens oidcTokenResponse, expectedIssuer, expectedAud
 
 type unverifiedJWTClaims struct {
 	Issuer   string
+	Subject  string
 	Audience []string
 	Exp      int64
 }
@@ -308,9 +310,10 @@ func parseUnverifiedJWTClaims(token string) (unverifiedJWTClaims, bool) {
 		return unverifiedJWTClaims{}, false
 	}
 	var raw struct {
-		Iss string `json:"iss"`
-		Aud any    `json:"aud"`
-		Exp int64  `json:"exp"`
+		Iss string   `json:"iss"`
+		Sub string   `json:"sub"`
+		Aud any      `json:"aud"`
+		Exp *float64 `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return unverifiedJWTClaims{}, false
@@ -328,10 +331,17 @@ func parseUnverifiedJWTClaims(token string) (unverifiedJWTClaims, bool) {
 			}
 		}
 	}
-	return unverifiedJWTClaims{Issuer: raw.Iss, Audience: aud, Exp: raw.Exp}, true
+	var exp int64
+	if raw.Exp != nil && !math.IsNaN(*raw.Exp) && !math.IsInf(*raw.Exp, 0) && *raw.Exp > 0 {
+		exp = int64(math.Floor(*raw.Exp))
+	}
+	return unverifiedJWTClaims{Issuer: raw.Iss, Subject: raw.Sub, Audience: aud, Exp: exp}, true
 }
 
 func jwtMatchesTarget(claims unverifiedJWTClaims, expectedIssuer, expectedAudience string) bool {
+	if strings.TrimSpace(claims.Subject) == "" || claims.Exp <= 0 {
+		return false
+	}
 	if expectedIssuer != "" && claims.Issuer != expectedIssuer {
 		return false
 	}

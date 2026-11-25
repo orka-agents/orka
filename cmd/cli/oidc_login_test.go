@@ -246,6 +246,38 @@ func TestFetchOIDCDiscoveryAndJWTRejectTrailingSlashMismatch(t *testing.T) {
 	}
 }
 
+func TestSelectOIDCBearerTokenAcceptsFractionalExpAndRequiresSubAndExp(t *testing.T) {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	sig := base64.RawURLEncoding.EncodeToString([]byte("sig"))
+
+	// Missing sub must be rejected; fallback to valid id_token with fractional NumericDate exp.
+	noSubPayload := base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"https://issuer.example","aud":"orka-api","exp":1893456000}`))
+	noSubTok := header + "." + noSubPayload + "." + sig
+
+	fracExp := float64(time.Now().UTC().Add(45*time.Minute).Unix()) + 0.75
+	fracPayloadBytes, _ := json.Marshal(map[string]any{
+		"iss": "https://issuer.example",
+		"sub": "alice",
+		"aud": "orka-api",
+		"exp": fracExp,
+	})
+	fracTok := header + "." + base64.RawURLEncoding.EncodeToString(fracPayloadBytes) + "." + sig
+
+	got, exp, err := selectOIDCBearerToken(oidcTokenResponse{
+		AccessToken: noSubTok,
+		IDToken:     fracTok,
+	}, "https://issuer.example", "orka-api")
+	if err != nil {
+		t.Fatalf("selectOIDCBearerToken error: %v", err)
+	}
+	if got != fracTok {
+		t.Fatalf("selected token = %q, want id_token with sub and fractional exp", got)
+	}
+	if exp == nil || exp.Unix() != int64(fracExp) {
+		t.Fatalf("exp = %v, want %d", exp, int64(fracExp))
+	}
+}
+
 func TestOIDCRefreshDoesNotAdoptReplacedAccount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
