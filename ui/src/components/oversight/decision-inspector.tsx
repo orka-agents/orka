@@ -246,6 +246,7 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
                 <Chip>{decision.mode === 'gate' ? 'gate mode' : 'audit mode'}</Chip>
                 <Chip>evidence {decision.evidenceLevel}</Chip>
                 {decision.policyRevision && <Chip>policy {decision.policyRevision}</Chip>}
+                {decision.replayed && <Chip title="Declared by the producer, like every producer field">replayed (declared by the producer)</Chip>}
                 {decision.wouldHavePaused && <Chip>would pause in gate mode</Chip>}
               </div>
             </Section>

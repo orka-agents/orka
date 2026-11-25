@@ -316,9 +316,11 @@ func sortedSet(set map[string]bool) []string {
 	return out
 }
 
-// decisionLatency measures observed action to recorded decision. Records
-// observed before the earliest recording in the set were backfilled, such as
-// replayed history, and say nothing about how fast a monitor keeps up.
+// decisionLatency measures observed action to recorded decision over live
+// records. Replayed records, and records observed before the earliest
+// recording in the set (backfilled history), say nothing about how fast a
+// monitor keeps up and are left out; replays are counted so a client can
+// say why there is no figure.
 func decisionLatency(views []oversightv1.DecisionView) *oversightv1.LatencySummary {
 	var firstRecorded time.Time
 	for i := range views {
@@ -326,21 +328,29 @@ func decisionLatency(views []oversightv1.DecisionView) *oversightv1.LatencySumma
 			firstRecorded = r
 		}
 	}
+	replayed := 0
 	seconds := make([]float64, 0, len(views))
 	for i := range views {
 		v := &views[i]
+		if v.Replayed {
+			replayed++
+			continue
+		}
 		if v.RecordedAt.IsZero() || v.ObservedAt.Before(firstRecorded) || v.RecordedAt.Before(v.ObservedAt) {
 			continue
 		}
 		seconds = append(seconds, v.RecordedAt.Sub(v.ObservedAt).Seconds())
 	}
 	if len(seconds) == 0 {
+		if replayed > 0 {
+			return &oversightv1.LatencySummary{ReplayedCount: replayed}
+		}
 		return nil
 	}
 	slices.Sort(seconds)
 	at := func(q float64) float64 {
 		return math.Round(seconds[min(len(seconds)-1, int(q*float64(len(seconds))))]*10) / 10
 	}
-	return &oversightv1.LatencySummary{Count: len(seconds), P50Seconds: at(0.5), P95Seconds: at(0.95),
+	return &oversightv1.LatencySummary{Count: len(seconds), ReplayedCount: replayed, P50Seconds: at(0.5), P95Seconds: at(0.95),
 		MaxSeconds: math.Round(seconds[len(seconds)-1]*10) / 10}
 }

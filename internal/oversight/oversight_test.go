@@ -7,7 +7,9 @@ MIT License - see LICENSE file for details.
 package oversight
 
 import (
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +221,28 @@ func TestPostureIsHonestByConstruction(t *testing.T) {
 		require.Equal(t, &oversightv1.LatencySummary{Count: 3, P50Seconds: 4, P95Seconds: 10, MaxSeconds: 10}, p.Basis.DecisionLatency)
 		require.Nil(t, ComputePosture("team", "24h", testNow, views[:1], false).Basis.DecisionLatency,
 			"a window of only backfilled records has no latency to report")
+	})
+	t.Run("decision latency leaves replayed records out and counts them", func(t *testing.T) {
+		at := func(id string, observed, recorded time.Duration, replayed bool) oversightv1.DecisionView {
+			v := view(t, 5, decision(id, "rep", func(d *oversightv1.OversightDecision) {
+				d.ObservedAt = testNow.Add(observed)
+				d.Replayed = replayed
+			}), "")
+			v.RecordedAt = testNow.Add(recorded)
+			return v
+		}
+		replays := []oversightv1.DecisionView{
+			at("r@0", -20*time.Minute, -20*time.Minute, true),
+			at("r@1", -10*time.Minute, -10*time.Minute, true),
+		}
+		all := ComputePosture("team", "24h", testNow, replays, false).Basis.DecisionLatency
+		require.Equal(t, &oversightv1.LatencySummary{ReplayedCount: 2}, all, "only replays: no figure, and why")
+		mixed := append(slices.Clone(replays), at("l@0", -5*time.Minute, -5*time.Minute+3*time.Second, false))
+		require.Equal(t, &oversightv1.LatencySummary{Count: 1, ReplayedCount: 2, P50Seconds: 3, P95Seconds: 3, MaxSeconds: 3},
+			ComputePosture("team", "24h", testNow, mixed, false).Basis.DecisionLatency)
+		var missing oversightv1.OversightDecision
+		require.NoError(t, json.Unmarshal([]byte(`{"id":"x@0"}`), &missing))
+		require.False(t, missing.Replayed, "a record without the field is live")
 	})
 	t.Run("excluded events are counted once per Task", func(t *testing.T) {
 		withExcluded := func(id, task string, platform int) oversightv1.DecisionView {

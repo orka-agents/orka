@@ -71,6 +71,15 @@ describe('DecisionInspector', () => {
     open(decision)
     await openDetails()
     expect(await screen.findByText('policy policy-r1')).toBeInTheDocument()
+    expect(screen.queryByText('replayed (declared by the producer)')).not.toBeInTheDocument()
+  })
+
+  it('marks a replayed record in Details as the producer declared it', async () => {
+    const decision = { ...riskyDecision, replayed: true }
+    serve(decision)
+    open(decision)
+    await openDetails()
+    expect(await screen.findByText('replayed (declared by the producer)')).toBeInTheDocument()
   })
 
   it('shows bytes sent only when the sensor observed sends', async () => {

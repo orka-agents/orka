@@ -7,7 +7,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { ShieldAlert } from 'lucide-react'
 import { useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { confidenceReasons, excludedSummary, formatSeconds, latencyText, reasonText, type Incident } from '@/lib/oversight'
+import { confidenceReasons, excludedSummary, formatSeconds, type Incident, latencyText, onlyReplayed, reasonText } from '@/lib/oversight'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
 
@@ -85,6 +85,14 @@ export function PostureLineView({ posture, incidents, charter }: { posture: Post
         {part('blind', `${blindSpots.length} ${blindSpots.length === 1 ? 'blind spot' : 'blind spots'}`, blindSpots.length > 0 ? 'font-medium text-status-failed' : 'text-muted-foreground')}
         {dot}
         {part('control', enforced ? 'enforced' : 'audit mode', 'text-muted-foreground')}
+        {onlyReplayed(latency) && (
+          <>
+            {dot}
+            <span className="px-1 text-muted-foreground" title={latencyText(latency)} data-testid="posture-latency">
+              decision latency: n/a (replayed)
+            </span>
+          </>
+        )}
         {latency && latency.count > 0 && (
           <>
             {dot}

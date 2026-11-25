@@ -137,6 +137,7 @@ func TestOversightReplayPlaysATakeWithItsTimingAsNewDecisions(t *testing.T) {
 	require.Equal(t, "task-t2", played.TaskName)
 	require.Equal(t, []string{"task-t2@0"}, played.Action.PriorActionIDs)
 	require.True(t, played.ObservedAt.After(start.Add(time.Hour)), "stamped with the time it was sent")
+	require.True(t, played.Replayed, "a replay always says it is one")
 	require.Contains(t, out.String(), "Played 2 decisions")
 }
 

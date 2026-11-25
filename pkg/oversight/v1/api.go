@@ -228,12 +228,15 @@ type PostureBasis struct {
 	DecisionLatency *LatencySummary `json:"decisionLatency,omitempty"`
 }
 
-// LatencySummary summarizes a set of durations in seconds.
+// LatencySummary summarizes a set of durations in seconds. Count is the
+// number of live records measured; ReplayedCount the replayed records left
+// out. Count 0 with ReplayedCount above 0 means only replays were seen.
 type LatencySummary struct {
-	Count      int     `json:"count"`
-	P50Seconds float64 `json:"p50Seconds"`
-	P95Seconds float64 `json:"p95Seconds"`
-	MaxSeconds float64 `json:"maxSeconds"`
+	Count         int     `json:"count"`
+	ReplayedCount int     `json:"replayedCount,omitempty"`
+	P50Seconds    float64 `json:"p50Seconds"`
+	P95Seconds    float64 `json:"p95Seconds"`
+	MaxSeconds    float64 `json:"maxSeconds"`
 }
 
 // PostureCoverage is how much of the window's actions were seen.

@@ -170,6 +170,11 @@ func runOversightReplay(ctx context.Context, c *client.Client, opts replayOption
 	if opts.idSuffix != "" {
 		applyIDSuffix(decisions, opts.idSuffix)
 	}
+	// Whatever a replay sends happened earlier: say so, so its timing is
+	// never taken for how fast a monitor keeps up.
+	for i := range decisions {
+		decisions[i].Replayed = true
+	}
 	if opts.preserveTiming && !opts.dryRun {
 		return playWithTiming(ctx, c, opts, decisions, out, now)
 	}

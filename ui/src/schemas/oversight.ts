@@ -145,6 +145,8 @@ export interface DecisionView {
   concernsRevision?: string
   concernsDigest?: string
   policyRevision?: string
+  /** Declared by the producer: replayed from an earlier recording. */
+  replayed?: boolean
   action: ActionEnvelope
   evidenceLevel: string
   coverage: ActionCoverage
@@ -356,6 +358,8 @@ export type OversightConfig = z.output<typeof oversightConfigSchema>
 /** How long decisions took from the observed action to being recorded; absent on an older server or with no live records. */
 export const latencySummarySchema = z.object({
   count: z.number(),
+  /** Replayed records left out of the figures; declared by the producer. */
+  replayedCount: z.number().default(0),
   p50Seconds: z.number(),
   p95Seconds: z.number(),
   maxSeconds: z.number(),

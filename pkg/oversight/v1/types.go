@@ -133,6 +133,10 @@ type OversightDecision struct {
 	// PolicyRevision names the monitor policy that mapped scores to this
 	// disposition, such as its thresholds and escalation rules.
 	PolicyRevision string `json:"policyRevision,omitempty"`
+	// Replayed is declared by the producer, like every producer field: the
+	// record was replayed from an earlier recording, so its timing says
+	// nothing about how fast a monitor keeps up. Missing means live.
+	Replayed bool `json:"replayed,omitempty"`
 
 	Action        ActionEnvelope `json:"action"`
 	EvidenceLevel EvidenceLevel  `json:"evidenceLevel"`

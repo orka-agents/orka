@@ -758,8 +758,18 @@ export function formatSeconds(seconds: number): string {
   return `${Math.floor(total / 60)}m ${total % 60}s`
 }
 
-/** "Decision latency: p50 4s · p95 41s · max 4m 41s (n=120)". */
-export function latencyText(latency: { count: number; p50Seconds: number; p95Seconds: number; maxSeconds: number } | undefined): string {
+type Latency = { count: number; replayedCount?: number; p50Seconds: number; p95Seconds: number; maxSeconds: number }
+
+/** True when the window held only replayed records, so there is no live figure. */
+export function onlyReplayed(latency: Latency | undefined): boolean {
+  return !!latency && latency.count <= 0 && (latency.replayedCount ?? 0) > 0
+}
+
+/** "Decision latency: p50 4s · p95 41s · max 4m 41s (n=120)", noting replays left out. */
+export function latencyText(latency: Latency | undefined): string {
+  const replayed = latency?.replayedCount ?? 0
+  if (onlyReplayed(latency)) return `Decision latency: n/a (replayed; ${replayed.toLocaleString()} replayed records)`
   if (!latency || latency.count <= 0) return 'Decision latency: no live records in this window'
-  return `Decision latency: p50 ${formatSeconds(latency.p50Seconds)} · p95 ${formatSeconds(latency.p95Seconds)} · max ${formatSeconds(latency.maxSeconds)} (n=${latency.count.toLocaleString()})`
+  const leftOut = replayed > 0 ? `; ${replayed.toLocaleString()} replayed left out` : ''
+  return `Decision latency: p50 ${formatSeconds(latency.p50Seconds)} · p95 ${formatSeconds(latency.p95Seconds)} · max ${formatSeconds(latency.maxSeconds)} (n=${latency.count.toLocaleString()} live${leftOut})`
 }
