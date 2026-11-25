@@ -239,6 +239,24 @@ describe('blocked attempts', () => {
   })
 })
 
+describe('credential story', () => {
+  it('does not call a failed token open a read', () => {
+    const read = makeDecision({
+      action: { toolName: 'code_exec', taintFlags: ['credential_read'], effects: { counts: { credential_read: 2 }, notableEvents: [
+        { id: 'e1', kind: 'credential_read', path: '/var/run/secrets/kubernetes.io/serviceaccount/token', outcome: 'failed(-2)' },
+        { id: 'e2', kind: 'credential_read', path: '/proc/self/environ', outcome: 'ok' },
+      ] } },
+    })
+    expect(credentialStory([read])).toBe('read a credential')
+    const token = makeDecision({
+      action: { toolName: 'code_exec', effects: { counts: { credential_read: 1 }, notableEvents: [
+        { id: 'e1', kind: 'credential_read', path: '/var/run/secrets/kubernetes.io/serviceaccount/token', outcome: 'ok' },
+      ] } },
+    })
+    expect(credentialStory([token])).toBe('read a token')
+  })
+})
+
 describe('strongest evidence', () => {
   it('names the event that matters, not the first routine read', () => {
     const read = makeDecision({

@@ -646,8 +646,12 @@ export function credentialStory(decisions: DecisionView[]): string | undefined {
     const tainted = [...(d.action.taintFlags ?? [])].find((t) => CREDENTIAL_WORDS.test(t))
     if (!counted && !tainted) return
     readAt = i
-    const hint = [tainted ?? '', ...(effects.paths ?? []).map((p) => p.value)].join(' ')
-    if (/token/i.test(hint)) what = 'a token'
+    // Say "a token" only when a token was read: a failed open is not a read.
+    const events = (effects.notableEvents ?? []).filter((e) => e.kind.includes('credential'))
+    const tokenRead = events.length > 0
+      ? events.some((e) => /token/i.test(e.path ?? '') && !/^fail|denied|blocked/i.test(e.outcome ?? ''))
+      : /token/i.test([tainted ?? '', ...(effects.paths ?? []).map((p) => p.value)].join(' '))
+    if (tokenRead) what = 'a token'
   })
   if (readAt < 0) return undefined
   for (const d of oldestFirst.slice(readAt)) {
