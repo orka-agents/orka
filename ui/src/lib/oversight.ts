@@ -6,6 +6,7 @@ import type {
   OversightConfig,
   DecisionView,
   OversightFeedbackLabel,
+  PostureResponse,
   OversightSignal,
   ProducerInfo,
   QueryTerm,
@@ -225,6 +226,44 @@ const REASON_TEXT: Record<string, string> = {
   window_not_fully_read: 'The window held more decisions than were read',
 }
 
+const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
+
+/**
+ * The short reasons a confidence state carries inline, most important first,
+ * so the state word never stands alone next to all-clear numbers. Audit mode
+ * has its own item on the posture line and is left out here.
+ */
+export function confidenceReasons(posture: PostureResponse, max = 2): string[] {
+  const { basis } = posture
+  const signals = basis.signals ?? {}
+  const short: Record<string, () => string> = {
+    against_charter: () => plural(basis.charterFindings, 'charter finding', 'charter findings'),
+    held_or_fail_closed: () => (signals.monitor_unavailable
+      ? `scorer unavailable on ${plural(signals.monitor_unavailable, 'action', 'actions')}`
+      : 'an action was held'),
+    monitor_failures: () => `scorer unavailable on ${plural(signals.monitor_unavailable ?? 0, 'action', 'actions')}`,
+    risky_unreviewed: () => `${(basis.unreviewedFlagged || signals.risky || 0).toLocaleString()} risky unreviewed`,
+    canaries_not_reported: () => 'no canaries reported',
+    visibility_not_warranted: () => 'coverage not full',
+    no_decisions_in_window: () => 'nothing recorded yet',
+    window_not_fully_read: () => 'window not fully read',
+  }
+  const order = ['against_charter', 'held_or_fail_closed', 'monitor_failures', 'visibility_not_warranted',
+    'risky_unreviewed', 'canaries_not_reported', 'no_decisions_in_window', 'window_not_fully_read']
+  const reasons = (posture.confidence.reasons ?? []).filter((r) => r !== 'audit_mode_only')
+  const ranked = [...reasons].sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b)
+    return (ia < 0 ? order.length : ia) - (ib < 0 ? order.length : ib)
+  })
+  const out: string[] = []
+  for (const r of ranked) {
+    const text = short[r]?.() ?? reasonText(r).toLowerCase()
+    if (!out.includes(text)) out.push(text)
+    if (out.length >= max) break
+  }
+  return out
+}
+
 /** A reason code in words; unknown codes are shown as sent. */
 export function reasonText(code: string): string {
   return REASON_TEXT[code] ?? code
@@ -394,7 +433,20 @@ type ActionKind = 'push' | 'upload' | 'credential' | 'send' | 'connect' | 'ran'
 /** How descriptive each phrase is, for choosing an incident's title. */
 const ACTION_RANK: Record<ActionKind, number> = { push: 5, upload: 4, credential: 3, send: 2, connect: 1, ran: 0 }
 
+/**
+ * An attempt the sensor saw blocked, with no bytes seen leaving: the summary
+ * says "tried to …" so a blocked push never reads as a completed one.
+ */
+export function wasBlocked(decision: DecisionView): boolean {
+  return (decision.action.effects?.blockedCount ?? 0) > 0 && !hasBytes(decision)
+}
+
+const BLOCKED = ' (blocked by policy)'
+
 function describeAction(decision: DecisionView, bytes: boolean): { kind: ActionKind; text: string } {
+  const blocked = wasBlocked(decision)
+  const tried = (done: string, attempt: string) => (blocked ? attempt : done)
+  const suffix = blocked ? BLOCKED : ''
   const effects = decision.action.effects ?? {}
   const dest = effects.destinations?.[0]?.value
   const size = bytes && hasBytes(decision) ? ` (${formatBytes(effects.bytesSent!)})` : ''
@@ -402,20 +454,20 @@ function describeAction(decision: DecisionView, bytes: boolean): { kind: ActionK
   const execs = (effects.notableEvents ?? []).filter((e) => e.args)
   for (const event of [...execs].reverse()) {
     const image = parseImageRef(event.args)
-    if (image) return { kind: 'push', text: `pushed ${image.name}:${image.tag} to ${image.host}${image.path ? `/${image.path}` : ''}${size}` }
+    if (image) return { kind: 'push', text: `${tried('pushed', 'tried to push')} ${image.name}:${image.tag} to ${image.host}${image.path ? `/${image.path}` : ''}${size}${suffix}` }
   }
   for (const event of execs) {
     const put = parsePutPath(event.args)
     const target = event.dest || dest
     if (put && target) {
       const repo = distributionRepo(put)
-      return { kind: 'upload', text: `uploaded to ${hostOf(target)}${repo ? `/${repo}` : ''}${size}` }
+      return { kind: 'upload', text: `${tried('uploaded', 'tried to upload')} to ${hostOf(target)}${repo ? `/${repo}` : ''}${size}${suffix}` }
     }
   }
   const story = credentialStory([decision])
   if (story) return { kind: 'credential', text: who ? `${who} ${story}` : story }
   if (dest && hasBytes(decision)) return { kind: 'send', text: bytes ? `sent ${formatBytes(effects.bytesSent!)} to ${dest}` : `sent data to ${dest}` }
-  if (dest) return { kind: 'connect', text: `connected to ${dest}` }
+  if (dest) return { kind: 'connect', text: `${tried('connected', 'tried to connect')} to ${dest}${suffix}` }
   const binary = effects.binaries?.[0]?.value ?? effects.notableEvents?.find((e) => e.binary)?.binary
   const ran = binary ? binaryName(binary) : decision.action.toolName
   const request = stripSynthetic(decision.action.requestSummary?.trim() ?? '').trim()
@@ -466,6 +518,11 @@ export function strongestEvidence(decision: DecisionView): string | undefined {
   const effects = decision.action.effects ?? {}
   const dest = effects.destinations?.[0]?.value
   if (hasBytes(decision)) return `kernel saw ${formatBytes(effects.bytesSent!)} sent${dest ? ` to ${dest}` : ''}`
+  if (wasBlocked(decision)) {
+    const blocked = effects.notableEvents?.find((e) => e.kind.includes('blocked'))
+    const where = blocked?.dest || dest
+    return `kernel saw a blocked connection${where ? ` to ${where}` : ''}; no data seen leaving`
+  }
   const event = effects.notableEvents?.[0]
   if (event) {
     const what = event.dest || event.path || (event.binary && binaryName(event.binary))
@@ -555,7 +612,11 @@ export function credentialStory(decisions: DecisionView[]): string | undefined {
     const effects = d.action.effects ?? {}
     const connected = (effects.counts?.net_connect ?? 0) > 0 || (effects.destinations?.length ?? 0) > 0
     const dest = effects.destinations?.[0]?.value ?? effects.notableEvents?.find((e) => e.dest)?.dest
-    if (connected && dest) return `read ${what}, then sent it to ${hostOf(dest)}`
+    if (connected && dest) {
+      return wasBlocked(d)
+        ? `read ${what}, then tried to send it to ${hostOf(dest)}${BLOCKED}`
+        : `read ${what}, then sent it to ${hostOf(dest)}`
+    }
   }
   return `read ${what}`
 }

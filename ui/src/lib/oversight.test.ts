@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 import {
+  actionPhrase,
+  confidenceReasons,
+  credentialStory,
   destinationDomain,
   draftConcernYaml,
   formatBytes,
@@ -18,7 +21,8 @@ import {
   topTriggeredScore,
 } from './oversight'
 import { parseSSEFrames } from '@/hooks/use-oversight-stream'
-import { charterConfig, charterDecision, makeDecision, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
+import { charterConfig, charterDecision, makeDecision, makePosture, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
+import type { PostureResponse } from '@/schemas/oversight'
 
 describe('oversight helpers', () => {
   it('builds key:value terms and quotes values with spaces', () => {
@@ -163,5 +167,58 @@ describe('oversight helpers', () => {
     expect(all[0].title).toBe('registry-pusher pushed api:latest to registry.demo.svc/prod (2 MB) — breaks rule 1')
     const partial = groupIncidents([push(1, 1024 * 1024), upload(2)], charterConfig)
     expect(partial[0].title).toBe('registry-pusher pushed api:latest to registry.demo.svc/prod — breaks rule 1')
+  })
+})
+
+describe('confidenceReasons', () => {
+  const posture = (reasons: string[], signals: Record<string, number> = {}, extra: Partial<PostureResponse['basis']> = {}) =>
+    ({ ...makePosture(), confidence: { state: 'degraded', summary: '', reasons },
+      basis: { ...makePosture().basis, signals, ...extra } }) as PostureResponse
+
+  it('never leaves the state word bare and leaves audit mode to its own item', () => {
+    expect(confidenceReasons(posture(['audit_mode_only', 'canaries_not_reported']))).toEqual(['no canaries reported'])
+  })
+
+  it('puts a scorer outage before unreviewed risk, with counts', () => {
+    const p = posture(['risky_unreviewed', 'held_or_fail_closed', 'canaries_not_reported'],
+      { monitor_unavailable: 1, risky: 3 }, { unreviewedFlagged: 3 })
+    expect(confidenceReasons(p)).toEqual(['scorer unavailable on 1 action', '3 risky unreviewed'])
+  })
+})
+
+describe('blocked attempts', () => {
+  const blockedPush = makeDecision({
+    agentName: 'registry-pusher',
+    action: {
+      toolName: 'code_exec',
+      effects: {
+        counts: { exec: 1, connect_blocked: 1 },
+        blockedCount: 1,
+        destinations: [{ value: 'registry.demo.svc:80', count: 1 }],
+        notableEvents: [
+          { id: 'e1', kind: 'exec', binary: '/usr/local/bin/python3', args: '/tmp/push.py push /tmp/image.tar registry.demo.svc/prod/api:latest' },
+          { id: 'e2', kind: 'connect_blocked', dest: 'registry.demo.svc:80', outcome: 'denied by policy' },
+        ],
+      },
+    },
+  })
+
+  it('never reads as a completed push', () => {
+    expect(actionPhrase(blockedPush)).toBe('tried to push api:latest to registry.demo.svc/prod (blocked by policy)')
+    expect(strongestEvidence(blockedPush)).toBe('kernel saw a blocked connection to registry.demo.svc:80; no data seen leaving')
+  })
+
+  it('says a blocked send after a token read was only attempted', () => {
+    const read = makeDecision({
+      id: 'r@0', seq: 1,
+      action: { toolName: 'code_exec', taintFlags: ['credential_read'],
+        effects: { counts: { credential_read: 1 }, paths: [{ value: '/var/run/secrets/kubernetes.io/serviceaccount/token', count: 1 }] } },
+    })
+    const send = makeDecision({
+      id: 'r@1', seq: 2,
+      action: { toolName: 'code_exec', taintFlags: ['credential_read'],
+        effects: { counts: { connect_blocked: 1 }, blockedCount: 1, destinations: [{ value: 'paste.demo.svc:80', count: 1 }] } },
+    })
+    expect(credentialStory([send, read])).toBe('read a token, then tried to send it to paste.demo.svc (blocked by policy)')
   })
 })

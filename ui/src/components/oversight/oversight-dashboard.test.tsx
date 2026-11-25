@@ -282,7 +282,7 @@ describe('OversightDashboard', () => {
       serveList([pause(1)])
       renderDashboard()
       const line = await screen.findByTestId('posture-line')
-      await waitFor(() => expect(line).toHaveTextContent('Degraded · 1 incident · 80% seen · 1 blind spot · audit mode'))
+      await waitFor(() => expect(line).toHaveTextContent('Degraded: coverage not full · no canaries reported · 1 incident · 80% seen · 1 blind spot · audit mode'))
       expect(line).not.toHaveTextContent(/warranted/i)
       expect(screen.getByTestId('posture-honesty')).toHaveTextContent('Audit mode: findings would pause an action; nothing is held.')
       expect(screen.getByTestId('posture-honesty')).toHaveTextContent('inferred')

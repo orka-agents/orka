@@ -7,7 +7,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { ShieldAlert } from 'lucide-react'
 import { useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { reasonText, type Incident } from '@/lib/oversight'
+import { confidenceReasons, reasonText, type Incident } from '@/lib/oversight'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
 
@@ -23,6 +23,13 @@ const CONFIDENCE_TONE: Record<string, string> = {
   degraded: 'text-status-pending',
   blind: 'text-status-failed',
   attention_required: 'text-status-failed',
+}
+
+/** The state word with its main reasons inline, e.g. "Degraded: no canaries reported". */
+function confidenceLabel(posture: PostureResponse): string {
+  const word = CONFIDENCE_TEXT[posture.confidence.state] ?? posture.confidence.state
+  const reasons = posture.confidence.state === 'warranted' ? [] : confidenceReasons(posture)
+  return reasons.length ? `${word}: ${reasons.join(' · ')}` : word
 }
 
 type Item = 'confidence' | 'incidents' | 'seen' | 'blind' | 'control'
@@ -68,7 +75,7 @@ export function PostureLineView({ posture, incidents, charter }: { posture: Post
   return (
     <div role="region" aria-label="Oversight posture" className="space-y-1.5">
       <p className="flex flex-wrap items-center gap-y-1 text-sm" data-testid="posture-line">
-        {part('confidence', CONFIDENCE_TEXT[posture.confidence.state] ?? posture.confidence.state, cn('font-semibold', CONFIDENCE_TONE[posture.confidence.state]))}
+        {part('confidence', confidenceLabel(posture), cn('font-semibold', CONFIDENCE_TONE[posture.confidence.state]))}
         {dot}
         {part('incidents', `${incidents.length} ${incidents.length === 1 ? 'incident' : 'incidents'}`)}
         {dot}
