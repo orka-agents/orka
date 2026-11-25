@@ -1633,8 +1633,9 @@ CI regenerates the code and fails on a difference.
 
 The wire currently serves `Describe` and `HealthCheck`, inter-agent messages,
 plan state, Task results, prompt result receipts, execution events (with their
-deduplicated, grouped and plan-carrying appends), the `Ownership` service and
-the `artifacts.v1` artifact store. `Ownership` carries operation receipts, the
+deduplicated, grouped and plan-carrying appends), the `Ownership` service,
+Session turn cleanup receipts, the controller epoch mirror, Task Job authority
+and the `artifacts.v1` artifact store. `Ownership` carries operation receipts, the
 controller epoch, the dataset binding and the write watermark, which both
 contract parts require; a server that serves both parts serves one dataset,
 so its state provider answers `Ownership` for both, as it answers `Describe`.
@@ -1733,7 +1734,7 @@ artifact-fence cases run only in process.
   (`UNSUPPORTED_FIELD`), so an older server
   never ignores a newer precondition. The protocol revision starts at 1, is 2
   since the result, receipt and artifact RPCs, 3 since the execution event
-  RPCs and 4 since the `Ownership` RPCs; a release raises it when it adds RPCs or request fields, and the client calls
+  RPCs, 4 since the `Ownership` RPCs and 5 since the first `Control` RPCs; a release raises it when it adds RPCs or request fields, and the client calls
   an RPC only on a server of at least the revision that introduced it. A
   newer field of a read or an administrative call is sent only to such a
   server; on an older one the client refuses a call that sets it

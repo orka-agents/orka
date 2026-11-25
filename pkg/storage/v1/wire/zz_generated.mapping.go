@@ -804,6 +804,50 @@ func fromWirePlanState(in *storagepb.PlanState, exact bool) (storagev1.PlanState
 	return out, err
 }
 
+func toWirePreparedPublicationReceipt(in storagev1.PreparedPublicationReceipt) (*storagepb.PreparedPublicationReceipt, error) {
+	out := &storagepb.PreparedPublicationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.TreeSha = in.TreeSHA
+	out.CommitSha = in.CommitSHA
+	out.ManifestDigest = in.ManifestDigest
+	out.RelativeRoot = in.RelativeRoot
+	out.BundleArtifactId = in.BundleArtifactID
+	out.BundleDigest = in.BundleDigest
+	out.BundleSizeBytes = in.BundleSizeBytes
+	out.BundleMediaType = in.BundleMediaType
+	out.BundleRef = in.BundleRef
+	if out.PreparedAt, err = timeToWire(in.PreparedAt, "PreparedPublicationReceipt.PreparedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePreparedPublicationReceipt(in *storagepb.PreparedPublicationReceipt, exact bool) (storagev1.PreparedPublicationReceipt, error) {
+	var out storagev1.PreparedPublicationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.TreeSHA = in.TreeSha
+	out.CommitSHA = in.CommitSha
+	out.ManifestDigest = in.ManifestDigest
+	out.RelativeRoot = in.RelativeRoot
+	out.BundleArtifactID = in.BundleArtifactId
+	out.BundleDigest = in.BundleDigest
+	out.BundleSizeBytes = in.BundleSizeBytes
+	out.BundleMediaType = in.BundleMediaType
+	out.BundleRef = in.BundleRef
+	if out.PreparedAt, err = timeFromWire(in.PreparedAt, "PreparedPublicationReceipt.PreparedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
 func toWirePromptResultReceipt(in storagev1.PromptResultReceipt) (*storagepb.PromptResultReceipt, error) {
 	out := &storagepb.PromptResultReceipt{}
 	var err error
@@ -988,6 +1032,210 @@ func fromWireProviderLimits(in *storagepb.ProviderLimits, exact bool) (storagev1
 	return out, err
 }
 
+func toWirePublicationReceipt(in storagev1.PublicationReceipt) (*storagepb.PublicationReceipt, error) {
+	out := &storagepb.PublicationReceipt{}
+	var err error
+	out.PublicationId = in.PublicationID
+	out.Generation = in.Generation
+	out.State = string(in.State)
+	if in.Prepared != nil {
+		if out.Prepared, err = toWirePreparedPublicationReceipt(*in.Prepared); err != nil {
+			return nil, err
+		}
+	}
+	if in.Publish != nil {
+		if out.Publish, err = toWirePublishOperationReceipt(*in.Publish); err != nil {
+			return nil, err
+		}
+	}
+	if in.Verification != nil {
+		if out.Verification, err = toWirePublicationVerificationReceipt(*in.Verification); err != nil {
+			return nil, err
+		}
+	}
+	if in.PullRequest != nil {
+		if out.PullRequest, err = toWirePullRequestOperationReceipt(*in.PullRequest); err != nil {
+			return nil, err
+		}
+	}
+	return out, err
+}
+
+func fromWirePublicationReceipt(in *storagepb.PublicationReceipt, exact bool) (storagev1.PublicationReceipt, error) {
+	var out storagev1.PublicationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.PublicationID = in.PublicationId
+	out.Generation = in.Generation
+	out.State = storagev1.PublicationState(in.State)
+	if in.Prepared != nil {
+		var v20 storagev1.PreparedPublicationReceipt
+		if v20, err = fromWirePreparedPublicationReceipt(in.Prepared, exact); err != nil {
+			return out, err
+		}
+		out.Prepared = &v20
+	}
+	if in.Publish != nil {
+		var v21 storagev1.PublishOperationReceipt
+		if v21, err = fromWirePublishOperationReceipt(in.Publish, exact); err != nil {
+			return out, err
+		}
+		out.Publish = &v21
+	}
+	if in.Verification != nil {
+		var v22 storagev1.PublicationVerificationReceipt
+		if v22, err = fromWirePublicationVerificationReceipt(in.Verification, exact); err != nil {
+			return out, err
+		}
+		out.Verification = &v22
+	}
+	if in.PullRequest != nil {
+		var v23 storagev1.PullRequestOperationReceipt
+		if v23, err = fromWirePullRequestOperationReceipt(in.PullRequest, exact); err != nil {
+			return out, err
+		}
+		out.PullRequest = &v23
+	}
+	return out, err
+}
+
+func toWirePublicationVerificationReceipt(in storagev1.PublicationVerificationReceipt) (*storagepb.PublicationVerificationReceipt, error) {
+	out := &storagepb.PublicationVerificationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.Outcome = string(in.Outcome)
+	out.ExpectedCommitSha = in.ExpectedCommitSHA
+	if out.ObservedRemote, err = toWireRemoteRefState(in.ObservedRemote); err != nil {
+		return nil, err
+	}
+	out.DescendantProofDigest = in.DescendantProofDigest
+	if out.VerifiedAt, err = timeToWire(in.VerifiedAt, "PublicationVerificationReceipt.VerifiedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePublicationVerificationReceipt(in *storagepb.PublicationVerificationReceipt, exact bool) (storagev1.PublicationVerificationReceipt, error) {
+	var out storagev1.PublicationVerificationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.Outcome = storagev1.PublicationState(in.Outcome)
+	out.ExpectedCommitSHA = in.ExpectedCommitSha
+	if out.ObservedRemote, err = fromWireRemoteRefState(in.ObservedRemote, exact); err != nil {
+		return out, err
+	}
+	out.DescendantProofDigest = in.DescendantProofDigest
+	if out.VerifiedAt, err = timeFromWire(in.VerifiedAt, "PublicationVerificationReceipt.VerifiedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWirePublishOperationReceipt(in storagev1.PublishOperationReceipt) (*storagepb.PublishOperationReceipt, error) {
+	out := &storagepb.PublishOperationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.TargetRepositoryId = in.TargetRepositoryID
+	out.TargetRef = in.TargetRef
+	if out.RemoteBefore, err = toWireRemoteRefState(in.RemoteBefore); err != nil {
+		return nil, err
+	}
+	out.ExpectedCommitSha = in.ExpectedCommitSHA
+	out.AcknowledgementUnknown = in.AcknowledgementUnknown
+	if out.PublishedAt, err = timeToWire(in.PublishedAt, "PublishOperationReceipt.PublishedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePublishOperationReceipt(in *storagepb.PublishOperationReceipt, exact bool) (storagev1.PublishOperationReceipt, error) {
+	var out storagev1.PublishOperationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.TargetRepositoryID = in.TargetRepositoryId
+	out.TargetRef = in.TargetRef
+	if out.RemoteBefore, err = fromWireRemoteRefState(in.RemoteBefore, exact); err != nil {
+		return out, err
+	}
+	out.ExpectedCommitSHA = in.ExpectedCommitSha
+	out.AcknowledgementUnknown = in.AcknowledgementUnknown
+	if out.PublishedAt, err = timeFromWire(in.PublishedAt, "PublishOperationReceipt.PublishedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWirePullRequestOperationReceipt(in storagev1.PullRequestOperationReceipt) (*storagepb.PullRequestOperationReceipt, error) {
+	out := &storagepb.PullRequestOperationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.IntentKey = in.IntentKey
+	out.ForgeId = in.ForgeID
+	out.Url = in.URL
+	out.State = in.State
+	out.HeadSha = in.HeadSHA
+	if out.ReconciledAt, err = timeToWire(in.ReconciledAt, "PullRequestOperationReceipt.ReconciledAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePullRequestOperationReceipt(in *storagepb.PullRequestOperationReceipt, exact bool) (storagev1.PullRequestOperationReceipt, error) {
+	var out storagev1.PullRequestOperationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.IntentKey = in.IntentKey
+	out.ForgeID = in.ForgeId
+	out.URL = in.Url
+	out.State = in.State
+	out.HeadSHA = in.HeadSha
+	if out.ReconciledAt, err = timeFromWire(in.ReconciledAt, "PullRequestOperationReceipt.ReconciledAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireRemoteRefState(in storagev1.RemoteRefState) (*storagepb.RemoteRefState, error) {
+	out := &storagepb.RemoteRefState{}
+	var err error
+	out.Absent = in.Absent
+	out.Sha = in.SHA
+	return out, err
+}
+
+func fromWireRemoteRefState(in *storagepb.RemoteRefState, exact bool) (storagev1.RemoteRefState, error) {
+	var out storagev1.RemoteRefState
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.Absent = in.Absent
+	out.SHA = in.Sha
+	return out, err
+}
+
 func toWireResolveOperationRequest(in storagev1.ResolveOperationRequest) (*storagepb.ResolveOperationRequest, error) {
 	out := &storagepb.ResolveOperationRequest{}
 	var err error
@@ -1080,8 +1328,8 @@ func toWireSessionExecutionEventFilter(in storagev1.SessionExecutionEventFilter)
 	var err error
 	out.Namespace = in.Namespace
 	out.SessionName = in.SessionName
-	for _, e20 := range in.EventTypes {
-		out.EventTypes = append(out.EventTypes, string(e20))
+	for _, e24 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e24))
 	}
 	out.AfterSeq = in.AfterSeq
 	out.Limit = int64(in.Limit)
@@ -1100,13 +1348,122 @@ func fromWireSessionExecutionEventFilter(in *storagepb.SessionExecutionEventFilt
 	if len(in.EventTypes) > 0 {
 		out.EventTypes = make([]string, 0, len(in.EventTypes))
 	}
-	for _, e21 := range in.EventTypes {
-		out.EventTypes = append(out.EventTypes, string(e21))
+	for _, e25 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e25))
 	}
 	out.AfterSeq = in.AfterSeq
 	if out.Limit, err = intFromWire(in.Limit, "SessionExecutionEventFilter.Limit"); err != nil {
 		return out, err
 	}
+	return out, err
+}
+
+func toWireSessionTurnCleanupReceipt(in storagev1.SessionTurnCleanupReceipt) (*storagepb.SessionTurnCleanupReceipt, error) {
+	out := &storagepb.SessionTurnCleanupReceipt{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.OperationId = in.OperationID
+	out.OperationDigest = in.OperationDigest
+	out.TurnId = in.TurnID
+	if out.Key, err = toWireSessionTurnKey(in.Key); err != nil {
+		return nil, err
+	}
+	out.PromptAttemptId = in.PromptAttemptID
+	out.TerminalKind = string(in.TerminalKind)
+	if out.FinalizedAt, err = timeToWire(in.FinalizedAt, "SessionTurnCleanupReceipt.FinalizedAt"); err != nil {
+		return nil, err
+	}
+	out.PublicationId = in.PublicationID
+	if in.PublicationReceipt != nil {
+		if out.PublicationReceipt, err = toWirePublicationReceipt(*in.PublicationReceipt); err != nil {
+			return nil, err
+		}
+	}
+	out.ProjectionId = in.ProjectionID
+	out.ProjectionKind = in.ProjectionKind
+	out.ProjectionDigest = in.ProjectionDigest
+	out.AggregateKind = in.AggregateKind
+	out.AggregateId = in.AggregateID
+	out.Payload = []byte(in.Payload)
+	out.PayloadDigest = in.PayloadDigest
+	out.ProjectionState = string(in.ProjectionState)
+	out.DeliveryDigest = in.DeliveryDigest
+	if out.DeliveredAt, err = nullableTimeToWire(in.DeliveredAt, "SessionTurnCleanupReceipt.DeliveredAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireSessionTurnCleanupReceipt(in *storagepb.SessionTurnCleanupReceipt, exact bool) (storagev1.SessionTurnCleanupReceipt, error) {
+	var out storagev1.SessionTurnCleanupReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.OperationID = in.OperationId
+	out.OperationDigest = in.OperationDigest
+	out.TurnID = in.TurnId
+	if out.Key, err = fromWireSessionTurnKey(in.Key, exact); err != nil {
+		return out, err
+	}
+	out.PromptAttemptID = in.PromptAttemptId
+	out.TerminalKind = storagev1.SessionTurnTerminalKind(in.TerminalKind)
+	if out.FinalizedAt, err = timeFromWire(in.FinalizedAt, "SessionTurnCleanupReceipt.FinalizedAt"); err != nil {
+		return out, err
+	}
+	out.PublicationID = in.PublicationId
+	if in.PublicationReceipt != nil {
+		var v26 storagev1.PublicationReceipt
+		if v26, err = fromWirePublicationReceipt(in.PublicationReceipt, exact); err != nil {
+			return out, err
+		}
+		out.PublicationReceipt = &v26
+	}
+	out.ProjectionID = in.ProjectionId
+	out.ProjectionKind = in.ProjectionKind
+	out.ProjectionDigest = in.ProjectionDigest
+	out.AggregateKind = in.AggregateKind
+	out.AggregateID = in.AggregateId
+	out.Payload = []byte(in.Payload)
+	if out.Payload == nil {
+		out.Payload = []byte{}
+	}
+	out.PayloadDigest = in.PayloadDigest
+	out.ProjectionState = storagev1.OutboxProjectionState(in.ProjectionState)
+	out.DeliveryDigest = in.DeliveryDigest
+	if out.DeliveredAt, err = nullableTimeFromWire(in.DeliveredAt, "SessionTurnCleanupReceipt.DeliveredAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireSessionTurnKey(in storagev1.SessionTurnKey) (*storagepb.SessionTurnKey, error) {
+	out := &storagepb.SessionTurnKey{}
+	var err error
+	out.SessionUid = in.SessionUID
+	out.LeaseGeneration = in.LeaseGeneration
+	out.TaskUid = in.TaskUID
+	out.Attempt = in.Attempt
+	out.PromptId = in.PromptID
+	return out, err
+}
+
+func fromWireSessionTurnKey(in *storagepb.SessionTurnKey, exact bool) (storagev1.SessionTurnKey, error) {
+	var out storagev1.SessionTurnKey
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.SessionUID = in.SessionUid
+	out.LeaseGeneration = in.LeaseGeneration
+	out.TaskUID = in.TaskUid
+	out.Attempt = in.Attempt
+	out.PromptID = in.PromptId
 	return out, err
 }
 
@@ -1116,12 +1473,12 @@ func toWireTaskDataFence(in storagev1.TaskDataFence) (*storagepb.TaskDataFence, 
 	out.Namespace = in.Namespace
 	out.TaskName = in.TaskName
 	out.Generation = in.Generation
-	for _, e22 := range in.Jobs {
-		w23, err := toWireTaskJobIdentity(e22)
+	for _, e27 := range in.Jobs {
+		w28, err := toWireTaskJobIdentity(e27)
 		if err != nil {
 			return nil, err
 		}
-		out.Jobs = append(out.Jobs, w23)
+		out.Jobs = append(out.Jobs, w28)
 	}
 	return out, err
 }
@@ -1139,12 +1496,12 @@ func fromWireTaskDataFence(in *storagepb.TaskDataFence, exact bool) (storagev1.T
 	if len(in.Jobs) > 0 {
 		out.Jobs = make([]storagev1.TaskJobIdentity, 0, len(in.Jobs))
 	}
-	for _, e24 := range in.Jobs {
-		g25, err := fromWireTaskJobIdentity(e24, exact)
+	for _, e29 := range in.Jobs {
+		g30, err := fromWireTaskJobIdentity(e29, exact)
 		if err != nil {
 			return out, err
 		}
-		out.Jobs = append(out.Jobs, g25)
+		out.Jobs = append(out.Jobs, g30)
 	}
 	return out, err
 }
@@ -1215,20 +1572,20 @@ func toWireUsageObservation(in storagev1.UsageObservation) (*storagepb.UsageObse
 	out.Provider = in.Provider
 	out.Model = in.Model
 	if in.InputTokens != nil {
-		v26 := int64(*in.InputTokens)
-		out.InputTokens = &v26
+		v31 := int64(*in.InputTokens)
+		out.InputTokens = &v31
 	}
 	if in.OutputTokens != nil {
-		v27 := int64(*in.OutputTokens)
-		out.OutputTokens = &v27
+		v32 := int64(*in.OutputTokens)
+		out.OutputTokens = &v32
 	}
 	if in.CachedInputTokens != nil {
-		v28 := int64(*in.CachedInputTokens)
-		out.CachedInputTokens = &v28
+		v33 := int64(*in.CachedInputTokens)
+		out.CachedInputTokens = &v33
 	}
 	if in.CacheWriteInputTokens != nil {
-		v29 := int64(*in.CacheWriteInputTokens)
-		out.CacheWriteInputTokens = &v29
+		v34 := int64(*in.CacheWriteInputTokens)
+		out.CacheWriteInputTokens = &v34
 	}
 	out.Status = in.Status
 	out.Complete = in.Complete
@@ -1258,20 +1615,20 @@ func fromWireUsageObservation(in *storagepb.UsageObservation, exact bool) (stora
 	out.Provider = in.Provider
 	out.Model = in.Model
 	if in.InputTokens != nil {
-		v30 := int64(*in.InputTokens)
-		out.InputTokens = &v30
+		v35 := int64(*in.InputTokens)
+		out.InputTokens = &v35
 	}
 	if in.OutputTokens != nil {
-		v31 := int64(*in.OutputTokens)
-		out.OutputTokens = &v31
+		v36 := int64(*in.OutputTokens)
+		out.OutputTokens = &v36
 	}
 	if in.CachedInputTokens != nil {
-		v32 := int64(*in.CachedInputTokens)
-		out.CachedInputTokens = &v32
+		v37 := int64(*in.CachedInputTokens)
+		out.CachedInputTokens = &v37
 	}
 	if in.CacheWriteInputTokens != nil {
-		v33 := int64(*in.CacheWriteInputTokens)
-		out.CacheWriteInputTokens = &v33
+		v38 := int64(*in.CacheWriteInputTokens)
+		out.CacheWriteInputTokens = &v38
 	}
 	out.Status = in.Status
 	out.Complete = in.Complete

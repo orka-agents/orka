@@ -13,6 +13,11 @@ var wireMethods = []string{
 	"GetArtifact",
 	"ListArtifacts",
 	"SaveArtifact",
+	"CheckTaskJobAuthority",
+	"DeleteTaskJobRevocations",
+	"GetSessionTurnCleanupReceipt",
+	"RevokeTaskJob",
+	"SyncControllerEpochMirror",
 	"Describe",
 	"HealthCheck",
 	"AppendExecutionEvent",
@@ -74,6 +79,35 @@ func (p *recordingProvider) ListArtifacts(ctx context.Context, owner storagev1.A
 
 func (p *recordingProvider) SaveArtifact(ctx context.Context, request storagev1.SaveArtifactRequest) error {
 	results, err := p.called(ctx, "SaveArtifact", request)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) CheckTaskJobAuthority(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	results, err := p.called(ctx, "CheckTaskJobAuthority", identity)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) DeleteTaskJobRevocations(ctx context.Context, namespace string, taskName string, taskUID string) error {
+	results, err := p.called(ctx, "DeleteTaskJobRevocations", namespace, taskName, taskUID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) GetSessionTurnCleanupReceipt(ctx context.Context, namespace string, sessionName string, promptAttemptID string) (*storagev1.SessionTurnCleanupReceipt, error) {
+	results, err := p.called(ctx, "GetSessionTurnCleanupReceipt", namespace, sessionName, promptAttemptID)
+	return resultAs[*storagev1.SessionTurnCleanupReceipt](results, 0), err
+}
+
+func (p *recordingProvider) RevokeTaskJob(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	results, err := p.called(ctx, "RevokeTaskJob", identity)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) SyncControllerEpochMirror(ctx context.Context, epoch storagev1.ControllerEpoch) error {
+	results, err := p.called(ctx, "SyncControllerEpochMirror", epoch)
 	_ = results
 	return err
 }
