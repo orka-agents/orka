@@ -62,7 +62,9 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 			})
 		case "/devicecode":
 			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parse form: %v", err)
+				t.Errorf("parse form: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
 			}
 			if got := r.Form.Get("client_id"); got != "orka-client-id" {
 				t.Errorf("client_id = %q, want orka-client-id", got)
@@ -76,7 +78,9 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 			})
 		case "/token":
 			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parse token form: %v", err)
+				t.Errorf("parse token form: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
 			}
 			switch r.Form.Get("grant_type") {
 			case "urn:ietf:params:oauth:grant-type:device_code":
@@ -318,4 +322,121 @@ func TestOIDCRefreshDoesNotAdoptReplacedAccount(t *testing.T) {
 	if got != "account-a-expired-token" {
 		t.Fatalf("configuredOIDCToken adopted replaced account token: got %q, want account-a-expired-token", got)
 	}
+}
+
+func TestResolveOIDCLoginTargetsRejectsExplicitOIDCDisabledEvenWithFlags(t *testing.T) {
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"oidc": false}) //nolint:errcheck
+	}))
+	defer orka.Close()
+
+	_, err := resolveOIDCLoginTargets(t.Context(), orka.URL, "https://issuer.example", "orka-client")
+	if err == nil || !strings.Contains(err.Error(), "does not have OIDC authentication enabled") {
+		t.Fatalf("expected OIDC disabled error even with manual flags, got %v", err)
+	}
+}
+
+func TestSelectOIDCBearerTokenSkipsExpiredAccessToken(t *testing.T) {
+	expiredAccess := testCompactJWT(t, "https://issuer.example", "orka-api", time.Now().UTC().Add(-time.Hour).Unix())
+	validIDExp := time.Now().UTC().Add(time.Hour).Unix()
+	validID := testCompactJWT(t, "https://issuer.example", "orka-api", validIDExp)
+
+	tok, exp, err := selectOIDCBearerToken(oidcTokenResponse{
+		AccessToken: expiredAccess,
+		IDToken:     validID,
+	}, "https://issuer.example", "orka-api")
+	if err != nil {
+		t.Fatalf("selectOIDCBearerToken error: %v", err)
+	}
+	if tok != validID {
+		t.Fatalf("selected token = %q, want unexpired id_token", tok)
+	}
+	if exp == nil || exp.Unix() != validIDExp {
+		t.Fatalf("exp = %v, want %d", exp, validIDExp)
+	}
+}
+
+func TestOIDCRefreshClearsRefreshTokenOnInvalidGrantAndSavesRotatedTokenOnUnusableBearer(t *testing.T) {
+	t.Run("invalid_grant clears refresh token", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"error": "invalid_grant"}) //nolint:errcheck
+		}))
+		defer idp.Close()
+
+		expired := time.Now().UTC().Add(-time.Minute)
+		initial := orkaConfig{
+			Server:            "https://orka.example",
+			Token:             "expired-token",
+			TokenKind:         tokenKindOIDC,
+			TokenExpiresAt:    &expired,
+			SessionServer:     "https://orka.example",
+			SessionSubject:    "oidc-login-1",
+			OIDCIssuer:        idp.URL,
+			OIDCAudience:      "orka-api",
+			OIDCClientID:      "orka-api",
+			OIDCTokenEndpoint: idp.URL + "/token",
+			OIDCRefreshToken:  "dead-refresh-token",
+		}
+		if err := saveConfig(initial); err != nil {
+			t.Fatalf("saveConfig: %v", err)
+		}
+
+		cmd := newRootCmd()
+		var errBuf bytes.Buffer
+		cmd.SetErr(&errBuf)
+		_ = configuredOIDCToken(cmd, "https://orka.example", initial)
+
+		after := loadConfig()
+		if after.OIDCRefreshToken != "" {
+			t.Fatalf("OIDCRefreshToken = %q, want cleared after invalid_grant", after.OIDCRefreshToken)
+		}
+	})
+
+	t.Run("rotated refresh token saved even when bearer is unusable", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"access_token":  "opaque-access-token",
+				"refresh_token": "rotated-refresh-token-2",
+				"expires_in":    3600,
+			})
+		}))
+		defer idp.Close()
+
+		expired := time.Now().UTC().Add(-time.Minute)
+		initial := orkaConfig{
+			Server:            "https://orka.example",
+			Token:             "previous-jwt",
+			TokenKind:         tokenKindOIDC,
+			TokenExpiresAt:    &expired,
+			SessionServer:     "https://orka.example",
+			SessionSubject:    "oidc-login-2",
+			OIDCIssuer:        idp.URL,
+			OIDCAudience:      "orka-api",
+			OIDCClientID:      "orka-api",
+			OIDCTokenEndpoint: idp.URL + "/token",
+			OIDCRefreshToken:  "old-refresh-token-1",
+		}
+		if err := saveConfig(initial); err != nil {
+			t.Fatalf("saveConfig: %v", err)
+		}
+
+		cmd := newRootCmd()
+		var errBuf bytes.Buffer
+		cmd.SetErr(&errBuf)
+		_ = configuredOIDCToken(cmd, "https://orka.example", initial)
+
+		after := loadConfig()
+		if after.OIDCRefreshToken != "rotated-refresh-token-2" {
+			t.Fatalf("OIDCRefreshToken = %q, want rotated-refresh-token-2", after.OIDCRefreshToken)
+		}
+		if after.Token != "previous-jwt" {
+			t.Fatalf("Token = %q, want previous-jwt preserved", after.Token)
+		}
+	})
 }

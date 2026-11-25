@@ -60,7 +60,7 @@ var (
 )
 
 type authConfigView struct {
-	OIDC       bool `json:"oidc"`
+	OIDC       *bool `json:"oidc"`
 	OIDCConfig *struct {
 		Issuer   string `json:"issuer"`
 		Audience string `json:"audience"`

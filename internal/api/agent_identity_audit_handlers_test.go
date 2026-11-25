@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
@@ -234,6 +235,51 @@ func TestListAgentIdentityAuditEnforcesContextTokenTaskScope(t *testing.T) {
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&task=task-other", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestListAgentIdentityAuditReturns404ForOtherUsersPrivateAHPTask(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+
+	privateTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ahp-turn-bob-1",
+			Namespace: "team-a",
+			UID:       types.UID("uid-bob-ahp"),
+			Labels:    map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			RequestedBy: &corev1alpha1.RequestedBy{
+				Issuer:  "https://issuer.example",
+				Subject: "bob-sub",
+			},
+		},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(privateTask).Build()
+
+	handlers := NewHandlers(HandlersConfig{
+		Client:                    kube,
+		EnforceNamespaceIsolation: true,
+		AgentIdentityAudit:        outboundaccess.NewAgentIdentityAuditBuffer(10),
+	})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{
+			Username:  "alice",
+			Namespace: "team-a",
+			AuthType:  AuthTypeOIDC,
+			Issuer:    "https://issuer.example",
+			Subject:   "alice-sub",
+		})
+		return c.Next()
+	})
+	app.Get("/api/v1/audit/identity", handlers.ListAgentIdentityAudit)
+
+	// Another person's private AHP Task must return 404 (matching missing tasks)
+	// rather than 403 so existence is not leaked.
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v1/audit/identity?namespace=team-a&task=ahp-turn-bob-1", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func TestAgentIdentityAuditBufferRedactionFromResolver(t *testing.T) {

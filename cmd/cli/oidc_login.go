@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -83,7 +84,8 @@ func newAuthLoginCmd() *cobra.Command {
 		Short: "Sign in to Orka with OIDC (device-code flow)",
 		Long: "Sign in to Orka using OpenID Connect device-code flow. By default, discovers the OIDC issuer and " +
 			"audience from the Orka server (/api/v1/auth/config), requests a device code, saves an Orka-compatible " +
-			"JWT (and refresh token when issued) in your Orka config, and automatically refreshes it before expiry.",
+			"JWT (and refresh token when issued) in your Orka config, and refreshes it on demand when a later command " +
+			"runs near or after expiry (otherwise run 'orka auth login' again).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runOIDCLogin(cmd, opts)
@@ -115,7 +117,7 @@ func resolveOIDCLoginTargets(ctx context.Context, server, issuer, clientID strin
 			return oidcLoginTargets{}, fmt.Errorf("read auth config from %s: %w", server, err)
 		}
 	} else {
-		if !options.OIDC && (issuer == "" || clientID == "") {
+		if options.OIDC != nil && !*options.OIDC {
 			return oidcLoginTargets{}, fmt.Errorf("%s does not have OIDC authentication enabled", server)
 		}
 		if options.OIDCConfig != nil {
@@ -265,6 +267,7 @@ func selectOIDCBearerToken(tokens oidcTokenResponse, expectedIssuer, expectedAud
 		return "", nil, errors.New("OIDC provider returned neither access_token nor id_token")
 	}
 
+	now := time.Now().UTC()
 	var fallbackJWT string
 	var fallbackExp *time.Time
 	for i, cand := range nonEmpty {
@@ -280,6 +283,9 @@ func selectOIDCBearerToken(tokens oidcTokenResponse, expectedIssuer, expectedAud
 			expiresIn = tokens.ExpiresIn
 		}
 		exp := resolveTokenExpiry(expiresIn, claims.Exp)
+		if exp != nil && !exp.After(now) {
+			continue
+		}
 		if fallbackJWT == "" {
 			fallbackJWT, fallbackExp = cand, exp
 		}
@@ -481,6 +487,11 @@ func pollOIDCDeviceFlow(ctx context.Context, tokenEndpoint, clientID string, dev
 		var resp oidcTokenResponse
 		status, err := postOIDCForm(ctx, tokenEndpoint, form, &resp)
 		if err != nil {
+			var netErr net.Error
+			if ctx.Err() == nil && errors.As(err, &netErr) && netErr.Timeout() {
+				interval += 5 * time.Second
+				continue
+			}
 			return oidcTokenResponse{}, fmt.Errorf("poll OIDC token endpoint: %w", err)
 		}
 		if status >= 200 && status < 300 && resp.Error == "" {
@@ -559,6 +570,10 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 	var refreshed oidcTokenResponse
 	status, err := postOIDCForm(ctx, cfg.OIDCTokenEndpoint, form, &refreshed)
 	if err != nil || status >= 300 || refreshed.Error != "" {
+		if refreshed.Error == "invalid_grant" {
+			cfg.OIDCRefreshToken = ""
+			_ = saveConfig(cfg)
+		}
 		fmt.Fprintln(cmd.ErrOrStderr(), "Could not refresh your OIDC token; run 'orka auth login'.") //nolint:errcheck
 		return cfg.Token
 	}
@@ -569,6 +584,10 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 	}
 	newToken, expiresAt, err := selectOIDCBearerToken(refreshed, cfg.OIDCIssuer, audience)
 	if err != nil {
+		if refreshed.RefreshToken != "" && refreshed.RefreshToken != cfg.OIDCRefreshToken {
+			cfg.OIDCRefreshToken = refreshed.RefreshToken
+			_ = saveConfig(cfg)
+		}
 		fmt.Fprintln(cmd.ErrOrStderr(), "Could not refresh your OIDC token; run 'orka auth login'.") //nolint:errcheck
 		return cfg.Token
 	}

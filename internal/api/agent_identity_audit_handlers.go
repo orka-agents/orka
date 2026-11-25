@@ -63,19 +63,9 @@ func (h *Handlers) ListAgentIdentityAudit(c fiber.Ctx) error {
 
 	var matchedTask *corev1alpha1.Task
 	if taskName != "" {
-		task := &corev1alpha1.Task{}
-		if err := h.client.Get(c.Context(), types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fiber.NewError(fiber.StatusNotFound, "task not found")
-			}
-			return fiber.NewError(fiber.StatusInternalServerError, "failed to load task")
-		}
-		allowed, err := h.auditTaskVisible(c, task, map[gatewayTaskAuthorizationKey]bool{})
+		task, err := h.resolveAuditedTask(c, namespace, taskName)
 		if err != nil {
 			return err
-		}
-		if !allowed {
-			return fiber.NewError(fiber.StatusForbidden, "not authorized to inspect audit records for this task")
 		}
 		if taskUID != "" && taskUID != string(task.UID) {
 			return c.JSON(fiber.Map{apiFieldItems: []outboundaccess.AgentIdentityAuditRecord{}})
@@ -148,6 +138,29 @@ func (h *Handlers) ListAgentIdentityAudit(c fiber.Ctx) error {
 		}
 	}
 	return c.JSON(fiber.Map{apiFieldItems: records})
+}
+
+// resolveAuditedTask loads a named Task in namespace and enforces AHP privacy
+// (returning 404 for another person's private AHP turn) and Task visibility.
+func (h *Handlers) resolveAuditedTask(c fiber.Ctx, namespace, taskName string) (*corev1alpha1.Task, error) {
+	task := &corev1alpha1.Task{}
+	if err := h.client.Get(c.Context(), types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to load task")
+	}
+	if ahpTaskHidden(GetUserInfo(c), task) {
+		return nil, fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
+	allowed, err := h.auditTaskVisible(c, task, map[gatewayTaskAuthorizationKey]bool{})
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, fiber.NewError(fiber.StatusForbidden, "not authorized to inspect audit records for this task")
+	}
+	return task, nil
 }
 
 // auditTaskVisible applies the same context-token, Gateway, and hidden-Task

@@ -95,7 +95,7 @@ func newConnectCmd() *cobra.Command {
 			}
 			fmt.Fprintf(out, "Authorize %s (%s) at:\n%s\n", args[0], mode, started.AuthorizeURL) //nolint:errcheck
 			if callbackHost, local := authorizeCallbackIsLocalhost(started.AuthorizeURL); local {
-				fmt.Fprintf(out, "Note: this server's OAuth callback targets %s. Open the link in a browser on this machine; if you consent on another device (such as a phone), the redirect to %s will fail with the provider's 'code' and 'state' URL — reopen that failed callback URL on a machine where %s is reachable first, then copy the resulting '#completion=...' URL and pass it to --completion below.\n", callbackHost, callbackHost, callbackHost) //nolint:errcheck
+				fmt.Fprintf(out, "Note: this server's OAuth callback targets %s. Open the link in a browser on the controller host (or with port forwarding to %s); if you consent on another device (such as a phone), the redirect to %s will fail with the provider's 'code' and 'state' URL — reopen that failed callback URL where %s is reachable first, then copy the resulting '#completion=...' URL and pass it to --completion below.\n", callbackHost, callbackHost, callbackHost, callbackHost) //nolint:errcheck
 			}
 			if noOpen {
 				fmt.Fprintln(out, "Browser opening skipped. Open the URL above in your browser to finish.") //nolint:errcheck
