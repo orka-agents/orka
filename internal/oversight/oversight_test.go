@@ -201,6 +201,25 @@ func TestPostureIsHonestByConstruction(t *testing.T) {
 		require.Equal(t, 2, p.Basis.Coverage.ObservedEvents, "one exec in each of the two actions")
 		require.Nil(t, p.Basis.Coverage.Excluded)
 	})
+	t.Run("decision latency leaves backfilled records out", func(t *testing.T) {
+		at := func(id string, observed, recorded time.Duration) oversightv1.DecisionView {
+			v := view(t, 4, decision(id, "lat", func(d *oversightv1.OversightDecision) {
+				d.ObservedAt = testNow.Add(observed)
+			}), "")
+			v.RecordedAt = testNow.Add(recorded)
+			return v
+		}
+		views := []oversightv1.DecisionView{
+			at("old@0", -6*time.Hour, -time.Hour), // seeded history, recorded later in one batch
+			at("live@0", -50*time.Minute, -50*time.Minute+2*time.Second),
+			at("live@1", -40*time.Minute, -40*time.Minute+4*time.Second),
+			at("live@2", -30*time.Minute, -30*time.Minute+10*time.Second),
+		}
+		p := ComputePosture("team", "24h", testNow, views, false)
+		require.Equal(t, &oversightv1.LatencySummary{Count: 3, P50Seconds: 4, P95Seconds: 10, MaxSeconds: 10}, p.Basis.DecisionLatency)
+		require.Nil(t, ComputePosture("team", "24h", testNow, views[:1], false).Basis.DecisionLatency,
+			"a window of only backfilled records has no latency to report")
+	})
 	t.Run("excluded events are counted once per Task", func(t *testing.T) {
 		withExcluded := func(id, task string, platform int) oversightv1.DecisionView {
 			return view(t, 3, decision(id, task, func(d *oversightv1.OversightDecision) {

@@ -8,6 +8,7 @@ package oversight
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -15,11 +16,11 @@ import (
 	oversightv1 "github.com/orka-agents/orka/pkg/oversight/v1"
 )
 
-// Posture reasons. They are machine codes a client may translate.
 // ExcludedAttributionPrefix marks attribution counts of events a monitor
 // deliberately left out of every action.
 const ExcludedAttributionPrefix = "excluded_"
 
+// Posture reasons. They are machine codes a client may translate.
 const (
 	ReasonNoDecisions         = "no_decisions_in_window"
 	ReasonStreamMissing       = "event_stream_missing"
@@ -192,6 +193,7 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 		}
 	}
 	basis.Tasks, basis.Agents = len(tasks), len(agents)
+	basis.DecisionLatency = decisionLatency(views)
 	if len(basis.Coverage.BlindSpots) == 0 {
 		basis.Coverage.BlindSpots = nil
 	}
@@ -312,4 +314,33 @@ func sortedSet(set map[string]bool) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// decisionLatency measures observed action to recorded decision. Records
+// observed before the earliest recording in the set were backfilled, such as
+// replayed history, and say nothing about how fast a monitor keeps up.
+func decisionLatency(views []oversightv1.DecisionView) *oversightv1.LatencySummary {
+	var firstRecorded time.Time
+	for i := range views {
+		if r := views[i].RecordedAt; !r.IsZero() && (firstRecorded.IsZero() || r.Before(firstRecorded)) {
+			firstRecorded = r
+		}
+	}
+	seconds := make([]float64, 0, len(views))
+	for i := range views {
+		v := &views[i]
+		if v.RecordedAt.IsZero() || v.ObservedAt.Before(firstRecorded) || v.RecordedAt.Before(v.ObservedAt) {
+			continue
+		}
+		seconds = append(seconds, v.RecordedAt.Sub(v.ObservedAt).Seconds())
+	}
+	if len(seconds) == 0 {
+		return nil
+	}
+	slices.Sort(seconds)
+	at := func(q float64) float64 {
+		return math.Round(seconds[min(len(seconds)-1, int(q*float64(len(seconds))))]*10) / 10
+	}
+	return &oversightv1.LatencySummary{Count: len(seconds), P50Seconds: at(0.5), P95Seconds: at(0.95),
+		MaxSeconds: math.Round(seconds[len(seconds)-1]*10) / 10}
 }

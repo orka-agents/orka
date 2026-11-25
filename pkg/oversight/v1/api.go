@@ -222,6 +222,18 @@ type PostureBasis struct {
 	RealProblems    int             `json:"realProblems"`
 	Coverage        PostureCoverage `json:"coverage"`
 	LastObservedAt  *time.Time      `json:"lastObservedAt,omitempty"`
+	// DecisionLatency is how long decisions took from the observed action to
+	// being recorded by Orka. Backfilled records, observed before the
+	// window's first recording, are left out.
+	DecisionLatency *LatencySummary `json:"decisionLatency,omitempty"`
+}
+
+// LatencySummary summarizes a set of durations in seconds.
+type LatencySummary struct {
+	Count      int     `json:"count"`
+	P50Seconds float64 `json:"p50Seconds"`
+	P95Seconds float64 `json:"p95Seconds"`
+	MaxSeconds float64 `json:"maxSeconds"`
 }
 
 // PostureCoverage is how much of the window's actions were seen.
