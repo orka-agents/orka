@@ -152,6 +152,59 @@ controller epoch is never advanced while held, so it keeps that evidence
 until you release the hold. An annotation that names any other hold releases
 nothing.
 
+### Task storage holds
+
+A single agent Task can also be held, when a record its Kubernetes state
+requires is missing from storage or differs from what Kubernetes recorded.
+Today this happens when a prompt attempt reached `Settling` but the store no
+longer holds its result receipt. Recovery then leaves the attempt in
+`Settling`: it does not run the prompt again, does not guess its outcome,
+does not report success and deletes nothing. Tasks on other Sessions keep
+running; later Tasks on the held Task's Session wait until the hold is
+released.
+
+Find held Tasks with:
+
+```bash
+kubectl get tasks -A -o json | jq -r '.items[]
+  | select(any(.status.conditions[]?; .type == "StorageRecoveryRequired" and .status == "True"))
+  | "\(.metadata.namespace)/\(.metadata.name)"'
+```
+
+The condition's reason is `MissingRecord` or `ConflictingRecord`, and its
+message names the record, its key, the digest Kubernetes recorded and the
+hold ID. If restoring storage brings the record back, recovery settles the
+Task from it and sets the condition to `False` with reason `RecordFound`. If
+the record cannot be recovered, release that exact hold:
+
+```bash
+kubectl -n <namespace> annotate task <name> \
+  storage.orka.ai/recovery-acknowledged=<hold-id> --overwrite
+```
+
+Recovery then records the prompt's outcome as unknown, without running it
+again, and sets the condition to `False` with reason `RecoveryAcknowledged`.
+If workspace validation had started, the Task's delivery ends as
+`DeliveryConflict`, because recovery cannot finish that validation.
+An annotation that names any other hold releases nothing. Deleting a held
+Task does not release its hold: the Task stays until a restored record or
+your acknowledgement releases it, and then its deletion completes.
+
+On a Gateway-owned Task, the Gateway Task admission policy admits this change
+only when the annotation is the only thing it changes and you may also update
+that Task's status: `update` on `tasks/status` in the Task's namespace.
+The Task roles Orka ships do not grant it: `orka-task-editor-role`,
+`orka-task-admin-role` and the Helm chart's client Role (`orka-client` for a
+release named `orka`) allow only `get` on `tasks/status`. Check with:
+
+```bash
+kubectl auth can-i update tasks.core.orka.ai/<name> --subresource=status -n <namespace>
+```
+
+As with any update of a Task that selects an execution workspace class, the
+operator also needs `use` permission on that class, and on the checkpoint the
+Task restores from.
+
 ## Security scan operations
 
 Repository security scanning runs **one scan at a time per repository** — a
