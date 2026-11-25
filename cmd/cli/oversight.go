@@ -43,9 +43,9 @@ type replayOptions struct {
 	pace       time.Duration
 	shiftToNow bool
 	dryRun     bool
-	// preserveTiming sends one decision at a time, waiting the recorded gap
-	// between observations (divided by speed, capped at maxGap), and stamps
-	// each with the time it is sent.
+	// preserveTiming keeps the recorded gaps between observations (divided
+	// by speed, capped at maxGap), sends whatever is due together, and stamps
+	// each decision with the time it is sent.
 	preserveTiming bool
 	speed          float64
 	maxGap         time.Duration
@@ -81,7 +81,7 @@ func newOversightReplayCmd() *cobra.Command {
 		"Shift every observedAt by the same amount so the newest record is now, keeping their spacing")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Check the files and report what would be sent")
 	cmd.Flags().BoolVar(&opts.preserveTiming, "preserve-timing", false,
-		"Send one decision at a time with the recorded gaps between them, stamped with the time each is sent")
+		"Keep the recorded gaps between decisions, sending those due together, stamped with the time they are sent")
 	cmd.Flags().Float64Var(&opts.speed, "speed", 1, "With --preserve-timing, play this many times faster")
 	cmd.Flags().DurationVar(&opts.maxGap, "max-gap", 10*time.Second, "With --preserve-timing, wait at most this long between decisions")
 	cmd.Flags().StringVar(&opts.idSuffix, "id-suffix", "", "Append this to every decision ID and Task name (for a repeat take)")
@@ -230,22 +230,37 @@ func playWithTiming(ctx context.Context, c *client.Client, opts replayOptions, d
 	if opts.speed <= 0 {
 		return errors.New("--speed must be positive")
 	}
+	// Each decision is due at its recorded offset from the first, divided by
+	// speed and with every gap capped at maxGap. Whatever is due is sent in one
+	// request (up to batchSize), so a dense take keeps to its schedule instead
+	// of falling behind one request per decision.
+	due := make([]time.Duration, len(decisions))
+	for i := 1; i < len(decisions); i++ {
+		gap := time.Duration(float64(decisions[i].ObservedAt.Sub(decisions[i-1].ObservedAt)) / opts.speed)
+		due[i] = due[i-1] + min(max(gap, 0), opts.maxGap)
+	}
+	began := time.Now()
 	ingested, duplicates := 0, 0
-	for i := range decisions {
-		if i > 0 {
-			gap := time.Duration(float64(decisions[i].ObservedAt.Sub(decisions[i-1].ObservedAt)) / opts.speed)
-			gap = min(max(gap, 0), opts.maxGap)
+	for next := 0; next < len(decisions); {
+		if wait := due[next] - time.Since(began); wait > 0 {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(gap):
+			case <-time.After(wait):
 			}
 		}
-		d := decisions[i]
-		d.ObservedAt = now().UTC().Truncate(time.Millisecond)
-		response, err := c.IngestOversightDecisions(ctx, opts.namespace, []oversightv1.OversightDecision{d})
+		elapsed := time.Since(began)
+		batch := make([]oversightv1.OversightDecision, 0, opts.batchSize)
+		stamp := now().UTC().Truncate(time.Millisecond)
+		for next < len(decisions) && len(batch) < opts.batchSize && due[next] <= elapsed {
+			d := decisions[next]
+			d.ObservedAt = stamp
+			batch = append(batch, d)
+			next++
+		}
+		response, err := c.IngestOversightDecisions(ctx, opts.namespace, batch)
 		if err != nil {
-			return fmt.Errorf("submit %s (ingested %d so far): %w", d.ID, ingested, err)
+			return fmt.Errorf("submit %s (ingested %d so far): %w", batch[0].ID, ingested, err)
 		}
 		ingested += response.Ingested
 		duplicates += response.Duplicates

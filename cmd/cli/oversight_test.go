@@ -131,11 +131,33 @@ func TestOversightReplayPlaysATakeWithItsTimingAsNewDecisions(t *testing.T) {
 		speed: 100, maxGap: time.Second, idSuffix: "-t2"}
 	require.NoError(t, runOversightReplay(t.Context(), c, opts, &out, now))
 	require.GreaterOrEqual(t, time.Since(began), 150*time.Millisecond, "the recorded 20s gap plays at 100x")
-	require.Len(t, ingest.batches, 2, "one decision per request")
+	require.Len(t, ingest.batches, 2, "the decisions were due apart")
 	played := ingest.batches[1][0]
 	require.Equal(t, "task-t2@1", played.ID)
 	require.Equal(t, "task-t2", played.TaskName)
 	require.Equal(t, []string{"task-t2@0"}, played.Action.PriorActionIDs)
 	require.True(t, played.ObservedAt.After(start.Add(time.Hour)), "stamped with the time it was sent")
 	require.Contains(t, out.String(), "Played 2 decisions")
+}
+
+func TestOversightReplayWithTimingSendsDecisionsThatAreDueTogether(t *testing.T) {
+	ingest := &fakeIngest{stored: map[string]bool{}}
+	server := httptest.NewServer(ingest)
+	defer server.Close()
+	start := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
+	lines := []string{
+		replayLine(t, "a@0", start), replayLine(t, "b@0", start), replayLine(t, "c@0", start),
+		replayLine(t, "d@0", start.Add(10*time.Second)),
+	}
+	file := filepath.Join(t.TempDir(), "take.jsonl")
+	require.NoError(t, os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+	c := client.NewWithNamespace(server.URL, "", "team")
+	opts := replayOptions{files: []string{file}, namespace: "team", batchSize: 2, preserveTiming: true,
+		speed: 100, maxGap: time.Second}
+	require.NoError(t, runOversightReplay(t.Context(), c, opts, &bytes.Buffer{}, time.Now))
+	sizes := make([]int, 0, len(ingest.batches))
+	for _, batch := range ingest.batches {
+		sizes = append(sizes, len(batch))
+	}
+	require.Equal(t, []int{2, 1, 1}, sizes, "three due at once are split by --batch-size; the fourth is due later")
 }
