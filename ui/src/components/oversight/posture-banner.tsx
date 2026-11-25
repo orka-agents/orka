@@ -5,7 +5,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useOversightConfig, useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { demoCharterRevisions as demoRevisions, reasonText } from '@/lib/oversight'
+import { demoCharterRevisions as demoRevisions, excludedText, reasonText } from '@/lib/oversight'
 import { formatTimestamp, timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
@@ -84,6 +84,17 @@ export function PostureView({ posture, demoCharterRevisions = [] }: { posture: P
             </p>
             {coverage.maxEvidenceLevel && (
               <p className="text-xs text-muted-foreground">Strongest evidence: {coverage.maxEvidenceLevel}</p>
+            )}
+            {Object.entries(coverage.excluded ?? {}).some(([, n]) => n > 0) && (
+              <div data-testid="coverage-excluded" className="text-sm">
+                <p className="text-muted-foreground">Set aside by the monitor, not scored (counted once per Task):</p>
+                <ul className="list-disc pl-5 tabular-nums">
+                  {Object.entries(coverage.excluded ?? {})
+                    .filter(([, n]) => n > 0)
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([kind, n]) => <li key={kind}>{excludedText(kind, n)}</li>)}
+                </ul>
+              </div>
             )}
           </section>
 

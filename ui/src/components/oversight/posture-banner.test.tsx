@@ -19,6 +19,16 @@ describe('PostureView', () => {
     expect(screen.getByText('Audit mode only: nothing is held')).toBeInTheDocument()
   })
 
+  it('lists what the monitor set aside, and nothing when it set nothing aside', () => {
+    const posture = makePosture()
+    const { rerender } = render(<PostureView posture={{ ...posture, basis: { ...posture.basis,
+      coverage: { ...posture.basis.coverage, excluded: { platform_traffic: 1, container_setup: 12 } } } }} />)
+    const list = within(screen.getByTestId('coverage-excluded')).getAllByRole('listitem')
+    expect(list.map((li) => li.textContent)).toEqual(['12 container-setup events', '1 platform connection'])
+    rerender(<PostureView posture={posture} />)
+    expect(screen.queryByTestId('coverage-excluded')).not.toBeInTheDocument()
+  })
+
   it.each([
     ['warranted', 'Warranted'],
     ['degraded', 'Degraded'],

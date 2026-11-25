@@ -284,6 +284,7 @@ describe('OversightDashboard', () => {
       const line = await screen.findByTestId('posture-line')
       await waitFor(() => expect(line).toHaveTextContent('Degraded: coverage not full · no canaries reported · 1 incident · 80% seen · 1 blind spot · audit mode'))
       expect(line).not.toHaveTextContent(/warranted/i)
+      expect(screen.queryByTestId('posture-excluded')).not.toBeInTheDocument()
       expect(screen.getByTestId('posture-honesty')).toHaveTextContent('Audit mode: findings would pause an action; nothing is held.')
       expect(screen.getByTestId('posture-honesty')).toHaveTextContent('inferred')
       const blind = within(line).getByRole('button', { name: /1 blind spot/ })
@@ -316,6 +317,15 @@ describe('OversightDashboard', () => {
       renderDashboard()
       await waitFor(() => expect(screen.getByTestId('funnel-strip')).toHaveTextContent(
         '12,408 kernel events → 1,314 actions → 1 need you (0 charter breaks · 1 would-pause · 0 would-hold)'))
+    })
+
+    it('says what the monitor set aside on the posture line', async () => {
+      server.use(http.get('/api/v1/oversight/posture', () => HttpResponse.json({
+        ...makePosture(), basis: { ...makePosture().basis, coverage: { ...makePosture().basis.coverage, excluded: { platform_traffic: 69, container_setup: 140 } } },
+      })))
+      serveList([])
+      renderDashboard()
+      expect(await screen.findByTestId('posture-excluded')).toHaveTextContent('set aside: 140 container-setup events · 69 platform connections')
     })
 
     it('omits the kernel step when no events were observed, or from an older server', async () => {

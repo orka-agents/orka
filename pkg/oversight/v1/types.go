@@ -207,9 +207,12 @@ type EffectEvent struct {
 // ActionCoverage says how completely the action was seen. It is never
 // omitted: a decision about an action nobody watched must say so.
 type ActionCoverage struct {
-	StreamState       string         `json:"streamState"`
-	SensorState       string         `json:"sensorState"`
-	AttributionMethod string         `json:"attributionMethod,omitempty"`
+	StreamState       string `json:"streamState"`
+	SensorState       string `json:"sensorState"`
+	AttributionMethod string `json:"attributionMethod,omitempty"`
+	// AttributionCounts counts the execution's sensor events by how they
+	// were attributed. Keys starting "excluded_" count events deliberately
+	// left out of every action, such as the platform's own traffic.
 	AttributionCounts map[string]int `json:"attributionCounts,omitempty"`
 	// UnattributedEvents counts sensor events in the action's window that
 	// could not be attributed to any action.

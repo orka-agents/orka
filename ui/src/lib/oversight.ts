@@ -264,6 +264,26 @@ export function confidenceReasons(posture: PostureResponse, max = 2): string[] {
   return out
 }
 
+const EXCLUDED_TEXT: Record<string, [string, string]> = {
+  platform_traffic: ['platform connection', 'platform connections'],
+  container_setup: ['container-setup event', 'container-setup events'],
+}
+
+/** One excluded kind in words: "69 platform connections". */
+export function excludedText(kind: string, count: number): string {
+  const [one, many] = EXCLUDED_TEXT[kind] ?? [`${kind.replace(/_/g, ' ')} event`, `${kind.replace(/_/g, ' ')} events`]
+  return `${count.toLocaleString()} ${count === 1 ? one : many}`
+}
+
+/** "set aside: 69 platform connections · 140 container-setup events", or undefined. */
+export function excludedSummary(excluded: Record<string, number> | undefined): string | undefined {
+  const parts = Object.entries(excluded ?? {})
+    .filter(([, n]) => n > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([kind, n]) => excludedText(kind, n))
+  return parts.length > 0 ? `set aside: ${parts.join(' · ')}` : undefined
+}
+
 /** A reason code in words; unknown codes are shown as sent. */
 export function reasonText(code: string): string {
   return REASON_TEXT[code] ?? code
@@ -443,6 +463,13 @@ export function wasBlocked(decision: DecisionView): boolean {
 
 const BLOCKED = ' (blocked by policy)'
 
+/** A name lookup the policy blocked: the sensor saw the attempt, not the name. */
+function blockedLookup(decision: DecisionView): boolean {
+  const effects = decision.action.effects ?? {}
+  return Object.keys(effects.counts ?? {}).some((k) => k.includes('lookup_blocked')) ||
+    (effects.notableEvents ?? []).some((e) => e.kind.includes('lookup_blocked'))
+}
+
 function describeAction(decision: DecisionView, bytes: boolean): { kind: ActionKind; text: string } {
   const blocked = wasBlocked(decision)
   const tried = (done: string, attempt: string) => (blocked ? attempt : done)
@@ -468,6 +495,9 @@ function describeAction(decision: DecisionView, bytes: boolean): { kind: ActionK
   if (story) return { kind: 'credential', text: who ? `${who} ${story}` : story }
   if (dest && hasBytes(decision)) return { kind: 'send', text: bytes ? `sent ${formatBytes(effects.bytesSent!)} to ${dest}` : `sent data to ${dest}` }
   if (dest) return { kind: 'connect', text: `${tried('connected', 'tried to connect')} to ${dest}${suffix}` }
+  if (blocked && blockedLookup(decision)) {
+    return { kind: 'connect', text: 'tried to reach an outside destination (name lookup blocked by policy)' }
+  }
   const binary = effects.binaries?.[0]?.value ?? effects.notableEvents?.find((e) => e.binary)?.binary
   const ran = binary ? binaryName(binary) : decision.action.toolName
   const request = stripSynthetic(decision.action.requestSummary?.trim() ?? '').trim()
@@ -612,6 +642,9 @@ export function credentialStory(decisions: DecisionView[]): string | undefined {
     const effects = d.action.effects ?? {}
     const connected = (effects.counts?.net_connect ?? 0) > 0 || (effects.destinations?.length ?? 0) > 0
     const dest = effects.destinations?.[0]?.value ?? effects.notableEvents?.find((e) => e.dest)?.dest
+    if (wasBlocked(d) && !dest && blockedLookup(d)) {
+      return `read ${what}, then tried to send it out (name lookup blocked by policy)`
+    }
     if (connected && dest) {
       return wasBlocked(d)
         ? `read ${what}, then tried to send it to ${hostOf(dest)}${BLOCKED}`

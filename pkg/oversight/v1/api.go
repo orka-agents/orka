@@ -234,6 +234,11 @@ type PostureCoverage struct {
 	// window's actions: the raw events behind them.
 	ObservedEvents int            `json:"observedEvents"`
 	BlindSpots     map[string]int `json:"blindSpots,omitempty"`
+	// Excluded counts what a monitor saw and deliberately left out of the
+	// actions, such as the platform's own traffic, keyed by the attribution
+	// count name after its "excluded_" prefix. Counts are per execution, so
+	// each Task's largest reported value is taken once.
+	Excluded map[string]int `json:"excluded,omitempty"`
 }
 
 // PostureProducer is one scorer or advisor seen in the window.

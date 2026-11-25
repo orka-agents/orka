@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 import {
   actionPhrase,
+  excludedSummary,
   confidenceReasons,
   credentialStory,
   destinationDomain,
@@ -233,5 +234,29 @@ describe('blocked attempts', () => {
         effects: { counts: { connect_blocked: 1 }, blockedCount: 1, destinations: [{ value: 'paste.demo.svc:80', count: 1 }] } },
     })
     expect(credentialStory([send, read])).toBe('read a token, then tried to send it to paste.demo.svc (blocked by policy)')
+  })
+})
+
+describe('excluded events', () => {
+  it('says what the monitor set aside, and nothing when it set nothing aside', () => {
+    expect(excludedSummary({ platform_traffic: 69, container_setup: 140, other_kind: 1 }))
+      .toBe('set aside: 140 container-setup events · 1 other kind event · 69 platform connections')
+    expect(excludedSummary({ platform_traffic: 0 })).toBeUndefined()
+    expect(excludedSummary(undefined)).toBeUndefined()
+  })
+
+  it('words a blocked name lookup as an attempt to reach out', () => {
+    const lookup = makeDecision({
+      agentName: 'report-agent',
+      action: { toolName: 'code_exec', effects: { counts: { exec: 1, dns_lookup_blocked: 4 }, blockedCount: 4 } },
+    })
+    expect(actionPhrase(lookup)).toBe('tried to reach an outside destination (name lookup blocked by policy)')
+    const read = makeDecision({
+      id: 'r@0', seq: 1,
+      action: { toolName: 'code_exec', taintFlags: ['credential_read'],
+        effects: { counts: { credential_read: 1 }, paths: [{ value: '/var/run/secrets/kubernetes.io/serviceaccount/token', count: 1 }] } },
+    })
+    expect(credentialStory([{ ...lookup, id: 'r@1', seq: 2 }, read]))
+      .toBe('read a token, then tried to send it out (name lookup blocked by policy)')
   })
 })

@@ -199,6 +199,18 @@ func TestPostureIsHonestByConstruction(t *testing.T) {
 		require.Contains(t, p.Visibility.Reasons, ReasonBlindSpots)
 		require.Equal(t, 11, p.Basis.Coverage.UnattributedEvents)
 		require.Equal(t, 2, p.Basis.Coverage.ObservedEvents, "one exec in each of the two actions")
+		require.Nil(t, p.Basis.Coverage.Excluded)
+	})
+	t.Run("excluded events are counted once per Task", func(t *testing.T) {
+		withExcluded := func(id, task string, platform int) oversightv1.DecisionView {
+			return view(t, 3, decision(id, task, func(d *oversightv1.OversightDecision) {
+				d.Coverage.AttributionCounts = map[string]int{"excluded_platform_traffic": platform, "excluded_container_setup": 4,
+					"owner-chain": 9, "excluded_": 7, "excluded_negative": -1}
+			}), "")
+		}
+		views := []oversightv1.DecisionView{withExcluded("a@0", "a", 2), withExcluded("a@1", "a", 3), withExcluded("b@0", "b", 1)}
+		p := ComputePosture("team", "24h", testNow, views, false)
+		require.Equal(t, map[string]int{"platform_traffic": 4, "container_setup": 8}, p.Basis.Coverage.Excluded)
 	})
 	t.Run("a missing stream or unavailable sensor is blind", func(t *testing.T) {
 		missing := view(t, 2, decision("b@0", "b", func(d *oversightv1.OversightDecision) { d.Coverage.SensorState = "unavailable" }), "")

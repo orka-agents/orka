@@ -16,6 +16,10 @@ import (
 )
 
 // Posture reasons. They are machine codes a client may translate.
+// ExcludedAttributionPrefix marks attribution counts of events a monitor
+// deliberately left out of every action.
+const ExcludedAttributionPrefix = "excluded_"
+
 const (
 	ReasonNoDecisions         = "no_decisions_in_window"
 	ReasonStreamMissing       = "event_stream_missing"
@@ -65,6 +69,7 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 		oversightv1.EvidenceLevelIssued: 1, oversightv1.EvidenceLevelApplied: 2,
 		oversightv1.EvidenceLevelObserved: 3, oversightv1.EvidenceLevelAttested: 4,
 	}
+	excluded := map[string]map[string]int{}
 	for i := range views {
 		v := &views[i]
 		basis.Actions++
@@ -137,6 +142,16 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 			visibility[ReasonUnattributedEvents] = true
 		}
 		basis.Coverage.UnattributedEvents += c.UnattributedEvents
+		for key, n := range c.AttributionCounts {
+			kind, found := strings.CutPrefix(key, ExcludedAttributionPrefix)
+			if !found || kind == "" || n <= 0 {
+				continue
+			}
+			if excluded[kind] == nil {
+				excluded[kind] = map[string]int{}
+			}
+			excluded[kind][v.TaskName] = max(excluded[kind][v.TaskName], n)
+		}
 		for _, n := range v.Action.Effects.Counts {
 			basis.Coverage.ObservedEvents += max(n, 0)
 		}
@@ -179,6 +194,14 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 	basis.Tasks, basis.Agents = len(tasks), len(agents)
 	if len(basis.Coverage.BlindSpots) == 0 {
 		basis.Coverage.BlindSpots = nil
+	}
+	for kind, perTask := range excluded {
+		if basis.Coverage.Excluded == nil {
+			basis.Coverage.Excluded = map[string]int{}
+		}
+		for _, n := range perTask {
+			basis.Coverage.Excluded[kind] += n
+		}
 	}
 
 	posture := oversightv1.PostureResponse{

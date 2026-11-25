@@ -233,6 +233,8 @@ export interface PostureCoverage {
   /** Sum of effect counts across the window's actions; 0 when not reported. */
   observedEvents?: number
   blindSpots?: Record<string, number>
+  /** Events a monitor deliberately left out of every action, by kind. */
+  excluded?: Record<string, number>
 }
 
 export interface PostureBasis {
@@ -357,6 +359,7 @@ export const postureCoverageSchema = z.object({
   unattributedEvents: z.number().default(0),
   observedEvents: z.number().default(0),
   blindSpots: z.record(z.number()).optional(),
+  excluded: z.record(z.number()).optional(),
 })
 
 /** Cheap shape check for a decision frame read off the stream. */

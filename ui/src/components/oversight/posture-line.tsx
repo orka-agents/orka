@@ -7,7 +7,7 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { ShieldAlert } from 'lucide-react'
 import { useOversightPosture } from '@/hooks/use-oversight'
 import { isNotImplementedError } from '@/lib/api-client'
-import { confidenceReasons, reasonText, type Incident } from '@/lib/oversight'
+import { confidenceReasons, excludedSummary, reasonText, type Incident } from '@/lib/oversight'
 import { cn } from '@/lib/utils'
 import type { PostureResponse } from '@/schemas/oversight'
 
@@ -148,6 +148,11 @@ export function PostureLineView({ posture, incidents, charter }: { posture: Post
         Effects marked kernel-observed were seen by a sensor; the rest are inferred from the agent&apos;s request.
         {posture.incomplete && ' Counts are a lower bound: the window held more decisions than were read.'}
       </p>
+      {excludedSummary(coverage.excluded) && (
+        <p className="text-xs text-muted-foreground" data-testid="posture-excluded" title="Seen by the monitor and left out of every action; counted once per Task">
+          {excludedSummary(coverage.excluded)}
+        </p>
+      )}
     </div>
   )
 }
