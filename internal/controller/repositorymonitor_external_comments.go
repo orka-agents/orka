@@ -151,86 +151,166 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorExternalReviewThread
 		if len(out) >= repositoryMonitorMaxExternalThreads || totalRunes >= repositoryMonitorMaxExternalTotalRunes {
 			break
 		}
-		if raw.IsResolved || raw.IsOutdated || strings.TrimSpace(raw.ID) == "" || len(raw.Comments) == 0 {
-			continue
-		}
-		// Skip Orka's own inline review threads.
-		if repositoryMonitorInlineFindingMarker.MatchString(raw.Comments[0].Body) {
-			continue
-		}
-		// Trust-gate on the thread's opening author; subsequent comments in the
-		// thread are included only if their author is also trusted.
-		rootAuthor := strings.TrimSpace(raw.Comments[0].Author)
-		rootBotActor := strings.EqualFold(strings.TrimSpace(raw.Comments[0].AuthorType), "Bot")
-		rootAllowed, rootIsBot, err := r.repositoryMonitorExternalCommentAuthorAllowed(ctx, monitor, baseURL, owner, repository, token, rootAuthor, rootBotActor, permCache)
+		thread, usedRunes, ok, err := r.buildRepositoryMonitorExternalReviewThread(ctx, monitor, baseURL, owner, repository, token, pr, spec, raw, repositoryMonitorMaxExternalTotalRunes-totalRunes, permCache)
 		if err != nil {
 			return nil, err
 		}
-		if !rootAllowed {
+		if !ok {
 			continue
 		}
-
-		comments := make([]repositoryMonitorExternalReviewComment, 0, min(len(raw.Comments), repositoryMonitorMaxCommentsPerThread))
-		var revParts []string
-		for _, c := range raw.Comments {
-			if len(comments) >= repositoryMonitorMaxCommentsPerThread || totalRunes >= repositoryMonitorMaxExternalTotalRunes {
-				break
-			}
-			author := strings.TrimSpace(c.Author)
-			isBotActor := strings.EqualFold(strings.TrimSpace(c.AuthorType), "Bot")
-			allowed, _, err := r.repositoryMonitorExternalCommentAuthorAllowed(ctx, monitor, baseURL, owner, repository, token, author, isBotActor, permCache)
-			if err != nil {
-				return nil, err
-			}
-			if !allowed {
-				continue
-			}
-			remaining := repositoryMonitorMaxExternalTotalRunes - totalRunes
-			limit := min(repositoryMonitorMaxExternalCommentRunes, remaining)
-			if limit <= 0 {
-				break
-			}
-			body := sanitizeRepositoryMonitorReviewText(c.Body, limit)
-			if body == "" {
-				continue
-			}
-			totalRunes += len([]rune(body))
-			comments = append(comments, repositoryMonitorExternalReviewComment{
-				Author: author,
-				Body:   body,
-			})
-			revParts = append(revParts, strings.TrimSpace(c.ID)+"|"+strings.TrimSpace(c.UpdatedAt)+"|"+author+"|"+repositoryMonitorShortHash(body))
-		}
-		if len(comments) == 0 {
-			continue
-		}
-		revision := repositoryMonitorShortHash(strings.Join(revParts, "\n"))
-		// Skip threads whose exact trusted comment revision was already handled
-		// by Orka (independent of head SHA so an unresolved thread doesn't loop
-		// after a repair push, while a new trusted comment changes revision and
-		// becomes eligible again).
-		if r.Store != nil {
-			ackID := repositoryMonitorExternalAckMutationID(monitor, pr.Number, raw.ID, revision)
-			if existing, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, ackID); err == nil && existing.Status == repositoryMonitorRunPhaseSucceeded {
-				continue
-			}
-			// Backward-compatible check for head-keyed reply records.
-			mutID := repositoryMonitorExternalReplyMutationID(monitor, pr.Number, raw.ID, pr.HeadSHA)
-			if existing, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutID); err == nil && existing.Status == repositoryMonitorRunPhaseSucceeded && existing.Reason == raw.ID {
-				continue
-			}
-		}
-		out = append(out, repositoryMonitorExternalReviewThread{
-			ThreadID: strings.TrimSpace(raw.ID),
-			Path:     sanitizeRepositoryMonitorReviewText(raw.Path, 256),
-			Line:     raw.Line,
-			Author:   rootAuthor,
-			IsBot:    rootIsBot || repositoryMonitorExternalBotAllowed(spec, rootAuthor, rootBotActor),
-			Revision: revision,
-			Comments: comments,
-		})
+		totalRunes += usedRunes
+		out = append(out, thread)
 	}
 	return out, nil
+}
+
+func (r *RepositoryMonitorReconciler) buildRepositoryMonitorExternalReviewThread(
+	ctx context.Context,
+	monitor *corev1alpha1.RepositoryMonitor,
+	baseURL, owner, repository, token string,
+	pr repositoryMonitorPullRequest,
+	spec corev1alpha1.RepositoryMonitorRepairExternalCommentsSpec,
+	raw repositoryMonitorRawExternalThread,
+	remainingRunes int,
+	permCache map[string]bool,
+) (repositoryMonitorExternalReviewThread, int, bool, error) {
+	if raw.IsResolved || raw.IsOutdated || strings.TrimSpace(raw.ID) == "" || len(raw.Comments) == 0 {
+		return repositoryMonitorExternalReviewThread{}, 0, false, nil
+	}
+	// Skip Orka's own inline review threads.
+	if repositoryMonitorInlineFindingMarker.MatchString(raw.Comments[0].Body) {
+		return repositoryMonitorExternalReviewThread{}, 0, false, nil
+	}
+	// Trust-gate on the thread's opening author; subsequent comments in the
+	// thread are included only if their author is also trusted.
+	rootAuthor := strings.TrimSpace(raw.Comments[0].Author)
+	rootBotActor := strings.EqualFold(strings.TrimSpace(raw.Comments[0].AuthorType), "Bot")
+	rootAllowed, rootIsBot, err := r.repositoryMonitorExternalCommentAuthorAllowed(ctx, monitor, baseURL, owner, repository, token, rootAuthor, rootBotActor, permCache)
+	if err != nil || !rootAllowed {
+		return repositoryMonitorExternalReviewThread{}, 0, false, err
+	}
+
+	// Collect all trusted comments for revision calculation first (independent
+	// of the prompt comment/rune budget), excluding durably owned Orka replies.
+	type trustedComment struct {
+		author string
+		body   string
+		revKey string
+	}
+	var trusted []trustedComment
+	for _, c := range raw.Comments {
+		author := strings.TrimSpace(c.Author)
+		isBotActor := strings.EqualFold(strings.TrimSpace(c.AuthorType), "Bot")
+		allowed, _, err := r.repositoryMonitorExternalCommentAuthorAllowed(ctx, monitor, baseURL, owner, repository, token, author, isBotActor, permCache)
+		if err != nil {
+			return repositoryMonitorExternalReviewThread{}, 0, false, err
+		}
+		if !allowed {
+			continue
+		}
+		if r.isRepositoryMonitorOwnedReplyComment(ctx, monitor, pr.Number, raw.ID, c.ID) {
+			continue
+		}
+		body := sanitizeRepositoryMonitorReviewText(c.Body, repositoryMonitorMaxExternalCommentRunes)
+		if body == "" {
+			continue
+		}
+		trusted = append(trusted, trustedComment{
+			author: author,
+			body:   body,
+			revKey: strings.TrimSpace(c.ID) + "|" + strings.TrimSpace(c.UpdatedAt) + "|" + author + "|" + repositoryMonitorShortHash(body),
+		})
+	}
+	if len(trusted) == 0 {
+		return repositoryMonitorExternalReviewThread{}, 0, false, nil
+	}
+
+	revParts := make([]string, 0, len(trusted))
+	for _, tc := range trusted {
+		revParts = append(revParts, tc.revKey)
+	}
+	revision := repositoryMonitorShortHash(strings.Join(revParts, "\n"))
+	// Check acknowledgement before charging the global rune budget so already
+	// handled unresolved threads never starve later unacknowledged threads.
+	if r.isRepositoryMonitorExternalThreadAcknowledged(ctx, monitor, pr, raw.ID, revision) {
+		return repositoryMonitorExternalReviewThread{}, 0, false, nil
+	}
+
+	// Keep the root comment plus the most recent trusted follow-ups within the
+	// per-thread comment cap and remaining global rune budget.
+	selected := trusted
+	if len(selected) > repositoryMonitorMaxCommentsPerThread {
+		tailCount := repositoryMonitorMaxCommentsPerThread - 1
+		bounded := make([]trustedComment, 0, repositoryMonitorMaxCommentsPerThread)
+		bounded = append(bounded, selected[0])
+		bounded = append(bounded, selected[len(selected)-tailCount:]...)
+		selected = bounded
+	}
+
+	comments := make([]repositoryMonitorExternalReviewComment, 0, len(selected))
+	usedRunes := 0
+	for _, tc := range selected {
+		avail := remainingRunes - usedRunes
+		if avail <= 0 {
+			break
+		}
+		body := tc.body
+		if runes := []rune(body); len(runes) > avail {
+			body = string(runes[:avail])
+		}
+		usedRunes += len([]rune(body))
+		comments = append(comments, repositoryMonitorExternalReviewComment{
+			Author: tc.author,
+			Body:   body,
+		})
+	}
+	if len(comments) == 0 {
+		return repositoryMonitorExternalReviewThread{}, 0, false, nil
+	}
+	return repositoryMonitorExternalReviewThread{
+		ThreadID: strings.TrimSpace(raw.ID),
+		Path:     sanitizeRepositoryMonitorReviewText(raw.Path, 256),
+		Line:     raw.Line,
+		Author:   rootAuthor,
+		IsBot:    rootIsBot || repositoryMonitorExternalBotAllowed(spec, rootAuthor, rootBotActor),
+		Revision: revision,
+		Comments: comments,
+	}, usedRunes, true, nil
+}
+
+func (r *RepositoryMonitorReconciler) isRepositoryMonitorExternalThreadAcknowledged(
+	ctx context.Context,
+	monitor *corev1alpha1.RepositoryMonitor,
+	pr repositoryMonitorPullRequest,
+	threadID, revision string,
+) bool {
+	if r.Store == nil {
+		return false
+	}
+	ackID := repositoryMonitorExternalAckMutationID(monitor, pr.Number, threadID, revision)
+	if existing, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, ackID); err == nil && existing.Status == repositoryMonitorRunPhaseSucceeded {
+		return true
+	}
+	mutID := repositoryMonitorExternalReplyMutationID(monitor, pr.Number, threadID, pr.HeadSHA)
+	if existing, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutID); err == nil && existing.Status == repositoryMonitorRunPhaseSucceeded && existing.Reason == threadID {
+		return true
+	}
+	return false
+}
+
+func (r *RepositoryMonitorReconciler) isRepositoryMonitorOwnedReplyComment(
+	ctx context.Context,
+	monitor *corev1alpha1.RepositoryMonitor,
+	prNumber int64,
+	threadID, commentID string,
+) bool {
+	commentID = strings.TrimSpace(commentID)
+	if r.Store == nil || commentID == "" {
+		return false
+	}
+	id := repositoryMonitorExternalOwnedReplyID(monitor, prNumber, threadID, commentID)
+	existing, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, id)
+	return err == nil && existing.Status == repositoryMonitorRunPhaseSucceeded && existing.ExternalID == commentID
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorExternalCommentAuthorAllowed(
@@ -481,9 +561,9 @@ func (r *RepositoryMonitorReconciler) replyExternalReviewThreadsAfterRepair(
 	marker := fmt.Sprintf("<!-- orka:repo-monitor-reply head=%s -->", strings.ToLower(strings.TrimSpace(job.HeadSHA)))
 	seen := map[string]bool{}
 
-	// Before resolving any thread, verify the PR head still matches the repair's
-	// pushed SHA so a concurrent force-push never gets stale threads resolved.
-	headStillMatchesPushed := true
+	// Before resolving any thread, fail closed unless a live PR read confirms
+	// the current head SHA still matches the repair's pushed SHA.
+	headStillMatchesPushed := false
 	if spec.ResolveBots || spec.ResolveOnFix {
 		if owner, repo, ownerErr := repositoryMonitorOwnerRepository(monitor); ownerErr == nil {
 			if livePR, prErr := r.fetchRepositoryMonitorPullRequest(ctx, owner, repo, token, job.PRNumber); prErr == nil && livePR != nil {
@@ -591,7 +671,20 @@ func (r *RepositoryMonitorReconciler) postRepositoryMonitorExternalThreadReply(
 		}
 	}
 
-	replyErr := r.addRepositoryMonitorReviewThreadReply(ctx, token, threadID, body)
+	replyCommentID, replyErr := r.addRepositoryMonitorReviewThreadReply(ctx, token, threadID, body)
+	if replyErr == nil && replyCommentID != "" && r.Store != nil {
+		ownedID := repositoryMonitorExternalOwnedReplyID(monitor, job.PRNumber, threadID, replyCommentID)
+		_ = r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{
+			ID:           ownedID,
+			Operation:    "owned_external_review_reply",
+			TargetKind:   repositoryMonitorPullRequestKind,
+			TargetNumber: job.PRNumber,
+			TargetSHA:    job.PushedSHA,
+			Reason:       threadID,
+			ExternalID:   replyCommentID,
+			Status:       repositoryMonitorRunPhaseSucceeded,
+		})
+	}
 	if mutation != nil {
 		mutation.Status, mutation.Error = repositoryMonitorRunPhaseSucceeded, ""
 		if replyErr != nil {
@@ -651,7 +744,7 @@ func (r *RepositoryMonitorReconciler) resolveRepositoryMonitorExternalThreadOnce
 	return resolveErr
 }
 
-func (r *RepositoryMonitorReconciler) addRepositoryMonitorReviewThreadReply(ctx context.Context, token, threadID, body string) error {
+func (r *RepositoryMonitorReconciler) addRepositoryMonitorReviewThreadReply(ctx context.Context, token, threadID, body string) (string, error) {
 	const mutation = `mutation($thread:ID!,$body:String!) { addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread,body:$body}) { comment { id } } }`
 	var response struct {
 		AddPullRequestReviewThreadReply struct {
@@ -661,12 +754,13 @@ func (r *RepositoryMonitorReconciler) addRepositoryMonitorReviewThreadReply(ctx 
 		} `json:"addPullRequestReviewThreadReply"`
 	}
 	if err := r.repositoryMonitorGitHubGraphQL(ctx, token, mutation, map[string]any{"thread": threadID, repositoryMonitorGraphQLBodyVariable: body}, &response); err != nil {
-		return err
+		return "", err
 	}
-	if strings.TrimSpace(response.AddPullRequestReviewThreadReply.Comment.ID) == "" {
-		return fmt.Errorf("GitHub did not return a reply comment ID for review thread %s", threadID)
+	commentID := strings.TrimSpace(response.AddPullRequestReviewThreadReply.Comment.ID)
+	if commentID == "" {
+		return "", fmt.Errorf("GitHub did not return a reply comment ID for review thread %s", threadID)
 	}
-	return nil
+	return commentID, nil
 }
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorExternalThreadAck(
@@ -700,6 +794,11 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorExternalThreadAck(
 		return r.recordRepositoryMonitorGitHubMutation(ctx, monitor, rec)
 	}
 	return r.updateRepositoryMonitorGitHubMutation(ctx, monitor, rec)
+}
+
+func repositoryMonitorExternalOwnedReplyID(monitor *corev1alpha1.RepositoryMonitor, prNumber int64, threadID, commentID string) string {
+	key := strings.Join([]string{monitor.Namespace, monitor.Name, strconv.FormatInt(prNumber, 10), threadID, commentID, "ext-owned-reply"}, "|")
+	return "ghmut-" + repositoryMonitorShortHash(key)
 }
 
 func repositoryMonitorExternalAckMutationID(monitor *corev1alpha1.RepositoryMonitor, prNumber int64, threadID, revision string) string {

@@ -169,7 +169,7 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 		return nil, err
 	}
 	operation := publicationOperationID("prepare", recovery.task)
-	commitAuthorName, commitAuthorEmail, err := taskPublicationCommitIdentity(recovery.task)
+	commitAuthorName, commitAuthorEmail, err := taskPublicationWireCommitIdentity(recovery.task)
 	if err != nil {
 		return nil, err
 	}

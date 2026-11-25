@@ -223,7 +223,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 		return acpPublicationResult{}, err
 	}
 	prepareOperation := publicationOperationID("prepare", task)
-	commitAuthorName, commitAuthorEmail, err := taskPublicationCommitIdentity(task)
+	commitAuthorName, commitAuthorEmail, err := taskPublicationWireCommitIdentity(task)
 	if err != nil {
 		return acpPublicationResult{}, err
 	}
@@ -873,6 +873,21 @@ func taskPublicationCommitIdentity(task *corev1alpha1.Task) (string, string, err
 		return publisher.CommitAuthorName, publisher.CommitAuthorEmail, nil
 	}
 	return publisher.ValidateCommitIdentity(task.Spec.Workspace.CommitAuthorName, task.Spec.Workspace.CommitAuthorEmail)
+}
+
+// taskPublicationWireCommitIdentity returns explicit author overrides for the
+// publisher prepare request, or empty strings when the Task uses the built-in
+// default identity so older publishers with strict JSON decoding accept
+// ordinary unsigned publications during mixed-version rollouts.
+func taskPublicationWireCommitIdentity(task *corev1alpha1.Task) (string, string, error) {
+	name, email, err := taskPublicationCommitIdentity(task)
+	if err != nil {
+		return "", "", err
+	}
+	if name == publisher.CommitAuthorName && email == publisher.CommitAuthorEmail {
+		return "", "", nil
+	}
+	return name, email, nil
 }
 
 func formatCommitIdentity(name, email string) string {
