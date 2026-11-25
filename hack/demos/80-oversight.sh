@@ -173,12 +173,19 @@ cmd_up() {
   cmd_status
 }
 
+# require_digest fails unless an image reference is pinned by digest.
+require_digest() {
+  local name="$1" ref="${!1:-}"
+  [[ -n "${ref}" ]] || { echo "set ${name} to an image pinned by digest (…@sha256:…)" >&2; return 1; }
+  [[ "${ref}" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "${name} must be pinned by digest (…@sha256:<64 hex>): ${ref}" >&2; return 1; }
+}
+
 # ensure_fleet installs the pack's scripted model endpoint and Agents, if it
 # has any: $OVERSIGHT_PACK/fleet/{platform.json,aimock.yaml,aimock-fixtures.json}.
 ensure_fleet() {
   local fleet="${OVERSIGHT_PACK}/fleet"
   [[ -f "${fleet}/platform.json" ]] || return 0
-  : "${OVERSIGHT_AIMOCK_IMAGE:?set OVERSIGHT_AIMOCK_IMAGE to the scripted model image, pinned by digest}"
+  require_digest OVERSIGHT_AIMOCK_IMAGE
   local model_ns
   model_ns="$(python3 -I -c 'import json, sys; print(next(i["metadata"]["name"] for i in json.load(open(sys.argv[1]))["items"] if i["kind"] == "Namespace"))' "${fleet}/platform.json")"
   log "Installing the scripted fleet (model endpoint in ${model_ns})"
@@ -187,7 +194,7 @@ ensure_fleet() {
     --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
   if [[ -f "${fleet}/demo-fixtures.json" ]]; then
     # In-cluster stand-ins the fleet's Tasks reach, such as a registry.
-    : "${OVERSIGHT_FIXTURE_IMAGE:?set OVERSIGHT_FIXTURE_IMAGE to an image with python3, pinned by digest}"
+    require_digest OVERSIGHT_FIXTURE_IMAGE
     sed -e "s|@WORKER_IMAGE@|${OVERSIGHT_FIXTURE_IMAGE}|g" "${fleet}/demo-fixtures.json" | kubectl apply -f - >/dev/null
   fi
   sed -e "s|@NS@|${model_ns}|g" -e "s|@IMAGE@|${OVERSIGHT_AIMOCK_IMAGE}|g" \
