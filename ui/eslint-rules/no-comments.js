@@ -15,6 +15,8 @@ const directive = new RegExp(
     ")(?=[\\s:]|$)",
 );
 
+const deprecation = /^[\s*]*(?:Deprecated:|@deprecated\b)/m;
+
 export const noComments = {
   meta: {
     type: "suggestion",
@@ -40,6 +42,7 @@ export const noComments = {
           if (
             comment.type === "Shebang" ||
             directive.test(comment.value) ||
+            deprecation.test(comment.value) ||
             licenseHeader
           ) {
             continue;
