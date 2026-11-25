@@ -24,16 +24,22 @@ func TestTaskGitHubAppCredentialsOnlyOnAgentTasks(t *testing.T) {
 	if match == nil {
 		t.Fatal("TaskSpec is missing the GitHubApp credential marker")
 	}
+	const signingMessage = "commitSigningCredentialRef does not support GitHubApp"
+	signing := regexp.MustCompile(`XValidation:rule="([^"]*commitSigningCredentialRef[^"]*)",message="` + signingMessage + `"`).
+		FindSubmatch(readTaskTypesSource(t))
+	if signing == nil {
+		t.Fatal("TaskSpec is missing the commit signing GitHubApp marker")
+	}
 	ref := apiextensions.JSONSchemaProps{Type: "object", Properties: map[string]apiextensions.JSONSchemaProps{"type": {Type: "string"}}}
 	refs := map[string]apiextensions.JSONSchemaProps{}
-	for _, name := range []string{"readCredentialRef", "publicationReadCredentialRef", "publicationCredentialRef", "forgeCredentialRef"} {
+	for _, name := range []string{"readCredentialRef", "publicationReadCredentialRef", "publicationCredentialRef", "forgeCredentialRef", "commitSigningCredentialRef"} {
 		refs[name] = ref
 	}
 	structural, err := structuralschema.NewStructural(&apiextensions.JSONSchemaProps{
 		Type: "object", Properties: map[string]apiextensions.JSONSchemaProps{
 			"type": {Type: "string"}, "workspace": {Type: "object", Properties: refs},
 		},
-		XValidations: apiextensions.ValidationRules{{Rule: string(match[1]), Message: message}},
+		XValidations: apiextensions.ValidationRules{{Rule: string(match[1]), Message: message}, {Rule: string(signing[1]), Message: signingMessage}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +60,7 @@ func TestTaskGitHubAppCredentialsOnlyOnAgentTasks(t *testing.T) {
 		"container with App publication read": {spec: map[string]any{"type": "container", "workspace": map[string]any{"publicationReadCredentialRef": app}}, wantErr: true},
 		"container with App publication":      {spec: map[string]any{"type": "container", "workspace": map[string]any{"publicationCredentialRef": app}}, wantErr: true},
 		"ai with App forge":                   {spec: map[string]any{"type": "ai", "workspace": map[string]any{"forgeCredentialRef": app}}, wantErr: true},
+		"agent with App commit signing":       {spec: map[string]any{"type": "agent", "workspace": map[string]any{"commitSigningCredentialRef": app}}, wantErr: true},
 	} {
 		errs, _ := validator.Validate(context.Background(), nil, structural, tc.spec, nil, celconfig.RuntimeCELCostBudget)
 		if tc.wantErr != (len(errs) != 0) {
