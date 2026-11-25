@@ -109,6 +109,11 @@ func (h *Handlers) IngestOversightDecisions(c fiber.Ctx) error {
 	if namespace == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "namespace is required")
 	}
+	if h.watchNamespace != "" && namespace != h.watchNamespace {
+		// Reads are limited to the watched namespace; records elsewhere could
+		// never be shown.
+		return fiber.NewError(fiber.StatusForbidden, "namespace not allowed")
+	}
 	if err := (internalCallerAuthorizer{}).verifyNamespace(c, namespace); err != nil {
 		return err
 	}

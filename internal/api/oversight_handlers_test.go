@@ -392,3 +392,11 @@ func TestOversightProducersMergeDeclarationsWithoutVerifyingTrust(t *testing.T) 
 	require.Equal(t, 1, observed.Failures)
 	require.Equal(t, []string{"shadow"}, observed.ObservedTrustStates)
 }
+
+func TestOversightIngestStaysInTheWatchedNamespace(t *testing.T) {
+	e := newOversightTestEnv(t, true, "system:serviceaccount:other:oversight-ingest|create|oversightdecisions")
+	e.h.watchNamespace = "team"
+	batch := oversightv1.IngestRequest{Decisions: []oversightv1.OversightDecision{testOversightDecision("a@0", "a", "", "", time.Now().UTC())}}
+	status, _ := e.do(t, http.MethodPost, "/internal/v1/oversight/other/decisions", "system:serviceaccount:other:oversight-ingest", batch)
+	require.Equal(t, http.StatusForbidden, status)
+}
