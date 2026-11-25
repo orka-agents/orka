@@ -108,3 +108,34 @@ func TestOversightReplaySendsNothingWhenALineIsInvalid(t *testing.T) {
 	err = runOversightReplay(t.Context(), c, replayOptions{files: []string{file}, batchSize: 10}, &bytes.Buffer{}, time.Now)
 	require.ErrorContains(t, err, "namespace is required")
 }
+
+func TestOversightReplayPlaysATakeWithItsTimingAsNewDecisions(t *testing.T) {
+	ingest := &fakeIngest{stored: map[string]bool{}}
+	server := httptest.NewServer(ingest)
+	defer server.Close()
+	start := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
+	first := replayLine(t, "task@0", start)
+	var second oversightv1.OversightDecision
+	require.NoError(t, json.Unmarshal([]byte(replayLine(t, "task@1", start.Add(20*time.Second))), &second))
+	second.Action.PriorActionIDs = []string{"task@0"}
+	raw, _ := json.Marshal(second)
+	file := filepath.Join(t.TempDir(), "take.jsonl")
+	require.NoError(t, os.WriteFile(file, []byte(first+"\n"+string(raw)+"\n"), 0o600))
+	c := client.NewWithNamespace(server.URL, "", "team")
+	clock := start.Add(time.Hour)
+	now := func() time.Time { clock = clock.Add(time.Second); return clock }
+
+	began := time.Now()
+	var out bytes.Buffer
+	opts := replayOptions{files: []string{file}, namespace: "team", batchSize: 50, preserveTiming: true,
+		speed: 100, maxGap: time.Second, idSuffix: "-t2"}
+	require.NoError(t, runOversightReplay(t.Context(), c, opts, &out, now))
+	require.GreaterOrEqual(t, time.Since(began), 150*time.Millisecond, "the recorded 20s gap plays at 100x")
+	require.Len(t, ingest.batches, 2, "one decision per request")
+	played := ingest.batches[1][0]
+	require.Equal(t, "task-t2@1", played.ID)
+	require.Equal(t, "task-t2", played.TaskName)
+	require.Equal(t, []string{"task-t2@0"}, played.Action.PriorActionIDs)
+	require.True(t, played.ObservedAt.After(start.Add(time.Hour)), "stamped with the time it was sent")
+	require.Contains(t, out.String(), "Played 2 decisions")
+}

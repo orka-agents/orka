@@ -43,6 +43,15 @@ type replayOptions struct {
 	pace       time.Duration
 	shiftToNow bool
 	dryRun     bool
+	// preserveTiming sends one decision at a time, waiting the recorded gap
+	// between observations (divided by speed, capped at maxGap), and stamps
+	// each with the time it is sent.
+	preserveTiming bool
+	speed          float64
+	maxGap         time.Duration
+	// idSuffix is appended to every ID and Task name, so one recorded take can
+	// be played again as new decisions.
+	idSuffix string
 }
 
 func newOversightReplayCmd() *cobra.Command {
@@ -71,6 +80,11 @@ func newOversightReplayCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.shiftToNow, "shift-to-now", false,
 		"Shift every observedAt by the same amount so the newest record is now, keeping their spacing")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Check the files and report what would be sent")
+	cmd.Flags().BoolVar(&opts.preserveTiming, "preserve-timing", false,
+		"Send one decision at a time with the recorded gaps between them, stamped with the time each is sent")
+	cmd.Flags().Float64Var(&opts.speed, "speed", 1, "With --preserve-timing, play this many times faster")
+	cmd.Flags().DurationVar(&opts.maxGap, "max-gap", 10*time.Second, "With --preserve-timing, wait at most this long between decisions")
+	cmd.Flags().StringVar(&opts.idSuffix, "id-suffix", "", "Append this to every decision ID and Task name (for a repeat take)")
 	_ = cmd.MarkFlagRequired("file")
 	return cmd
 }
@@ -153,6 +167,12 @@ func runOversightReplay(ctx context.Context, c *client.Client, opts replayOption
 			decisions[i].RunID = opts.runID
 		}
 	}
+	if opts.idSuffix != "" {
+		applyIDSuffix(decisions, opts.idSuffix)
+	}
+	if opts.preserveTiming && !opts.dryRun {
+		return playWithTiming(ctx, c, opts, decisions, out, now)
+	}
 	if opts.dryRun {
 		_, _ = fmt.Fprintf(out, "%d decisions are valid; nothing submitted (dry run).\n", len(decisions))
 		return nil
@@ -183,6 +203,54 @@ func runOversightReplay(ctx context.Context, c *client.Client, opts replayOption
 		}
 	}
 	_, _ = fmt.Fprintf(out, "Replayed %d decisions into %s: %d ingested, %d already stored.\n",
+		len(decisions), opts.namespace, ingested, duplicates)
+	return nil
+}
+
+func applyIDSuffix(decisions []oversightv1.OversightDecision, suffix string) {
+	rename := func(id string) string {
+		task, seq, found := strings.Cut(id, "@")
+		if !found {
+			return id + suffix
+		}
+		return task + suffix + "@" + seq
+	}
+	for i := range decisions {
+		d := &decisions[i]
+		d.ID, d.TaskName = rename(d.ID), d.TaskName+suffix
+		for j := range d.Action.PriorActionIDs {
+			d.Action.PriorActionIDs[j] = rename(d.Action.PriorActionIDs[j])
+		}
+	}
+}
+
+// playWithTiming replays a recorded take as a live stream.
+func playWithTiming(ctx context.Context, c *client.Client, opts replayOptions, decisions []oversightv1.OversightDecision,
+	out io.Writer, now func() time.Time) error {
+	if opts.speed <= 0 {
+		return errors.New("--speed must be positive")
+	}
+	ingested, duplicates := 0, 0
+	for i := range decisions {
+		if i > 0 {
+			gap := time.Duration(float64(decisions[i].ObservedAt.Sub(decisions[i-1].ObservedAt)) / opts.speed)
+			gap = min(max(gap, 0), opts.maxGap)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(gap):
+			}
+		}
+		d := decisions[i]
+		d.ObservedAt = now().UTC().Truncate(time.Millisecond)
+		response, err := c.IngestOversightDecisions(ctx, opts.namespace, []oversightv1.OversightDecision{d})
+		if err != nil {
+			return fmt.Errorf("submit %s (ingested %d so far): %w", d.ID, ingested, err)
+		}
+		ingested += response.Ingested
+		duplicates += response.Duplicates
+	}
+	_, _ = fmt.Fprintf(out, "Played %d decisions into %s: %d ingested, %d already stored.\n",
 		len(decisions), opts.namespace, ingested, duplicates)
 	return nil
 }
