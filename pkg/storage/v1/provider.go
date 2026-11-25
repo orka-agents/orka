@@ -147,8 +147,9 @@ const (
 	// adds [MemoryConsolidationStore]. Revision 12 adds [AHPStore] to
 	// [StateProvider]. Revision 13 adds [UsageStore.ListUsageTasksInSessions]
 	// and the requester a [UsageTask] keeps. Revision 14 adds
-	// [AuthSessionStore] to [StateProvider].
-	ContractRevision = 14
+	// [AuthSessionStore] to [StateProvider]. Revision 15 requires
+	// [WriteWatermarkStore] on both provider contracts.
+	ContractRevision = 15
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -205,6 +206,7 @@ type StateProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -240,5 +242,6 @@ type ArtifactProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	ArtifactStore
 }

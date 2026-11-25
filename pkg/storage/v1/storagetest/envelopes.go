@@ -23,6 +23,8 @@ type Option func(*suiteOptions)
 
 type suiteOptions struct {
 	providerAttachesEnvelopes bool
+	maintenance               *MaintenanceHarness
+	durability                *DurabilityHarness
 }
 
 // ProviderAttachesEnvelopes runs the suite against a provider that attaches

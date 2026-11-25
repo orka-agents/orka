@@ -308,6 +308,7 @@ func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 		"version 6":                     `PRAGMA user_version=6`,
 		"version 7":                     `PRAGMA user_version=7`,
 		"version 8":                     `PRAGMA user_version=8`,
+		"version 9":                     `PRAGMA user_version=9`,
 		"unknown":                       `PRAGMA user_version=2147483647`,
 		"negative":                      `PRAGMA user_version=-1`,
 		"version reset":                 `PRAGMA user_version=0`,
