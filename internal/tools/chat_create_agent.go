@@ -56,7 +56,7 @@ func (t *ChatCreateAgentTool) Parameters() json.RawMessage {
 			enabledString:           map[string]any{jsonSchemaTypeField: jsonSchemaTypeBoolean, jsonSchemaDescriptionField: "Enable coordination (delegate_task/wait_for_tasks tools)"},
 			"maxConcurrentChildren": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max concurrent child tasks (default 5)"},
 			"maxDepth":              map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Max delegation depth (default 3)"},
-			"allowedAgents":         map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "List of agent names this agent can delegate to. If empty, can delegate to any agent.", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription, jsonSchemaMinLengthField: 1, jsonSchemaPatternField: `\S`}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent namespace (defaults to same namespace)"}}, jsonSchemaRequiredField: []string{nameField}}},
+			"allowedAgents":         map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, jsonSchemaDescriptionField: "Explicit Agents allowed for delegate_task, including dynamically created Agents. Empty or omitted denies tool delegation. Entries match name and namespace; omitted namespace defaults to the parent Agent namespace.", itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription, jsonSchemaMinLengthField: 1, jsonSchemaPatternField: `\S`}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Agent namespace (defaults to parent Agent namespace)"}}, jsonSchemaRequiredField: []string{nameField}}},
 		},
 		},
 	}, jsonSchemaRequiredField: []string{nameField},
@@ -583,9 +583,8 @@ func normalizeChatOpenCodeModel(agent *corev1alpha1.Agent) (string, bool) {
 
 // parseCoordinationConfig extracts coordination configuration from chat args
 // into the agent spec. It returns an error result and false for a field with
-// the wrong JSON type or an allowed agent without a name. Ignoring either would
-// drop a restriction: an empty allowedAgents lets the Agent delegate to any
-// agent.
+// the wrong JSON type or an allowed agent without a name, rather than silently
+// dropping the intended coordination policy.
 func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (string, bool) {
 	coord, ok := a["coordination"]
 	if !ok {
@@ -636,7 +635,7 @@ func parseCoordinationConfig(a map[string]any, agent *corev1alpha1.Agent) (strin
 				return invalid(fmt.Sprintf("allowedAgents[%d].name", i), "a string")
 			}
 			if strings.TrimSpace(name) == "" {
-				result, _ := ChatToolErrorResult(invalidArgumentsErrorType, fmt.Sprintf("coordination.allowedAgents[%d].name is required", i), "Give each allowed agent a name, or omit allowedAgents to allow any agent")
+				result, _ := ChatToolErrorResult(invalidArgumentsErrorType, fmt.Sprintf("coordination.allowedAgents[%d].name is required", i), "Give each allowed agent a name; empty or omitted allowedAgents denies delegate_task")
 				return result, false
 			}
 			namespace := ""

@@ -227,8 +227,11 @@ The top-level Task phase, `status.execution`, and `status.delivery` are safe com
 ## How the features fit together
 
 - **Delegation.** A coordinator Agent creates child Tasks with `delegate_task` and collects
-  them with `wait_for_tasks`. The controller enforces the allowed Agents, depth, and
-  concurrency, and records progress in the parent's `status.childTasks`. In autonomous mode,
+  them with `wait_for_tasks`. Explicit allowlists match Agent name and namespace;
+  empty or omitted lists deny tool delegation, including to dynamically created Agents.
+  The controller retains its separate legacy `create_agent` label/parent-task exemption,
+  which is not an ownership/provenance check and does not bypass tool policy. It enforces
+  depth and concurrency, and records progress in the parent's `status.childTasks`. In autonomous mode,
   the controller reruns the coordinator in a loop, carrying a saved plan between iterations.
   See [Multi-agent coordination](../guides/multi-agent-coordination.md) and
   [Autonomous tasks](../guides/autonomous-tasks.md).

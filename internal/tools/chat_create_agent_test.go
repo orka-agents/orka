@@ -27,6 +27,33 @@ import (
 
 const testProviderOpenAI = "openai"
 
+func TestCreateAgentSchemasDescribeFailClosedDelegation(t *testing.T) {
+	for _, tool := range []Tool{&ChatCreateAgentTool{}, NewCreateAgentTool(newFakeClient(), executionmode.HarnessV2)} {
+		t.Run(tool.Name()+"/"+fmt.Sprintf("%T", tool), func(t *testing.T) {
+			var schema struct {
+				Properties struct {
+					Coordination struct {
+						Properties struct {
+							AllowedAgents struct {
+								Description string `json:"description"`
+							} `json:"allowedAgents"`
+						} `json:"properties"`
+					} `json:"coordination"`
+				} `json:"properties"`
+			}
+			if err := json.Unmarshal(tool.Parameters(), &schema); err != nil {
+				t.Fatal(err)
+			}
+			description := schema.Properties.Coordination.Properties.AllowedAgents.Description
+			for _, want := range []string{"Empty or omitted denies", "parent Agent namespace"} {
+				if !strings.Contains(description, want) {
+					t.Errorf("allowedAgents description missing %q: %s", want, description)
+				}
+			}
+		})
+	}
+}
+
 func TestChatCreateAgentTool_ParametersDescribeOpenCodeACP(t *testing.T) {
 	params := string((&ChatCreateAgentTool{}).Parameters())
 	for _, want := range []string{"copilot, claude, codex, or opencode", "OpenCode defaults to Read, Write, Edit, Bash, Glob, and Grep", "OpenCode defaults to true", "native instruction mechanism"} {
@@ -923,8 +950,8 @@ func TestParseRuntimeConfig_RejectsInvalidOpenCodeModel(t *testing.T) {
 	}
 }
 
-// A coordination restriction with the wrong JSON type used to be ignored, and an
-// empty allowedAgents lets the Agent delegate to any agent.
+// A coordination restriction with the wrong JSON type must be rejected rather
+// than silently dropping the intended policy.
 func TestChatCreateAgentTool_Execute_RejectsWrongTypedCoordination(t *testing.T) {
 	run := func(coordination string) (ChatToolResult, []corev1alpha1.Agent) {
 		t.Helper()
@@ -1049,6 +1076,9 @@ func TestChatCreateAgentTool_Execute_AllowedAgentIdentities(t *testing.T) {
 					if wantError != "" {
 						if response.Success || response.ErrorType != errTypeInvalidArgs || !strings.Contains(response.Error, wantError) {
 							t.Errorf("result = %#v, want invalid arguments with error %q", response, wantError)
+						}
+						if mode == "direct" && strings.HasSuffix(wantError, ".name is required") && strings.Contains(response.Suggestion, "allow any agent") {
+							t.Errorf("invalid allowlist advice must not promise unrestricted delegation: %s", response.Suggestion)
 						}
 						if len(agents.Items) != 0 {
 							t.Errorf("rejected allowedAgents created %d Agents", len(agents.Items))

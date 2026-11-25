@@ -18,7 +18,8 @@ coding-agent Agents (Codex, Claude Code, Copilot CLI, OpenCode) that run on Runt
 [`code-review/`](https://github.com/orka-agents/orka/tree/main/examples/code-review) runs one
 code-and-review pass and opens a pull request on approval.
 [`self-bootstrapping/`](https://github.com/orka-agents/orka/tree/main/examples/self-bootstrapping)
-creates the specialists it needs before delegating to them.
+creates specialists in a first Task; an operator then allowlists them and starts a new
+Task to delegate.
 :::
 
 ## How delegation works
@@ -40,6 +41,53 @@ Task "refactor-auth" (coordinator Agent)              depth 0
 5. `wait_for_tasks` blocks until the children finish and returns their results.
 6. The coordinator writes the final answer and the parent Task completes. Deleting the parent
    deletes its children.
+
+## Explicit delegation policy
+
+`spec.coordination.allowedAgents` is an explicit name-and-namespace allowlist for
+`delegate_task`, in both native workers and the ACP broker. An empty or omitted
+list **denies tool delegation**, including to Agents created by `create_agent`.
+An entry without `namespace` defaults to the **coordinating parent Agent's
+namespace**, not the child Task's namespace. A same-named Agent in another
+namespace needs its own explicit entry:
+
+```yaml
+coordination:
+  enabled: true
+  allowedAgents:
+    - name: researcher               # In the coordinator Agent's namespace
+    - name: researcher
+      namespace: specialist-catalog  # A different, explicitly allowed Agent
+```
+
+Use `agentNamespace` to select a cross-namespace target while keeping the child
+Task in the parent Task's namespace. Namespace isolation and watch-namespace
+restrictions still apply. Controller-rendered worker policies use `namespace/name`
+entries. Legacy bare names in `ORKA_COORDINATION_ALLOWED_AGENTS` match only the
+parent Task namespace (falling back to the current namespace when it is absent).
+Changing `taskNamespace` cannot broaden that default.
+
+The Task controller also checks explicit entries by name **and** namespace. It
+still has a separate legacy exemption for an Agent marked
+`orka.ai/created-by: create_agent` whose parent-task label/annotation matches the
+parent Task name. That exemption is unchanged, is not an ownership/provenance
+check, and is **not** used by `delegate_task`. Do not rely on it to bypass a tool
+allowlist.
+
+### Upgrade behavior
+
+Native `delegate_task` previously treated an empty/absent worker allowlist as
+unrestricted; it now refuses delegation, matching the broker. Populate explicit
+entries before submitting coordinating Tasks, including for dynamically created
+specialists. Cross-namespace targets must be listed with their namespace.
+
+Native worker policy is frozen in each Job environment. Editing an Agent's list
+does **not** refresh an already-running worker. Newly built Jobs use the current
+list, including later autonomous iterations. For non-autonomous two-stage
+bootstrap, first create specialists and return their names
+without delegating; an operator then allowlists them and submits a new delegation
+Task. Keep the creation Task while its owned specialists are needed. See the
+[self-bootstrapping example](https://github.com/orka-agents/orka/tree/main/examples/self-bootstrapping).
 
 ## Set up a coordinator
 
@@ -151,7 +199,7 @@ The controller checks every child against its parent's Agent before the child ru
 
 | Field | Default | What happens |
 | --- | --- | --- |
-| `allowedAgents` | `[]` | A child for an Agent not on the list fails. With an empty list, the coordinator can delegate only to Agents it created itself with `create_agent`. |
+| `allowedAgents` | `[]` | Explicit Agent name/namespace targets. Empty or omitted denies `delegate_task`, even for dynamically created Agents. The controller retains its separate legacy dynamic-Agent exemption described above. |
 | `maxDepth` | `3` | A child deeper than this fails. The top-level coordinator is depth 0. |
 | `maxConcurrentChildren` | `5` | A child beyond this limit waits, and starts when a sibling finishes. It does not fail. |
 

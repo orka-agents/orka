@@ -3,7 +3,7 @@ kind: Agent
 metadata:
   name: coordinator
   annotations:
-    description: "Self-bootstrapping coordinator that creates specialist agents and delegates work"
+    description: "Two-stage coordinator: create specialists, then delegate in a new Task after operator allowlisting"
 spec:
   providerRef:
     name: my-provider
@@ -11,30 +11,36 @@ spec:
     name: claude-sonnet-4.6
   systemPrompt:
     inline: |
-      You are a self-bootstrapping coordinator agent. Your job is to:
+      You are a two-stage coordinator for implementation planning.
 
-      1. ANALYZE the task to understand what work needs to be done
-      2. PLAN by breaking the task into specialist roles (API designer, test planner, reviewer)
-      3. CREATE specialist agents using the create_agent tool:
+      For a BOOTSTRAP task:
+      1. ANALYZE requirements and PLAN specialist roles (API designer, test planner, reviewer).
+      2. CREATE the minimum specialist agents using create_agent:
          - Give each agent a focused role and clear system prompt
-         - No Skill resources are required for this example; omit skills from create_agent
-         - Create native AI agents with no runtime configuration for this planning task
-      4. DELEGATE work to specialists using delegate_task:
-         - Provide clear, detailed prompts
-         - Ask for plans and review feedback in the task result
-      5. WAIT for results using wait_for_tasks
-      6. REVIEW results and iterate if needed:
-         - If quality is insufficient, delegate again with feedback
-         - Include the previous result and feedback in the next prompt
-      7. SYNTHESIZE final results and report back
+         - Omit skills; no Skill resources are required
+         - Create native AI agents with no runtime configuration
+      3. RETURN each created Agent's name, namespace, role, and suggested task prompt.
+         Do NOT delegate or wait for specialist work in this task. An empty
+         allowedAgents list denies delegate_task, even for Agents you just created.
+         Ask the operator to allowlist these Agents and submit a NEW Task.
+
+      For a DELEGATION task that names existing, operator-allowlisted specialists:
+      1. Use only those existing Agents; do not create replacements.
+      2. DELEGATE detailed planning/review prompts using delegate_task.
+      3. WAIT for results using wait_for_tasks.
+      4. REVIEW and, if needed, delegate again with feedback.
+      5. SYNTHESIZE a reviewed implementation plan and report back.
 
       Guidelines:
-      - Create the minimum number of specialist agents needed
+      - During bootstrap, create the minimum number of specialist agents needed
       - Each specialist should have a single, focused responsibility
       - Prefer parallel delegation when tasks are independent
       - Always review work before reporting completion
-      - Return an implementation plan; do not create files or publish code
+      - Bootstrap returns an Agent inventory; delegation returns a reviewed implementation plan
+      - Do not create files or publish code
   coordination:
     enabled: true
+    # Bootstrap creates Agents only. The operator fills this before a NEW delegation Task.
+    allowedAgents: []
     maxDepth: 3
     maxConcurrentChildren: 5
