@@ -14,7 +14,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import { useOversightAlerts } from '@/stores/oversight-alerts'
 import { OversightDashboard, type OversightSearch } from './oversight-dashboard'
-import { charterConfig, charterDecision, makeDecision, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
+import { charterConfig, charterDecision, makeDecision, makePosture, producersResponse, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
 import type { DecisionView } from '@/schemas/oversight'
 
 function serveList(items: DecisionView[], query?: { key: string; value: string }[]) {
@@ -49,7 +49,7 @@ describe('OversightDashboard', () => {
       const frame = `event: ready\ndata: {}\n\n: heartbeat\n\nid: 9\nevent: decision\ndata: ${JSON.stringify({ ...unavailableDecision, seq: 9 })}\n\n`
       return new HttpResponse(frame, { headers: { 'Content-Type': 'text/event-stream' } })
     }))
-    renderDashboard()
+    renderDashboard({ view: 'activity' })
     const table = await screen.findByRole('table', { name: 'Oversight decisions' })
     await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(3))
     expect(new URL(streamURL).searchParams.get('after')).toBe('1')
@@ -61,9 +61,10 @@ describe('OversightDashboard', () => {
   it('pivots from the drawer to an all-time search', async () => {
     serveList([riskyDecision])
     const { onSearchChange } = renderDashboard({ window: '7d', decision: riskyDecision.id })
+    await userEvent.click(await screen.findByRole('button', { name: 'Details' }))
     const effects = await screen.findByRole('region', { name: 'Kernel-observed effects' })
     await userEvent.click(within(effects).getAllByRole('button', { name: 'Search all time for bin:wget' })[0])
-    expect(onSearchChange).toHaveBeenLastCalledWith({ q: 'bin:wget', window: undefined, decision: undefined, view: undefined })
+    expect(onSearchChange).toHaveBeenLastCalledWith({ q: 'bin:wget', window: undefined, decision: undefined, view: 'activity' })
   })
 
   it('shows the echoed terms, the history panel and how many actions were searched', async () => {
@@ -103,7 +104,9 @@ describe('OversightDashboard', () => {
     )
     renderDashboard()
     expect(await screen.findAllByText('Oversight is not enabled')).not.toHaveLength(0)
-    expect(listHits).toBe(1)
+    await new Promise((r) => setTimeout(r, 100))
+    // One request each for the feed and Needs you, never retried.
+    expect(listHits).toBeLessThanOrEqual(2)
     expect(streamHits).toBe(0)
   })
 
@@ -146,9 +149,9 @@ describe('OversightDashboard', () => {
 
   it('switches to the question by action matrix', async () => {
     serveList([riskyDecision])
-    const { onSearchChange } = renderDashboard()
+    const { onSearchChange } = renderDashboard({ view: 'activity' })
     await screen.findByRole('table', { name: 'Oversight decisions' })
-    await userEvent.click(screen.getByRole('tab', { name: 'Question × action' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Question × action' }))
     expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ view: 'matrix' }))
   })
 
@@ -180,9 +183,10 @@ describe('OversightDashboard', () => {
 
     it('does not alert for charter decisions already in the initial page', async () => {
       serveList([charterDecision])
-      server.use(streamOf({ ...riskyDecision, seq: 30 }))
-      renderDashboard()
-      await screen.findByText('Looks risky')
+      server.use(streamOf({ ...riskyDecision, id: 'build-1@30', seq: 30 }))
+      renderDashboard({ view: 'activity' })
+      const table = await screen.findByRole('table', { name: 'Oversight decisions' })
+      await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(3))
       expect(toastMock).not.toHaveBeenCalled()
       expect(screen.queryByTestId('alerts-unread')).not.toBeInTheDocument()
     })
@@ -207,5 +211,130 @@ describe('OversightDashboard', () => {
       renderDashboard({ decision: charterDecision.id })
       expect(await screen.findByTestId('charter-rule')).toHaveTextContent('Rule 2 of Workspace charter')
     })
+  })
+
+  describe('Needs you', () => {
+    const pause = (n: number, agent = 'agent-a') => makeDecision({
+      id: `${agent}@${n}`, seq: n, agentName: agent, wouldHavePaused: true, signal: 'risky', disposition: 'audit_flagged',
+      actionNarrative: `[synthetic] pushed images to a forbidden path #${n}`, observedAt: `2026-11-25T10:0${n % 10}:00Z`,
+    })
+
+    it('is the default and groups what needs a person into incident cards', async () => {
+      serveList([
+        pause(1), pause(2), pause(3),
+        { ...charterDecision, agentName: 'agent-b' },
+        { ...unavailableDecision, agentName: 'agent-c' },
+        makeDecision({ id: 'risky-only', seq: 50, signal: 'risky', disposition: 'audit_flagged' }),
+        makeDecision({ id: 'quiet', seq: 51 }),
+      ])
+      server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+      renderDashboard()
+      expect(screen.getByRole('tab', { name: /Needs you/ })).toHaveAttribute('data-state', 'active')
+      const list = await screen.findByRole('list', { name: 'Incidents that need you' })
+      await waitFor(() => expect(within(list).getAllByRole('button')).toHaveLength(3))
+      const cards = within(list).getAllByRole('button')
+      // Most severe first: charter break, would hold, would pause.
+      expect(cards[0]).toHaveTextContent('agent-b broke charter rule 2: Never write outside the workspace.')
+      expect(cards[0].querySelectorAll('[data-badge]')).toHaveLength(1)
+      expect(cards[1]).toHaveTextContent('Scorer unavailable → would hold')
+      expect(cards[2]).toHaveTextContent('agent-a pushed images to a forbidden path #3')
+      expect(cards[2]).not.toHaveTextContent('[synthetic]')
+      expect(within(cards[2]).getByLabelText('3 actions')).toHaveTextContent('×3')
+      expect(screen.queryByRole('table', { name: 'Oversight decisions' })).not.toBeInTheDocument()
+    })
+
+    it('asks the server for the attention-worthy signals in the posture window', async () => {
+      const seen: string[] = []
+      server.use(http.get('/api/v1/oversight/decisions', ({ request }) => {
+        const url = new URL(request.url)
+        seen.push(`${url.searchParams.get('q')}@${url.searchParams.get('window')}`)
+        return HttpResponse.json({ namespace: 'default', items: [] })
+      }))
+      renderDashboard()
+      expect(await screen.findByText('Nothing needs you')).toBeInTheDocument()
+      expect(seen).toContain('signal:against_charter|monitor_unavailable|risky@24h')
+    })
+
+    it('caps the cards at the attention budget', async () => {
+      serveList(Array.from({ length: 12 }, (_, i) => pause(i + 1, `agent-${i}`)))
+      renderDashboard()
+      const list = await screen.findByRole('list', { name: 'Incidents that need you' })
+      await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(10))
+      await userEvent.click(screen.getByRole('button', { name: 'Show 2 more' }))
+      expect(within(list).getAllByRole('listitem')).toHaveLength(12)
+    })
+
+    it('opens the newest decision of a card with the incident listed in the drawer', async () => {
+      serveList([pause(1), pause(2)])
+      const onSearchChange = vi.fn()
+      const { rerender } = render(<OversightDashboard search={{}} onSearchChange={onSearchChange} />)
+      const list = await screen.findByRole('list', { name: 'Incidents that need you' })
+      await userEvent.click(within(list).getByRole('button'))
+      expect(onSearchChange).toHaveBeenLastCalledWith(expect.objectContaining({ decision: 'agent-a@2' }))
+      rerender(<OversightDashboard search={{ decision: 'agent-a@2' }} onSearchChange={onSearchChange} />)
+      const actions = await screen.findByRole('list', { name: 'Actions in this incident' })
+      expect(within(actions).getAllByRole('listitem')).toHaveLength(2)
+    })
+
+    it('shows posture as one line whose parts open their evidence', async () => {
+      server.use(http.get('/api/v1/oversight/posture', () => HttpResponse.json(makePosture())))
+      serveList([pause(1)])
+      renderDashboard()
+      const line = await screen.findByTestId('posture-line')
+      await waitFor(() => expect(line).toHaveTextContent('Degraded · 1 incident · 80% seen · 1 blind spot · audit mode'))
+      expect(line).not.toHaveTextContent(/warranted/i)
+      expect(screen.getByTestId('posture-honesty')).toHaveTextContent('Audit mode: findings would pause an action; nothing is held.')
+      expect(screen.getByTestId('posture-honesty')).toHaveTextContent('inferred')
+      const blind = within(line).getByRole('button', { name: /1 blind spot/ })
+      expect(blind).toHaveAttribute('aria-expanded', 'false')
+      await userEvent.click(blind)
+      expect(screen.getByRole('list', { name: 'Known blind spots' })).toHaveTextContent('dns_over_https')
+      await userEvent.click(within(line).getByRole('button', { name: /80% seen/ }))
+      expect(screen.getByText('8 of 10 actions attributed in the last 24h')).toBeInTheDocument()
+      // The counters grid and canary basis are not on Needs you.
+      expect(screen.queryByText('Canary basis')).not.toBeInTheDocument()
+    })
+
+    it('shows the charter collapsed under the posture line, open when a rule is highlighted', async () => {
+      server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+      serveList([])
+      renderDashboard()
+      const toggle = await screen.findByRole('button', { name: /Demo charter · Rule 3 highlighted/ })
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByRole('list', { name: 'Rules of Workspace charter' })).toBeInTheDocument()
+      await userEvent.click(toggle)
+      expect(screen.queryByRole('list', { name: 'Rules of Workspace charter' })).not.toBeInTheDocument()
+    })
+
+    it('keeps the charter collapsed when nothing is highlighted', async () => {
+      const plain = { ...charterConfig, charters: [{ ...charterConfig.charters![0], preview: false, bounds: [{ id: 'B1', sentence: 'One rule.' }] }] }
+      server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(plain)))
+      serveList([])
+      renderDashboard()
+      const toggle = await screen.findByRole('button', { name: /Workspace charter · 1 rules/ })
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    })
+  })
+
+  it('puts operator material on the Monitors tab', async () => {
+    server.use(
+      http.get('/api/v1/oversight/posture', () => HttpResponse.json(makePosture())),
+      http.get('/api/v1/oversight/producers', () => HttpResponse.json(producersResponse)),
+    )
+    serveList([])
+    renderDashboard({ view: 'monitors' })
+    expect(await screen.findByText('Canary basis')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Scorers' })).toBeInTheDocument()
+    expect(await screen.findByText('(declared, not verified by Orka)')).toBeInTheDocument()
+  })
+
+  it('keeps the key grammar behind a help button', async () => {
+    serveList([])
+    renderDashboard({ view: 'activity' })
+    const box = await screen.findByLabelText('Search oversight decisions')
+    expect(box).toHaveAttribute('placeholder', 'try "push prod" or "token"')
+    expect(screen.queryByText(/Narrow with key:value terms/)).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Search help' }))
+    expect(screen.getByText(/Narrow with key:value terms/)).toBeInTheDocument()
   })
 })

@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest'
+import userEvent from '@testing-library/user-event'
 import { render, screen } from '@/test/test-utils'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
@@ -49,6 +50,9 @@ describe('oversight renders API strings as text', () => {
     expect(await screen.findByText(`bound ${IMG}`)).toBeInTheDocument()
     expect(screen.getByText(`title ${SCRIPT}`)).toBeInTheDocument()
     expect(await screen.findByTestId('charter-rule')).toHaveTextContent(`Rule 1 of title ${SCRIPT}`)
+    // The story is plain text too, then the record under Details.
+    expect(await screen.findByRole('heading', { name: `narrative ${IMG} — breaks charter rule 1` })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Details' }))
     expect(await screen.findByTestId('request-summary')).toHaveTextContent(`summary ${IMG}`)
     expect(screen.getByTestId('advisor-summary')).toHaveTextContent(`advisor ${IMG}`)
     expect(screen.getAllByText(`sentence ${SCRIPT}`).length).toBeGreaterThan(0)

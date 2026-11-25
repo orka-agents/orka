@@ -96,7 +96,7 @@ export function TaskOversightTab({ taskName }: { taskName: string }) {
                 </p>
               </div>
             </div>
-            <DecisionTable decisions={decisions} onOpen={setOpen} hideTask label={`Oversight decisions for ${taskName}`} />
+            <DecisionTable decisions={decisions} onOpen={setOpen} label={`Oversight decisions for ${taskName}`} />
             {list.hasNextPage && (
               <div className="flex justify-center">
                 <Button variant="outline" size="sm" onClick={() => list.fetchNextPage()} disabled={list.isFetchingNextPage}>

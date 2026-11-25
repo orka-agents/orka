@@ -1,50 +1,22 @@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { feedbackLabelText, isMonitorFailure, scoreVsThreshold, signalPresentation, topTriggeredScore } from '@/lib/oversight'
+import { useOversightConfig } from '@/hooks/use-oversight'
+import { feedbackLabelText, rowBadge, rowBadgeKind, rowSummary, rowTooltip, type RowBadgeKind } from '@/lib/oversight'
 import { formatTimestamp, timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import type { DecisionView } from '@/schemas/oversight'
-import { Chip, SignalBadge, WouldPauseChip } from './signal'
-import { TONE_ROW } from './tones'
+import { TONE_BADGE, TONE_ROW } from './tones'
 
-/** The one-line reason a row reads the way it does. */
-export function DecisionFinding({ decision }: { decision: DecisionView }) {
-  switch (decision.signal) {
-    case 'against_charter': {
-      const finding = decision.charterFindings?.[0]
-      if (finding) {
-        return (
-          <span className="text-status-failed">
-            Against the charter: <q className="italic">{finding.sentence}</q>
-          </span>
-        )
-      }
-      return <span className="text-status-failed">Held for a person</span>
-    }
-    case 'monitor_unavailable': {
-      const failed = [...(decision.scorers ?? []), ...(decision.advisors ?? [])].find((p) => isMonitorFailure(p.status))
-      return (
-        <span className="text-status-failed">
-          Scorer unavailable → would hold (never a silent pass)
-          {failed && <span className="text-muted-foreground"> · {failed.status}</span>}
-        </span>
-      )
-    }
-    case 'risky': {
-      const top = topTriggeredScore(decision)
-      if (top) {
-        return (
-          <span className="text-status-pending">
-            Looks risky: <span className="font-mono tabular-nums">{scoreVsThreshold(top)}</span>
-            {top.label && <span className="text-muted-foreground"> {top.label}</span>}
-          </span>
-        )
-      }
-      const concern = decision.advisors?.flatMap((a) => a.concerns ?? [])[0]
-      return <span className="text-status-pending">Looks risky{concern ? `: advisor named ${concern}` : ''}</span>
-    }
-    default:
-      return <span>{signalPresentation(decision.signal).label}</span>
-  }
+/** The single most severe badge a row or incident carries, always in words. */
+export function RowBadge({ kind, className }: { kind: RowBadgeKind; className?: string }) {
+  const badge = rowBadge(kind)
+  return (
+    <span
+      data-badge={kind}
+      className={cn('inline-flex w-fit shrink-0 items-center whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium', TONE_BADGE[badge.tone], className)}
+    >
+      {badge.label}
+    </span>
+  )
 }
 
 export interface DecisionTableProps {
@@ -55,11 +27,15 @@ export interface DecisionTableProps {
   onToggleSelect?: (id: string) => void
   onToggleAll?: (select: boolean) => void
   label?: string
-  /** Hide the Task column, as on a Task's own tab. */
-  hideTask?: boolean
 }
 
-export function DecisionTable({ decisions, onOpen, selectedIds, onToggleSelect, onToggleAll, label = 'Oversight decisions', hideTask }: DecisionTableProps) {
+/**
+ * One line per action: the most severe badge, a plain-language summary built
+ * from its fields, and when. Raw tool text and IDs are on hover and in the
+ * drawer.
+ */
+export function DecisionTable({ decisions, onOpen, selectedIds, onToggleSelect, onToggleAll, label = 'Oversight decisions' }: DecisionTableProps) {
+  const { data: config } = useOversightConfig()
   const selectable = Boolean(selectedIds && onToggleSelect)
   const allSelected = selectable && decisions.length > 0 && decisions.every((d) => selectedIds!.has(d.id))
   return (
@@ -68,24 +44,18 @@ export function DecisionTable({ decisions, onOpen, selectedIds, onToggleSelect, 
         <TableRow>
           {selectable && (
             <TableHead className="w-8">
-              <input
-                type="checkbox"
-                aria-label="Select all shown"
-                checked={allSelected}
-                onChange={(event) => onToggleAll?.(event.target.checked)}
-              />
+              <input type="checkbox" aria-label="Select all shown" checked={allSelected} onChange={(event) => onToggleAll?.(event.target.checked)} />
             </TableHead>
           )}
-          <TableHead>Signal</TableHead>
-          <TableHead>Action</TableHead>
-          {!hideTask && <TableHead>Task</TableHead>}
-          <TableHead>Why</TableHead>
+          <TableHead className="w-0">Signal</TableHead>
+          <TableHead>What happened</TableHead>
           <TableHead className="text-right">When</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {decisions.map((decision) => {
-          const tone = signalPresentation(decision.signal).tone
+          const kind = rowBadgeKind(decision)
+          const tone = rowBadge(kind).tone
           return (
             <TableRow
               key={decision.id}
@@ -103,43 +73,24 @@ export function DecisionTable({ decisions, onOpen, selectedIds, onToggleSelect, 
                   />
                 </TableCell>
               )}
-              <TableCell>
-                <div className="flex flex-col gap-1">
-                  <SignalBadge signal={decision.signal} />
-                  {decision.wouldHavePaused && <WouldPauseChip />}
-                </div>
-              </TableCell>
-              <TableCell className="max-w-md">
+              <TableCell><RowBadge kind={kind} /></TableCell>
+              <TableCell className="max-w-xl whitespace-normal">
                 <button
                   type="button"
-                  className="text-left font-mono text-sm font-medium hover:underline focus-visible:underline focus-visible:outline-none"
+                  title={rowTooltip(decision)}
+                  className={cn('text-left text-sm hover:underline focus-visible:underline focus-visible:outline-none', tone === 'muted' && 'text-muted-foreground')}
                   onClick={(event) => {
                     event.stopPropagation()
                     onOpen(decision.id)
                   }}
-                  aria-label={`Inspect ${decision.action.toolName} action ${decision.id}`}
                 >
-                  {decision.action.toolName}
+                  {rowSummary(decision, config)}
                 </button>
-                {decision.actionNarrative && (
-                  <p className={cn('line-clamp-2 text-xs whitespace-normal', tone === 'muted' ? 'text-muted-foreground/80' : 'text-muted-foreground')}>
-                    {decision.actionNarrative}
-                  </p>
-                )}
-              </TableCell>
-              {!hideTask && (
-                <TableCell className="text-xs">
-                  <div className="font-mono">{decision.taskName}</div>
-                  {decision.agentName && <div className="text-muted-foreground">{decision.agentName}</div>}
-                </TableCell>
-              )}
-              <TableCell className="max-w-sm text-xs whitespace-normal">
-                <DecisionFinding decision={decision} />
                 {decision.feedback && (
-                  <div className="mt-1"><Chip>Labelled: {feedbackLabelText(decision.feedback.label)}</Chip></div>
+                  <span className="ml-2 text-xs text-muted-foreground">· labelled {feedbackLabelText(decision.feedback.label).toLowerCase()}</span>
                 )}
               </TableCell>
-              <TableCell className="text-right text-xs text-muted-foreground tabular-nums" title={formatTimestamp(decision.observedAt)}>
+              <TableCell className="text-right text-xs whitespace-nowrap text-muted-foreground tabular-nums" title={formatTimestamp(decision.observedAt)}>
                 {timeAgo(decision.observedAt)}
               </TableCell>
             </TableRow>

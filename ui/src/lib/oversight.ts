@@ -297,3 +297,146 @@ export function findCharterRule(config: OversightConfig | undefined, revision: s
 export const ruleName = (rule: CharterRule | undefined, boundID: string) => (rule ? `Rule ${rule.bound.number}` : `rule ${boundID}`)
 
 export const charterName = (charter: CharterDeclaration) => charter.title?.trim() || charter.revision
+
+// --- Plain-language rows and incidents -----------------------------------------
+
+const SYNTHETIC_PREFIX = /^\s*\[synthetic\]\s*/i
+
+/** Whether a producer marked a text as synthetic (generated for a demo or test). */
+export const isSyntheticText = (text: string | undefined) => Boolean(text && SYNTHETIC_PREFIX.test(text))
+
+/** A text without its leading "[synthetic] " marker, for row display only. */
+export const stripSynthetic = (text: string) => text.replace(SYNTHETIC_PREFIX, '')
+
+/** 2.6 MB, 512 KB, 120 B. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '?'
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '')} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1).replace(/\.0$/, '')} KB`
+  return `${bytes} B`
+}
+
+const hasBytes = (decision: DecisionView) => typeof decision.action.effects?.bytesSent === 'number'
+
+/** What the action did, from its fields: bytes and destination, else the narrative, else its effects. */
+export function actionPhrase(decision: DecisionView): string {
+  const effects = decision.action.effects ?? {}
+  const dest = effects.destinations?.[0]?.value
+  if (dest && hasBytes(decision)) return `sent ${formatBytes(effects.bytesSent!)} to ${dest}`
+  if (dest) return `connected to ${dest}`
+  const narrative = decision.actionNarrative?.trim()
+  if (narrative) return stripSynthetic(narrative)
+  const path = effects.paths?.[0]?.value
+  if (path) return `touched ${path}`
+  const binary = effects.binaries?.[0]?.value
+  if (binary) return `ran ${binaryName(binary)}`
+  return `called ${decision.action.toolName}`
+}
+
+/** "sent 2.6 MB to host:443 — breaks charter rule 1". */
+export function rowSummary(decision: DecisionView, config: OversightConfig | undefined): string {
+  const phrase = actionPhrase(decision)
+  const finding = decision.charterFindings?.[0]
+  if (finding) {
+    const rule = findCharterRule(config, decision.charterRevision, finding.boundID)
+    return `${phrase} — breaks charter rule ${rule ? rule.bound.number : finding.boundID}`
+  }
+  if (decision.signal === 'monitor_unavailable' || decision.disposition === 'fail_closed') return `${phrase} — scorer unavailable, would hold`
+  if (decision.wouldHavePaused) return `${phrase} — would pause`
+  return phrase
+}
+
+/** The kernel-observed fact that best backs the story, or undefined when nothing was observed. */
+export function strongestEvidence(decision: DecisionView): string | undefined {
+  const effects = decision.action.effects ?? {}
+  const dest = effects.destinations?.[0]?.value
+  if (hasBytes(decision)) return `kernel saw ${formatBytes(effects.bytesSent!)} sent${dest ? ` to ${dest}` : ''}`
+  const event = effects.notableEvents?.[0]
+  if (event) {
+    const what = event.dest || event.path || (event.binary && binaryName(event.binary))
+    return `kernel saw ${event.kind}${what ? ` ${what}` : ''}${event.outcome ? ` (${event.outcome})` : ''}`
+  }
+  return undefined
+}
+
+export type RowBadgeKind = 'against_charter' | 'would_hold' | 'would_pause' | 'risky' | 'consistent'
+
+const ROW_BADGES: Record<RowBadgeKind, SignalPresentation & { rank: number }> = {
+  against_charter: { label: 'Against the charter', tone: 'red', rank: 4 },
+  would_hold: { label: 'Scorer unavailable → would hold', tone: 'red-outline', rank: 3 },
+  would_pause: { label: 'Would pause (audit mode)', tone: 'amber', rank: 2 },
+  risky: { label: 'Looks risky', tone: 'amber', rank: 1 },
+  consistent: { label: 'Consistent with the task', tone: 'muted', rank: 0 },
+}
+
+/** The one most severe badge for a decision. */
+export function rowBadgeKind(decision: DecisionView): RowBadgeKind {
+  if (decision.signal === 'against_charter') return 'against_charter'
+  if (decision.signal === 'monitor_unavailable' || decision.disposition === 'fail_closed') return 'would_hold'
+  if (decision.wouldHavePaused) return 'would_pause'
+  if (decision.signal === 'risky') return 'risky'
+  return 'consistent'
+}
+
+export const rowBadge = (kind: RowBadgeKind) => ROW_BADGES[kind]
+
+/** The hover text that keeps raw identifiers out of the row itself. */
+export function rowTooltip(decision: DecisionView): string {
+  return [
+    `tool ${decision.action.toolName}`,
+    decision.action.requestSummary && `request: ${decision.action.requestSummary}`,
+    `task ${decision.taskName}`,
+    decision.agentName && `agent ${decision.agentName}`,
+    `id ${decision.id}`,
+  ].filter(Boolean).join('\n')
+}
+
+/** Whether a decision needs a person: a charter break, a would-pause or a would-hold. */
+export const needsHuman = (decision: DecisionView) => rowBadgeKind(decision) !== 'risky' && rowBadgeKind(decision) !== 'consistent'
+
+export interface Incident {
+  key: string
+  actor: string
+  /** A bound ID for a charter break, else "would-pause" or "would-hold". */
+  kind: string
+  badge: RowBadgeKind
+  title: string
+  decisions: DecisionView[]
+  lastSeen: string
+}
+
+const shorten = (text: string, max = 90) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text)
+
+/**
+ * Groups the decisions that need a person into incidents by actor (agent,
+ * else Task) and kind, most severe first and then most recent. Titles are
+ * built from the data: the actor, then the broken rule or the newest
+ * decision's own account of what it did.
+ */
+export function groupIncidents(decisions: DecisionView[], config: OversightConfig | undefined): Incident[] {
+  const groups = new Map<string, Incident>()
+  const newestFirst = [...decisions].sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0) || b.observedAt.localeCompare(a.observedAt))
+  for (const decision of newestFirst) {
+    if (!needsHuman(decision)) continue
+    const badge = rowBadgeKind(decision)
+    const finding = decision.charterFindings?.[0]
+    const kind = badge === 'against_charter' && finding ? finding.boundID : badge === 'would_pause' ? 'would-pause' : 'would-hold'
+    const actor = decision.agentName || decision.taskName
+    const key = `${actor}\u0000${kind}`
+    const existing = groups.get(key)
+    if (existing) {
+      existing.decisions.push(decision)
+      continue
+    }
+    let title: string
+    if (finding) {
+      const rule = findCharterRule(config, decision.charterRevision, finding.boundID)
+      const sentence = rule?.bound.sentence ?? finding.sentence
+      title = `${actor} broke charter rule ${rule ? rule.bound.number : finding.boundID}: ${shorten(sentence)}`
+    } else {
+      title = `${actor} ${shorten(actionPhrase(decision))}`
+    }
+    groups.set(key, { key, actor, kind, badge, title, decisions: [decision], lastSeen: decision.observedAt })
+  }
+  return [...groups.values()].sort((a, b) => rowBadge(b.badge).rank - rowBadge(a.badge).rank || b.lastSeen.localeCompare(a.lastSeen))
+}

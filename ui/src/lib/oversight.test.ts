@@ -3,6 +3,11 @@ import { parse } from 'yaml'
 import {
   destinationDomain,
   draftConcernYaml,
+  formatBytes,
+  groupIncidents,
+  rowSummary,
+  stripSynthetic,
+  strongestEvidence,
   featureReason,
   pathDirectoryGlob,
   queryTerm,
@@ -11,7 +16,7 @@ import {
   topTriggeredScore,
 } from './oversight'
 import { parseSSEFrames } from '@/hooks/use-oversight-stream'
-import { makeDecision, riskyDecision } from '@/test/fixtures/oversight'
+import { charterConfig, charterDecision, makeDecision, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
 
 describe('oversight helpers', () => {
   it('builds key:value terms and quotes values with spaces', () => {
@@ -59,5 +64,38 @@ describe('oversight helpers', () => {
       { id: '7', event: 'decision', data: '{"a":1}' },
     ])
     expect(rest).toBe('id: 8\nevent: dec')
+  })
+
+  it('formats bytes and strips the synthetic marker', () => {
+    expect(formatBytes(2.6 * 1024 * 1024)).toBe('2.6 MB')
+    expect(formatBytes(2048)).toBe('2 KB')
+    expect(formatBytes(12)).toBe('12 B')
+    expect(stripSynthetic('[synthetic] pushed')).toBe('pushed')
+    expect(stripSynthetic('real [synthetic]')).toBe('real [synthetic]')
+  })
+
+  it('summarises a row from its fields', () => {
+    const push = makeDecision({
+      action: { toolName: 'shell', effects: { bytesSent: 2.6 * 1024 * 1024, destinations: [{ value: 'registry.demo.svc:443', count: 1 }] } },
+      charterFindings: [{ producerRef: 'rules-a', boundID: 'B0', sentence: 'x' }],
+      signal: 'against_charter',
+    })
+    expect(rowSummary(push, charterConfig)).toBe('sent 2.6 MB to registry.demo.svc:443 — breaks charter rule 1')
+    expect(strongestEvidence(push)).toBe('kernel saw 2.6 MB sent to registry.demo.svc:443')
+    expect(strongestEvidence(makeDecision())).toBeUndefined()
+  })
+
+  it('groups only what needs a person into incidents, most severe first', () => {
+    const pause = (id: string, seq: number) => makeDecision({ id, seq, wouldHavePaused: true, signal: 'risky' })
+    const incidents = groupIncidents([
+      pause('p1', 1), pause('p2', 2), charterDecision, unavailableDecision,
+      makeDecision({ id: 'r', signal: 'risky' }), makeDecision({ id: 'c' }),
+    ], charterConfig)
+    expect(incidents.map((i) => [i.kind, i.decisions.map((d) => d.id)])).toEqual([
+      ['B1', ['build-2@1']],
+      ['would-hold', ['build-3@1']],
+      ['would-pause', ['p2', 'p1']],
+    ])
+    expect(incidents[0].title).toBe('agent-a broke charter rule 2: Never write outside the workspace.')
   })
 })

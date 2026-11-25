@@ -1,28 +1,51 @@
 import { describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
-import { render, screen, within } from '@/test/test-utils'
+import { render, screen } from '@/test/test-utils'
+vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
+
+import { useAuthStore } from '@/stores/auth'
 import { DecisionTable } from './decision-table'
 import { QuestionMatrix } from './question-matrix'
-import { charterDecision, makeDecision, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
+import { http, HttpResponse } from 'msw'
+import { server } from '@/test/mocks/server'
+import { charterConfig, charterDecision, makeDecision, riskyDecision, unavailableDecision } from '@/test/fixtures/oversight'
 
 const rowOf = (signal: string) => document.querySelector<HTMLElement>(`tr[data-signal="${signal}"]`)!
 
 describe('DecisionTable', () => {
-  it('labels every signal in words, not colour alone', () => {
-    render(<DecisionTable decisions={[makeDecision(), riskyDecision, charterDecision, unavailableDecision]} onOpen={() => {}} />)
-    expect(within(rowOf('consistent')).getAllByText('Consistent with the task').length).toBeGreaterThan(0)
-    expect(within(rowOf('risky')).getByText('Looks risky')).toBeInTheDocument()
-    expect(within(rowOf('risky')).getByText('K2 0.91 ≥ 0.82')).toBeInTheDocument()
-    expect(within(rowOf('against_charter')).getByText('Against the charter')).toBeInTheDocument()
-    expect(within(rowOf('against_charter')).getByText('Never write outside the workspace.')).toBeInTheDocument()
-    expect(within(rowOf('monitor_unavailable')).getByText('Scorer unavailable → would hold')).toBeInTheDocument()
-    expect(within(rowOf('monitor_unavailable')).getByText(/never a silent pass/)).toBeInTheDocument()
+  it('gives each row one badge, the most severe, in words', () => {
+    const risky = makeDecision({ id: 'r@1', signal: 'risky', disposition: 'audit_flagged' })
+    render(<DecisionTable decisions={[makeDecision(), riskyDecision, risky, charterDecision, unavailableDecision]} onOpen={() => {}} />)
+    const badges = [...document.querySelectorAll('tbody tr')].map((row) => [...row.querySelectorAll('[data-badge]')].map((b) => b.textContent))
+    expect(badges).toEqual([
+      ['Consistent with the task'],
+      ['Would pause (audit mode)'],
+      ['Looks risky'],
+      ['Against the charter'],
+      ['Scorer unavailable → would hold'],
+    ])
   })
 
-  it('shows the would-pause chip only when gate mode would have paused', () => {
-    render(<DecisionTable decisions={[makeDecision(), riskyDecision]} onOpen={() => {}} />)
-    expect(within(rowOf('risky')).getByText('Would pause (audit mode)')).toBeInTheDocument()
-    expect(within(rowOf('consistent')).queryByText('Would pause (audit mode)')).not.toBeInTheDocument()
+  it('summarises each row in plain language from its fields', async () => {
+    render(<DecisionTable decisions={[riskyDecision, charterDecision, unavailableDecision, makeDecision({ id: 's@1', actionNarrative: '[synthetic] Pushed an image.' })]} onOpen={() => {}} />)
+    expect(screen.getByRole('button', { name: 'sent 2 KB to cdn.registry.example:443 — would pause' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Ran the test suite. — breaks charter rule B1' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Ran the test suite. — scorer unavailable, would hold' })).toBeInTheDocument()
+    // The synthetic marker is stripped from rows.
+    expect(screen.getByRole('button', { name: 'Pushed an image.' })).toBeInTheDocument()
+    // Raw tool text and IDs are on hover, not in the row.
+    const row = screen.getByRole('button', { name: /sent 2 KB/ })
+    expect(row).toHaveAttribute('title', expect.stringContaining('request: fetch weights'))
+    expect(row).toHaveAttribute('title', expect.stringContaining('task build-1'))
+    expect(rowOf('risky')).not.toHaveTextContent('build-1')
+    expect(rowOf('risky')).not.toHaveTextContent('code_exec')
+  })
+
+  it('names the declared rule number when the charter is declared', async () => {
+    useAuthStore.setState({ token: 'test-token' })
+    server.use(http.get('/api/v1/oversight/config', () => HttpResponse.json(charterConfig)))
+    render(<DecisionTable decisions={[charterDecision]} onOpen={() => {}} />)
+    expect(await screen.findByRole('button', { name: 'Ran the test suite. — breaks charter rule 2' })).toBeInTheDocument()
   })
 
   it('keeps grey rows quiet and opens a row on click', async () => {
@@ -30,7 +53,7 @@ describe('DecisionTable', () => {
     render(<DecisionTable decisions={[makeDecision(), riskyDecision]} onOpen={onOpen} />)
     expect(rowOf('consistent').className).toContain('text-muted-foreground')
     expect(rowOf('consistent').className).not.toContain('border-l-')
-    await userEvent.click(screen.getByRole('button', { name: /Inspect code_exec action build-1@2/ }))
+    await userEvent.click(screen.getByRole('button', { name: /sent 2 KB/ }))
     expect(onOpen).toHaveBeenCalledWith('build-1@2')
   })
 

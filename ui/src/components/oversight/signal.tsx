@@ -1,4 +1,3 @@
-import { Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { signalPresentation } from '@/lib/oversight'
 import { TONE_BADGE } from './tones'
@@ -15,14 +14,6 @@ export function SignalBadge({ signal, className }: { signal: string; className?:
       )}
     >
       {presentation.label}
-    </span>
-  )
-}
-
-export function WouldPauseChip() {
-  return (
-    <span className="inline-flex w-fit shrink-0 items-center whitespace-nowrap rounded-full border border-status-pending/60 px-2 py-0.5 text-xs font-medium text-status-pending">
-      Would pause (audit mode)
     </span>
   )
 }
@@ -56,12 +47,11 @@ export function PivotButton({ query, onPivot, children, className }: PivotButton
       title={`Search all time for ${query}`}
       aria-label={`Search all time for ${query}`}
       className={cn(
-        'group inline-flex max-w-full items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-left font-mono text-xs break-all hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none',
+        'inline max-w-full text-left font-mono text-xs break-all underline-offset-2 decoration-dotted hover:underline focus-visible:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none',
         className,
       )}
     >
-      <span className="min-w-0">{children}</span>
-      <Search className="size-3 shrink-0 opacity-40 group-hover:opacity-100" aria-hidden="true" />
+      {children}
     </button>
   )
 }

@@ -28,6 +28,11 @@ function open(decision: DecisionView, props: Partial<React.ComponentProps<typeof
   return { onPivot, onOpenDecision }
 }
 
+/** Opens the collapsed Details, where the full record lives. */
+async function openDetails() {
+  await userEvent.click(await screen.findByRole('button', { name: 'Details' }))
+}
+
 describe('DecisionInspector', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'default' })
@@ -37,6 +42,7 @@ describe('DecisionInspector', () => {
   it('lists every scorer and advisor by producer with trust, status and scores', async () => {
     serve(riskyDecision)
     open(riskyDecision)
+    await openDetails()
     const cards = await screen.findAllByTestId('scorer-card')
     expect(cards).toHaveLength(2)
     // Label from the producers endpoint, else the providerRef.
@@ -62,6 +68,7 @@ describe('DecisionInspector', () => {
   it('shows bytes sent only when the sensor observed sends', async () => {
     serve(riskyDecision)
     open(riskyDecision)
+    await openDetails()
     expect(await screen.findByTestId('bytes-sent')).toHaveTextContent('2,048 bytes sent (kernel-observed)')
   })
 
@@ -69,6 +76,7 @@ describe('DecisionInspector', () => {
     const decision = makeDecision()
     serve(decision)
     open(decision)
+    await openDetails()
     await screen.findByText('Kernel-observed effects')
     expect(screen.queryByTestId('bytes-sent')).not.toBeInTheDocument()
     expect(screen.queryByText(/bytes sent/)).not.toBeInTheDocument()
@@ -77,6 +85,7 @@ describe('DecisionInspector', () => {
   it('pivots a field to an all-time search', async () => {
     serve(riskyDecision)
     const { onPivot } = open(riskyDecision)
+    await openDetails()
     const effects = await screen.findByRole('region', { name: 'Kernel-observed effects' })
     await userEvent.click(within(effects).getAllByRole('button', { name: 'Search all time for bin:wget' })[0])
     expect(onPivot).toHaveBeenLastCalledWith('bin:wget')
@@ -97,6 +106,7 @@ describe('DecisionInspector', () => {
   it('highlights the cited notable event', async () => {
     serve(riskyDecision)
     open(riskyDecision)
+    await openDetails()
     await userEvent.click(await screen.findByRole('button', { name: 'Highlight event ev-2' }))
     const table = screen.getByRole('table', { name: 'Notable events' })
     const rows = within(table).getAllByRole('row')
@@ -107,6 +117,7 @@ describe('DecisionInspector', () => {
   it('opens prior actions in the drawer', async () => {
     serve(riskyDecision)
     const { onOpenDecision } = open(riskyDecision)
+    await openDetails()
     await userEvent.click(await screen.findByRole('button', { name: 'build-1@1' }))
     expect(onOpenDecision).toHaveBeenCalledWith('build-1@1')
   })
@@ -119,6 +130,7 @@ describe('DecisionInspector', () => {
       return HttpResponse.json({ recorded: 1, feedback: { label: 'false_alarm', note: 'benign', reviewer: 'alice', recordedAt: '2026-11-25T10:00:00Z' } })
     }))
     open(riskyDecision)
+    await openDetails()
     await userEvent.type(await screen.findByLabelText('Label note (optional)'), 'benign')
     await userEvent.click(screen.getByRole('button', { name: 'False alarm' }))
     await waitFor(() => expect(body).toEqual({ id: 'build-1@2', label: 'false_alarm', note: 'benign' }))
@@ -135,7 +147,7 @@ describe('DecisionInspector', () => {
       }],
     })))
     const { onPivot } = open(riskyDecision)
-    await userEvent.click(await screen.findByRole('button', { name: /More like this/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /Has it done this before\?/ }))
     const item = await screen.findByTestId('similar-item')
     expect(within(item).getByText('100% alike')).toBeInTheDocument()
     expect(within(item).getByText('exact signature')).toBeInTheDocument()
@@ -145,5 +157,60 @@ describe('DecisionInspector', () => {
     expect(screen.getByText(/Compared 40 actions/)).toBeInTheDocument()
     await userEvent.click(within(item).getByRole('button', { name: 'Search all time for domain:registry.example' }))
     expect(onPivot).toHaveBeenCalledWith('domain:registry.example')
+  })
+
+  it('tells the story first and keeps the record under a collapsed Details', async () => {
+    serve(riskyDecision)
+    open(riskyDecision)
+    expect(await screen.findByRole('heading', { name: 'sent 2 KB to cdn.registry.example:443 — would pause' })).toBeInTheDocument()
+    expect(screen.getByTestId('strongest-evidence')).toHaveTextContent('kernel saw 2 KB sent to cdn.registry.example:443')
+    expect(screen.queryByTestId('inspector-details')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('scorer-card')).not.toBeInTheDocument()
+    const details = screen.getByRole('button', { name: 'Details' })
+    expect(details).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(details)
+    expect(details).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByTestId('inspector-details')).toBeInTheDocument()
+  })
+
+  it('says when no kernel evidence backs the story', async () => {
+    const decision = makeDecision({ evidenceLevel: 'issued' })
+    serve(decision)
+    open(decision)
+    expect(await screen.findByTestId('strongest-evidence')).toHaveTextContent('No kernel evidence: this is inferred from the agent\'s request (evidence issued).')
+  })
+
+  it('marks a false alarm from the story', async () => {
+    serve(riskyDecision)
+    let body: unknown
+    server.use(http.post('/api/v1/oversight/decisions/:id/feedback', async ({ request }) => {
+      body = await request.json()
+      return HttpResponse.json({ recorded: 1, feedback: { label: 'false_alarm', reviewer: 'alice', recordedAt: '2026-11-25T10:00:00Z' } })
+    }))
+    open(riskyDecision)
+    await userEvent.click(await screen.findByRole('button', { name: 'Mark false alarm' }))
+    await waitFor(() => expect(body).toEqual({ label: 'false_alarm' }))
+    expect(await screen.findByRole('button', { name: 'Marked false alarm' })).toBeDisabled()
+  })
+
+  it('shows the synthetic marker only in Details, labelled', async () => {
+    const decision = makeDecision({ actionNarrative: '[synthetic] Ran the test suite.' })
+    serve(decision)
+    open(decision)
+    expect(await screen.findByRole('heading', { name: 'Ran the test suite.' })).toBeInTheDocument()
+    expect(screen.getByText('synthetic record')).toBeInTheDocument()
+    await openDetails()
+    expect(screen.getByText('[synthetic] Ran the test suite.')).toBeInTheDocument()
+    expect(screen.getByText(/marked this record synthetic/)).toBeInTheDocument()
+  })
+
+  it('lists the incident\'s actions when opened from an incident', async () => {
+    serve(riskyDecision)
+    const other = makeDecision({ id: 'build-1@9', seq: 9, wouldHavePaused: true, actionNarrative: 'Second download.' })
+    const { onOpenDecision } = open(riskyDecision, { related: [riskyDecision, other] })
+    const list = await screen.findByRole('list', { name: 'Actions in this incident' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2)
+    await userEvent.click(within(list).getByRole('button', { name: /Second download/ }))
+    expect(onOpenDecision).toHaveBeenCalledWith('build-1@9')
   })
 })

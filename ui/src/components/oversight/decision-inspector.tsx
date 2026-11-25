@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertTriangle, History, Sparkles } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, History } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -23,13 +23,18 @@ import {
   destinationDomain,
   findCharterRule,
   feedbackLabelText,
+  isSyntheticText,
+  rowBadgeKind,
+  rowSummary,
+  rowTooltip,
+  strongestEvidence,
   formatProbability,
   isMonitorFailure,
   pathDirectoryGlob,
   producerLabel,
   queryTerm,
 } from '@/lib/oversight'
-import { formatTimestamp } from '@/lib/time'
+import { formatTimestamp, timeAgo } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import {
   OVERSIGHT_FEEDBACK_LABELS,
@@ -38,7 +43,8 @@ import {
   type ProducerInfo,
   type ScorerEvaluation,
 } from '@/schemas/oversight'
-import { Chip, PivotButton, SignalBadge, WouldPauseChip } from './signal'
+import { Chip, PivotButton } from './signal'
+import { RowBadge } from './decision-table'
 import { SimilarPanel } from './similar-panel'
 
 export interface DecisionInspectorProps {
@@ -50,10 +56,12 @@ export interface DecisionInspectorProps {
   onOpenDecision: (id: string) => void
   /** A row already loaded, shown while the full decision loads. */
   initial?: DecisionView
+  /** The incident's decisions, newest first, when the drawer opened from an incident card. */
+  related?: DecisionView[]
 }
 
 /** The Action Inspector: a read-only slide-over for one decision. */
-export function DecisionInspector({ decisionId, onClose, onPivot, onOpenDecision, initial }: DecisionInspectorProps) {
+export function DecisionInspector({ decisionId, onClose, onPivot, onOpenDecision, initial, related }: DecisionInspectorProps) {
   return (
     <Dialog open={Boolean(decisionId)} onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent
@@ -66,6 +74,7 @@ export function DecisionInspector({ decisionId, onClose, onPivot, onOpenDecision
             onPivot={onPivot}
             onOpenDecision={onOpenDecision}
             initial={initial?.id === decisionId ? initial : undefined}
+            related={related?.some((d) => d.id === decisionId) ? related : undefined}
           />
         )}
       </DialogContent>
@@ -73,7 +82,7 @@ export function DecisionInspector({ decisionId, onClose, onPivot, onOpenDecision
   )
 }
 
-function InspectorBody({ decisionId, onPivot, onOpenDecision, initial }: { decisionId: string; onPivot: (q: string) => void; onOpenDecision: (id: string) => void; initial?: DecisionView }) {
+function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }: { decisionId: string; onPivot: (q: string) => void; onOpenDecision: (id: string) => void; initial?: DecisionView; related?: DecisionView[] }) {
   const { data, error, isLoading } = useOversightDecision(decisionId)
   const overrides = useFeedbackOverrides()
   const { data: producersResp } = useOversightProducers()
@@ -81,6 +90,8 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial }: { decis
   const producers = producersResp?.producers ?? []
   const [highlighted, setHighlighted] = useState<Set<string>>(new Set())
   const [showSimilar, setShowSimilar] = useState(false)
+  const [showDetails, setShowDetails] = useState(false)
+  const falseAlarm = useOversightFeedback(decisionId)
   const loaded = data ?? initial
   const decision = loaded ? withOverride(loaded, overrides) : undefined
 
@@ -110,192 +121,272 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial }: { decis
   const { action } = decision
   const effects = action.effects ?? {}
   const pivot = (key: string, value: string) => onPivot(queryTerm(key, value))
+  const summary = rowSummary(decision, config)
+  const finding = decision.charterFindings?.[0]
+  const rule = finding ? findCharterRule(config, decision.charterRevision, finding.boundID) : undefined
+  const evidence = strongestEvidence(decision)
+  const synthetic = isSyntheticText(decision.actionNarrative)
+  const openSimilar = () => {
+    setShowSimilar(true)
+    // Scroll once the panel has rendered.
+    setTimeout(() => document.getElementById('oversight-similar')?.scrollIntoView?.({ block: 'start' }), 0)
+  }
+  const markFalseAlarm = () => falseAlarm.mutate(
+    { label: 'false_alarm' },
+    {
+      onSuccess: () => toast.success('Marked false alarm'),
+      onError: (error) => toast.error(`Could not record the label: ${error instanceof Error ? error.message : 'request failed'}`),
+    },
+  )
 
   return (
     <>
       <header className="space-y-2 border-b p-5 pr-12">
         <div className="flex flex-wrap items-center gap-2">
-          <SignalBadge signal={decision.signal} />
-          {decision.wouldHavePaused && <WouldPauseChip />}
-          <Chip>disposition {decision.disposition}</Chip>
-          <Chip>{decision.mode === 'gate' ? 'gate mode' : 'audit mode'}</Chip>
-          <Chip>evidence {decision.evidenceLevel}</Chip>
+          <RowBadge kind={rowBadgeKind(decision)} />
+          {synthetic && <Chip className="text-muted-foreground">synthetic record</Chip>}
         </div>
-        <DialogTitle className="font-mono text-base break-all">{action.toolName}</DialogTitle>
+        <DialogTitle className="text-base leading-snug break-words">{summary}</DialogTitle>
         <DialogDescription className="text-xs">
-          Action {decision.actionSeq} of <span className="font-mono">{decision.taskName}</span> · {formatTimestamp(decision.observedAt)}
+          {decision.agentName || decision.taskName} · {formatTimestamp(decision.observedAt)}
         </DialogDescription>
-        <div className="flex flex-wrap items-center gap-1.5 text-xs">
-          <PivotButton query={queryTerm('task', decision.taskName)} onPivot={onPivot}>task {decision.taskName}</PivotButton>
-          {decision.agentName && (
-            <>
-              <PivotButton query={queryTerm('agent', decision.agentName)} onPivot={onPivot}>agent {decision.agentName}</PivotButton>
-              <Button variant="ghost" size="xs" onClick={() => pivot('agent', decision.agentName!)}>
-                <History aria-hidden="true" /> This agent&apos;s timeline
-              </Button>
-            </>
-          )}
-          {decision.workloadIdentity && (
-            <PivotButton query={queryTerm('identity', decision.workloadIdentity)} onPivot={onPivot}>{decision.workloadIdentity}</PivotButton>
-          )}
-          {decision.runID && <PivotButton query={queryTerm('run', decision.runID)} onPivot={onPivot}>run {decision.runID}</PivotButton>}
-        </div>
       </header>
 
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5">
-        {decision.actionNarrative && (
-          <Section title="What happened">
-            <p className="text-sm whitespace-pre-wrap break-words">{decision.actionNarrative}</p>
-          </Section>
-        )}
-
-        <Section title="Tool call">
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-            <dt className="text-muted-foreground">Tool</dt>
-            <dd><PivotButton query={queryTerm('tool', action.toolName)} onPivot={onPivot}>{action.toolName}</PivotButton></dd>
-            {action.toolCallID && (
-              <>
-                <dt className="text-muted-foreground">Call ID</dt>
-                <dd className="font-mono text-xs break-all">{action.toolCallID}</dd>
-              </>
-            )}
-          </dl>
-          {action.requestSummary && (
-            <pre data-testid="request-summary" className="mt-2 max-h-48 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-words">
-              {action.requestSummary}
-            </pre>
+        <section aria-label="Story" className="space-y-3">
+          {finding && (
+            <div className="space-y-1 rounded-md border border-status-failed/40 bg-status-failed-bg p-3 text-sm">
+              <p className="text-xs font-medium" data-testid="charter-rule">
+                {rule ? <>Rule {rule.bound.number} of {charterName(rule.charter)}</> : <>Bound {finding.boundID}</>}
+              </p>
+              <blockquote className="border-l-2 border-status-failed pl-2">{rule?.bound.sentence ?? finding.sentence}</blockquote>
+              <p className="text-xs text-muted-foreground">{finding.enforced ? 'Enforced.' : 'Audit only: would pause, nothing was held.'}</p>
+            </div>
           )}
-        </Section>
+          <p className="text-sm" data-testid="strongest-evidence">
+            {evidence ?? <span className="text-muted-foreground">No kernel evidence: this is inferred from the agent&apos;s request (evidence {decision.evidenceLevel}).</span>}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="outline" onClick={openSimilar}>
+              <History aria-hidden="true" /> Has it done this before?
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={markFalseAlarm}
+              disabled={falseAlarm.isPending || decision.feedback?.label === 'false_alarm'}
+            >
+              {decision.feedback?.label === 'false_alarm' ? 'Marked false alarm' : 'Mark false alarm'}
+            </Button>
+            {decision.feedback && decision.feedback.label !== 'false_alarm' && (
+              <span className="text-xs text-muted-foreground">Labelled {feedbackLabelText(decision.feedback.label).toLowerCase()}</span>
+            )}
+          </div>
+        </section>
 
-        {(decision.charterFindings?.length ?? 0) > 0 && (
-          <Section title="Charter findings">
-            <ul className="space-y-2">
-              {decision.charterFindings!.map((finding, i) => (
-                <li key={`${finding.boundID}-${i}`} className="space-y-1 rounded-md border border-status-failed/40 bg-status-failed-bg p-3 text-sm">
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                    <PivotButton query={queryTerm('bound', finding.boundID)} onPivot={onPivot}>bound {finding.boundID}</PivotButton>
-                    <PivotButton query={queryTerm('producer', finding.producerRef)} onPivot={onPivot}>
-                      {producerLabel(finding.producerRef, producers)}
-                    </PivotButton>
-                    <Chip>{finding.enforced ? 'enforced' : 'audit only'}</Chip>
-                  </div>
-                  {(() => {
-                    const rule = findCharterRule(config, decision.charterRevision, finding.boundID)
-                    return rule ? (
-                      <p className="text-xs font-medium" data-testid="charter-rule">
-                        Rule {rule.bound.number} of {charterName(rule.charter)}
-                      </p>
-                    ) : null
-                  })()}
-                  <blockquote className="border-l-2 border-status-failed pl-2 italic">{finding.sentence}</blockquote>
-                  <CitedEvents ids={finding.citedEventIDs} onCite={cite} />
+        {related && related.length > 1 && (
+          <Section title={`This incident · ${related.length} actions`}>
+            <ol className="space-y-1" aria-label="Actions in this incident">
+              {related.map((item) => (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    aria-current={item.id === decision.id ? 'true' : undefined}
+                    onClick={() => onOpenDecision(item.id)}
+                    title={rowTooltip(item)}
+                    className={cn('w-full rounded px-2 py-1 text-left text-xs hover:bg-accent', item.id === decision.id && 'bg-accent font-medium')}
+                  >
+                    {rowSummary(item, config)} <span className="text-muted-foreground">· {timeAgo(item.observedAt)}</span>
+                  </button>
                 </li>
               ))}
-            </ul>
+            </ol>
           </Section>
         )}
 
-        {decision.tier0 && ((decision.tier0.rules?.length ?? 0) > 0 || decision.tier0.highStakesClass) && (
-          <Section title="Deterministic rules">
-            <div className="flex flex-wrap gap-1.5 text-xs">
-              {decision.tier0.rules?.map((rule) => <Chip key={rule} className="font-mono">{rule}</Chip>)}
-              {decision.tier0.highStakesClass && <Chip>high-stakes class {decision.tier0.highStakesClass}</Chip>}
-            </div>
-          </Section>
+        {showSimilar && (
+          <div id="oversight-similar">
+            <Section title="Has it done this before?">
+              <SimilarPanel decisionId={decision.id} onOpenDecision={onOpenDecision} onPivot={onPivot} />
+            </Section>
+          </div>
         )}
 
-        <Section title="Monitor findings">
-          {(decision.scorers?.length ?? 0) === 0 && (decision.advisors?.length ?? 0) === 0 ? (
-            <p className="text-sm text-muted-foreground">No scorer or advisor evaluated this action.</p>
-          ) : (
-            <div className="space-y-3">
-              {decision.scorers?.map((scorer, i) => (
-                <ScorerCard key={`s-${scorer.providerRef}-${i}`} scorer={scorer} producers={producers} onPivot={onPivot} onCite={cite} />
-              ))}
-              {decision.advisors?.map((advisor, i) => (
-                <AdvisorCard key={`a-${advisor.providerRef}-${i}`} advisor={advisor} producers={producers} onPivot={onPivot} onCite={cite} />
-              ))}
-            </div>
-          )}
-        </Section>
+        <div className="border-t pt-3">
+          <Button variant="ghost" size="sm" aria-expanded={showDetails} onClick={() => setShowDetails((v) => !v)}>
+            {showDetails ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />} Details
+          </Button>
+        </div>
 
-        <Section title="Kernel-observed effects">
-          <EffectsSummary decision={decision} onPivot={onPivot} />
-          {(effects.notableEvents?.length ?? 0) > 0 && (
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full text-xs" aria-label="Notable events">
-                <thead className="text-left text-muted-foreground">
-                  <tr>
-                    <th className="py-1 pr-2 font-medium">Event</th>
-                    <th className="py-1 pr-2 font-medium">Kind</th>
-                    <th className="py-1 pr-2 font-medium">Detail</th>
-                    <th className="py-1 pr-2 font-medium">Outcome</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {effects.notableEvents!.map((event) => (
-                    <tr
-                      key={event.id}
-                      id={`oversight-event-${event.id}`}
-                      data-highlighted={highlighted.has(event.id) || undefined}
-                      aria-current={highlighted.has(event.id) ? 'true' : undefined}
-                      className={cn('border-t align-top', highlighted.has(event.id) && 'bg-status-pending-bg outline outline-1 outline-status-pending')}
-                    >
-                      <td className="py-1 pr-2 font-mono">{event.id}{highlighted.has(event.id) && <span className="sr-only"> (cited)</span>}</td>
-                      <td className="py-1 pr-2">{event.kind}{event.role && <span className="text-muted-foreground"> · {event.role}</span>}</td>
-                      <td className="space-y-0.5 py-1 pr-2">
-                        {event.binary && <div><PivotButton query={queryTerm('bin', binaryName(event.binary))} onPivot={onPivot}>{event.binary}</PivotButton></div>}
-                        {event.path && <div><PivotButton query={queryTerm('path', event.path)} onPivot={onPivot}>{event.path}</PivotButton></div>}
-                        {event.dest && <div><PivotButton query={queryTerm('dest', event.dest)} onPivot={onPivot}>{event.dest}</PivotButton></div>}
-                        {event.args && <div className="font-mono break-all text-muted-foreground">{event.args}</div>}
-                      </td>
-                      <td className="py-1 pr-2">{event.outcome}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {(effects.omittedEvents ?? 0) > 0 && (
-                <p className="mt-1 text-xs text-muted-foreground">{effects.omittedEvents} more events were left out of this record.</p>
+        {showDetails && (
+          <div className="space-y-6" data-testid="inspector-details">
+            <Section title="Identity">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                <span>task <PivotButton query={queryTerm('task', decision.taskName)} onPivot={onPivot}>{decision.taskName}</PivotButton></span>
+                {decision.agentName && (
+                  <>
+                    <span>agent <PivotButton query={queryTerm('agent', decision.agentName)} onPivot={onPivot}>{decision.agentName}</PivotButton></span>
+                    <Button variant="ghost" size="xs" onClick={() => pivot('agent', decision.agentName!)}>
+                      This agent&apos;s timeline
+                    </Button>
+                  </>
+                )}
+                {decision.workloadIdentity && (
+                  <span>identity <PivotButton query={queryTerm('identity', decision.workloadIdentity)} onPivot={onPivot}>{decision.workloadIdentity}</PivotButton></span>
+                )}
+                {decision.runID && <span>run <PivotButton query={queryTerm('run', decision.runID)} onPivot={onPivot}>{decision.runID}</PivotButton></span>}
+              </div>
+              <div className="flex flex-wrap gap-1.5 text-xs">
+                <Chip className="font-mono">{decision.id}</Chip>
+                <Chip>action {decision.actionSeq}</Chip>
+                <Chip>disposition {decision.disposition}</Chip>
+                <Chip>{decision.mode === 'gate' ? 'gate mode' : 'audit mode'}</Chip>
+                <Chip>evidence {decision.evidenceLevel}</Chip>
+                {decision.wouldHavePaused && <Chip>would pause in gate mode</Chip>}
+              </div>
+            </Section>
+
+            {decision.actionNarrative && (
+              <Section title="Recorded narrative">
+                {synthetic && (
+                  <p className="text-xs text-muted-foreground">Its producer marked this record synthetic: generated for a demo or test, not a real agent action.</p>
+                )}
+                <p className="text-sm whitespace-pre-wrap break-words">{decision.actionNarrative}</p>
+              </Section>
+            )}
+
+            <Section title="Tool call">
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                <dt className="text-muted-foreground">Tool</dt>
+                <dd><PivotButton query={queryTerm('tool', action.toolName)} onPivot={onPivot}>{action.toolName}</PivotButton></dd>
+                {action.toolCallID && (
+                  <>
+                    <dt className="text-muted-foreground">Call ID</dt>
+                    <dd className="font-mono text-xs break-all">{action.toolCallID}</dd>
+                  </>
+                )}
+              </dl>
+              {action.requestSummary && (
+                <pre data-testid="request-summary" className="mt-2 max-h-48 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-words">
+                  {action.requestSummary}
+                </pre>
               )}
-            </div>
-          )}
-        </Section>
+            </Section>
 
-        <Section title="Causal context">
-          {(action.priorActionIDs?.length ?? 0) > 0 ? (
-            <div className="space-y-1">
-              <p className="text-xs text-muted-foreground">Prior actions the evaluation saw</p>
-              <ol className="flex flex-wrap gap-1.5">
-                {action.priorActionIDs!.map((id) => (
-                  <li key={id}>
-                    <Button variant="outline" size="xs" className="font-mono" onClick={() => onOpenDecision(id)}>{id}</Button>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">No prior actions were in the evaluation window.</p>
-          )}
-          <TaintTimeline own={action.taintFlags} inherited={action.inheritedTaint} onPivot={onPivot} />
-        </Section>
+            {(decision.charterFindings?.length ?? 0) > 0 && (
+              <Section title="Charter findings">
+                <ul className="space-y-2">
+                  {decision.charterFindings!.map((finding, i) => (
+                    <li key={`${finding.boundID}-${i}`} className="space-y-1 rounded-md border border-status-failed/40 bg-status-failed-bg p-3 text-sm">
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                        <PivotButton query={queryTerm('bound', finding.boundID)} onPivot={onPivot}>bound {finding.boundID}</PivotButton>
+                        <PivotButton query={queryTerm('producer', finding.producerRef)} onPivot={onPivot}>
+                          {producerLabel(finding.producerRef, producers)}
+                        </PivotButton>
+                        <Chip>{finding.enforced ? 'enforced' : 'audit only'}</Chip>
+                      </div>
+                      <blockquote className="border-l-2 border-status-failed pl-2 italic">{finding.sentence}</blockquote>
+                      <CitedEvents ids={finding.citedEventIDs} onCite={cite} />
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            )}
 
-        <Section title="Coverage">
-          <CoverageDetails decision={decision} />
-        </Section>
+            {decision.tier0 && ((decision.tier0.rules?.length ?? 0) > 0 || decision.tier0.highStakesClass) && (
+              <Section title="Deterministic rules">
+                <div className="flex flex-wrap gap-1.5 text-xs">
+                  {decision.tier0.rules?.map((rule) => <Chip key={rule} className="font-mono">{rule}</Chip>)}
+                  {decision.tier0.highStakesClass && <Chip>high-stakes class {decision.tier0.highStakesClass}</Chip>}
+                </div>
+              </Section>
+            )}
 
-        <Section title="Outcome label">
-          <FeedbackControls decision={decision} />
-        </Section>
+            <Section title="Monitor findings">
+              {(decision.scorers?.length ?? 0) === 0 && (decision.advisors?.length ?? 0) === 0 ? (
+                <p className="text-sm text-muted-foreground">No scorer or advisor evaluated this action.</p>
+              ) : (
+                <div className="space-y-3">
+                  {decision.scorers?.map((scorer, i) => (
+                    <ScorerCard key={`s-${scorer.providerRef}-${i}`} scorer={scorer} producers={producers} onPivot={onPivot} onCite={cite} />
+                  ))}
+                  {decision.advisors?.map((advisor, i) => (
+                    <AdvisorCard key={`a-${advisor.providerRef}-${i}`} advisor={advisor} producers={producers} onPivot={onPivot} onCite={cite} />
+                  ))}
+                </div>
+              )}
+            </Section>
 
-        <Section title="More like this">
-          {showSimilar ? (
-            <SimilarPanel decisionId={decision.id} onOpenDecision={onOpenDecision} onPivot={onPivot} />
-          ) : (
-            <Button variant="outline" size="sm" onClick={() => setShowSimilar(true)}>
-              <Sparkles aria-hidden="true" /> More like this
-            </Button>
-          )}
-        </Section>
+            <Section title="Kernel-observed effects">
+              <EffectsSummary decision={decision} onPivot={onPivot} />
+              {(effects.notableEvents?.length ?? 0) > 0 && (
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full text-xs" aria-label="Notable events">
+                    <thead className="text-left text-muted-foreground">
+                      <tr>
+                        <th className="py-1 pr-2 font-medium">Event</th>
+                        <th className="py-1 pr-2 font-medium">Kind</th>
+                        <th className="py-1 pr-2 font-medium">Detail</th>
+                        <th className="py-1 pr-2 font-medium">Outcome</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {effects.notableEvents!.map((event) => (
+                        <tr
+                          key={event.id}
+                          id={`oversight-event-${event.id}`}
+                          data-highlighted={highlighted.has(event.id) || undefined}
+                          aria-current={highlighted.has(event.id) ? 'true' : undefined}
+                          className={cn('border-t align-top', highlighted.has(event.id) && 'bg-status-pending-bg outline outline-1 outline-status-pending')}
+                        >
+                          <td className="py-1 pr-2 font-mono">{event.id}{highlighted.has(event.id) && <span className="sr-only"> (cited)</span>}</td>
+                          <td className="py-1 pr-2">{event.kind}{event.role && <span className="text-muted-foreground"> · {event.role}</span>}</td>
+                          <td className="space-y-0.5 py-1 pr-2">
+                            {event.binary && <div><PivotButton query={queryTerm('bin', binaryName(event.binary))} onPivot={onPivot}>{event.binary}</PivotButton></div>}
+                            {event.path && <div><PivotButton query={queryTerm('path', event.path)} onPivot={onPivot}>{event.path}</PivotButton></div>}
+                            {event.dest && <div><PivotButton query={queryTerm('dest', event.dest)} onPivot={onPivot}>{event.dest}</PivotButton></div>}
+                            {event.args && <div className="font-mono break-all text-muted-foreground">{event.args}</div>}
+                          </td>
+                          <td className="py-1 pr-2">{event.outcome}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {(effects.omittedEvents ?? 0) > 0 && (
+                    <p className="mt-1 text-xs text-muted-foreground">{effects.omittedEvents} more events were left out of this record.</p>
+                  )}
+                </div>
+              )}
+            </Section>
+
+            <Section title="Causal context">
+              {(action.priorActionIDs?.length ?? 0) > 0 ? (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Prior actions the evaluation saw</p>
+                  <ol className="flex flex-wrap gap-1.5">
+                    {action.priorActionIDs!.map((id) => (
+                      <li key={id}>
+                        <Button variant="outline" size="xs" className="font-mono" onClick={() => onOpenDecision(id)}>{id}</Button>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">No prior actions were in the evaluation window.</p>
+              )}
+              <TaintTimeline own={action.taintFlags} inherited={action.inheritedTaint} onPivot={onPivot} />
+            </Section>
+
+            <Section title="Coverage">
+              <CoverageDetails decision={decision} />
+            </Section>
+
+            <Section title="Outcome label">
+              <FeedbackControls decision={decision} />
+            </Section>
+
+          </div>
+        )}
       </div>
     </>
   )

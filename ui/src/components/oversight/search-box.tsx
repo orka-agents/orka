@@ -39,6 +39,7 @@ export function SearchBox({ q, window, terms, error, queryKeys, onSubmit, onWind
   const [draft, setDraft] = useState({ text: q, seen: q })
   if (draft.seen !== q) setDraft({ text: q, seen: q })
   const mode: SearchMode = 'query'
+  const [showHelp, setShowHelp] = useState(false)
   const shownTerms = terms ?? []
 
   return (
@@ -56,9 +57,9 @@ export function SearchBox({ q, window, terms, error, queryKeys, onSubmit, onWind
           <Input
             aria-label="Search oversight decisions"
             aria-invalid={error ? true : undefined}
-            aria-describedby={error ? 'oversight-search-error' : 'oversight-search-help'}
+            aria-describedby={error ? 'oversight-search-error' : undefined}
             className="pl-8 font-mono"
-            placeholder="concern:K2 dest:*.example.com:443 bin:curl task:build-* &quot;free text&quot;"
+            placeholder='try "push prod" or "token"'
             value={draft.text}
             onChange={(event) => setDraft({ text: event.target.value, seen: q })}
           />
@@ -72,17 +73,33 @@ export function SearchBox({ q, window, terms, error, queryKeys, onSubmit, onWind
           {WINDOW_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
         <Button type="submit">Search</Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label="Search help"
+          aria-expanded={showHelp}
+          aria-controls="oversight-search-help"
+          onClick={() => setShowHelp((v) => !v)}
+        >
+          ?
+        </Button>
         {q && (
           <Button type="button" variant="ghost" onClick={() => onSubmit('')}>Clear</Button>
         )}
       </form>
-      {error ? (
+      {error && (
         <p id="oversight-search-error" role="alert" className="text-sm text-status-failed">{error}</p>
-      ) : (
-        <p id="oversight-search-help" className="text-xs text-muted-foreground">
-          key:value terms all must match; list alternatives with | or , and use * as a wildcard.
-          {queryKeys && queryKeys.length > 0 && <> Keys: <span className="font-mono">{queryKeys.join(' ')}</span></>}
-        </p>
+      )}
+      {showHelp && (
+        <div id="oversight-search-help" className="space-y-1 rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+          <p>Words are matched as keywords against each action&apos;s redacted text; every word must match. &quot;Quoted phrases&quot; match as typed.</p>
+          <p>
+            Narrow with key:value terms, which all must match; list alternatives with | or , and use * as a wildcard,
+            for example <span className="font-mono">bin:curl</span> or <span className="font-mono">task:build-*</span>.
+          </p>
+          {queryKeys && queryKeys.length > 0 && <p>Keys: <span className="font-mono">{queryKeys.join(' ')}</span></p>}
+        </div>
       )}
       {shownTerms.length > 0 && (
         <ul className="flex flex-wrap gap-1.5" aria-label="Search terms">
