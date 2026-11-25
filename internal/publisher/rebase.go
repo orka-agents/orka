@@ -109,9 +109,11 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		}, nil
 	}
 
-	// List commits in BaseOID..HeadOID in chronological order (oldest first).
+	// List commits in BaseOID..HeadOID in chronological order (oldest first),
+	// bounded to maxRebaseCommits+1 so oversized branches hit ErrRebaseRefused
+	// instead of runGit's output buffer cap.
 	revList, err := p.runGit(ctx, box, box.root, nil, nil,
-		"--git-dir="+repositoryPath, "rev-list", "--reverse", "--parents", request.BaseOID+".."+request.HeadOID)
+		"--git-dir="+repositoryPath, "rev-list", "--max-count="+strconv.Itoa(maxRebaseCommits+1), "--reverse", "--parents", request.BaseOID+".."+request.HeadOID)
 	if err != nil {
 		return RebaseBranchResult{}, fmt.Errorf("enumerate commits to rebase: %w", err)
 	}
