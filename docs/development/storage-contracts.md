@@ -402,11 +402,16 @@ the observable parts.
   Persisted fields such as gateway claim ownership, lease expiry, the frozen
   Task tool policy, usage phase history, scan-run cancellation state and
   finding decision times are tagged `json:"-"`, so a provider that sends these
-  structs as JSON loses them. The
-  network protocol (step 6) defines its own wire records with a round-trip
-  test over every record type. `ExecutionEvent.Usage` is also tagged
-  `json:"-"`: it carries the usage observation Orka derived from the event
-  (see "Orka policy above the client").
+  structs as JSON loses them. The wire protocol (see "Wire protocol" below)
+  defines its own wire records, carries every field including the `json:"-"`
+  ones, and round-trips every record type in a test. `ExecutionEvent.Usage` is
+  also tagged `json:"-"`: it carries the usage observation Orka derived from
+  the event (see "Orka policy above the client").
+- **What the wire preserves.** Nil and empty slices and maps are equivalent,
+  so a caller must not tell a nil result apart from an empty one. Strings are
+  valid UTF-8. Times are within 0001-01-01 and 9999-12-31 UTC; the zero
+  `time.Time` means "no time", and a `*time.Time` keeps nil apart from a
+  pointer to the zero time.
 - **Artifacts.** Requests carry an `ArtifactOwner` (namespace, Task name and
   Task UID) so the identity can grow with a Job and cleanup generation without
   another signature change. The Task UID is reserved: Orka passes it where it
@@ -1381,8 +1386,13 @@ test envelopes send their own. The options `WithMaintenance` and
 `WithDurability` add the cases that need a harness only the provider's own
 tests can supply; a harness is given the provider the factory returned. The
 SQLite provider runs it directly with both options, refusing writes without
-an envelope as in production, and the storage client runs it over SQLite with
-`ProviderAttachesEnvelopes`, so the client attaches the envelopes.
+an envelope as in production, and again over the wire loopback (see "Wire
+protocol"), and the storage client runs it over SQLite with
+`ProviderAttachesEnvelopes`, so the client attaches the envelopes. The
+`Parallel` option runs every family, the harness families included, in
+parallel for a factory that returns isolated datasets concurrently. A harness
+that restarts or fails over a database the other families share would
+disconnect them, so a suite with one omits `Parallel`.
 
 `internal/storageclient/storagefault` injects storage faults for Orka's own
 tests. It wraps a state provider, an artifact provider or the embedded store
@@ -1404,6 +1414,142 @@ SQLite also implements the duplicate SQL control-record methods described in
 not part of the provider contract or the client. A client test fails if any
 other SQLite method is missing from the client, so a consumer's type assertion
 cannot silently lose a capability.
+
+### Wire protocol
+
+`pkg/storage` is its own Go module, `github.com/orka-agents/orka/pkg/storage`,
+so a separately built provider imports the contract, the suite and the wire
+library without Orka's module graph. Its only direct requirements are gRPC,
+protobuf, the `google.rpc` status types and the assertion library the suite
+uses, and no package in it imports Orka's internal packages. The root module
+requires it through a `replace` directive, so Dockerfiles copy
+`pkg/storage/go.mod` and `go.sum` before downloading modules, and root `./...`
+patterns do not include it: `make fmt`, `vet`, `test` and `lint` run it
+separately. Each release also tags the module as `pkg/storage/<version>`.
+
+The protocol is gRPC with protobuf. The hand-written `.proto`
+files under `pkg/storage/proto/orka/storage/v1` are the wire source of truth:
+one service per contract family, one RPC per contract method, named after it,
+and wire records named after the Go records, with fields in snake case.
+`make generate-storage` (part of `make generate`) compiles them with a pinned
+buf and protoc plugins into `pkg/storage/v1/wire/storagepb`, then runs
+`wiregen`, which reads the Go contract and the descriptors and writes the
+mapping in `pkg/storage/v1/wire`. Parameters map to request fields by name and
+results to response fields by position. A method whose only parameter is the
+record named after its request message, such as `ConsumeMessagesRequest`,
+sends that record as the whole request. A response field marked `write_back`
+carries back the record a pointer parameter of the same name points to, so
+the ID `SendMessage` assigns reaches the caller's `Message` as it does in
+process. Each RPC declares its kind (`READ`, `WRITE` or `ADMIN`), which must
+be the kind and contract part the method catalog (`storagev1.LookupMethod`)
+gives it. Generation fails when a method of a Go interface a service names
+(`go_interface`) has no RPC or an RPC no method, when an RPC's kind or contract
+part differs from the catalog, when any parameter, result or record field,
+including a `json:"-"` field, has no wire field or the reverse, when two Go
+fields claim one wire field, or when a pair of types is outside the mapping
+table. A family whose service does not exist yet is not checked.
+CI regenerates the code and fails on a difference.
+
+The wire currently serves `Describe` and `HealthCheck`, inter-agent messages
+and plan state. The other families stay in process until their RPCs land.
+`wiretest.State` serves a provider over an in-memory loopback with TLS 1.3 and
+bearer authentication, sending each family that has RPCs through the server
+library and the generated client. The SQLite provider passes the suite's state
+families that way; its maintenance and durability harnesses and the
+artifact-fence cases run only in process.
+
+- **Call metadata.** Every request names `orka-storage-contract`
+  (`orka.storage.v1`) and its `orka-storage-revision`; the server refuses a
+  call without them (`CONTRACT_MISMATCH`). Every call except `Describe` and
+  `HealthCheck` names the dataset it expects in the binary header
+  `orka-storage-dataset-bin`, as a dataset ID may hold any UTF-8 text. Before
+  the provider runs, the server refuses a call that leaves it out or names it
+  twice (`VALIDATION`) or names another dataset (`DATASET_MISMATCH`), and,
+  when its provider's `Describe` fails, a call that names one (the
+  `UNAVAILABLE`, `UNAUTHENTICATED` or `INCOMPATIBLE` that `Describe` may
+  return, or `UNAVAILABLE` for any other error). The server describes the
+  provider again before every read or administrative call that names a
+  dataset, so a provider whose dataset changed before such a call never
+  answers it for the dataset it served before. A switch while the provider
+  runs the call is not detected: its response can carry records from the new
+  dataset under the dataset the check named. Closing that window is open in
+  the provider contract, either by a provider serving one dataset for its
+  lifetime or by each read checking the dataset it reads. A write is compared against
+  the dataset the provider last described, on the first call that names a
+  dataset or on any later `Describe` or read, and is still checked by its
+  envelope's dataset. A
+  client without a dataset can call only `Describe` and `HealthCheck`, and a bound client
+  leaves the dataset off those two, so its `Describe` reports whichever
+  dataset the server serves, as in process. Responses name the contract, the
+  server's revision and, once the server knows it, the serving dataset; a
+  bound client refuses any other response for another dataset, as
+  `ErrOutcomeUnknown` for a write or an administrative call and
+  `ErrDatasetMismatch` for a read. It refuses an error for another dataset the
+  same way, unless the server can send that error before its dataset check
+  (`UNAUTHENTICATED`, `CONTRACT_MISMATCH`, `UNSUPPORTED_FIELD`,
+  `DATASET_MISMATCH`, `UNAVAILABLE` or `INCOMPATIBLE`), so another dataset's
+  `NOT_FOUND` or refused write is never taken as an answer for its own. A
+  write's `WriteEnvelope` travels as the binary header
+  `orka-storage-envelope-bin`, and the server puts it in the
+  provider's context with `WithWriteEnvelope`. A read or an administrative
+  call never carries one: the client leaves it off, and the server refuses one
+  (`VALIDATION`). A write's envelope names the dataset its call names: the
+  bound client refuses one for another dataset before sending, and the server
+  refuses it before the provider runs (`DATASET_MISMATCH`), so a write never
+  commits to a dataset other than the one its response names. A call made under a Task data fence carries the
+  `TaskDataFence` as the binary header `orka-storage-task-data-fence-bin`, and
+  the server puts it in the provider's context with `WithTaskDataFence`.
+- **Request digests.** Before the provider runs a write that carries an
+  envelope, the server recomputes `RequestDigest` from the decoded arguments
+  and refuses a mismatch with `VALIDATION`, so an operation ID is never bound
+  to a request other than the one its client digested. The server decodes the
+  numbers in dynamic values as `json.Number`, so the provider stores and the
+  digest covers them exactly as the caller wrote them; the client decodes a
+  response's dynamic values as `encoding/json` does by default, as an
+  in-process provider returns them.
+- **Unknown fields.** The server refuses a request with a field it does not
+  know anywhere in its message tree (`UNSUPPORTED_FIELD`), so an older server
+  never ignores a newer precondition. The protocol revision starts at 1; a
+  release raises it when it adds RPCs or request fields, and the client calls
+  an RPC only on a server of at least the revision that introduced it. A
+  newer field of a read or an administrative call is sent only to such a
+  server; on an older one the client refuses a call that sets it
+  (`ErrIncompatible`) and sends one that leaves it unset. Generation refuses
+  a newer field on a write's request, whose digest would then differ between
+  revisions.
+- **Errors.** Every status the server library produces for a storage call
+  carries a `google.rpc.ErrorInfo` in domain `storage.orka.ai` whose reason
+  names the contract error; every contract sentinel has one. The client rebuilds
+  the typed error, so `errors.Is` and `errors.As` behave as in process,
+  including a `FencedError` or `PreconditionFailedError` that matches
+  `ErrConflict` and an `ErrDatasetDetached` that matches `ErrNotReady`. Only
+  `VALIDATION`, `FENCED`, `PRECONDITION_FAILED` and `CONFLICT` forward their
+  message, bounded and stripped of control characters: the first three the
+  message of the typed error, whether the provider wrapped its value or a
+  pointer to it, so `errors.As` finds the text it finds in process,
+  and `CONFLICT` the error's text as the provider wrote it. `TOO_LARGE` forwards
+  its typed fields, and `BINDING_CONFLICT` the `BindingConflictError` itself as
+  a second status detail. A failed authentication is `ErrUnauthenticated`, as
+  is any call to a server with an `Authenticator` that reached it through a
+  transport that runs no gRPC tap, such as `grpc.Server.ServeHTTP`, and a
+  call the server refuses for its contract headers or an unknown field, or an
+  RPC it does not serve, is `ErrIncompatible`. Any other provider error, and a
+  provider panic, is reported without its text as `PROVIDER_ERROR` with a
+  correlation ID the server logs; the client returns it as `ErrOutcomeUnknown`
+  for a write or an administrative call and a plain error for a read. An error
+  that matches several sentinels crosses as the first of them in the codec's
+  order, so only that sentinel matches on the client.
+- **Send evidence.** A status without that ErrorInfo came from the gRPC
+  library or a proxy. On a connection built with `wire.Dial`, which takes TLS
+  credentials, per-call credentials and a dialer but no interceptors, and
+  given to the client directly rather than wrapped, the client's stats
+  handler records whether a call's request headers could have left the
+  process: a call that never sent them is `ErrUnavailable`, and a write or an
+  administrative call that may have been sent is `ErrOutcomeUnknown`. On any other connection, a
+  write's transport failure is `ErrOutcomeUnknown`. Storage connections disable gRPC's configured retries;
+  only its transparent retries of attempts the server never processed remain.
+  The client refuses invalid UTF-8, out-of-range times and requests over the
+  16 MiB message limit before sending anything.
 
 ### Orka policy above the client
 

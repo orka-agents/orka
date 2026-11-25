@@ -176,11 +176,11 @@ func requireSameOutcome(t testingT, want, got writeOutcome) {
 }
 
 // runWriteCatalog runs the commit-time checks for every case.
-func runWriteCatalog[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P]) {
+func runWriteCatalog[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], settings suiteOptions) {
 	for _, c := range cases {
 		t.Run(c.method, func(t *testing.T) {
 			t.Run("refusals", func(t *testing.T) { runWriteRefusals(t, newProvider(t), c) })
-			t.Run("receipts", func(t *testing.T) { runWriteReceipts(t, newProvider(t), c) })
+			t.Run("receipts", func(t *testing.T) { runWriteReceipts(t, newProvider(t), c, settings) })
 			t.Run("aborted", func(t *testing.T) { runWriteAborted(t, newProvider(t), c) })
 			t.Run("detached", func(t *testing.T) { runWriteDetached(t, newProvider(t), c) })
 		})
@@ -267,8 +267,10 @@ func runWriteRefusals[P writeCaseProvider](t *testing.T, provider P, c writeCase
 // runWriteReceipts checks that a lost response is safe to retry: a replay of
 // the same envelope returns the original outcome without a second change,
 // even after the controller was replaced, and a reused operation ID with a
-// different request is refused.
-func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase[P]) {
+// different request digest is refused. Behind a transport that recomputes
+// request digests (see RecomputesRequestDigests), the transport refuses that
+// digest with ErrValidation before the provider compares it with the receipt.
+func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase[P], settings suiteOptions) {
 	dataset, _ := prepareWriteCase(t, provider, c)
 	ctx := t.Context()
 	envelope := envelopeFor(t, dataset, c, suiteFence)
@@ -285,7 +287,11 @@ func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase
 	other := envelope
 	other.RequestDigest = controlDigest("a different request")
 	outcome := callWrite(ctx, t, provider, c, other, suiteFence)
-	require.ErrorIs(t, outcome.err, storagev1.ErrDuplicateMismatch)
+	if settings.recomputedDigests[c.method] {
+		require.ErrorIs(t, outcome.err, storagev1.ErrValidation)
+	} else {
+		require.ErrorIs(t, outcome.err, storagev1.ErrDuplicateMismatch)
+	}
 	require.Equal(t, after, c.observe(t, provider))
 
 	resolved, err := provider.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
