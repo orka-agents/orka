@@ -16,14 +16,13 @@ import (
 )
 
 const (
-	TaskName           = "ORKA_TASK_NAME"
-	TaskNamespace      = "ORKA_TASK_NAMESPACE"
-	ServiceAccountName = "ORKA_SERVICE_ACCOUNT_NAME"
-	ResultEndpoint     = "ORKA_RESULT_ENDPOINT"
-	ResultStdout       = "ORKA_RESULT_STDOUT"
-	ControllerURL      = "ORKA_CONTROLLER_URL"
-	Command            = "ORKA_COMMAND"
-	AgentName          = "ORKA_AGENT_NAME"
+	TaskName       = "ORKA_TASK_NAME"
+	TaskNamespace  = "ORKA_TASK_NAMESPACE"
+	ResultEndpoint = "ORKA_RESULT_ENDPOINT"
+	ResultStdout   = "ORKA_RESULT_STDOUT"
+	ControllerURL  = "ORKA_CONTROLLER_URL"
+	Command        = "ORKA_COMMAND"
+	AgentName      = "ORKA_AGENT_NAME"
 
 	PriorTask           = "ORKA_PRIOR_TASK"
 	PriorTaskNamespace  = "ORKA_PRIOR_TASK_NAMESPACE"
@@ -69,6 +68,7 @@ const (
 	AIDeprecatedMemoryTools = "ORKA_AI_DEPRECATED_MEMORY_TOOLS"
 	GatewayReplyEnabled     = "ORKA_GATEWAY_REPLY_ENABLED"
 	AIFallbackCount         = "ORKA_AI_FALLBACK_COUNT"
+	AIFallbackEnvPrefix     = "ORKA_AI_FALLBACK_"
 	ControllerMode          = "ORKA_CONTROLLER_MODE"
 
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -108,6 +108,7 @@ const (
 	PodNamespace = "POD_NAMESPACE"
 	Namespace    = "NAMESPACE"
 
+	CodeExecEnvPrefix               = "ORKA_CODE_EXEC_"
 	CodeExecBackend                 = "ORKA_CODE_EXEC_BACKEND"
 	CodeExecLocalCPUSeconds         = "ORKA_CODE_EXEC_LOCAL_CPU_SECONDS"
 	CodeExecLocalMemoryKB           = "ORKA_CODE_EXEC_LOCAL_MEMORY_KB"
@@ -295,7 +296,7 @@ type FallbackProviderEnv struct {
 }
 
 func FallbackPrefix(i int) string {
-	return fmt.Sprintf("ORKA_AI_FALLBACK_%d", i)
+	return fmt.Sprintf("%s%d", AIFallbackEnvPrefix, i)
 }
 
 func FallbackProviderKey(i int) string        { return FallbackPrefix(i) + "_PROVIDER" }

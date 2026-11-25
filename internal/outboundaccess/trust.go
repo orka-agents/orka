@@ -22,7 +22,6 @@ type TrustConfig struct {
 	Gateways                TrustedServiceReferences
 	TokenEndpoints          TrustedServiceReferences
 	PlatformServiceAccounts map[string]struct{}
-	TokenRequester          string
 }
 
 func PlatformServiceAccountSet(usernames []string, namespace string, names ...string) map[string]struct{} {
@@ -44,10 +43,6 @@ func PlatformServiceAccountSet(usernames []string, namespace string, names ...st
 func (c TrustConfig) platformServiceAccount(namespace, name string) bool {
 	_, ok := c.PlatformServiceAccounts[namespace+"/"+name]
 	return ok
-}
-
-func (c TrustConfig) tokenRequester(namespace, name string) bool {
-	return c.TokenRequester != "" && c.TokenRequester == namespace+"/"+name
 }
 
 func ParseTrustedServiceReferences(value string) (TrustedServiceReferences, error) {

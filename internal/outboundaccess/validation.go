@@ -465,7 +465,7 @@ func resolveTokenSource(
 		}
 		platform := serviceAccount.Labels[labels.LabelPlatformIdentity] == labels.PlatformIdentityValue ||
 			trust.platformServiceAccount(namespace, serviceAccount.Name)
-		if platform && !trust.tokenRequester(namespace, serviceAccount.Name) {
+		if platform {
 			return unresolved(ReasonReferenceDenied, "Orka platform ServiceAccounts cannot be outbound token sources"), nil
 		}
 	}

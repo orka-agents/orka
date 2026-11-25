@@ -883,3 +883,47 @@ func TestOutboundAccessPolicyReconcilerReportsACappedDelegationAge(t *testing.T)
 		})
 	}
 }
+
+func TestOutboundAccessPolicyReconcilerRevokesTokenRequestForAIWorkerServiceAccount(t *testing.T) {
+	scheme := outboundPolicyControllerTestScheme(t)
+	policy := controllerServiceAccountPolicy("worker-token", testAIWorkerServiceAccountName)
+	policy.Finalizers = []string{outboundTokenRequestRBACFinalizer}
+	worker := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: testAIWorkerServiceAccountName, Namespace: policy.Namespace}}
+	reconciler := &OutboundAccessPolicyReconciler{
+		Scheme:                     scheme,
+		AIWorkerServiceAccountName: testAIWorkerServiceAccountName,
+		Trust: outboundaccess.TrustConfig{PlatformServiceAccounts: outboundaccess.PlatformServiceAccountSet(
+			nil, policy.Namespace, testAIWorkerServiceAccountName)},
+	}
+	staleRole, staleBinding, err := reconciler.desiredOutboundTokenRequestGrant(policy, []string{testAIWorkerServiceAccountName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := ctrlfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy, worker, staleRole, staleBinding).
+		WithStatusSubresource(&corev1alpha1.OutboundAccessPolicy{}).
+		Build()
+	reconciler.Client, reconciler.APIReader = client, client
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}}
+	reconcileOutboundPolicy(t, reconciler, request, 3)
+
+	key := outboundTokenRequestTestKey(t, policy, reconciler.AIWorkerServiceAccountName)
+	if err := client.Get(context.Background(), key, &rbacv1.Role{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get TokenRequest Role error = %v, want NotFound", err)
+	}
+	if err := client.Get(context.Background(), key, &rbacv1.RoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("get TokenRequest RoleBinding error = %v, want NotFound", err)
+	}
+	updated := &corev1alpha1.OutboundAccessPolicy{}
+	if err := client.Get(context.Background(), request.NamespacedName, updated); err != nil {
+		t.Fatal(err)
+	}
+	resolved := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.OutboundAccessPolicyConditionResolvedRefs)
+	if resolved == nil || resolved.Status != metav1.ConditionFalse || resolved.Reason != outboundaccess.ReasonReferenceDenied {
+		t.Fatalf("ResolvedRefs = %#v, want False/%s", resolved, outboundaccess.ReasonReferenceDenied)
+	}
+	if controllerutil.ContainsFinalizer(updated, outboundTokenRequestRBACFinalizer) {
+		t.Fatalf("policy finalizers = %#v, want the TokenRequest finalizer removed", updated.Finalizers)
+	}
+}

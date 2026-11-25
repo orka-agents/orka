@@ -783,12 +783,6 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnv(envVars, workerenv.TaskName, task.Name)
 	envVars = setControllerEnv(envVars, workerenv.TaskNamespace, task.Namespace)
 	envVars = setControllerEnv(envVars, workerenv.TaskUID, string(task.UID))
-	envVars = append(removeControllerEnv(envVars, workerenv.ServiceAccountName), corev1.EnvVar{
-		Name: workerenv.ServiceAccountName,
-		ValueFrom: &corev1.EnvVarSource{
-			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.serviceAccountName"},
-		},
-	})
 	if agent != nil {
 		envVars = setControllerEnv(envVars, workerenv.AgentName, agent.Name)
 	}
@@ -959,7 +953,7 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 		return envVars
 	}
 	for _, envVar := range task.Spec.Env {
-		if isReservedTaskTelemetryEnv(task, envVar.Name) {
+		if isReservedTaskEnv(task, envVar.Name) {
 			continue
 		}
 		envVars = append(envVars, envVar)
@@ -967,16 +961,33 @@ func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev
 	return envVars
 }
 
-func isReservedTaskTelemetryEnv(task *corev1alpha1.Task, name string) bool {
+func isReservedTaskEnv(task *corev1alpha1.Task, name string) bool {
 	if task == nil {
 		return false
 	}
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAI:
-		return isReservedAIWorkerTelemetryEnv(name)
+		return isReservedAIWorkerTelemetryEnv(name) ||
+			isReservedAIWorkerCodeExecEnv(name) ||
+			isReservedAIWorkerProviderConnectionEnv(name)
 	default:
 		return false
 	}
+}
+
+func isReservedAIWorkerCodeExecEnv(name string) bool {
+	return strings.HasPrefix(name, workerenv.CodeExecEnvPrefix)
+}
+
+func isReservedAIWorkerProviderConnectionEnv(name string) bool {
+	switch name {
+	case workerenv.AIBaseURL,
+		workerenv.AIAzureAPIVersion,
+		workerenv.AnthropicBaseURL,
+		workerenv.OpenAIBaseURL:
+		return true
+	}
+	return strings.HasPrefix(name, workerenv.AIFallbackEnvPrefix)
 }
 
 func isReservedAIWorkerTelemetryEnv(name string) bool {

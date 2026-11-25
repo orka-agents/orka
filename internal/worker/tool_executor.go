@@ -295,7 +295,6 @@ func NewToolExecutor() *ToolExecutor {
 						Trust: outboundaccess.TrustConfig{
 							Gateways:       trustedGateways,
 							TokenEndpoints: trustedEndpoints,
-							TokenRequester: toolExecutorTokenRequester(namespace),
 						},
 					}
 				}
@@ -2103,12 +2102,4 @@ func toolHTTPTimeout(tool *corev1alpha1.Tool) time.Duration {
 		return 0
 	}
 	return tool.Spec.HTTP.Timeout.Duration
-}
-
-func toolExecutorTokenRequester(namespace string) string {
-	name := strings.TrimSpace(os.Getenv(workerenv.ServiceAccountName))
-	if name == "" || strings.TrimSpace(namespace) == "" {
-		return ""
-	}
-	return strings.TrimSpace(namespace) + "/" + name
 }

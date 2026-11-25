@@ -452,13 +452,14 @@ func TestKubernetesResolverRefusesPolicyChangedAfterCheck(t *testing.T) {
 	}
 }
 
-func TestKubernetesResolverTokenRequesterMayUseOnlyItsOwnPlatformAccount(t *testing.T) {
+func TestKubernetesResolverRefusesPlatformAccountsBeforeTokenRequest(t *testing.T) {
 	for _, tc := range []struct {
 		account string
 		allowed bool
 	}{
-		{account: "orka-ai-worker", allowed: true},
+		{account: "orka-ai-worker", allowed: false},
 		{account: "orka-controller", allowed: false},
+		{account: "workload", allowed: true},
 	} {
 		t.Run(tc.account, func(t *testing.T) {
 			scheme := resolverScheme(t)
@@ -471,9 +472,13 @@ func TestKubernetesResolverTokenRequesterMayUseOnlyItsOwnPlatformAccount(t *test
 				},
 				ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
 			}})
+			accountLabels := map[string]string{labels.LabelPlatformIdentity: labels.PlatformIdentityValue}
+			if tc.allowed {
+				accountLabels = nil
+			}
 			reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy,
 				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: tc.account, Namespace: "tenant",
-					Labels: map[string]string{labels.LabelPlatformIdentity: labels.PlatformIdentityValue}}},
+					Labels: accountLabels}},
 			).Build()
 			tokenRequests := 0
 			clientset := k8sfake.NewSimpleClientset()
@@ -488,7 +493,7 @@ func TestKubernetesResolverTokenRequesterMayUseOnlyItsOwnPlatformAccount(t *test
 			exchanger := &captureExchanger{result: tokenexchange.Result{
 				AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}
 			resolver := &KubernetesResolver{Reader: reader, KubeClient: clientset, Exchanger: exchanger,
-				Trust: TrustConfig{TokenRequester: "tenant/orka-ai-worker"}}
+				Trust: TrustConfig{}}
 			_, err := resolver.Resolve(context.Background(), ResolveRequest{
 				Namespace: "tenant", PolicyName: "direct", TargetScheme: "https", CredentialScopeAllowed: true})
 			if tc.allowed && (err != nil || tokenRequests != 1) {

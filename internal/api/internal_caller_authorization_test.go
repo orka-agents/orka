@@ -125,6 +125,48 @@ func TestSubmitResultRequiresCurrentTaskWorkerWithKubernetesClient(t *testing.T)
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
+func TestSubmitResultAcceptsOnlyTheTasksOwnWorkerPod(t *testing.T) {
+	scheme := internalCallerAuthScheme(t)
+	taskA := internalCallerAuthTask()
+	jobA := internalCallerAuthJob(taskA, "job-a", "job-uid")
+	podA := internalCallerAuthPod(taskA, "pod-a", "pod-uid", jobA)
+	taskB := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-b", Namespace: "default", UID: types.UID("task-b-uid")},
+		Status:     corev1alpha1.TaskStatus{JobName: "job-b", JobUID: "job-b-uid", Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	jobB := internalCallerAuthJob(taskB, "job-b", "job-b-uid")
+	podB := internalCallerAuthPod(taskB, "pod-b", "pod-b-uid", jobB)
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(taskA, jobA, podA, taskB, jobB, podB).Build()
+
+	for _, tc := range []struct {
+		name       string
+		podName    string
+		podUID     string
+		wantStatus int
+	}{
+		{name: "another Task's worker Pod", podName: "pod-b", podUID: "pod-b-uid", wantStatus: http.StatusForbidden},
+		{name: "stale Pod UID", podName: "pod-a", podUID: "old-pod-uid", wantStatus: http.StatusForbidden},
+		{name: "own worker Pod", podName: "pod-a", podUID: "pod-uid", wantStatus: http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := sqlite.NewDB(":memory:")
+			require.NoError(t, err)
+			store := testStorageClient(sqlite.NewStore(db, ":memory:"))
+			h := NewInternalHandlers(store, store, store, store, store, InternalHandlersConfig{Client: k8sClient, APIReader: k8sClient})
+			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, internalCallerAuthWorkerUser(tc.podName, tc.podUID))
+				return c.Next()
+			})
+			app.Post("/internal/v1/results/:namespace/:taskName", h.SubmitResult)
+
+			resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/internal/v1/results/default/task-a", bytes.NewReader([]byte("result"))))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantStatus, resp.StatusCode)
+		})
+	}
+}
+
 func internalCallerAuthScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
