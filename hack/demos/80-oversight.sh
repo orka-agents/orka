@@ -29,6 +29,8 @@
 #   OVERSIGHT_SPEED    replay speed-up of the recorded take (default 1)
 #   WAVE_DELAY         seconds between Task waves (default 6)
 #   OVERSIGHT_MAX_SCORER_CALLS  live mode soft ceiling passed to the bridge (default 500)
+#   OVERSIGHT_CONTEXT_LIVE / _REPLAY  optional context labels for the take
+#                      (JSON list of {name, value}), e.g. "Scorer: live"
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -160,9 +162,20 @@ apply_waves() {
   done
 }
 
+# set_context records where this take's records come from, shown as
+# operator-declared labels: OVERSIGHT_CONTEXT_<MODE> (a JSON list of
+# {name, value}) when the pack's environment sets one.
+set_context() {
+  local var="OVERSIGHT_CONTEXT_${MODE^^}"
+  [[ -n "${!var:-}" ]] || return 0
+  k patch configmap orka-oversight-producers --type merge \
+    -p "$(python3 -I -c 'import json, sys; print(json.dumps({"data": {"context.json": sys.argv[1]}}))' "${!var}")" >/dev/null
+}
+
 cmd_play() {
   ensure_cli
   ensure_api
+  set_context
   local take_id
   take_id="-take$(date +%H%M%S)"
   case "${MODE}" in
