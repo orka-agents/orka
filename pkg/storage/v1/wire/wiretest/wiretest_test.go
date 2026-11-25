@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
+	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
@@ -63,7 +64,7 @@ func TestCleanupWaitsForRunningHandlers(t *testing.T) {
 		release()
 		stop()
 	})
-	client := wiretest.Serve(loopback, provider)
+	client := wiretest.Serve(loopback, wire.ServerConfig{State: provider})
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
