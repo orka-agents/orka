@@ -197,6 +197,7 @@ func TestSelectOIDCBearerTokenFallsBackToIDTokenWhenAccessTokenOpaque(t *testing
 	tok, exp, err := selectOIDCBearerToken(oidcTokenResponse{
 		AccessToken: "opaque-access-token",
 		IDToken:     idTok,
+		ExpiresIn:   7200, // Longer than the ID token's own exp; must not outlast ID token.
 	}, "https://issuer.example", "orka-api")
 	if err != nil {
 		t.Fatalf("selectOIDCBearerToken error: %v", err)

@@ -266,12 +266,19 @@ func selectOIDCBearerToken(tokens oidcTokenResponse, expectedIssuer, expectedAud
 
 	var fallbackJWT string
 	var fallbackExp *time.Time
-	for _, cand := range nonEmpty {
+	for i, cand := range nonEmpty {
 		claims, ok := parseUnverifiedJWTClaims(cand)
 		if !ok {
 			continue
 		}
-		exp := resolveTokenExpiry(tokens.ExpiresIn, claims.Exp)
+		// expires_in applies only to the access_token (RFC 6749 §5.1); when
+		// selecting an id_token or when the JWT carries an earlier exp claim,
+		// prefer the JWT's exp so refresh runs before Orka rejects the token.
+		expiresIn := 0
+		if i == 0 && strings.TrimSpace(tokens.AccessToken) != "" {
+			expiresIn = tokens.ExpiresIn
+		}
+		exp := resolveTokenExpiry(expiresIn, claims.Exp)
 		if fallbackJWT == "" {
 			fallbackJWT, fallbackExp = cand, exp
 		}
@@ -335,15 +342,26 @@ func jwtMatchesTarget(claims unverifiedJWTClaims, expectedIssuer, expectedAudien
 }
 
 func resolveTokenExpiry(expiresIn int, jwtExp int64) *time.Time {
+	var fromExpiresIn *time.Time
 	if expiresIn > 0 {
 		exp := time.Now().UTC().Add(time.Duration(expiresIn) * time.Second)
-		return &exp
+		fromExpiresIn = &exp
 	}
+	var fromJWT *time.Time
 	if jwtExp > 0 {
 		exp := time.Unix(jwtExp, 0).UTC()
-		return &exp
+		fromJWT = &exp
 	}
-	return nil
+	if fromJWT != nil && fromExpiresIn != nil {
+		if fromJWT.Before(*fromExpiresIn) {
+			return fromJWT
+		}
+		return fromExpiresIn
+	}
+	if fromJWT != nil {
+		return fromJWT
+	}
+	return fromExpiresIn
 }
 
 func defaultOIDCLoginScope(issuer, audience string) string {
