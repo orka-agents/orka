@@ -248,7 +248,8 @@ describe('excluded events', () => {
   it('words a blocked name lookup as an attempt to reach out', () => {
     const lookup = makeDecision({
       agentName: 'report-agent',
-      action: { toolName: 'code_exec', effects: { counts: { exec: 1, dns_lookup_blocked: 4 }, blockedCount: 4 } },
+      action: { toolName: 'code_exec', effects: { counts: { exec: 1, dns_lookup_blocked: 4 }, blockedCount: 4,
+        notableEvents: [{ id: 'l1', kind: 'dns_lookup_blocked', dest: 'kube-dns.kube-system.svc:53', outcome: 'denied by policy' }] } },
     })
     expect(actionPhrase(lookup)).toBe('tried to reach an outside destination (name lookup blocked by policy)')
     const read = makeDecision({

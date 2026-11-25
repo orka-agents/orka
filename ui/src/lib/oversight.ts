@@ -642,7 +642,9 @@ export function credentialStory(decisions: DecisionView[]): string | undefined {
     const effects = d.action.effects ?? {}
     const connected = (effects.counts?.net_connect ?? 0) > 0 || (effects.destinations?.length ?? 0) > 0
     const dest = effects.destinations?.[0]?.value ?? effects.notableEvents?.find((e) => e.dest)?.dest
-    if (wasBlocked(d) && !dest && blockedLookup(d)) {
+    // A blocked name lookup reached no destination of its own; its events
+    // may name only the resolver they tried.
+    if (wasBlocked(d) && !(effects.destinations?.length) && blockedLookup(d)) {
       return `read ${what}, then tried to send it out (name lookup blocked by policy)`
     }
     if (connected && dest) {
