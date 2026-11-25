@@ -181,6 +181,7 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		session, err := target.BeginImport(t.Context(), beginImportRequest(t, describe(t, source), manifest))
 		require.NoError(t, err)
 		family, record := firstRecord(t, manifest, records)
+		_, mutableRecord, hasMutable := firstMutableRecord(manifest, records)
 		batch := func(sequence int64, records ...storagev1.RawRecord) storagev1.ImportRecordsRequest {
 			return storagev1.ImportRecordsRequest{SessionID: session.SessionID, Family: family, Sequence: sequence, Records: records}
 		}
@@ -223,8 +224,13 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		}
 		_, err = target.ImportRecords(t.Context(), batch(1, record, wrongKey))
 		refusedPair(err, storagev1.ErrValidation, "a valid record followed by an invalid one")
-		_, err = target.ImportRecords(t.Context(), batch(1, record, changedRecord(t, record)))
-		refusedPair(err, storagev1.ErrConflict, "a batch that holds one key with two bodies")
+		if hasMutable {
+			mutableBatch := func(sequence int64, recs ...storagev1.RawRecord) storagev1.ImportRecordsRequest {
+				return storagev1.ImportRecordsRequest{SessionID: session.SessionID, Family: mutableRecord.Family, Sequence: sequence, Records: recs}
+			}
+			_, err = target.ImportRecords(t.Context(), mutableBatch(1, mutableRecord, changedRecord(t, mutableRecord)))
+			refusedPair(err, storagev1.ErrConflict, "a batch that holds one key with two bodies")
+		}
 
 		// Two copies of one record count once. A provider that takes one
 		// record at a time may refuse the pair instead.
@@ -239,10 +245,15 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		replay, err := target.ImportRecords(t.Context(), batch(1, record))
 		require.NoError(t, err, "a repeated batch")
 		require.Equal(t, progress, replay)
-		_, err = target.ImportRecords(t.Context(), batch(2, changedRecord(t, record)))
-		require.ErrorIs(t, err, storagev1.ErrConflict, "a record whose key is held with another body")
-		_, err = target.ImportRecords(t.Context(), batch(1, changedRecord(t, record)))
-		require.ErrorIs(t, err, storagev1.ErrConflict, "a repeated batch whose record changed")
+		if hasMutable {
+			mutated := changedRecord(t, mutableRecord)
+			if mutableRecord.Family == family {
+				_, err = target.ImportRecords(t.Context(), batch(2, mutated))
+				require.ErrorIs(t, err, storagev1.ErrConflict, "a record whose key is held with another body")
+				_, err = target.ImportRecords(t.Context(), batch(1, mutated))
+				require.ErrorIs(t, err, storagev1.ErrConflict, "a repeated batch whose record changed")
+			}
+		}
 		_, err = target.ImportRecords(t.Context(), batch(2, record))
 		require.NoError(t, err, "a later batch may repeat a record the family holds")
 		after, err := target.GetImportProgress(t.Context(), session.SessionID)
@@ -655,18 +666,33 @@ func importedCount(progress storagev1.ImportProgress, family string) int64 {
 	return -1
 }
 
-// firstRecord returns the first record of the first non-empty family that has
-// a field outside its key.
+// firstRecord returns the first record of the first non-empty family, preferring
+// one with a field outside its key when available, so custom seeds that only
+// populate key-only families still work.
 func firstRecord(t *testing.T, manifest []storagev1.FamilyDigest, records map[string][]storagev1.RawRecord) (string, storagev1.RawRecord) {
 	t.Helper()
+	if family, rec, ok := firstMutableRecord(manifest, records); ok {
+		return family, rec
+	}
 	for _, family := range manifest {
-		schema, _ := storagev1.LookupExportSchema(family.Family)
-		if len(records[family.Family]) > 0 && slices.ContainsFunc(schema.Fields, func(field storagev1.ExportField) bool { return !field.Key }) {
+		if len(records[family.Family]) > 0 {
 			return family.Family, records[family.Family][0]
 		}
 	}
-	t.Fatal("the seed wrote no record with a field outside its key")
+	t.Fatal("the seed wrote no records")
 	return "", storagev1.RawRecord{}
+}
+
+// firstMutableRecord returns the first record of the first non-empty family
+// that has a field outside its key.
+func firstMutableRecord(manifest []storagev1.FamilyDigest, records map[string][]storagev1.RawRecord) (string, storagev1.RawRecord, bool) {
+	for _, family := range manifest {
+		schema, _ := storagev1.LookupExportSchema(family.Family)
+		if len(records[family.Family]) > 0 && slices.ContainsFunc(schema.Fields, func(field storagev1.ExportField) bool { return !field.Key }) {
+			return family.Family, records[family.Family][0], true
+		}
+	}
+	return "", storagev1.RawRecord{}, false
 }
 
 // changedRecord returns record with its first field outside the key changed.
@@ -692,18 +718,37 @@ func changedRecord(t *testing.T, record storagev1.RawRecord) storagev1.RawRecord
 func changedExportValue(field storagev1.ExportField, value any) any {
 	switch typed := value.(type) {
 	case string:
-		// A changed ASCII byte keeps the length, so an identifier at its
-		// bound stays within it and the change is the only difference.
-		for i := range len(typed) {
-			if typed[i] < utf8.RuneSelf {
-				replacement := byte('x')
-				if typed[i] == 'x' {
-					replacement = 'y'
-				}
-				return typed[:i] + string(replacement) + typed[i+1:]
+		// Replace a single rune with another rune of the exact same UTF-8 byte
+		// width so identifiers at MaxControlIdentifierBytes never grow past the
+		// limit.
+		if typed == "" {
+			return "x"
+		}
+		r, width := utf8.DecodeRuneInString(typed)
+		var replacement rune
+		switch width {
+		case 1:
+			replacement = 'x'
+			if r == 'x' {
+				replacement = 'y'
+			}
+		case 2:
+			replacement = '\u00e9'
+			if r == replacement {
+				replacement = '\u00ea'
+			}
+		case 3:
+			replacement = '\u2603'
+			if r == replacement {
+				replacement = '\u2604'
+			}
+		default:
+			replacement = '\U0001f600'
+			if r == replacement {
+				replacement = '\U0001f601'
 			}
 		}
-		return typed + "x"
+		return string(replacement) + typed[width:]
 	case int64:
 		return typed + 1
 	case bool:
