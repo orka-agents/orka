@@ -74,6 +74,15 @@ func ParseSSHSigningKey(privateKeyPEM []byte) (ssh.Signer, string, error) {
 	if signer == nil || signer.PublicKey() == nil {
 		return nil, "", invalid("commit signing key", "signing key has no public key")
 	}
+	// Only deterministic SSH signing key types (Ed25519 and RSA PKCS#1 v1.5) are
+	// permitted so independent publishers produce identical commit OIDs and
+	// bundle digests for the same prepare request. Randomized ECDSA signatures
+	// would break deterministic preparation and recovery verification.
+	switch signer.PublicKey().Type() {
+	case ssh.KeyAlgoED25519, ssh.KeyAlgoRSA:
+	default:
+		return nil, "", invalid("commit signing key", "unsupported SSH signing key type %q (only ssh-ed25519 and ssh-rsa are supported for deterministic commit signing)", signer.PublicKey().Type())
+	}
 	return signer, ssh.FingerprintSHA256(signer.PublicKey()), nil
 }
 

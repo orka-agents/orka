@@ -26,8 +26,8 @@ const (
 	repositoryMonitorMergeableStateBehind = "behind"
 	repositoryMonitorMergeableStateDirty  = "dirty"
 	repositoryMonitorReadinessOperation   = "readiness_status"
-	repositoryMonitorReadinessTargetKind = "commit"
-	repositoryMonitorReadinessSuccess    = "Orka workflow evidence is current. GitHub controls required approvals and merging."
+	repositoryMonitorReadinessTargetKind  = "commit"
+	repositoryMonitorReadinessSuccess     = "Orka workflow evidence is current. GitHub controls required approvals and merging."
 )
 
 func repositoryMonitorReadinessContext(monitor *corev1alpha1.RepositoryMonitor) string {

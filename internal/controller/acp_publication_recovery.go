@@ -192,6 +192,10 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 	identity := store.ExternalEffectIdentity{
 		Kind: publisherPrepareOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
 	}
+	request, err = d.loadPersistedPrepareRequest(ctx, identity, request)
+	if err != nil {
+		return nil, err
+	}
 	response, err := runACPExternalEffect(ctx, d, recovery.fence, identity, request, func(callCtx context.Context) (publisherservice.PublicationPrepareResponse, error) {
 		return d.Publisher.PreparePublication(callCtx, request)
 	})
@@ -543,6 +547,46 @@ func (d *ACPDispatcher) loadPersistedPullRequestRequest(
 		}
 	}
 	return request, nil, store.ConflictErrorf("pull request effect does not match its immutable request digest")
+}
+
+// loadPersistedPrepareRequest preserves replay of unsigned default-identity
+// preparations recorded before CommitAuthorName/CommitAuthorEmail were added.
+func (d *ACPDispatcher) loadPersistedPrepareRequest(
+	ctx context.Context,
+	identity store.ExternalEffectIdentity,
+	request publisherservice.PublicationPrepareRequest,
+) (publisherservice.PublicationPrepareRequest, error) {
+	if d.Store == nil {
+		return request, nil
+	}
+	effect, err := d.Store.GetExternalEffectByIdentity(ctx, identity)
+	if errors.Is(err, store.ErrNotFound) {
+		return request, nil
+	}
+	if err != nil {
+		return request, err
+	}
+	candidates := []publisherservice.PublicationPrepareRequest{request}
+	if request.SigningCredentialRef == nil &&
+		request.Request.CommitAuthorName == publisher.CommitAuthorName &&
+		request.Request.CommitAuthorEmail == publisher.CommitAuthorEmail {
+		legacy := request
+		legacy.Request.CommitAuthorName = ""
+		legacy.Request.CommitAuthorEmail = ""
+		candidates = append(candidates, legacy)
+	}
+	for _, candidate := range candidates {
+		digest, digestErr := acpDomainDigest("external-effect-request", map[string]any{
+			identityKey: identity, requestKey: candidate,
+		})
+		if digestErr != nil {
+			return request, digestErr
+		}
+		if digest == effect.RequestDigest {
+			return candidate, nil
+		}
+	}
+	return request, nil
 }
 
 func (d *ACPDispatcher) finishPersistedPublicationRecovery(

@@ -89,7 +89,7 @@ type PromptAttemptSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=role
-	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:MaxItems=5
 	CredentialBindings []PromptCredentialBinding `json:"credentialBindings,omitempty"`
 }
 

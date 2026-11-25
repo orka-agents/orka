@@ -128,12 +128,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx
 	if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
 		return "", nil
 	}
+	var externalErr error
 	if reviewFirst && !ciFirst {
 		fix, err := r.repositoryMonitorFixWorkPending(ctx, monitor, owner, repo, pr, item, full)
 		if err != nil {
-			return "", err
-		}
-		if fix {
+			// Do not block broken-CI repair on a transient external review thread
+			// lookup failure; keep the error to surface if CI is not broken.
+			externalErr = err
+		} else if fix {
 			return repositoryMonitorCommandIntentFix, nil
 		}
 	}
@@ -143,6 +145,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx
 	}
 	if broke {
 		return repositoryMonitorCommandIntentFixCI, nil
+	}
+	if externalErr != nil {
+		return "", externalErr
 	}
 	if reviewFirst {
 		return "", nil

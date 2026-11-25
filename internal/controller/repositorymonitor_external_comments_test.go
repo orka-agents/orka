@@ -55,7 +55,7 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 											"line":       42,
 											"comments": map[string]any{
 												"nodes": []map[string]any{
-													{"author": map[string]any{"login": "coderabbitai[bot]"}, "body": "Handle nil error here."},
+													{"id": "PRRC_bot_1", "updatedAt": "2026-11-24T00:00:00Z", "author": map[string]any{"__typename": "Bot", "login": "coderabbitai"}, "body": "Handle nil error here."},
 												},
 											},
 										},
@@ -67,8 +67,8 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 											"line":       88,
 											"comments": map[string]any{
 												"nodes": []map[string]any{
-													{"author": map[string]any{"login": "maintainer"}, "body": "Please add a unit test."},
-													{"author": map[string]any{"login": "driveby-user"}, "body": "<!-- orka:repo-monitor-reply head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"},
+													{"id": "PRRC_human_1", "updatedAt": "2026-11-24T00:00:00Z", "author": map[string]any{"__typename": "User", "login": "maintainer"}, "body": "Please add a unit test."},
+													{"id": "PRRC_driveby_1", "updatedAt": "2026-11-24T00:01:00Z", "author": map[string]any{"__typename": "User", "login": "driveby-user"}, "body": "<!-- orka:repo-monitor-reply head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"},
 												},
 											},
 										},
@@ -152,6 +152,14 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 		case strings.HasSuffix(r.URL.Path, "/status"):
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"state": "success", "statuses": []any{}})
+		case r.URL.Path == "/repos/orka-agents/orka/pulls/42" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 42,
+				"state":  "open",
+				"head":   map[string]any{"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ref": "feat/test"},
+				"base":   map[string]any{"ref": "main"},
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -273,6 +281,24 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 	mu.Unlock()
 	if afterRetryReplies != 2 || afterRetryResolved != 1 {
 		t.Fatalf("retry duplicated mutations: replies=%d resolved=%d", afterRetryReplies, afterRetryResolved)
+	}
+
+	// 5b. Cross-head suppression: after the push to bbb..., unchanged unresolved
+	// threads must not be re-selected as fresh work.
+	pushedPR := pr
+	pushedPR.HeadSHA = job.PushedSHA
+	remaining, err := r.fetchRepositoryMonitorExternalReviewThreads(ctx, monitor, "orka-agents", "orka", pushedPR)
+	if err != nil {
+		t.Fatalf("fetchRepositoryMonitorExternalReviewThreads after push: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 remaining threads on pushed head for unchanged revisions, got %+v", remaining)
+	}
+
+	// 5c. Partially malformed JSON must be discarded rather than returning half-populated entries.
+	malformed := parseRepositoryMonitorRepairExternalResult([]byte(`{"addressedThreads":[{"threadId":"PRRT_bot_1","status":"fixed","note":42}]}`))
+	if len(malformed.AddressedThreads) != 0 {
+		t.Fatalf("expected malformed JSON to be discarded, got %+v", malformed)
 	}
 
 	// 6. Missing structured addressedThreads must NOT fabricate replies or resolve threads.

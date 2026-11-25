@@ -252,6 +252,13 @@ func validatePrepareRequest(request PrepareRequest) error {
 			return invalid("workspace relative root", "must be a canonical relative path")
 		}
 	}
+	if err := validatePrepareCommitFields(request); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePrepareCommitFields(request PrepareRequest) error {
 	if request.CommitMessage == "" || len(request.CommitMessage) > 4096 || !utf8.ValidString(request.CommitMessage) ||
 		strings.ContainsRune(request.CommitMessage, 0) || strings.Contains(request.CommitMessage, "\r") || !strings.HasSuffix(request.CommitMessage, "\n") {
 		return invalid("commit message", "must be non-empty UTF-8, at most 4096 bytes, contain no NUL/CR, and end with newline")
@@ -262,14 +269,18 @@ func validatePrepareRequest(request PrepareRequest) error {
 	if _, _, err := ValidateCommitIdentity(request.CommitAuthorName, request.CommitAuthorEmail); err != nil {
 		return err
 	}
-	if len(request.SigningKey) > 0 {
-		_, fingerprint, err := ParseSSHSigningKey(request.SigningKey)
-		if err != nil {
-			return err
+	if len(request.SigningKey) == 0 {
+		if request.SigningKeyFingerprint != "" {
+			return invalid("commit signing key", "signing key fingerprint requires a signing key")
 		}
-		if request.SigningKeyFingerprint != "" && request.SigningKeyFingerprint != fingerprint {
-			return invalid("commit signing key", "signing key fingerprint does not match private key")
-		}
+		return nil
+	}
+	_, fingerprint, err := ParseSSHSigningKey(request.SigningKey)
+	if err != nil {
+		return err
+	}
+	if request.SigningKeyFingerprint != "" && request.SigningKeyFingerprint != fingerprint {
+		return invalid("commit signing key", "signing key fingerprint does not match private key")
 	}
 	return nil
 }

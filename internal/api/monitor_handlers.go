@@ -440,6 +440,12 @@ func (h *Handlers) validateRepositoryMonitorCredentialSecrets(c fiber.Ctx, names
 			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("%s %q must contain a non-empty token, password, or %s key", credential.field, secretName, workerenv.GitHubToken))
 		}
 	}
+	if secretName := repositoryMonitorCredentialRefName(spec.Commit.SigningCredentialRef); secretName != "" {
+		if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c),
+			namespace, "get", "", "secrets", secretName); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

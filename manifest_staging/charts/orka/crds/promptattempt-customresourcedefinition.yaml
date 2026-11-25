@@ -117,7 +117,7 @@ spec:
                   - secretName
                   - secretUid
                   type: object
-                maxItems: 4
+                maxItems: 5
                 type: array
                 x-kubernetes-list-map-keys:
                 - role

@@ -457,7 +457,7 @@ spec:
 
 - `authorName` and `authorEmail` override the Git author and committer identity on repair and implementation commits.
 - `signOff: true` appends `Signed-off-by: <authorName> <<authorEmail>>` to every commit message.
-- `signingCredentialRef` references a distinct Kubernetes Secret in the monitor namespace containing an unencrypted OpenSSH private key under `signingKey` (or `key` / `id_ed25519`). Register the matching public key as a GitHub SSH signing key for the bot account. The key is fetched in memory only by the clean-room publisher during `publication.prepare` to produce OpenSSH `SSHSIG` signatures — it never enters the ACP runtime Pod or disk.
+- `signingCredentialRef` references a distinct Kubernetes Secret in the monitor namespace containing an unencrypted OpenSSH private key (`ssh-ed25519` or `ssh-rsa`) under `signingKey` (or `key` / `id_ed25519`). Register the matching public key as a GitHub SSH signing key for the bot account. The controller validates and binds the Secret reference in memory, and the clean-room publisher fetches the key in memory during `publication.prepare` to produce deterministic OpenSSH `SSHSIG` signatures — it never enters the ACP runtime Pod or disk.
 
 ### External review comments (humans and review bots)
 
