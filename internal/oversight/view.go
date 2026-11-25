@@ -66,7 +66,7 @@ func RecordIDs(records []storagev1.OversightDecisionRecord) []string {
 // distinguishing feature of signature. The tool and generic effect kinds are
 // left out: they alone would recall nearly every decision.
 func SimilarCandidates(namespace string, signature []oversightv1.Feature) []storagev1.OversightFacetMatch {
-	var matches []storagev1.OversightFacetMatch
+	matches := make([]storagev1.OversightFacetMatch, 0, len(signature))
 	for _, feature := range signature {
 		kind := feature.Kind
 		switch kind {
@@ -123,6 +123,12 @@ func RankSimilar(source oversightv1.DecisionView, candidates []oversightv1.Decis
 	return items
 }
 
+// Grouping keys for Group.
+const (
+	GroupByAgent = "agent"
+	GroupByTask  = "task"
+)
+
 // Group summarizes views by agent or Task. A decision without an agent is
 // grouped under its Task's name.
 func Group(views []oversightv1.DecisionView, by string) []oversightv1.DecisionGroup {
@@ -130,7 +136,7 @@ func Group(views []oversightv1.DecisionView, by string) []oversightv1.DecisionGr
 	var groups []oversightv1.DecisionGroup
 	for _, view := range views {
 		key := view.TaskName
-		if by == "agent" && view.AgentName != "" {
+		if by == GroupByAgent && view.AgentName != "" {
 			key = view.AgentName
 		}
 		i, ok := index[key]
@@ -153,7 +159,7 @@ func Group(views []oversightv1.DecisionView, by string) []oversightv1.DecisionGr
 		if view.ObservedAt.After(group.LastSeen) {
 			group.LastSeen = view.ObservedAt
 		}
-		if by == "agent" && len(group.Tasks) < 5 && !slices.Contains(group.Tasks, view.TaskName) {
+		if by == GroupByAgent && len(group.Tasks) < 5 && !slices.Contains(group.Tasks, view.TaskName) {
 			group.Tasks = append(group.Tasks, view.TaskName)
 		}
 	}

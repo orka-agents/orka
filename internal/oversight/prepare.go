@@ -73,11 +73,10 @@ func redactText(value string, limit int) string {
 	return truncateBytes(redacted, limit)
 }
 
-func redactAll(values []string, limit int) []string {
+func redactAll(values []string, limit int) {
 	for i := range values {
 		values[i] = redactText(values[i], limit)
 	}
-	return values
 }
 
 func redactCounted(values []oversightv1.CountedValue) {
@@ -222,8 +221,10 @@ func Narrative(d *oversightv1.OversightDecision) string {
 }
 
 func searchText(d *oversightv1.OversightDecision, narrative string) string {
-	parts := []string{d.TaskName, d.AgentName, d.Action.ToolName, d.Action.RequestSummary, narrative}
 	effects := d.Action.Effects
+	parts := make([]string, 0, 5+len(effects.Binaries)+len(effects.Paths)+len(effects.Destinations)+4*len(effects.NotableEvents)+
+		len(d.Advisors)+len(d.CharterFindings))
+	parts = append(parts, d.TaskName, d.AgentName, d.Action.ToolName, d.Action.RequestSummary, narrative)
 	parts = append(parts, values(effects.Binaries)...)
 	parts = append(parts, values(effects.Paths)...)
 	parts = append(parts, values(effects.Destinations)...)

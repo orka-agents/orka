@@ -303,7 +303,7 @@ func oversightFilterSQL(filter storagev1.OversightDecisionFilter) (string, []any
 		add(condition, values...)
 	}
 	if len(filter.AnyFacets) > 0 {
-		var alternatives []string
+		alternatives := make([]string, 0, len(filter.AnyFacets))
 		var values []any
 		for _, match := range filter.AnyFacets {
 			condition, matchValues := facetCondition(match)

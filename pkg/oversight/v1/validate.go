@@ -60,7 +60,8 @@ func (d *OversightDecision) Validate() error {
 		return err
 	}
 	for name, value := range map[string]string{
-		"taskUID": d.TaskUID, "agentName": d.AgentName, "workloadIdentity": d.WorkloadIdentity, "runID": d.RunID, "charterRevision": d.CharterRevision, "concernsRef": d.ConcernsRef,
+		"taskUID": d.TaskUID, "agentName": d.AgentName, "workloadIdentity": d.WorkloadIdentity, "runID": d.RunID,
+		"charterRevision": d.CharterRevision, "concernsRef": d.ConcernsRef,
 		"concernsRevision": d.ConcernsRevision, "concernsDigest": d.ConcernsDigest, "approvalRef": d.ApprovalRef,
 	} {
 		if len(value) > MaxShortTextBytes {
@@ -76,7 +77,9 @@ func (d *OversightDecision) Validate() error {
 	if d.Mode != ModeAudit && d.Mode != ModeGate {
 		return invalid("mode must be audit or gate")
 	}
-	if d.OutageFallback != "" && d.OutageFallback != OutageFallbackFailClosed && d.OutageFallback != OutageFallbackAuditOnly {
+	switch d.OutageFallback {
+	case "", OutageFallbackFailClosed, OutageFallbackAuditOnly:
+	default:
 		return invalid("outageFallback must be fail_closed or audit_only")
 	}
 	if !slices.Contains(Dispositions, d.Disposition) {

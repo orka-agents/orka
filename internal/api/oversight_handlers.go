@@ -375,8 +375,8 @@ func (h *Handlers) GroupOversightDecisions(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	by := c.Query("by", "agent")
-	if by != "agent" && by != "task" {
+	by := c.Query("by", oversight.GroupByAgent)
+	if by != oversight.GroupByAgent && by != oversight.GroupByTask {
 		return fiber.NewError(fiber.StatusBadRequest, "by must be agent or task")
 	}
 	filter, terms, err := oversightQueryFilter(c, namespace, time.Now().UTC())
@@ -441,12 +441,27 @@ func (h *Handlers) GetOversightPosture(c fiber.Ctx) error {
 }
 
 // GetOversightConfig handles GET /api/v1/oversight/config: the search keys a
-// client may offer.
+// client may offer, and the charter revisions the operator declared as
+// previews (labelled "preview rule check, audit only"), read from the
+// producer declarations ConfigMap's previewCharterRevisions key.
 func (h *Handlers) GetOversightConfig(c fiber.Ctx) error {
-	if _, err := h.authorizeOversightRead(c, "getOversightConfig", "list"); err != nil {
+	namespace, err := h.authorizeOversightRead(c, "getOversightConfig", "list")
+	if err != nil {
 		return err
 	}
-	return c.JSON(fiber.Map{"queryKeys": oversight.QueryKeys(), "maxBulkFeedback": oversightv1.MaxBulkFeedback})
+	previews := []string{}
+	if cm, found, err := h.oversightProducersConfigMap(c.Context(), namespace); err != nil {
+		return err
+	} else if found {
+		for revision := range strings.SplitSeq(cm.Data[oversightPreviewChartersKey], ",") {
+			if revision = strings.TrimSpace(revision); revision != "" && len(previews) < maxOversightProducers {
+				previews = append(previews, revision)
+			}
+		}
+	}
+	return c.JSON(fiber.Map{
+		"queryKeys": oversight.QueryKeys(), "maxBulkFeedback": oversightv1.MaxBulkFeedback, "demoCharterRevisions": previews,
+	})
 }
 
 // RecordOversightFeedback handles POST /api/v1/oversight/decisions/{id}/feedback.
@@ -642,6 +657,7 @@ func cloneOversightFilter(f storagev1.OversightDecisionFilter) storagev1.Oversig
 const (
 	oversightProducersConfigMap = "orka-oversight-producers"
 	oversightProducersKey       = "producers.json"
+	oversightPreviewChartersKey = "previewCharterRevisions"
 	maxOversightProducers       = 64
 )
 
@@ -718,7 +734,7 @@ func (h *Handlers) ListOversightProducers(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-func (h *Handlers) declaredOversightProducers(ctx context.Context, namespace string) ([]oversightv1.ProducerInfo, bool, error) {
+func (h *Handlers) oversightProducersConfigMap(ctx context.Context, namespace string) (*corev1.ConfigMap, bool, error) {
 	reader := h.apiReader
 	if reader == nil {
 		reader = h.client
@@ -733,6 +749,14 @@ func (h *Handlers) declaredOversightProducers(ctx context.Context, namespace str
 		}
 		log.Error(err, "read oversight producer declarations", "namespace", namespace)
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, "failed to read oversight producer declarations")
+	}
+	return &cm, true, nil
+}
+
+func (h *Handlers) declaredOversightProducers(ctx context.Context, namespace string) ([]oversightv1.ProducerInfo, bool, error) {
+	cm, found, err := h.oversightProducersConfigMap(ctx, namespace)
+	if err != nil || !found {
+		return nil, found, err
 	}
 	raw := cm.Data[oversightProducersKey]
 	if raw == "" {

@@ -46,7 +46,7 @@ var queryFacets = map[string]string{
 }
 
 // queryFields are the keys matched against decision fields.
-var queryFields = []string{"tool", "task", "agent", "run", "disposition", "feedback", "minScore", "wouldPause", "since", "sig"}
+var queryFields = []string{"tool", GroupByTask, GroupByAgent, "run", "disposition", "feedback", "minScore", "wouldPause", "since", "sig"}
 
 // QueryKeys lists every key the grammar accepts, for clients and errors.
 func QueryKeys() []string {
@@ -118,14 +118,14 @@ func ParseQuery(q string, now time.Time) (storagev1.OversightDecisionFilter, []o
 		switch key {
 		case "tool":
 			filter.ToolNames = append(filter.ToolNames, alternatives...)
-		case "agent":
+		case GroupByAgent:
 			filter.AgentNames = append(filter.AgentNames, alternatives...)
 		case "run":
 			if len(alternatives) != 1 {
 				return filter, nil, fmt.Errorf("%w: run: takes one value", ErrQuery)
 			}
 			filter.RunID = alternatives[0]
-		case "task":
+		case GroupByTask:
 			for _, alternative := range alternatives {
 				if prefix, ok := strings.CutSuffix(alternative, "*"); ok && !strings.Contains(prefix, "*") && len(alternatives) == 1 {
 					filter.TaskPrefix = prefix

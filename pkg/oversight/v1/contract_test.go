@@ -30,7 +30,8 @@ func TestContractDoesNotImportOrkaInternals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, imported := range append(append(append([]string(nil), pkg.Imports...), pkg.TestImports...), pkg.XTestImports...) {
+	imports := append(append(append([]string(nil), pkg.Imports...), pkg.TestImports...), pkg.XTestImports...)
+	for _, imported := range imports {
 		if strings.HasPrefix(imported, "github.com/orka-agents/orka/") &&
 			!strings.HasPrefix(imported, "github.com/orka-agents/orka/pkg/") {
 			t.Errorf("%s imports %s", pkg.ImportPath, imported)
@@ -63,7 +64,9 @@ func validDecision() oversightv1.OversightDecision {
 				{QuestionID: "K2", Probability: 0.1, Threshold: &threshold},
 			},
 		}},
-		Advisors: []oversightv1.AdvisorEvaluation{{ProviderRef: "advisor-a", ModelID: "model-b", Status: "content_filtered", Concerns: []string{"K10"}}},
+		Advisors: []oversightv1.AdvisorEvaluation{{
+			ProviderRef: "advisor-a", ModelID: "model-b", Status: "content_filtered", Concerns: []string{"K10"},
+		}},
 	}
 }
 
@@ -122,7 +125,7 @@ func TestSignatureNormalizesSpecificsAway(t *testing.T) {
 	if oversightv1.SignatureHash(a.Signature()) != oversightv1.SignatureHash(b.Signature()) {
 		t.Fatalf("signatures differ:\n%v\n%v", a.Signature(), b.Signature())
 	}
-	var features []string
+	features := make([]string, 0, len(a.Signature()))
 	for _, f := range a.Signature() {
 		features = append(features, f.String())
 	}
@@ -140,7 +143,9 @@ func TestSignatureNormalizesSpecificsAway(t *testing.T) {
 }
 
 func TestNormalizers(t *testing.T) {
-	for in, want := range map[string]string{"/etc/localtime": "/etc/*", "/localtime": "/localtime", "rel/./a": "rel/a", "/a/b/c/d/e": "/a/b/c/*"} {
+	for in, want := range map[string]string{
+		"/etc/localtime": "/etc/*", "/localtime": "/localtime", "rel/./a": "rel/a", "/a/b/c/d/e": "/a/b/c/*",
+	} {
 		if got := oversightv1.PathPrefix(in); got != want {
 			t.Errorf("PathPrefix(%q) = %q, want %q", in, got, want)
 		}
@@ -186,6 +191,8 @@ func TestFeedbackValidate(t *testing.T) {
 }
 
 func TestMonitorFailedMeansATierGaveNoUsableAnswer(t *testing.T) {
+	type scorers = []oversightv1.ScorerEvaluation
+	type advisors = []oversightv1.AdvisorEvaluation
 	scorer := func(trust, status string) oversightv1.ScorerEvaluation {
 		return oversightv1.ScorerEvaluation{ProviderRef: "s", ModelID: "m", TrustState: trust, Status: status}
 	}
@@ -198,12 +205,12 @@ func TestMonitorFailedMeansATierGaveNoUsableAnswer(t *testing.T) {
 		failed   bool
 	}{
 		"no evaluations":                     {nil, nil, false},
-		"the only scorer timed out":          {[]oversightv1.ScorerEvaluation{scorer("", "timeout")}, nil, true},
-		"a shadow scorer timed out":          {[]oversightv1.ScorerEvaluation{scorer("qualified", "ok"), scorer("shadow", "timeout")}, nil, false},
-		"the qualified scorer timed out":     {[]oversightv1.ScorerEvaluation{scorer("qualified", "timeout"), scorer("shadow", "ok")}, nil, true},
-		"only shadow scorers, one answers":   {[]oversightv1.ScorerEvaluation{scorer("shadow", "ok"), scorer("shadow", "error")}, nil, false},
-		"one advisor filtered, one answered": {nil, []oversightv1.AdvisorEvaluation{advisor("content_filtered"), advisor("ok")}, false},
-		"every advisor filtered":             {nil, []oversightv1.AdvisorEvaluation{advisor("content_filtered")}, true},
+		"the only scorer timed out":          {scorers{scorer("", "timeout")}, nil, true},
+		"a shadow scorer timed out":          {scorers{scorer("qualified", "ok"), scorer("shadow", "timeout")}, nil, false},
+		"the qualified scorer timed out":     {scorers{scorer("qualified", "timeout"), scorer("shadow", "ok")}, nil, true},
+		"only shadow scorers, one answers":   {scorers{scorer("shadow", "ok"), scorer("shadow", "error")}, nil, false},
+		"one advisor filtered, one answered": {nil, advisors{advisor("content_filtered"), advisor("ok")}, false},
+		"every advisor filtered":             {nil, advisors{advisor("content_filtered")}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			d := oversightv1.OversightDecision{Scorers: tc.scorers, Advisors: tc.advisors}

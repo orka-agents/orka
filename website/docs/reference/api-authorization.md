@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 168 authenticated external route registrations, including 69
+The table covers all 178 authenticated external route registrations, including 71
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -236,6 +236,16 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/stream` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/trace` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/oversight/config` | `core.orka.ai` | `oversightdecisions` | `list` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `GET` | `/api/v1/oversight/posture` | `core.orka.ai` | `oversightdecisions` | `list` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `GET` | `/api/v1/oversight/producers` | `core.orka.ai` | `oversightdecisions` | `list` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `GET` | `/api/v1/oversight/decisions` | `core.orka.ai` | `oversightdecisions` | `list` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `GET` | `/api/v1/oversight/decisions/stream` | `core.orka.ai` | `oversightdecisions` | `list` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `GET` | `/api/v1/oversight/decisions/groups` | `core.orka.ai` | `oversightdecisions` | `list` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `POST` | `/api/v1/oversight/decisions/bulk-feedback` | `core.orka.ai` | `oversightdecisions/feedback` | `create` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `GET` | `/api/v1/oversight/decisions/:id` | `core.orka.ai` | `oversightdecisions` | `get` | `:id` | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `GET` | `/api/v1/oversight/decisions/:id/similar` | `core.orka.ai` | `oversightdecisions` | `list` | empty | `Q` | Oversight; `501` unless `--oversight-enabled` |
+| `POST` | `/api/v1/oversight/decisions/:id/feedback` | `core.orka.ai` | `oversightdecisions/feedback` | `create` | `:id` | `Q` | Oversight; `501` unless `--oversight-enabled` |
 | `GET` | `/api/v1/attention` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history; monitor items need `list` on `repositorymonitors` and `monitorworkactions` |
 | `GET` | `/api/v1/approvals` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history |
 | `GET` | `/api/v1/audit/identity` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read, context-token Task binding, and hidden-Task visibility checks per record |

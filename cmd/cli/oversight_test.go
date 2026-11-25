@@ -66,7 +66,7 @@ func TestOversightReplayBatchesShiftsAndIsIdempotent(t *testing.T) {
 	server := httptest.NewServer(ingest)
 	defer server.Close()
 	start := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
-	var lines []string
+	lines := make([]string, 0, 5)
 	for i := range 5 {
 		lines = append(lines, replayLine(t, fmt.Sprintf("task@%d", i), start.Add(time.Duration(i)*time.Minute)))
 	}
