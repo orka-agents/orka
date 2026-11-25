@@ -119,10 +119,11 @@ func jsonMapToWire(value map[string]any, field string) (*storagepb.JSONValue, er
 	return jsonToWire(value, field)
 }
 
-// rawJSONToWire carries json.RawMessage bytes unchanged. Empty bytes are an
-// absent field.
+// rawJSONToWire carries json.RawMessage bytes unchanged. Empty or
+// whitespace-only bytes are an absent field, as they are zero in a request
+// digest and no content to a provider.
 func rawJSONToWire(value json.RawMessage, field string) (*storagepb.JSONValue, error) {
-	if len(value) == 0 {
+	if len(bytes.TrimSpace(value)) == 0 {
 		return nil, nil
 	}
 	if !json.Valid(value) {

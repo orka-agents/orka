@@ -20,6 +20,15 @@ type stateOverlay struct {
 var overlayMethods = []string{
 	"Describe",
 	"HealthCheck",
+	"AppendExecutionEvent",
+	"AppendExecutionEventIfAbsent",
+	"AppendExecutionEventWithPlanIfAbsent",
+	"AppendExecutionEventsIfAbsent",
+	"DeleteExecutionEvents",
+	"GetLatestExecutionEventSeq",
+	"GetLatestExecutionEventSeqs",
+	"ListExecutionEvents",
+	"ListSessionExecutionEvents",
 	"ConsumeMessages",
 	"DeleteParentMessages",
 	"DeleteTaskMessages",
@@ -41,6 +50,42 @@ func (overlay stateOverlay) Describe(ctx context.Context) (storagev1.ProviderInf
 
 func (overlay stateOverlay) HealthCheck(ctx context.Context) error {
 	return overlay.client.HealthCheck(ctx)
+}
+
+func (overlay stateOverlay) AppendExecutionEvent(ctx context.Context, event *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
+	return overlay.client.AppendExecutionEvent(ctx, event)
+}
+
+func (overlay stateOverlay) AppendExecutionEventIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string) (*storagev1.ExecutionEvent, bool, error) {
+	return overlay.client.AppendExecutionEventIfAbsent(ctx, event, dedupeKey)
+}
+
+func (overlay stateOverlay) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string, plan *storagev1.PlanState) (*storagev1.ExecutionEvent, bool, error) {
+	return overlay.client.AppendExecutionEventWithPlanIfAbsent(ctx, event, dedupeKey, plan)
+}
+
+func (overlay stateOverlay) AppendExecutionEventsIfAbsent(ctx context.Context, appends []storagev1.ExecutionEventAppend) ([]storagev1.ExecutionEventAppendResult, error) {
+	return overlay.client.AppendExecutionEventsIfAbsent(ctx, appends)
+}
+
+func (overlay stateOverlay) DeleteExecutionEvents(ctx context.Context, namespace string, streamType string, streamID string) error {
+	return overlay.client.DeleteExecutionEvents(ctx, namespace, streamType, streamID)
+}
+
+func (overlay stateOverlay) GetLatestExecutionEventSeq(ctx context.Context, namespace string, streamType string, streamID string) (int64, error) {
+	return overlay.client.GetLatestExecutionEventSeq(ctx, namespace, streamType, streamID)
+}
+
+func (overlay stateOverlay) GetLatestExecutionEventSeqs(ctx context.Context, namespace string, streamType string, streamIDs []string) (map[string]int64, error) {
+	return overlay.client.GetLatestExecutionEventSeqs(ctx, namespace, streamType, streamIDs)
+}
+
+func (overlay stateOverlay) ListExecutionEvents(ctx context.Context, filter storagev1.ExecutionEventFilter) ([]storagev1.ExecutionEvent, error) {
+	return overlay.client.ListExecutionEvents(ctx, filter)
+}
+
+func (overlay stateOverlay) ListSessionExecutionEvents(ctx context.Context, filter storagev1.SessionExecutionEventFilter) ([]storagev1.SessionExecutionEvent, int64, error) {
+	return overlay.client.ListSessionExecutionEvents(ctx, filter)
 }
 
 func (overlay stateOverlay) ConsumeMessages(ctx context.Context, request storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {

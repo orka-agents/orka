@@ -111,6 +111,70 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "ExecutionEvent",
+		goType:  reflect.TypeFor[storagev1.ExecutionEvent](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEvent{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireExecutionEvent(value.(storagev1.ExecutionEvent)) },
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireExecutionEvent(message.(*storagepb.ExecutionEvent), exact)
+		},
+	},
+	{
+		name:    "ExecutionEventAppend",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventAppend](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventAppend{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventAppend(value.(storagev1.ExecutionEventAppend))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireExecutionEventAppend(message.(*storagepb.ExecutionEventAppend), exact)
+		},
+	},
+	{
+		name:    "ExecutionEventAppendResult",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventAppendResult](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventAppendResult{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventAppendResult(value.(storagev1.ExecutionEventAppendResult))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireExecutionEventAppendResult(message.(*storagepb.ExecutionEventAppendResult), exact)
+		},
+	},
+	{
+		name:    "ExecutionEventFilter",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventFilter](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventFilter{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventFilter(value.(storagev1.ExecutionEventFilter))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireExecutionEventFilter(message.(*storagepb.ExecutionEventFilter), exact)
+		},
+	},
+	{
+		name:    "ExecutionEventTruncation",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventTruncation](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventTruncation{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventTruncation(value.(storagev1.ExecutionEventTruncation))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireExecutionEventTruncation(message.(*storagepb.ExecutionEventTruncation), exact)
+		},
+	},
+	{
+		name:    "ExecutionEventUsage",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventUsage](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventUsage{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventUsage(value.(storagev1.ExecutionEventUsage))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireExecutionEventUsage(message.(*storagepb.ExecutionEventUsage), exact)
+		},
+	},
+	{
 		name:    "Message",
 		goType:  reflect.TypeFor[storagev1.Message](),
 		newWire: func() proto.Message { return &storagepb.Message{} },
@@ -180,6 +244,28 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "SessionExecutionEvent",
+		goType:  reflect.TypeFor[storagev1.SessionExecutionEvent](),
+		newWire: func() proto.Message { return &storagepb.SessionExecutionEvent{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionExecutionEvent(value.(storagev1.SessionExecutionEvent))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireSessionExecutionEvent(message.(*storagepb.SessionExecutionEvent), exact)
+		},
+	},
+	{
+		name:    "SessionExecutionEventFilter",
+		goType:  reflect.TypeFor[storagev1.SessionExecutionEventFilter](),
+		newWire: func() proto.Message { return &storagepb.SessionExecutionEventFilter{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionExecutionEventFilter(value.(storagev1.SessionExecutionEventFilter))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireSessionExecutionEventFilter(message.(*storagepb.SessionExecutionEventFilter), exact)
+		},
+	},
+	{
 		name:    "TaskDataFence",
 		goType:  reflect.TypeFor[storagev1.TaskDataFence](),
 		newWire: func() proto.Message { return &storagepb.TaskDataFence{} },
@@ -197,6 +283,17 @@ var recordCodecs = []recordCodec{
 		},
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireTaskJobIdentity(message.(*storagepb.TaskJobIdentity), exact)
+		},
+	},
+	{
+		name:    "UsageObservation",
+		goType:  reflect.TypeFor[storagev1.UsageObservation](),
+		newWire: func() proto.Message { return &storagepb.UsageObservation{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireUsageObservation(value.(storagev1.UsageObservation))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireUsageObservation(message.(*storagepb.UsageObservation), exact)
 		},
 	},
 	{

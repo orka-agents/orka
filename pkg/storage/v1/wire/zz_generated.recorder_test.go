@@ -15,6 +15,15 @@ var wireMethods = []string{
 	"SaveArtifact",
 	"Describe",
 	"HealthCheck",
+	"AppendExecutionEvent",
+	"AppendExecutionEventIfAbsent",
+	"AppendExecutionEventWithPlanIfAbsent",
+	"AppendExecutionEventsIfAbsent",
+	"DeleteExecutionEvents",
+	"GetLatestExecutionEventSeq",
+	"GetLatestExecutionEventSeqs",
+	"ListExecutionEvents",
+	"ListSessionExecutionEvents",
 	"ConsumeMessages",
 	"DeleteParentMessages",
 	"DeleteTaskMessages",
@@ -67,6 +76,52 @@ func (p *recordingProvider) HealthCheck(ctx context.Context) error {
 	results, err := p.called(ctx, "HealthCheck")
 	_ = results
 	return err
+}
+
+func (p *recordingProvider) AppendExecutionEvent(ctx context.Context, event *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
+	results, err := p.called(ctx, "AppendExecutionEvent", event)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), err
+}
+
+func (p *recordingProvider) AppendExecutionEventIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string) (*storagev1.ExecutionEvent, bool, error) {
+	results, err := p.called(ctx, "AppendExecutionEventIfAbsent", event, dedupeKey)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), resultAs[bool](results, 1), err
+}
+
+func (p *recordingProvider) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string, plan *storagev1.PlanState) (*storagev1.ExecutionEvent, bool, error) {
+	results, err := p.called(ctx, "AppendExecutionEventWithPlanIfAbsent", event, dedupeKey, plan)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), resultAs[bool](results, 1), err
+}
+
+func (p *recordingProvider) AppendExecutionEventsIfAbsent(ctx context.Context, appends []storagev1.ExecutionEventAppend) ([]storagev1.ExecutionEventAppendResult, error) {
+	results, err := p.called(ctx, "AppendExecutionEventsIfAbsent", appends)
+	return resultAs[[]storagev1.ExecutionEventAppendResult](results, 0), err
+}
+
+func (p *recordingProvider) DeleteExecutionEvents(ctx context.Context, namespace string, streamType string, streamID string) error {
+	results, err := p.called(ctx, "DeleteExecutionEvents", namespace, streamType, streamID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) GetLatestExecutionEventSeq(ctx context.Context, namespace string, streamType string, streamID string) (int64, error) {
+	results, err := p.called(ctx, "GetLatestExecutionEventSeq", namespace, streamType, streamID)
+	return resultAs[int64](results, 0), err
+}
+
+func (p *recordingProvider) GetLatestExecutionEventSeqs(ctx context.Context, namespace string, streamType string, streamIDs []string) (map[string]int64, error) {
+	results, err := p.called(ctx, "GetLatestExecutionEventSeqs", namespace, streamType, streamIDs)
+	return resultAs[map[string]int64](results, 0), err
+}
+
+func (p *recordingProvider) ListExecutionEvents(ctx context.Context, filter storagev1.ExecutionEventFilter) ([]storagev1.ExecutionEvent, error) {
+	results, err := p.called(ctx, "ListExecutionEvents", filter)
+	return resultAs[[]storagev1.ExecutionEvent](results, 0), err
+}
+
+func (p *recordingProvider) ListSessionExecutionEvents(ctx context.Context, filter storagev1.SessionExecutionEventFilter) ([]storagev1.SessionExecutionEvent, int64, error) {
+	results, err := p.called(ctx, "ListSessionExecutionEvents", filter)
+	return resultAs[[]storagev1.SessionExecutionEvent](results, 0), resultAs[int64](results, 1), err
 }
 
 func (p *recordingProvider) ConsumeMessages(ctx context.Context, request storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {

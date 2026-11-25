@@ -251,6 +251,237 @@ func fromWireDatasetUsage(in *storagepb.DatasetUsage, exact bool) (storagev1.Dat
 	return out, err
 }
 
+func toWireExecutionEvent(in storagev1.ExecutionEvent) (*storagepb.ExecutionEvent, error) {
+	out := &storagepb.ExecutionEvent{}
+	var err error
+	out.Id = in.ID
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamId = in.StreamID
+	out.Seq = in.Seq
+	out.Type = in.Type
+	out.Severity = in.Severity
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AgentName = in.AgentName
+	out.ToolName = in.ToolName
+	out.ToolCallId = in.ToolCallID
+	out.Summary = in.Summary
+	if out.Content, err = rawJSONToWire(in.Content, "ExecutionEvent.Content"); err != nil {
+		return nil, err
+	}
+	out.ContentText = in.ContentText
+	if in.Truncation != nil {
+		if out.Truncation, err = toWireExecutionEventTruncation(*in.Truncation); err != nil {
+			return nil, err
+		}
+	}
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "ExecutionEvent.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if in.Usage != nil {
+		if out.Usage, err = toWireExecutionEventUsage(*in.Usage); err != nil {
+			return nil, err
+		}
+	}
+	return out, err
+}
+
+func fromWireExecutionEvent(in *storagepb.ExecutionEvent, exact bool) (storagev1.ExecutionEvent, error) {
+	var out storagev1.ExecutionEvent
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.ID = in.Id
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamID = in.StreamId
+	out.Seq = in.Seq
+	out.Type = in.Type
+	out.Severity = in.Severity
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AgentName = in.AgentName
+	out.ToolName = in.ToolName
+	out.ToolCallID = in.ToolCallId
+	out.Summary = in.Summary
+	if out.Content, err = rawJSONFromWire(in.Content, "ExecutionEvent.Content"); err != nil {
+		return out, err
+	}
+	out.ContentText = in.ContentText
+	if in.Truncation != nil {
+		var v2 storagev1.ExecutionEventTruncation
+		if v2, err = fromWireExecutionEventTruncation(in.Truncation, exact); err != nil {
+			return out, err
+		}
+		out.Truncation = &v2
+	}
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "ExecutionEvent.CreatedAt"); err != nil {
+		return out, err
+	}
+	if in.Usage != nil {
+		var v3 storagev1.ExecutionEventUsage
+		if v3, err = fromWireExecutionEventUsage(in.Usage, exact); err != nil {
+			return out, err
+		}
+		out.Usage = &v3
+	}
+	return out, err
+}
+
+func toWireExecutionEventAppend(in storagev1.ExecutionEventAppend) (*storagepb.ExecutionEventAppend, error) {
+	out := &storagepb.ExecutionEventAppend{}
+	var err error
+	if in.Event != nil {
+		if out.Event, err = toWireExecutionEvent(*in.Event); err != nil {
+			return nil, err
+		}
+	}
+	out.DedupeKey = in.DedupeKey
+	return out, err
+}
+
+func fromWireExecutionEventAppend(in *storagepb.ExecutionEventAppend, exact bool) (storagev1.ExecutionEventAppend, error) {
+	var out storagev1.ExecutionEventAppend
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	if in.Event != nil {
+		var v4 storagev1.ExecutionEvent
+		if v4, err = fromWireExecutionEvent(in.Event, exact); err != nil {
+			return out, err
+		}
+		out.Event = &v4
+	}
+	out.DedupeKey = in.DedupeKey
+	return out, err
+}
+
+func toWireExecutionEventAppendResult(in storagev1.ExecutionEventAppendResult) (*storagepb.ExecutionEventAppendResult, error) {
+	out := &storagepb.ExecutionEventAppendResult{}
+	var err error
+	if in.Event != nil {
+		if out.Event, err = toWireExecutionEvent(*in.Event); err != nil {
+			return nil, err
+		}
+	}
+	out.Appended = in.Appended
+	return out, err
+}
+
+func fromWireExecutionEventAppendResult(in *storagepb.ExecutionEventAppendResult, exact bool) (storagev1.ExecutionEventAppendResult, error) {
+	var out storagev1.ExecutionEventAppendResult
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	if in.Event != nil {
+		var v5 storagev1.ExecutionEvent
+		if v5, err = fromWireExecutionEvent(in.Event, exact); err != nil {
+			return out, err
+		}
+		out.Event = &v5
+	}
+	out.Appended = in.Appended
+	return out, err
+}
+
+func toWireExecutionEventFilter(in storagev1.ExecutionEventFilter) (*storagepb.ExecutionEventFilter, error) {
+	out := &storagepb.ExecutionEventFilter{}
+	var err error
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamId = in.StreamID
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	for _, e6 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e6))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int64(in.Limit)
+	return out, err
+}
+
+func fromWireExecutionEventFilter(in *storagepb.ExecutionEventFilter, exact bool) (storagev1.ExecutionEventFilter, error) {
+	var out storagev1.ExecutionEventFilter
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamID = in.StreamId
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	if len(in.EventTypes) > 0 {
+		out.EventTypes = make([]string, 0, len(in.EventTypes))
+	}
+	for _, e7 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e7))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int(in.Limit)
+	return out, err
+}
+
+func toWireExecutionEventTruncation(in storagev1.ExecutionEventTruncation) (*storagepb.ExecutionEventTruncation, error) {
+	out := &storagepb.ExecutionEventTruncation{}
+	var err error
+	out.SummaryTruncated = in.SummaryTruncated
+	out.SummaryOriginalChars = int64(in.SummaryOriginalChars)
+	out.ContentTextTruncated = in.ContentTextTruncated
+	out.ContentTextOriginalChars = int64(in.ContentTextOriginalChars)
+	out.ContentJsonTruncated = in.ContentJSONTruncated
+	out.ContentJsonOriginalBytes = int64(in.ContentJSONOriginalBytes)
+	return out, err
+}
+
+func fromWireExecutionEventTruncation(in *storagepb.ExecutionEventTruncation, exact bool) (storagev1.ExecutionEventTruncation, error) {
+	var out storagev1.ExecutionEventTruncation
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.SummaryTruncated = in.SummaryTruncated
+	out.SummaryOriginalChars = int(in.SummaryOriginalChars)
+	out.ContentTextTruncated = in.ContentTextTruncated
+	out.ContentTextOriginalChars = int(in.ContentTextOriginalChars)
+	out.ContentJSONTruncated = in.ContentJsonTruncated
+	out.ContentJSONOriginalBytes = int(in.ContentJsonOriginalBytes)
+	return out, err
+}
+
+func toWireExecutionEventUsage(in storagev1.ExecutionEventUsage) (*storagepb.ExecutionEventUsage, error) {
+	out := &storagepb.ExecutionEventUsage{}
+	var err error
+	if out.Observation, err = toWireUsageObservation(in.Observation); err != nil {
+		return nil, err
+	}
+	out.KeepFirstObservedAt = in.KeepFirstObservedAt
+	return out, err
+}
+
+func fromWireExecutionEventUsage(in *storagepb.ExecutionEventUsage, exact bool) (storagev1.ExecutionEventUsage, error) {
+	var out storagev1.ExecutionEventUsage
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	if out.Observation, err = fromWireUsageObservation(in.Observation, exact); err != nil {
+		return out, err
+	}
+	out.KeepFirstObservedAt = in.KeepFirstObservedAt
+	return out, err
+}
+
 func toWireMessage(in storagev1.Message) (*storagepb.Message, error) {
 	out := &storagepb.Message{}
 	var err error
@@ -391,14 +622,14 @@ func toWireProviderInfo(in storagev1.ProviderInfo) (*storagepb.ProviderInfo, err
 	var err error
 	out.ContractVersion = in.ContractVersion
 	out.ContractRevision = int64(in.ContractRevision)
-	for _, e2 := range in.Contracts {
-		out.Contracts = append(out.Contracts, string(e2))
+	for _, e8 := range in.Contracts {
+		out.Contracts = append(out.Contracts, string(e8))
 	}
 	out.DatasetId = in.DatasetID
 	out.DatasetOrigin = string(in.DatasetOrigin)
 	out.SchemaVersion = in.SchemaVersion
-	for _, e3 := range in.Capabilities {
-		out.Capabilities = append(out.Capabilities, string(e3))
+	for _, e9 := range in.Capabilities {
+		out.Capabilities = append(out.Capabilities, string(e9))
 	}
 	if out.Limits, err = toWireProviderLimits(in.Limits); err != nil {
 		return nil, err
@@ -427,12 +658,12 @@ func toWireProviderInfo(in storagev1.ProviderInfo) (*storagepb.ProviderInfo, err
 			return nil, err
 		}
 	}
-	for _, e4 := range in.MigratedTo {
-		w5, err := toWireMigrationMarker(e4)
+	for _, e10 := range in.MigratedTo {
+		w11, err := toWireMigrationMarker(e10)
 		if err != nil {
 			return nil, err
 		}
-		out.MigratedTo = append(out.MigratedTo, w5)
+		out.MigratedTo = append(out.MigratedTo, w11)
 	}
 	return out, err
 }
@@ -449,8 +680,8 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo, exact bool) (storagev1.Pro
 	if len(in.Contracts) > 0 {
 		out.Contracts = make([]string, 0, len(in.Contracts))
 	}
-	for _, e6 := range in.Contracts {
-		out.Contracts = append(out.Contracts, string(e6))
+	for _, e12 := range in.Contracts {
+		out.Contracts = append(out.Contracts, string(e12))
 	}
 	out.DatasetID = in.DatasetId
 	out.DatasetOrigin = storagev1.DatasetOrigin(in.DatasetOrigin)
@@ -458,8 +689,8 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo, exact bool) (storagev1.Pro
 	if len(in.Capabilities) > 0 {
 		out.Capabilities = make([]string, 0, len(in.Capabilities))
 	}
-	for _, e7 := range in.Capabilities {
-		out.Capabilities = append(out.Capabilities, string(e7))
+	for _, e13 := range in.Capabilities {
+		out.Capabilities = append(out.Capabilities, string(e13))
 	}
 	if out.Limits, err = fromWireProviderLimits(in.Limits, exact); err != nil {
 		return out, err
@@ -474,35 +705,35 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo, exact bool) (storagev1.Pro
 		return out, err
 	}
 	if in.Usage != nil {
-		var v8 storagev1.DatasetUsage
-		if v8, err = fromWireDatasetUsage(in.Usage, exact); err != nil {
+		var v14 storagev1.DatasetUsage
+		if v14, err = fromWireDatasetUsage(in.Usage, exact); err != nil {
 			return out, err
 		}
-		out.Usage = &v8
+		out.Usage = &v14
 	}
 	if in.Binding != nil {
-		var v9 storagev1.DatasetBinding
-		if v9, err = fromWireDatasetBinding(in.Binding, exact); err != nil {
+		var v15 storagev1.DatasetBinding
+		if v15, err = fromWireDatasetBinding(in.Binding, exact); err != nil {
 			return out, err
 		}
-		out.Binding = &v9
+		out.Binding = &v15
 	}
 	if in.Source != nil {
-		var v10 storagev1.DatasetSource
-		if v10, err = fromWireDatasetSource(in.Source, exact); err != nil {
+		var v16 storagev1.DatasetSource
+		if v16, err = fromWireDatasetSource(in.Source, exact); err != nil {
 			return out, err
 		}
-		out.Source = &v10
+		out.Source = &v16
 	}
 	if len(in.MigratedTo) > 0 {
 		out.MigratedTo = make([]storagev1.MigrationMarker, 0, len(in.MigratedTo))
 	}
-	for _, e11 := range in.MigratedTo {
-		g12, err := fromWireMigrationMarker(e11, exact)
+	for _, e17 := range in.MigratedTo {
+		g18, err := fromWireMigrationMarker(e17, exact)
 		if err != nil {
 			return out, err
 		}
-		out.MigratedTo = append(out.MigratedTo, g12)
+		out.MigratedTo = append(out.MigratedTo, g18)
 	}
 	return out, err
 }
@@ -568,18 +799,77 @@ func fromWireSaveArtifactRequest(in *storagepb.SaveArtifactRequest, exact bool) 
 	return out, err
 }
 
+func toWireSessionExecutionEvent(in storagev1.SessionExecutionEvent) (*storagepb.SessionExecutionEvent, error) {
+	out := &storagepb.SessionExecutionEvent{}
+	var err error
+	if out.ExecutionEvent, err = toWireExecutionEvent(in.ExecutionEvent); err != nil {
+		return nil, err
+	}
+	out.SessionSeq = in.SessionSeq
+	out.TaskSeq = in.TaskSeq
+	return out, err
+}
+
+func fromWireSessionExecutionEvent(in *storagepb.SessionExecutionEvent, exact bool) (storagev1.SessionExecutionEvent, error) {
+	var out storagev1.SessionExecutionEvent
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	if out.ExecutionEvent, err = fromWireExecutionEvent(in.ExecutionEvent, exact); err != nil {
+		return out, err
+	}
+	out.SessionSeq = in.SessionSeq
+	out.TaskSeq = in.TaskSeq
+	return out, err
+}
+
+func toWireSessionExecutionEventFilter(in storagev1.SessionExecutionEventFilter) (*storagepb.SessionExecutionEventFilter, error) {
+	out := &storagepb.SessionExecutionEventFilter{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	for _, e19 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e19))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int64(in.Limit)
+	return out, err
+}
+
+func fromWireSessionExecutionEventFilter(in *storagepb.SessionExecutionEventFilter, exact bool) (storagev1.SessionExecutionEventFilter, error) {
+	var out storagev1.SessionExecutionEventFilter
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	if len(in.EventTypes) > 0 {
+		out.EventTypes = make([]string, 0, len(in.EventTypes))
+	}
+	for _, e20 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e20))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int(in.Limit)
+	return out, err
+}
+
 func toWireTaskDataFence(in storagev1.TaskDataFence) (*storagepb.TaskDataFence, error) {
 	out := &storagepb.TaskDataFence{}
 	var err error
 	out.Namespace = in.Namespace
 	out.TaskName = in.TaskName
 	out.Generation = in.Generation
-	for _, e13 := range in.Jobs {
-		w14, err := toWireTaskJobIdentity(e13)
+	for _, e21 := range in.Jobs {
+		w22, err := toWireTaskJobIdentity(e21)
 		if err != nil {
 			return nil, err
 		}
-		out.Jobs = append(out.Jobs, w14)
+		out.Jobs = append(out.Jobs, w22)
 	}
 	return out, err
 }
@@ -597,12 +887,12 @@ func fromWireTaskDataFence(in *storagepb.TaskDataFence, exact bool) (storagev1.T
 	if len(in.Jobs) > 0 {
 		out.Jobs = make([]storagev1.TaskJobIdentity, 0, len(in.Jobs))
 	}
-	for _, e15 := range in.Jobs {
-		g16, err := fromWireTaskJobIdentity(e15, exact)
+	for _, e23 := range in.Jobs {
+		g24, err := fromWireTaskJobIdentity(e23, exact)
 		if err != nil {
 			return out, err
 		}
-		out.Jobs = append(out.Jobs, g16)
+		out.Jobs = append(out.Jobs, g24)
 	}
 	return out, err
 }
@@ -626,6 +916,88 @@ func fromWireTaskJobIdentity(in *storagepb.TaskJobIdentity, exact bool) (storage
 	out.Namespace = in.Namespace
 	out.TaskUID = in.TaskUid
 	out.JobUID = in.JobUid
+	return out, err
+}
+
+func toWireUsageObservation(in storagev1.UsageObservation) (*storagepb.UsageObservation, error) {
+	out := &storagepb.UsageObservation{}
+	var err error
+	out.Id = in.ID
+	out.Namespace = in.Namespace
+	out.NamespaceUid = in.NamespaceUID
+	out.TaskUid = in.TaskUID
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AttemptId = in.AttemptID
+	out.CounterId = in.CounterID
+	out.Scope = in.Scope
+	out.Source = in.Source
+	out.Provider = in.Provider
+	out.Model = in.Model
+	if in.InputTokens != nil {
+		v25 := int64(*in.InputTokens)
+		out.InputTokens = &v25
+	}
+	if in.OutputTokens != nil {
+		v26 := int64(*in.OutputTokens)
+		out.OutputTokens = &v26
+	}
+	if in.CachedInputTokens != nil {
+		v27 := int64(*in.CachedInputTokens)
+		out.CachedInputTokens = &v27
+	}
+	if in.CacheWriteInputTokens != nil {
+		v28 := int64(*in.CacheWriteInputTokens)
+		out.CacheWriteInputTokens = &v28
+	}
+	out.Status = in.Status
+	out.Complete = in.Complete
+	if out.ObservedAt, err = timeToWire(in.ObservedAt, "UsageObservation.ObservedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireUsageObservation(in *storagepb.UsageObservation, exact bool) (storagev1.UsageObservation, error) {
+	var out storagev1.UsageObservation
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.ID = in.Id
+	out.Namespace = in.Namespace
+	out.NamespaceUID = in.NamespaceUid
+	out.TaskUID = in.TaskUid
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AttemptID = in.AttemptId
+	out.CounterID = in.CounterId
+	out.Scope = in.Scope
+	out.Source = in.Source
+	out.Provider = in.Provider
+	out.Model = in.Model
+	if in.InputTokens != nil {
+		v29 := int64(*in.InputTokens)
+		out.InputTokens = &v29
+	}
+	if in.OutputTokens != nil {
+		v30 := int64(*in.OutputTokens)
+		out.OutputTokens = &v30
+	}
+	if in.CachedInputTokens != nil {
+		v31 := int64(*in.CachedInputTokens)
+		out.CachedInputTokens = &v31
+	}
+	if in.CacheWriteInputTokens != nil {
+		v32 := int64(*in.CacheWriteInputTokens)
+		out.CacheWriteInputTokens = &v32
+	}
+	out.Status = in.Status
+	out.Complete = in.Complete
+	if out.ObservedAt, err = timeFromWire(in.ObservedAt, "UsageObservation.ObservedAt"); err != nil {
+		return out, err
+	}
 	return out, err
 }
 
