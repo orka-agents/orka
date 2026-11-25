@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
 	corev1 "k8s.io/api/core/v1"
@@ -458,6 +459,7 @@ func (h *Handlers) GetOversightConfig(c fiber.Ctx) error {
 	response := oversightv1.ConfigResponse{
 		QueryKeys: oversight.QueryKeys(), MaxBulkFeedback: oversightv1.MaxBulkFeedback,
 		DemoCharterRevisions: []string{}, Charters: []oversightv1.CharterDeclaration{},
+		Context: []oversightv1.ContextLabel{}, Concerns: []oversightv1.ConcernDeclaration{},
 	}
 	cm, found, err := h.oversightProducersConfigMap(c.Context(), namespace)
 	if err != nil {
@@ -489,6 +491,36 @@ func (h *Handlers) GetOversightConfig(c fiber.Ctx) error {
 				previews[charter.Revision] = true
 			}
 			response.Charters = append(response.Charters, charter)
+		}
+	}
+	if raw := cm.Data[oversightContextKey]; raw != "" {
+		var labels []oversightv1.ContextLabel
+		if err := json.Unmarshal([]byte(raw), &labels); err != nil {
+			return fiber.NewError(fiber.StatusUnprocessableEntity,
+				fmt.Sprintf("%s/%s %s is not a JSON list of labels", namespace, oversightProducersConfigMap, oversightContextKey))
+		}
+		for _, label := range labels {
+			if label.Name == "" || len(response.Context) >= maxOversightContextLabels {
+				continue
+			}
+			label.Name = truncateOversightLabel(label.Name)
+			label.Value = truncateOversightLabel(label.Value)
+			response.Context = append(response.Context, label)
+		}
+	}
+	if raw := cm.Data[oversightConcernsKey]; raw != "" {
+		var concerns []oversightv1.ConcernDeclaration
+		if err := json.Unmarshal([]byte(raw), &concerns); err != nil {
+			return fiber.NewError(fiber.StatusUnprocessableEntity,
+				fmt.Sprintf("%s/%s %s is not a JSON list of concerns", namespace, oversightProducersConfigMap, oversightConcernsKey))
+		}
+		for _, concern := range concerns {
+			if concern.ID == "" || concern.Name == "" || len(response.Concerns) >= maxOversightProducers {
+				continue
+			}
+			concern.Name = truncateOversightLabel(concern.Name)
+			concern.Meaning = truncateOversightText(concern.Meaning, oversightv1.MaxCharterSentenceBytes)
+			response.Concerns = append(response.Concerns, concern)
 		}
 	}
 	for revision := range previews {
@@ -693,7 +725,12 @@ const (
 	oversightProducersKey       = "producers.json"
 	oversightPreviewChartersKey = "previewCharterRevisions"
 	oversightChartersKey        = "charters.json"
-	maxOversightProducers       = 64
+	// oversightContextKey holds operator-declared labels for the environment.
+	oversightContextKey       = "context.json"
+	oversightConcernsKey      = "concerns.json"
+	maxOversightContextLabels = 8
+	maxOversightLabelBytes    = 80
+	maxOversightProducers     = 64
 )
 
 // ListOversightProducers handles GET /api/v1/oversight/producers: the
@@ -803,4 +840,17 @@ func (h *Handlers) declaredOversightProducers(ctx context.Context, namespace str
 			fmt.Sprintf("%s/%s %s is not a JSON list of producers", namespace, oversightProducersConfigMap, oversightProducersKey))
 	}
 	return declared, true, nil
+}
+
+func truncateOversightLabel(s string) string { return truncateOversightText(s, maxOversightLabelBytes) }
+
+func truncateOversightText(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }

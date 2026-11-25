@@ -226,11 +226,14 @@ type PostureBasis struct {
 
 // PostureCoverage is how much of the window's actions were seen.
 type PostureCoverage struct {
-	MaxEvidenceLevel   EvidenceLevel  `json:"maxEvidenceLevel,omitempty"`
-	StreamOK           int            `json:"streamOK"`
-	SensorAttributed   int            `json:"sensorAttributed"`
-	UnattributedEvents int            `json:"unattributedEvents"`
-	BlindSpots         map[string]int `json:"blindSpots,omitempty"`
+	MaxEvidenceLevel   EvidenceLevel `json:"maxEvidenceLevel,omitempty"`
+	StreamOK           int           `json:"streamOK"`
+	SensorAttributed   int           `json:"sensorAttributed"`
+	UnattributedEvents int           `json:"unattributedEvents"`
+	// ObservedEvents sums the effect counts the sensor attributed to the
+	// window's actions: the raw events behind them.
+	ObservedEvents int            `json:"observedEvents"`
+	BlindSpots     map[string]int `json:"blindSpots,omitempty"`
 }
 
 // PostureProducer is one scorer or advisor seen in the window.
@@ -314,4 +317,23 @@ type ConfigResponse struct {
 	// DemoCharterRevisions lists the preview charter revisions.
 	DemoCharterRevisions []string             `json:"demoCharterRevisions"`
 	Charters             []CharterDeclaration `json:"charters"`
+	// Context is what an operator declared about this environment, such as
+	// "Workload: synthetic fleet". Orka shows it as declared; it checks none of it.
+	Context []ContextLabel `json:"context"`
+	// Concerns names the questions the monitor asks, so a client can show
+	// "Unrequested destination" rather than a question ID.
+	Concerns []ConcernDeclaration `json:"concerns"`
+}
+
+// ConcernDeclaration is one question a scorer answers, as an operator named it.
+type ConcernDeclaration struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Meaning string `json:"meaning,omitempty"`
+}
+
+// ContextLabel is one operator-declared fact about the environment.
+type ContextLabel struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }

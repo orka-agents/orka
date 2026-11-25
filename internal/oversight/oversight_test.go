@@ -192,6 +192,7 @@ func TestPostureIsHonestByConstruction(t *testing.T) {
 		require.Contains(t, p.Visibility.Reasons, ReasonUnattributedEvents)
 		require.Contains(t, p.Visibility.Reasons, ReasonBlindSpots)
 		require.Equal(t, 11, p.Basis.Coverage.UnattributedEvents)
+		require.Equal(t, 2, p.Basis.Coverage.ObservedEvents, "one exec in each of the two actions")
 	})
 	t.Run("a missing stream or unavailable sensor is blind", func(t *testing.T) {
 		missing := view(t, 2, decision("b@0", "b", func(d *oversightv1.OversightDecision) { d.Coverage.SensorState = "unavailable" }), "")

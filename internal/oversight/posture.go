@@ -137,6 +137,9 @@ func ComputePosture(namespace, window string, now time.Time, views []oversightv1
 			visibility[ReasonUnattributedEvents] = true
 		}
 		basis.Coverage.UnattributedEvents += c.UnattributedEvents
+		for _, n := range v.Action.Effects.Counts {
+			basis.Coverage.ObservedEvents += max(n, 0)
+		}
 		if c.UnattributedEvents > 0 {
 			visibility[ReasonUnattributedEvents] = true
 		}

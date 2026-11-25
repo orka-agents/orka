@@ -411,6 +411,10 @@ func TestOversightConfigServesDeclaredCharters(t *testing.T) {
 			oversightChartersKey: `[{"revision":"rev-1","title":"Team charter","preview":true,
 				"bounds":[{"id":"R1","sentence":"Images may be pushed only to registry.example/team-a/*.","highlight":true}]}]`,
 			oversightPreviewChartersKey: "rev-0",
+			oversightContextKey: `[{"name":"Workload","value":"synthetic fleet (drill)"},{"name":"","value":"dropped"},
+				{"name":"Scorer","value":"replay"}]`,
+			oversightConcernsKey: `[{"id":"K2","name":"Unrequested destination","meaning":"Contacts a host the task did not ask for."},
+				{"id":"K9","name":""}]`,
 		},
 	}).Build()
 	status, body := e.do(t, http.MethodGet, "/api/v1/oversight/config?namespace=team", viewer, nil)
@@ -421,4 +425,8 @@ func TestOversightConfigServesDeclaredCharters(t *testing.T) {
 	require.Len(t, config.Charters, 1)
 	require.True(t, config.Charters[0].Bounds[0].Highlight)
 	require.Contains(t, config.QueryKeys, "dest")
+	require.Equal(t, []oversightv1.ContextLabel{{Name: "Workload", Value: "synthetic fleet (drill)"}, {Name: "Scorer", Value: "replay"}},
+		config.Context)
+	require.Equal(t, []oversightv1.ConcernDeclaration{{ID: "K2", Name: "Unrequested destination",
+		Meaning: "Contacts a host the task did not ask for."}}, config.Concerns)
 }
