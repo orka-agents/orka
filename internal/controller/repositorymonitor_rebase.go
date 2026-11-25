@@ -152,7 +152,31 @@ func (r *RepositoryMonitorReconciler) executeRepositoryMonitorBranchRebase(
 		OperationID: metadata.OperationID,
 	}
 	return runExternalEffect(ctx, r.DurableControlStore, fence, identity, req, func(callCtx context.Context) (publisherservice.BranchRebaseResponse, error) {
-		return r.BranchRebaser.RebaseBranch(callCtx, req)
+		var lastErr error
+		backoff := 250 * time.Millisecond
+		for attempt := range 3 {
+			res, callErr := r.BranchRebaser.RebaseBranch(callCtx, req)
+			if callErr == nil {
+				return res, nil
+			}
+			lastErr = callErr
+			var clientErr *publisherservice.ClientError
+			if !errors.As(callErr, &clientErr) || !clientErr.Response.Retryable || publisherservice.TransportCause(callErr) != nil {
+				return publisherservice.BranchRebaseResponse{}, callErr
+			}
+			if attempt == 2 {
+				break
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-callCtx.Done():
+				timer.Stop()
+				return publisherservice.BranchRebaseResponse{}, callCtx.Err()
+			case <-timer.C:
+			}
+			backoff *= 2
+		}
+		return publisherservice.BranchRebaseResponse{}, lastErr
 	})
 }
 
