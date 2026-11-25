@@ -15,7 +15,8 @@
 #   $OVERSIGHT_PACK/history/*.jsonl     seeded history, shifted to end now
 #   $OVERSIGHT_PACK/take/*.jsonl        a recorded live take, replayed with
 #                                       its timing (the default play mode)
-#   $OVERSIGHT_PACK/tasks/wave-*/*.yaml scripted drill Tasks, applied in waves
+#   $OVERSIGHT_PACK/tasks/wave-*/*.yaml scripted Tasks, applied in waves (live only)
+#   $OVERSIGHT_PACK/fleet/              their scripted model endpoint and Agents
 #   $OVERSIGHT_PACK/live-bridge         optional: streams live decisions for
 #                                       OVERSIGHT_MODE=live (see below)
 #
@@ -28,6 +29,7 @@
 #   OVERSIGHT_MODE     replay (default) or live
 #   OVERSIGHT_SPEED    replay speed-up of the recorded take (default 1)
 #   WAVE_DELAY         seconds between Task waves (default 6)
+#   OVERSIGHT_AIMOCK_IMAGE  the scripted model image, for a pack with a fleet
 #   OVERSIGHT_MAX_SCORER_CALLS  live mode soft ceiling passed to the bridge (default 500)
 #   OVERSIGHT_CONTEXT_LIVE / _REPLAY  optional context labels for the take
 #                      (JSON list of {name, value}), e.g. "Scorer: live"
@@ -149,6 +151,23 @@ cmd_up() {
   cmd_status
 }
 
+# ensure_fleet installs the pack's scripted model endpoint and Agents, if it
+# has any: $OVERSIGHT_PACK/fleet/{platform.json,aimock.yaml,aimock-fixtures.json}.
+ensure_fleet() {
+  local fleet="${OVERSIGHT_PACK}/fleet"
+  [[ -f "${fleet}/platform.json" ]] || return 0
+  : "${OVERSIGHT_AIMOCK_IMAGE:?set OVERSIGHT_AIMOCK_IMAGE to the scripted model image, pinned by digest}"
+  local model_ns
+  model_ns="$(python3 -I -c 'import json, sys; print(next(i["metadata"]["name"] for i in json.load(open(sys.argv[1]))["items"] if i["kind"] == "Namespace"))' "${fleet}/platform.json")"
+  log "Installing the scripted fleet (model endpoint in ${model_ns})"
+  kubectl apply -f "${fleet}/platform.json" >/dev/null
+  kubectl -n "${model_ns}" create configmap demo-fixtures --from-file=seeds.json="${fleet}/aimock-fixtures.json" \
+    --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
+  sed -e "s|@NS@|${model_ns}|g" -e "s|@IMAGE@|${OVERSIGHT_AIMOCK_IMAGE}|g" \
+    -e "s|@SHA@|$(sha256sum "${fleet}/aimock-fixtures.json" | cut -c1-64)|g" "${fleet}/aimock.yaml" | kubectl apply -f - >/dev/null
+  kubectl -n "${model_ns}" rollout status deployment/aimock --timeout=5m
+}
+
 apply_waves() {
   local first=1
   for wave in "${OVERSIGHT_PACK}"/tasks/wave-*/; do
@@ -183,15 +202,15 @@ cmd_play() {
       local args=()
       while IFS= read -r f; do args+=(--file "$f"); done < <(files_in "${OVERSIGHT_PACK}/take")
       ((${#args[@]})) || { echo "no recorded take in ${OVERSIGHT_PACK}/take" >&2; return 1; }
-      apply_waves &
-      local waves=$!
+      # Replayed records describe kernel observations; real Tasks never run
+      # next to them, so a replay has no Tasks-view beat.
       log "Streaming the recorded take (speed ${OVERSIGHT_SPEED:-1}x)"
       replay "${args[@]}" --preserve-timing --speed "${OVERSIGHT_SPEED:-1}" --id-suffix "${take_id}"
-      wait "${waves}"
       ;;
     live)
       [[ -x "${OVERSIGHT_PACK}/live-bridge" ]] || { echo "live mode needs ${OVERSIGHT_PACK}/live-bridge" >&2; return 1; }
       log "Live take: scorer calls capped near ${OVERSIGHT_MAX_SCORER_CALLS:-500}; no advisor tier"
+      ensure_fleet
       apply_waves
       ORKA_OVERSIGHT_URL="${API}" ORKA_OVERSIGHT_NAMESPACE="${NS}" ORKA_OVERSIGHT_TOKEN="$(ingest_token)" \
         OVERSIGHT_MAX_SCORER_CALLS="${OVERSIGHT_MAX_SCORER_CALLS:-500}" OVERSIGHT_ADVISORS=off \
