@@ -22,10 +22,13 @@ var catalogInterfaces = map[string]reflect.Type{
 	"ControllerEpochAdvancer": reflect.TypeFor[storagev1.ControllerEpochAdvancer](),
 	"DatasetBindingStore":     reflect.TypeFor[storagev1.DatasetBindingStore](),
 	"WriteWatermarkStore":     reflect.TypeFor[storagev1.WriteWatermarkStore](),
+	"DatasetExporter":         reflect.TypeFor[storagev1.DatasetExporter](),
+	"DatasetImporter":         reflect.TypeFor[storagev1.DatasetImporter](),
+	"MigrationMarkerStore":    reflect.TypeFor[storagev1.MigrationMarkerStore](),
 }
 
 // readPrefixes are the name prefixes of methods that change nothing.
-var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck"}
+var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck", "Export"}
 
 // writesNamedLikeReads are writes whose names start with a read prefix.
 var writesNamedLikeReads = []string{"IsLocked"}
@@ -109,6 +112,12 @@ func TestMethodCatalogKinds(t *testing.T) {
 		"SaveArtifact":                storagev1.MethodWrite,
 		"AdvanceWriteWatermark":       storagev1.MethodWrite,
 		"GetWriteWatermark":           storagev1.MethodRead,
+		"ExportRecords":               storagev1.MethodRead,
+		"GetImportProgress":           storagev1.MethodRead,
+		"BeginImport":                 storagev1.MethodAdmin,
+		"ImportRecords":               storagev1.MethodAdmin,
+		"CompleteImport":              storagev1.MethodAdmin,
+		"MarkDatasetMigrated":         storagev1.MethodAdmin,
 	} {
 		info, ok := storagev1.LookupMethod(name)
 		require.True(t, ok, name)
@@ -139,6 +148,19 @@ var classified = map[string]storagev1.CallClass{
 	// lost writes are detected even while ordinary work saturates the store.
 	"AdvanceWriteWatermark": storagev1.CallControl,
 	"GetWriteWatermark":     storagev1.CallControl,
+
+	// A migration copies a dataset while writes are stopped. Export batches
+	// can carry whole results and artifacts.
+	"AbortImport":          storagev1.CallBackground,
+	"BeginImport":          storagev1.CallBackground,
+	"ClearMigrationMarker": storagev1.CallBackground,
+	"CompleteImport":       storagev1.CallBackground,
+	"ExportDigest":         storagev1.CallBackground,
+	"ExportFamilies":       storagev1.CallBackground,
+	"ExportRecords":        storagev1.CallBulk,
+	"GetImportProgress":    storagev1.CallBackground,
+	"ImportRecords":        storagev1.CallBackground,
+	"MarkDatasetMigrated":  storagev1.CallBackground,
 
 	"DeleteGatewayTaskCleanupReceipt":     storagev1.CallBackground,
 	"ListGatewaySessionCleanupCandidates": storagev1.CallBackground,

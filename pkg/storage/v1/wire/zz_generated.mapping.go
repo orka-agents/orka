@@ -137,6 +137,28 @@ func fromWireDatasetBootstrap(in *storagepb.DatasetBootstrap, exact bool) (stora
 	return out, err
 }
 
+func toWireDatasetSource(in storagev1.DatasetSource) (*storagepb.DatasetSource, error) {
+	out := &storagepb.DatasetSource{}
+	var err error
+	out.DatasetId = in.DatasetID
+	out.SchemaVersion = in.SchemaVersion
+	out.ManifestDigest = in.ManifestDigest
+	return out, err
+}
+
+func fromWireDatasetSource(in *storagepb.DatasetSource, exact bool) (storagev1.DatasetSource, error) {
+	var out storagev1.DatasetSource
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.DatasetID = in.DatasetId
+	out.SchemaVersion = in.SchemaVersion
+	out.ManifestDigest = in.ManifestDigest
+	return out, err
+}
+
 func toWireDatasetUsage(in storagev1.DatasetUsage) (*storagepb.DatasetUsage, error) {
 	out := &storagepb.DatasetUsage{}
 	var err error
@@ -186,6 +208,32 @@ func fromWireMessage(in *storagepb.Message, exact bool) (storagev1.Message, erro
 	out.Content = in.Content
 	out.Read = in.Read
 	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "Message.CreatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireMigrationMarker(in storagev1.MigrationMarker) (*storagepb.MigrationMarker, error) {
+	out := &storagepb.MigrationMarker{}
+	var err error
+	out.Contract = in.Contract
+	out.TargetDatasetId = in.TargetDatasetID
+	if out.MarkedAt, err = timeToWire(in.MarkedAt, "MigrationMarker.MarkedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireMigrationMarker(in *storagepb.MigrationMarker, exact bool) (storagev1.MigrationMarker, error) {
+	var out storagev1.MigrationMarker
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	_ = exact
+	out.Contract = in.Contract
+	out.TargetDatasetID = in.TargetDatasetId
+	if out.MarkedAt, err = timeFromWire(in.MarkedAt, "MigrationMarker.MarkedAt"); err != nil {
 		return out, err
 	}
 	return out, err
@@ -269,6 +317,18 @@ func toWireProviderInfo(in storagev1.ProviderInfo) (*storagepb.ProviderInfo, err
 			return nil, err
 		}
 	}
+	if in.Source != nil {
+		if out.Source, err = toWireDatasetSource(*in.Source); err != nil {
+			return nil, err
+		}
+	}
+	for _, e4 := range in.MigratedTo {
+		w5, err := toWireMigrationMarker(e4)
+		if err != nil {
+			return nil, err
+		}
+		out.MigratedTo = append(out.MigratedTo, w5)
+	}
 	return out, err
 }
 
@@ -284,8 +344,8 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo, exact bool) (storagev1.Pro
 	if len(in.Contracts) > 0 {
 		out.Contracts = make([]string, 0, len(in.Contracts))
 	}
-	for _, e4 := range in.Contracts {
-		out.Contracts = append(out.Contracts, string(e4))
+	for _, e6 := range in.Contracts {
+		out.Contracts = append(out.Contracts, string(e6))
 	}
 	out.DatasetID = in.DatasetId
 	out.DatasetOrigin = storagev1.DatasetOrigin(in.DatasetOrigin)
@@ -293,8 +353,8 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo, exact bool) (storagev1.Pro
 	if len(in.Capabilities) > 0 {
 		out.Capabilities = make([]string, 0, len(in.Capabilities))
 	}
-	for _, e5 := range in.Capabilities {
-		out.Capabilities = append(out.Capabilities, string(e5))
+	for _, e7 := range in.Capabilities {
+		out.Capabilities = append(out.Capabilities, string(e7))
 	}
 	if out.Limits, err = fromWireProviderLimits(in.Limits, exact); err != nil {
 		return out, err
@@ -309,18 +369,35 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo, exact bool) (storagev1.Pro
 		return out, err
 	}
 	if in.Usage != nil {
-		var v6 storagev1.DatasetUsage
-		if v6, err = fromWireDatasetUsage(in.Usage, exact); err != nil {
+		var v8 storagev1.DatasetUsage
+		if v8, err = fromWireDatasetUsage(in.Usage, exact); err != nil {
 			return out, err
 		}
-		out.Usage = &v6
+		out.Usage = &v8
 	}
 	if in.Binding != nil {
-		var v7 storagev1.DatasetBinding
-		if v7, err = fromWireDatasetBinding(in.Binding, exact); err != nil {
+		var v9 storagev1.DatasetBinding
+		if v9, err = fromWireDatasetBinding(in.Binding, exact); err != nil {
 			return out, err
 		}
-		out.Binding = &v7
+		out.Binding = &v9
+	}
+	if in.Source != nil {
+		var v10 storagev1.DatasetSource
+		if v10, err = fromWireDatasetSource(in.Source, exact); err != nil {
+			return out, err
+		}
+		out.Source = &v10
+	}
+	if len(in.MigratedTo) > 0 {
+		out.MigratedTo = make([]storagev1.MigrationMarker, 0, len(in.MigratedTo))
+	}
+	for _, e11 := range in.MigratedTo {
+		g12, err := fromWireMigrationMarker(e11, exact)
+		if err != nil {
+			return out, err
+		}
+		out.MigratedTo = append(out.MigratedTo, g12)
 	}
 	return out, err
 }
@@ -361,12 +438,12 @@ func toWireTaskDataFence(in storagev1.TaskDataFence) (*storagepb.TaskDataFence, 
 	out.Namespace = in.Namespace
 	out.TaskName = in.TaskName
 	out.Generation = in.Generation
-	for _, e8 := range in.Jobs {
-		w9, err := toWireTaskJobIdentity(e8)
+	for _, e13 := range in.Jobs {
+		w14, err := toWireTaskJobIdentity(e13)
 		if err != nil {
 			return nil, err
 		}
-		out.Jobs = append(out.Jobs, w9)
+		out.Jobs = append(out.Jobs, w14)
 	}
 	return out, err
 }
@@ -384,12 +461,12 @@ func fromWireTaskDataFence(in *storagepb.TaskDataFence, exact bool) (storagev1.T
 	if len(in.Jobs) > 0 {
 		out.Jobs = make([]storagev1.TaskJobIdentity, 0, len(in.Jobs))
 	}
-	for _, e10 := range in.Jobs {
-		g11, err := fromWireTaskJobIdentity(e10, exact)
+	for _, e15 := range in.Jobs {
+		g16, err := fromWireTaskJobIdentity(e15, exact)
 		if err != nil {
 			return out, err
 		}
-		out.Jobs = append(out.Jobs, g11)
+		out.Jobs = append(out.Jobs, g16)
 	}
 	return out, err
 }

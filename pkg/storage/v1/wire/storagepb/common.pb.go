@@ -744,6 +744,8 @@ type ProviderInfo struct {
 	Bootstrap        *DatasetBootstrap      `protobuf:"bytes,13,opt,name=bootstrap,proto3" json:"bootstrap,omitempty"`
 	Usage            *DatasetUsage          `protobuf:"bytes,14,opt,name=usage,proto3" json:"usage,omitempty"`
 	Binding          *DatasetBinding        `protobuf:"bytes,15,opt,name=binding,proto3" json:"binding,omitempty"`
+	Source           *DatasetSource         `protobuf:"bytes,16,opt,name=source,proto3" json:"source,omitempty"`
+	MigratedTo       []*MigrationMarker     `protobuf:"bytes,17,rep,name=migrated_to,json=migratedTo,proto3" json:"migrated_to,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -883,6 +885,143 @@ func (x *ProviderInfo) GetBinding() *DatasetBinding {
 	return nil
 }
 
+func (x *ProviderInfo) GetSource() *DatasetSource {
+	if x != nil {
+		return x.Source
+	}
+	return nil
+}
+
+func (x *ProviderInfo) GetMigratedTo() []*MigrationMarker {
+	if x != nil {
+		return x.MigratedTo
+	}
+	return nil
+}
+
+// DatasetSource names the dataset an imported dataset was copied from.
+type DatasetSource struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	DatasetId      string                 `protobuf:"bytes,1,opt,name=dataset_id,json=datasetId,proto3" json:"dataset_id,omitempty"`
+	SchemaVersion  string                 `protobuf:"bytes,2,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	ManifestDigest string                 `protobuf:"bytes,3,opt,name=manifest_digest,json=manifestDigest,proto3" json:"manifest_digest,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *DatasetSource) Reset() {
+	*x = DatasetSource{}
+	mi := &file_orka_storage_v1_common_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DatasetSource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DatasetSource) ProtoMessage() {}
+
+func (x *DatasetSource) ProtoReflect() protoreflect.Message {
+	mi := &file_orka_storage_v1_common_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DatasetSource.ProtoReflect.Descriptor instead.
+func (*DatasetSource) Descriptor() ([]byte, []int) {
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DatasetSource) GetDatasetId() string {
+	if x != nil {
+		return x.DatasetId
+	}
+	return ""
+}
+
+func (x *DatasetSource) GetSchemaVersion() string {
+	if x != nil {
+		return x.SchemaVersion
+	}
+	return ""
+}
+
+func (x *DatasetSource) GetManifestDigest() string {
+	if x != nil {
+		return x.ManifestDigest
+	}
+	return ""
+}
+
+// MigrationMarker records that a contract part of a dataset was migrated to
+// another dataset.
+type MigrationMarker struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Contract        string                 `protobuf:"bytes,1,opt,name=contract,proto3" json:"contract,omitempty"`
+	TargetDatasetId string                 `protobuf:"bytes,2,opt,name=target_dataset_id,json=targetDatasetId,proto3" json:"target_dataset_id,omitempty"`
+	MarkedAt        *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=marked_at,json=markedAt,proto3" json:"marked_at,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *MigrationMarker) Reset() {
+	*x = MigrationMarker{}
+	mi := &file_orka_storage_v1_common_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MigrationMarker) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MigrationMarker) ProtoMessage() {}
+
+func (x *MigrationMarker) ProtoReflect() protoreflect.Message {
+	mi := &file_orka_storage_v1_common_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MigrationMarker.ProtoReflect.Descriptor instead.
+func (*MigrationMarker) Descriptor() ([]byte, []int) {
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *MigrationMarker) GetContract() string {
+	if x != nil {
+		return x.Contract
+	}
+	return ""
+}
+
+func (x *MigrationMarker) GetTargetDatasetId() string {
+	if x != nil {
+		return x.TargetDatasetId
+	}
+	return ""
+}
+
+func (x *MigrationMarker) GetMarkedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.MarkedAt
+	}
+	return nil
+}
+
 // ServerInfo describes the server library that serves a provider, rather
 // than the provider itself.
 type ServerInfo struct {
@@ -900,7 +1039,7 @@ type ServerInfo struct {
 
 func (x *ServerInfo) Reset() {
 	*x = ServerInfo{}
-	mi := &file_orka_storage_v1_common_proto_msgTypes[12]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -912,7 +1051,7 @@ func (x *ServerInfo) String() string {
 func (*ServerInfo) ProtoMessage() {}
 
 func (x *ServerInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_orka_storage_v1_common_proto_msgTypes[12]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -925,7 +1064,7 @@ func (x *ServerInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerInfo.ProtoReflect.Descriptor instead.
 func (*ServerInfo) Descriptor() ([]byte, []int) {
-	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{12}
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ServerInfo) GetProtocolRevision() int64 {
@@ -1012,7 +1151,7 @@ const file_orka_storage_v1_common_proto_rawDesc = "" +
 	"\n" +
 	"dataset_id\x18\x01 \x01(\tR\tdatasetId\x129\n" +
 	"\abinding\x18\x02 \x01(\v2\x1f.orka.storage.v1.DatasetBindingR\abinding\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\x94\x05\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\x8f\x06\n" +
 	"\fProviderInfo\x12)\n" +
 	"\x10contract_version\x18\x01 \x01(\tR\x0fcontractVersion\x12+\n" +
 	"\x11contract_revision\x18\x02 \x01(\x03R\x10contractRevision\x12\x1c\n" +
@@ -1033,7 +1172,19 @@ const file_orka_storage_v1_common_proto_rawDesc = "" +
 	"observedAt\x12?\n" +
 	"\tbootstrap\x18\r \x01(\v2!.orka.storage.v1.DatasetBootstrapR\tbootstrap\x123\n" +
 	"\x05usage\x18\x0e \x01(\v2\x1d.orka.storage.v1.DatasetUsageR\x05usage\x129\n" +
-	"\abinding\x18\x0f \x01(\v2\x1f.orka.storage.v1.DatasetBindingR\abinding\"\xb4\x01\n" +
+	"\abinding\x18\x0f \x01(\v2\x1f.orka.storage.v1.DatasetBindingR\abinding\x126\n" +
+	"\x06source\x18\x10 \x01(\v2\x1e.orka.storage.v1.DatasetSourceR\x06source\x12A\n" +
+	"\vmigrated_to\x18\x11 \x03(\v2 .orka.storage.v1.MigrationMarkerR\n" +
+	"migratedTo\"~\n" +
+	"\rDatasetSource\x12\x1d\n" +
+	"\n" +
+	"dataset_id\x18\x01 \x01(\tR\tdatasetId\x12%\n" +
+	"\x0eschema_version\x18\x02 \x01(\tR\rschemaVersion\x12'\n" +
+	"\x0fmanifest_digest\x18\x03 \x01(\tR\x0emanifestDigest\"\x92\x01\n" +
+	"\x0fMigrationMarker\x12\x1a\n" +
+	"\bcontract\x18\x01 \x01(\tR\bcontract\x12*\n" +
+	"\x11target_dataset_id\x18\x02 \x01(\tR\x0ftargetDatasetId\x127\n" +
+	"\tmarked_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\bmarkedAt\"\xb4\x01\n" +
 	"\n" +
 	"ServerInfo\x12+\n" +
 	"\x11protocol_revision\x18\x01 \x01(\x03R\x10protocolRevision\x12'\n" +
@@ -1053,7 +1204,7 @@ func file_orka_storage_v1_common_proto_rawDescGZIP() []byte {
 	return file_orka_storage_v1_common_proto_rawDescData
 }
 
-var file_orka_storage_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_orka_storage_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_orka_storage_v1_common_proto_goTypes = []any{
 	(*NullableTime)(nil),          // 0: orka.storage.v1.NullableTime
 	(*JSONValue)(nil),             // 1: orka.storage.v1.JSONValue
@@ -1067,28 +1218,33 @@ var file_orka_storage_v1_common_proto_goTypes = []any{
 	(*DatasetBinding)(nil),        // 9: orka.storage.v1.DatasetBinding
 	(*BindingConflictError)(nil),  // 10: orka.storage.v1.BindingConflictError
 	(*ProviderInfo)(nil),          // 11: orka.storage.v1.ProviderInfo
-	(*ServerInfo)(nil),            // 12: orka.storage.v1.ServerInfo
-	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 14: google.protobuf.Duration
+	(*DatasetSource)(nil),         // 12: orka.storage.v1.DatasetSource
+	(*MigrationMarker)(nil),       // 13: orka.storage.v1.MigrationMarker
+	(*ServerInfo)(nil),            // 14: orka.storage.v1.ServerInfo
+	(*timestamppb.Timestamp)(nil), // 15: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 16: google.protobuf.Duration
 }
 var file_orka_storage_v1_common_proto_depIdxs = []int32{
-	13, // 0: orka.storage.v1.NullableTime.value:type_name -> google.protobuf.Timestamp
+	15, // 0: orka.storage.v1.NullableTime.value:type_name -> google.protobuf.Timestamp
 	2,  // 1: orka.storage.v1.WriteEnvelope.fence:type_name -> orka.storage.v1.ControllerEpochFence
-	13, // 2: orka.storage.v1.WriteEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	15, // 2: orka.storage.v1.WriteEnvelope.issued_at:type_name -> google.protobuf.Timestamp
 	4,  // 3: orka.storage.v1.TaskDataFence.jobs:type_name -> orka.storage.v1.TaskJobIdentity
-	14, // 4: orka.storage.v1.ProviderLimits.receipt_retention:type_name -> google.protobuf.Duration
-	13, // 5: orka.storage.v1.DatasetBinding.bound_at:type_name -> google.protobuf.Timestamp
+	16, // 4: orka.storage.v1.ProviderLimits.receipt_retention:type_name -> google.protobuf.Duration
+	15, // 5: orka.storage.v1.DatasetBinding.bound_at:type_name -> google.protobuf.Timestamp
 	9,  // 6: orka.storage.v1.BindingConflictError.binding:type_name -> orka.storage.v1.DatasetBinding
 	6,  // 7: orka.storage.v1.ProviderInfo.limits:type_name -> orka.storage.v1.ProviderLimits
-	13, // 8: orka.storage.v1.ProviderInfo.observed_at:type_name -> google.protobuf.Timestamp
+	15, // 8: orka.storage.v1.ProviderInfo.observed_at:type_name -> google.protobuf.Timestamp
 	7,  // 9: orka.storage.v1.ProviderInfo.bootstrap:type_name -> orka.storage.v1.DatasetBootstrap
 	8,  // 10: orka.storage.v1.ProviderInfo.usage:type_name -> orka.storage.v1.DatasetUsage
 	9,  // 11: orka.storage.v1.ProviderInfo.binding:type_name -> orka.storage.v1.DatasetBinding
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	12, // 12: orka.storage.v1.ProviderInfo.source:type_name -> orka.storage.v1.DatasetSource
+	13, // 13: orka.storage.v1.ProviderInfo.migrated_to:type_name -> orka.storage.v1.MigrationMarker
+	15, // 14: orka.storage.v1.MigrationMarker.marked_at:type_name -> google.protobuf.Timestamp
+	15, // [15:15] is the sub-list for method output_type
+	15, // [15:15] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_orka_storage_v1_common_proto_init() }
@@ -1103,7 +1259,7 @@ func file_orka_storage_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_orka_storage_v1_common_proto_rawDesc), len(file_orka_storage_v1_common_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -8,8 +8,9 @@
 // and namespace isolation, the typed errors providers return, idempotent
 // replays, atomic grouped writes, bounded queries, one winner among
 // concurrent callers, conditional commands that refuse a changed target or a
-// stale fence, exact nanosecond times, the provider description and the
-// store halves of the Kubernetes control protocols.
+// stale fence, exact nanosecond times, the provider description, the store
+// halves of the Kubernetes control protocols and, for a provider that reports
+// the export capability, export and import.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
 //
@@ -103,6 +104,7 @@ var stateFamilies = []stateFamily{
 	{"installations", func(t *testing.T, newProvider StateFactory) {
 		runInstallations(t, newProvider)
 	}},
+	{"export-import", runStateExportImport},
 }
 
 // RunState runs every state.v1 case against providers from newProvider, and
@@ -161,6 +163,9 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) 
 	})
 	settings.run(t, "installations", func(t *testing.T) {
 		runInstallations(t, wrapped)
+	})
+	settings.run(t, "export-import", func(t *testing.T) {
+		runArtifactsExportImport(t, wrapped)
 	})
 	runOptionalFamilies(t, wrapped, artifactWriteCases, settings)
 }

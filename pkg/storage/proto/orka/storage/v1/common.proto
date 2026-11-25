@@ -38,8 +38,8 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // contract error, and is authoritative; the status code is advisory. The
 // reasons are NOT_FOUND, CONFLICT, FENCED, PRECONDITION_FAILED,
 // BINDING_CONFLICT, SESSION_CONFIGURATION_MISMATCH, NOT_READY,
-// DATASET_DETACHED, DATASET_MISMATCH, CLOCK_SKEW, OPERATION_EXPIRED,
-// OPERATION_ABORTED, DUPLICATE_MISMATCH, GATEWAY_MESSAGE_REPLAY_ONLY, CAPACITY,
+// DATASET_DETACHED, DATASET_MIGRATED, DATASET_MISMATCH, CLOCK_SKEW,
+// OPERATION_EXPIRED, OPERATION_ABORTED, DUPLICATE_MISMATCH, GATEWAY_MESSAGE_REPLAY_ONLY, CAPACITY,
 // VALIDATION, GATEWAY_OWNED_SESSION, GATEWAY_SESSION_CLEANUP_PENDING,
 // TASK_JOB_REVOKED, TASK_DATA_CLEANUP_CHANGED, USAGE_SELECTION_TOO_LARGE,
 // CONNECTOR_CUSTODY_TOMBSTONED, CONNECTOR_CONSENT_SUPERSEDED,
@@ -160,6 +160,23 @@ message ProviderInfo {
   DatasetBootstrap bootstrap = 13;
   DatasetUsage usage = 14;
   DatasetBinding binding = 15;
+  DatasetSource source = 16;
+  repeated MigrationMarker migrated_to = 17;
+}
+
+// DatasetSource names the dataset an imported dataset was copied from.
+message DatasetSource {
+  string dataset_id = 1;
+  string schema_version = 2;
+  string manifest_digest = 3;
+}
+
+// MigrationMarker records that a contract part of a dataset was migrated to
+// another dataset.
+message MigrationMarker {
+  string contract = 1;
+  string target_dataset_id = 2;
+  google.protobuf.Timestamp marked_at = 3;
 }
 
 // ServerInfo describes the server library that serves a provider, rather
