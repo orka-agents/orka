@@ -34,7 +34,8 @@ a decision written only in a comment is invisible to anyone outside that file.
   - compiler and tool directives (`//go:`, `//nolint`, `// +kubebuilder` and other `// +`
     markers, `#nosec`, `# shellcheck`, `# noqa`, `eslint-disable`, `@ts-expect-error`,
     `/// <reference>`)
-  - license headers, `Deprecated:` notices, cgo preambles, and Go example `Output:` blocks
+  - license headers, `Deprecated:` and TypeScript `@deprecated` notices, cgo preambles, and Go
+    example `Output:` blocks
   - generated files, `testdata/`, and skills vendored from another repository
     (`.agents/skills/autoreview`)
   - doc comments on types and fields under `api/`, because controller-gen publishes those

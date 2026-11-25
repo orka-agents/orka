@@ -17,6 +17,8 @@ const directive = new RegExp(
     ")(?=[\\s:]|$)",
 );
 
+const deprecation = /^[\s*]*(?:Deprecated:|@deprecated\b)/m;
+
 const noticeParagraphs = JSON.parse(
   readFileSync(
     new URL("../../hack/commentlint/scan/notices.json", import.meta.url),
@@ -68,7 +70,8 @@ export const noComments = {
           (comment) =>
             comment.type !== "Shebang" &&
             comment.range[1] <= codeStart &&
-            !directive.test(comment.value),
+            !directive.test(comment.value) &&
+            !deprecation.test(comment.value),
         );
         const header = new Set(
           onlyNotices(
@@ -88,6 +91,7 @@ export const noComments = {
           if (
             comment.type === "Shebang" ||
             directive.test(comment.value) ||
+            deprecation.test(comment.value) ||
             header.has(comment)
           ) {
             continue;
