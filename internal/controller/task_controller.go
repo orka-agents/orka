@@ -354,11 +354,16 @@ func childTaskHoldsConcurrencySlot(task *corev1alpha1.Task) bool {
 	}
 }
 
+// maxUnmarkedSiblingJobSelectorBatch caps the number of task label values in
+// one live Job list selector so large Pending child queues never exceed the
+// API server's HTTP request size limit.
+const maxUnmarkedSiblingJobSelectorBatch = 200
+
 // countChildSiblingSlots counts the siblings of task that hold a
 // maxConcurrentChildren slot, stopping once limit is reached. createTaskJob
 // creates a Job before the Task records JobName, so a failed status write or a
 // restart can leave a running child Pending without markers; those siblings are
-// counted when one live Job list finds a Job they own.
+// counted when a live Job list finds a Job they own.
 func (r *TaskReconciler) countChildSiblingSlots(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -388,23 +393,26 @@ func (r *TaskReconciler) countChildSiblingSlots(
 		return active, nil
 	}
 
-	byTask, err := k8slabels.NewRequirement(labels.LabelTask, selection.In, unmarkedNames)
-	if err != nil {
-		return 0, err
-	}
-	var jobs batchv1.JobList
-	if err := r.taskMetadataReader().List(ctx, &jobs, client.InNamespace(task.Namespace),
-		client.MatchingLabelsSelector{Selector: k8slabels.NewSelector().Add(*byTask)}); err != nil {
-		return 0, err
-	}
-	for i := range jobs.Items {
-		for _, ref := range jobs.Items[i].OwnerReferences {
-			if label, ok := unmarked[ref.UID]; !ok || jobs.Items[i].Labels[labels.LabelTask] != label {
-				continue
-			}
-			delete(unmarked, ref.UID)
-			if active++; active >= limit {
-				return active, nil
+	for start := 0; start < len(unmarkedNames); start += maxUnmarkedSiblingJobSelectorBatch {
+		end := min(start+maxUnmarkedSiblingJobSelectorBatch, len(unmarkedNames))
+		byTask, err := k8slabels.NewRequirement(labels.LabelTask, selection.In, unmarkedNames[start:end])
+		if err != nil {
+			return 0, err
+		}
+		var jobs batchv1.JobList
+		if err := r.taskMetadataReader().List(ctx, &jobs, client.InNamespace(task.Namespace),
+			client.MatchingLabelsSelector{Selector: k8slabels.NewSelector().Add(*byTask)}); err != nil {
+			return 0, err
+		}
+		for i := range jobs.Items {
+			for _, ref := range jobs.Items[i].OwnerReferences {
+				if label, ok := unmarked[ref.UID]; !ok || jobs.Items[i].Labels[labels.LabelTask] != label {
+					continue
+				}
+				delete(unmarked, ref.UID)
+				if active++; active >= limit {
+					return active, nil
+				}
 			}
 		}
 	}
@@ -1418,7 +1426,30 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	// every child created in a burst would pass the check. Task reconciles are
 	// serialized (taskControllerMaxConcurrentReconciles), so a live read sees
 	// every slot an earlier admission recorded before this check runs.
+	//
+	// Before hitting the API server, check the informer cache first: if the
+	// cache already shows active marked siblings at or above the limit (none of
+	// which are this task), we can short-circuit and requeue without a live
+	// sibling list. Admission still always performs a live read.
 	if coord.MaxConcurrentChildren > 0 {
+		var cachedSiblings corev1alpha1.TaskList
+		if err := r.List(ctx, &cachedSiblings, client.InNamespace(task.Namespace),
+			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err == nil {
+			cachedActive := int32(0)
+			for i := range cachedSiblings.Items {
+				s := &cachedSiblings.Items[i]
+				if s.Name == task.Name {
+					continue
+				}
+				if childTaskHoldsConcurrencySlot(s) {
+					if cachedActive++; cachedActive >= coord.MaxConcurrentChildren {
+						log.Info("coordination concurrency limit reached (cached)", "active", cachedActive, "max", coord.MaxConcurrentChildren)
+						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+					}
+				}
+			}
+		}
+
 		var siblings corev1alpha1.TaskList
 		if err := r.taskMetadataReader().List(ctx, &siblings, client.InNamespace(task.Namespace),
 			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
