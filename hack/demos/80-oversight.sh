@@ -16,7 +16,8 @@
 #   $OVERSIGHT_PACK/take/*.jsonl        a recorded live take, replayed with
 #                                       its timing (the default play mode)
 #   $OVERSIGHT_PACK/tasks/wave-*/*.yaml scripted Tasks, applied in waves (live only)
-#   $OVERSIGHT_PACK/fleet/              their scripted model endpoint and Agents
+#   $OVERSIGHT_PACK/fleet/              their scripted model endpoint, Agents and
+#                                       in-cluster fixtures (demo-fixtures.json)
 #   $OVERSIGHT_PACK/live-bridge         optional: streams live decisions for
 #                                       OVERSIGHT_MODE=live (see below)
 #
@@ -30,6 +31,7 @@
 #   OVERSIGHT_SPEED    replay speed-up of the recorded take (default 1)
 #   WAVE_DELAY         seconds between Task waves (default 6)
 #   OVERSIGHT_AIMOCK_IMAGE  the scripted model image, for a pack with a fleet
+#   OVERSIGHT_FIXTURE_IMAGE an image with python3 for the fleet's in-cluster fixtures
 #   OVERSIGHT_MAX_SCORER_CALLS  live mode soft ceiling passed to the bridge (default 500)
 #   OVERSIGHT_CONTEXT_LIVE / _REPLAY  optional context labels for the take
 #                      (JSON list of {name, value}), e.g. "Scorer: live"
@@ -183,6 +185,11 @@ ensure_fleet() {
   kubectl apply -f "${fleet}/platform.json" >/dev/null
   kubectl -n "${model_ns}" create configmap demo-fixtures --from-file=seeds.json="${fleet}/aimock-fixtures.json" \
     --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f - >/dev/null
+  if [[ -f "${fleet}/demo-fixtures.json" ]]; then
+    # In-cluster stand-ins the fleet's Tasks reach, such as a registry.
+    : "${OVERSIGHT_FIXTURE_IMAGE:?set OVERSIGHT_FIXTURE_IMAGE to an image with python3, pinned by digest}"
+    sed -e "s|@WORKER_IMAGE@|${OVERSIGHT_FIXTURE_IMAGE}|g" "${fleet}/demo-fixtures.json" | kubectl apply -f - >/dev/null
+  fi
   sed -e "s|@NS@|${model_ns}|g" -e "s|@IMAGE@|${OVERSIGHT_AIMOCK_IMAGE}|g" \
     -e "s|@SHA@|$(sha256sum "${fleet}/aimock-fixtures.json" | cut -c1-64)|g" "${fleet}/aimock.yaml" | kubectl apply -f - >/dev/null
   kubectl -n "${model_ns}" rollout status deployment/aimock --timeout=5m
@@ -231,10 +238,23 @@ cmd_play() {
       [[ -x "${OVERSIGHT_PACK}/live-bridge" ]] || { echo "live mode needs ${OVERSIGHT_PACK}/live-bridge" >&2; return 1; }
       log "Live take: scorer calls capped near ${OVERSIGHT_MAX_SCORER_CALLS:-500}; no advisor tier"
       ensure_fleet
-      apply_waves
+      # The bridge starts first: short-lived Pods carry the metadata that
+      # attaches kernel effects to an action, so it must be watching before
+      # the first wave. It touches the ready file once it is.
+      local ready bridge
+      ready="$(mktemp -u)"
       ORKA_OVERSIGHT_URL="${API}" ORKA_OVERSIGHT_NAMESPACE="${NS}" ORKA_OVERSIGHT_TOKEN="$(ingest_token)" \
         OVERSIGHT_MAX_SCORER_CALLS="${OVERSIGHT_MAX_SCORER_CALLS:-500}" OVERSIGHT_ADVISORS=off \
-        OVERSIGHT_TAKE_ID="${take_id}" "${OVERSIGHT_PACK}/live-bridge"
+        OVERSIGHT_TAKE_ID="${take_id}" OVERSIGHT_BRIDGE_READY_FILE="${ready}" "${OVERSIGHT_PACK}/live-bridge" &
+      bridge=$!
+      for _ in $(seq 60); do
+        [[ -e "${ready}" ]] && break
+        kill -0 "${bridge}" 2>/dev/null || { echo "the live bridge exited before it was ready" >&2; return 1; }
+        sleep 1
+      done
+      [[ -e "${ready}" ]] || { kill "${bridge}" 2>/dev/null; echo "the live bridge was not ready in 60s" >&2; return 1; }
+      apply_waves
+      wait "${bridge}"
       ;;
     *) echo "OVERSIGHT_MODE is replay or live" >&2; return 1 ;;
   esac
