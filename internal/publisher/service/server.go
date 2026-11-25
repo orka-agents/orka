@@ -386,6 +386,8 @@ func classifyPublisherError(err error) error {
 		return apiError(ErrInvalidRequest, "invalid_request", "publisher request is invalid", 400, false, err)
 	case errors.Is(err, publisher.ErrUnsafeDelta), errors.Is(err, publisher.ErrUnsupportedDelta):
 		return apiError(ErrInvalidRequest, "unsafe_delta", "workspace delta is unsafe or unsupported", 422, false, err)
+	case errors.Is(err, publisher.ErrRebaseRefused):
+		return apiError(nil, "rebase_refused", "automated rebase was refused due to conflicts or non-linear history", 422, false, err)
 	case errors.Is(err, publisher.ErrSourceMoved):
 		return apiError(nil, "source_moved", "source ref moved from the persisted baseline", 409, false, err)
 	case errors.Is(err, publisher.ErrBranchMoved), errors.Is(err, publisher.ErrBranchClaimMismatch):

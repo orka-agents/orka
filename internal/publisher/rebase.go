@@ -125,7 +125,7 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		}, nil
 	}
 	if len(lines) > maxRebaseCommits {
-		return RebaseBranchResult{}, operationError(ErrCASRejected, "rebase branch", fmt.Sprintf("PR has %d commits to rebase (max %d)", len(lines), maxRebaseCommits), nil)
+		return RebaseBranchResult{}, operationError(ErrRebaseRefused, "rebase branch", fmt.Sprintf("PR has %d commits to rebase (max %d)", len(lines), maxRebaseCommits), nil)
 	}
 
 	commitTime := request.CommitTimestamp.UTC().Truncate(time.Second)
@@ -139,7 +139,7 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			// Refuse merge commits or root commits during automated linear rebase.
-			return RebaseBranchResult{}, operationError(ErrCASRejected, "rebase branch", "automated rebase requires linear non-merge commits", nil)
+			return RebaseBranchResult{}, operationError(ErrRebaseRefused, "rebase branch", "automated rebase requires linear non-merge commits", nil)
 		}
 		origOID, origParent := fields[0], fields[1]
 		if err := validateObjectID("rebase commit", origOID); err != nil {
@@ -150,11 +150,11 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		merged, mergeErr := p.runGit(ctx, box, box.root, nil, nil,
 			"--git-dir="+repositoryPath, "merge-tree", "--write-tree", "--merge-base="+origParent, currentParent, origOID)
 		if mergeErr != nil {
-			return RebaseBranchResult{}, operationError(ErrCASRejected, "rebase branch", fmt.Sprintf("merge conflict while rebasing commit %s", origOID[:min(12, len(origOID))]), mergeErr)
+			return RebaseBranchResult{}, operationError(ErrRebaseRefused, "rebase branch", fmt.Sprintf("merge conflict while rebasing commit %s", origOID[:min(12, len(origOID))]), mergeErr)
 		}
 		treeLine := strings.TrimSpace(strings.SplitN(merged.stdout, "\n", 2)[0])
 		if err := validateObjectID("rebased tree", treeLine); err != nil {
-			return RebaseBranchResult{}, operationError(ErrCASRejected, "rebase branch", "rebase produced invalid tree", err)
+			return RebaseBranchResult{}, operationError(ErrRebaseRefused, "rebase branch", "rebase produced invalid tree", err)
 		}
 
 		// Preserve original author metadata and commit message; use configured
@@ -236,7 +236,18 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 	if _, pushErr := p.runGit(mutationCtx, box, box.root, nil, nil,
 		"--git-dir="+repositoryPath, "push", "--porcelain", "--no-verify", "--no-recurse-submodules",
 		lease, "--", request.Target.URL, refspec); pushErr != nil {
-		return RebaseBranchResult{}, operationError(ErrCASRejected, "push rebased branch", "remote push rejected or failed", pushErr)
+		// Reconcile remote ref on push error: the server may have accepted the
+		// rewrite before the connection dropped.
+		if postObserved, obsErr := p.observeRef(mutationCtx, box, request.Target, request.TargetRef); obsErr == nil && !postObserved.Absent && postObserved.OID == currentParent {
+			return RebaseBranchResult{
+				OperationID:  request.OperationID,
+				PreviousOID:  request.HeadOID,
+				BaseOID:      request.BaseOID,
+				NewHeadOID:   currentParent,
+				RebasedCount: rebasedCount,
+			}, nil
+		}
+		return RebaseBranchResult{}, operationError(ErrPublicationUnknown, "push rebased branch", "remote push outcome is unknown or rejected", pushErr)
 	}
 
 	return RebaseBranchResult{

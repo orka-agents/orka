@@ -552,24 +552,13 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorActionsJobLog(ctx co
 	return string(body), nil
 }
 
-// repositoryMonitorEvidenceTailText sanitizes untrusted multi-line CI log text
-// and keeps the trailing lines within maxBytes and maxLines.
+// repositoryMonitorEvidenceTailText sanitizes the full bounded CI log text
+// first (so multiline credential blocks cannot lose their header context), then
+// keeps the trailing lines within maxBytes and maxLines.
 func repositoryMonitorEvidenceTailText(value string, maxBytes, maxLines int) (string, bool) {
-	cut := false
-	rawLimit := repositoryMonitorEvidenceRawLimit(maxBytes)
-	if len(value) > rawLimit {
-		// Keep the tail of the raw log at a line boundary so we capture the
-		// failure summary at the end of the job.
-		tail := value[len(value)-rawLimit:]
-		if idx := strings.IndexByte(tail, '\n'); idx >= 0 && idx+1 < len(tail) {
-			tail = tail[idx+1:]
-		}
-		value = tail
-		cut = true
-	}
 	lines, sanitizeCut := repositoryMonitorEvidenceSanitizedLines(value, len(value)+1)
 	text, bounded := repositoryMonitorEvidenceBoundTail(lines, maxBytes, maxLines)
-	return text, cut || sanitizeCut || bounded
+	return text, sanitizeCut || bounded
 }
 
 func repositoryMonitorEvidenceBoundTail(lines []string, maxBytes, maxLines int) (string, bool) {

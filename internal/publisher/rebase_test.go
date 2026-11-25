@@ -109,8 +109,8 @@ func TestRebaseBranchLinearSignedAndConflictRejection(t *testing.T) {
 		BaseOID:     conflictBaseOID,
 		HeadOID:     result.NewHeadOID,
 	})
-	if !errors.Is(conflictErr, ErrCASRejected) {
-		t.Fatalf("expected ErrCASRejected on merge conflict, got %v", conflictErr)
+	if !errors.Is(conflictErr, ErrRebaseRefused) {
+		t.Fatalf("expected ErrRebaseRefused on merge conflict, got %v", conflictErr)
 	}
 	// Remote head must remain untouched.
 	afterConflict := strings.TrimSpace(runTestGit(t, "", nil, "--git-dir="+remoteDir, "rev-parse", "refs/heads/feat/linear"))

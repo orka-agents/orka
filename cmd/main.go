@@ -2472,6 +2472,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	var branchRebaser controller.RepositoryMonitorBranchRebaser
+	if publisherClient != nil {
+		branchRebaser = publisherClient
+	}
 	if err := (&controller.RepositoryMonitorReconciler{
 		Client:                    mgr.GetClient(),
 		Scheme:                    mgr.GetScheme(),
@@ -2481,7 +2485,7 @@ func main() {
 		DurableControlStore:       kubeControlStore,
 		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
-		BranchRebaser:             publisherClient,
+		BranchRebaser:             branchRebaser,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
