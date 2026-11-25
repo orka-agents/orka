@@ -574,16 +574,20 @@ func renderServer(f *goFile, svc *service) {
 			fail = "return %s"
 			f.printf("func (service *%sService) %s(stream grpc.ClientStreamingServer[%s, %s]) error {\n",
 				lowerFirst(svc.name), method.name, request, response)
-			f.printf("ctx := stream.Context()\nwireRequest := &%s{}\n", request)
+			f.printf("ctx := stream.Context()\n")
+			f.printf("if err := service.server.requireIntercepted(ctx); err != nil {\nreturn err\n}\n")
+			f.printf("wireRequest := &%s{}\n", request)
 			f.printf("if err := service.server.receiveUpload(stream, &method%s, wireRequest); err != nil {\nreturn err\n}\n", method.name)
 		case streamDownload, streamList:
 			fail = "return %s"
 			f.printf("func (service *%sService) %s(wireRequest *%s, stream grpc.ServerStreamingServer[%s]) error {\n",
 				lowerFirst(svc.name), method.name, request, response)
 			f.printf("ctx := stream.Context()\n")
+			f.printf("if err := service.server.requireIntercepted(ctx); err != nil {\nreturn err\n}\n")
 		default:
 			f.printf("func (service *%sService) %s(ctx context.Context, wireRequest *%s) (*%s, error) {\n",
 				lowerFirst(svc.name), method.name, request, response)
+			f.printf("if err := service.server.requireIntercepted(ctx); err != nil {\nreturn nil, err\n}\n")
 		}
 		f.printf("var err error\n")
 		args := []string{"ctx"}

@@ -400,14 +400,18 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 		s.logCall(ctx, m, started, err)
 	}()
 	callCtx, release, served, err := s.admit(ctx, m)
+	isDescribe := m.name == methodDescribe.name
 	// Every authenticated call, including one refused, answers with the
 	// contract, revision and, once known, the serving dataset; an admitted
-	// call answers with the dataset it was checked against.
-	if headerErr := grpc.SetHeader(ctx, s.responseHeader(served)); headerErr != nil {
-		if err == nil {
-			release()
+	// call answers with the dataset it was checked against (or the newly
+	// described dataset for Describe).
+	if !isDescribe || err != nil {
+		if headerErr := grpc.SetHeader(ctx, s.responseHeader(served)); headerErr != nil {
+			if err == nil {
+				release()
+			}
+			return nil, s.headerError(ctx, m, headerErr)
 		}
-		return nil, s.headerError(ctx, m, headerErr)
 	}
 	if err != nil {
 		return nil, err
@@ -415,9 +419,22 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 	defer release()
 	ctx = callCtx
 	if message, ok := req.(proto.Message); ok && hasUnknownFields(message.ProtoReflect()) {
+		if isDescribe {
+			_ = grpc.SetHeader(ctx, s.responseHeader(served))
+		}
 		return nil, unsupportedFieldStatus()
 	}
+	ctx = context.WithValue(ctx, interceptedCall{}, s)
 	resp, err = handler(ctx, req)
+	if isDescribe {
+		headerDataset := served
+		if desc, ok := resp.(*storagepb.DescribeResponse); ok && desc.GetProvider().GetDatasetId() != "" {
+			headerDataset = desc.GetProvider().GetDatasetId()
+		}
+		if hdrErr := grpc.SetHeader(ctx, s.responseHeader(headerDataset)); hdrErr != nil {
+			return nil, s.headerError(ctx, m, hdrErr)
+		}
+	}
 	if err != nil {
 		return nil, s.statusError(ctx, m, err)
 	}
@@ -520,7 +537,7 @@ func (s *checkedStream) RecvMsg(message any) error {
 		header, _ := metadata.FromIncomingContext(s.ctx)
 		served, describeErr := s.server.servingDataset(s.ctx, s.method, header)
 		s.served = served
-		if headerErr := s.ServerStream.SetHeader(s.server.responseHeader(served)); headerErr != nil {
+		if headerErr := s.SetHeader(s.server.responseHeader(served)); headerErr != nil {
 			return s.server.headerError(s.ctx, s.method, headerErr)
 		}
 		s.headerSent = true
@@ -619,6 +636,18 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 // overloadedSince is the protocol revision whose clients know the
 // OVERLOADED reason.
 const overloadedSince = 2
+
+// interceptedCall marks a context that passed through this Server's protocol
+// interceptor.
+type interceptedCall struct{}
+
+func (s *Server) requireIntercepted(ctx context.Context) error {
+	if marked, _ := ctx.Value(interceptedCall{}).(*Server); marked == s {
+		return nil
+	}
+	return errorStatus(codes.FailedPrecondition, ReasonContractMismatch,
+		"storage server was registered without ServerOptions", nil)
+}
 
 // checkContract refuses a call without the orka.storage.v1 contract header
 // and a protocol revision. The server serves every older revision.
@@ -729,8 +758,12 @@ func (s *Server) checkDigest(ctx context.Context, m *method, args ...any) error 
 // needs no dataset. Describe and Refresh update the dataset too.
 func (s *Server) servingDataset(ctx context.Context, m *method, header metadata.MD) (string, error) {
 	known := s.DatasetID()
-	omitted := m.mayOmitDataset() && len(header.Get(HeaderDataset)) == 0
-	if known != "" && (omitted || m.kind == storagev1.MethodWrite) {
+	named := header.Get(HeaderDataset)
+	omitted := m.mayOmitDataset() && len(named) == 0
+	if known != "" && omitted {
+		return known, nil
+	}
+	if known != "" && m.kind == storagev1.MethodWrite && (len(named) != 1 || named[0] == known) {
 		return known, nil
 	}
 	if omitted {
