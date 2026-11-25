@@ -52,6 +52,7 @@ func TestTaskGitHubAppCredentialsOnlyOnAgentTasks(t *testing.T) {
 	}{
 		"agent with App on every role": {spec: map[string]any{"type": "agent", "workspace": map[string]any{
 			"readCredentialRef": app, "publicationReadCredentialRef": app, "publicationCredentialRef": app, "forgeCredentialRef": app,
+			"commitSigningCredentialRef": token,
 		}}},
 		"container with Token and untyped refs": {spec: map[string]any{"type": "container", "workspace": map[string]any{
 			"readCredentialRef": map[string]any{}, "publicationCredentialRef": token,
