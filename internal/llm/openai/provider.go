@@ -109,6 +109,12 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		}
 		endpoint := strings.TrimRight(config.BaseURL, "/")
 		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion), azure.WithAPIKey(config.APIKey))
+		// openai-go refuses Azure credentials over plaintext HTTP. Opting in for an
+		// http:// endpoint still limits it to loopback destinations, such as a
+		// local proxy or test server; any other HTTP host fails closed.
+		if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
+			opts = append(opts, azure.WithUnsafeAllowHTTP())
+		}
 	} else {
 		opts = append(opts, option.WithAPIKey(config.APIKey))
 		if config.BaseURL != "" {
