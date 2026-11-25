@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -470,19 +471,41 @@ func newExternalRuntimeTestProxyServer(t *testing.T, name string, handler http.H
 	return server
 }
 
-// lateEOFCheckBody delays every read after the declared body length, which is
-// the proxy transport's trailing overlong-body check.
+// lateEOFCheckBody blocks every read after the declared body length until
+// release is closed, so the test can confirm the upstream flushed a response
+// event while the proxy transport's trailing EOF check is still in flight, and
+// records the trailing read's result so a closed-body error cannot hide behind
+// an already-completed stream.
 type lateEOFCheckBody struct {
 	io.ReadCloser
-	remaining int64
+	remaining   int64
+	atEOFOnce   sync.Once
+	atEOF       chan struct{}
+	release     <-chan struct{}
+	eofDoneOnce sync.Once
+	eofDone     chan struct{}
+	eofResult   chan error
 }
 
 func (b *lateEOFCheckBody) Read(p []byte) (int, error) {
-	if b.remaining <= 0 {
-		time.Sleep(50 * time.Millisecond)
+	isTrailing := b.remaining <= 0
+	if isTrailing {
+		b.atEOFOnce.Do(func() {
+			close(b.atEOF)
+		})
+		<-b.release
 	}
 	n, err := b.ReadCloser.Read(p)
 	b.remaining -= int64(n)
+	if isTrailing {
+		select {
+		case b.eofResult <- err:
+		default:
+		}
+		b.eofDoneOnce.Do(func() {
+			close(b.eofDone)
+		})
+	}
 	return n, err
 }
 
@@ -492,6 +515,20 @@ func (b *lateEOFCheckBody) Read(p []byte) (int, error) {
 // body, that check fails, and the stream is cut after acceptance.
 func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *testing.T) {
 	const lines = 5
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	atEOF := make(chan struct{})
+	releaseEOF := make(chan struct{})
+	eofDone := make(chan struct{})
+	eofResult := make(chan error, 1)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseEOF)
+		})
+	}
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -502,7 +539,18 @@ func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *test
 		for sequence := range lines {
 			_, _ = fmt.Fprintf(w, "{\"sequence\":%d}\n", sequence)
 			w.(http.Flusher).Flush()
-			time.Sleep(20 * time.Millisecond)
+			if sequence == 0 {
+				// Wait for the trailing EOF check to finish after the client
+				// observes the first flushed event before streaming the rest.
+				select {
+				case <-eofDone:
+				case <-r.Context().Done():
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}))
 	t.Cleanup(upstream.Close)
@@ -512,16 +560,33 @@ func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *test
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	server := newExternalRuntimeTestProxyServer(t, "late EOF check", func(w http.ResponseWriter, request *http.Request) {
-		request.Body = &lateEOFCheckBody{ReadCloser: request.Body, remaining: request.ContentLength}
+		request.Body = &lateEOFCheckBody{
+			ReadCloser: request.Body,
+			remaining:  request.ContentLength,
+			atEOF:      atEOF,
+			release:    releaseEOF,
+			eofDone:    eofDone,
+			eofResult:  eofResult,
+		}
 		proxy.ServeHTTP(w, request)
 	})
-	// Past the transport's 4 KiB write buffer, the body reaches the upstream
-	// before the trailing EOF check runs.
-	payload, err := json.Marshal(map[string]string{"prompt": strings.Repeat("x", 16<<10)})
+	// Release the trailing-EOF gate before server/upstream Cleanup runs so a
+	// failed or timed-out test never hangs shutting down handlers.
+	defer release()
+
+	// Pad the JSON object to an exact multiple of 4 KiB (the transport write
+	// buffer) so the complete JSON body flushes to the upstream before the
+	// trailing EOF check runs.
+	const targetPayloadBytes = 16 << 10
+	const wrapperLen = len(`{"prompt":""}`)
+	payload, err := json.Marshal(map[string]string{"prompt": strings.Repeat("x", targetPayloadBytes-wrapperLen)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPut, server.URL+"/v2/runtime-sessions/session/prompts/prompt", bytes.NewReader(payload))
+	if len(payload) != targetPayloadBytes {
+		t.Fatalf("expected %d-byte payload, got %d", targetPayloadBytes, len(payload))
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, server.URL+"/v2/runtime-sessions/session/prompts/prompt", bytes.NewReader(payload))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,9 +599,27 @@ func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *test
 	scanner := bufio.NewScanner(response.Body)
 	for scanner.Scan() {
 		received++
+		if received == 1 {
+			// The first streamed event arrived while the EOF check was still
+			// blocked; now release the EOF check so the remaining stream runs.
+			select {
+			case <-atEOF:
+			case <-ctx.Done():
+				t.Fatal("proxy did not enter trailing EOF check before flushing first event")
+			}
+			release()
+		}
 	}
 	if err := scanner.Err(); err != nil || received != lines {
 		t.Fatalf("proxied stream delivered %d of %d events (read error %v)", received, lines, err)
+	}
+	select {
+	case err := <-eofResult:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("expected trailing request-body read to return io.EOF, got %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("expected trailing request-body EOF check to complete")
 	}
 }
 
