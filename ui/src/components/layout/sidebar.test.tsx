@@ -69,6 +69,48 @@ describe('Sidebar', () => {
     expect(screen.getByText('Connectors')).toBeInTheDocument()
   })
 
+  const chatConfig = (extra: Record<string, unknown>) => ({
+    enabled: true, provider: 'p', model: 'm', maxIterations: 1, maxDuration: '1m', maxTasksPerTurn: 1, maxConcurrent: 1, availableTools: [], ...extra,
+  })
+
+  it('shows Oversight when the server says oversight is enabled', async () => {
+    server.use(http.get('/api/v1/chat/config', () => HttpResponse.json(chatConfig({ oversightEnabled: true }))))
+    render(<Sidebar />)
+    expect(await screen.findByText('Oversight')).toBeInTheDocument()
+  })
+
+  it('hides Oversight when the server says oversight is disabled', async () => {
+    let probed = false
+    server.use(
+      http.get('/api/v1/chat/config', () => HttpResponse.json(chatConfig({ oversightEnabled: false }))),
+      http.get('/api/v1/oversight/posture', () => { probed = true; return HttpResponse.json({}) }),
+    )
+    render(<Sidebar />)
+    await waitFor(() => expect(screen.queryByText('Oversight')).not.toBeInTheDocument())
+    expect(probed).toBe(false)
+  })
+
+  it('asks the posture API when the config cannot say and hides Oversight on 501', async () => {
+    server.use(
+      http.get('/api/v1/chat/config', () => HttpResponse.json({ error: 'not found' }, { status: 404 })),
+      http.get('/api/v1/connectors', () => HttpResponse.json({ items: [] })),
+      http.get('/api/v1/oversight/posture', () => HttpResponse.json({ error: 'oversight is not enabled' }, { status: 501 })),
+    )
+    render(<Sidebar />)
+    await waitFor(() => expect(screen.queryByText('Oversight')).not.toBeInTheDocument())
+  })
+
+  it('keeps Oversight when the posture probe answers', async () => {
+    let probed = false
+    server.use(
+      http.get('/api/v1/chat/config', () => HttpResponse.json(chatConfig({}))),
+      http.get('/api/v1/oversight/posture', () => { probed = true; return HttpResponse.json({}) }),
+    )
+    render(<Sidebar />)
+    await waitFor(() => expect(probed).toBe(true))
+    expect(screen.getByText('Oversight')).toBeInTheDocument()
+  })
+
   it('active nav item has correct styling', () => {
     render(<Sidebar />)
     const dashboardLink = screen.getByText('Dashboard').closest('a')

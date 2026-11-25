@@ -1,0 +1,320 @@
+// Response shapes of the read-only oversight API (/api/v1/oversight/*). The
+// Go types in pkg/oversight/v1 are the source of truth; every string here is
+// data from the server and is rendered as plain text only.
+
+export type OversightSignal = 'consistent' | 'risky' | 'against_charter' | 'monitor_unavailable'
+
+export type OversightDisposition =
+  | 'allow'
+  | 'audit_flagged'
+  | 'paused'
+  | 'held_for_human'
+  | 'fail_closed'
+  | 'degraded'
+
+export type OversightFeedbackLabel = 'real_problem' | 'false_alarm' | 'unclear'
+
+export const OVERSIGHT_FEEDBACK_LABELS: readonly OversightFeedbackLabel[] = ['real_problem', 'false_alarm', 'unclear']
+
+export interface CountedValue {
+  value: string
+  count: number
+}
+
+export interface EffectEvent {
+  id: string
+  kind: string
+  binary?: string
+  path?: string
+  dest?: string
+  args?: string
+  outcome?: string
+  role?: string
+}
+
+export interface ObservedEffects {
+  counts?: Record<string, number>
+  binaries?: CountedValue[]
+  paths?: CountedValue[]
+  destinations?: CountedValue[]
+  blockedCount?: number
+  /** Absent means the sensor did not observe sends; it is not zero. */
+  bytesSent?: number
+  notableEvents?: EffectEvent[]
+  omittedEvents?: number
+}
+
+export interface ActionEnvelope {
+  toolName: string
+  toolCallID?: string
+  requestSummary?: string
+  effects: ObservedEffects
+  priorActionIDs?: string[]
+  taintFlags?: string[]
+  inheritedTaint?: string[]
+}
+
+export interface ActionCoverage {
+  streamState: string
+  sensorState: string
+  attributionMethod?: string
+  attributionCounts?: Record<string, number>
+  unattributedEvents?: number
+  blindSpots?: string[]
+}
+
+export interface Tier0Evaluation {
+  rules?: string[]
+  highStakesClass?: string
+}
+
+export interface CharterFinding {
+  producerRef: string
+  boundID: string
+  sentence: string
+  citedEventIDs?: string[]
+  enforced?: boolean
+}
+
+export interface ConcernScore {
+  questionID: string
+  label?: string
+  probability: number
+  threshold?: number
+  triggered?: boolean
+}
+
+export interface ScorerEvaluation {
+  providerRef: string
+  modelID: string
+  modelFamily?: string
+  modelDigest?: string
+  promptRevision?: string
+  /** What the producer reported; Orka does not verify it in Phase 0. */
+  trustState?: string
+  windowSize?: number
+  latencyMs?: number
+  status: string
+  citedEventIDs?: string[]
+  scores?: ConcernScore[]
+}
+
+export interface AdvisorEvaluation {
+  providerRef: string
+  modelID: string
+  modelFamily?: string
+  modelDigest?: string
+  promptRevision?: string
+  trustState?: string
+  status: string
+  verdict?: string
+  releaseRequested?: boolean
+  releaseGranted?: boolean
+  releaseDeniedReason?: string
+  citedEventIDs?: string[]
+  concerns?: string[]
+  summary?: string
+  latencyMs?: number
+}
+
+export interface DecisionFeedback {
+  label: OversightFeedbackLabel
+  note?: string
+  reviewer?: string
+  recordedAt: string
+}
+
+export interface DecisionView {
+  id: string
+  seq?: number
+  namespace?: string
+  taskName: string
+  taskUID?: string
+  agentName?: string
+  workloadIdentity?: string
+  runID?: string
+  actionSeq: number
+  observedAt: string
+  recordedAt?: string
+  mode: 'audit' | 'gate' | string
+  outageFallback?: string
+  charterRevision?: string
+  concernsRef?: string
+  concernsRevision?: string
+  concernsDigest?: string
+  action: ActionEnvelope
+  evidenceLevel: string
+  coverage: ActionCoverage
+  tier0?: Tier0Evaluation
+  charterFindings?: CharterFinding[]
+  scorers?: ScorerEvaluation[]
+  advisors?: AdvisorEvaluation[]
+  disposition: OversightDisposition | string
+  wouldHavePaused?: boolean
+  escalatedBecause?: string[]
+  approvalRef?: string
+  signal: OversightSignal | string
+  signatureHash?: string
+  actionNarrative?: string
+  feedback?: DecisionFeedback
+}
+
+export interface QueryTerm {
+  key: string
+  value: string
+}
+
+export interface DecisionListResponse {
+  namespace: string
+  query?: QueryTerm[]
+  items: DecisionView[]
+  continue?: string
+}
+
+export interface SignatureFeature {
+  kind: string
+  value: string
+}
+
+export interface SimilarItem {
+  decision: DecisionView
+  score: number
+  exactSignature?: boolean
+  shared: SignatureFeature[] | null
+}
+
+export interface SimilarResponse {
+  namespace: string
+  source: DecisionView
+  signature: SignatureFeature[] | null
+  items: SimilarItem[] | null
+  searched: number
+  truncated?: boolean
+}
+
+export interface DecisionGroup {
+  key: string
+  count: number
+  risky: number
+  againstCharter: number
+  firstSeen: string
+  lastSeen: string
+  tasks?: string[]
+}
+
+export interface GroupsResponse {
+  namespace: string
+  by: 'agent' | 'task' | string
+  query?: QueryTerm[]
+  groups: DecisionGroup[] | null
+  searched: number
+  truncated?: boolean
+}
+
+export interface FeedbackResponse {
+  recorded: number
+  feedback: DecisionFeedback
+}
+
+export interface PostureState {
+  state: string
+  summary: string
+  reasons?: string[]
+}
+
+export interface PostureCoverage {
+  maxEvidenceLevel?: string
+  streamOK: number
+  sensorAttributed: number
+  unattributedEvents: number
+  blindSpots?: Record<string, number>
+}
+
+export interface PostureBasis {
+  actions: number
+  tasks: number
+  agents: number
+  dispositions: Record<string, number>
+  signals: Record<string, number>
+  wouldHavePaused: number
+  charterFindings: number
+  unreviewedFlagged: number
+  falseAlarms: number
+  realProblems: number
+  coverage: PostureCoverage
+  lastObservedAt?: string
+}
+
+export interface PostureProducer {
+  role: string
+  providerRef: string
+  modelID: string
+  trustState?: string
+  evaluations: number
+  failures: number
+}
+
+export interface PostureResponse {
+  namespace: string
+  window: string
+  generatedAt: string
+  mode?: string
+  confidence: PostureState
+  visibility: PostureState
+  control: PostureState
+  charterRevisions?: string[]
+  concernsRevisions?: string[]
+  basis: PostureBasis
+  producers?: PostureProducer[]
+  incomplete?: boolean
+}
+
+export interface ProducerMetric {
+  name: string
+  value: number
+  unit?: string
+}
+
+export interface ProducerInfo {
+  providerRef: string
+  label?: string
+  role?: string
+  modelID?: string
+  modelFamily?: string
+  modelDigest?: string
+  /** The declaration's claim; Orka has not verified it unless trustVerified. */
+  declaredTrustState?: string
+  trustVerified: boolean
+  observedTrustStates?: string[]
+  evalRunID?: string
+  sampleSize?: number
+  metrics?: ProducerMetric[]
+  note?: string
+  evaluations: number
+  failures: number
+}
+
+export interface ProducersResponse {
+  namespace: string
+  declared: boolean
+  producers: ProducerInfo[] | null
+}
+
+export interface OversightConfig {
+  queryKeys: string[]
+  maxBulkFeedback: number
+  /**
+   * Not served yet: charter revisions an operator marked as a demo. Only a
+   * revision listed here is labelled as a demo charter.
+   */
+  demoCharterRevisions?: string[]
+}
+
+/** Cheap shape check for a decision frame read off the stream. */
+export function isDecisionView(value: unknown): value is DecisionView {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.id === 'string' && typeof record.taskName === 'string' &&
+    typeof record.action === 'object' && record.action !== null &&
+    typeof record.coverage === 'object' && record.coverage !== null
+}
