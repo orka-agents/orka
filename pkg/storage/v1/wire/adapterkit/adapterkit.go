@@ -317,7 +317,20 @@ func Serve(ctx context.Context, config Config) error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancelShutdown()
 	_ = probe.Shutdown(shutdownCtx)
-	workers.Wait()
+	workersDone := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(workersDone)
+	}()
+	workerWait := config.ShutdownTimeout
+	if workerWait <= 0 {
+		workerWait = 5 * time.Second
+	}
+	select {
+	case <-workersDone:
+	case <-time.After(workerWait):
+		forced = true
+	}
 	if !forced {
 		<-grpcServed
 	}

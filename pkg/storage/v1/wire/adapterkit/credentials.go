@@ -139,7 +139,12 @@ func (c *credentialStore) reloadCertificate() error {
 func (c *credentialStore) reloadTokens() error {
 	entries, err := os.ReadDir(c.config.BearerTokenDir)
 	if err != nil {
-		return c.failed("bearer-tokens", err)
+		if !errors.Is(err, fs.ErrNotExist) {
+			return c.failed("bearer-tokens", err)
+		}
+		// A missing token directory means no tokens are mounted; clear any
+		// previously cached tokens so removed credentials stop authenticating.
+		entries = nil
 	}
 	var names []string
 	var tokens [][]byte

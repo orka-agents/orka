@@ -455,18 +455,28 @@ func (s *Server) interceptStream(srv any, stream grpc.ServerStream, info *grpc.S
 		s.logCall(ctx, m, started, err)
 	}()
 	callCtx, release, served, err := s.admit(ctx, m)
-	if headerErr := stream.SetHeader(s.responseHeader(served)); headerErr != nil {
-		if err == nil {
-			release()
-		}
-		return s.headerError(ctx, m, headerErr)
-	}
 	if err != nil {
+		if headerErr := stream.SetHeader(s.responseHeader(served)); headerErr != nil {
+			return s.headerError(ctx, m, headerErr)
+		}
 		return err
 	}
 	defer release()
-	ctx = callCtx
-	err = handler(srv, &checkedStream{ServerStream: stream, ctx: ctx, kind: m.kind})
+	ctx = context.WithValue(callCtx, interceptedCall{}, s)
+	cs := &checkedStream{
+		ServerStream: stream,
+		server:       s,
+		method:       m,
+		ctx:          ctx,
+		kind:         m.kind,
+		served:       served,
+	}
+	err = handler(srv, cs)
+	if !cs.headerSent {
+		if headerErr := stream.SetHeader(s.responseHeader(cs.served)); headerErr != nil {
+			return s.headerError(ctx, m, headerErr)
+		}
+	}
 	if _, isStatus := status.FromError(err); err != nil && !isStatus {
 		return s.providerError(ctx, m, err)
 	}
@@ -483,12 +493,18 @@ func (s *Server) headerError(ctx context.Context, m *method, err error) error {
 
 // checkedStream gives a streaming handler the call's checked context,
 // bounds every receive and send by it, including the receive of a download's
-// request that gRPC makes before the handler runs, and refuses any request
-// message with a field the server does not know.
+// request that gRPC makes before the handler runs, refuses any request
+// message with a field the server does not know, and revalidates the serving
+// dataset right after receiving the request so a dataset switch while waiting
+// for the request cannot serve data under the old dataset header.
 type checkedStream struct {
 	grpc.ServerStream
-	ctx  context.Context
-	kind storagev1.MethodKind
+	server     *Server
+	method     *method
+	ctx        context.Context
+	kind       storagev1.MethodKind
+	served     string
+	headerSent bool
 }
 
 func (s *checkedStream) Context() context.Context { return s.ctx }
@@ -499,6 +515,18 @@ func (s *checkedStream) RecvMsg(message any) error {
 	}
 	if decoded, ok := message.(proto.Message); ok && hasUnknownFields(decoded.ProtoReflect()) {
 		return unsupportedFieldStatus()
+	}
+	if !s.headerSent {
+		header, _ := metadata.FromIncomingContext(s.ctx)
+		served, describeErr := s.server.servingDataset(s.ctx, s.method, header)
+		s.served = served
+		if headerErr := s.ServerStream.SetHeader(s.server.responseHeader(served)); headerErr != nil {
+			return s.server.headerError(s.ctx, s.method, headerErr)
+		}
+		s.headerSent = true
+		if err := s.server.checkDataset(s.ctx, s.method, header, served, describeErr); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -932,11 +960,11 @@ func (s *Server) encodeError(ctx context.Context, m *method, err error) error {
 	return providerErrorStatus(correlation)
 }
 
-// panicked reports a provider panic as a provider error.
-func (s *Server) panicked(ctx context.Context, m *method, recovered any) error {
+// panicked reports a provider panic as a provider error without logging the
+// raw panic value, which may contain credential-like strings.
+func (s *Server) panicked(ctx context.Context, m *method, _ any) error {
 	correlation := newCorrelationID()
-	s.logger.ErrorContext(ctx, "storage provider panicked", "method", m.name, "correlation", correlation,
-		"panic", fmt.Sprint(recovered))
+	s.logger.ErrorContext(ctx, "storage provider panicked", "method", m.name, "correlation", correlation)
 	return providerErrorStatus(correlation)
 }
 
