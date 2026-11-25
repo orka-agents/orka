@@ -668,6 +668,9 @@ func reviewedSliceWithContext(t *testing.T, repositoryScan, runID, sliceID strin
 		reviewSlice.OwnedFiles = append(reviewSlice.OwnedFiles, storepkg.ReviewSliceFile{Path: path})
 	}
 	bindReviewSliceContext(t, reviewSlice)
+	// The slice's review corroborated every file it was given.
+	reviewSlice.Coverage = security.ReviewCoverageComplete
+	reviewSlice.ReviewedFiles = slices.Sorted(slices.Values(paths))
 	return reviewSlice
 }
 
@@ -727,6 +730,14 @@ type reviewResultRetryFixture struct {
 
 func newReviewResultRetryFixture(t *testing.T) *reviewResultRetryFixture {
 	t.Helper()
+	return newReviewResultRetryFixtureAt(t, "")
+}
+
+// newReviewResultRetryFixtureAt builds the retry fixture for a run whose
+// mapper resolved headCommit, with the source review pinned to it as the
+// controller pins review Tasks.
+func newReviewResultRetryFixtureAt(t *testing.T, headCommit string) *reviewResultRetryFixture {
+	t.Helper()
 	ctx := context.Background()
 	securityStore := setupControllerSQLiteStore(t)
 	scheme := runtime.NewScheme()
@@ -758,6 +769,7 @@ func newReviewResultRetryFixture(t *testing.T) *reviewResultRetryFixture {
 		Mode:                     "initial",
 		Phase:                    scanRunPhaseRunning,
 		PolicyDigest:             policyDigest,
+		HeadCommit:               headCommit,
 		StartedAt:                time.Now().Add(-time.Minute),
 	}
 	if err := securityStore.CreateScanRun(ctx, run); err != nil {
@@ -811,7 +823,7 @@ func newReviewResultRetryFixture(t *testing.T) *reviewResultRetryFixture {
 			Type:      corev1alpha1.TaskTypeAgent,
 			AgentRef:  &corev1alpha1.AgentReference{Name: "poison-source-agent"},
 			Prompt:    "POISON SOURCE PROMPT MUST NOT BE COPIED",
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: security.PinScanWorkspace(repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead), headCommit),
 		},
 		Status: corev1alpha1.TaskStatus{
 			Phase:     corev1alpha1.TaskPhaseSucceeded,
@@ -7155,7 +7167,7 @@ func TestIngestReviewTaskRetriesFailedPromptOnce(t *testing.T) {
 		t.Fatalf("ingestScanTask(failed source) error = %v", err)
 	}
 	retryTask := fixture.getRetryTask(t)
-	if !strings.Contains(retryTask.Spec.Prompt, "failed or returned an invalid terminal result") {
+	if !strings.Contains(retryTask.Spec.Prompt, "failed, returned an invalid terminal result, or recorded no coverage") {
 		t.Fatalf("retry prompt = %q", retryTask.Spec.Prompt)
 	}
 	run, err := fixture.store.GetScanRun(fixture.ctx, defaultNS, fixture.run.ID)

@@ -167,6 +167,21 @@ func runSecurity(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Equal(t, "API handlers v2", updated.Title)
 		require.NotNil(t, updated.LastReviewedAt, "re-upsert keeps the recorded review time")
+		require.Empty(t, updated.Coverage)
+		require.Empty(t, updated.ReviewedFiles)
+
+		slice.Coverage, slice.ReviewedFiles = "partial", []string{"api/handler.go"}
+		require.NoError(t, p.UpsertReviewSlice(ctx, slice))
+		covered, err := p.GetReviewSlice(ctx, workflowNamespace, workflowScan, "slice-1")
+		require.NoError(t, err)
+		require.Equal(t, "partial", covered.Coverage)
+		require.Equal(t, []string{"api/handler.go"}, covered.ReviewedFiles)
+		slice.Coverage, slice.ReviewedFiles = "", nil
+		require.NoError(t, p.UpsertReviewSlice(ctx, slice))
+		remapped, err := p.GetReviewSlice(ctx, workflowNamespace, workflowScan, "slice-1")
+		require.NoError(t, err)
+		require.Empty(t, remapped.Coverage, "a later mapper write clears the previous review's coverage")
+		require.Empty(t, remapped.ReviewedFiles)
 
 		require.NoError(t, p.UpsertReviewSlice(ctx, &storagev1.ReviewSlice{ID: "slice-2", Namespace: workflowNamespace,
 			RepositoryScan: workflowScan, Source: "deterministic", Title: "CLI", LastScanRunID: "run-1"}))

@@ -530,6 +530,8 @@ func currentSchemaStatements() []string {
 			last_reviewed_at  TIMESTAMP,
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			coverage          TEXT NOT NULL DEFAULT '',
+			reviewed_files_json TEXT NOT NULL DEFAULT '[]',
 			PRIMARY KEY (namespace, repository_scan, id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_review_slices_repo

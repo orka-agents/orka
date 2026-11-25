@@ -463,6 +463,7 @@ func cloneReviewSlice(slice store.ReviewSlice) store.ReviewSlice {
 	slice.ChangedLineRanges = slices.Clone(slice.ChangedLineRanges)
 	slice.Tags = slices.Clone(slice.Tags)
 	slice.TrustBoundaries = slices.Clone(slice.TrustBoundaries)
+	slice.ReviewedFiles = slices.Clone(slice.ReviewedFiles)
 	if slice.LastReviewedAt != nil {
 		reviewed := *slice.LastReviewedAt
 		slice.LastReviewedAt = &reviewed

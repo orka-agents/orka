@@ -245,10 +245,17 @@ type ReviewSlice struct {
 	TrustBoundaries   []string           `json:"trustBoundaries,omitempty"`
 	Confidence        string             `json:"confidence"`
 	Status            string             `json:"status"`
-	LastScanRunID     string             `json:"lastScanRunID,omitempty"`
-	LastReviewedAt    *time.Time         `json:"lastReviewedAt,omitempty"`
-	CreatedAt         time.Time          `json:"createdAt,omitempty"`
-	UpdatedAt         time.Time          `json:"updatedAt,omitempty"`
+	// Coverage is what the slice's last accepted review corroborated it
+	// examined: complete, partial, or none. Empty means no review has
+	// recorded coverage since the mapper last wrote the slice.
+	Coverage string `json:"coverage,omitempty"`
+	// ReviewedFiles are the trusted-context files that review read or cited.
+	// Only these can support resolving a finding the review did not observe.
+	ReviewedFiles  []string   `json:"reviewedFiles,omitempty"`
+	LastScanRunID  string     `json:"lastScanRunID,omitempty"`
+	LastReviewedAt *time.Time `json:"lastReviewedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt,omitempty"`
+	UpdatedAt      time.Time  `json:"updatedAt,omitempty"`
 }
 
 // ReviewSliceFilter constrains review slice queries.

@@ -2294,6 +2294,70 @@ func TestCreateSecurityValidationTaskMaterializesRuntimeRefAllowedTools(t *testi
 	require.Equal(t, "pending", storedFinding.ValidationStatus)
 }
 
+// A manual validation examines the commit the finding's evidence was
+// recorded at, not whatever the scan's branch names when the Task starts.
+func TestCreateSecurityValidationTaskPinsTheFindingCommit(t *testing.T) {
+	const commit = "fedcba9876543210fedcba9876543210fedcba98"
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan-validation-pin", Namespace: "demo"},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL: securityTestRepoURL, Branch: "release", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	analysisAgent, cachedRuntime, apiReader := securityExternalRuntimePolicySkew(
+		scheme, scan.Spec.AnalysisAgentRef.Name, corev1alpha1.WorkspaceIntentRead, []string{},
+	)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(scan, analysisAgent, cachedRuntime).Build()
+	db, err := sqlite.NewDB(":memory:")
+	require.NoError(t, err)
+	securityStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, APIReader: securityRuntimePolicySkewReader{Reader: fakeClient, policyReader: apiReader}, SecurityStore: securityStore})
+	finding := &store.Finding{
+		ID: "finding-validation-pin", Namespace: "demo", RepositoryScan: scan.Name, Severity: "high", Confidence: "high",
+		CommitSHA: commit,
+	}
+
+	require.NoError(t, handlers.createSecurityValidationTask(context.Background(), nil, scan, finding))
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, fakeClient.List(context.Background(), &tasks, client.InNamespace("demo")))
+	require.Len(t, tasks.Items, 1)
+	workspace := tasks.Items[0].Spec.Workspace
+	require.NotNil(t, workspace)
+	require.Equal(t, corev1alpha1.WorkspaceIntentRead, workspace.Intent)
+	require.Equal(t, "release", workspace.Branch)
+	require.Equal(t, commit, workspace.Ref)
+}
+
+// A context token that scopes the workspace branch or ref rejects any ref it
+// did not name, so a validation it requests keeps that source unpinned; every
+// other caller validates the finding commit.
+func TestSecurityValidationWorkspaceKeepsTokenScopedSourceUnpinned(t *testing.T) {
+	const commit = "fedcba9876543210fedcba9876543210fedcba98"
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: securityTestRepoURL, Branch: "release"}}
+	finding := &store.Finding{CommitSHA: commit}
+	contextTokenUser := func(scope map[string]any) *UserInfo {
+		return &UserInfo{AuthType: AuthTypeContextToken, ContextToken: &ContextToken{TransactionContext: scope}}
+	}
+
+	require.Equal(t, commit, securityValidationWorkspace(nil, scan, finding).Ref)
+	require.Equal(t, commit, securityValidationWorkspace(contextTokenUser(map[string]any{"repo": securityTestRepoURL}), scan, finding).Ref)
+	for _, scope := range []map[string]any{
+		{"branch": "release"},
+		{"ref": "v1.2.0"},
+	} {
+		user := contextTokenUser(scope)
+		workspace := securityValidationWorkspace(user, scan, finding)
+		require.Empty(t, workspace.Ref, "scope %v", scope)
+		require.Equal(t, "release", workspace.Branch)
+	}
+	// The pin is what a branch-scoped token would reject.
+	branchToken := &ContextToken{TransactionContext: map[string]any{"branch": "release"}}
+	require.Empty(t, contextTokenWorkspaceFailures(branchToken, securityValidationWorkspace(contextTokenUser(branchToken.TransactionContext), scan, finding)))
+	require.NotEmpty(t, contextTokenWorkspaceFailures(branchToken, securityValidationWorkspace(nil, scan, finding)))
+}
+
 func TestCreateSecurityPatchTaskRejectsLegacyCredentialReuse(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))

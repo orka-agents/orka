@@ -138,6 +138,9 @@ Cite findings only from included file ranges below.
 	}
 	var envelope struct {
 		Findings struct {
+			Scan struct {
+				ReviewedFiles []string `json:"reviewedFiles"`
+			} `json:"scan"`
 			Findings []struct {
 				Evidence []struct {
 					Path      string `json:"path"`
@@ -148,6 +151,9 @@ Cite findings only from included file ranges below.
 	}
 	if err := json.Unmarshal(result, &envelope); err != nil {
 		t.Fatal(err)
+	}
+	if got := envelope.Findings.Scan.ReviewedFiles; len(got) != 2 || got[0] != "README.md" || got[1] != "server.js" {
+		t.Fatalf("reviewedFiles = %#v, want every listed mapper context file", got)
 	}
 	if len(envelope.Findings.Findings) != 2 {
 		t.Fatalf("findings = %#v, want accepted and rejected fixtures", envelope.Findings.Findings)

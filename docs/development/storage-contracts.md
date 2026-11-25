@@ -15,8 +15,8 @@ the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 9` identifies this layout, which adds the GitHub sign-in
-session table to the version 8 Agent Host Protocol layout. Opening a database
+`PRAGMA user_version = 10` identifies this layout, which adds the security review
+coverage columns to the version 9 GitHub sign-in layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -30,8 +30,9 @@ key, the 171-to-172 transition adds the write stamp columns of results and
 artifacts, the 172-to-173 transition adds memory generations and consolidation
 proposal targets, the 173-to-174 transition adds memory consolidation runs, the
 174-to-175 transition adds the empty Agent Host Protocol tables, the
-175-to-176 transition adds the empty GitHub sign-in session table, and the
-upgrade records an adopted identity. A store at an earlier schema version
+175-to-176 transition adds the empty GitHub sign-in session table, the
+176-to-177 transition adds the review coverage columns of security review
+slices, and the upgrade records an adopted identity. A store at an earlier schema version
 upgrades through numbered version steps under the same lock, backup and
 transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
 169-to-170 and 170-to-171 objects and every later step, a version-2 store gains
@@ -40,12 +41,14 @@ the 169-to-170 columns and every later step, a version-3 store gains the
 columns and every later step, a version-5 store gains the 172-to-173 columns
 and every later step, a version-6 store gains the 173-to-174 table and every
 later step, a version-7 store gains the empty 174-to-175 and 175-to-176
-tables, a version-8 store gains the empty 175-to-176 table, and all
-keep their identity row, records and bootstrap state unchanged. Before the
+tables and every later step, a version-8 store gains the empty 175-to-176
+table and every later step, a version-9 store gains the 176-to-177 columns,
+and all keep their identity row, records and bootstrap state unchanged. Before the
 170-to-171 index is rebuilt, a `retry_pending` work action that shares its
 dedupe key with a queued, leased or running action, or with a newer
 `retry_pending` one, is cancelled with reason `dedupe_superseded`. Existing
-results and artifacts get the write stamp (0, 0).
+results and artifacts get the write stamp (0, 0), and existing review slices
+get no coverage.
 An installation a version-2 store's epoch advance recorded stays its owner, at
 switch generation 0 with no record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
