@@ -328,19 +328,47 @@ func (d *OversightDecision) TriggeredConcerns() []string {
 	return sortedKeys(seen)
 }
 
-// MonitorFailed reports whether any scorer or advisor gave no usable answer.
+// MonitorFailed reports whether a tier gave no usable answer: every scorer,
+// or every advisor, that counts failed. Shadow evaluators count only when a
+// tier has nothing else, so a shadow scorer timing out never hides a working
+// one, and a failed advisor is covered by one that answered.
 func (d *OversightDecision) MonitorFailed() bool {
-	for _, scorer := range d.Scorers {
-		if scorer.Status != EvaluationStatusOK {
-			return true
+	scorers := make([]evaluation, 0, len(d.Scorers))
+	for _, s := range d.Scorers {
+		scorers = append(scorers, evaluation{s.TrustState, s.Status})
+	}
+	advisors := make([]evaluation, 0, len(d.Advisors))
+	for _, a := range d.Advisors {
+		advisors = append(advisors, evaluation{a.TrustState, a.Status})
+	}
+	return tierFailed(scorers) || tierFailed(advisors)
+}
+
+type evaluation struct{ trust, status string }
+
+func tierFailed(tier []evaluation) bool {
+	if len(tier) == 0 {
+		return false
+	}
+	counted := 0
+	for _, e := range tier {
+		if e.trust == TrustStateShadow {
+			continue
+		}
+		counted++
+		if e.status == EvaluationStatusOK {
+			return false
 		}
 	}
-	for _, advisor := range d.Advisors {
-		if advisor.Status != EvaluationStatusOK {
-			return true
+	if counted > 0 {
+		return true
+	}
+	for _, e := range tier {
+		if e.status == EvaluationStatusOK {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // MaxProbability returns the highest probability any scorer gave any

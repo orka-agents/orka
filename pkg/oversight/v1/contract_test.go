@@ -184,3 +184,32 @@ func TestFeedbackValidate(t *testing.T) {
 		t.Fatalf("Validate() = %v", err)
 	}
 }
+
+func TestMonitorFailedMeansATierGaveNoUsableAnswer(t *testing.T) {
+	scorer := func(trust, status string) oversightv1.ScorerEvaluation {
+		return oversightv1.ScorerEvaluation{ProviderRef: "s", ModelID: "m", TrustState: trust, Status: status}
+	}
+	advisor := func(status string) oversightv1.AdvisorEvaluation {
+		return oversightv1.AdvisorEvaluation{ProviderRef: "a", ModelID: "m", Status: status}
+	}
+	for name, tc := range map[string]struct {
+		scorers  []oversightv1.ScorerEvaluation
+		advisors []oversightv1.AdvisorEvaluation
+		failed   bool
+	}{
+		"no evaluations":                     {nil, nil, false},
+		"the only scorer timed out":          {[]oversightv1.ScorerEvaluation{scorer("", "timeout")}, nil, true},
+		"a shadow scorer timed out":          {[]oversightv1.ScorerEvaluation{scorer("qualified", "ok"), scorer("shadow", "timeout")}, nil, false},
+		"the qualified scorer timed out":     {[]oversightv1.ScorerEvaluation{scorer("qualified", "timeout"), scorer("shadow", "ok")}, nil, true},
+		"only shadow scorers, one answers":   {[]oversightv1.ScorerEvaluation{scorer("shadow", "ok"), scorer("shadow", "error")}, nil, false},
+		"one advisor filtered, one answered": {nil, []oversightv1.AdvisorEvaluation{advisor("content_filtered"), advisor("ok")}, false},
+		"every advisor filtered":             {nil, []oversightv1.AdvisorEvaluation{advisor("content_filtered")}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := oversightv1.OversightDecision{Scorers: tc.scorers, Advisors: tc.advisors}
+			if got := d.MonitorFailed(); got != tc.failed {
+				t.Fatalf("MonitorFailed() = %v, want %v", got, tc.failed)
+			}
+		})
+	}
+}
