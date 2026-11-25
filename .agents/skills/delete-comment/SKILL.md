@@ -117,6 +117,8 @@ or the same Python tokens and AST. It also refuses:
 - any shell script with a command name built from an expansion such as `$cmd` or `$(...)`,
   or containing an unquoted glob character, because it cannot be resolved statically and
   might be `source`
+- any shell script whose `trap` action, parsed as shell code, does any of the above or
+  cannot be resolved statically
 
 Delete a refused comment by hand and check the code around it. Run it once per scope against an unmodified tree, because line
 numbers shift after deletion. Delete UI comments by hand, keeping any JSX expression valid

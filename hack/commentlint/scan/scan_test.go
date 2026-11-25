@@ -485,6 +485,9 @@ func TestSourcedAliasesBlockDeletion(t *testing.T) {
 		"subst.sh":   "#!/bin/sh\n$(printf .) ./defs\nemit\n# payload\nEOF\n",
 		"glob.sh":    "#!/bin/sh\n[.] ./defs\nemit\n# payload\nEOF\n",
 		"star.sh":    "#!/bin/bash\nsourc? ./defs\nemit\n# payload\nEOF\n",
+		"trap.sh":    "#!/bin/bash\ntrap '. ./defs' DEBUG\nemit\n# payload\nEOF\n",
+		"trapdd.sh":  "#!/bin/bash\ntrap -- \"source ./defs\" DEBUG\nemit\n# payload\nEOF\n",
+		"trapvar.sh": "#!/bin/bash\ntrap \"$act\" DEBUG\nemit\n# payload\nEOF\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
@@ -501,6 +504,34 @@ func TestSourcedAliasesBlockDeletion(t *testing.T) {
 		}
 		if err := Delete(root, []Target{{File: name, Line: line}}); err == nil {
 			t.Fatalf("deleting comments in %s, which sources aliases, should be refused", name)
+		}
+	}
+}
+
+func TestPlainTrapsAllowDeletion(t *testing.T) {
+	root := newRepo(t)
+	files := map[string]string{
+		"cleanup.sh": "#!/bin/bash\ncleanup() { rm -f x; }\ntrap cleanup EXIT\n# note\necho hi\n",
+		"quoted.sh":  "#!/bin/bash\ntrap 'rm -f \"$tmp\"' EXIT\n# note\necho hi\n",
+		"ignore.sh":  "#!/bin/bash\ntrap '' INT\n# note\necho hi\n",
+		"list.sh":    "#!/bin/bash\ntrap -p\n# note\necho hi\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range files {
+		line := strings.Count(body[:strings.Index(body, "# note")], "\n") + 1
+		if err := Delete(root, []Target{{File: name, Line: line}}); err != nil {
+			t.Fatalf("deleting the comment in %s: %v", name, err)
+		}
+		got, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), "# note") {
+			t.Fatalf("%s still has its comment:\n%s", name, got)
 		}
 	}
 }
