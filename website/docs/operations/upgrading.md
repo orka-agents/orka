@@ -113,9 +113,9 @@ upgrading:
   `serviceAccountRef` names one, or names the controller or a worker ServiceAccount the
   controller is configured with (labeled or not, for example an externally managed
   controller account), now reports `ReferenceDenied`, and the controller revokes any
-  TokenRequest grant it held. The AI worker's own ServiceAccount is the one exception: a
-  token for itself gives it nothing new. Point other such policies at a dedicated
-  ServiceAccount.
+  TokenRequest grant it held. Point such policies at a dedicated ServiceAccount. This
+  now includes the AI worker's own ServiceAccount; see
+  [Worker accounts are not outbound token sources](#worker-token-sources).
 - Check the release namespace for ServiceAccount-token Secrets
   (`kubectl -n <namespace> get secrets --field-selector type=kubernetes.io/service-account-token`).
   The default AI worker profile can read them; delete any you do not need, and treat a
@@ -133,6 +133,15 @@ upgrading:
   seconds forever. Literal private IPs and other policy violations fail at once.
 - The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
   fields are unchanged.
+
+## Worker accounts are not outbound token sources {#worker-token-sources}
+
+An OutboundAccessPolicy `serviceAccountRef` that names the AI worker's own
+ServiceAccount now reports `ReferenceDenied`, like every other Orka platform account,
+and the controller revokes the TokenRequest grant it held for it. A token requested for
+the worker's account can be bound to any Pod that runs as it, including another Task's
+worker Pod. Create a dedicated ServiceAccount for the outbound identity and point the
+policy at it; the controller grants the AI worker TokenRequest for exactly that account.
 
 ## The class admin role no longer grants every verb {#class-admin-role}
 
