@@ -142,8 +142,7 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			correlation := newCorrelationID()
-			s.logger.ErrorContext(ctx, "storage provider panicked", "method", m.name, "correlation", correlation,
-				"panic", fmt.Sprint(recovered))
+			s.logger.ErrorContext(ctx, "storage provider panicked", "method", m.name, "correlation", correlation)
 			resp, err = nil, providerErrorStatus(correlation)
 		}
 		s.logCall(ctx, m, started, err)
@@ -153,29 +152,60 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 	// name, its dataset needs the serving dataset first.
 	header, _ := metadata.FromIncomingContext(ctx)
 	served, describeErr := s.servingDataset(ctx, m, header)
-	if err := grpc.SetHeader(ctx, s.responseHeader()); err != nil {
-		correlation := newCorrelationID()
-		s.logger.ErrorContext(ctx, "storage response headers cannot be set", "method", m.name, "correlation", correlation,
-			"error", err)
-		return nil, providerErrorStatus(correlation)
+	isDescribe := m.name == methodDescribe.name
+	if !isDescribe {
+		if err := grpc.SetHeader(ctx, s.responseHeader(served)); err != nil {
+			correlation := newCorrelationID()
+			s.logger.ErrorContext(ctx, "storage response headers cannot be set", "method", m.name, "correlation", correlation,
+				"error", err)
+			return nil, providerErrorStatus(correlation)
+		}
 	}
 	if err := checkContract(header); err != nil {
+		if isDescribe {
+			_ = grpc.SetHeader(ctx, s.responseHeader(served))
+		}
 		return nil, err
 	}
 	if message, ok := req.(proto.Message); ok && hasUnknownFields(message.ProtoReflect()) {
+		if isDescribe {
+			_ = grpc.SetHeader(ctx, s.responseHeader(served))
+		}
 		return nil, errorStatus(codes.InvalidArgument, ReasonUnsupportedField,
 			"the request carries a field this storage server does not know", nil)
 	}
 	if err := s.checkDataset(ctx, m, header, served, describeErr); err != nil {
+		if isDescribe {
+			_ = grpc.SetHeader(ctx, s.responseHeader(served))
+		}
 		return nil, err
 	}
 	if ctx, err = withEnvelope(ctx, m, header); err != nil {
+		if isDescribe {
+			_ = grpc.SetHeader(ctx, s.responseHeader(served))
+		}
 		return nil, err
 	}
 	if ctx, err = withTaskDataFence(ctx, header); err != nil {
+		if isDescribe {
+			_ = grpc.SetHeader(ctx, s.responseHeader(served))
+		}
 		return nil, err
 	}
+	ctx = context.WithValue(ctx, interceptedCall{}, s)
 	resp, err = handler(ctx, req)
+	if isDescribe {
+		headerDataset := served
+		if desc, ok := resp.(*storagepb.DescribeResponse); ok && desc.GetProvider().GetDatasetId() != "" {
+			headerDataset = desc.GetProvider().GetDatasetId()
+		}
+		if hdrErr := grpc.SetHeader(ctx, s.responseHeader(headerDataset)); hdrErr != nil {
+			correlation := newCorrelationID()
+			s.logger.ErrorContext(ctx, "storage response headers cannot be set", "method", m.name, "correlation", correlation,
+				"error", hdrErr)
+			return nil, providerErrorStatus(correlation)
+		}
+	}
 	if err != nil {
 		return nil, s.statusError(ctx, m, err)
 	}
@@ -185,6 +215,18 @@ func (s *Server) intercept(ctx context.Context, req any, info *grpc.UnaryServerI
 		}
 	}
 	return resp, nil
+}
+
+// interceptedCall marks a context that passed through this Server's protocol
+// interceptor.
+type interceptedCall struct{}
+
+func (s *Server) requireIntercepted(ctx context.Context) error {
+	if marked, _ := ctx.Value(interceptedCall{}).(*Server); marked == s {
+		return nil
+	}
+	return errorStatus(codes.FailedPrecondition, ReasonContractMismatch,
+		"storage server was registered without ServerOptions", nil)
 }
 
 // checkContract refuses a call without the orka.storage.v1 contract header
@@ -298,8 +340,12 @@ func (s *Server) checkDigest(ctx context.Context, m *method, args ...any) error 
 func (s *Server) servingDataset(ctx context.Context, m *method, header metadata.MD) (string, error) {
 	loaded := s.dataset.Load()
 	known := loaded != nil && *loaded != ""
-	omitted := m.mayOmitDataset() && len(header.Get(HeaderDataset)) == 0
-	if known && (omitted || m.kind == storagev1.MethodWrite) {
+	named := header.Get(HeaderDataset)
+	omitted := m.mayOmitDataset() && len(named) == 0
+	if known && omitted {
+		return *loaded, nil
+	}
+	if known && m.kind == storagev1.MethodWrite && (len(named) != 1 || named[0] == *loaded) {
 		return *loaded, nil
 	}
 	if omitted {
@@ -355,12 +401,18 @@ func describeRefusal(err error) bool {
 		errors.Is(err, storagev1.ErrIncompatible)
 }
 
-// responseHeader names the contract, this library's revision and, once the
-// server knows it, the serving dataset.
-func (s *Server) responseHeader() metadata.MD {
+// responseHeader names the contract, this library's revision and the serving
+// dataset checked for this call (falling back to the cached dataset when none
+// was checked).
+func (s *Server) responseHeader(served string) metadata.MD {
 	header := metadata.Pairs(HeaderContract, storagev1.ContractVersion, HeaderRevision, strconv.Itoa(ProtocolRevision))
-	if dataset := s.dataset.Load(); dataset != nil && *dataset != "" {
-		header.Set(HeaderDataset, *dataset)
+	if served == "" {
+		if dataset := s.dataset.Load(); dataset != nil && *dataset != "" {
+			served = *dataset
+		}
+	}
+	if served != "" {
+		header.Set(HeaderDataset, served)
 	}
 	return header
 }

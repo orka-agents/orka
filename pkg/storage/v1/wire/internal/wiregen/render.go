@@ -491,6 +491,7 @@ func renderServer(f *goFile, svc *service) {
 		response := wireMessage(f, method.desc.Output())
 		f.printf("func (service *%sService) %s(ctx context.Context, wireRequest *%s) (*%s, error) {\n",
 			lowerFirst(svc.name), method.name, request, response)
+		f.printf("if err := service.server.requireIntercepted(ctx); err != nil {\nreturn nil, err\n}\n")
 		f.printf("var err error\n")
 		args := []string{"ctx"}
 		argNames := map[*binding]string{}
