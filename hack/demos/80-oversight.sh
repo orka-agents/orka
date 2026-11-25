@@ -119,6 +119,26 @@ decision_count() {
     python3 -I -c 'import json, sys; print(len(json.load(sys.stdin)["items"]))'
 }
 
+# seed_history retries while a freshly started controller's store is not yet
+# ready. A 503 on the first batch stored nothing, so the whole replay is safe
+# to send again; any other failure stops.
+seed_history() {
+  local out
+  for _ in $(seq 20); do
+    if out="$(replay "$@" --shift-to-now --batch-size 50 2>&1)"; then
+      printf '%s\n' "${out}"
+      return 0
+    fi
+    if [[ "${out}" != *"HTTP 503"* || "${out}" != *"(ingested 0, duplicates 0 so far)"* ]]; then
+      printf '%s\n' "${out}" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  printf '%s\n' "${out}" >&2
+  return 1
+}
+
 files_in() {
   local dir="$1"
   [[ -d "${dir}" ]] || return 0
@@ -145,7 +165,7 @@ cmd_up() {
     while IFS= read -r f; do args+=(--file "$f"); done < <(files_in "${OVERSIGHT_PACK}/history")
     if ((${#args[@]})); then
       log "Seeding history"
-      replay "${args[@]}" --shift-to-now --batch-size 50
+      seed_history "${args[@]}"
     fi
   fi
   cmd_status
