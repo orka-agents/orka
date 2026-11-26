@@ -93,14 +93,32 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err != nil {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
+	ctx = withExternalRuntimeTimingWorkspace(ctx, w)
+	// An eviction or upgrade drain of a detached warm runtime ends its
+	// window now (ADR 0055), so retention suspends it inside the drain's
+	// deadline; the runtime keeps serving no one in the meantime.
+	if ended, err := endACPWorkspaceWarmWindowForDrain(ctx, r.Client, pool, w, r.now()); err != nil || ended {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
 	deleting := !pool.DeletionTimestamp.IsZero() || !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
+	// ADR 0057: a continuation's speculative resume leaves the settled
+	// workspace Suspended until the publication below flips it back to Ready
+	// in the same write.
+	pendingResume := acpWorkspaceSpeculativeResumePending(w, r.now())
 	// A provider-reported Failed instance is terminal: retire it, never replace
 	// it. So is one the provider stopped because its Suspend authorization
 	// expired first: like an instance the worker killed, it kept no data, and
 	// a data-only class admits a successor only with verified retained data.
-	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
+	stopping := deleting || pool.Spec.DesiredReplicas == 0 ||
+		(w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady && !pendingResume) ||
 		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed ||
 		externalProviderSuspendDeadlineExceeded(w)
+	// Timing only: remember when this process first saw the sequence retire.
+	if w.Spec.Workload != nil {
+		r.externalTimings.observeRetirement(pool.UID, w.Spec.Workload.Sequence, stopping, r.now())
+	} else {
+		r.externalTimings.observeRetirement(pool.UID, 0, false, r.now())
+	}
 	if stopping {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
@@ -112,7 +130,8 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for the authoritative controller epoch")
 		}
 	}
-	if !workspaceCurrentlyAdmittedByCore(w) {
+	attachmentOnlyLag := externalAttachmentOnlyLag(pool, w)
+	if !workspaceCurrentlyAdmittedByCore(w) && !attachmentOnlyLag {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current workspace admission")
 	}
 	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
@@ -160,6 +179,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 				return ctrl.Result{}, err
 			}
+			r.externalTimings.observeRetirement(pool.UID, w.Spec.Workload.Sequence, true, r.now())
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "retiring the old runtime fence before credential rotation")
 		}
 	}
@@ -174,6 +194,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return ctrl.Result{}, err
 	}
 	if w.Spec.Workload == nil || (w.Status.Allocation != nil && w.Status.Allocation.State == workspacev1alpha1.AllocationStopped) {
+		if externalPublishedSuccessorAwaitsProvider(w) {
+			// The provider has not reported the published request's allocation
+			// yet. Nothing is republished or rotated while it catches up.
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting,
+				"public workload request published; waiting for provider materialization")
+		}
 		if w.Spec.Workload != nil {
 			a := w.Status.Allocation
 			if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || a.Key != w.Spec.Workload.Key || a.Sequence != w.Spec.Workload.Sequence || a.Identity.RequestRevision != w.Spec.Workload.Revision || !a.Identity.Valid() || a.Startup != nil || w.Status.ObservedGeneration != w.Generation {
@@ -182,6 +208,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 				return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 			}
+			r.noteExternalRuntimeStopProven(pool, w)
 		}
 		if externalEvictionSettlementPending(pool, w) {
 			// An eviction whose outcome was never recorded settles against
@@ -197,7 +224,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 				return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, corev1alpha1.RuntimePoolLifecycleStarting, "rotating private credentials before cold boot")
 			}
 		}
-		return r.publishExternalWorkspaceWorkload(ctx, pool, cfg, w, auth, providerSecret)
+		return r.publishExternalWorkspaceWorkload(ctx, pool, cfg, w, auth, providerSecret, pendingResume)
 	}
 	if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "persisted workload failed its immutable binding")
@@ -212,9 +239,24 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if slices.Contains(request.Runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess) && !externalNativeRuntimeHasOpaqueIdentity(request) {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "native workload requires retirement before opaque runtime identity admission")
 	}
-	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil || w.Status.ObservedGeneration != w.Generation {
+	if err := workspacev1alpha1.ValidateStartup(*request, allocationOrEmpty(w)); err != nil ||
+		w.Status.ObservedGeneration != w.Generation || !workspaceCurrentlyAdmittedByCore(w) {
+		if err == nil && attachmentOnlyLag {
+			// ADR 0057: only an attachment or its re-admission moved the
+			// generation; the admitted instance keeps serving, untouched,
+			// until the provider and core catch up. Keep worker eviction checks
+			// active so a terminating worker still enters deadline-bound drain.
+			if _, attestErr := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup); attestErr != nil {
+				if eviction := (*externalWorkerEvictionError)(nil); errors.As(attestErr, &eviction) {
+					return r.beginExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline)
+				}
+				return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
 	}
+	acpRuntimeAdmission.startupObserved(pool, request.Sequence)
 	pod, err := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup)
 	if eviction := (*externalWorkerEvictionError)(nil); errors.As(err, &eviction) {
 		return r.beginExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline)
@@ -234,11 +276,16 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
+	// The instance evidence and the credential binding land in one pool write.
+	evidenceErr, bootstrapErr := r.bindExternalRuntimeInstanceAdmission(ctx, pool, w, auth, pod.UID)
+	if evidenceErr != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
 	}
-	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, auth, pod.UID); err != nil {
+	if bootstrapErr != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
+	}
+	if err := r.recordExternalRuntimeServed(ctx, pool, w, pod); err != nil {
+		return ctrl.Result{}, err
 	}
 	nonce := string(auth.Data[runtimePoolBootstrapNonceKey])
 	if w.Status.Allocation.Startup.Process != nil {
@@ -248,12 +295,17 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	} else if _, err := r.seedWorkspaceSupervisorCredentials(ctx, w.Status.Allocation.Startup.Endpoint, nonce, auth, providerSecret); err != nil {
 		return r.externalPoolRequestProgress(ctx, pool, request, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for exact-instance credential bootstrap")
 	}
+	acpRuntimeAdmission.credentialsSeeded(pool, request.Sequence)
 	status := r.baseRuntimePoolStatus(pool, 1)
 	r.deriveExternalRuntimeTelemetryReady(pool, &status, request)
-	return r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*pod}, []corev1.Pod{*pod}, auth, status,
+	result, err := r.reconcileRuntimePoolServingWithPostProbeFence(ctx, pool, cfg, []corev1.Pod{*pod}, []corev1.Pod{*pod}, auth, status,
 		func(ctx context.Context, _ *corev1alpha1.RuntimePoolActiveInstanceStatus) (ctrl.Result, bool, error) {
 			current, err := r.externalPoolWorkspace(ctx, pool)
-			if err != nil || current.Spec.Workload == nil || current.Spec.Workload.Revision != request.Revision || !reflect.DeepEqual(current.Status.Allocation, w.Status.Allocation) || current.Status.ObservedGeneration != current.Generation || !workspaceCurrentlyAdmittedByCore(current) {
+			// An attachment that lands during verification of an instance the
+			// pool already serves does not invalidate it (ADR 0057).
+			lagging := err == nil && (current.Status.ObservedGeneration != current.Generation || !workspaceCurrentlyAdmittedByCore(current)) &&
+				!externalAttachmentOnlyLag(pool, current)
+			if err != nil || current.Spec.Workload == nil || current.Spec.Workload.Revision != request.Revision || !reflect.DeepEqual(current.Status.Allocation, w.Status.Allocation) || lagging {
 				result, err := r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "provider evidence changed during authenticated runtime verification")
 				return result, true, err
 			}
@@ -263,6 +315,30 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			}
 			return ctrl.Result{}, false, nil
 		})
+	if err == nil {
+		refreshed := &corev1alpha1.RuntimePool{}
+		if getErr := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(pool), refreshed); getErr == nil {
+			if recErr := r.recordExternalRuntimeServed(ctx, refreshed, w, pod); recErr != nil {
+				return ctrl.Result{}, recErr
+			}
+		}
+		acpRuntimeAdmission.served(ctx, uncachedReader(r.APIReader, r.Client), pool, request.Sequence)
+	}
+	return result, err
+}
+
+// externalPublishedSuccessorAwaitsProvider reports a workspace whose
+// published request is the cold boot that follows the stopped allocation the
+// provider still reports: same allocation key, the next sequence, naming that
+// exact instance as its predecessor. That is the window between publication
+// (and its core re-admission) and the provider's first report of the new
+// allocation, not a stopped allocation that fails to prove the current
+// runtime terminated.
+func externalPublishedSuccessorAwaitsProvider(w *workspacev1alpha1.ExecutionWorkspace) bool {
+	request, a := w.Spec.Workload, w.Status.Allocation
+	return request != nil && a != nil && a.State == workspacev1alpha1.AllocationStopped &&
+		a.Key == request.Key && a.Sequence+1 == request.Sequence && a.Identity.Valid() &&
+		request.PreviousInstance != nil && *request.PreviousInstance == a.Identity
 }
 
 func allocationOrEmpty(w *workspacev1alpha1.ExecutionWorkspace) workspacev1alpha1.AllocationObservation {
@@ -316,7 +392,8 @@ func (r *RuntimePoolReconciler) externalPoolProgressStatus(pool *corev1alpha1.Ru
 	return status
 }
 
-func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret) (ctrl.Result, error) {
+//nolint:gocyclo // Rendering, network admission, and the one-write publication stay auditable together.
+func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace, auth, provider *corev1.Secret, resume bool) (ctrl.Result, error) {
 	registration := &workspacev1alpha1.ExecutionWorkspaceProvider{}
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: w.Spec.ProviderBinding.Name}, registration); err != nil {
 		return ctrl.Result{}, err
@@ -437,8 +514,24 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := workspaceprovider.ValidateWorkloadTransition(w.Spec.Workload, request, w.Status.Allocation, slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)); err != nil {
 		return ctrl.Result{}, err
 	}
+	now := r.now()
+	if resume && !acpWorkspaceSpeculativeResumePending(w, now) {
+		// The speculative resume deadline expired while proving termination or
+		// rendering the workload; leave the workspace suspended so the Task can
+		// take its ordinary cold-resume path.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	// ADR 0057: a Task's staged attachment, rechecked against this exact
+	// object version, lands in the same write, so the provider acknowledges
+	// the epoch and starts the runtime on one observation and the runtime is
+	// admitted once.
+	attachment, err := installableACPWorkspaceAttachmentIntent(ctx, uncachedReader(r.APIReader, r.Client), w, resume, now)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	before := w.DeepCopy()
-	w.Spec.Workload, w.Spec.Retirement = &request, nil
+	applyExternalWorkspacePublication(w, &request, resume, attachment)
+	setExternalRuntimeMilestone(w, externalWorkloadPublishedAnnotation, request.Sequence, r.now())
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -452,6 +545,20 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	// the published request re-derives the same condition from the request.
 	r.setExternalRuntimeTelemetryReady(pool, &status, telemetryFits, telemetryMessage)
 	return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+}
+
+// applyExternalWorkspacePublication writes the next request and, for a
+// speculative resume or start (ADR 0057), the Ready flip and the requester's
+// staged attachment into the same workspace write.
+func applyExternalWorkspacePublication(w *workspacev1alpha1.ExecutionWorkspace, request *workspacev1alpha1.WorkloadRequest, resume bool, attachment *workspacev1alpha1.ExecutionWorkspaceAttachment) {
+	w.Spec.Workload, w.Spec.Retirement = request, nil
+	if resume {
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	}
+	if attachment != nil {
+		w.Spec.Attachment, w.Spec.AttachmentEpoch = attachment, attachment.Epoch
+		delete(w.Annotations, acpWorkspaceAttachmentIntentAnnotation)
+	}
 }
 
 // setExternalRuntimeTelemetryReady records whether a request's supervisor
@@ -899,6 +1006,22 @@ func (r *RuntimePoolReconciler) seedExternalNativeCredentials(ctx context.Contex
 
 //nolint:gocyclo // Retirement authority follows independent identity, drain, termination and disposition gates.
 func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, deleting bool) (ctrl.Result, error) {
+	if !deleting && w.Spec.Retirement == nil && pool.Spec.DesiredReplicas == 0 &&
+		pool.Annotations["orka.ai/external-runtime-retirement-requested"] != booleanTrueValue &&
+		w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+		!externalProviderSuspendDeadlineExceeded(w) &&
+		w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		w.Spec.Attachment != nil {
+		// An attachment landed concurrently with DesiredReplicas -> 0
+		// scale-down; restore pool demand instead of draining and retiring a
+		// live attached runtime.
+		before := pool.DeepCopy()
+		pool.Spec.DesiredReplicas = 1
+		if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "closing admission before exact-instance retirement")
 	}
@@ -933,10 +1056,22 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 		}
-		return r.externalPoolStopped(ctx, pool, w)
+		r.noteExternalRuntimeStopProven(pool, w)
+		// The Stopped report comes first and is unchanged. The rotation after
+		// it rests on the termination proof above, not on that record.
+		result, err := r.externalPoolStopped(ctx, pool, w)
+		if err == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+			r.rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx, pool)
+		}
+		return result, err
 	}
+	tainted, err := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), w)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	action := externalRetirementAction(w, deleting, tainted)
 	if w.Spec.Retirement == nil {
-		if externalRetirementAction(w, deleting) == workspacev1alpha1.WorkloadRetirementSuspend && r.externalEvictionDeadlineExceeded(pool, w) {
+		if action == workspacev1alpha1.WorkloadRetirementSuspend && r.externalEvictionDeadlineExceeded(pool, w) {
 			// The worker kills the instance when its eviction window ends. A
 			// suspension issued at or after that point could not prove that it
 			// captured settled work, so it is never authorized: the instance is
@@ -974,7 +1109,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "exact runtime materialization is unavailable for drain")
 				}
-				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, externalRetirementAction(w, deleting)); err != nil {
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, action); err != nil {
 					return ctrl.Result{}, err
 				}
 				validationPool, cfg, err := runtimePoolPodTemplateValidationTarget(pool, w.Spec.Workload.Runtime.Template)
@@ -993,11 +1128,11 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil || !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "runtime drain fence changed")
 				}
-				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status, externalRetirementAction(w, deleting)); err != nil {
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status, action); err != nil {
 					return ctrl.Result{}, err
 				}
 				if !probe.Status.Drain.Requested {
-					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, externalRetirementDrainReason(externalRetirementAction(w, deleting))); err != nil {
+					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, externalRetirementDrainReason(action)); err != nil {
 						return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "authenticated runtime drain request is unavailable")
 					}
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for authenticated drain settlement")
@@ -1012,7 +1147,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			}
 		}
 	}
-	action := externalRetirementAction(w, deleting)
 	if w.Spec.Retirement != nil && w.Spec.Retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend && action == workspacev1alpha1.WorkloadRetirementSuspend {
 		// Termination can begin after Suspend was authorized and before the
 		// provider started it. Keep collecting the exact worker's signal while
@@ -1033,6 +1167,11 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	if !reflect.DeepEqual(w.Spec.Retirement, retirement) {
 		before := w.DeepCopy()
 		w.Spec.Retirement = retirement
+		authorized := r.now()
+		if before.Spec.Retirement == nil || before.Spec.Retirement.Sequence != retirement.Sequence || before.Spec.Retirement.Action != retirement.Action {
+			setExternalRuntimeMilestone(w, externalRetirementAuthorizedAnnotation, retirement.Sequence, authorized)
+		}
+		r.stampExternalRuntimeStopRequested(w, before.Spec.Retirement, pool, authorized)
 		if deleting {
 			w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 			w.Spec.Attachment = nil
@@ -1042,6 +1181,60 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		}
 	}
 	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for identity-bound provider termination and disposition")
+}
+
+// rotateWorkspaceRuntimePoolAuthAfterProvenStop rotates the private
+// credentials a stopped instance consumed once its termination is proven and
+// the pool records Stopped, instead of when a later cold boot is published,
+// so a resume does not wait for the rotation.
+//
+// It runs the same steps, in the same order, as the rotation before
+// publication (rotateConsumedWorkspaceRuntimePoolAuthSecret), under the same
+// proof: the caller has just observed the exact instance terminated, and
+// ensureExternalPrivateAuthCredential re-checks that proof before it deletes
+// the consumed Secret, observes its absence, and only then creates the fresh
+// one. The fresh credentials therefore postdate the old instance's proven
+// termination and were never delivered to it; they reach a runtime only
+// through the sealed bootstrap to the instance bound at the next attested
+// startup. The bootstrap-instance binding is cleared last, while no
+// replacement request exists.
+//
+// It is best effort. A failure leaves the remaining steps to the rotation
+// before publication, which is unchanged and still fails closed.
+func (r *RuntimePoolReconciler) rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx context.Context, pool *corev1alpha1.RuntimePool) {
+	if r.CleanupOnly || r.WorkspaceCleanupOnly {
+		return
+	}
+	if r.Epochs != nil {
+		if current, ready := r.Epochs.Current(); !ready || current.Epoch <= 0 {
+			return
+		}
+	}
+	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil {
+		return
+	}
+	// Unpublish the consumed Secret, replace it, then clear the instance
+	// binding: one step per iteration, each on freshly read state.
+	for range 3 {
+		if binding, bindingErr := runtimePoolBootstrapInstanceBindingFromAnnotation(pool); bindingErr != nil || binding == nil {
+			return
+		}
+		auth, _, ensureErr := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
+		if ensureErr != nil {
+			err = ensureErr
+			break
+		}
+		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, auth)
+		if rotateErr != nil || !rotating {
+			err = rotateErr
+			break
+		}
+	}
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("Left private credential rotation to the next cold boot",
+			"runtimePool", pool.Name, "error", err.Error())
+	}
 }
 
 // externalPoolStopped records a stopped instance. An eviction outcome is
@@ -1108,6 +1301,12 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 	if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
+	// A deleted pool never records Stopped: its released finalizer is the
+	// persisted proof that the runtime stopped.
+	if before.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		r.observeExternalRuntimeStop(ctx, pool)
+	}
+	r.externalTimings.forget(pool.UID)
 	return ctrl.Result{}, nil
 }
 
@@ -1121,6 +1320,7 @@ func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx conte
 	if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 		return true, err
 	}
+	r.noteExternalRuntimeStopProven(pool, w)
 	if w.Spec.Workload != nil {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.PoolBinding.UID != pool.UID {
 			return false, workspaceprovider.ErrStaleIdentity
@@ -1241,13 +1441,25 @@ func externalRuntimeEvidence(pool *corev1alpha1.RuntimePool) (*externalRuntimeIn
 }
 
 func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) error {
+	evidence, err := desiredExternalRuntimeInstanceEvidence(pool, w)
+	if err != nil || evidence == "" {
+		return err
+	}
+	return r.patchExternalRuntimeAdmissionBindings(ctx, pool, evidence, "")
+}
+
+// desiredExternalRuntimeInstanceEvidence returns the instance-evidence
+// annotation the current startup requires, or "" when the pool already
+// records exactly it. It refuses evidence that does not continue the recorded
+// instance's lineage.
+func desiredExternalRuntimeInstanceEvidence(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (string, error) {
 	a := w.Status.Allocation
 	binding := externalRuntimeInstanceEvidence{WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Endpoint: a.Startup.Endpoint}
 	if a.Startup.Process != nil {
 		var err error
 		binding.RuntimeUID, _, err = externalNativeRuntimeIdentity(w.Spec.Workload, a.Identity.InstanceID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		binding.Pod = a.Startup.Process.Worker
 		binding.NativeProcess = true
@@ -1257,25 +1469,75 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 	}
 	previous, err := externalRuntimeEvidence(pool)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if previous != nil {
 		if *previous == binding {
-			return nil
+			return "", nil
 		}
 		if previous.WorkspaceUID != w.UID || previous.Sequence+1 != binding.Sequence || w.Spec.Workload.PreviousInstance == nil || *w.Spec.Workload.PreviousInstance != previous.Identity {
-			return workspaceprovider.ErrStaleIdentity
+			return "", workspaceprovider.ErrStaleIdentity
 		}
 	}
 	encoded, err := json.Marshal(binding)
 	if err != nil {
-		return err
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// bindExternalRuntimeInstanceAdmission records, in one optimistic pool
+// write, the independently observed instance evidence and the binding of the
+// private bootstrap credentials to that exact workload. Each is validated
+// exactly as when they were written separately: evidenceErr reports evidence
+// that conflicts with the recorded instance (nothing is written), and
+// bootstrapErr a credential binding to another workload (the evidence is
+// still recorded, as before, and the binding is not).
+func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceAdmission(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	w *workspacev1alpha1.ExecutionWorkspace,
+	authSecret *corev1.Secret,
+	workloadUID types.UID,
+) (evidenceErr, bootstrapErr error) {
+	evidence, err := desiredExternalRuntimeInstanceEvidence(pool, w)
+	if err != nil {
+		return err, nil
+	}
+	bootstrap, bootstrapErr := desiredRuntimePoolBootstrapInstanceBinding(pool, authSecret, workloadUID)
+	if bootstrapErr != nil {
+		bootstrap = ""
+	}
+	if err := r.patchExternalRuntimeAdmissionBindings(ctx, pool, evidence, bootstrap); err != nil {
+		return err, nil
+	}
+	return nil, bootstrapErr
+}
+
+// patchExternalRuntimeAdmissionBindings writes the non-empty annotation
+// values in one patch, which refreshes pool in place. Evidence keeps its
+// optimistic lock; a credential binding alone keeps its plain merge patch, as
+// when each was written on its own.
+func (r *RuntimePoolReconciler) patchExternalRuntimeAdmissionBindings(ctx context.Context, pool *corev1alpha1.RuntimePool, evidence, bootstrap string) error {
+	if evidence == "" && bootstrap == "" {
+		return nil
 	}
 	before := pool.DeepCopy()
 	if pool.Annotations == nil {
 		pool.Annotations = map[string]string{}
 	}
-	pool.Annotations[externalRuntimeEvidenceAnnotation] = string(encoded)
+	if evidence != "" {
+		pool.Annotations[externalRuntimeEvidenceAnnotation] = evidence
+	}
+	if bootstrap != "" {
+		pool.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] = bootstrap
+	}
+	if evidence == "" {
+		if err := r.Patch(ctx, pool, client.MergeFrom(before)); err != nil {
+			return fmt.Errorf("record RuntimePool annotation: %w", err)
+		}
+		return nil
+	}
 	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 

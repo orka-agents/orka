@@ -45,6 +45,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -69,10 +70,15 @@ var (
 )
 
 const (
-	runtimePoolFinalizer          = "orka.ai/runtime-pool-cleanup"
-	runtimePoolRequeue            = 10 * time.Second
-	runtimePoolProbeTimeout       = 10 * time.Second
-	runtimePoolPort         int32 = 8080
+	runtimePoolFinalizer    = "orka.ai/runtime-pool-cleanup"
+	runtimePoolRequeue      = 10 * time.Second
+	runtimePoolProbeTimeout = 10 * time.Second
+	// runtimePoolBootingRequeue re-probes a supervisor that answered while
+	// still booting. Booting is a short in-process phase that writes no
+	// Kubernetes object the pool watches, so waiting the general requeue
+	// would add up to that whole interval to its admission.
+	runtimePoolBootingRequeue       = time.Second
+	runtimePoolPort           int32 = 8080
 
 	runtimePoolManagedByLabel                     = "app.kubernetes.io/managed-by"
 	runtimePoolManagedByLabelValue                = "orka"
@@ -402,7 +408,29 @@ type RuntimePoolReconciler struct {
 	SubstrateRouter *RuntimePoolSubstrateRouter
 	Rand            io.Reader
 	Now             func() time.Time
+	// MaxConcurrentReconciles is how many different RuntimePools the
+	// controller reconciles at once; one pool is never reconciled
+	// concurrently with itself. Zero selects
+	// DefaultRuntimePoolMaxConcurrentReconciles.
+	MaxConcurrentReconciles int
+
+	// externalTimings deduplicates execution-workspace runtime start and stop
+	// timing reports. It never affects reconciliation.
+	externalTimings externalRuntimeTimingReports
 }
+
+const (
+	// DefaultRuntimePoolMaxConcurrentReconciles lets independent pools, such
+	// as concurrent cold starts, publish their workloads without queueing
+	// behind each other. Every object a pool reconcile creates or writes is
+	// named for, or linked one-to-one with, that pool; writes to shared
+	// objects are create-if-absent or resourceVersion-checked; and the
+	// reconciler holds no mutable state between reconciles.
+	DefaultRuntimePoolMaxConcurrentReconciles = 4
+	// MaxRuntimePoolMaxConcurrentReconciles bounds
+	// --runtime-pool-max-concurrent-reconciles.
+	MaxRuntimePoolMaxConcurrentReconciles = 64
+)
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
@@ -588,14 +616,7 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (bool, error) {
-	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
-	if condition != nil && condition.Status == metav1.ConditionTrue &&
-		condition.ObservedGeneration > 0 && condition.ObservedGeneration <= pool.Generation &&
-		condition.Reason == acpRuntimePoolImageProvenanceReason {
-		// RuntimePool UID plus the CRD's immutable runtime image/profile,
-		// trust-domain, runtime-namespace, and workspace binding keep this proof
-		// attached to one exact workload identity. Controller-owned replica and
-		// capacity changes may advance generation without invalidating it.
+	if runtimePoolImageProvenanceRecorded(pool) {
 		return true, nil
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
@@ -620,6 +641,19 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 		}
 	}
 	return historicalRuntimePoolTemplateMatches(pool, cfg, deployment.Spec.Template), nil
+}
+
+// runtimePoolImageProvenanceRecorded reports a pool whose status already
+// carries the Task-verified image provenance proof. RuntimePool UID plus the
+// CRD's immutable runtime image/profile, trust-domain, runtime-namespace, and
+// workspace binding keep this proof attached to one exact workload identity.
+// Controller-owned replica and capacity changes may advance generation without
+// invalidating it, so a proof observed at any earlier generation still holds.
+func runtimePoolImageProvenanceRecorded(pool *corev1alpha1.RuntimePool) bool {
+	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	return condition != nil && condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration > 0 && condition.ObservedGeneration <= pool.Generation &&
+		condition.Reason == acpRuntimePoolImageProvenanceReason
 }
 
 func (r *RuntimePoolReconciler) backfillHistoricalWorkspaceRuntimePoolImageProvenance(
@@ -1204,7 +1238,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		return r.finishEnrolledRuntimePoolServing(ctx, pool, status, boot)
 	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	requeue := runtimePoolRequeue
+	if probe.Status.Lifecycle == harnessv2.SupervisorLifecycleBooting && !probe.Status.Drain.Requested {
+		requeue = runtimePoolBootingRequeue
+	}
+	return r.finishRuntimePoolStatus(ctx, pool, status, requeue)
 }
 
 func (r *RuntimePoolReconciler) reconcileRuntimePoolInPlaceSupervisorRestart(
@@ -2013,31 +2051,34 @@ func runtimePoolBootstrapInstanceBindingFromAnnotation(
 	return &binding, nil
 }
 
-func (r *RuntimePoolReconciler) bindWorkspaceRuntimePoolBootstrapInstance(
-	ctx context.Context,
+// desiredRuntimePoolBootstrapInstanceBinding returns the bootstrap-instance
+// annotation binding the private auth Secret to the exact workload, or ""
+// when the pool already records exactly that binding. Credentials bound to
+// another workload are a conflict.
+func desiredRuntimePoolBootstrapInstanceBinding(
 	pool *corev1alpha1.RuntimePool,
 	authSecret *corev1.Secret,
 	workloadUID types.UID,
-) error {
+) (string, error) {
 	if authSecret == nil || authSecret.UID == "" || workloadUID == "" {
-		return fmt.Errorf("RuntimePool bootstrap auth Secret and workload UIDs are required")
+		return "", fmt.Errorf("RuntimePool bootstrap auth Secret and workload UIDs are required")
 	}
 	desired := runtimePoolBootstrapInstanceBinding{AuthSecretUID: authSecret.UID, WorkloadUID: workloadUID}
 	existing, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if existing != nil {
 		if *existing == desired {
-			return nil
+			return "", nil
 		}
-		return errRuntimePoolBootstrapInstanceConflict
+		return "", errRuntimePoolBootstrapInstanceConflict
 	}
 	value, err := json.Marshal(desired)
 	if err != nil {
-		return fmt.Errorf("encode RuntimePool bootstrap instance binding: %w", err)
+		return "", fmt.Errorf("encode RuntimePool bootstrap instance binding: %w", err)
 	}
-	return r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolBootstrapInstanceBindingAnnotation, string(value))
+	return string(value), nil
 }
 
 // rotateConsumedWorkspaceRuntimePoolAuthSecret advances private auth Secret
@@ -3570,6 +3611,9 @@ func (r *RuntimePoolReconciler) recordRuntimePoolStatus(ctx context.Context, poo
 		return false, err
 	}
 	recordRuntimePoolMetrics(pool, status)
+	if runtimePoolHasExternalWorkspace(pool) {
+		r.observeExternalRuntimeTransition(ctx, pool, base.Status, status)
+	}
 	if scaledToZero {
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}
@@ -4141,6 +4185,11 @@ func runtimePoolRequestForChild(_ context.Context, object client.Object) []recon
 
 // SetupWithManager sets up watches for RuntimePools and their cross-namespace children.
 func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	workers, err := effectiveMaxConcurrentReconciles("runtimepool", r.MaxConcurrentReconciles,
+		DefaultRuntimePoolMaxConcurrentReconciles, MaxRuntimePoolMaxConcurrentReconciles)
+	if err != nil {
+		return err
+	}
 	builder := ctrl.NewControllerManagedBy(mgr).For(&corev1alpha1.RuntimePool{})
 	if _, err := mgr.GetRESTMapper().RESTMapping(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace").GroupKind(), workspacev1alpha1.GroupVersion.Version); err == nil {
 		builder = builder.Watches(&workspacev1alpha1.ExecutionWorkspace{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
@@ -4160,5 +4209,6 @@ func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&policyv1.PodDisruptionBudget{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Named("runtimepool").
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: workers}).
 		Complete(r)
 }

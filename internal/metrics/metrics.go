@@ -131,6 +131,15 @@ var (
 		[]string{"action", labelReason},
 	)
 
+	ACPWorkspaceRuntimePhaseDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_acp_workspace_runtime_phase_duration_seconds",
+			Help:    "Duration of each phase of starting or stopping an execution-workspace runtime, by path and phase",
+			Buckets: []float64{0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 900},
+		},
+		[]string{"path", "phase"},
+	)
+
 	StorageRecoveryHold = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "orka_storage_recovery_hold",
@@ -371,6 +380,7 @@ func init() {
 	metrics.Registry.MustRegister(
 		ApprovalDecisionDuration,
 		ACPWorkspaceRetentionActionsTotal,
+		ACPWorkspaceRuntimePhaseDuration,
 		StorageRecoveryHold,
 		APIRequestsTotal,
 		APIRequestDuration,
@@ -598,6 +608,13 @@ func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
 
 func RecordACPWorkspaceRetentionAction(action, reason string) {
 	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
+}
+
+func RecordACPWorkspaceRuntimePhase(path, phase string, duration time.Duration) {
+	if duration < 0 {
+		return
+	}
+	ACPWorkspaceRuntimePhaseDuration.WithLabelValues(normalizeMetricLabel(path), normalizeMetricLabel(phase)).Observe(duration.Seconds())
 }
 
 func RecordTaskWaitTransition(kind, state string, waited time.Duration) {

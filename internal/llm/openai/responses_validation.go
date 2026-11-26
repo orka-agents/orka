@@ -100,12 +100,34 @@ func validateResponseFunctionMetadata(item responses.ResponseOutputItemUnion) er
 	return nil
 }
 
+func responseEventFunctionName(evt responses.ResponseStreamEventUnion) (name string, invalid bool) {
+	raw := evt.RawJSON()
+	if raw == "" {
+		return "", false
+	}
+	var fields struct {
+		Name json.RawMessage `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil || fields.Name == nil {
+		return "", false
+	}
+	if err := json.Unmarshal(fields.Name, &name); err != nil || name == "" {
+		return "", true
+	}
+	return name, false
+}
+
+func responseEventFunctionNameInvalid(evt responses.ResponseStreamEventUnion) bool {
+	_, invalid := responseEventFunctionName(evt)
+	return invalid
+}
+
 func validateResponseFunctionEventMetadata(evt responses.ResponseStreamEventUnion) error {
 	if evt.JSON.OutputIndex.Raw() != "" && (!evt.JSON.OutputIndex.Valid() || evt.OutputIndex < 0) {
 		return fmt.Errorf("response function call has an invalid output index")
 	}
 	if evt.Type == eventTypeResponseFunctionCallArgumentsDelta || evt.Type == eventTypeResponseFunctionCallArgumentsDone {
-		if invalidResponseMetadataString(evt.ItemID, evt.JSON.ItemID) || invalidResponseMetadataString(evt.Name, evt.JSON.Name) {
+		if invalidResponseMetadataString(evt.ItemID, evt.JSON.ItemID) || responseEventFunctionNameInvalid(evt) {
 			return fmt.Errorf("response function call has invalid metadata")
 		}
 		arguments := evt.JSON.Arguments

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -103,6 +104,9 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		}
 		endpoint := strings.TrimRight(config.BaseURL, "/")
 		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion), azure.WithAPIKey(config.APIKey))
+		if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
+			opts = append(opts, azure.WithUnsafeAllowHTTP())
+		}
 	} else {
 		opts = append(opts, option.WithAPIKey(config.APIKey))
 		if config.BaseURL != "" {
@@ -230,7 +234,7 @@ func isBareResponsesForbiddenError(err error) bool {
 		if isUnsupportedAPIMessage(apiErr.Code) || isUnsupportedAPIMessage(apiErr.Message) {
 			return false
 		}
-		return isBareResponsesForbiddenMessage(apiErr.Error())
+		return isBareResponsesForbiddenMessage(openAIErrorMessage(apiErr))
 	}
 
 	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
@@ -358,7 +362,7 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 		case "tool":
 			items = append(items, responses.ResponseInputItemUnionParam{
 				OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-					CallID: msg.ToolCallID,
+					CallID: openai.String(msg.ToolCallID),
 					Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 						OfString: openai.String(msg.Content),
 					},
@@ -916,14 +920,15 @@ func handleResponseFunctionCallArgumentsDelta(evt responses.ResponseStreamEventU
 	if err != nil {
 		return failResponsesStream(send, err)
 	}
-	if err := tracker.validateSnapshot(fc, evt.Name, "", false); err != nil {
+	name, _ := responseEventFunctionName(evt)
+	if err := tracker.validateSnapshot(fc, name, "", false); err != nil {
 		return failResponsesStream(send, err)
 	}
 	if tracker.ordered && fc.argumentsDone && evt.Delta != "" {
 		return failResponsesStream(send, errors.New(responseFunctionArgumentsChanged))
 	}
-	if evt.Name != "" {
-		fc.name = evt.Name
+	if name != "" {
+		fc.name = name
 	}
 	fc.args.WriteString(evt.Delta)
 	return tracker.emit(fc, send)
@@ -942,11 +947,12 @@ func handleResponseFunctionCallArgumentsDone(evt responses.ResponseStreamEventUn
 			arguments = fc.args.String()
 		}
 	}
-	if err := tracker.validateSnapshot(fc, evt.Name, arguments, true); err != nil {
+	name, _ := responseEventFunctionName(evt)
+	if err := tracker.validateSnapshot(fc, name, arguments, true); err != nil {
 		return failResponsesStream(send, err)
 	}
-	if evt.Name != "" {
-		fc.name = evt.Name
+	if name != "" {
+		fc.name = name
 	}
 	fc.arguments = arguments
 	fc.argumentsDone = true
@@ -1545,8 +1551,28 @@ func toProviderError(err error) *llm.ProviderError {
 	pe := &llm.ProviderError{Provider: "openai", Message: err.Error()}
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode
+		pe.Message = openAIErrorMessage(apiErr)
 	}
 	return pe
+}
+
+func openAIErrorMessage(apiErr *openai.Error) string {
+	if apiErr == nil {
+		return "OpenAI API error"
+	}
+	status := strconv.Itoa(apiErr.StatusCode)
+	if text := http.StatusText(apiErr.StatusCode); text != "" {
+		status += " " + text
+	}
+	msg := status
+	if req := apiErr.Request; req != nil && req.URL != nil {
+		target := url.URL{Scheme: req.URL.Scheme, Host: req.URL.Host, Path: req.URL.Path, RawPath: req.URL.RawPath}
+		msg = fmt.Sprintf("%s %q: %s", req.Method, target.String(), status)
+	}
+	if raw := strings.TrimSpace(apiErr.RawJSON()); raw != "" {
+		msg += " " + raw
+	}
+	return msg
 }
 
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {

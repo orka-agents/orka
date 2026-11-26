@@ -99,7 +99,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/development-digests"
           printf '%s\n' "$IMAGE_DIGEST" > "$RUNNER_TEMP/development-digests/digest-${IMAGE_NAME}.txt"
       - name: Upload this build's digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: development-digest-${{ matrix.name }}-${{ github.sha }}
           # Preserve successful matrix artifacts when only failed jobs rerun.
@@ -145,7 +145,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
         run: go run ./cmd/build/release development-publish "$RUNNER_TEMP/development-digests" "$SOURCE_SHA"
       - name: Upload digest-pinned references and Helm values
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: development-images-${{ github.sha }}
           overwrite: true
