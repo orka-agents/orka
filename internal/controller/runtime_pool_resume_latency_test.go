@@ -67,9 +67,14 @@ func TestExternalRuntimePoolAdmissionBindsEvidenceAndCredentialsInOneWrite(t *te
 	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || pool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
 		t.Fatalf("attested startup did not serve: %s/%s: %s", pool.Status.Lifecycle, pool.Status.AdmissionState, pool.Status.Message)
 	}
-	// Before: one patch for the evidence and another for the binding.
-	if got := counter.take(); got != 1 {
-		t.Fatalf("RuntimePool patches on the admission pass = %d, want 1", got)
+	// Before: one patch for the evidence, one for the binding, and one for
+	// recording externalRuntimeServedAnnotation after serving. Merging
+	// evidence+binding brings the first admission pass down to 2 patches.
+	if got := counter.take(); got != 2 {
+		t.Fatalf("RuntimePool patches on the admission pass = %d, want 2", got)
+	}
+	if pool.Annotations[externalRuntimeServedAnnotation] == "" {
+		t.Fatalf("expected %s annotation to be recorded after serving transition", externalRuntimeServedAnnotation)
 	}
 	evidence, err := externalRuntimeEvidence(&pool)
 	if err != nil || evidence == nil || evidence.Pod.UID != pod.UID {
