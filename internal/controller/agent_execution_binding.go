@@ -192,8 +192,11 @@ type agentExecutionSnapshotWorkspaceClass struct {
 	EffectiveOnDetach        string                                    `json:"effectiveOnDetach"`
 	SuspendMode              string                                    `json:"suspendMode,omitempty"`
 	SandboxVolume            *agentExecutionSnapshotSandboxVolume      `json:"sandboxVolume,omitempty"`
-	MaxSuspended             *int32                                    `json:"maxSuspended,omitempty"`
-	SuspendAfterDetach       string                                    `json:"suspendAfterDetach,omitempty"`
+	MaxSuspended *int32 `json:"maxSuspended,omitempty"`
+	// SuspendAfterDetach is omitted when unset; downgrade precondition: a
+	// controller release from before ADR 0055 rejects snapshots that carry a
+	// nonempty suspendAfterDetach field (DisallowUnknownFields).
+	SuspendAfterDetach string `json:"suspendAfterDetach,omitempty"`
 	DefaultOnDetach          string                                    `json:"defaultOnDetach"`
 	AllowedOnDetach          []string                                  `json:"allowedOnDetach"`
 	DetachTimeout            string                                    `json:"detachTimeout"`

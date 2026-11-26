@@ -1233,9 +1233,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
 		// Restart-safe: ensure the deadline stamp exists for exactly this
-		// epoch before enforcing it.
-		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, task, epoch); err != nil {
-			return false, err
+		// epoch before enforcing it, unless retention has already moved the
+		// workspace to Suspended (for example, warm-window expiry after epoch
+		// release and before Task settlement). Restamping an already-Suspended
+		// workspace would leave a stale revocation stamp behind and block a
+		// continuation even after cold resume.
+		if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, task, epoch); err != nil {
+				return false, err
+			}
 		}
 		if err := manager.FinalizeRevocation(ctx, workspace, epoch, attachmentSecretName(workspace.Name, epoch)); err != nil {
 			// The adapter has not cleared the enforced epoch yet. The frozen

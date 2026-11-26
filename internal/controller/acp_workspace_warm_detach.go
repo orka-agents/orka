@@ -317,8 +317,12 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 	}
 	if tainted {
 		// Operator access forfeits retention and cuts the window short.
-		return expire("OperatorTaintedWarmWindowExpired",
-			"the warm-detach window ended early for a workspace tainted by operator access; applying the Delete disposition instead of Suspend")
+		// Continuation demand must not veto deleting a tainted workspace.
+		if err := r.expireWorkspace(ctx, workspace, "OperatorTaintedWarmWindowExpired",
+			"the warm-detach window ended early for a workspace tainted by operator access; applying the Delete disposition instead of Suspend", false); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		return ctrl.Result{RequeueAfter: lifetimeRequeue}, true, nil
 	}
 	if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		return expire("FailedWorkspaceWarmWindowExpired",

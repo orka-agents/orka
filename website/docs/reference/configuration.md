@@ -707,7 +707,7 @@ readiness and Task binding fail closed.
 | `idleTimeout` | class lifecycle | Idle suspended workspaces expire; idle `Ready` workspaces take the class default action. |
 | `maxLifetime` | class lifecycle | Hard cleanup bound, always. |
 | `spec.retention.maxSuspendedWorkspaces` | provider-owned workspace profile | Caps concurrently suspended workspaces per class and namespace. Rejected at admission, retried at settlement with the frozen Suspend action preserved. This is a cap, not an expiry. |
-| `spec.retention.suspendAfterDetach` | Substrate workspace profile | Optional warm-detach window, a duration such as `10m`. A detached workspace whose frozen action is Suspend stays `Ready`, with its runtime running, for this long before the Suspend applies. No default. |
+| `spec.retention.suspendAfterDetach` | Substrate workspace profile | Optional warm-detach window, a duration such as `10m`. A detached workspace whose frozen action is Suspend stays `Ready`, with its runtime running, for this long before the Suspend applies. No default. Requires a Substrate provider release and `SubstrateWorkspaceProfile` CRD that define and validate `spec.retention.suspendAfterDetach`. |
 
 A queued continuation may take a still-`Ready` workspace directly. Deletion policies that
 retain data past workspace deletion are rejected.

@@ -210,7 +210,8 @@ A tainted session:
 - **Is never checkpointed.** Settlement and idle retention delete the
   workspace instead of suspending it, even when the class freezes `Suspend`.
   If its RuntimePool scales down or replaces the runtime first, the runtime is
-  stopped without a data-preserving suspension.
+  stopped without a data-preserving suspension unless a `Suspend` was already
+  authorized for the current runtime instance before the taint landed.
   `ExecutionWorkspaceCheckpoint` exports from it fail routing with
   `SourceOperatorTainted`, so forks cannot consume it.
 - **Is never continued.** Its runtime is not captured as the Session's native

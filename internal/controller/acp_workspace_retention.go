@@ -223,6 +223,15 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	} else if handled {
 		return result, nil
 	}
+	if acpWorkspaceWarmSuspendRetryable(workspace) {
+		demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace, demandCutoff)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if demandOutstanding {
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
+		}
+	}
 	if result, handled, err := r.retryPendingWarmSuspend(ctx, workspace, now); err != nil {
 		return ctrl.Result{}, err
 	} else if handled {

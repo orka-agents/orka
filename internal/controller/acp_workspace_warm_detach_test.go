@@ -927,3 +927,137 @@ func TestWarmReadyWorkspaceDoesNotConsumeSuspendedQuota(t *testing.T) {
 		t.Fatalf("suspended count = (%d, %v), want 0", count, err)
 	}
 }
+
+func TestWarmDetachIdleReaperHonorsOpenWarmWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	warm := warmRetentionWorkspace(t, "acp-ws-warm-reaper", time.Now().Add(20*time.Minute))
+	warm.Spec.Lifecycle.IdleTimeout = nil
+	warm.Annotations[acpExecutionWorkspacePoolAnnotation] = "acp-ws-pool-warm"
+	pool := &corev1alpha1.RuntimePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   warm.Namespace,
+			Name:        "acp-ws-pool-warm",
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: warm.Name},
+			Annotations: map[string]string{acpExecutionWorkspaceUIDAnnotation: string(warm.UID)},
+		},
+		Spec: corev1alpha1.RuntimePoolSpec{
+			ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+				WorkspaceRef: &workspacev1alpha1.ObjectIdentityReference{Name: warm.Name, UID: warm.UID},
+			},
+		},
+	}
+	c := acpAdapterTestClient(t, warm, pool)
+	d := &ACPDispatcher{Client: c, APIReader: c, IdlePoolTTL: DefaultACPIdlePoolTTL}
+	_, attached, err := d.runtimePoolIdlePolicy(ctx, pool)
+	if err != nil {
+		t.Fatalf("runtimePoolIdlePolicy error: %v", err)
+	}
+	if !attached {
+		t.Fatal("open warm-detach window must hold the pool against the idle reaper")
+	}
+}
+
+func TestWarmDetachTaintedExpiryIgnoresQueuedContinuationDemand(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	warm := warmRetentionWorkspace(t, "acp-ws-warm-tainted-demand", time.Now().Add(5*time.Minute), func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Annotations[operatoraccess.TaintAnnotation] = "tainted"
+	})
+	continuation := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: warm.Namespace,
+			Name:      "task-continuation",
+			UID:       "task-continuation-uid",
+			Labels:    map[string]string{"orka.ai/session": warm.Spec.SessionRef.Name},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: warm.Spec.SessionRef.Name},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	c := acpAdapterTestClient(t, warm, continuation)
+	reconcileRetention(t, c, warm)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(warm), current); err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	} else if err == nil && current.DeletionTimestamp.IsZero() {
+		t.Fatal("tainted warm workspace was not deleted despite queued continuation")
+	}
+}
+
+func TestWarmDetachPendingSuspendRetrySkipsLiveResumeDemand(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Now()
+	warm := warmRetentionWorkspace(t, "acp-ws-warm-retry-demand", now.Add(-time.Minute), func(w *workspacev1alpha1.ExecutionWorkspace) {
+		delete(w.Annotations, acpWorkspaceSuspendAtAnnotation)
+		w.Annotations[acpWorkspaceSuspendPendingAnnotation] = now.Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+		w.Annotations[acpWorkspaceResumeRequestedAnnotation] = "task-resume-uid"
+	})
+	resumer := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: warm.Namespace,
+			Name:      "task-resume",
+			UID:       "task-resume-uid",
+			Labels:    map[string]string{"orka.ai/session": warm.Spec.SessionRef.Name},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			SessionRef: &corev1alpha1.SessionReference{Name: warm.Spec.SessionRef.Name},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	c := acpAdapterTestClient(t, warm, resumer)
+	reconcileRetention(t, c, warm)
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(warm), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		t.Fatalf("desiredState = %s, want Ready while resume demand is live", current.Spec.DesiredState)
+	}
+	if current.Annotations[acpWorkspaceSuspendPendingAnnotation] == "" {
+		t.Fatal("suspend-pending marker was cleared while resume demand was live")
+	}
+}
+
+func TestWarmDetachExpiryBeforeSettlementDoesNotRestampSuspendedWorkspace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	warm := warmRetentionWorkspace(t, "acp-ws-warm-expired-settle", time.Now().Add(-time.Minute), func(w *workspacev1alpha1.ExecutionWorkspace) {
+		w.Spec.Attachment = nil
+		w.Spec.AttachmentEpoch = 1
+		w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		delete(w.Annotations, acpWorkspaceRevocationStartedAnnotation)
+		delete(w.Annotations, acpWorkspaceSuspendAtAnnotation)
+	})
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: warm.Namespace,
+			Name:      "task-settling",
+			UID:       "task-settling-uid",
+			Labels:    map[string]string{acpExecutionWorkspaceLinkLabel: warm.Name},
+			Annotations: map[string]string{
+				acpExecutionWorkspaceUIDAnnotation: string(warm.UID),
+				acpTaskAttachmentEpochAnnotation:   "1",
+			},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	c := acpAdapterTestClient(t, warm, task)
+	r := &TaskReconciler{Client: c, APIReader: c}
+	settled, err := r.settleACPClassWorkspace(ctx, task)
+	if err != nil {
+		t.Fatalf("settleACPClassWorkspace error: %v", err)
+	}
+	if !settled {
+		t.Fatal("expected already-Suspended workspace to settle")
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(warm), current); err != nil {
+		t.Fatal(err)
+	}
+	if got := current.Annotations[acpWorkspaceRevocationStartedAnnotation]; got != "" {
+		t.Fatalf("revocation-started annotation was restamped on already-Suspended workspace: %q", got)
+	}
+}
