@@ -133,7 +133,9 @@ func fromWireConsumeMessagesRequest(in *storagepb.ConsumeMessagesRequest, exact 
 	out.Namespace = in.Namespace
 	out.TaskName = in.TaskName
 	out.ParentTask = in.ParentTask
-	out.Limit = int(in.Limit)
+	if out.Limit, err = intFromWire(in.Limit, "ConsumeMessagesRequest.Limit"); err != nil {
+		return out, err
+	}
 	return out, err
 }
 
@@ -426,7 +428,9 @@ func fromWireExecutionEventFilter(in *storagepb.ExecutionEventFilter, exact bool
 		out.EventTypes = append(out.EventTypes, string(e7))
 	}
 	out.AfterSeq = in.AfterSeq
-	out.Limit = int(in.Limit)
+	if out.Limit, err = intFromWire(in.Limit, "ExecutionEventFilter.Limit"); err != nil {
+		return out, err
+	}
 	return out, err
 }
 
@@ -450,11 +454,17 @@ func fromWireExecutionEventTruncation(in *storagepb.ExecutionEventTruncation, ex
 	var err error
 	_ = exact
 	out.SummaryTruncated = in.SummaryTruncated
-	out.SummaryOriginalChars = int(in.SummaryOriginalChars)
+	if out.SummaryOriginalChars, err = intFromWire(in.SummaryOriginalChars, "ExecutionEventTruncation.SummaryOriginalChars"); err != nil {
+		return out, err
+	}
 	out.ContentTextTruncated = in.ContentTextTruncated
-	out.ContentTextOriginalChars = int(in.ContentTextOriginalChars)
+	if out.ContentTextOriginalChars, err = intFromWire(in.ContentTextOriginalChars, "ExecutionEventTruncation.ContentTextOriginalChars"); err != nil {
+		return out, err
+	}
 	out.ContentJSONTruncated = in.ContentJsonTruncated
-	out.ContentJSONOriginalBytes = int(in.ContentJsonOriginalBytes)
+	if out.ContentJSONOriginalBytes, err = intFromWire(in.ContentJsonOriginalBytes, "ExecutionEventTruncation.ContentJSONOriginalBytes"); err != nil {
+		return out, err
+	}
 	return out, err
 }
 
@@ -572,9 +582,13 @@ func fromWirePlanState(in *storagepb.PlanState, exact bool) (storagev1.PlanState
 	_ = exact
 	out.TaskName = in.TaskName
 	out.Namespace = in.Namespace
-	out.Iteration = int(in.Iteration)
+	if out.Iteration, err = intFromWire(in.Iteration, "PlanState.Iteration"); err != nil {
+		return out, err
+	}
 	out.Summary = in.Summary
-	out.ProgressPct = int(in.ProgressPct)
+	if out.ProgressPct, err = intFromWire(in.ProgressPct, "PlanState.ProgressPct"); err != nil {
+		return out, err
+	}
 	out.GoalComplete = in.GoalComplete
 	out.PlanDocument = in.PlanDocument
 	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "PlanState.CreatedAt"); err != nil {
@@ -676,7 +690,9 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo, exact bool) (storagev1.Pro
 	var err error
 	_ = exact
 	out.ContractVersion = in.ContractVersion
-	out.ContractRevision = int(in.ContractRevision)
+	if out.ContractRevision, err = intFromWire(in.ContractRevision, "ProviderInfo.ContractRevision"); err != nil {
+		return out, err
+	}
 	if len(in.Contracts) > 0 {
 		out.Contracts = make([]string, 0, len(in.Contracts))
 	}
@@ -854,7 +870,9 @@ func fromWireSessionExecutionEventFilter(in *storagepb.SessionExecutionEventFilt
 		out.EventTypes = append(out.EventTypes, string(e20))
 	}
 	out.AfterSeq = in.AfterSeq
-	out.Limit = int(in.Limit)
+	if out.Limit, err = intFromWire(in.Limit, "SessionExecutionEventFilter.Limit"); err != nil {
+		return out, err
+	}
 	return out, err
 }
 
