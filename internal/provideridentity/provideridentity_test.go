@@ -41,8 +41,13 @@ func TestParseRefusesUnknownFieldsAndAcceptsEmpty(t *testing.T) {
 	if _, err := Parse(raw); err != nil {
 		t.Fatalf("Parse(valid) = %v", err)
 	}
-	if _, err := Parse(raw + `{}`); err == nil {
-		t.Fatal("trailing data was accepted")
+	for _, trailing := range []string{`{}`, `}`, `]`, ` } `, `"x"`} {
+		if _, err := Parse(raw + trailing); err == nil {
+			t.Fatalf("trailing data %q was accepted", trailing)
+		}
+	}
+	if _, err := Parse(" " + raw + "\n"); err != nil {
+		t.Fatalf("Parse(valid with surrounding space) = %v", err)
 	}
 }
 

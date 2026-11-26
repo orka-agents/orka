@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -123,7 +124,9 @@ func Parse(raw string) (Config, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("parse the Provider identity configuration: %w", err)
 	}
-	if decoder.More() {
+	// More reports elements inside an array or object, not the end of
+	// input, so an unmatched "}" or "]" would pass it.
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return Config{}, errors.New("parse the Provider identity configuration: trailing data after the JSON object")
 	}
 	return config, config.Validate()
