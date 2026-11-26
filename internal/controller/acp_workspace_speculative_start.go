@@ -468,13 +468,18 @@ func (r *TaskReconciler) flipACPWorkspaceForColdResume(
 	// carries the requesting Task's name so retention can retire demand whose
 	// requester died before attaching instead of holding the workspace
 	// forever.
+	now := time.Now().UTC()
 	workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] =
-		time.Now().UTC().Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
+		now.Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = effectiveOnDetach
 	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
-	// A speculative start left by an earlier cycle, or an expired one, never
-	// carries over.
-	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+	// A speculative start left by an earlier cycle never carries over, but an
+	// expired marker owned by this same requester stays in place so the queue
+	// path's expired-owner guard does not renew a fresh speculative TTL before
+	// attachment or settlement clears it.
+	if deadline, owner, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]); !ok || owner != string(task.UID) || now.Before(deadline) {
+		delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+	}
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
@@ -687,9 +692,6 @@ func (r *TaskReconciler) releaseACPWorkspaceSpeculativeClaims(
 		}
 		if pendingResume {
 			delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
-			if acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID)) {
-				delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
-			}
 		}
 		if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
@@ -733,7 +735,7 @@ func (r *TaskReconciler) releaseACPWorkspaceStagedAttachmentObjects(
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, next)}, secret); err == nil {
 		secretOwner := metav1.GetControllerOf(secret)
-		if secretOwner != nil && secretOwner.UID == workspace.UID && string(secret.Data[taskUIDField]) == string(task.UID) {
+		if secretOwner != nil && secretOwner.UID == workspace.UID {
 			if err := r.Delete(ctx, secret, deleteCurrentObjectPreconditions(secret)...); err != nil && !apierrors.IsNotFound(err) {
 				return err
 			}

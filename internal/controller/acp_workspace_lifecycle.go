@@ -473,6 +473,27 @@ func refuseOperatorTaintedACPWorkspaceHandoff(
 	return nil
 }
 
+func validateUnattachedACPClassWorkspaceReuse(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) error {
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		// The class path cold-resumes a Suspended workspace through its
+		// explicit Ready flip, never by attaching it. Rejecting here keeps an
+		// attach retry from reversing a suspension (for example the delayed
+		// Suspend of a warm-detach window) that landed after the first read.
+		return fmt.Errorf("workspace desired state %q is not reusable for direct attachment", workspace.Spec.DesiredState)
+	}
+	if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open {
+		drained := strings.TrimSpace(workspace.Annotations[acpWorkspaceWarmWindowDrainedAnnotation]) != ""
+		limit := deadline
+		if !drained {
+			limit = deadline.Add(acpWorkspaceWarmExpiryGrace)
+		}
+		if !now.Before(limit) {
+			return fmt.Errorf("workspace warm-detach window expired at %s; wait for suspension", deadline.UTC().Format(time.RFC3339))
+		}
+	}
+	return nil
+}
+
 // An external provider needs an acknowledged attachment before core publishes
 // physical demand. Allow that handshake for a fresh materialized workspace or
 // a terminated cold-resume predecessor without relaxing generic selection.
@@ -494,15 +515,8 @@ func validateACPClassWorkspaceAttachmentAttempt(
 		return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
 	}
 	if workspace.Spec.Attachment == nil {
-		if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
-			// The class path cold-resumes a Suspended workspace through its
-			// explicit Ready flip, never by attaching it. Rejecting here keeps an
-			// attach retry from reversing a suspension (for example the delayed
-			// Suspend of a warm-detach window) that landed after the first read.
-			return fmt.Errorf("workspace desired state %q is not reusable for direct attachment", workspace.Spec.DesiredState)
-		}
-		if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open && !now.Before(deadline) {
-			return fmt.Errorf("workspace warm-detach window expired at %s; wait for suspension", deadline.UTC().Format(time.RFC3339))
+		if err := validateUnattachedACPClassWorkspaceReuse(workspace, now); err != nil {
+			return err
 		}
 	}
 	err := validateWorkspaceAttachmentAttempt(workspace, task, now)
