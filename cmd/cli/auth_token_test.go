@@ -151,6 +151,31 @@ func TestAuthTokenRefusesTokenPastItsSavedExpiry(t *testing.T) {
 	}
 }
 
+func TestAuthTokenUsesTheSelectedTokensExpiryWhenTheConfigIsReplaced(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envToken, "")
+	t.Setenv(envServer, "")
+	replacement := testCompactJWT(t, "https://idp.example", "orka-client-id", time.Now().Add(time.Hour).Unix())
+	saveOIDCTestConfig(t, replacement, time.Now().Add(time.Hour), "https://idp.example/token", "refresh-b")
+	pastSaved := time.Now().Add(-time.Minute)
+	read := orkaConfig{
+		Server:            testAuthTokenServer,
+		Token:             testCompactJWT(t, "https://idp.example", "orka-client-id", time.Now().Add(time.Hour).Unix()),
+		TokenKind:         tokenKindOIDC,
+		TokenExpiresAt:    &pastSaved,
+		SessionServer:     testAuthTokenServer,
+		SessionSubject:    "oidc-replaced-login",
+		OIDCClientID:      "orka-client-id",
+		OIDCTokenEndpoint: "https://idp.example/token",
+	}
+
+	token, err := authTokenFromConfig(newRootCmd(), read)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("token match replacement %v, err = %v; want an expired-token error from the token's own saved expiry",
+			token == replacement, err)
+	}
+}
+
 func TestAuthTokenRefusesExpiredOIDCTokenWhenRefreshIsRejected(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(envToken, "")
