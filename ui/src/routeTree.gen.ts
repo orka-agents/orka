@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as UsageRouteImport } from './routes/usage'
+import { Route as OversightRouteImport } from './routes/oversight'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as KanbanRouteImport } from './routes/kanban'
 import { Route as ChatRouteImport } from './routes/chat'
@@ -42,6 +43,11 @@ import { Route as GatewaysBindingsBindingIdRouteImport } from './routes/gateways
 const UsageRoute = UsageRouteImport.update({
   id: '/usage',
   path: '/usage',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OversightRoute = OversightRouteImport.update({
+  id: '/oversight',
+  path: '/oversight',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -193,6 +199,7 @@ export interface FileRoutesByFullPath {
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
   '/login': typeof LoginRoute
+  '/oversight': typeof OversightRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -224,6 +231,7 @@ export interface FileRoutesByTo {
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
   '/login': typeof LoginRoute
+  '/oversight': typeof OversightRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -256,6 +264,7 @@ export interface FileRoutesById {
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
   '/login': typeof LoginRoute
+  '/oversight': typeof OversightRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -289,6 +298,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/kanban'
     | '/login'
+    | '/oversight'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -320,6 +330,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/kanban'
     | '/login'
+    | '/oversight'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -351,6 +362,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/kanban'
     | '/login'
+    | '/oversight'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -383,6 +395,7 @@ export interface RootRouteChildren {
   ChatRoute: typeof ChatRoute
   KanbanRoute: typeof KanbanRoute
   LoginRoute: typeof LoginRoute
+  OversightRoute: typeof OversightRoute
   UsageRoute: typeof UsageRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
@@ -416,6 +429,13 @@ declare module '@tanstack/react-router' {
       path: '/usage'
       fullPath: '/usage'
       preLoaderRoute: typeof UsageRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/oversight': {
+      id: '/oversight'
+      path: '/oversight'
+      fullPath: '/oversight'
+      preLoaderRoute: typeof OversightRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -623,6 +643,7 @@ const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRoute,
   KanbanRoute: KanbanRoute,
   LoginRoute: LoginRoute,
+  OversightRoute: OversightRoute,
   UsageRoute: UsageRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,

@@ -36,6 +36,8 @@ import { formatShellCommand } from '@/lib/task-command'
 import { actionErrorMessage } from './action-error'
 import { isTaskCancellable, isTaskCancelling, isTaskDeleting, isWaitingForApproval, nextCancelTarget } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
+import { TaskOversightTab } from '@/components/oversight/task-oversight-tab'
+import { useOversightAvailability } from '@/hooks/use-oversight'
 import { isTaskInFlight, isTaskTerminal } from '@/lib/task-phase'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
@@ -170,6 +172,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   if (tabState.seen !== search.tab) setTabState({ override: null, seen: search.tab })
   const availableTabs = new Set(['overview', 'activity', 'approvals', 'result', 'logs', 'spec'])
   if (hasPlanHistory) availableTabs.add('plan')
+  // Shown only once the controller says it serves oversight.
+  const oversightEnabled = useOversightAvailability() === true
+  if (oversightEnabled) availableTabs.add('oversight')
   const rawTab = tabState.override ?? search.tab ?? 'overview'
   const requestedTab = MERGED_TABS[rawTab] ?? rawTab
   const activeTab = availableTabs.has(requestedTab) ? requestedTab : 'overview'
@@ -445,6 +450,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           {hasPlanHistory && (
             <TabsTrigger value="plan">Plan</TabsTrigger>
           )}
+          {oversightEnabled && (
+            <TabsTrigger value="oversight">Oversight</TabsTrigger>
+          )}
         </TabsList>
         </div>
 
@@ -681,6 +689,11 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           </TabsContent>
         )}
 
+        {oversightEnabled && activeTab === 'oversight' && (
+          <TabsContent value="oversight">
+            <TaskOversightTab taskName={taskId} />
+          </TabsContent>
+        )}
       </Tabs>
     </div>
   )

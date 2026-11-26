@@ -187,9 +187,27 @@ export const handlers = [
       maxConcurrent: 5,
       availableTools: ['create_task', 'list_tasks'],
       connectorsEnabled: true,
+      oversightEnabled: false,
     })
   }),
   http.delete(`${API}/chat/:sessionId`, () => {
     return new HttpResponse(null, { status: 204 })
   }),
+
+  // Oversight (read-only). Tests that need data override these.
+  http.get(`${API}/oversight/config`, () => HttpResponse.json({ queryKeys: ['agent', 'bin', 'concern', 'dest', 'task', 'tool'], maxBulkFeedback: 200 })),
+  http.get(`${API}/oversight/posture`, () => HttpResponse.json({
+    namespace: 'default', window: '24h', generatedAt: new Date().toISOString(),
+    confidence: { state: 'blind', summary: 'No decisions were recorded in this window, so nothing was seen.', reasons: ['no_decisions_in_window'] },
+    visibility: { state: 'blind', summary: 'No decisions were recorded in this window, so nothing was seen.', reasons: ['no_decisions_in_window'] },
+    control: { state: 'not_enforced', summary: 'Audit mode: findings are recorded, but no action is held.', reasons: ['audit_mode_only'] },
+    basis: {
+      actions: 0, tasks: 0, agents: 0, dispositions: {}, signals: {}, wouldHavePaused: 0, charterFindings: 0,
+      unreviewedFlagged: 0, falseAlarms: 0, realProblems: 0, coverage: { streamOK: 0, sensorAttributed: 0, unattributedEvents: 0 },
+    },
+  })),
+  http.get(`${API}/oversight/decisions`, () => HttpResponse.json({ namespace: 'default', items: [] })),
+  http.get(`${API}/oversight/decisions/stream`, () => new HttpResponse('event: ready\ndata: {}\n\n', { headers: { 'Content-Type': 'text/event-stream' } })),
+  http.get(`${API}/oversight/decisions/groups`, () => HttpResponse.json({ namespace: 'default', by: 'agent', groups: [], searched: 0 })),
+  http.get(`${API}/oversight/producers`, () => HttpResponse.json({ namespace: 'default', declared: false, producers: [] })),
 ]

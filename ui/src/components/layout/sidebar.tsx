@@ -1,12 +1,14 @@
 import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2, Inbox } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2, Inbox, Eye } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
 import { useIsMobile } from '@/hooks/use-media-query'
 import { useChatConfig } from '@/hooks/use-chat'
+import { useOversightAvailability } from '@/hooks/use-oversight'
+import { unreadAlertCount, useOversightAlerts } from '@/stores/oversight-alerts'
 import { api, isNotImplementedError } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
 import { OrcaMark } from '@/components/ui/orca-mark'
@@ -20,6 +22,7 @@ const NAV_ITEMS = [
   { to: '/tasks', label: 'Tasks', icon: ListTodo },
   { to: '/kanban', label: 'Board', icon: Columns3 },
   { to: '/approvals', label: 'Approvals', icon: Inbox },
+  { to: '/oversight', label: 'Oversight', icon: Eye },
   { to: '/gateways', label: 'Gateways', icon: RadioTower },
   { to: '/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/runtimes', label: 'Runtimes', icon: Boxes },
@@ -48,7 +51,13 @@ export function Sidebar() {
     staleTime: 60 * 1000,
   })
   const connectorsOff = chatConfig?.connectorsEnabled === false || (chatConfigUnavailable && isNotImplementedError(connectorsProbe.error))
-  const navItems = NAV_ITEMS.filter((item) => item.to !== '/settings/connectors' || !connectorsOff)
+  // Oversight follows the same rule: the chat config's flag, or a 501 from
+  // the posture API when the config cannot say.
+  const oversightOff = useOversightAvailability() === false
+  const namespace = useUIStore((s) => s.namespace)
+  const oversightUnread = useOversightAlerts((s) => unreadAlertCount(s, namespace))
+  const navItems = NAV_ITEMS.filter((item) =>
+    (item.to !== '/settings/connectors' || !connectorsOff) && (item.to !== '/oversight' || !oversightOff))
   const { sidebarCollapsed: desktopCollapsed, toggleSidebar, mobileSidebarOpen, setMobileSidebarOpen } = useUIStore()
   const isMobile = useIsMobile()
 
@@ -175,6 +184,18 @@ export function Sidebar() {
             >
               <Icon className="h-4 w-4 shrink-0" />
               {!sidebarCollapsed && <span>{label}</span>}
+              {to === '/oversight' && oversightUnread > 0 && (
+                <span
+                  data-testid="oversight-unread"
+                  className={cn(
+                    'rounded-full bg-status-failed-bg px-1.5 text-xs font-semibold tabular-nums text-status-failed',
+                    sidebarCollapsed ? 'absolute top-0.5 right-0.5 px-1 text-[10px]' : 'ml-auto',
+                  )}
+                >
+                  <span aria-hidden="true">{oversightUnread}</span>
+                  <span className="sr-only">{oversightUnread} unread charter alerts</span>
+                </span>
+              )}
             </Link>
           )
         })}

@@ -71,6 +71,8 @@ type ChatConfig struct {
 	// ConnectorsEnabled mirrors --connectors-enabled: without it the
 	// linked-account surfaces (list_connections) are not offered at all.
 	ConnectorsEnabled bool
+	// OversightEnabled advertises the Oversight page to the dashboard.
+	OversightEnabled bool
 	// DashboardEnabled mirrors --dashboard-enabled, so linked-account
 	// guidance names the dashboard page only when this controller serves it.
 	DashboardEnabled       bool
@@ -1454,6 +1456,7 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 		"maxConcurrent":           ch.config.MaxConcurrent,
 		"availableTools":          toolNames,
 		"connectorsEnabled":       ch.config.ConnectorsEnabled,
+		"oversightEnabled":        ch.config.OversightEnabled,
 	})
 }
 

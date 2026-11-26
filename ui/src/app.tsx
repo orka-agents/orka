@@ -5,6 +5,7 @@ import { NotFoundPage } from './components/common/not-found-page'
 import { captureHashToken } from './lib/login-return'
 import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
+import { useOversightAlerts } from './stores/oversight-alerts'
 import { useUIStore } from './stores/ui'
 
 const queryClient = new QueryClient({
@@ -20,14 +21,16 @@ const queryClient = new QueryClient({
 // identity change (logout, or signing in as someone else) the query cache is
 // cleared and the chat store is reset — transcript, session, provider/model
 // selections (including their localStorage persistence), and the turn epoch,
-// which also aborts any in-flight chat turn — so a new session can never
-// read or reuse the previous token's data.
+// which also aborts any in-flight chat turn — and the session's oversight
+// alerts are dropped, so a new session can never read or reuse the previous
+// token's data.
 let lastToken = useAuthStore.getState().token
 useAuthStore.subscribe((state) => {
   if (state.token !== lastToken) {
     lastToken = state.token
     queryClient.clear()
     useChatStore.getState().resetForIdentityChange()
+    useOversightAlerts.getState().reset()
   }
 })
 

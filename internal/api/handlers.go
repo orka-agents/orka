@@ -124,6 +124,8 @@ type Handlers struct {
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
+	oversightStore            store.OversightStore
+	oversightEnabled          bool
 	liveEvents                *liveevents.Broker
 	gatewayEventStore         store.GatewayEventStore
 	gatewayDeliveryStore      store.GatewayDeliveryStore
@@ -173,15 +175,18 @@ type HandlersConfig struct {
 	SecurityStore            store.SecurityStore
 	RepositoryMonitorStore   store.RepositoryMonitorStore
 	ExecutionEventStore      store.ExecutionEventStore
-	LiveEvents               *liveevents.Broker
-	GatewayEventStore        store.GatewayEventStore
-	GatewayDeliveryStore     store.GatewayDeliveryStore
-	GatewayService           *gatewayruntime.Service
-	Connectors               ConnectorConfig
-	GitHubSignIn             GitHubSignInConfig
-	OIDCEnabled              bool
-	OIDCIssuer               string
-	OIDCAudience             string
+	// OversightStore keeps oversight decisions; OversightEnabled serves them.
+	OversightStore       store.OversightStore
+	OversightEnabled     bool
+	LiveEvents           *liveevents.Broker
+	GatewayEventStore    store.GatewayEventStore
+	GatewayDeliveryStore store.GatewayDeliveryStore
+	GatewayService       *gatewayruntime.Service
+	Connectors           ConnectorConfig
+	GitHubSignIn         GitHubSignInConfig
+	OIDCEnabled          bool
+	OIDCIssuer           string
+	OIDCAudience         string
 	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
 	AHP                *ahphost.Host
 	SubstrateMCPProxy  SubstrateMCPProxyConfig
@@ -215,6 +220,8 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		executionEventStore:       cfg.ExecutionEventStore,
+		oversightStore:            cfg.OversightStore,
+		oversightEnabled:          cfg.OversightEnabled,
 		liveEvents:                cfg.LiveEvents,
 		gatewayEventStore:         cfg.GatewayEventStore,
 		gatewayDeliveryStore:      cfg.GatewayDeliveryStore,

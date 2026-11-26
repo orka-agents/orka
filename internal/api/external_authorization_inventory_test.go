@@ -52,6 +52,16 @@ GET /api/v1/tasks/:id/events | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/stream | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/trace | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/approvals | get core.orka.ai:tasks protected
+GET /api/v1/oversight/config | list core.orka.ai:oversightdecisions
+GET /api/v1/oversight/posture | list core.orka.ai:oversightdecisions
+GET /api/v1/oversight/producers | list core.orka.ai:oversightdecisions
+GET /api/v1/oversight/decisions | list core.orka.ai:oversightdecisions
+GET /api/v1/oversight/decisions/stream | list core.orka.ai:oversightdecisions
+GET /api/v1/oversight/decisions/groups | list core.orka.ai:oversightdecisions
+POST /api/v1/oversight/decisions/bulk-feedback | create core.orka.ai:oversightdecisions/feedback
+GET /api/v1/oversight/decisions/:id | get core.orka.ai:oversightdecisions protected
+GET /api/v1/oversight/decisions/:id/similar | list core.orka.ai:oversightdecisions
+POST /api/v1/oversight/decisions/:id/feedback | create core.orka.ai:oversightdecisions/feedback protected
 GET /api/v1/attention | list core.orka.ai:tasks
 GET /api/v1/approvals | list core.orka.ai:tasks
 GET /api/v1/audit/identity | list core.orka.ai:tasks

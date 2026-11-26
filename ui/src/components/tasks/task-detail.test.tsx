@@ -41,6 +41,29 @@ describe('TaskDetail', () => {
     vi.mocked(toast.error).mockClear()
   })
 
+  it('shows the Oversight tab only when oversight is enabled', async () => {
+    const config = (oversightEnabled: boolean) => HttpResponse.json({
+      enabled: true, provider: 'p', model: 'm', maxIterations: 1, maxDuration: '1m', maxTasksPerTurn: 1, maxConcurrent: 1, availableTools: [], oversightEnabled,
+    })
+    mockSearch.current = { tab: 'oversight' }
+    server.use(
+      http.get('/api/v1/chat/config', () => config(true)),
+      http.get('/api/v1/oversight/decisions', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('q')).toBe('task:test-task')
+        return HttpResponse.json({ namespace: 'default', items: [] })
+      }),
+    )
+    const { unmount } = render(<TaskDetail taskId="test-task" />)
+    expect(await screen.findByRole('tab', { name: 'Oversight' })).toHaveAttribute('data-state', 'active')
+    expect(await screen.findByText('No oversight decisions for this Task')).toBeInTheDocument()
+    unmount()
+
+    server.use(http.get('/api/v1/chat/config', () => config(false)))
+    render(<TaskDetail taskId="test-task" />)
+    expect(await screen.findByRole('tab', { name: 'Overview' })).toHaveAttribute('data-state', 'active')
+    expect(screen.queryByRole('tab', { name: 'Oversight' })).not.toBeInTheDocument()
+  })
+
   it('loading state shows skeletons', () => {
     server.use(
       http.get('/api/v1/tasks/:id', async () => {
