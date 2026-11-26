@@ -350,7 +350,7 @@ func generationSince(object *metav1.ObjectMeta) time.Time {
 	// Generation > 1 has no trustworthy durable spec-change timestamp on the
 	// object, so fail closed from the time this process first observes it.
 	since := time.Now()
-	if object.CreationTimestamp.Time.After(since) {
+	if object.CreationTimestamp.After(since) {
 		since = object.CreationTimestamp.Time
 	}
 	if object.UID != "" {
