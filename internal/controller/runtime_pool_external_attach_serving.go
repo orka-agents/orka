@@ -101,9 +101,16 @@ func externalAttachmentOnlyLag(pool *corev1alpha1.RuntimePool, w *workspacev1alp
 		return false
 	}
 	admitted := workspaceprovider.FindCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted))
-	if admitted == nil || admitted.Status != metav1.ConditionTrue ||
-		admitted.Reason != string(workspacev1alpha1.ReasonReady) ||
-		admitted.ObservedGeneration != w.Spec.CoreAdmission.AdmittedGeneration {
+	// Core re-admits in two writes: the Admitted=True/Ready condition may
+	// already name w.Generation+1 before coreAdmission.AdmittedGeneration
+	// advances on the next pass. Accept either exact AdmittedGeneration or
+	// the in-flight next-generation condition, while rejecting missing,
+	// False, Unknown, or stale conditions.
+	admittedGenValid := admitted != nil && admitted.Status == metav1.ConditionTrue &&
+		admitted.Reason == string(workspacev1alpha1.ReasonReady) &&
+		(admitted.ObservedGeneration == w.Spec.CoreAdmission.AdmittedGeneration ||
+			(w.Spec.CoreAdmission.AdmittedGeneration < w.Generation && admitted.ObservedGeneration == w.Generation+1))
+	if !admittedGenValid {
 		return false
 	}
 	a := w.Status.Allocation

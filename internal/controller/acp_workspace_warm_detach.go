@@ -354,7 +354,8 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 		requeue := min(deadline.Sub(now)+time.Second, lifetimeRequeue)
 		return ctrl.Result{RequeueAfter: requeue}, true, nil
 	}
-	if !tainted && now.Before(deadline.Add(acpWorkspaceWarmExpiryGrace)) &&
+	drained := strings.TrimSpace(workspace.Annotations[acpWorkspaceWarmWindowDrainedAnnotation]) != ""
+	if !tainted && !drained && now.Before(deadline.Add(acpWorkspaceWarmExpiryGrace)) &&
 		workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
 		// A continuation that is bound but not attached yet must not watch
 		// the runtime it is about to attach get suspended. Its demand
