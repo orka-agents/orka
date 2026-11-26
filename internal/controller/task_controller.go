@@ -452,6 +452,9 @@ func (r *TaskReconciler) admitNewTask(ctx context.Context, req ctrl.Request, tas
 		if !chainAdmission {
 			return ctrl.Result{RequeueAfter: time.Second}, nil, true
 		}
+		if !task.DeletionTimestamp.IsZero() {
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
 	}
 	return ctrl.Result{}, nil, false
 }
@@ -1578,6 +1581,11 @@ func (r *TaskReconciler) acquireChildAdmission(ctx context.Context, task *corev1
 	log := logf.FromContext(ctx)
 	granted, err := r.acquireTaskAdmissionSlot(ctx, task, children)
 	if err != nil {
+		if r.MaxTasksPerNamespace > 0 {
+			if relErr := r.releaseTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace)); relErr != nil {
+				log.Error(relErr, "failed to release namespace task slot after child admission error")
+			}
+		}
 		log.Error(err, "failed to acquire a coordination child slot")
 		return ctrl.Result{}, err, true
 	}
