@@ -244,6 +244,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 				if eviction := (*externalWorkerEvictionError)(nil); errors.As(attestErr, &eviction) {
 					return r.beginExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline)
 				}
+				return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
 			}
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
