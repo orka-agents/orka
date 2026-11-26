@@ -1934,6 +1934,7 @@ func coordinationChildTask(name string, status corev1alpha1.TaskStatus) *corev1a
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   "default",
+			UID:         types.UID(name + "-uid"),
 			Annotations: map[string]string{labels.AnnotationCoordinationDepth: "1"},
 			Labels:      map[string]string{labels.LabelParentTask: "parent"},
 		},
@@ -1977,15 +1978,17 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitIgnoresStaleCache(t *te
 // status write fails, the sibling runs while still looking Pending and
 // unadmitted; its owned Job must still hold the slot.
 func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *testing.T) {
+	isController := true
 	tests := []struct {
 		name     string
 		jobLabel string
 		ownerUID types.UID
+		finished bool
 		wantWait bool
 	}{
 		{name: "owned job", jobLabel: "sibling", ownerUID: "sibling-uid", wantWait: true},
 		{name: "job of a deleted task with the same name", jobLabel: "sibling", ownerUID: "previous-sibling-uid", wantWait: false},
-		{name: "job labeled for another sibling", jobLabel: "other", ownerUID: "sibling-uid", wantWait: false},
+		{name: "completed job of a sibling", jobLabel: "sibling", ownerUID: "sibling-uid", finished: true, wantWait: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2005,8 +2008,12 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *
 						Kind:       "Task",
 						Name:       "sibling",
 						UID:        tt.ownerUID,
+						Controller: &isController,
 					}},
 				},
+			}
+			if tt.finished {
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 			}
 			childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
 
