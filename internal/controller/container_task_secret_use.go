@@ -321,12 +321,12 @@ type specChange struct {
 
 // latestChange returns the latest time the objects' specs may have changed.
 // An object still at its first generation changed when it was created. For a
-// later generation, the change time is not recorded, so the first time this
-// process sees that generation it takes the object's latest managed-field
-// update, which is no earlier than the spec change, and keeps it while the
-// generation stays the same. Metadata-only writes, such as a chart upgrade
-// relabelling the policy, leave the generation alone and do not move the
-// cutoff.
+// later generation, Kubernetes does not record a durable spec-change timestamp
+// (managedFields tracks current field ownership rather than change history), so
+// the controller records the time it first observes that generation and keeps
+// it while the generation stays the same. Metadata-only writes, such as a chart
+// upgrade relabelling the policy, leave the generation alone and do not move
+// the cutoff.
 func latestChange(objects ...*metav1.ObjectMeta) time.Time {
 	var latest time.Time
 	for _, object := range objects {
@@ -347,12 +347,11 @@ func generationSince(object *metav1.ObjectMeta) time.Time {
 	if seen, ok := specChanges.seen[object.UID]; ok && object.UID != "" && seen.generation == object.Generation {
 		return seen.since
 	}
-	// The latest managed-field update is no earlier than the spec change.
-	// Without one after creation the change time is unknown, so take now:
-	// the change happened no later than that.
-	since := latestManagedFieldTime(object)
-	if !since.After(object.CreationTimestamp.Time) {
-		since = time.Now()
+	// Generation > 1 has no trustworthy durable spec-change timestamp on the
+	// object, so fail closed from the time this process first observes it.
+	since := time.Now()
+	if object.CreationTimestamp.Time.After(since) {
+		since = object.CreationTimestamp.Time
 	}
 	if object.UID != "" {
 		specChanges.seen[object.UID] = specChange{generation: object.Generation, since: since}
@@ -431,14 +430,4 @@ func normalizedPolicySpec(spec admissionregistrationv1.ValidatingAdmissionPolicy
 		}
 	}
 	return spec
-}
-
-func latestManagedFieldTime(object *metav1.ObjectMeta) time.Time {
-	var latest time.Time
-	for _, entry := range object.ManagedFields {
-		if entry.Time != nil && entry.Time.After(latest) {
-			latest = entry.Time.Time
-		}
-	}
-	return latest
 }

@@ -135,7 +135,7 @@ entrypoint that you want, use that instead.
 | `mkdir /root/.cache: read-only file system` | Go build cache outside `/tmp` | `export GOCACHE=/tmp/gocache` |
 | Second command in a chain fails, first succeeded | Inline env prefix, not `export` | Use `export ... && ...` |
 | `EACCES` / `EROFS` from npm or pip | Cache outside `/tmp` | Set `npm_config_cache` or `PIP_CACHE_DIR` |
-| `spec.env[N] (NAME) uses valueFrom.secretKeyRef, which container Tasks receive only when the operator enables direct Secret mounts` | An `env` entry reads a Secret or ConfigMap | Drop the entry, or ask an operator to grant your identity `use` on the Secret under [the Secret use policy](#secrets) |
+| `spec.env[N] (NAME) uses valueFrom.secretKeyRef, which container Tasks receive only when the operator enables direct Secret mounts` | An `env` entry reads a Secret or ConfigMap | For a ConfigMap (`configMapKeyRef`), remove the entry; for a Secret (`secretKeyRef`), drop the entry or ask an operator to grant your identity `use` on the Secret under [the Secret use policy](#secrets) |
 
 ## Other fields
 
@@ -181,8 +181,9 @@ so Tasks created by agents, tools, chat, or the Orka API never receive Secrets t
 the controller also refuses a Task that carries their provenance. The runs of a scheduled
 Task receive the Secrets the scheduled Task names. The Secret must be in the Task's
 namespace, and `configMapKeyRef` and `fileKeyRef` stay refused. Changing the spec of such a Task,
-for example its image or command, needs `use` again. A Task created before the policy was in
-force was never checked and fails instead; recreate it.
+for example its image or command, needs `use` again. Wait until the 30-second settling period
+after installing or updating the policy ends before creating Tasks; a Task created before the
+policy took effect or during that settling window fails instead and must be recreated.
 
 `spec.secretRef` arrives as **files under `/secrets/task`**, one file per key; read the key you
 need from `/secrets/task/<key>`. An `env` entry's `secretKeyRef` becomes that environment
