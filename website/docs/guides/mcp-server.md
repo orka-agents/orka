@@ -149,17 +149,19 @@ connects, so the header doesn't go stale:
     "orka": {
       "type": "http",
       "url": "https://orka.example.com/mcp",
-      "headersHelper": "orka auth token --format header-json"
+      "headersHelper": "orka auth token --server https://orka.example.com --format header-json"
     }
   }
 }
 ```
 
-Claude Code runs a project's `headersHelper` only once you trust the workspace. For a
-client that reads the header from the environment, export the token before you start
-it: `export ORKA_TOKEN="$(orka auth token)"`. That copy doesn't refresh, and while it is
-exported, `orka auth token` prints it rather than your saved sign-in; unset it and run
-the command again when it expires.
+Name the same server the client connects to with `--server`: a sign-in saved for any
+other server is then refused, even after you later sign in elsewhere. Claude Code runs a
+project's `headersHelper` only once you trust the workspace. For a client that reads the
+header from the environment, export the token before you start it:
+`export ORKA_TOKEN="$(orka auth token --server https://orka.example.com)"`. That copy
+doesn't refresh, and while it is exported, `orka auth token` prints it rather than your
+saved sign-in; unset it and run the command again when it expires.
 
 ## Tools
 

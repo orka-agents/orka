@@ -169,11 +169,11 @@ orka auth whoami
 `orka auth token` prints the token the CLI sends to the server, so another client, such as an [MCP client](../guides/mcp-server.md#use-your-orka-sign-in) or a script, can act as you. It refreshes a saved sign-in first:
 
 ```bash
-curl -H "Authorization: Bearer $(orka auth token)" https://orka.example.com/api/v1/auth/whoami
-orka auth token --format header-json   # {"Authorization":"Bearer <token>"}
+curl -H "Authorization: Bearer $(orka auth token --server https://orka.example.com)" https://orka.example.com/api/v1/auth/whoami
+orka auth token --server https://orka.example.com --format header-json   # {"Authorization":"Bearer <token>"}
 ```
 
-It takes the token from the same sources as every other command, in the same order. A saved sign-in that has expired and can't be refreshed makes it fail rather than print the stale token. It never prints a session saved by `orka login`, which reaches only your own connections and agent host, and it never prints a kubeconfig user's credential, so it needs a server from `--server`, `ORKA_SERVER` or the config file. The output is a credential: don't log it or paste it into shared files.
+Pass `--server` with the address the other client sends the token to: a sign-in saved for any other server is then refused rather than printed, even after you later sign in elsewhere. It takes the token from the same sources as every other command, in the same order. A saved sign-in that has expired and can't be refreshed makes it fail rather than print the stale token. It never prints a session saved by `orka login`, which reaches only your own connections and agent host, and it never prints a kubeconfig user's credential, so it needs a server from `--server`, `ORKA_SERVER` or the config file. The output is a credential: don't log it or paste it into shared files.
 
 Validate auth before running larger workflows:
 

@@ -135,6 +135,22 @@ func TestAuthTokenRefusesExpiredOIDCTokenItCannotRefresh(t *testing.T) {
 	}
 }
 
+func TestAuthTokenRefusesTokenPastItsSavedExpiry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(envToken, "")
+	t.Setenv(envServer, "")
+	token := testCompactJWT(t, "https://idp.example", "orka-client-id", time.Now().Add(time.Hour).Unix())
+	saveOIDCTestConfig(t, token, time.Now().Add(-time.Minute), "https://idp.example/token", "")
+
+	stdout, _, err := runAuthTokenCLI(t)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("err = %v, want an expired-token error when the saved expiry has passed before the JWT's exp", err)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want nothing", stdout)
+	}
+}
+
 func TestAuthTokenRefusesExpiredOIDCTokenWhenRefreshIsRejected(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(envToken, "")

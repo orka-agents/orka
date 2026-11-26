@@ -91,11 +91,9 @@ func runAuthToken(cmd *cobra.Command, format string) error {
 
 func oidcTokenExpired(token string) bool {
 	now := time.Now()
-	if claims, ok := parseUnverifiedJWTClaims(token); ok && claims.Exp > 0 {
-		return !now.Before(time.Unix(claims.Exp, 0))
+	if claims, ok := parseUnverifiedJWTClaims(token); ok && claims.Exp > 0 && !now.Before(time.Unix(claims.Exp, 0)) {
+		return true
 	}
-	if saved := loadConfig(); saved.Token == token && saved.TokenExpiresAt != nil {
-		return !now.Before(*saved.TokenExpiresAt)
-	}
-	return false
+	saved := loadConfig()
+	return saved.Token == token && saved.TokenExpiresAt != nil && !now.Before(*saved.TokenExpiresAt)
 }
