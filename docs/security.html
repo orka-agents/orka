@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Security | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/security"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Security | Orka"><meta data-rh="true" name="description" content="Credential and network boundaries for ACP runtimes, native workers, and publication."><meta data-rh="true" property="og:description" content="Credential and network boundaries for ACP runtimes, native workers, and publication."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/security"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/security" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/security" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Security","item":"https://orka-agents.github.io/orka/docs/security"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.84a3497b.css">
-<script src="/orka/assets/js/runtime~main.e200e673.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.a7c08e8b.js" defer="defer"></script>
 <script src="/orka/assets/js/main.e159c864.js" defer="defer"></script>
 </head>
 <body>
@@ -47,10 +47,19 @@ a compromised publisher still cannot exfiltrate through your model provider.</p>
 <p>These workers use dedicated ServiceAccounts bound to <code>orka-ai-worker-role</code>,
 <code>orka-vendor-worker-role</code>, or <code>orka-container-worker-role</code>. Include these identities when
 auditing Kubernetes access.</p>
-<p>Container Tasks are untrusted compute. A Task&#x27;s <code>spec.secretRef</code> is mounted only when an
-operator sets <code>ORKA_AGENT_DIRECT_SECRET_MOUNTS=true</code>; without it the mount is omitted and the
-Task still runs. A <code>spec.env</code> entry that reads a Secret or ConfigMap through <code>valueFrom</code> is
-refused outright: without the opt-in the Task fails before its Pod is created. Task <code>env</code>
+<p>Container Tasks are untrusted compute. By default a Task&#x27;s <code>spec.secretRef</code> is omitted and
+the Task still runs, and a <code>spec.env</code> entry that reads a Secret or ConfigMap through
+<code>valueFrom</code> makes the Task fail before its Pod is created. With the Secret use policy
+(<code>--container-task-secret-use-authorization-enabled</code>), the admission policy requires the
+identity that writes a container Task to hold the <code>use</code> verb on each Secret it names (except
+for scheduled runs written by the controller, which the controller validates against their
+authorized parent scheduled Task; revoking <code>use</code> later does not stop delivery for Tasks that
+were already admitted). Orka grants that
+verb to none of its own identities, so Tasks created by agents, tools, chat, or the API never
+qualify, and the controller delivers nothing until it has confirmed the admission policy is
+bound and covers the namespace (clusters must have the <code>ValidatingAdmissionPolicy</code> admission
+plugin enabled). The legacy <code>ORKA_AGENT_DIRECT_SECRET_MOUNTS=true</code> switch instead delivers to every
+container Task and cannot be combined with the policy. Task <code>env</code>
 never reaches the workspace preparation init container, which holds the clone credential;
 only <code>HTTP_PROXY</code>, <code>HTTPS_PROXY</code>, and <code>NO_PROXY</code> pass through to it. See
 <a class="" href="/orka/docs/container-tasks#other-fields">Container tasks</a>.</p>
