@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -41,7 +44,7 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 	var request publisherservice.CredentialMaterialRequest
 	decoder := json.NewDecoder(strings.NewReader(string(c.Body())))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
+	if err := decoder.Decode(&request); err != nil || !errors.Is(decoder.Decode(&struct{}{}), io.EOF) || request.Validate() != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
 	if request.ParentOperation == publisherservice.OperationBranchRebase {
@@ -70,6 +73,32 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{apiFieldError: "credential_version_changed"})
 	}
 	key := expectedSecretKey
+	if reference.Type == corev1alpha1.WorkspaceCredentialGitHubApp {
+		if !isGitHubAppSecret(secret) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "github_app_secret_invalid"})
+		}
+		privateKey := secret.Data[key]
+		if len(privateKey) > maxBrokeredCredentialBytes {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "github_app_secret_invalid"})
+		}
+		token, err := s.mintGitHubAppCredential(c.Context(), task.Spec.Workspace, publisherservice.CredentialRole(credentialRole),
+			secret.Data[corev1alpha1.GitHubAppIDSecretKey], privateKey)
+		if err != nil {
+			status, code, retryAfter := githubAppErrorResponse(err)
+			if retryAfter > 0 {
+				c.Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+			}
+			return c.Status(status).JSON(fiber.Map{apiFieldError: code})
+		}
+		material, err := formatPublisherCredential(request.Reference.Kind, []byte(token))
+		if err != nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
+		}
+		return c.JSON(publisherservice.CredentialMaterialResponse{Material: material, ResourceVersion: secret.ResourceVersion})
+	}
+	if isGitHubAppSecret(secret) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
+	}
 	value := bytes.TrimSpace(secret.Data[key])
 	if request.Reference.Kind == publisherservice.CredentialSSHSigningKey {
 		if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\x00") {
@@ -128,6 +157,9 @@ func (s *Server) issueBranchRebaseCredential(c fiber.Ctx, request publisherservi
 	secret := &corev1.Secret{}
 	if err := reader.Get(c.Context(), client.ObjectKey{Namespace: monitor.Namespace, Name: expectedSecretName}, secret); err != nil || secret.ResourceVersion == "" {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{apiFieldError: "credential_version_changed"})
+	}
+	if isGitHubAppSecret(secret) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
 	}
 	var value []byte
 	for _, k := range candidateKeys {

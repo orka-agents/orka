@@ -488,6 +488,77 @@ hold the artifact signing key.
 Every `spec.workspace` field, with defaults, is in the
 [Resource reference](../reference/resources.md#workspace).
 
+### GitHub App credentials
+
+A fine-grained personal access token has to be created per organization and
+rotated by hand before it expires (while a classic token is released with
+whatever scope and lifetime it was created with). Rewriting the Secret doesn't
+help a Task that is already queued: the
+frozen version no longer matches, and the Task ends `CredentialBlocked`.
+Instead, a credential reference can name a Secret holding a GitHub App's ID
+and private key. The credential broker then mints an installation token for
+each operation.
+
+Before creating `orka.ai/github-app` Secrets, finish upgrading all controller
+and API/broker replicas to a version that enforces the `orka.ai/github-app`
+Secret type guard (and remove or revoke any App private-key Secrets before
+rolling back to an older version, which would not block raw release via
+untyped references):
+
+```bash
+kubectl create secret generic project-publisher-app \
+  --type=orka.ai/github-app \
+  --from-literal=appId=123456 \
+  --from-file=privateKey=publisher-app.private-key.pem
+```
+
+```yaml
+  workspace:
+    gitRepo: https://github.com/example/project.git
+    readCredentialRef:
+      name: project-publisher-app
+      key: privateKey
+      type: GitHubApp
+    publicationCredentialRef:
+      name: project-publisher-app
+      key: privateKey
+      type: GitHubApp
+```
+
+`appId` holds the numeric GitHub App ID. `key` names the entry with the PEM
+private key (PKCS#1 or PKCS#8 RSA). For each operation, the broker looks up the
+App's installation on the Task's repository and asks GitHub for a token
+limited to that repository and the role's permission:
+
+| Role | Repository | Permissions |
+| --- | --- | --- |
+| `readCredentialRef` | `gitRepo` | Contents read |
+| `publicationReadCredentialRef` | `publicationGitRepo`, else `gitRepo` | Contents read |
+| `publicationCredentialRef` | `publicationGitRepo`, else `gitRepo` | Contents write |
+| `forgeCredentialRef` | `gitRepo` and the publication repository | Pull requests write, Contents read |
+
+Give the App only those permissions, installed on the repositories Tasks may
+use. Use a separate App for publishing, not the App people sign in with:
+user tokens get the intersection of the App's and the person's permissions,
+so granting Contents write to a sign-in App widens what every person's token
+can do. GitHub App credentials support github.com repositories only, and
+the forge role needs the base and publication repositories under one
+account.
+
+The tokens last an hour, are minted per operation and aren't stored. All
+existing checks still apply. The controller freezes the App Secret's version
+at reservation, so rotating the private key ends queued Tasks as
+`CredentialBlocked`, as rotating a token does. Drain or let them finish
+before you rotate. If the App isn't installed on the repository or lacks the
+permission, the operation fails with a non-retryable credential error. If
+GitHub is unavailable, the publisher retries. Anyone who may name the Secret in
+a Task can get tokens for every repository across every organization or account
+where the App is installed: each minted token is limited to the Task's
+repository and role, but permission to reference the Secret spans the App's
+entire installation footprint rather than a single organization. Container and
+`ai` Tasks can't use `type: GitHubApp`, and Secrets of type `orka.ai/github-app` are never released
+as raw tokens or SSH signing keys.
+
 ## Pull request text
 
 Pull-request text comes from the frozen Task spec and prompt, never from files or output produced by the agent. Orka rejects secret-like titles and bodies at runtime before publication, including prompt-derived titles. Orka reserves comments beginning with `<!-- orka.publisher.pr-` for reconciliation. Remove these comments when copying an existing PR body into `prBody`. The publisher keeps the original title and body when reconciling an existing pull request. A continuation does not overwrite a person's edits.
