@@ -1533,7 +1533,9 @@ func (service *messagesService) ListUnreadMessages(ctx context.Context, wireRequ
 	var a2 string
 	a2 = wireRequest.ParentTask
 	var a3 int
-	a3 = int(wireRequest.Limit)
+	if a3, err = intFromWire(wireRequest.Limit, "ListUnreadMessages.limit"); err != nil {
+		return nil, requestStatus(err)
+	}
 	var r0 []storagev1.Message
 	r0, err = service.provider.ListUnreadMessages(ctx, a0, a1, a2, a3)
 	if err != nil {
