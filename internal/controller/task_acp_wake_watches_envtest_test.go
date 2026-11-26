@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -128,6 +129,13 @@ func TestACPWorkspaceStatusChangeWakesLinkedTaskWithoutPolling(t *testing.T) {
 		}
 	}
 
+	if err := wait.PollUntilContextTimeout(ctx, 20*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		var cached corev1alpha1.Task
+		err := mgr.GetClient().Get(ctx, client.ObjectKeyFromObject(task), &cached)
+		return err == nil, nil
+	}); err != nil {
+		t.Fatalf("Task did not appear in manager cache: %v", err)
+	}
 	if err := c.Create(ctx, workspace); err != nil {
 		t.Fatal(err)
 	}
