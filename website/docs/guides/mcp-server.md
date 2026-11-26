@@ -23,7 +23,9 @@ The endpoint is off by default. Start the controller with:
 --mcp-server-enabled
 ```
 
-or set `ORKA_MCP_SERVER_ENABLED=true`. It is served at `POST /mcp` on the API port
+or set `ORKA_MCP_SERVER_ENABLED=true`. With Helm, set
+`controller.mcpServer.enabled=true` (and optionally `controller.mcpServer.maxConcurrent`).
+It is served at `POST /mcp` on the API port
 (`8080`). `--mcp-max-concurrent` (default `16`) bounds concurrent MCP requests per API
 replica. Long waits (`wait_for_task`, `tasks/result`) give up their request slot and
 use a separate pool of half as many wait slots (at least one), so waits never block

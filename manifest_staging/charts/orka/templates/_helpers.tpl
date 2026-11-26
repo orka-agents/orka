@@ -858,6 +858,105 @@ own signing namespace.
 {{- end -}}
 {{- end }}
 
+{{- define "orka.validateMCPServer" -}}
+{{- $enabled := dig "mcpServer" "enabled" false .Values.controller -}}
+{{- if not (kindIs "bool" $enabled) -}}
+{{- fail "controller.mcpServer.enabled must be true or false" -}}
+{{- end -}}
+{{- if $enabled -}}
+{{- $max := toString (dig "mcpServer" "maxConcurrent" 16 .Values.controller) -}}
+{{- if not (regexMatch `^[1-9][0-9]{0,5}$` $max) -}}
+{{- fail (printf "controller.mcpServer.maxConcurrent %q must be a whole number from 1 to 999999" $max) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Names and mount paths of the controller Pod's chart-managed volumes, whether or
+not the current values render them. controller.extraVolumes and
+controller.extraVolumeMounts are checked against every one, so an extra volume
+can never replace or hide the store, a credential or the webhook certificate,
+and enabling a feature later cannot collide with one.
+*/}}
+{{- define "orka.controllerManagedVolumes" -}}
+{{- dict
+  "tmp" "/tmp"
+  "substrate-api-credentials" "/var/run/orka/substrate-api"
+  "substrate-client" "/run/substrate-client"
+  "substrate-server" "/run/substrate-server"
+  "store" "/data"
+  "storage-config" "/etc/orka/storage"
+  "acp-artifact-capability" "/var/run/orka/acp-artifacts"
+  "workspace-publisher-auth" "/var/run/orka/publisher-auth"
+  "provider-auth-proxy" "/var/run/orka/provider-auth"
+  "agent-execution-snapshot-key" "/var/run/orka/agent-execution-snapshot"
+  "agent-identity-token" "/var/run/secrets/orka.ai/agent-identity"
+  "webhook-tls" "/var/run/orka/webhook/tls"
+  | toJson -}}
+{{- end }}
+
+{{- define "orka.validateControllerExtraVolumes" -}}
+{{- $managed := include "orka.controllerManagedVolumes" . | fromJson -}}
+{{- /* Paths no extra mount may be at, inside or above, with what each holds.
+The ServiceAccount token is mounted by Kubernetes, which skips it when a
+container already mounts that path, so the controller would lose its API
+credential. */ -}}
+{{- $reserved := dict "/var/run/secrets/kubernetes.io/serviceaccount" "the controller's ServiceAccount token" -}}
+{{- range $name, $path := $managed -}}
+{{- $_ := set $reserved $path (printf "the chart's %q volume" $name) -}}
+{{- end -}}
+{{- $volumes := .Values.controller.extraVolumes | default list -}}
+{{- $mounts := .Values.controller.extraVolumeMounts | default list -}}
+{{- if not (kindIs "slice" $volumes) -}}
+{{- fail "controller.extraVolumes must be a list of volumes" -}}
+{{- end -}}
+{{- if not (kindIs "slice" $mounts) -}}
+{{- fail "controller.extraVolumeMounts must be a list of volume mounts" -}}
+{{- end -}}
+{{- $names := dict -}}
+{{- range $index, $volume := $volumes -}}
+{{- $name := "" -}}
+{{- if kindIs "map" $volume -}}
+{{- $name = toString (default "" $volume.name) -}}
+{{- end -}}
+{{- if not $name -}}
+{{- fail (printf "controller.extraVolumes[%d] must be a volume with a name" $index) -}}
+{{- end -}}
+{{- if hasKey $managed $name -}}
+{{- fail (printf "controller.extraVolumes[%d] reuses the chart's volume name %q" $index $name) -}}
+{{- end -}}
+{{- if hasKey $names $name -}}
+{{- fail (printf "controller.extraVolumes[%d] repeats the volume name %q" $index $name) -}}
+{{- end -}}
+{{- $_ := set $names $name true -}}
+{{- end -}}
+{{- $paths := dict -}}
+{{- range $index, $mount := $mounts -}}
+{{- $name := "" -}}
+{{- $path := "" -}}
+{{- if kindIs "map" $mount -}}
+{{- $name = toString (default "" $mount.name) -}}
+{{- $path = toString (default "" $mount.mountPath) -}}
+{{- end -}}
+{{- if not (hasKey $names $name) -}}
+{{- fail (printf "controller.extraVolumeMounts[%d] must name a volume from controller.extraVolumes, not %q" $index $name) -}}
+{{- end -}}
+{{- $clean := trimSuffix "/" (clean $path) -}}
+{{- if or (not (hasPrefix "/" $path)) (not $clean) -}}
+{{- fail (printf "controller.extraVolumeMounts[%d].mountPath %q must be an absolute path other than /" $index $path) -}}
+{{- end -}}
+{{- if hasKey $paths $clean -}}
+{{- fail (printf "controller.extraVolumeMounts[%d].mountPath %q repeats another extra mount's path" $index $path) -}}
+{{- end -}}
+{{- $_ := set $paths $clean true -}}
+{{- range $reservedPath, $holds := $reserved -}}
+{{- if or (eq $clean $reservedPath) (hasPrefix (printf "%s/" $reservedPath) $clean) (hasPrefix (printf "%s/" $clean) $reservedPath) -}}
+{{- fail (printf "controller.extraVolumeMounts[%d].mountPath %q overlaps %s, where %s is mounted" $index $path $reservedPath $holds) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "orka.validateAgentHosts" -}}
 {{- if include "orka.agentHostsEnabled" . -}}
 {{- $namespace := include "orka.agentHostNamespace" . -}}
