@@ -729,13 +729,13 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx cont
 			command.Error = "workflow action was cancelled"
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 		}
-		// UpdateWorkAction replaces the whole row. Write only a field this
-		// intake changes, so a redelivery never writes back a copy the
-		// controller or recovery has advanced since it was read.
+		// UpdateWorkAction replaces the whole row, so write only for a status
+		// change intake owns: a write for a run link alone could restore a
+		// copy the controller has advanced since it was read. The controller
+		// links the run itself when it records the action's state.
 		changed := false
 		if runID != "" && existing.RunID == "" {
 			existing.RunID = runID
-			changed = true
 		}
 		if status == store.RepositoryMonitorWorkActionStatusQueued && existing.Status == store.RepositoryMonitorWorkActionStatusRetryPending && existing.BlockedReason == store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed {
 			existing.Status = store.RepositoryMonitorWorkActionStatusQueued

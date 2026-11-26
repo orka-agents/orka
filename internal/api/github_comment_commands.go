@@ -203,7 +203,9 @@ func (h *Handlers) recordRepositoryMonitorCommentCommand(c fiber.Ctx, monitor *c
 // interrupted intake finishes it the same way.
 func (h *Handlers) finishRepositoryMonitorCommandRecording(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, metadata map[string]any) error {
 	command.Status = githubCommandStatusAccepted
-	if err := h.upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx, monitor, command, "", metadata); err != nil {
+	// Link the deterministic run now, so queueing the run later changes nothing
+	// and never writes back a copy of the action the controller has advanced.
+	if err := h.upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx, monitor, command, repositoryMonitorCommandRunID(command), metadata); err != nil {
 		command.Status = githubCommandStatusRecording
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command context: %v", err))
 	}
