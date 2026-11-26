@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Operator workspace access | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Operator workspace access | Orka"><meta data-rh="true" name="description" content="Debug a running agent Task with orka task exec and orka task cp: enablement, permissions, the session taint, and audit."><meta data-rh="true" property="og:description" content="Debug a running agent Task with orka task exec and orka task cp: enablement, permissions, the session taint, and audit."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/operator-workspace-access" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Operator workspace access","item":"https://orka-agents.github.io/orka/docs/guides/operator-workspace-access"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.84a3497b.css">
-<script src="/orka/assets/js/runtime~main.4d95dcb7.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.54a7cc9f.js" defer="defer"></script>
 <script src="/orka/assets/js/main.e159c864.js" defer="defer"></script>
 </head>
 <body>
@@ -114,6 +114,9 @@ or cold-resumes it. A continuation queued behind the tainting Task waits for
 a fresh workspace, and otherwise fails with <code>execution workspace was tainted by operator access</code>.</li>
 <li class=""><strong>Is never checkpointed.</strong> Settlement and idle retention delete the
 workspace instead of suspending it, even when the class freezes <code>Suspend</code>.
+If its RuntimePool scales down or replaces the runtime first, the runtime is
+stopped without a data-preserving suspension unless a <code>Suspend</code> was already
+authorized for the current runtime instance before the taint landed.
 <code>ExecutionWorkspaceCheckpoint</code> exports from it fail routing with
 <code>SourceOperatorTainted</code>, so forks cannot consume it.</li>
 <li class=""><strong>Is never continued.</strong> Its runtime is not captured as the Session&#x27;s native
