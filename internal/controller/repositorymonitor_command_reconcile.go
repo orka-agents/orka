@@ -394,6 +394,19 @@ func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorCommandRecording(c
 	if time.Since(command.CreatedAt) < repositoryMonitorCommandRecordingGrace {
 		return false, nil
 	}
+	// The listed recording may be stale: a redelivery can accept the command
+	// after the list was read. Settle only a command that is still recording.
+	current, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, command.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.Status != repositoryMonitorCommandRecording {
+		return true, nil
+	}
+	command = current
 	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
 	if errors.Is(err, store.ErrNotFound) {
 		return true, nil
@@ -403,6 +416,12 @@ func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorCommandRecording(c
 	}
 	switch {
 	case action.CommandEventID != command.ID:
+		return true, nil
+	case action.Status == store.RepositoryMonitorWorkActionStatusRetryPending:
+		// Only intake parks an action for retry, after it accepted the command
+		// and then failed to signal its run. A redelivery can do that between
+		// the read above and this one, and rejecting the command would strand
+		// the retry and its dedupe key.
 		return true, nil
 	case action.Status == store.RepositoryMonitorWorkActionStatusCompleted && action.Phase == "coalesced":
 		command.Status = repositoryMonitorCommandCompleted

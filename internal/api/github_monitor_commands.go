@@ -729,8 +729,13 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx cont
 			command.Error = "workflow action was cancelled"
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 		}
+		// UpdateWorkAction replaces the whole row. Write only a field this
+		// intake changes, so a redelivery never writes back a copy the
+		// controller or recovery has advanced since it was read.
+		changed := false
 		if runID != "" && existing.RunID == "" {
 			existing.RunID = runID
+			changed = true
 		}
 		if status == store.RepositoryMonitorWorkActionStatusQueued && existing.Status == store.RepositoryMonitorWorkActionStatusRetryPending && existing.BlockedReason == store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed {
 			existing.Status = store.RepositoryMonitorWorkActionStatusQueued
@@ -738,11 +743,16 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkActionWithMetadata(ctx cont
 			existing.BlockedReason = ""
 			existing.Error = ""
 			existing.CompletedAt = nil
+			changed = true
 		}
 		if existing.Status == store.RepositoryMonitorWorkActionStatusQueued && status != store.RepositoryMonitorWorkActionStatusQueued {
 			existing.Status = status
 			existing.Phase = phase
 			existing.BlockedReason = blockedReason
+			changed = true
+		}
+		if !changed {
+			return nil
 		}
 		metrics.RecordRepositoryMonitorWorkAction(existing.DesiredAction, existing.Status)
 		return h.repositoryMonitorStore.UpdateWorkAction(ctx, existing)

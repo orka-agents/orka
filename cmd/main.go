@@ -382,6 +382,7 @@ func main() {
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
 	var acpWorkspaceAllowProviderTokenInSandbox bool
+	var acpWorkspaceDefaultSuspendAfterDetach time.Duration
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
@@ -744,6 +745,12 @@ func main() {
 		"Allow built-in Agents to declare runtime.skills (Agent Skills read from digest-pinned images). Off by default; requires --acp-toolboxes-enabled, whose registry allowlist, pull secrets, node selector, and mount method skills reuse.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.DurationVar(&acpWorkspaceDefaultSuspendAfterDetach, "acp-workspace-default-suspend-after-detach",
+		controller.DefaultACPWorkspaceSuspendAfterDetach,
+		"Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets no "+
+			"spec.retention.suspendAfterDetach (ADR 0057). Existing workspaces keep what they froze. 0 disables only the controller default; "+
+			"the ExecutionWorkspaceClass annotation "+controller.ACPWorkspaceClassDefaultSuspendAfterDetachAnnotation+
+			" still sets a per-class window, and \"disabled\" opts a class out.")
 	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
 		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
@@ -960,6 +967,11 @@ func main() {
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
 		setupLog.Error(nativeSessionMaxBytesErr, "invalid native session size configuration")
+		os.Exit(1)
+	}
+	if err := controller.ValidateACPWorkspaceDefaultSuspendAfterDetach(acpWorkspaceDefaultSuspendAfterDetach); err != nil {
+		// The logger is not set up yet, so setupLog would drop this.
+		fmt.Fprintf(os.Stderr, "invalid --acp-workspace-default-suspend-after-detach: %v\n", err)
 		os.Exit(1)
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
@@ -2140,6 +2152,8 @@ func main() {
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+
+		ACPWorkspaceDefaultSuspendAfterDetach: acpWorkspaceDefaultSuspendAfterDetach,
 
 		AIWorkerServiceAccountName:        aiWorkerServiceAccountName,
 		VendorWorkerServiceAccountName:    vendorWorkerServiceAccountName,

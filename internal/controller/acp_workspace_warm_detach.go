@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
@@ -30,6 +31,50 @@ import (
 // before the Suspend applies. The window is frozen per workspace through
 // acpWorkspaceSuspendAfterDetachAnnotation; one window instance is the
 // absolute acpWorkspaceSuspendAtAnnotation deadline.
+
+// acpWorkspaceWarmExpiryGrace bounds how long live continuation demand may
+// defer a warm window's expiry past its deadline, and how close to the
+// deadline a continuation records its demand before attaching.
+const acpWorkspaceWarmExpiryGrace = 2 * time.Minute
+
+// stampACPWorkspaceWarmDemand records a continuation's demand on a warm
+// workspace whose deadline is near. Retention's delayed Suspend is an
+// optimistic write on the same object, so once this lands the expiry either
+// sees the demand and defers, or loses the conflict, exactly as it would
+// against the attachment itself.
+func (r *TaskReconciler) stampACPWorkspaceWarmDemand(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	now time.Time,
+) error {
+	deadline, open := acpWorkspaceWarmWindowOpen(workspace)
+	if !open || deadline.Sub(now) >= acpWorkspaceWarmExpiryGrace ||
+		acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID)) {
+		return nil
+	}
+	base := workspace.DeepCopy()
+	workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] =
+		now.UTC().Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
+	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+}
+
+// warmWindowDemandOutstanding reports demand that must defer a warm window's
+// expiry: a live recorded requester, an open speculative start (ADR 0057),
+// or any live continuation Task of the Session, bound or not yet linked.
+func (r *ACPWorkspaceRetentionReconciler) warmWindowDemandOutstanding(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	now time.Time,
+) (bool, error) {
+	if deadline, _, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]); ok && now.Before(deadline) {
+		return true, nil
+	}
+	if live, err := r.recordedWorkspaceDemandLive(ctx, workspace, nil); err != nil || live {
+		return true, err
+	}
+	return r.liveSessionContinuationExists(ctx, workspace, nil)
+}
 
 // parseACPWorkspaceSuspendAfterDetach parses a frozen warm-detach window: a
 // positive Go duration of at most maxACPWorkspaceSuspendAfterDetach.
@@ -210,6 +255,7 @@ func (r *TaskReconciler) settleACPWorkspaceWarm(
 	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now.UTC().Format(time.RFC3339Nano)
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			return false, true, nil
@@ -308,6 +354,28 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 		requeue := min(deadline.Sub(now)+time.Second, lifetimeRequeue)
 		return ctrl.Result{RequeueAfter: requeue}, true, nil
 	}
+	drained := strings.TrimSpace(workspace.Annotations[acpWorkspaceWarmWindowDrainedAnnotation]) != ""
+	if !tainted && !drained && now.Before(deadline.Add(acpWorkspaceWarmExpiryGrace)) &&
+		workspace.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
+		// A continuation that is bound but not attached yet must not watch
+		// the runtime it is about to attach get suspended. Its demand
+		// defers expiry for a bounded grace; the attachment then ends the
+		// window, or the grace runs out and the Suspend applies.
+		outstanding, err := r.warmWindowDemandOutstanding(ctx, workspace, now)
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		if outstanding {
+			graceEnds := deadline.Add(acpWorkspaceWarmExpiryGrace)
+			logf.FromContext(ctx).Info("Warm-detach window expiry deferred for live continuation demand",
+				"workspace", workspace.Name, "deadline", deadline.UTC().Format(time.RFC3339Nano),
+				"graceEnds", graceEnds.UTC().Format(time.RFC3339Nano), "pastDeadlineMs", now.Sub(deadline).Milliseconds())
+			r.recordRetention(workspace, "WarmWindowExpiryDeferred",
+				"the warm-detach window elapsed while a continuation still demands the workspace; its Suspend waits at most until "+
+					graceEnds.UTC().Format(time.RFC3339))
+			return ctrl.Result{RequeueAfter: min(5*time.Second, graceEnds.Sub(now)+time.Second)}, true, nil
+		}
+	}
 	// A fenced expiry can return without deleting: a Session continuation
 	// admitted before the retention fence vetoes it, or a concurrent update
 	// wins the precondition. Retention watches only workspaces, so keep the
@@ -377,9 +445,21 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 
 // validateACPWorkspaceSuspendAfterDetach verifies a materialized window when
 // present. An absent window stays admissible so a workspace created before
-// the annotation existed can be backfilled.
+// the annotation existed can be backfilled. A window frozen from the
+// controller default (ADR 0057) is admissible only for a binding whose
+// profile sets none, whatever default the current controller uses.
 func validateACPWorkspaceSuspendAfterDetach(workspace *workspacev1alpha1.ExecutionWorkspace, expected string) error {
 	raw, present := workspace.Annotations[acpWorkspaceSuspendAfterDetachAnnotation]
+	source, sourced := workspace.Annotations[acpWorkspaceSuspendAfterDetachSourceAnnotation]
+	if sourced {
+		if source != acpWorkspaceSuspendAfterDetachSourceDefault || !present || expected != "" {
+			return fmt.Errorf("%w: workspace %s default warm-detach window does not match the frozen binding", errACPWorkspaceBindingConflict, workspace.Name)
+		}
+		if _, err := parseACPWorkspaceSuspendAfterDetach(raw); err != nil {
+			return fmt.Errorf("%w: workspace %s default warm-detach window is invalid", errACPWorkspaceBindingConflict, workspace.Name)
+		}
+		return nil
+	}
 	if !present {
 		return nil
 	}

@@ -8,6 +8,10 @@ Accepted. Amends the detach step of ADR 0027, the idle Ready rule of ADR 0029, a
 Detach and finalization section of ADR 0026 for Substrate classes that opt in. ADR
 0031's data-only cold path and ADR 0030's full-memory gate are unchanged.
 
+Amended by [ADR 0057](0057-substrate-continuation-latency.md): new eligible Substrate workspaces
+freeze a controller default window when their profile sets none, replacing the **No default** rule
+for those workspaces only.
+
 ## Context
 
 A session-reused Substrate workspace whose frozen detach action is `Suspend` is torn
@@ -123,10 +127,11 @@ which the mid-Task bearer rotation already applies to a running Actor.
 - **A drain ends the window at once.** When the RuntimePool must drain a detached warm runtime,
   because of a worker eviction or a retirement for an upgrade or a changed runtime fence, it
   moves `suspend-at` to now and records `acp.workspace.orka.ai/warm-window-drained-at`. It never
-  moves the deadline later. Retention then applies the frozen Suspend immediately, so the
-  suspension lands inside the drain's deadline. A window longer than that deadline (up to one
-  hour is allowed) would otherwise expire after the eviction had already killed the runtime,
-  which loses data. A later detach, the suspension, and an attachment clear the marker.
+  moves the deadline later. Retention then applies the frozen Suspend immediately, without any
+  live-demand grace, so the suspension lands inside the drain's deadline. A window longer than
+  that deadline (up to one hour is allowed) would otherwise expire after the eviction had already
+  killed the runtime, which loses data. A later detach, the suspension, and an attachment clear
+  the marker.
 - **A vetoed expiry keeps its requeue.** Expiry deletion is fenced like idle expiry,
   so a Session continuation admitted before the fence cancels it. Retention then keeps
   its bounded `maxLifetime` / poll requeue, because it watches only workspaces and a
