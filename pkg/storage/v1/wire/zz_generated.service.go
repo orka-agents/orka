@@ -806,7 +806,9 @@ func (client *Client) PruneOperationReceipts(ctx context.Context, limit int) (in
 		return 0, err
 	}
 	var r0 int
-	r0 = int(wireResponse.Removed)
+	if r0, err = intFromWire(wireResponse.Removed, "PruneOperationReceipts result"); err != nil {
+		return 0, client.responseError(&methodPruneOperationReceipts, err)
+	}
 	return r0, nil
 }
 
@@ -1752,7 +1754,9 @@ func (service *ownershipService) PruneOperationReceipts(ctx context.Context, wir
 	}
 	var err error
 	var a0 int
-	a0 = int(wireRequest.Limit)
+	if a0, err = intFromWire(wireRequest.Limit, "PruneOperationReceipts.limit"); err != nil {
+		return nil, requestStatus(err)
+	}
 	var r0 int
 	r0, err = service.provider.PruneOperationReceipts(ctx, a0)
 	if err != nil {
