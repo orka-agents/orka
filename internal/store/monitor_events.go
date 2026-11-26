@@ -63,6 +63,7 @@ var repositoryMonitorEventDecisions = map[string]string{
 	"update_branch_started":               RepositoryMonitorDecisionAccepted,
 
 	RepositoryMonitorEventCommandRejected: RepositoryMonitorDecisionRefused,
+	"issue_action_refused":                RepositoryMonitorDecisionRefused,
 	"pause_label_rejected":                RepositoryMonitorDecisionRefused,
 	"repair_refused":                      RepositoryMonitorDecisionRefused,
 	"review_result_rejected":              RepositoryMonitorDecisionRefused,
