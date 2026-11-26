@@ -2305,6 +2305,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				),
 			)
 		}
+		turnTimings.mark(acpTurnStepTerminalPersistence)
 		outcome := acpPromptOutcomeFailed
 		switch terminal.Type {
 		case harnessv2.EventCancelled:
