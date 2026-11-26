@@ -176,6 +176,7 @@ type (
 	UsageWorkRequest                          = storagev1.UsageWorkRequest
 	UsageTask                                 = storagev1.UsageTask
 	UsageGatewayOwner                         = storagev1.UsageGatewayOwner
+	UsageRequester                            = storagev1.UsageRequester
 	UsageTaskPhase                            = storagev1.UsageTaskPhase
 	UsageObservation                          = storagev1.UsageObservation
 	UsagePRLink                               = storagev1.UsagePRLink
@@ -290,6 +291,9 @@ const (
 	MaxMessageBatch                   = storagev1.MaxMessageBatch
 	MaxMemoryRecallIDs                = storagev1.MaxMemoryRecallIDs
 	MaxResultBytes                    = storagev1.MaxResultBytes
+	MaxMessageContentBytes            = storagev1.MaxMessageContentBytes
+	MaxMessageBatchBytes              = storagev1.MaxMessageBatchBytes
+	MaxControlIdentifierBytes         = storagev1.MaxControlIdentifierBytes
 )
 
 var (

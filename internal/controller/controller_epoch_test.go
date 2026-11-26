@@ -77,7 +77,10 @@ func TestControllerEpochManagerAdvancesStorageBeforeReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = mirrorDB.Close() })
-	authority := installationEpochStore{ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), installationID: "installation-a"}
+	authority := installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: newMemoryStorageRecords(),
+		installationID: "installation-a",
+	}
 	mirror := sqlite.NewStore(mirrorDB, "mirror")
 	manager := NewControllerEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, mirror)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -477,6 +480,8 @@ const (
 )
 
 type retainedIntentEpochStore struct {
+	memoryStorageRecords
+
 	current  *store.ControllerEpoch
 	changes  []store.ControllerEpochCAS
 	conflict retainedIntentEpochConflict
@@ -573,6 +578,12 @@ type recordingEpochDataset struct {
 	advanceErrs []error
 	// describeErrs, when non-empty, fail the next descriptions in order.
 	describeErrs []error
+	// watermark is the fake dataset's write watermark.
+	watermark   int64
+	watermarkAt time.Time
+	// floorRefusals are the advances refused because the dataset held a
+	// lower epoch than their AcknowledgedEpoch, as the contract requires.
+	floorRefusals []storagev1.AdvanceControllerEpochRequest
 }
 
 func newRecordingEpochDataset(datasetID string) *recordingEpochDataset {
@@ -600,10 +611,27 @@ func (d *recordingEpochDataset) AdvanceControllerEpoch(
 		d.advanceErrs = d.advanceErrs[1:]
 		return storagev1.ControllerEpochMirrorState{}, err
 	}
+	stored := int64(0)
+	if len(d.requests) > 0 {
+		stored = d.requests[len(d.requests)-1].Epoch.Epoch
+	}
+	if stored < request.AcknowledgedEpoch {
+		d.floorRefusals = append(d.floorRefusals, request)
+		return storagev1.ControllerEpochMirrorState{}, fmt.Errorf("%w: dataset holds epoch %d, below acknowledged epoch %d",
+			storagev1.ErrNotReady, stored, request.AcknowledgedEpoch)
+	}
 	d.requests = append(d.requests, request)
 	return storagev1.ControllerEpochMirrorState{
 		DatasetID: request.DatasetID, Epoch: request.Epoch, InstallationID: request.InstallationID,
 	}, nil
+}
+
+// refusedBelowFloor returns the advances the dataset refused because it held
+// a lower epoch than they acknowledged.
+func (d *recordingEpochDataset) refusedBelowFloor() []storagev1.AdvanceControllerEpochRequest {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.floorRefusals)
 }
 
 func (d *recordingEpochDataset) GetControllerEpochMirror(context.Context, string) (storagev1.ControllerEpochMirrorState, error) {
@@ -634,9 +662,10 @@ func (d *recordingEpochDataset) advanceRequests() []storagev1.AdvanceControllerE
 }
 
 // installationEpochStore gives an epoch store without its own installation
-// record a fixed installation ID.
+// record a fixed installation ID, and keeps its storage record in memory.
 type installationEpochStore struct {
 	store.ControllerEpochStore
+	*memoryStorageRecords
 	installationID string
 }
 

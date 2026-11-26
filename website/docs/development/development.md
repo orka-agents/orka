@@ -57,7 +57,7 @@ For a normal manifest or chart contribution:
 3. Review and commit the source changes together with all changes under `manifest_staging/`.
 4. Do not promote the chart in an ordinary feature PR. The root snapshots may intentionally remain at the current release while staging contains the next release.
 
-`make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make manifests` and inspect `git diff` for the same drift check locally.
+`make manifests` rebuilds staging from scratch, so direct changes in `manifest_staging/` are clobbered. CI reruns generation and requires a clean diff to detect stale output; run `make verify-generated` on a clean working tree for the same drift check locally. It also covers `make generate` output and names the command that fixes each stale file.
 
 Release preparation runs the staged release targets:
 
@@ -360,6 +360,12 @@ make build       # Now the Go build will succeed
 ```
 
 If the UI isn't built, the `ensure-ui-embed` Makefile target creates a stub `internal/uiembed/dist/index.html` so the Go build doesn't fail — but the embedded UI won't work.
+
+### Storage contract module
+
+`pkg/storage` is a nested Go module that the root module requires through a `replace` directive. Root `./...` patterns skip it, so run its tests with `go -C pkg/storage test ./...`; `make fmt`, `make vet`, `make test` and `make lint` already do. A Dockerfile that runs `go mod download` must copy `pkg/storage/go.mod` and `pkg/storage/go.sum` first.
+
+`make generate` also runs `make generate-storage`, which installs pinned buf and protoc plugins into `bin/storage-proto` on first use and regenerates the storage wire code from `pkg/storage/proto`. It needs no `protoc` install. `make verify-storage-generated` checks the committed code without changing the tree. See [storage contracts](https://github.com/orka-agents/orka/blob/main/docs/development/storage-contracts.md#wire-protocol).
 
 ### CLI version injection
 

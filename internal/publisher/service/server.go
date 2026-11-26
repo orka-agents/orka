@@ -124,6 +124,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+PublicationVerifyPath, s.handlePublicationVerify)
 	mux.HandleFunc("POST "+PublicationReclaimPath, s.handlePublicationReclaim)
 	mux.HandleFunc("POST "+PullRequestReconcilePath, s.handlePullRequestReconcile)
+	mux.HandleFunc("POST "+BranchRebasePath, s.handleBranchRebase)
 	return securityHeaders(mux)
 }
 
@@ -143,9 +144,9 @@ func (s *Server) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleCapabilities(writer http.ResponseWriter, request *http.Request) {
 	operations := []Operation{
 		OperationWorkspaceResolve, OperationWorkspacePrepare, OperationPublicationPreflight, OperationPublicationPrepare,
-		OperationPublicationPublish, OperationPublicationVerify, OperationPublicationReclaim,
+		OperationPublicationPublish, OperationPublicationVerify, OperationPublicationReclaim, OperationBranchRebase,
 	}
-	credentialKinds := []CredentialKind{CredentialHTTPExtraHeader}
+	credentialKinds := []CredentialKind{CredentialHTTPExtraHeader, CredentialSSHSigningKey}
 	if s.config.PRFactory != nil {
 		operations = append(operations, OperationPullRequestReconcile)
 		credentialKinds = append(credentialKinds, CredentialForgeToken)
@@ -385,6 +386,8 @@ func classifyPublisherError(err error) error {
 		return apiError(ErrInvalidRequest, "invalid_request", "publisher request is invalid", 400, false, err)
 	case errors.Is(err, publisher.ErrUnsafeDelta), errors.Is(err, publisher.ErrUnsupportedDelta):
 		return apiError(ErrInvalidRequest, "unsafe_delta", "workspace delta is unsafe or unsupported", 422, false, err)
+	case errors.Is(err, publisher.ErrRebaseRefused):
+		return apiError(nil, "rebase_refused", "automated rebase was refused due to conflicts or non-linear history", 422, false, err)
 	case errors.Is(err, publisher.ErrSourceMoved):
 		return apiError(nil, "source_moved", "source ref moved from the persisted baseline", 409, false, err)
 	case errors.Is(err, publisher.ErrBranchMoved), errors.Is(err, publisher.ErrBranchClaimMismatch):

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -60,6 +61,7 @@ type nativeRemoteFixture struct {
 	client                 client.Client
 	gatewayURL             string
 	executor               *worker.ToolExecutor
+	httpClient             *http.Client
 	tool                   *corev1alpha1.Tool
 	task                   *corev1alpha1.Task
 	agent                  *corev1alpha1.Agent
@@ -150,8 +152,9 @@ func newNativeRemoteFixture(t *testing.T) *nativeRemoteFixture {
 	_ = corev1alpha1.AddToScheme(scheme)
 	f.client = fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(f.tool, f.agent, f.task, secret, policy, service).Build()
+	f.httpClient = server.Client()
 	f.executor = worker.NewToolExecutorForNamespace(
-		"team", kubefake.NewSimpleClientset(secret), server.Client(), nativeRemoteResolver{gateway: server.URL},
+		"team", kubefake.NewSimpleClientset(secret), f.httpClient, nativeRemoteResolver{gateway: server.URL},
 	)
 	tokenPath := filepath.Join(t.TempDir(), "task-token")
 	if err := os.WriteFile(tokenPath, []byte("task-test-authority"), 0600); err != nil {
@@ -419,36 +422,47 @@ func TestNativeRemoteMCPStartupDeadlineIncludesDependencies(t *testing.T) {
 func TestNativeRemoteMCPDeadlineIncludesRevalidation(t *testing.T) {
 	for _, phase := range []string{"execution", "approval refresh"} {
 		t.Run(phase, func(t *testing.T) {
+			// The httptest server stays outside the bubble: its accept loop is
+			// blocked on network I/O, which would stop the fake clock forever.
+			// Without keep-alives, connections dialed in the bubble close after
+			// each response instead of idling on a network read.
 			f := newNativeRemoteFixture(t)
+			f.httpClient.Transport.(*http.Transport).DisableKeepAlives = true
 			f.tool.Spec.HTTP.Timeout = &metav1.Duration{Duration: 100 * time.Millisecond}
 			if err := f.client.Update(t.Context(), f.tool); err != nil {
 				t.Fatal(err)
 			}
-			ctx, loaded, err := f.prepare(t)
-			if err != nil {
-				t.Fatal(err)
-			}
-			outer, cancel := context.WithTimeout(ctx, 2*time.Second)
-			defer cancel()
-			toolContext := prepareApprovalToolContext(&tools.ToolContext{
-				Client:    nativeRemoteBlockingClient{Client: f.client},
-				Namespace: "team", TaskID: "task", TaskUID: "task-uid",
-			}, nil)
-			before := f.requests.Load()
-			if phase == "execution" {
-				_, err = executeNativeRemoteTool(outer, toolContext, loaded["health"], json.RawMessage(`{}`))
-			} else {
-				err = toolContext.ApprovalTargetRefresh(outer, "health", loaded["health"])
-			}
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("native validation did not preserve its deadline: %v", err)
-			}
-			if outer.Err() != nil {
-				t.Fatal("native validation waited for the outer deadline instead of the Tool timeout")
-			}
-			if f.requests.Load() != before || f.calls.Load() != 0 {
-				t.Fatal("timed-out native validation reached the remote server")
-			}
+			// The bubble's fake clock advances only while every goroutine in it is
+			// durably blocked, so the successful preparation cannot spend the
+			// 100ms Tool budget on scheduling delays or httptest round trips.
+			// Only the blocked revalidation read lets the clock reach a deadline.
+			synctest.Test(t, func(t *testing.T) {
+				ctx, loaded, err := f.prepare(t)
+				if err != nil {
+					t.Fatal(err)
+				}
+				outer, cancel := context.WithTimeout(ctx, 2*time.Second)
+				defer cancel()
+				toolContext := prepareApprovalToolContext(&tools.ToolContext{
+					Client:    nativeRemoteBlockingClient{Client: f.client},
+					Namespace: "team", TaskID: "task", TaskUID: "task-uid",
+				}, nil)
+				before := f.requests.Load()
+				if phase == "execution" {
+					_, err = executeNativeRemoteTool(outer, toolContext, loaded["health"], json.RawMessage(`{}`))
+				} else {
+					err = toolContext.ApprovalTargetRefresh(outer, "health", loaded["health"])
+				}
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("native validation did not preserve its deadline: %v", err)
+				}
+				if outer.Err() != nil {
+					t.Fatal("native validation waited for the outer deadline instead of the Tool timeout")
+				}
+				if f.requests.Load() != before || f.calls.Load() != 0 {
+					t.Fatal("timed-out native validation reached the remote server")
+				}
+			})
 		})
 	}
 }

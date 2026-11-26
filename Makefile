@@ -63,10 +63,17 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen kustomize workspace-crds ## Generate canonical and staged manifests.
+	# controller-gen leaves the CRD of a removed kind behind, so generate CRDs
+	# into an empty directory and replace the bases only once it succeeds.
+	# workspace-crds has already copied the workspace.orka.ai CRDs in.
 	# A module pattern excludes nested provider checkouts used by local conformance.
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config=config/crd/bases
-	# controller-gen leaves removed kinds behind; Core no longer serves these provider APIs.
-	rm -f config/crd/bases/acp.workspace.orka.ai_*.yaml config/crd/bases/fake.workspace.orka.ai_*.yaml
+	@set -euo pipefail; \
+		crds="$$(mktemp -d)"; \
+		trap 'rm -rf "$$crds"' EXIT; \
+		"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd:allowDangerousTypes=true webhook paths="github.com/orka-agents/orka/..." output:crd:artifacts:config="$$crds"; \
+		rm -f "$$crds"/acp.workspace.orka.ai_*.yaml "$$crds"/fake.workspace.orka.ai_*.yaml; \
+		find config/crd/bases -name '*.yaml' ! -name 'workspace.orka.ai_*' -delete; \
+		cp "$$crds"/*.yaml config/crd/bases/
 	@set -euo pipefail; \
 		tmp="$$(mktemp -d .manifest_staging.tmp.XXXXXX)"; \
 		backup=""; \
@@ -147,13 +154,30 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 	scripts/sync-helm-crds.sh
 
 .PHONY: generate
-generate: controller-gen ## Generate DeepCopy implementations and the storage client's write envelope decorators.
+generate: controller-gen generate-storage ## Generate DeepCopy implementations, the storage client's write envelope decorators, the storage fault wrappers and the orka.storage.v1 wire code.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
-	go generate ./internal/storageclient
+	go generate ./internal/storageclient ./internal/storageclient/storagefault
+
+.PHONY: verify-generated
+verify-generated: ## Fail when `make generate manifests` changes any file. Needs a clean working tree.
+	MAKE="$(MAKE)" scripts/verify-generated.sh
+
+# The storage contract is a nested Go module (pkg/storage). The root module's
+# ./... patterns do not include it, so its targets run with go -C.
+STORAGE_MODULE := pkg/storage
+
+.PHONY: generate-storage
+generate-storage: ## Generate the orka.storage.v1 protobuf code and the Go-to-wire mapping.
+	scripts/generate-storage-proto.sh generate
+
+.PHONY: verify-storage-generated
+verify-storage-generated: ## Check that the orka.storage.v1 generated code matches its sources.
+	scripts/generate-storage-proto.sh verify
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
+	go -C $(STORAGE_MODULE) fmt ./...
 
 .PHONY: ensure-ui-embed
 ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/build without full UI build).
@@ -165,6 +189,7 @@ ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/bu
 .PHONY: vet
 vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
+	go -C $(STORAGE_MODULE) vet ./...
 
 
 .PHONY: repository-monitor-fake-e2e
@@ -182,6 +207,7 @@ GO_TEST_TIMEOUT ?= 20m
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -timeout $(GO_TEST_TIMEOUT) -coverprofile cover.out
+	go -C $(STORAGE_MODULE) test -timeout $(GO_TEST_TIMEOUT) ./...
 
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
@@ -239,10 +265,12 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 .PHONY: lint
 lint: ensure-ui-embed golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run --new
+	cd $(STORAGE_MODULE) && "$(GOLANGCI_LINT)" run --new
 
 .PHONY: lint-fix
 lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix --new
+	cd $(STORAGE_MODULE) && "$(GOLANGCI_LINT)" run --fix --new
 
 ##@ Demos
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -438,6 +439,43 @@ func TestFinishPromptGenAIKeepsUsageWhenItEndsTelemetryFirst(t *testing.T) {
 	usage, ok := h.metrics(t)[genai.MetricClientTokenUsage].(metricdata.Histogram[int64])
 	if !ok || len(usage.DataPoints) != 2 {
 		t.Fatalf("token usage = %+v, want input and output samples", h.metrics(t)[genai.MetricClientTokenUsage])
+	}
+}
+
+// Each distinct tool name label is a histogram series, and adapter and MCP
+// tool names are unbounded. A supervisor labels at most
+// maxGenAIMetricToolNames of them; later names fall back to their ACP kind.
+// Spans keep every name.
+func TestGenAIToolDurationMetricBoundsToolNameLabels(t *testing.T) {
+	h := newGenAITestHarness(t, providerKindCodex, "gpt-5")
+	start := time.Now().UTC()
+	prompt := h.server.startInvokeAgent(context.Background(), &sessionState{id: "session-1"}, testGenAIPromptRequest(), start)
+	const calls = maxGenAIMetricToolNames + 10
+	for i := range calls {
+		update := &harnessv2.ToolCallUpdate{ToolCallID: "call-" + strconv.Itoa(i), Kind: "fetch", Status: harnessv2.ToolCallStatusCompleted}
+		prompt.observeTool(update, "mcp__server__tool_"+strconv.Itoa(i), start)
+	}
+	// A name already admitted keeps its label.
+	prompt.observeTool(&harnessv2.ToolCallUpdate{ToolCallID: "call-again", Kind: "fetch", Status: harnessv2.ToolCallStatusCompleted}, "mcp__server__tool_0", start)
+	prompt.finish(acp.PromptResult{Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn}, start.Add(time.Minute))
+
+	durations, ok := h.metrics(t)[genai.MetricExecuteToolDuration].(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatal("missing tool duration histogram")
+	}
+	labels := map[string]uint64{}
+	for _, point := range durations.DataPoints {
+		name, _ := point.Attributes.Value(attribute.Key(genai.AttrToolName))
+		labels[name.AsString()] += point.Count
+	}
+	if len(labels) != maxGenAIMetricToolNames+1 {
+		t.Fatalf("tool name labels = %d, want %d admitted names plus the kind", len(labels), maxGenAIMetricToolNames)
+	}
+	if labels["fetch"] != calls-maxGenAIMetricToolNames || labels["mcp__server__tool_0"] != 2 {
+		t.Fatalf("tool name samples = %v, want the overflow under its kind and admitted names kept", labels)
+	}
+	if spans := h.spans("execute_tool mcp__server__tool_" + strconv.Itoa(calls-1)); len(spans) != 1 {
+		t.Fatalf("spans for an unlabeled name = %d, want its own span", len(spans))
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr/funcr"
 
@@ -94,30 +95,64 @@ func (r *KubernetesResolver) auditAgentIdentityUse(policy *corev1alpha1.Outbound
 	}
 	logger = logger.WithName(agentIdentityAuditLogName)
 	mode := AgentIdentityMode(policy.Spec.AgentIdentity)
+	now := time.Now().UTC()
+	if r.Now != nil {
+		now = r.Now().UTC()
+	}
+	record := AgentIdentityAuditRecord{
+		Timestamp:        now,
+		Event:            "agent_identity_use",
+		Mode:             mode,
+		PolicyNamespace:  policy.Namespace,
+		PolicyName:       policy.Name,
+		PolicyUID:        string(policy.UID),
+		PolicyGeneration: policy.Generation,
+		Tool:             req.Tool.Name,
+		ToolMethod:       req.Tool.Method,
+		ArgumentsDigest:  argumentsDigest(req.Tool.Name, req.Arguments),
+		TaskUID:          auditTaskUID(req),
+	}
 	values := []any{
-		"event", "agent_identity_use",
-		"policyNamespace", policy.Namespace, "policyName", policy.Name,
-		"policyUID", string(policy.UID), "policyGeneration", policy.Generation,
-		"mode", mode, "tool", req.Tool.Name, "toolMethod", req.Tool.Method,
-		"argumentsDigest", argumentsDigest(req.Tool.Name, req.Arguments),
-		"taskUID", auditTaskUID(req),
+		"event", record.Event,
+		"policyNamespace", record.PolicyNamespace, "policyName", record.PolicyName,
+		"policyUID", record.PolicyUID, "policyGeneration", record.PolicyGeneration,
+		"mode", mode, "tool", record.Tool, "toolMethod", record.ToolMethod,
+		"argumentsDigest", record.ArgumentsDigest,
+		"taskUID", record.TaskUID,
 	}
 	if binding := req.AgentIdentity; binding != nil {
+		record.AgentNamespace = binding.AgentNamespace
+		record.AgentName = binding.AgentName
+		record.AgentUID = binding.AgentUID
+		record.AgentGeneration = binding.AgentGeneration
+		record.IdentityIssuer = binding.Identity.Issuer
+		record.IdentityID = binding.Identity.ID
+		record.IssuerInstance = auditIssuerInstance(binding.Identity.Instance)
 		values = append(values,
-			"agentNamespace", binding.AgentNamespace, "agentName", binding.AgentName,
-			"agentUID", binding.AgentUID, "agentGeneration", binding.AgentGeneration,
-			"identityIssuer", binding.Identity.Issuer, "identityID", binding.Identity.ID,
-			"issuerInstance", auditIssuerInstance(binding.Identity.Instance),
+			"agentNamespace", record.AgentNamespace, "agentName", record.AgentName,
+			"agentUID", record.AgentUID, "agentGeneration", record.AgentGeneration,
+			"identityIssuer", record.IdentityIssuer, "identityID", record.IdentityID,
+			"issuerInstance", record.IssuerInstance,
 		)
 	}
 	if mode == corev1alpha1.OutboundAgentIdentityModeDelegated {
-		values = append(values, "requester", r.requesterPseudonym(req.Requester))
+		record.Requester = r.requesterPseudonym(req.Requester)
+		values = append(values, "requester", record.Requester)
 	}
 	if err != nil {
-		logger.Info("agent identity call refused", append(values, "outcome", "refused", "reason", agentIdentityRefusalReason(err))...)
+		record.Outcome = "refused"
+		record.Reason = agentIdentityRefusalReason(err)
+		if r.AuditSink != nil {
+			r.AuditSink.Record(record)
+		}
+		logger.Info("agent identity call refused", append(values, "outcome", record.Outcome, "reason", record.Reason)...)
 		return
 	}
-	logger.Info("agent identity call issued", append(values, "outcome", "issued")...)
+	record.Outcome = "issued"
+	if r.AuditSink != nil {
+		r.AuditSink.Record(record)
+	}
+	logger.Info("agent identity call issued", append(values, "outcome", record.Outcome)...)
 }
 
 // auditTaskUID names the calling Task whether or not it has an identity

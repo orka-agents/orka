@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	defaultWorkspaceCredentialKey = "token"
-	maxBrokeredCredentialBytes    = 32 << 10
+	defaultWorkspaceCredentialKey     = "token"
+	workspaceCredentialKeyPassword    = "password"
+	maxBrokeredCredentialBytes        = 32 << 10
+	apiErrorCredentialMaterialInvalid = "credential_material_invalid"
 )
 
 func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
@@ -42,6 +44,9 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil || request.Validate() != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{apiFieldError: apiErrorInvalidRequest})
 	}
+	if request.ParentOperation == publisherservice.OperationBranchRebase {
+		return s.issueBranchRebaseCredential(c, request)
+	}
 	task, reference, frozenResourceVersion, credentialRole, err := s.authorizePublisherCredentialRequest(c.Context(), request)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
@@ -50,7 +55,8 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
 	binding, err := s.frozenPromptCredentialBinding(c.Context(), task, credentialRole)
-	if err != nil || binding.SecretName != reference.Name || binding.SecretKey != effectiveWorkspaceCredentialKey(reference) ||
+	expectedSecretKey := effectiveWorkspaceCredentialKeyForRole(reference, credentialRole)
+	if err != nil || binding.SecretName != reference.Name || binding.SecretKey != expectedSecretKey ||
 		binding.ResourceVersion != frozenResourceVersion {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
 	}
@@ -63,14 +69,83 @@ func (s *Server) issuePublisherCredential(c fiber.Ctx) error {
 		secret.ResourceVersion == "" || secret.ResourceVersion != frozenResourceVersion || string(secret.UID) != binding.SecretUID {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{apiFieldError: "credential_version_changed"})
 	}
-	key := effectiveWorkspaceCredentialKey(reference)
+	key := expectedSecretKey
 	value := bytes.TrimSpace(secret.Data[key])
-	if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\r\n\x00") {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "credential_material_invalid"})
+	if request.Reference.Kind == publisherservice.CredentialSSHSigningKey {
+		if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\x00") {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
+		}
+	} else if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\r\n\x00") {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
 	}
 	material, err := formatPublisherCredential(request.Reference.Kind, value)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: "credential_material_invalid"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
+	}
+	return c.JSON(publisherservice.CredentialMaterialResponse{Material: material, ResourceVersion: secret.ResourceVersion})
+}
+
+// issueBranchRebaseCredential authorizes an in-flight RepositoryMonitor
+// clean-room branch rebase operation against the monitor's explicit
+// publicationCredentialRef or commit.signingCredentialRef.
+func (s *Server) issueBranchRebaseCredential(c fiber.Ctx, request publisherservice.CredentialMaterialRequest) error {
+	if err := s.authorizePublisherParentEffect(c.Context(), request.ParentOperation, request.Metadata); err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+	}
+	monitorName := strings.TrimPrefix(request.Metadata.PublicationID, "rm-rebase-")
+	if monitorName == "" || monitorName == request.Metadata.PublicationID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+	}
+	reader := s.authorizationReader()
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	if err := reader.Get(c.Context(), client.ObjectKey{Namespace: request.Metadata.Namespace, Name: monitorName}, monitor); err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+	}
+	if !monitor.Spec.Repair.Enabled || !strings.EqualFold(strings.TrimSpace(monitor.Spec.Repair.UpdateBranchStrategy), "rebase") {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+	}
+	var expectedSecretName string
+	var candidateKeys []string
+	switch {
+	case request.Reference.Kind == publisherservice.CredentialSSHSigningKey && request.Reference.Role == publisherservice.CredentialRoleCommitSign:
+		if monitor.Spec.Commit.SigningCredentialRef == nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+		}
+		expectedSecretName = strings.TrimSpace(monitor.Spec.Commit.SigningCredentialRef.Name)
+		candidateKeys = []string{"signingKey", "key", "id_ed25519"}
+	case request.Reference.Kind == publisherservice.CredentialHTTPExtraHeader && request.Reference.Role == publisherservice.CredentialRoleTargetWrite:
+		if monitor.Spec.PublicationCredentialRef == nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+		}
+		expectedSecretName = strings.TrimSpace(monitor.Spec.PublicationCredentialRef.Name)
+		candidateKeys = []string{defaultWorkspaceCredentialKey, workspaceCredentialKeyPassword, "GITHUB_TOKEN"}
+	default:
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+	}
+	if expectedSecretName == "" || request.Reference.Name != expectedSecretName {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorAuthorizationFailed})
+	}
+	secret := &corev1.Secret{}
+	if err := reader.Get(c.Context(), client.ObjectKey{Namespace: monitor.Namespace, Name: expectedSecretName}, secret); err != nil || secret.ResourceVersion == "" {
+		return c.Status(fiber.StatusGone).JSON(fiber.Map{apiFieldError: "credential_version_changed"})
+	}
+	var value []byte
+	for _, k := range candidateKeys {
+		if trimmed := bytes.TrimSpace(secret.Data[k]); len(trimmed) > 0 {
+			value = trimmed
+			break
+		}
+	}
+	if request.Reference.Kind == publisherservice.CredentialSSHSigningKey {
+		if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\x00") {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
+		}
+	} else if len(value) == 0 || len(value) > maxBrokeredCredentialBytes || bytes.ContainsAny(value, "\r\n\x00") {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
+	}
+	material, err := formatPublisherCredential(request.Reference.Kind, value)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{apiFieldError: apiErrorCredentialMaterialInvalid})
 	}
 	return c.JSON(publisherservice.CredentialMaterialResponse{Material: material, ResourceVersion: secret.ResourceVersion})
 }
@@ -139,10 +214,21 @@ func (s *Server) authorizePublicationCredential(
 	if execution.State != corev1alpha1.TaskExecutionStateSucceeded {
 		return nil, nil, "", "", fmt.Errorf("publication credential request is not bound to the settled task")
 	}
-	if request.ParentOperation == publisherservice.OperationPublicationPublish && operatoraccess.Tainted(task.Annotations) {
+	if request.ParentOperation == publisherservice.OperationPublicationPublish {
 		// Backstop for the controller's pre-publishing gate: a session tainted
-		// by operator access never receives forge write credentials.
-		return nil, nil, "", "", fmt.Errorf("publication credential is unavailable for an operator-tainted task")
+		// by operator access never receives forge write credentials. The taint
+		// may sit on the Task, on its linked workspace incarnation, or on
+		// another Task that shared that incarnation, so check all three, and
+		// fail closed when they cannot be read.
+		tainted := operatoraccess.Tainted(task.Annotations)
+		if !tainted {
+			if tainted, err = controller.ACPTaskOperatorTainted(ctx, s.authorizationReader(), task); err != nil {
+				return nil, nil, "", "", fmt.Errorf("publication credential is unavailable")
+			}
+		}
+		if tainted {
+			return nil, nil, "", "", fmt.Errorf("publication credential is unavailable for an operator-tainted task")
+		}
 	}
 	kind, expectedState, expectedCredentialKind := publicationCredentialOperation(request.ParentOperation)
 	credentialRole := request.Reference.Role
@@ -150,7 +236,12 @@ func (s *Server) authorizePublicationCredential(
 		credentialRole = publisherservice.CredentialRole(promptCredentialRoleForOperation(request.ParentOperation))
 	}
 	if request.ParentOperation == publisherservice.OperationPublicationPrepare {
-		if credentialRole != publisherservice.CredentialRoleSourceRead && credentialRole != publisherservice.CredentialRoleTargetRead {
+		if request.Reference.Kind == publisherservice.CredentialSSHSigningKey {
+			if credentialRole != publisherservice.CredentialRoleCommitSign {
+				return nil, nil, "", "", fmt.Errorf("publication credential role is invalid for the requested operation")
+			}
+			expectedCredentialKind = publisherservice.CredentialSSHSigningKey
+		} else if credentialRole != publisherservice.CredentialRoleSourceRead && credentialRole != publisherservice.CredentialRoleTargetRead {
 			return nil, nil, "", "", fmt.Errorf("publication credential role is invalid for the requested operation")
 		}
 	} else if credentialRole != publisherservice.CredentialRole(promptCredentialRoleForOperation(request.ParentOperation)) {
@@ -181,6 +272,9 @@ func publicationCredentialBinding(
 	case publisherservice.OperationPublicationPreflight, publisherservice.OperationPublicationVerify:
 		return workspace.PublicationReadCredentialRef, execution.PublicationReadCredentialResourceVersion
 	case publisherservice.OperationPublicationPrepare:
+		if role == publisherservice.CredentialRoleCommitSign {
+			return workspace.CommitSigningCredentialRef, execution.CommitSigningCredentialResourceVersion
+		}
 		if role == publisherservice.CredentialRoleTargetRead {
 			return workspace.PublicationReadCredentialRef, execution.PublicationReadCredentialResourceVersion
 		}
@@ -288,14 +382,22 @@ func (s *Server) frozenPromptCredentialBinding(
 	return match, nil
 }
 
-func effectiveWorkspaceCredentialKey(reference *corev1alpha1.WorkspaceCredentialReference) string {
-	if reference == nil || strings.TrimSpace(reference.Key) == "" {
-		return defaultWorkspaceCredentialKey
+func effectiveWorkspaceCredentialKeyForRole(reference *corev1alpha1.WorkspaceCredentialReference, _ string) string {
+	if reference != nil && strings.TrimSpace(reference.Key) != "" {
+		return strings.TrimSpace(reference.Key)
 	}
-	return strings.TrimSpace(reference.Key)
+	return defaultWorkspaceCredentialKey
 }
 
 func formatPublisherCredential(kind publisherservice.CredentialKind, value []byte) (string, error) {
+	if kind == publisherservice.CredentialSSHSigningKey {
+		if len(bytes.TrimSpace(value)) == 0 {
+			return "", fmt.Errorf("credential is empty")
+		}
+		// Base64-encode the PEM so the broker response remains a single line
+		// without CR/LF while preserving exact key bytes.
+		return base64.StdEncoding.EncodeToString(value), nil
+	}
 	trimmed := strings.TrimSpace(string(value))
 	if trimmed == "" {
 		return "", fmt.Errorf("credential is empty")

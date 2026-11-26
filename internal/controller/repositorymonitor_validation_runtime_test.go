@@ -636,6 +636,12 @@ func TestRepositoryMonitorValidationJobAcceptsAPIDefaultedEnvFieldRef(t *testing
 	if err := controllerutil.SetControllerReference(task, expected, scheme); err != nil {
 		t.Fatal(err)
 	}
+	// The built Job need not carry a fieldRef of its own, so add one as the
+	// controller would render it: without apiVersion.
+	expected.Spec.Template.Spec.Containers[0].Env = append(expected.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:      "ORKA_TEST_POD_NAMESPACE",
+		ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}},
+	})
 	actual := expected.DeepCopy()
 	actual.UID = types.UID("validation-job-uid")
 	if err := defaultExpectedRepositoryMonitorValidationJob(actual, actual); err != nil {

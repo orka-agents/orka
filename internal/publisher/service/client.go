@@ -170,6 +170,12 @@ func (c *Client) ReclaimPublication(ctx context.Context, request PublicationRecl
 	return response, err
 }
 
+func (c *Client) RebaseBranch(ctx context.Context, request BranchRebaseRequest) (BranchRebaseResponse, error) {
+	var response BranchRebaseResponse
+	err := c.post(ctx, OperationBranchRebase, request.Metadata, request, &response)
+	return response, err
+}
+
 func (c *Client) ReconcilePullRequest(ctx context.Context, request PullRequestReconcileRequest) (PullRequestReconcileResponse, error) {
 	ctx, cancel := requestContext(ctx)
 	defer cancel()

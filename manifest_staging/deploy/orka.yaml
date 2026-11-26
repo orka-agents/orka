@@ -1272,6 +1272,7 @@ rules:
   - memoryproposals
   verbs:
   - create
+  - list
 - apiGroups:
   - core.orka.ai
   resources:
@@ -3781,7 +3782,7 @@ spec:
 
         (variables.garbageCollector ||
          request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller')) ||
-      variables.foregroundFinalizerRemoval || request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
+      variables.foregroundFinalizerRemoval || variables.storageRecoveryAcknowledgement || request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
     message: gateway-owned Tasks may only be managed by the owning Orka controller,
       trusted workers, or Kubernetes cleanup controllers
   variables:
@@ -3819,6 +3820,25 @@ spec:
         (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
       dyn(oldObject.metadata).all(k, k == 'finalizers' || k == 'managedFields' || k in dyn(object.metadata))
     name: foregroundFinalizerRemoval
+  - expression: |-
+      request.operation == 'UPDATE' && (!has(request.subResource) || request.subResource == '') && has(object.metadata.annotations) && 'storage.orka.ai/recovery-acknowledged' in object.metadata.annotations && dyn(object).all(k, k == 'metadata' ||
+
+        (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+      dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) && dyn(object.metadata).all(k, k == 'annotations' || k == 'managedFields' ||
+
+        (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+      dyn(oldObject.metadata).all(k, k == 'annotations' || k == 'managedFields' || k in dyn(object.metadata)) && object.metadata.annotations.all(k, k == 'storage.orka.ai/recovery-acknowledged' ||
+
+        (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations &&
+          object.metadata.annotations[k] == oldObject.metadata.annotations[k])) &&
+      (!has(oldObject.metadata.annotations) ||
+
+        oldObject.metadata.annotations.all(k, k == 'storage.orka.ai/recovery-acknowledged' ||
+          k in object.metadata.annotations)) &&
+      authorizer.group('core.orka.ai').resource('tasks').subresource('status')
+
+        .namespace(request.namespace).name(request.name).check('update').allowed()
+    name: storageRecoveryAcknowledgement
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -3894,6 +3914,10 @@ spec:
   - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memories'').namespace(request.namespace).check(''list'').allowed()'
     message: caller is not authorized to list memories, which a memory consolidation
       run reads and reports on
+    reason: Forbidden
+  - expression: '!variables.checkedRun || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''list'').allowed()'
+    message: caller is not authorized to list memory proposals, which a memory consolidation
+      run reads so it does not repeat them
     reason: Forbidden
   - expression: '!variables.checkedRun || object.spec.ai.memoryConsolidation.?mode.orValue(''DryRun'')
       != ''Propose'' || authorizer.group(''core.orka.ai'').resource(''memoryproposals'').namespace(request.namespace).check(''create'').allowed()'

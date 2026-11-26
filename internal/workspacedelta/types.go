@@ -119,6 +119,9 @@ type Snapshot struct {
 	manifestDigest string
 	entryCount     int
 	totalBytes     int64
+	// ignore holds the repository ignore rules read from this baseline's own
+	// .gitignore files and .git/info/exclude; nil when it has none.
+	ignore *ignoreRules
 }
 
 type entry struct {
