@@ -68,6 +68,7 @@ func newConfigSetTokenCmd() *cobra.Command {
 
 			if err := updateConfig(func(cfg *orkaConfig) error {
 				cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer = value, "", nil, ""
+				cfg.OIDCIssuer, cfg.OIDCAudience, cfg.OIDCClientID, cfg.OIDCTokenEndpoint, cfg.OIDCRefreshToken, cfg.OIDCScope = "", "", "", "", "", ""
 				return nil
 			}); err != nil {
 				return fmt.Errorf("save config: %w", err)

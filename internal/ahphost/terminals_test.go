@@ -187,6 +187,7 @@ func TestEndedTerminalsNothingFollowsGoWithTheNextTerminal(t *testing.T) {
 	backend.onReap = nil
 	require.NoError(t, client.Unsubscribe(ctx, "ahp-terminal:/three"))
 	require.NoError(t, other.Unsubscribe(ctx, "ahp-terminal:/two"))
+	require.NoError(t, other.Request(ctx, "ping", map[string]any{}, nil))
 	looks := 0
 	backend.onTerminals = func() {
 		looks++

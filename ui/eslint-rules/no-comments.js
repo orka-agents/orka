@@ -17,6 +17,8 @@ const directive = new RegExp(
     ")(?=[\\s:]|$)",
 );
 
+const blockDirective = /^\s*(?:eslint|globals?|exported)(?=\s|$)/;
+
 const deprecation = /^[\s*]*(?:Deprecated:|@deprecated\b)/m;
 
 const noticeParagraphs = JSON.parse(
@@ -91,6 +93,7 @@ export const noComments = {
           if (
             comment.type === "Shebang" ||
             directive.test(comment.value) ||
+            (comment.type === "Block" && blockDirective.test(comment.value)) ||
             deprecation.test(comment.value) ||
             header.has(comment)
           ) {

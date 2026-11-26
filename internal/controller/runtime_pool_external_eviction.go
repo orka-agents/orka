@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
 const (
@@ -136,23 +137,34 @@ func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time,
 	return signaledAt, deadline, evicting
 }
 
-func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace) bool {
+func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace, tainted bool) bool {
 	return w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+		!tainted && !operatoraccess.Tainted(w.Annotations) &&
 		slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
-func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting bool) workspacev1alpha1.WorkloadRetirementAction {
+func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting, tainted bool) workspacev1alpha1.WorkloadRetirementAction {
 	quarantined := w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
 	failed := w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed
+	tainted = tainted || operatoraccess.Tainted(w.Annotations)
 	switch {
 	case deleting:
 		return workspacev1alpha1.WorkloadRetirementDelete
-	case !quarantined && !failed && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)):
+	case tainted && !quarantined && !failed && externalSuspendRetirementAuthorized(w):
+		return workspacev1alpha1.WorkloadRetirementSuspend
+	case !quarantined && !failed && !tainted && (w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended || slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)):
 		return workspacev1alpha1.WorkloadRetirementSuspend
 	default:
 		return workspacev1alpha1.WorkloadRetirementStop
 	}
+}
+
+func externalSuspendRetirementAuthorized(w *workspacev1alpha1.ExecutionWorkspace) bool {
+	retirement, workload, allocation := w.Spec.Retirement, w.Spec.Workload, w.Status.Allocation
+	return retirement != nil && workload != nil && allocation != nil &&
+		retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend &&
+		retirement.Sequence == workload.Sequence && retirement.Identity == allocation.Identity
 }
 
 func externalRetirementDrainReason(action workspacev1alpha1.WorkloadRetirementAction) string {
@@ -232,9 +244,13 @@ func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 	if w.Spec.Workload == nil || a == nil || !a.Identity.Valid() || a.Sequence != w.Spec.Workload.Sequence || a.Key != w.Spec.Workload.Key {
 		return nil, errExternalEvictionUnbound
 	}
+	tainted, err := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), w)
+	if err != nil {
+		return nil, err
+	}
 	record := externalRuntimeEviction{
 		WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Source: source,
-		SignaledAt: signaledAt.UTC(), Deadline: deadline.UTC(), Suspendable: externalWorkspaceSuspendable(w),
+		SignaledAt: signaledAt.UTC(), Deadline: deadline.UTC(), Suspendable: externalWorkspaceSuspendable(w, tainted),
 	}
 	existing, malformed := currentExternalRuntimeEviction(pool, w)
 	if malformed {
@@ -266,6 +282,9 @@ func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 		}
 		if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 			return nil, err
+		}
+		if requestRetirement {
+			r.externalTimings.observeRetirement(pool.UID, w.Spec.Workload.Sequence, true, r.now())
 		}
 	}
 	return &record, nil

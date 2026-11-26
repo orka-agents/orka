@@ -131,32 +131,18 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			}
 			return ctrl.Result{}, err
 		}
+		allowCreate, requiredUID, poolPolicyFailure := acpRuntimePoolDemandPolicy(task, attempt, delivery, plan)
 		if !workspaceReady {
+			if poolPolicyFailure == "" {
+				r.startACPWorkspaceSpeculativeRuntime(ctx, task, plan, allowCreate, requiredUID)
+			}
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		runtimeBound := taskExecutionHasRuntimeOrSessionBinding(task.Status.Execution) ||
-			promptAttemptHasRuntimeOrSessionBinding(attempt)
-		allowCreate := delivery.allowPoolCreation && !runtimeBound
-		requiredUID := delivery.requiredRuntimePoolUID
-		if runtimeBound {
-			execution := task.Status.Execution
-			if execution == nil || execution.RuntimePoolName != plan.PoolName || strings.TrimSpace(execution.RuntimePoolUID) == "" {
-				return r.failACPPlanningTask(
-					ctx,
-					task,
-					corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
-					"the runtime-bound ACP attempt is missing its exact frozen RuntimePool identity",
-				)
-			}
-			requiredUID = types.UID(execution.RuntimePoolUID)
+		if workspaceName != "" {
+			acpPreDispatch.mark(task, acpPreDispatchWorkspaceReady)
 		}
-		if !allowCreate && requiredUID == "" {
-			return r.failACPPlanningTask(
-				ctx,
-				task,
-				corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"),
-				"the frozen ACP runtime delivery plan requires an exact preexisting RuntimePool identity",
-			)
+		if poolPolicyFailure != "" {
+			return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"), poolPolicyFailure)
 		}
 		pool, poolPreexisting, err = r.ensureACPRuntimePoolWithPolicy(
 			ctx, task.Namespace, plan, workspaceName,
@@ -173,6 +159,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			}
 			return ctrl.Result{}, err
 		}
+		acpPreDispatch.mark(task, acpPreDispatchRuntimePoolReady)
 	}
 	if task.Status.Execution != nil && !taskExecutionStateTerminal(task.Status.Execution.State) {
 		if !externalDispatch && (task.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
@@ -223,6 +210,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("persist ACP prompt attempt: %w", err)
 	}
+	acpPreDispatch.mark(task, acpPreDispatchAttemptPersisted)
 
 	metadataBase := task.DeepCopy()
 	if task.Labels == nil {
@@ -255,6 +243,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		PublicationReadCredentialResourceVersion: credentialVersions.TargetRead,
 		PublicationCredentialResourceVersion:     credentialVersions.TargetWrite,
 		ForgeCredentialResourceVersion:           credentialVersions.Forge,
+		CommitSigningCredentialResourceVersion:   credentialVersions.CommitSign,
 		LastTransitionTime:                       &now,
 	}
 	if externalDispatch {
@@ -280,6 +269,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 			ObservedAt:    &now,
 		}.Status()
 	}
+	acpPreDispatch.markQueueWriteIssued(task)
 	if err := r.Status().Patch(ctx, task, client.MergeFrom(statusBase)); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1363,6 +1353,29 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 	return nil
 }
 
+func acpRuntimePoolDemandPolicy(
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	delivery acpRuntimeDeliverySelection,
+	plan ACPRuntimePlan,
+) (bool, types.UID, string) {
+	runtimeBound := taskExecutionHasRuntimeOrSessionBinding(task.Status.Execution) ||
+		promptAttemptHasRuntimeOrSessionBinding(attempt)
+	allowCreate := delivery.allowPoolCreation && !runtimeBound
+	requiredUID := delivery.requiredRuntimePoolUID
+	if runtimeBound {
+		execution := task.Status.Execution
+		if execution == nil || execution.RuntimePoolName != plan.PoolName || strings.TrimSpace(execution.RuntimePoolUID) == "" {
+			return false, "", "the runtime-bound ACP attempt is missing its exact frozen RuntimePool identity"
+		}
+		requiredUID = types.UID(execution.RuntimePoolUID)
+	}
+	if !allowCreate && requiredUID == "" {
+		return false, "", "the frozen ACP runtime delivery plan requires an exact preexisting RuntimePool identity"
+	}
+	return allowCreate, requiredUID, ""
+}
+
 func (r *TaskReconciler) ensureACPRuntimePool(
 	ctx context.Context,
 	namespace string,
@@ -1373,7 +1386,6 @@ func (r *TaskReconciler) ensureACPRuntimePool(
 	)
 }
 
-//nolint:gocyclo // Pool creation, immutable identity checks, and activation form one optimistic state transition.
 func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 	ctx context.Context,
 	namespace string,
@@ -1383,6 +1395,23 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 	workspaceTaskUID string,
 	allowCreate bool,
 	requiredUID types.UID,
+) (*corev1alpha1.RuntimePool, bool, error) {
+	return r.ensureACPRuntimePoolDemand(
+		ctx, namespace, plan, workspaceName, workspaceUID, workspaceTaskUID, allowCreate, requiredUID, true,
+	)
+}
+
+//nolint:gocyclo // Pool creation, immutable identity checks, and activation form one optimistic state transition.
+func (r *TaskReconciler) ensureACPRuntimePoolDemand(
+	ctx context.Context,
+	namespace string,
+	plan ACPRuntimePlan,
+	workspaceName string,
+	workspaceUID string,
+	workspaceTaskUID string,
+	allowCreate bool,
+	requiredUID types.UID,
+	handshake bool,
 ) (*corev1alpha1.RuntimePool, bool, error) {
 	if plan.Workspace != nil && (plan.Workspace.Class == nil || plan.Workspace.Class.ControllerName == "") {
 		return nil, false, store.ValidationErrorf("new workspace RuntimePools require an external provider class; legacy bindings are cleanup-only")
@@ -1547,6 +1576,9 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 			return nil, false, err
 		}
 	}
+	if !handshake {
+		return pool, poolPreexisting, nil
+	}
 	if handshakeErr := r.verifyACPWorkspaceReadyForPool(
 		ctx, pool, workspaceName, workspaceUID, workspaceTaskUID,
 	); handshakeErr != nil {
@@ -1653,9 +1685,7 @@ func (r *TaskReconciler) recordACPRuntimePoolImageProvenance(
 		if expectedUID != "" && current.UID != expectedUID {
 			return store.ValidationErrorf("RuntimePool %s was replaced before image provenance could be recorded", pool.Name)
 		}
-		condition := meta.FindStatusCondition(current.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
-		if condition != nil && condition.Status == metav1.ConditionTrue &&
-			condition.ObservedGeneration == current.Generation && condition.Reason == acpRuntimePoolImageProvenanceReason {
+		if runtimePoolImageProvenanceRecorded(current) {
 			*pool = *current.DeepCopy()
 			return nil
 		}

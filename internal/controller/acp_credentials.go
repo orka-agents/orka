@@ -52,6 +52,13 @@ func (d *ACPDispatcher) freezeWorkspaceCredentialVersions(ctx context.Context, t
 		)
 		return fmt.Errorf("freeze forge credential: %w", err)
 	}
+	commitSigningVersion, err := d.workspaceCredentialResourceVersion(ctx, task, workspace.CommitSigningCredentialRef)
+	if err != nil {
+		err = classifyACPWorkspaceCredentialFreezeError(
+			err, store.PromptCredentialCommitSign, "commit signing credential", execution.CommitSigningCredentialResourceVersion,
+		)
+		return fmt.Errorf("freeze commit signing credential: %w", err)
+	}
 	type frozenCredentialVersion struct {
 		role     store.PromptCredentialRole
 		expected string
@@ -62,6 +69,7 @@ func (d *ACPDispatcher) freezeWorkspaceCredentialVersions(ctx context.Context, t
 		"publication read credential":  {store.PromptCredentialTargetRead, execution.PublicationReadCredentialResourceVersion, publicationReadVersion},
 		"publication write credential": {store.PromptCredentialTargetWrite, execution.PublicationCredentialResourceVersion, publicationVersion},
 		"forge credential":             {store.PromptCredentialForge, execution.ForgeCredentialResourceVersion, forgeVersion},
+		"commit signing credential":    {store.PromptCredentialCommitSign, execution.CommitSigningCredentialResourceVersion, commitSigningVersion},
 	} {
 		if version.expected != version.current {
 			return &acpWorkspaceCredentialBlockedError{
@@ -72,7 +80,8 @@ func (d *ACPDispatcher) freezeWorkspaceCredentialVersions(ctx context.Context, t
 	if execution.ReadCredentialResourceVersion == readVersion &&
 		execution.PublicationReadCredentialResourceVersion == publicationReadVersion &&
 		execution.PublicationCredentialResourceVersion == publicationVersion &&
-		execution.ForgeCredentialResourceVersion == forgeVersion {
+		execution.ForgeCredentialResourceVersion == forgeVersion &&
+		execution.CommitSigningCredentialResourceVersion == commitSigningVersion {
 		return nil
 	}
 	return d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
@@ -87,6 +96,9 @@ func (d *ACPDispatcher) freezeWorkspaceCredentialVersions(ctx context.Context, t
 		}
 		if status.ForgeCredentialResourceVersion == "" {
 			status.ForgeCredentialResourceVersion = forgeVersion
+		}
+		if status.CommitSigningCredentialResourceVersion == "" {
+			status.CommitSigningCredentialResourceVersion = commitSigningVersion
 		}
 	})
 }
@@ -126,6 +138,7 @@ type acpCredentialVersions struct {
 	TargetRead  string
 	TargetWrite string
 	Forge       string
+	CommitSign  string
 }
 
 func resolvePromptCredentialBindings(
@@ -137,16 +150,18 @@ func resolvePromptCredentialBindings(
 		return nil, acpCredentialVersions{}, nil
 	}
 	type requestedBinding struct {
-		role      store.PromptCredentialRole
-		reference *corev1alpha1.WorkspaceCredentialReference
-		set       func(*acpCredentialVersions, string)
+		role       store.PromptCredentialRole
+		reference  *corev1alpha1.WorkspaceCredentialReference
+		defaultKey string
+		set        func(*acpCredentialVersions, string)
 	}
 	workspace := task.Spec.Workspace
 	requests := []requestedBinding{
-		{store.PromptCredentialSourceRead, workspace.ReadCredentialRef, func(v *acpCredentialVersions, value string) { v.SourceRead = value }},
-		{store.PromptCredentialTargetRead, workspace.PublicationReadCredentialRef, func(v *acpCredentialVersions, value string) { v.TargetRead = value }},
-		{store.PromptCredentialTargetWrite, workspace.PublicationCredentialRef, func(v *acpCredentialVersions, value string) { v.TargetWrite = value }},
-		{store.PromptCredentialForge, workspace.ForgeCredentialRef, func(v *acpCredentialVersions, value string) { v.Forge = value }},
+		{store.PromptCredentialSourceRead, workspace.ReadCredentialRef, defaultACPWorkspaceCredentialKey, func(v *acpCredentialVersions, value string) { v.SourceRead = value }},
+		{store.PromptCredentialTargetRead, workspace.PublicationReadCredentialRef, defaultACPWorkspaceCredentialKey, func(v *acpCredentialVersions, value string) { v.TargetRead = value }},
+		{store.PromptCredentialTargetWrite, workspace.PublicationCredentialRef, defaultACPWorkspaceCredentialKey, func(v *acpCredentialVersions, value string) { v.TargetWrite = value }},
+		{store.PromptCredentialForge, workspace.ForgeCredentialRef, defaultACPWorkspaceCredentialKey, func(v *acpCredentialVersions, value string) { v.Forge = value }},
+		{store.PromptCredentialCommitSign, workspace.CommitSigningCredentialRef, defaultACPWorkspaceCredentialKey, func(v *acpCredentialVersions, value string) { v.CommitSign = value }},
 	}
 	bindings := make([]store.PromptCredentialBinding, 0, len(requests))
 	versions := acpCredentialVersions{}
@@ -160,7 +175,7 @@ func resolvePromptCredentialBindings(
 		}
 		key := strings.TrimSpace(requested.reference.Key)
 		if key == "" {
-			key = defaultACPWorkspaceCredentialKey
+			key = requested.defaultKey
 		}
 		value, ok := secret.Data[key]
 		if !ok || len(bytes.TrimSpace(value)) == 0 || len(value) > maxACPWorkspaceCredentialBytes || bytes.ContainsAny(value, "\x00") {

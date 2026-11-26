@@ -41,6 +41,18 @@ func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
 }
 
 func (s *Store) sendMessageWrite(ctx context.Context, msg store.Message) (sentMessage, error) {
+	if len(msg.Content) > store.MaxMessageContentBytes {
+		return sentMessage{}, store.TooLargeError{
+			What: "message content", Size: int64(len(msg.Content)), Limit: store.MaxMessageContentBytes,
+		}
+	}
+	for _, field := range []struct{ name, value string }{
+		{"namespace", msg.Namespace}, {"fromTask", msg.FromTask}, {"toTask", msg.ToTask}, {"parentTask", msg.ParentTask},
+	} {
+		if len(field.value) > store.MaxControlIdentifierBytes {
+			return sentMessage{}, store.ValidationErrorf("message %s exceeds %d bytes", field.name, store.MaxControlIdentifierBytes)
+		}
+	}
 	var sent sentMessage
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
 		var err error
@@ -184,7 +196,39 @@ func selectUnreadMessages(
 		return nil, err
 	}
 	defer rows.Close() //nolint:errcheck
-	return scanMessages(rows, namespace)
+	return scanMessageBatch(rows, namespace)
+}
+
+func scanMessageBatch(rows *sql.Rows, namespace string) ([]store.Message, error) {
+	var messages []store.Message
+	var batchBytes int
+	for rows.Next() {
+		m := store.Message{Namespace: namespace}
+		if err := rows.Scan(&m.ID, &m.FromTask, &m.ToTask, &m.ParentTask, &m.Content, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		rowBytes := len(m.Content)
+		idBytes := len(m.Namespace) + len(m.FromTask) + len(m.ToTask) + len(m.ParentTask)
+		if idBytes > 4*store.MaxControlIdentifierBytes {
+			rowBytes += idBytes - 4*store.MaxControlIdentifierBytes
+		}
+		if len(messages) > 0 && batchBytes+rowBytes > store.MaxMessageBatchBytes {
+			break
+		}
+		if len(messages) == 0 && rowBytes > store.MaxMessageBatchBytes {
+			return nil, store.TooLargeError{What: "message batch", Size: int64(rowBytes), Limit: store.MaxMessageBatchBytes}
+		}
+		if messages == nil {
+			messages = make([]store.Message, 0, initialMessageBatchCapacity)
+		}
+		m.CreatedAt = m.CreatedAt.UTC()
+		batchBytes += rowBytes
+		messages = append(messages, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
 }
 
 func selectMessagesByID(

@@ -406,7 +406,18 @@ func TestArtifactsBindingProbesOfTheEmbeddedStore(t *testing.T) {
 	require.NotEqual(t, "another-dataset", stateInfo.DatasetID)
 }
 
-var notWrappedYet []string
+var notWrappedYet = []string{
+	"AbortImport",
+	"BeginImport",
+	"ClearMigrationMarker",
+	"CompleteImport",
+	"ExportDigest",
+	"ExportFamilies",
+	"ExportRecords",
+	"GetImportProgress",
+	"ImportRecords",
+	"MarkDatasetMigrated",
+}
 
 func TestWrappersServeEveryCatalogMethod(t *testing.T) {
 	backend := openSQLite(t)

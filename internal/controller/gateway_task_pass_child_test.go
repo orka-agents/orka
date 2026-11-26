@@ -181,7 +181,7 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	require.Error(t, execute(), "restart without provenance protection must refuse existing children")
 	protected = true
 	r.TaskProvenanceProtected = false
-	_, err = r.freezeGatewayTaskGrant(t.Context(), child, *childBody.MCPConfiguration)
+	_, err = r.freezeGatewayTaskGrant(t.Context(), child, agent, *childBody.MCPConfiguration)
 	require.True(t, isPermanentACPAgentConfigurationError(err))
 	r.TaskProvenanceProtected = true
 	for _, change := range []func(*corev1alpha1.Task){
@@ -190,13 +190,13 @@ func TestGatewayTaskPassChildInheritance(t *testing.T) {
 	} {
 		forged := child.DeepCopy()
 		change(forged)
-		_, err = r.freezeGatewayTaskGrant(t.Context(), forged, *childBody.MCPConfiguration)
+		_, err = r.freezeGatewayTaskGrant(t.Context(), forged, agent, *childBody.MCPConfiguration)
 		require.True(t, isPermanentACPAgentConfigurationError(err))
 	}
 	unbound := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "unbound-parent", Namespace: parent.Namespace}, Spec: *parent.Spec.DeepCopy()}
 	require.NoError(t, r.Create(t.Context(), unbound))
 	unboundChild := newGatewayPassChild(t, r, unbound, "unbound-parent-child")
-	_, err = r.freezeGatewayTaskGrant(t.Context(), unboundChild, *childBody.MCPConfiguration)
+	_, err = r.freezeGatewayTaskGrant(t.Context(), unboundChild, agent, *childBody.MCPConfiguration)
 	require.ErrorContains(t, err, "parent has no frozen gateway grant")
 	require.True(t, isPermanentACPAgentConfigurationError(err))
 	forbidden := &corev1alpha1.Tool{}

@@ -26,6 +26,7 @@ type persistedPublicationRecoveryContext struct {
 	targetReadCredential *publisherservice.CredentialReference
 	writeCredential      *publisherservice.CredentialReference
 	forgeCredential      *publisherservice.CredentialReference
+	signingCredential    *publisherservice.CredentialReference
 	claim                *store.BranchClaim
 	artifact             harnessv2.ArtifactReference
 }
@@ -126,6 +127,7 @@ func (d *ACPDispatcher) loadPersistedPublicationRecovery(
 		targetReadCredential: publisherCredentialReference(workspace.PublicationReadCredentialRef, publisherservice.CredentialRoleTargetRead),
 		writeCredential:      publisherCredentialReference(workspace.PublicationCredentialRef, publisherservice.CredentialRoleTargetWrite),
 		forgeCredential:      publisherForgeCredentialReference(workspace.ForgeCredentialRef),
+		signingCredential:    publisherCommitSigningCredentialReference(workspace.CommitSigningCredentialRef),
 		claim:                claim,
 		artifact: harnessv2.ArtifactReference{
 			ArtifactID: harnessv2.ArtifactID(publication.ArtifactID), Digest: publication.ArtifactDigest,
@@ -162,21 +164,32 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 		return nil, err
 	}
 	operation := publicationOperationID("prepare", recovery.task)
+	commitAuthorName, commitAuthorEmail, err := taskPublicationWireCommitIdentity(recovery.task)
+	if err != nil {
+		return nil, err
+	}
 	request := publisherservice.PublicationPrepareRequest{
-		Metadata:            publisherservice.OperationMetadata{Namespace: recovery.task.Namespace, PublicationID: publication.ID, OperationID: operation},
-		SourceCredentialRef: recovery.sourceCredential,
-		DeltaArtifact:       recovery.artifact,
+		Metadata:             publisherservice.OperationMetadata{Namespace: recovery.task.Namespace, PublicationID: publication.ID, OperationID: operation},
+		SourceCredentialRef:  recovery.sourceCredential,
+		SigningCredentialRef: recovery.signingCredential,
+		DeltaArtifact:        recovery.artifact,
 		Request: publisher.PrepareRequest{
 			PublicationID: publication.ID, PublicationGeneration: publication.Generation, OperationID: operation,
 			Source: recovery.source, SourceRef: publication.SourceRef, Target: recovery.target, TargetRef: publication.TargetRef,
 			BranchClaimGeneration: publication.BranchClaimGeneration, BaselineOID: publication.SourceBaselineSHA,
 			RemoteBefore: publisherRemoteRef(publication.Baseline), DeltaArtifactDigest: publication.ArtifactDigest,
-			RelativeRoot:  strings.TrimSpace(recovery.workspace.SubPath),
-			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
+			RelativeRoot:      strings.TrimSpace(recovery.workspace.SubPath),
+			CommitAuthorName:  commitAuthorName,
+			CommitAuthorEmail: commitAuthorEmail,
+			CommitMessage:     publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}
 	identity := store.ExternalEffectIdentity{
 		Kind: publisherPrepareOperation, Namespace: recovery.task.Namespace, AggregateID: publication.ID, OperationID: operation,
+	}
+	request, err = d.loadPersistedPrepareRequest(ctx, identity, request)
+	if err != nil {
+		return nil, err
 	}
 	response, err := runACPExternalEffect(ctx, d, recovery.fence, identity, request, func(callCtx context.Context) (publisherservice.PublicationPrepareResponse, error) {
 		return d.Publisher.PreparePublication(callCtx, request)
@@ -524,6 +537,44 @@ func (d *ACPDispatcher) loadPersistedPullRequestRequest(
 		}
 	}
 	return request, nil, store.ConflictErrorf("pull request effect does not match its immutable request digest")
+}
+
+func (d *ACPDispatcher) loadPersistedPrepareRequest(
+	ctx context.Context,
+	identity store.ExternalEffectIdentity,
+	request publisherservice.PublicationPrepareRequest,
+) (publisherservice.PublicationPrepareRequest, error) {
+	if d.Store == nil {
+		return request, nil
+	}
+	effect, err := d.Store.GetExternalEffectByIdentity(ctx, identity)
+	if errors.Is(err, store.ErrNotFound) {
+		return request, nil
+	}
+	if err != nil {
+		return request, err
+	}
+	candidates := []publisherservice.PublicationPrepareRequest{request}
+	if request.SigningCredentialRef == nil &&
+		request.Request.CommitAuthorName == publisher.CommitAuthorName &&
+		request.Request.CommitAuthorEmail == publisher.CommitAuthorEmail {
+		legacy := request
+		legacy.Request.CommitAuthorName = ""
+		legacy.Request.CommitAuthorEmail = ""
+		candidates = append(candidates, legacy)
+	}
+	for _, candidate := range candidates {
+		digest, digestErr := acpDomainDigest("external-effect-request", map[string]any{
+			identityKey: identity, requestKey: candidate,
+		})
+		if digestErr != nil {
+			return request, digestErr
+		}
+		if digest == effect.RequestDigest {
+			return candidate, nil
+		}
+	}
+	return request, nil
 }
 
 func (d *ACPDispatcher) finishPersistedPublicationRecovery(

@@ -88,7 +88,7 @@ func withActivePrompt(probe RuntimePoolProbeResult) RuntimePoolProbeResult {
 
 func TestExternalNativeWorkerTerminationDrainsBeforeSuspendOnly(t *testing.T) {
 	f, w, pod, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
-	if !externalWorkspaceSuspendable(w) {
+	if !externalWorkspaceSuspendable(w, false) {
 		t.Fatal("fixture workspace is not data-only suspendable")
 	}
 	terminateNativeWorker(t, f, worker)

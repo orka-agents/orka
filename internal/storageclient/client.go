@@ -3,6 +3,7 @@ package storageclient
 import (
 	"context"
 	"errors"
+	"maps"
 	"reflect"
 	"sync/atomic"
 
@@ -29,6 +30,7 @@ type Client struct {
 
 	state     storagev1.StateProvider
 	artifacts storagev1.ArtifactProvider
+	datasets  map[string]Dataset
 	ops       *operations
 }
 
@@ -58,13 +60,19 @@ func New(options Options) (*Client, error) {
 			return nil, err
 		}
 	}
+	state := envelopedState{StateProvider: options.State, ops: ops}
+	artifacts := envelopedArtifacts{ArtifactProvider: options.Artifacts, ops: ops}
 	return &Client{
-		StateProvider: envelopedState{StateProvider: options.State, ops: ops},
-		ArtifactStore: envelopedArtifacts{ArtifactProvider: options.Artifacts, ops: ops},
+		StateProvider: state,
+		ArtifactStore: artifacts,
 		Embedded:      options.Embedded,
 		state:         options.State,
 		artifacts:     options.Artifacts,
-		ops:           ops,
+		datasets: map[string]Dataset{
+			storagev1.StateContract:     state,
+			storagev1.ArtifactsContract: artifacts,
+		},
+		ops: ops,
 	}, nil
 }
 
@@ -75,13 +83,11 @@ func (c *Client) BindFences(source FenceSource) error {
 type Dataset interface {
 	storagev1.ProviderDescriber
 	storagev1.ControllerEpochAdvancer
+	storagev1.WriteWatermarkStore
 }
 
 func (c *Client) Datasets() map[string]Dataset {
-	return map[string]Dataset{
-		storagev1.StateContract:     c.state,
-		storagev1.ArtifactsContract: c.artifacts,
-	}
+	return maps.Clone(c.datasets)
 }
 
 func (c *Client) UnresolvedOperations() int {

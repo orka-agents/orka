@@ -267,6 +267,17 @@ func TestRuntimeSessionProjectsProtectedNewSessionMetadata(t *testing.T) {
 	}
 }
 
+func TestRuntimeSessionRecordsStartupTimings(t *testing.T) {
+	session := newTestRuntimeSession(t, "immediate")
+	timings := session.StartupTimings()
+	if timings.ProcessStart <= 0 || timings.Initialize <= 0 || timings.ProviderSession <= 0 {
+		t.Fatalf("startup timings = %+v, want process start, initialize and provider session recorded", timings)
+	}
+	if timings.Authenticate != 0 {
+		t.Fatalf("authenticate = %v, want zero without an auth method", timings.Authenticate)
+	}
+}
+
 func TestMergeNewSessionMetaRejectsProtectedNamespace(t *testing.T) {
 	protected := Meta{sessionMetaRuntimeSessionID: "session"}
 	for _, provider := range []Meta{

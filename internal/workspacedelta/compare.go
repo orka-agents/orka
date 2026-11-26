@@ -26,7 +26,7 @@ func BuildWithLimitsContext(ctx context.Context, baseline *Snapshot, postRoot st
 	if err != nil {
 		return Result{}, err
 	}
-	post, err := capture(ctx, postRoot, baseline.options.withoutContentPolicy(), false)
+	post, err := capture(ctx, postRoot, baseline.options.withoutContentPolicy(), false, baseline)
 	if err != nil {
 		return Result{}, err
 	}

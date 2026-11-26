@@ -466,6 +466,18 @@ func (r *AgentReconciler) validateCoordination(ctx context.Context, agent *corev
 			return fmt.Errorf("failed to check coordination target agent %q: %w", allowed.Name, err)
 		}
 	}
+	for _, name := range agent.Spec.Coordination.DelegatedGatewayTools {
+		tool := &corev1alpha1.Tool{}
+		if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, tool); err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("delegated gateway tool %q not found", name)
+			}
+			return fmt.Errorf("failed to check delegated gateway tool %q: %w", name, err)
+		}
+		if tool.Spec.HTTP == nil || !tool.Spec.HTTP.GatewayTaskPass {
+			return fmt.Errorf("delegated gateway tool %q is not a gateway task pass tool", name)
+		}
+	}
 	return nil
 }
 
@@ -529,7 +541,9 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		}
 		agent.Status.ActiveTasks = activeCount
 		agent.Status.Ready = validationErr == nil
-		agent.Status.LastUsed = lastUsed
+		if lastUsed != nil && (agent.Status.LastUsed == nil || agent.Status.LastUsed.Before(lastUsed)) {
+			agent.Status.LastUsed = lastUsed
+		}
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
 		setAgentIdentityCondition(agent, now, identity)
 		if !apiequality.Semantic.DeepEqual(agent.Status.IdentityClaim, observedClaim) &&

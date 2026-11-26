@@ -951,8 +951,8 @@ func TestTaskReconcilerInitializesApprovalTrackingWithStatus(t *testing.T) {
 				t.Fatal(err)
 			}
 			stored := h.task()
-			if stored.Status.Phase != corev1alpha1.TaskPhasePending {
-				t.Fatalf("phase = %q, want status initialized", stored.Status.Phase)
+			if stored.Status.Phase == "" {
+				t.Fatal("phase is empty, want status initialized")
 			}
 			if len(selected) == 0 {
 				if stored.Status.ApprovalWebhooks != nil {

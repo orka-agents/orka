@@ -128,6 +128,11 @@ const ACPSuspendQuotaLeaseNamePrefix = "acp-suspend-quota-"
 
 const ACPWorkspaceRetentionFenceLeaseNamePrefix = "acp-retention-fence-"
 
+const (
+	TaskAdmissionNamespaceLedgerNamePrefix = "orka-task-admission-"
+	TaskAdmissionChildrenLedgerNamePrefix  = "orka-child-admission-"
+)
+
 func SelectorValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {

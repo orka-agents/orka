@@ -1,0 +1,392 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	authorizationv1 "k8s.io/api/authorization/v1"
+
+	"github.com/orka-agents/orka/internal/store"
+)
+
+var memoryCreateRoutes = []string{"/api/v1/memories", "/internal/v1/memories/default"}
+
+func memoryPermission(verb, resource, name string) authorizationv1.ResourceAttributes {
+	return authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: resource, Verb: verb, Name: name}
+}
+
+func (f *externalAuthorizationFixture) signInAs(t *testing.T, name string, permissions ...authorizationv1.ResourceAttributes) string {
+	t.Helper()
+	f.user.Username = "system:serviceaccount:default:" + name
+	f.user.UID = name + "-uid"
+	f.allowOnly(t, permissions...)
+	return f.user.Username
+}
+
+func TestMemoryCreateRejectsClientProposalProvenance(t *testing.T) {
+	for _, path := range memoryCreateRoutes {
+		for _, tc := range []struct {
+			name, body, field string
+		}{
+			{"proposal source", `{"content":"x","source":"memory_proposal"}`, "source memory_proposal"},
+			{"proposal source folded", `{"content":"x","source":" Memory_Proposal "}`, "source memory_proposal"},
+			{"proposal id", `{"content":"x","sourceProposalId":"protected"}`, "sourceProposalId"},
+			{"proposal id with another source", `{"content":"x","source":"user","sourceProposalId":"protected"}`, "sourceProposalId"},
+			{"blank proposal id", `{"content":"x","sourceProposalId":" "}`, "sourceProposalId"},
+			{"proposal id folded key", `{"content":"x","SourceProposalID":"protected"}`, "sourceProposalId"},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				f := newExternalAuthorizationFixture(t)
+				f.allowRoute(t, "POST /api/v1/memories")
+				before := f.changes(t)
+				status, body := f.request(t, http.MethodPost, path, tc.body)
+				require.Equal(t, http.StatusBadRequest, status, body)
+				require.Contains(t, body, tc.field+" cannot be set by clients")
+				require.Equal(t, before, f.changes(t))
+			})
+		}
+	}
+}
+
+func TestMemoryCreateKeepsClientSource(t *testing.T) {
+	for _, path := range memoryCreateRoutes {
+		t.Run(path, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			f.allowRoute(t, "POST /api/v1/memories")
+			for _, tc := range []struct{ body, source string }{
+				{`{"content":"named source","source":"user"}`, "user"},
+				{`{"content":"default source"}`, "manual"},
+				{`{"content":"empty provenance","source":"","sourceProposalId":""}`, "manual"},
+			} {
+				status, body := f.request(t, http.MethodPost, path, tc.body)
+				require.Equal(t, http.StatusCreated, status, body)
+				var created store.Memory
+				require.NoError(t, json.Unmarshal([]byte(body), &created))
+				stored, err := f.store.GetMemory(t.Context(), "default", created.ID)
+				require.NoError(t, err)
+				require.Equal(t, tc.source, stored.Source)
+				require.Empty(t, stored.SourceProposalID)
+			}
+		})
+	}
+}
+
+var memoryUpdateRoutes = []string{"/api/v1/memories/", "/internal/v1/memories/default/"}
+
+func TestMemoryUpdateRejectsClientProposalSource(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		for _, tc := range []struct{ name, body string }{
+			{"proposal source", `{"source":"memory_proposal"}`},
+			{"proposal source folded", `{"content":"relabeled","source":" Memory_Proposal "}`},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				f := newExternalAuthorizationFixture(t)
+				f.allowOnly(t, memoryPermission("update", "memories", "protected"))
+				before := f.changes(t)
+				status, body := f.request(t, http.MethodPut, route+"protected", tc.body)
+				require.Equal(t, http.StatusBadRequest, status, body)
+				require.Contains(t, body, "source memory_proposal cannot be set by clients")
+				require.Equal(t, before, f.changes(t))
+				stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+				require.NoError(t, err)
+				require.Equal(t, "manual", stored.Source)
+				require.Equal(t, "protected-content", stored.Content)
+			})
+		}
+		t.Run(route+"/named source", func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			f.allowOnly(t, memoryPermission("update", "memories", "protected"))
+			status, body := f.request(t, http.MethodPut, route+"protected", `{"source":"user"}`)
+			require.Equal(t, http.StatusOK, status, body)
+			stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+			require.NoError(t, err)
+			require.Equal(t, "user", stored.Source)
+		})
+	}
+}
+
+func TestMemoryUpdateKeepsAppliedProvenance(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		t.Run(route, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: "protected", Status: "accepted", Reviewer: "reviewer",
+			}))
+			applied, err := f.store.ApplyMemoryProposal(t.Context(), store.MemoryProposalApply{Namespace: "default", ID: "protected", AppliedBy: "applier"})
+			require.NoError(t, err)
+			f.allowOnly(t, memoryPermission("update", "memories", applied.ID))
+
+			read := *applied
+			read.Content = "edited after review"
+			roundTrip, err := json.Marshal(read)
+			require.NoError(t, err)
+			for _, body := range []string{
+				string(roundTrip),
+				`{"content":"edited again"}`,
+				`{"content":"edited with another link","sourceProposalId":"other"}`,
+			} {
+				status, response := f.request(t, http.MethodPut, route+applied.ID, body)
+				require.Equal(t, http.StatusOK, status, response)
+				stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
+				require.NoError(t, err)
+				require.Equal(t, store.MemorySourceProposal, stored.Source)
+				require.Equal(t, "protected", stored.SourceProposalID)
+			}
+
+			for _, body := range []string{
+				`{"content":"relabeled","source":"user"}`,
+				`{"source":" "}`,
+			} {
+				before := f.changes(t)
+				status, response := f.request(t, http.MethodPut, route+applied.ID, body)
+				require.Equal(t, http.StatusBadRequest, status, response)
+				require.Contains(t, response, "source of a memory applied from a proposal cannot be changed by clients")
+				require.Equal(t, before, f.changes(t))
+			}
+
+			stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
+			require.NoError(t, err)
+			require.Equal(t, "edited with another link", stored.Content)
+			require.Equal(t, store.MemorySourceProposal, stored.Source)
+		})
+	}
+}
+
+func TestMemoryUpdateRelabelsUnlinkedProposalSource(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		for _, tc := range []struct {
+			name             string
+			sourceProposalID string
+		}{
+			{name: "empty proposal id", sourceProposalID: ""},
+			{name: "whitespace proposal id", sourceProposalID: " "},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				f := newExternalAuthorizationFixture(t)
+				require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{
+					ID:               "unlinked",
+					Namespace:        "default",
+					Source:           store.MemorySourceProposal,
+					SourceProposalID: tc.sourceProposalID,
+					Content:          "unlinked",
+				}))
+				f.allowOnly(t, memoryPermission("update", "memories", "unlinked"))
+				status, body := f.request(t, http.MethodPut, route+"unlinked", `{"source":"user"}`)
+				require.Equal(t, http.StatusOK, status, body)
+				stored, err := f.store.GetMemory(t.Context(), "default", "unlinked")
+				require.NoError(t, err)
+				require.Equal(t, "user", stored.Source)
+				require.Equal(t, tc.sourceProposalID, stored.SourceProposalID)
+			})
+		}
+	}
+}
+
+func TestMemoryUpdateProtectsAndRestoresRelabeledAppliedMemory(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		t.Run(route, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: "protected", Status: "accepted", Reviewer: "reviewer",
+			}))
+			applied, err := f.store.ApplyMemoryProposal(t.Context(), store.MemoryProposalApply{
+				Namespace: "default", ID: "protected", AppliedBy: "applier",
+			})
+			require.NoError(t, err)
+			applied.Source = "user"
+			require.NoError(t, f.store.UpdateMemory(t.Context(), applied))
+			f.allowOnly(t, memoryPermission("update", "memories", applied.ID))
+
+			before := f.changes(t)
+			status, body := f.request(t, http.MethodPut, route+applied.ID, `{"source":"manual"}`)
+			require.Equal(t, http.StatusBadRequest, status, body)
+			require.Contains(t, body, "source of a memory applied from a proposal cannot be changed by clients")
+			require.Equal(t, before, f.changes(t))
+
+			status, body = f.request(t, http.MethodPut, route+applied.ID, `{"source":" Memory_Proposal "}`)
+			require.Equal(t, http.StatusBadRequest, status, body)
+			require.Contains(t, body, "source memory_proposal cannot be set by clients")
+			require.Equal(t, before, f.changes(t))
+
+			status, body = f.request(t, http.MethodPut, route+applied.ID, `{"source":"memory_proposal"}`)
+			require.Equal(t, http.StatusOK, status, body)
+			stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
+			require.NoError(t, err)
+			require.Equal(t, store.MemorySourceProposal, stored.Source)
+			require.Equal(t, "protected", stored.SourceProposalID)
+		})
+	}
+}
+
+func TestReviewedProposalApplyLinksReviewedContent(t *testing.T) {
+	const reviewed = "Returns go through the dock 4 intake desk."
+	f := newExternalAuthorizationFixture(t)
+
+	f.signInAs(t, "proposer", memoryPermission("create", "memoryproposals", ""))
+	status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals",
+		`{"type":"memory","title":"Dock 4 returns","content":"`+reviewed+`"}`)
+	require.Equal(t, http.StatusCreated, status, body)
+	var proposal store.MemoryProposal
+	require.NoError(t, json.Unmarshal([]byte(body), &proposal))
+	require.Equal(t, "pending", proposal.Status)
+
+	f.signInAs(t, "memory-writer", memoryPermission("create", "memories", ""))
+	for _, path := range memoryCreateRoutes {
+		status, body = f.request(t, http.MethodPost, path,
+			`{"content":"Unreviewed content.","source":"memory_proposal","sourceProposalId":"`+proposal.ID+`"}`)
+		require.Equal(t, http.StatusBadRequest, status, body)
+	}
+
+	reviewer := f.signInAs(t, "reviewer", memoryPermission("review", "memoryproposals", proposal.ID))
+	status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/review", `{"status":"accepted"}`)
+	require.Equal(t, http.StatusOK, status, body)
+
+	applyPermissions := make([]authorizationv1.ResourceAttributes, 0, 3)
+	applyPermissions = append(applyPermissions,
+		memoryPermission("apply", "memoryproposals", proposal.ID),
+		memoryPermission("create", "memories", ""),
+	)
+	applier := f.signInAs(t, "applier", applyPermissions...)
+	status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply", `{}`)
+	require.Equal(t, http.StatusOK, status, body)
+	var applied store.Memory
+	require.NoError(t, json.Unmarshal([]byte(body), &applied))
+	require.Equal(t, reviewed, applied.Content)
+	require.Equal(t, "memory_proposal", applied.Source)
+	require.Equal(t, proposal.ID, applied.SourceProposalID)
+
+	stored, err := f.store.GetMemoryProposal(t.Context(), "default", proposal.ID)
+	require.NoError(t, err)
+	require.Equal(t, "applied", stored.Status)
+	require.Equal(t, applied.ID, stored.AppliedMemoryID)
+	require.Equal(t, reviewer, stored.Reviewer)
+	require.NotNil(t, stored.ReviewedAt)
+	require.Equal(t, applier, stored.AppliedBy)
+	require.NotNil(t, stored.AppliedAt)
+
+	f.signInAs(t, "applier", append(applyPermissions, memoryPermission("get", "memories", applied.ID))...)
+	status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply", `{}`)
+	require.Equal(t, http.StatusOK, status, body)
+	var again store.Memory
+	require.NoError(t, json.Unmarshal([]byte(body), &again))
+	require.Equal(t, applied.ID, again.ID)
+	require.Equal(t, reviewed, again.Content)
+
+	memories, err := f.store.ListMemories(t.Context(), store.MemoryFilter{Namespace: "default", IncludeDisabled: true, IncludeDeleted: true})
+	require.NoError(t, err)
+	linked := 0
+	for _, memory := range memories {
+		require.NotEqual(t, "Unreviewed content.", memory.Content)
+		if memory.SourceProposalID == proposal.ID {
+			linked++
+		}
+	}
+	require.Equal(t, 1, linked)
+}
+
+func TestConsolidationApplyRecordsServerOwnedProvenance(t *testing.T) {
+	for _, proposalType := range []string{store.MemoryProposalTypeMerge, store.MemoryProposalTypeSupersede} {
+		t.Run(proposalType, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			protected, err := f.store.GetMemory(t.Context(), "default", "protected")
+			require.NoError(t, err)
+			targets := []store.MemoryProposalTarget{{MemoryID: "protected", Generation: protected.Generation}}
+			if proposalType == store.MemoryProposalTypeMerge {
+				require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "second", Namespace: "default", Content: "second memory"}))
+				targets = append(targets, store.MemoryProposalTarget{MemoryID: "second", Generation: 1})
+			}
+			proposal := &store.MemoryProposal{ID: "consolidate", Namespace: "default", Type: proposalType, Title: "consolidate",
+				Content: "replacement", Targets: targets}
+			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+			}))
+			f.allowAll()
+
+			status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/consolidate/apply", `{}`)
+			require.Equal(t, http.StatusOK, status, body)
+			var applied store.Memory
+			require.NoError(t, json.Unmarshal([]byte(body), &applied))
+			require.Equal(t, store.MemorySourceProposal, applied.Source)
+			require.Equal(t, proposal.ID, applied.SourceProposalID)
+			for _, target := range targets {
+				replaced, err := f.store.GetMemory(t.Context(), "default", target.MemoryID)
+				require.NoError(t, err)
+				require.Equal(t, applied.ID, replaced.SupersededBy)
+				require.Equal(t, "manual", replaced.Source)
+				require.Empty(t, replaced.SourceProposalID)
+			}
+
+			for _, route := range memoryUpdateRoutes {
+				status, body = f.request(t, http.MethodPut, route+applied.ID, `{"content":"edited","sourceProposalId":"other"}`)
+				require.Equal(t, http.StatusOK, status, body)
+				before := f.changes(t)
+				status, body = f.request(t, http.MethodPut, route+applied.ID, `{"source":"user"}`)
+				require.Equal(t, http.StatusBadRequest, status, body)
+				require.Contains(t, body, "source of a memory applied from a proposal cannot be changed by clients")
+				require.Equal(t, before, f.changes(t))
+				stored, err := f.store.GetMemory(t.Context(), "default", applied.ID)
+				require.NoError(t, err)
+				require.Equal(t, store.MemorySourceProposal, stored.Source)
+				require.Equal(t, proposal.ID, stored.SourceProposalID)
+			}
+		})
+	}
+}
+
+func TestRetireApplyLeavesTargetProvenance(t *testing.T) {
+	f := newExternalAuthorizationFixture(t)
+	protected, err := f.store.GetMemory(t.Context(), "default", "protected")
+	require.NoError(t, err)
+	proposal := &store.MemoryProposal{ID: "retire", Namespace: "default", Type: store.MemoryProposalTypeRetire, Title: "retire",
+		Targets: []store.MemoryProposalTarget{{MemoryID: "protected", Generation: protected.Generation}}}
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+	require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+		Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+	}))
+	f.allowAll()
+
+	status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/retire/apply", `{}`)
+	require.Equal(t, http.StatusOK, status, body)
+	var returned store.Memory
+	require.NoError(t, json.Unmarshal([]byte(body), &returned))
+	require.Equal(t, "protected", returned.ID)
+
+	stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+	require.NoError(t, err)
+	require.True(t, stored.Disabled)
+	require.Equal(t, "manual", stored.Source)
+	require.Empty(t, stored.SourceProposalID)
+	applied, err := f.store.GetMemoryProposal(t.Context(), "default", proposal.ID)
+	require.NoError(t, err)
+	require.Equal(t, "applied", applied.Status)
+	require.Equal(t, "protected", applied.AppliedMemoryID)
+}
+
+func TestMemoryUpdateCannotLinkAPendingProposal(t *testing.T) {
+	for _, route := range memoryUpdateRoutes {
+		t.Run(route, func(t *testing.T) {
+			f := newExternalAuthorizationFixture(t)
+			proposal := &store.MemoryProposal{Namespace: "default", Type: "memory", Title: "reviewed", Content: "Reviewed content."}
+			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+			f.allowOnly(t, memoryPermission("update", "memories", "protected"))
+			status, body := f.request(t, http.MethodPut, route+"protected",
+				`{"content":"Unreviewed content.","sourceProposalId":"`+proposal.ID+`"}`)
+			require.Equal(t, http.StatusOK, status, body)
+			stored, err := f.store.GetMemory(t.Context(), "default", "protected")
+			require.NoError(t, err)
+			require.Empty(t, stored.SourceProposalID)
+
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+			}))
+			applied, err := f.store.ApplyMemoryProposal(t.Context(), store.MemoryProposalApply{Namespace: "default", ID: proposal.ID, AppliedBy: "applier"})
+			require.NoError(t, err)
+			require.NotEqual(t, "protected", applied.ID)
+			require.Equal(t, "Reviewed content.", applied.Content)
+			require.Equal(t, proposal.ID, applied.SourceProposalID)
+		})
+	}
+}

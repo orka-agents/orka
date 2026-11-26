@@ -369,6 +369,9 @@ func acpWorkspaceBindingDigestWithClassOnDetach(
 		if binding.Class.MaxSuspendedWorkspaces != nil {
 			fields["classMaxSuspended"] = fmt.Sprintf("%d", *binding.Class.MaxSuspendedWorkspaces)
 		}
+		if binding.Class.SuspendAfterDetach != "" {
+			fields["classSuspendAfterDetach"] = binding.Class.SuspendAfterDetach
+		}
 	}
 	return acpDomainDigest("execution-workspace-binding", fields)
 }

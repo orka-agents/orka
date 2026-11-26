@@ -18,6 +18,25 @@ type Option func(*suiteOptions)
 
 type suiteOptions struct {
 	providerAttachesEnvelopes bool
+	maintenance               *MaintenanceHarness
+	durability                *DurabilityHarness
+	parallel                  bool
+	recomputedDigests         map[string]bool
+}
+
+func Parallel() Option {
+	return func(o *suiteOptions) { o.parallel = true }
+}
+
+func RecomputesRequestDigests(methods ...string) Option {
+	return func(o *suiteOptions) {
+		if o.recomputedDigests == nil {
+			o.recomputedDigests = map[string]bool{}
+		}
+		for _, method := range methods {
+			o.recomputedDigests[method] = true
+		}
+	}
 }
 
 func ProviderAttachesEnvelopes() Option {

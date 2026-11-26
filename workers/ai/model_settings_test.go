@@ -22,16 +22,16 @@ func TestParseModelSettings(t *testing.T) {
 		wantSet         bool
 		wantMaxTokens   int
 	}{
-		{name: "unset", wantMaxTokens: 4096},
+		{name: "unset", wantMaxTokens: 0},
 		{name: "explicit zero", temperature: "0", maxTokens: "256", wantSet: true, wantMaxTokens: 256},
-		{name: "upper temperature bound", temperature: "2", wantTemperature: 2, wantSet: true, wantMaxTokens: 4096},
-		{name: "fractional temperature", temperature: "0.75", wantTemperature: 0.75, wantSet: true, wantMaxTokens: 4096},
+		{name: "upper temperature bound", temperature: "2", wantTemperature: 2, wantSet: true, wantMaxTokens: 0},
+		{name: "fractional temperature", temperature: "0.75", wantTemperature: 0.75, wantSet: true, wantMaxTokens: 0},
 		{name: "large output cap", maxTokens: "8192", wantMaxTokens: 8192},
 		{name: "smallest output cap", maxTokens: "1", wantMaxTokens: 1},
-		{name: "zero output cap", maxTokens: "0", wantMaxTokens: 4096},
-		{name: "negative output cap", maxTokens: "-256", wantMaxTokens: 4096},
+		{name: "zero output cap", maxTokens: "0", wantMaxTokens: 0},
+		{name: "negative output cap", maxTokens: "-256", wantMaxTokens: 0},
 		{name: "maximum int32 output cap", maxTokens: "2147483647", wantMaxTokens: 2147483647},
-		{name: "minimum int32 output cap", maxTokens: "-2147483648", wantMaxTokens: 4096},
+		{name: "minimum int32 output cap", maxTokens: "-2147483648", wantMaxTokens: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

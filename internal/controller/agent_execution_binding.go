@@ -152,6 +152,7 @@ type agentExecutionSnapshotWorkspaceClass struct {
 	SuspendMode              string                                    `json:"suspendMode,omitempty"`
 	SandboxVolume            *agentExecutionSnapshotSandboxVolume      `json:"sandboxVolume,omitempty"`
 	MaxSuspended             *int32                                    `json:"maxSuspended,omitempty"`
+	SuspendAfterDetach       string                                    `json:"suspendAfterDetach,omitempty"`
 	DefaultOnDetach          string                                    `json:"defaultOnDetach"`
 	AllowedOnDetach          []string                                  `json:"allowedOnDetach"`
 	DetachTimeout            string                                    `json:"detachTimeout"`
@@ -420,7 +421,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		}
 	}
 
-	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, mcpConfiguration)
+	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, agent, mcpConfiguration)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +585,7 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 			AllowBash:           agent.Spec.Runtime.DefaultAllowBash,
 		}
 	}
-	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, mcpConfiguration)
+	body.GatewayGrant, err = r.freezeGatewayTaskGrant(ctx, task, agent, mcpConfiguration)
 	if err != nil {
 		return nil, err
 	}
@@ -800,7 +801,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 	}
 	if existing := current.Status.AgentExecutionBinding; existing != nil {
 		if existing.BindingDigest == candidate.binding.BindingDigest {
-			return existing, nil
+			current.DeepCopyInto(task)
+			return task.Status.AgentExecutionBinding, nil
 		}
 		return nil, &errAgentExecutionBindingConflict{
 			existingDigest:  existing.BindingDigest,
@@ -825,7 +827,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 			latest.UID == task.UID {
 			if existing := latest.Status.AgentExecutionBinding; existing != nil {
 				if existing.BindingDigest == candidate.binding.BindingDigest {
-					return existing, nil
+					latest.DeepCopyInto(task)
+					return task.Status.AgentExecutionBinding, nil
 				}
 				return nil, &errAgentExecutionBindingConflict{
 					existingDigest:  existing.BindingDigest,
@@ -835,7 +838,8 @@ func (r *TaskReconciler) persistAgentExecutionBinding(
 		}
 		return nil, fmt.Errorf("write-once binding patch: %w", err)
 	}
-	return current.Status.AgentExecutionBinding, nil
+	current.DeepCopyInto(task)
+	return task.Status.AgentExecutionBinding, nil
 }
 
 func decodeAgentExecutionSnapshot(body []byte) (agentExecutionSnapshotBody, error) {
@@ -1050,6 +1054,7 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		ParametersBinding:        class.ParametersBinding.DeepCopy(),
 		EffectiveOnDetach:        class.EffectiveOnDetach,
 		SuspendMode:              class.SuspendMode,
+		SuspendAfterDetach:       class.SuspendAfterDetach,
 		DefaultOnDetach:          class.DefaultOnDetach,
 		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
 		DetachTimeout:            class.DetachTimeout,
@@ -1095,6 +1100,7 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 		ParametersBinding:        class.ParametersBinding.DeepCopy(),
 		EffectiveOnDetach:        class.EffectiveOnDetach,
 		SuspendMode:              class.SuspendMode,
+		SuspendAfterDetach:       class.SuspendAfterDetach,
 		DefaultOnDetach:          class.DefaultOnDetach,
 		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
 		DetachTimeout:            class.DetachTimeout,
@@ -1421,6 +1427,12 @@ func agentCacheBehind(ctx context.Context, reader client.Reader, agent *corev1al
 	return 0
 }
 
+func taskAdvancedPastBindingPass(decided, fresh *corev1alpha1.Task) bool {
+	return fresh.Status.Phase != decided.Status.Phase ||
+		fresh.DeletionTimestamp.IsZero() != decided.DeletionTimestamp.IsZero() ||
+		(decided.Status.Execution == nil && fresh.Status.Execution != nil)
+}
+
 func (r *TaskReconciler) ensureAgentExecutionBinding(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1442,7 +1454,10 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 		}
 		if current.Status.AgentExecutionBinding != nil {
-			task = current
+			if taskAdvancedPastBindingPass(task, current) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil, true
+			}
+			current.DeepCopyInto(task)
 		}
 	}
 	if existing := task.Status.AgentExecutionBinding; existing != nil {
@@ -1502,8 +1517,10 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		}
 	}
 	firstBinding := task.Status.AgentExecutionBinding == nil
+	beforeBinding := task.DeepCopy()
 	binding, err := r.persistAgentExecutionBinding(ctx, task, candidate)
 	if err == nil && firstBinding {
+		acpPreDispatch.mark(task, acpPreDispatchExecutionBound)
 		r.recordAgentExecutionSettings(task, candidate)
 	}
 	if err != nil {
@@ -1517,6 +1534,9 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		}
 		log.Error(err, "write-once binding persistence failed")
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
+	}
+	if taskAdvancedPastBindingPass(beforeBinding, task) {
+		return ctrl.Result{RequeueAfter: time.Second}, nil, true
 	}
 	task.Status.AgentExecutionBinding = binding
 	if err := r.verifyBoundExecution(ctx, task, binding); err != nil {

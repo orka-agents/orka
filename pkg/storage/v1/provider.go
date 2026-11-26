@@ -7,7 +7,7 @@ import (
 
 const (
 	ContractVersion   = "orka.storage.v1"
-	ContractRevision  = 14
+	ContractRevision  = 16
 	StateContract     = "state.v1"
 	ArtifactsContract = "artifacts.v1"
 )
@@ -54,6 +54,7 @@ type StateProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -87,5 +88,6 @@ type ArtifactProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	ArtifactStore
 }

@@ -98,6 +98,7 @@ type Snapshot struct {
 	manifestDigest string
 	entryCount     int
 	totalBytes     int64
+	ignore         *ignoreRules
 }
 
 type entry struct {

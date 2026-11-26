@@ -37,6 +37,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
@@ -131,11 +132,14 @@ type Handlers struct {
 	signInLimiter             *gatewayIngressLimiter
 	invites                   *githubInvites
 	oidcEnabled               bool
+	oidcIssuer                string
+	oidcAudience              string
 	ahp                       *ahphost.Host
 	completionLocks           *completionLocks
 	substrateMCPRouter        *workerexecutor.SubstrateMCPRouter
 	chatTurns                 chatTurnStopper
 	attentionBounds           attentionBounds
+	agentIdentityAudit        outboundaccess.AgentIdentityAuditReader
 }
 
 type HandlersConfig struct {
@@ -166,8 +170,11 @@ type HandlersConfig struct {
 	Connectors                ConnectorConfig
 	GitHubSignIn              GitHubSignInConfig
 	OIDCEnabled               bool
+	OIDCIssuer                string
+	OIDCAudience              string
 	AHP                       *ahphost.Host
 	SubstrateMCPProxy         SubstrateMCPProxyConfig
+	AgentIdentityAudit        outboundaccess.AgentIdentityAuditReader
 }
 
 func NewHandlers(cfg HandlersConfig) *Handlers {
@@ -208,9 +215,12 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		signInLimiter:             newGitHubSignInLimiter(),
 		invites:                   &githubInvites{},
 		oidcEnabled:               cfg.OIDCEnabled,
+		oidcIssuer:                cfg.OIDCIssuer,
+		oidcAudience:              cfg.OIDCAudience,
 		ahp:                       cfg.AHP,
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
+		agentIdentityAudit:        cfg.AgentIdentityAudit,
 	}
 }
 

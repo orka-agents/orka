@@ -290,6 +290,10 @@ type RepositoryMonitorStore interface {
 
 const MaxMessageBatch = 500
 
+const MaxMessageContentBytes = 1 << 20
+
+const MaxMessageBatchBytes = 4 << 20
+
 type Message struct {
 	ID         int64     `json:"id"`
 	Namespace  string    `json:"namespace"`

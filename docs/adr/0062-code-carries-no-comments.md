@@ -32,8 +32,8 @@ a decision written only in a comment is invisible to anyone outside that file.
   records explain *why*. Issues track the shortcuts that remain.
 - Some comments are exempt and never counted:
   - compiler and tool directives (`//go:`, `//nolint`, `// +kubebuilder` and other `// +`
-    markers, `#nosec`, `# shellcheck`, `# noqa`, `eslint-disable`, `@ts-expect-error`,
-    `/// <reference>`)
+    markers, `#nosec`, `# shellcheck`, `# noqa`, `eslint-disable`, ESLint's `/* eslint */`
+    and `/* global */` configuration comments, `@ts-expect-error`, `/// <reference>`)
   - license headers, `Deprecated:` and TypeScript `@deprecated` notices, cgo preambles, and Go
     example `Output:` blocks
   - generated files, `testdata/`, and skills vendored from another repository

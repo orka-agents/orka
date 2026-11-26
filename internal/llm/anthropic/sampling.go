@@ -11,37 +11,66 @@ import (
 	"strings"
 )
 
-func acceptsSamplingParams(model string) bool {
+const legacyMaxTokens = 4096
+
+const recentMaxTokens = 64000
+
+type claudeModel struct {
+	family string
+	major  int
+	minor  int
+}
+
+func parseClaudeModel(model string) (claudeModel, bool) {
 	_, name, found := strings.Cut(strings.ToLower(model), "claude-")
 	if !found {
-		return true
+		return claudeModel{}, false
 	}
 	parts := strings.FieldsFunc(name, func(r rune) bool {
 		return r == '-' || r == '.' || r == '@'
 	})
 	if len(parts) == 0 {
-		return true
+		return claudeModel{}, false
 	}
-	switch parts[0] {
+	m := claudeModel{family: parts[0]}
+	switch m.family {
 	case "fable", "mythos":
-		return false
+		return m, true
 	case "opus", "sonnet", "haiku":
 	default:
-		return true
+		return claudeModel{}, false
 	}
 	if len(parts) < 2 {
-		return true
+		return claudeModel{}, false
 	}
 	major, err := strconv.Atoi(parts[1])
 	if err != nil {
+		return claudeModel{}, false
+	}
+	m.major = major
+	if len(parts) >= 3 && len(parts[2]) <= 2 {
+		if minor, err := strconv.Atoi(parts[2]); err == nil {
+			m.minor = minor
+		}
+	}
+	return m, true
+}
+
+func (m claudeModel) atLeast(major, minor int) bool {
+	if m.family == "fable" || m.family == "mythos" {
 		return true
 	}
-	if major != 4 {
-		return major < 4
+	return m.major > major || (m.major == major && m.minor >= minor)
+}
+
+func acceptsSamplingParams(model string) bool {
+	m, ok := parseClaudeModel(model)
+	return !ok || !m.atLeast(4, 7)
+}
+
+func defaultMaxTokens(model string) int64 {
+	if m, ok := parseClaudeModel(model); ok && m.atLeast(4, 5) {
+		return recentMaxTokens
 	}
-	if len(parts) < 3 || len(parts[2]) > 2 {
-		return true
-	}
-	minor, err := strconv.Atoi(parts[2])
-	return err != nil || minor < 7
+	return legacyMaxTokens
 }

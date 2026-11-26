@@ -24,6 +24,8 @@ const (
 	sessionRenewWindow     = 2 * time.Hour
 	sessionRenewTimeout    = 30 * time.Second
 	plainHTTPScheme        = "http"
+	httpsScheme            = "https"
+	cliLoginUse            = "login"
 )
 
 var noRedirectClient = &http.Client{
@@ -41,7 +43,11 @@ var (
 )
 
 type authConfigView struct {
-	OIDC   bool `json:"oidc"`
+	OIDC       *bool `json:"oidc"`
+	OIDCConfig *struct {
+		Issuer   string `json:"issuer"`
+		Audience string `json:"audience"`
+	} `json:"oidcConfig"`
 	GitHub *struct {
 		ClientID  string `json:"clientID"`
 		AgentHost bool   `json:"agentHost"`
@@ -62,7 +68,7 @@ func newLoginCmd() *cobra.Command {
 	var noHost, noOpen bool
 	var timeout time.Duration
 	cmd := &cobra.Command{
-		Use:   "login",
+		Use:   cliLoginUse,
 		Short: "Sign in to Orka with GitHub",
 		Long: "Sign in to Orka with your GitHub account. You approve a code on github.com, Orka checks you are in an " +
 			"allowed org or team, links your GitHub account, and starts your Copilot environment unless you pass " +
@@ -123,6 +129,7 @@ func newLoginCmd() *cobra.Command {
 				cfg.Server, cfg.Token, cfg.TokenKind, cfg.Namespace = server, session.Token, tokenKindGitHubSession, session.Namespace
 				expires := session.ExpiresAt
 				cfg.SessionServer, cfg.TokenExpiresAt, cfg.SessionLogin, cfg.SessionSubject = server, &expires, session.Login, session.Subject
+				cfg.OIDCIssuer, cfg.OIDCAudience, cfg.OIDCClientID, cfg.OIDCTokenEndpoint, cfg.OIDCRefreshToken, cfg.OIDCScope = "", "", "", "", "", ""
 				return nil
 			}); err != nil {
 				return fmt.Errorf("save the session: %w", err)
@@ -160,8 +167,17 @@ func newLogoutCmd() *cobra.Command {
 			}
 			defer unlock()
 			cfg := loadConfig()
+			if cfg.TokenKind == tokenKindOIDC && cfg.Token != "" {
+				cfg.Token, cfg.TokenKind, cfg.TokenExpiresAt, cfg.SessionServer, cfg.SessionLogin, cfg.SessionSubject = "", "", nil, "", "", ""
+				cfg.OIDCIssuer, cfg.OIDCAudience, cfg.OIDCClientID, cfg.OIDCTokenEndpoint, cfg.OIDCRefreshToken, cfg.OIDCScope = "", "", "", "", "", ""
+				if err := saveConfig(cfg); err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), "Signed out.") //nolint:errcheck
+				return nil
+			}
 			if cfg.TokenKind != tokenKindGitHubSession || cfg.Token == "" {
-				return errors.New("not signed in with orka login")
+				return errors.New("not signed in with orka login or orka auth login")
 			}
 			if err := sessionServerAllowed(cfg.SessionServer); err != nil {
 				return fmt.Errorf("the saved session is not sent to its server: %w", err)
@@ -191,19 +207,25 @@ func loginServer(cmd *cobra.Command) (string, error) {
 	return server, nil
 }
 
+func isLoopbackHostname(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
 func sessionServerAllowed(server string) error {
 	parsed, err := url.Parse(server)
 	if err != nil || parsed.Host == "" {
 		return fmt.Errorf("%q is not a server URL", server)
 	}
-	if parsed.Scheme == "https" {
+	if parsed.Scheme == httpsScheme {
 		return nil
 	}
-	if parsed.Scheme == plainHTTPScheme {
-		switch parsed.Hostname() {
-		case "localhost", "127.0.0.1", "::1":
-			return nil
-		}
+	if parsed.Scheme == plainHTTPScheme && isLoopbackHostname(parsed.Hostname()) {
+		return nil
 	}
 	return fmt.Errorf("%s would carry your session in the clear; use https, or http only to localhost", server)
 }

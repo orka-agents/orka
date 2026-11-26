@@ -2,6 +2,8 @@ package v1
 
 import "maps"
 
+const unknownName = "unknown"
+
 type MethodKind uint8
 
 const (
@@ -19,7 +21,7 @@ func (k MethodKind) String() string {
 	case MethodAdmin:
 		return "admin"
 	default:
-		return "unknown"
+		return unknownName
 	}
 }
 
@@ -53,7 +55,7 @@ func (c CallClass) String() string {
 	case CallBulk:
 		return "bulk"
 	default:
-		return "unknown"
+		return unknownName
 	}
 }
 
@@ -80,11 +82,13 @@ func (info MethodInfo) as(class CallClass) MethodInfo {
 }
 
 var methodCatalog = map[string]MethodInfo{
+	"AbortImport":                               {Kind: MethodAdmin, Class: CallBackground},
 	"AcquireChatTurn":                           stateWrite(""),
 	"AcquireLock":                               stateWrite(""),
 	"ActivateSessionTurnProjection":             stateWrite(""),
 	"AdmitGatewayEvent":                         stateWrite("$1.Event.Namespace, $1.Event.GatewayUID, $1.Event.ExternalEventID"),
 	"AdvanceControllerEpoch":                    {Kind: MethodAdmin, Class: CallControl},
+	"AdvanceWriteWatermark":                     {Kind: MethodWrite, Class: CallControl},
 	"AppendAHPJournal":                          stateWrite(""),
 	"AppendExecutionEvent":                      stateWrite(""),
 	"AppendExecutionEventIfAbsent":              stateWrite("$1.Namespace, $1.StreamType, $1.StreamID, $2"),
@@ -93,6 +97,7 @@ var methodCatalog = map[string]MethodInfo{
 	"AppendMessages":                            stateWrite(""),
 	"AppendMessagesWithLock":                    stateWrite(""),
 	"ArchiveMemoryProposal":                     stateWrite(""),
+	"BeginImport":                               {Kind: MethodAdmin, Class: CallBackground},
 	"BeginMemoryConsolidationRun":               stateWrite("$1.Namespace, $1.TaskUID"),
 	"BindDataset":                               {Kind: MethodAdmin, Class: CallControl},
 	"BindPatchProposalPublicationEvidence":      stateWrite(""),
@@ -103,8 +108,10 @@ var methodCatalog = map[string]MethodInfo{
 	"ClaimNextGatewayDelivery":                  stateWrite(""),
 	"ClaimNextGatewayEvent":                     stateWrite(""),
 	"ClaimOutboxProjectionRecords":              stateWrite(""),
+	"ClearMigrationMarker":                      {Kind: MethodAdmin, Class: CallBackground},
 	"CommitMemoryProposalApplication":           stateWrite(""),
 	"CommitScanTaskIngestion":                   stateWrite(""),
+	"CompleteImport":                            {Kind: MethodAdmin, Class: CallBackground},
 	"CompleteMemoryConsolidationRun":            stateWrite("$1.Namespace, $1.TaskUID"),
 	"CommitSealedConnectorCompletion":           stateWrite(""),
 	"CommitSealedSessionTurnFinalization":       stateWrite("$1.Key.SessionUID, $1.Key.LeaseGeneration, $1.Key.TaskUID, $1.Key.Attempt, $1.Key.PromptID").as(CallBulk),
@@ -171,6 +178,9 @@ var methodCatalog = map[string]MethodInfo{
 	"EnsureSessionSoulWithLock":                 stateWrite(""),
 	"ExpireGatewayEvent":                        stateWrite(""),
 	"ExpireGatewayEventWithDelivery":            stateWrite("$1.Delivery.Namespace, $1.EventID"),
+	"ExportDigest":                              {Kind: MethodRead, Class: CallBackground},
+	"ExportFamilies":                            {Kind: MethodRead, Class: CallBackground},
+	"ExportRecords":                             {Kind: MethodRead, Class: CallBulk},
 	"FreezeGatewayEventTaskRuntimeAllowedTools": stateWrite(""),
 	"GetAHPChannelState":                        stateRead(),
 	"GetAHPClient":                              stateRead(),
@@ -195,6 +205,7 @@ var methodCatalog = map[string]MethodInfo{
 	"GetGatewayTaskCleanupReceipt":              stateRead(),
 	"GetGitHubMutationRecord":                   stateRead(),
 	"GetImplementationJob":                      stateRead(),
+	"GetImportProgress":                         {Kind: MethodRead, Class: CallBackground},
 	"GetLatestExecutionEventSeq":                stateRead(),
 	"GetLatestExecutionEventSeqs":               stateRead(),
 	"GetLatestThreatModel":                      stateRead(),
@@ -228,11 +239,13 @@ var methodCatalog = map[string]MethodInfo{
 	"GetSessionTurnCleanupReceipt":              stateRead(),
 	"GetSessionType":                            stateRead(),
 	"GetWorkAction":                             stateRead(),
+	"GetWriteWatermark":                         {Kind: MethodRead, Class: CallControl},
 	"HasGatewayTaskTombstone":                   stateRead(),
 	"HasSessionCleanupFenceForUID":              stateRead(),
 	"HasSessionCleanupIntent":                   stateRead(),
 	"HealthCheck":                               {Kind: MethodRead, Class: CallControl},
 	"GetMemoryConsolidationCursor":              stateRead(),
+	"ImportRecords":                             {Kind: MethodAdmin, Class: CallBackground},
 	"IsLocked":                                  stateWrite(""),
 	"LinkUsagePullRequest":                      stateWrite(""),
 	"ListAHPChannels":                           stateRead(),
@@ -286,6 +299,7 @@ var methodCatalog = map[string]MethodInfo{
 	"LoadTranscriptThrough":                     stateRead(),
 	"LoadUsage":                                 stateRead(),
 	"MaintainGatewayRecords":                    stateWrite("").as(CallBackground),
+	"MarkDatasetMigrated":                       {Kind: MethodAdmin, Class: CallBackground},
 	"MarkExpiredGatewayEventDeadLettered":       stateWrite(""),
 	"MarkFindingDuplicate":                      stateWrite(""),
 	"MarkGatewayDeliveryDelivered":              stateWrite(""),

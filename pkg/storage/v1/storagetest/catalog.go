@@ -19,6 +19,8 @@ type writeCase[P any] struct {
 	args          func(fence storagev1.ControllerEpochFence) []any
 	explicitFence bool
 	observe       func(t *testing.T, provider P) any
+	observeWrites bool
+	observeReads  func(t *testing.T, provider P) any
 	afterCommit   func(t *testing.T, provider P)
 }
 
@@ -127,11 +129,11 @@ func requireSameOutcome(t testingT, want, got writeOutcome) {
 		got.returned, got.args, want.returned, want.args)
 }
 
-func runWriteCatalog[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P]) {
+func runWriteCatalog[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], settings suiteOptions) {
 	for _, c := range cases {
 		t.Run(c.method, func(t *testing.T) {
 			t.Run("refusals", func(t *testing.T) { runWriteRefusals(t, newProvider(t), c) })
-			t.Run("receipts", func(t *testing.T) { runWriteReceipts(t, newProvider(t), c) })
+			t.Run("receipts", func(t *testing.T) { runWriteReceipts(t, newProvider(t), c, settings) })
 			t.Run("aborted", func(t *testing.T) { runWriteAborted(t, newProvider(t), c) })
 			t.Run("detached", func(t *testing.T) { runWriteDetached(t, newProvider(t), c) })
 		})
@@ -209,7 +211,7 @@ func runWriteRefusals[P writeCaseProvider](t *testing.T, provider P, c writeCase
 	require.Equal(t, baseline, c.observe(t, provider), "a write under a replaced controller's fence changed state")
 }
 
-func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase[P]) {
+func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase[P], settings suiteOptions) {
 	dataset, _ := prepareWriteCase(t, provider, c)
 	ctx := t.Context()
 	envelope := envelopeFor(t, dataset, c, suiteFence)
@@ -226,7 +228,11 @@ func runWriteReceipts[P writeCaseProvider](t *testing.T, provider P, c writeCase
 	other := envelope
 	other.RequestDigest = controlDigest("a different request")
 	outcome := callWrite(ctx, t, provider, c, other, suiteFence)
-	require.ErrorIs(t, outcome.err, storagev1.ErrDuplicateMismatch)
+	if settings.recomputedDigests[c.method] {
+		require.ErrorIs(t, outcome.err, storagev1.ErrValidation)
+	} else {
+		require.ErrorIs(t, outcome.err, storagev1.ErrDuplicateMismatch)
+	}
 	require.Equal(t, after, c.observe(t, provider))
 
 	resolved, err := provider.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
@@ -320,6 +326,10 @@ func runConcurrentReplays[P writeCaseProvider](t *testing.T, provider P, c write
 	return outcomes
 }
 
+func servesContract(info storagev1.MethodInfo, contract string) bool {
+	return info.Contract == "" || info.Contract == contract
+}
+
 func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, error) {
 	covered := map[string]bool{}
 	for _, c := range cases {
@@ -327,7 +337,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 		switch {
 		case !ok:
 			return nil, fmt.Errorf("write case %q names no contract method", c.method)
-		case info.Kind != storagev1.MethodWrite || info.Contract != contract:
+		case info.Kind != storagev1.MethodWrite || !servesContract(info, contract):
 			return nil, fmt.Errorf("write case %q is not a %s write", c.method, contract)
 		case covered[c.method]:
 			return nil, fmt.Errorf("write case %q is listed twice", c.method)
@@ -336,7 +346,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 	}
 	var uncovered []string
 	for name, info := range storagev1.Methods() {
-		if info.Kind == storagev1.MethodWrite && info.Contract == contract && !covered[name] {
+		if info.Kind == storagev1.MethodWrite && servesContract(info, contract) && !covered[name] {
 			uncovered = append(uncovered, name)
 		}
 	}

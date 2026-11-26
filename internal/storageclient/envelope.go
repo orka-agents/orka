@@ -243,6 +243,16 @@ func (o *operations) drive(
 		if ctx.Err() != nil || !o.now().Add(wait).Before(deadline) || !sleep(ctx, wait) {
 			break
 		}
+		ended, err := o.admitRetry(ctx, call.contract, capAt)
+		if ended {
+			break
+		}
+		if err != nil {
+			if unknown {
+				return o.resolve(ctx, call, envelope, attempt, err)
+			}
+			return err
+		}
 	}
 	if unknown {
 		return o.resolve(ctx, call, envelope, attempt, last)
@@ -251,6 +261,28 @@ func (o *operations) drive(
 		return errors.Join(ctx.Err(), last)
 	}
 	return last
+}
+
+func (o *operations) admitRetry(ctx context.Context, contract string, capAt time.Time) (ended bool, err error) {
+	horizonCtx := ctx
+	if !capAt.IsZero() {
+		var cancel context.CancelFunc
+		horizonCtx, cancel = context.WithDeadline(ctx, capAt)
+		defer cancel()
+	}
+	waitCtx, cancelWait := context.WithTimeout(horizonCtx, o.fenceWait)
+	defer cancelWait()
+	o.fencesMu.Lock()
+	source := o.fences
+	o.fencesMu.Unlock()
+	if _, _, err := source.WriteFence(waitCtx, contract); err != nil {
+		if horizonCtx.Err() != nil && !errors.Is(err, storagev1.ErrNotReady) {
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: the controller epoch fence for %s closed after the write's first attempt: %w",
+			storagev1.ErrNotReady, contract, err)
+	}
+	return false, nil
 }
 
 func (o *operations) retryBounds(ctx context.Context, envelope storagev1.WriteEnvelope) (deadline, capAt time.Time) {

@@ -34,6 +34,7 @@ type ProviderProfile struct {
 	AdapterDigest         string
 	ValidateWorkspace     func(acp.SessionPaths) error
 	PrepareSession        func(acp.SessionPaths) error
+	BindProviderProxy     func(acp.SessionPaths, ProviderProxyBinding) error
 }
 
 type ProviderSessionProjection struct {

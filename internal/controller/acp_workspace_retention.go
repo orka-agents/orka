@@ -43,6 +43,10 @@ import (
 const (
 	acpWorkspaceLastDetachedAnnotation             = "acp.workspace.orka.ai/last-detached-at"
 	acpWorkspaceMaxSuspendedAnnotation             = "acp.workspace.orka.ai/max-suspended"
+	acpWorkspaceSuspendAfterDetachAnnotation       = "acp.workspace.orka.ai/suspend-after-detach"
+	acpWorkspaceSuspendAtAnnotation                = "acp.workspace.orka.ai/suspend-at"
+	acpWorkspaceSuspendPendingAnnotation           = "acp.workspace.orka.ai/suspend-pending"
+	maxACPWorkspaceSuspendAfterDetach              = time.Hour
 	acpWorkspaceLegacyRetentionDeadlineAnnotation  = "acp.workspace.orka.ai/legacy-retention-deadline"
 	acpWorkspaceRetentionRequeue                   = 5 * time.Minute
 	acpWorkspaceLegacyRetentionGrace               = 24 * time.Hour
@@ -150,6 +154,39 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	} else if refreshed {
 		return releaseQuota(ctrl.Result{RequeueAfter: time.Second})
+	}
+	if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open {
+		tainted, taintErr := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), workspace)
+		if taintErr != nil {
+			return ctrl.Result{}, taintErr
+		}
+		if !tainted && now.Before(deadline) {
+			return releaseQuota(ctrl.Result{RequeueAfter: min(deadline.Sub(now)+time.Second, lifetimeRequeue)})
+		}
+	}
+	if result, handled, err := r.reconcileWarmDetachWindow(ctx, workspace, now, lifetimeRequeue); err != nil {
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
+	}
+	if acpWorkspaceWarmSuspendRetryable(workspace) {
+		demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace, demandCutoff)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if demandOutstanding {
+			if retentionFence != nil {
+				if err := r.deleteACPWorkspaceRetentionFence(ctx, retentionFence); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
+		}
+	}
+	if result, handled, err := r.retryPendingWarmSuspend(ctx, workspace, now); err != nil {
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
@@ -1203,6 +1240,10 @@ func suspendACPWorkspaceWithinQuota(
 			formatACPWorkspaceSettlementReceipt(settledTaskUID, settledTaskEpoch)
 	}
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }

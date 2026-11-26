@@ -23,14 +23,17 @@ import (
 
 const DefaultStorePath = "/data/orka.db"
 
+const DefaultSQLiteSynchronous = "normal"
+
 const MaxFileBytes = 1 << 20
 
 var adapterURLPattern = regexp.MustCompile(`^https://[^\s@?#]+$`)
 
 type Flags struct {
-	storeBackend storeBackendFlag
-	StorePath    string
-	ConfigPath   string
+	storeBackend      storeBackendFlag
+	StorePath         string
+	SQLiteSynchronous string
+	ConfigPath        string
 }
 
 type storeBackendFlag struct {
@@ -57,6 +60,9 @@ func (f *Flags) AddFlags(fs *flag.FlagSet) {
 		"Storage `backend` when --storage-config is not set. Only sqlite is supported. Cannot be combined with --storage-config.")
 	fs.StringVar(&f.StorePath, "store-path", DefaultStorePath,
 		"Path to the embedded SQLite database file, used by every storage contract bound to sqlite.")
+	fs.StringVar(&f.SQLiteSynchronous, "store-sqlite-synchronous", DefaultSQLiteSynchronous,
+		"SQLite synchronous `mode` of the embedded database: normal syncs the write-ahead log at checkpoints, so the "+
+			"latest commits can be lost if the node or its disk fails; full syncs every commit.")
 	fs.StringVar(&f.ConfigPath, "storage-config", "",
 		"Path to a storage configuration file that binds each storage contract to sqlite or to a storage adapter. "+
 			"Empty binds both contracts to embedded SQLite at --store-path.")

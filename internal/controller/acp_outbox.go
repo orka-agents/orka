@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -116,6 +118,7 @@ func enqueueDurableTaskTerminalProjectionForUID(
 		return getErr
 	}
 	if _, err = projectionStore.EnqueueOutboxProjection(ctx, projection, fence); err == nil {
+		wakeACPOutboxProjectors()
 		return nil
 	} else if !errors.Is(err, store.ErrConflict) {
 		return err
@@ -138,19 +141,93 @@ func validateMatchingTaskTerminalProjection(existing *store.OutboxProjection, ex
 }
 
 const (
-	defaultACPOutboxInterval = time.Second
-	defaultACPOutboxLease    = 30 * time.Second
-	defaultACPOutboxLimit    = 32
-	defaultACPOutboxAttempts = 10
+	defaultACPOutboxInterval          = time.Second
+	defaultACPOutboxLease             = 30 * time.Second
+	defaultACPOutboxLimit             = 32
+	defaultACPOutboxAttempts          = 10
+	defaultACPOutboxIdleClaimInterval = 10 * time.Second
 )
 
+var acpOutboxWakeups = struct {
+	sync.Mutex
+	subscribers map[chan struct{}]struct{}
+}{subscribers: map[chan struct{}]struct{}{}}
+
+func subscribeACPOutboxWakeups() (<-chan struct{}, func()) {
+	wake := make(chan struct{}, 1)
+	acpOutboxWakeups.Lock()
+	acpOutboxWakeups.subscribers[wake] = struct{}{}
+	acpOutboxWakeups.Unlock()
+	return wake, func() {
+		acpOutboxWakeups.Lock()
+		delete(acpOutboxWakeups.subscribers, wake)
+		acpOutboxWakeups.Unlock()
+	}
+}
+
+func wakeACPOutboxProjectors() {
+	acpOutboxWakeups.Lock()
+	defer acpOutboxWakeups.Unlock()
+	for wake := range acpOutboxWakeups.subscribers {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+type acpOutboxPass struct {
+	claimedAt time.Time
+	claimed   []string
+	retries   map[string]time.Time
+}
+
+type acpOutboxSchedule struct {
+	retries map[string]time.Time
+}
+
+func (s *acpOutboxSchedule) observe(pass acpOutboxPass, err error) {
+	if s.retries == nil {
+		s.retries = map[string]time.Time{}
+	}
+	if err != nil {
+		maps.Copy(s.retries, pass.retries)
+		return
+	}
+	for _, id := range pass.claimed {
+		delete(s.retries, id)
+	}
+	if len(pass.claimed) < defaultACPOutboxLimit {
+		for id, due := range s.retries {
+			if !due.After(pass.claimedAt) {
+				delete(s.retries, id)
+			}
+		}
+	}
+	maps.Copy(s.retries, pass.retries)
+}
+
+func (s *acpOutboxSchedule) next(now time.Time, pass acpOutboxPass, err error, idle time.Duration) time.Time {
+	if err != nil || len(pass.claimed) >= defaultACPOutboxLimit {
+		return now
+	}
+	next := now.Add(idle)
+	for _, due := range s.retries {
+		if due.Before(next) {
+			next = due
+		}
+	}
+	return next
+}
+
 type ACPOutboxProjector struct {
-	Client      client.Client
-	Store       store.OutboxProjectionStore
-	Epochs      *ControllerEpochManager
-	WorkerID    string
-	Interval    time.Duration
-	MaxAttempts int64
+	Client            client.Client
+	Store             store.OutboxProjectionStore
+	Epochs            *ControllerEpochManager
+	WorkerID          string
+	Interval          time.Duration
+	MaxAttempts       int64
+	IdleClaimInterval time.Duration
 }
 
 func (p *ACPOutboxProjector) NeedLeaderElection() bool { return true }
@@ -169,34 +246,57 @@ func (p *ACPOutboxProjector) Start(ctx context.Context) error {
 	if p.MaxAttempts <= 0 {
 		p.MaxAttempts = defaultACPOutboxAttempts
 	}
+	idle := p.IdleClaimInterval
+	if idle <= 0 {
+		idle = defaultACPOutboxIdleClaimInterval
+	}
+	wake, unsubscribe := subscribeACPOutboxWakeups()
+	defer unsubscribe()
 	ticker := time.NewTicker(p.Interval)
 	defer ticker.Stop()
+	var schedule acpOutboxSchedule
+	var nextClaim time.Time
 	for {
-		if err := p.projectOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logf.FromContext(ctx).Error(err, "ACP outbox projection pass failed")
+		if now := time.Now(); !now.Before(nextClaim) {
+			pass, err := p.projectPass(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				logf.FromContext(ctx).Error(err, "ACP outbox projection pass failed")
+			}
+			schedule.observe(pass, err)
+			nextClaim = schedule.next(time.Now(), pass, err, idle)
 		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-wake:
+			nextClaim = time.Time{}
 		case <-ticker.C:
 		}
 	}
 }
 
 func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
+	_, err := p.projectPass(ctx)
+	return err
+}
+
+func (p *ACPOutboxProjector) projectPass(ctx context.Context) (acpOutboxPass, error) {
+	var pass acpOutboxPass
 	fence, err := p.Epochs.CurrentFence(ctx)
 	if err != nil {
-		return err
+		return pass, err
 	}
 	now := time.Now().UTC()
 	projections, err := p.Store.ClaimOutboxProjections(ctx, store.ClaimOutboxProjectionsRequest{
 		Fence: fence, WorkerID: p.WorkerID, Limit: defaultACPOutboxLimit, LeaseDuration: defaultACPOutboxLease, Now: now,
 	})
 	if err != nil {
-		return err
+		return pass, err
 	}
+	pass.claimedAt = now
 	for i := range projections {
 		projection := &projections[i]
+		pass.claimed = append(pass.claimed, projection.ID)
 		deliveryDigest, projectErr := p.deliver(ctx, *projection)
 		state := store.OutboxProjectionDelivered
 		lastError := ""
@@ -216,7 +316,7 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 			"deliveryDigest": deliveryDigest, "lastError": lastError, "availableAt": availableAt,
 		})
 		if err != nil {
-			return err
+			return pass, err
 		}
 		_, err = p.Store.CompleteOutboxProjection(ctx, store.CompleteOutboxProjectionRequest{
 			ID: projection.ID, Fence: fence, ExpectedVersion: projection.Version, LeaseOwner: p.WorkerID,
@@ -224,10 +324,16 @@ func (p *ACPOutboxProjector) projectOnce(ctx context.Context) error {
 			NewState: state, DeliveryDigest: deliveryDigest, LastError: lastError, AvailableAt: availableAt, UpdatedAt: time.Now().UTC(),
 		})
 		if err != nil {
-			return err
+			return pass, err
+		}
+		if state == store.OutboxProjectionPending {
+			if pass.retries == nil {
+				pass.retries = map[string]time.Time{}
+			}
+			pass.retries[projection.ID] = availableAt
 		}
 	}
-	return nil
+	return pass, nil
 }
 
 type taskTerminalProjection = taskterminal.Projection
@@ -328,7 +434,9 @@ func (p *ACPOutboxProjector) deliver(ctx context.Context, projection store.Outbo
 				Reason: "Task" + string(payload.Phase), Message: taskTerminalMessage,
 			})
 		}
-		if err := p.Client.Status().Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if err := admitTaskStatus(ctx, p.Epochs, taskSuccessOf(base), task, func(ctx context.Context) error {
+			return p.Client.Status().Patch(ctx, task, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		}); err != nil {
 			return err
 		}
 		deliveredResourceVersion = task.ResourceVersion

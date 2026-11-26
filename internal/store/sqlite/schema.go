@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -22,7 +22,9 @@ const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  switch_generation INTEGER NOT NULL DEFAULT 0 CHECK(switch_generation >= 0),
  key_fingerprint TEXT NOT NULL DEFAULT '',
  binding_state TEXT NOT NULL DEFAULT '' CHECK(binding_state IN ('', 'bound', 'detached')),
- bound_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(bound_at_ns >= 0)
+ bound_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(bound_at_ns >= 0),
+ write_watermark INTEGER NOT NULL DEFAULT 0 CHECK(write_watermark >= 0),
+ write_watermark_at_ns INTEGER NOT NULL DEFAULT 0
 )`
 
 func initializeSchema(db *sql.DB) error {

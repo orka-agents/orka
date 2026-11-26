@@ -687,7 +687,7 @@ jq -e '
 
 grep -Fq 'ORKA_SECURITY_SCAN_DIAGNOSTICS_DIR: ${{ runner.temp }}/security-scan-e2e-diagnostics' "${security_workflow}"
 grep -Fq 'if: ${{ failure() }}' "${security_workflow}"
-grep -Fq 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' "${security_workflow}"
+grep -Fq 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9' "${security_workflow}"
 grep -Fq 'path: ${{ runner.temp }}/security-scan-e2e-diagnostics' "${security_workflow}"
 
 preflight_root="${test_root}/preflight-cleanup"

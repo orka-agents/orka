@@ -36,10 +36,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -108,58 +110,65 @@ const (
 
 type TaskReconciler struct {
 	client.Client
-	APIReader                         client.Reader
-	Scheme                            *runtime.Scheme
-	JobBuilder                        *JobBuilder
-	TaskProvenanceProtected           bool
-	GatewayService                    *gatewayruntime.Service
-	SessionManager                    *SessionManager
-	WebhookNotifier                   *WebhookNotifier
-	Recorder                          record.EventRecorder
-	KubeClient                        kubernetes.Interface
-	OutboundAccessResolver            outboundaccess.Resolver
-	BrokeredTransactionExchange       *workerpkg.TransactionExchangeConfig
-	ResultStore                       store.ResultStore
-	PlanStore                         store.PlanStore
-	MessageStore                      store.MessageStore
-	ArtifactStore                     store.ArtifactStore
-	ExecutionEventStore               store.ExecutionEventStore
-	DurableControlStore               store.DurableControlStore
-	AgentExecutionSnapshots           store.AgentExecutionSnapshotStore
-	RepositoryValidationBindings      tools.RepositoryValidationBindingStore
-	MCPRegistry                       *tools.Registry
-	ACPArtifactRetirer                artifactcap.IdentityRetirer
-	ACPPublicationReclaimer           ACPPublicationReclaimer
-	ControllerEpochManager            *ControllerEpochManager
-	ControllerNamespace               string
-	ACPAdmissionGate                  *ACPAdmissionGate
-	Mode                              executionmode.Mode
-	ACPRuntimeImages                  ACPRuntimeImages
-	ACPRuntimePoolCapacity            corev1alpha1.RuntimePoolCapacitySpec
-	ACPToolboxPolicy                  ACPToolboxPolicy
-	Identity                          agentidentity.Config
-	ACPRuntimeNamespace               string
-	EnforceNamespaceIsolation         bool
-	ProviderUseAuthorization          bool
-	MaxTasksPerNamespace              int32
-	WorkspaceProviderAPIEnabled       bool
-	WorkspaceSettlementProtected      bool
-	ACPWorkspaceDispatchEnabled       bool
-	AIWorkerServiceAccountName        string
-	VendorWorkerServiceAccountName    string
-	ContainerWorkerServiceAccountName string
-	AIWorkerClusterRoleName           string
-	VendorWorkerClusterRoleName       string
-	ContainerWorkerClusterRoleName    string
-	WorkerRoleBindingNamePrefix       string
-	EnforceTransactionCredentialAuth  bool
-	TransactionCredentialReadScopes   []string
-	OutboundAccessTrust               outboundaccess.TrustConfig
-	trustedServiceCleanupMu           sync.RWMutex
-	trustedServiceCleanupDone         bool
-	WebhookDeliveryWorkers            int
-	webhookDeliveries                 *taskWebhookDispatcher
+	APIReader                             client.Reader
+	Scheme                                *runtime.Scheme
+	JobBuilder                            *JobBuilder
+	TaskProvenanceProtected               bool
+	GatewayService                        *gatewayruntime.Service
+	SessionManager                        *SessionManager
+	WebhookNotifier                       *WebhookNotifier
+	Recorder                              record.EventRecorder
+	KubeClient                            kubernetes.Interface
+	OutboundAccessResolver                outboundaccess.Resolver
+	BrokeredTransactionExchange           *workerpkg.TransactionExchangeConfig
+	ResultStore                           store.ResultStore
+	PlanStore                             store.PlanStore
+	MessageStore                          store.MessageStore
+	ArtifactStore                         store.ArtifactStore
+	ExecutionEventStore                   store.ExecutionEventStore
+	DurableControlStore                   store.DurableControlStore
+	AgentExecutionSnapshots               store.AgentExecutionSnapshotStore
+	RepositoryValidationBindings          tools.RepositoryValidationBindingStore
+	MCPRegistry                           *tools.Registry
+	ACPArtifactRetirer                    artifactcap.IdentityRetirer
+	ACPPublicationReclaimer               ACPPublicationReclaimer
+	ControllerEpochManager                *ControllerEpochManager
+	ControllerNamespace                   string
+	ACPAdmissionGate                      *ACPAdmissionGate
+	Mode                                  executionmode.Mode
+	ACPRuntimeImages                      ACPRuntimeImages
+	ACPRuntimePoolCapacity                corev1alpha1.RuntimePoolCapacitySpec
+	ACPToolboxPolicy                      ACPToolboxPolicy
+	Identity                              agentidentity.Config
+	ACPRuntimeNamespace                   string
+	EnforceNamespaceIsolation             bool
+	ProviderUseAuthorization              bool
+	MaxTasksPerNamespace                  int32
+	WorkspaceProviderAPIEnabled           bool
+	WorkspaceSettlementProtected          bool
+	ACPWorkspaceDispatchEnabled           bool
+	ACPWorkspaceDefaultSuspendAfterDetach time.Duration
+	AIWorkerServiceAccountName            string
+	VendorWorkerServiceAccountName        string
+	ContainerWorkerServiceAccountName     string
+	AIWorkerClusterRoleName               string
+	VendorWorkerClusterRoleName           string
+	ContainerWorkerClusterRoleName        string
+	WorkerRoleBindingNamePrefix           string
+	EnforceTransactionCredentialAuth      bool
+	TransactionCredentialReadScopes       []string
+	OutboundAccessTrust                   outboundaccess.TrustConfig
+	trustedServiceCleanupMu               sync.RWMutex
+	trustedServiceCleanupDone             bool
+	WebhookDeliveryWorkers                int
+	webhookDeliveries                     *taskWebhookDispatcher
+	MaxConcurrentReconciles               int
 }
+
+const (
+	DefaultTaskMaxConcurrentReconciles = 4
+	MaxTaskMaxConcurrentReconciles     = 64
+)
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks/status,verbs=get;update;patch
@@ -202,13 +211,20 @@ func (r *TaskReconciler) taskMetadataReader() client.Reader {
 }
 
 func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.NamespacedName, present bool) error {
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	_, err := r.patchTaskFinalizerReturning(ctx, key, present)
+	return err
+}
+
+func (r *TaskReconciler) patchTaskFinalizerReturning(ctx context.Context, key types.NamespacedName, present bool) (*corev1alpha1.Task, error) {
+	var result *corev1alpha1.Task
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &corev1alpha1.Task{}
 		if err := r.taskMetadataReader().Get(ctx, key, current); err != nil {
 			return err
 		}
 		hasFinalizer := controllerutil.ContainsFinalizer(current, labels.TaskFinalizer)
 		if hasFinalizer == present {
+			result = current
 			return nil
 		}
 		base := current.DeepCopy()
@@ -217,8 +233,36 @@ func (r *TaskReconciler) patchTaskFinalizer(ctx context.Context, key types.Names
 		} else {
 			controllerutil.RemoveFinalizer(current, labels.TaskFinalizer)
 		}
-		return r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		result = current
+		return nil
 	})
+	return result, err
+}
+
+func acpTaskChainsAdmission(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Spec.Schedule == "" &&
+		task.DeletionTimestamp.IsZero()
+}
+
+func (r *TaskReconciler) initializePendingStatus(ctx context.Context, task *corev1alpha1.Task) error {
+	initialize := func(t *corev1alpha1.Task) {
+		t.Status.Phase = corev1alpha1.TaskPhasePending
+		startTrackingInitialApprovalSelection(t)
+	}
+	candidate := task.DeepCopy()
+	initialize(candidate)
+	err := r.Status().Update(ctx, candidate)
+	if err == nil {
+		candidate.DeepCopyInto(task)
+		return nil
+	}
+	if !apierrors.IsConflict(err) {
+		return err
+	}
+	return r.updateStatusWithRetry(ctx, task, initialize)
 }
 
 func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) error {
@@ -229,6 +273,7 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
 		previousJobName := task.Status.JobName
 		hadACPExecution := task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0
+		reported := taskSuccessOf(task)
 		mutate(task)
 		write := func(writeCtx context.Context) error {
 			if taskJobAuthorityChanged(previousJob, previousJobName, task) {
@@ -236,7 +281,9 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 					return err
 				}
 			}
-			return r.Status().Update(writeCtx, task)
+			return admitTaskStatus(writeCtx, r.ControllerEpochManager, reported, task, func(ctx context.Context) error {
+				return r.Status().Update(ctx, task)
+			})
 		}
 		if hadACPExecution && taskDataAuthorityEnded(task) {
 			return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
@@ -287,6 +334,54 @@ func taskPhaseCountsTowardConcurrency(phase corev1alpha1.TaskPhase) bool {
 	}
 }
 
+func (r *TaskReconciler) admitNewTask(ctx context.Context, req ctrl.Request, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	chainAdmission := acpTaskChainsAdmission(task)
+	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		patched, err := r.patchTaskFinalizerReturning(ctx, req.NamespacedName, true)
+		if err != nil {
+			log.Error(err, "failed to add finalizer")
+			return ctrl.Result{}, err, true
+		}
+		if !chainAdmission || patched == nil || patched.UID != task.UID || !acpTaskChainsAdmission(patched) ||
+			!controllerutil.ContainsFinalizer(patched, labels.TaskFinalizer) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
+		patched.DeepCopyInto(task)
+	}
+
+	if task.Status.Phase == "" {
+		var err error
+		if chainAdmission {
+			err = r.initializePendingStatus(ctx, task)
+		} else {
+			err = r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
+				t.Status.Phase = corev1alpha1.TaskPhasePending
+				startTrackingInitialApprovalSelection(t)
+			})
+		}
+		if err != nil {
+			log.Error(err, "failed to update initial status")
+			return ctrl.Result{}, err, true
+		}
+		acpPreDispatch.mark(task, acpPreDispatchStatusInitialized)
+		_ = r.recordTaskLifecycleEvent(
+			ctx,
+			task,
+			execevents.ExecutionEventTypeTaskCreated,
+			execevents.ExecutionEventSeverityInfo,
+			"Task status initialized to Pending",
+		)
+		if !chainAdmission {
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
+		if !task.DeletionTimestamp.IsZero() {
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
+	}
+	return ctrl.Result{}, nil, false
+}
+
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -300,6 +395,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 		log.Error(err, "unable to fetch Task")
 		return ctrl.Result{}, err
+	}
+	if task.Status.Execution == nil && task.Spec.Schedule == "" && task.DeletionTimestamp.IsZero() &&
+		!task.Status.Phase.IsTerminal() {
+		acpPreDispatch.mark(task, acpPreDispatchObserved)
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
 		stopErr := r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
@@ -350,32 +449,11 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleDeletion(ctx, task)
 	}
 
-	if !controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
-		if err := r.patchTaskFinalizer(ctx, req.NamespacedName, true); err != nil {
-			log.Error(err, "failed to add finalizer")
+	if result, err, done := r.admitNewTask(ctx, req, task); done {
+		if err != nil {
 			tracing.RecordSpanError(span, err)
-			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: time.Second}, nil
-	}
-
-	if task.Status.Phase == "" {
-		if err := r.updateStatusWithRetry(ctx, task, func(t *corev1alpha1.Task) {
-			t.Status.Phase = corev1alpha1.TaskPhasePending
-			startTrackingInitialApprovalSelection(t)
-		}); err != nil {
-			log.Error(err, "failed to update initial status")
-			tracing.RecordSpanError(span, err)
-			return ctrl.Result{}, err
-		}
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskCreated,
-			execevents.ExecutionEventSeverityInfo,
-			"Task status initialized to Pending",
-		)
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return result, err
 	}
 
 	stopThenCascade := func(result ctrl.Result, err error) (ctrl.Result, error) {
@@ -809,7 +887,7 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 	if delay := r.remainingRetryDelay(task, time.Now()); delay > 0 {
-		return ctrl.Result{RequeueAfter: delay}, nil
+		return r.holdRetryAdmission(ctx, task, delay)
 	}
 
 	if task.Spec.SessionRef != nil && task.Spec.Type != corev1alpha1.TaskTypeAgent {
@@ -818,38 +896,8 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
-	if r.MaxTasksPerNamespace > 0 {
-		validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
-		if err != nil {
-			log.Error(err, "failed to verify repository validation provenance for namespace limit")
-			if errors.Is(err, errRepositoryMonitorValidationConfinement) {
-				return r.failTask(ctx, task, err.Error())
-			}
-			return ctrl.Result{}, err
-		}
-		if !validationTask {
-			var namespaceTasks corev1alpha1.TaskList
-			if err := r.List(ctx, &namespaceTasks, client.InNamespace(task.Namespace)); err != nil {
-				log.Error(err, "failed to list namespace tasks for limit check")
-				return ctrl.Result{}, err
-			}
-			active := int32(0)
-			for _, t := range namespaceTasks.Items {
-				if t.Name != task.Name && taskPhaseCountsTowardConcurrency(t.Status.Phase) {
-					active++
-				}
-			}
-			if active >= r.MaxTasksPerNamespace {
-				log.Info("namespace task limit reached, requeueing",
-					"namespace", task.Namespace,
-					"active", active,
-					"limit", r.MaxTasksPerNamespace,
-				)
-				r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
-					"namespace %q has %d active tasks (limit: %d), requeueing", task.Namespace, active, r.MaxTasksPerNamespace)
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-			}
-		}
+	if result, done, _, err := r.acquireNamespaceAdmission(ctx, task); done {
+		return result, err
 	}
 
 	agent, err := r.resolveAgent(ctx, task)
@@ -1105,7 +1153,118 @@ func (r *TaskReconciler) resolveAgent(ctx context.Context, task *corev1alpha1.Ta
 	return agent, nil
 }
 
+func (r *TaskReconciler) acquireNamespaceAdmission(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, bool, error) {
+	if r.MaxTasksPerNamespace <= 0 {
+		return ctrl.Result{}, false, false, nil
+	}
+	log := logf.FromContext(ctx)
+	validationTask, err := r.repositoryMonitorValidationTask(ctx, task)
+	if err != nil {
+		log.Error(err, "failed to verify repository validation provenance for namespace limit")
+		if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+			result, err := r.failTask(ctx, task, err.Error())
+			return result, true, false, err
+		}
+		return ctrl.Result{}, true, false, err
+	}
+	if validationTask {
+		return ctrl.Result{}, false, false, nil
+	}
+	namespace := r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace)
+	children, isChild := r.coordinationChildAdmissionScope(ctx, task)
+	if isChild {
+		free, err := r.taskAdmissionSlotFree(ctx, task, children)
+		if err != nil {
+			log.Error(err, "failed to check a coordination child slot")
+			return ctrl.Result{}, true, false, err
+		}
+		if !free {
+			if err := r.releaseTaskAdmissionSlot(ctx, task, namespace); err != nil {
+				log.Error(err, "failed to release a namespace task slot")
+				return ctrl.Result{}, true, false, err
+			}
+			log.Info("coordination concurrency limit reached", "max", children.limit)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, true, true, nil
+		}
+	}
+	granted, err := r.acquireTaskAdmissionSlot(ctx, task, namespace)
+	if err != nil {
+		log.Error(err, "failed to acquire a namespace task slot")
+		return ctrl.Result{}, true, false, err
+	}
+	if !granted {
+		if isChild {
+			if err := r.releaseTaskAdmissionSlot(ctx, task, children); err != nil {
+				log.Error(err, "failed to release a coordination child slot")
+				return ctrl.Result{}, true, false, err
+			}
+		}
+		log.Info("namespace task limit reached, requeueing",
+			"namespace", task.Namespace,
+			"limit", r.MaxTasksPerNamespace,
+		)
+		r.Recorder.Eventf(task, corev1.EventTypeNormal, "NamespaceTaskLimitReached",
+			"namespace %q has no free task slot (limit: %d), requeueing", task.Namespace, r.MaxTasksPerNamespace)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, true, true, nil
+	}
+	return ctrl.Result{}, false, false, nil
+}
+
+func (r *TaskReconciler) coordinationChildAdmissionScope(ctx context.Context, task *corev1alpha1.Task) (taskAdmissionScope, bool) {
+	if _, ok := task.Annotations[labels.AnnotationCoordinationDepth]; !ok {
+		return taskAdmissionScope{}, false
+	}
+	parentName := labels.ParentTaskName(task.Labels, task.Annotations)
+	parentTask := &corev1alpha1.Task{}
+	if parentName == "" || r.Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask) != nil {
+		return taskAdmissionScope{}, false
+	}
+	if pinned, ok := taskParentUIDPin(task, parentName); ok && pinned != parentTask.UID {
+		return taskAdmissionScope{}, false
+	}
+	if parentTask.Spec.AgentRef == nil {
+		return taskAdmissionScope{}, false
+	}
+	agentNS := parentTask.Spec.AgentRef.Namespace
+	if agentNS == "" {
+		agentNS = task.Namespace
+	}
+	parentAgent := &corev1alpha1.Agent{}
+	if r.Get(ctx, types.NamespacedName{Name: parentTask.Spec.AgentRef.Name, Namespace: agentNS}, parentAgent) != nil {
+		return taskAdmissionScope{}, false
+	}
+	coord := parentAgent.Spec.Coordination
+	if coord == nil || !coord.Enabled || coord.MaxConcurrentChildren <= 0 {
+		return taskAdmissionScope{}, false
+	}
+	return r.childrenAdmissionScope(parentTask, coord.MaxConcurrentChildren), true
+}
+
+func (r *TaskReconciler) holdRetryAdmission(ctx context.Context, task *corev1alpha1.Task, delay time.Duration) (ctrl.Result, error) {
+	backoff := ctrl.Result{RequeueAfter: delay}
+	if result, done, waiting, err := r.acquireNamespaceAdmission(ctx, task); done {
+		if waiting {
+			return backoff, nil
+		}
+		return result, err
+	}
+	if result, done, waiting, err := r.coordinationConstraints(ctx, task); done && !waiting {
+		return result, err
+	}
+	return backoff, nil
+}
+
 func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error, bool) {
+	result, done, _, err := r.coordinationConstraints(ctx, task)
+	return result, err, done
+}
+
+func (r *TaskReconciler) coordinationConstraints(ctx context.Context, task *corev1alpha1.Task) (result ctrl.Result, done, waiting bool, err error) {
+	result, err, done = r.checkCoordinationConstraints(ctx, task, &waiting)
+	return result, done, waiting, err
+}
+
+func (r *TaskReconciler) checkCoordinationConstraints(ctx context.Context, task *corev1alpha1.Task, waiting *bool) (ctrl.Result, error, bool) {
 	depthStr, ok := task.Annotations[labels.AnnotationCoordinationDepth]
 	if !ok {
 		return ctrl.Result{}, nil, false
@@ -1125,6 +1284,20 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 		log.Error(err, "failed to get parent task")
 		result, err := r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))
 		return result, err, true
+	}
+	if pinned, ok := taskParentUIDPin(task, parentName); ok {
+		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask); err != nil {
+			if apierrors.IsNotFound(err) {
+				result, err := r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))
+				return result, err, true
+			}
+			return ctrl.Result{}, err, true
+		}
+		if pinned != parentTask.UID {
+			result, err := r.failTask(ctx, task, fmt.Sprintf(
+				"parent Task %q was replaced: this child belongs to parent Task UID %s, not to the current Task of that name", parentName, pinned))
+			return result, err, true
+		}
 	}
 
 	parentAgent := &corev1alpha1.Agent{}
@@ -1178,25 +1351,36 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 	}
 
 	if coord.MaxConcurrentChildren > 0 {
-		var siblings corev1alpha1.TaskList
-		if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
-			log.Error(err, "failed to list sibling tasks")
-			return ctrl.Result{}, err, true
-		}
-		active := int32(0)
-		for _, s := range siblings.Items {
-			if s.Name != task.Name && taskPhaseCountsTowardConcurrency(s.Status.Phase) {
-				active++
-			}
-		}
-		if active >= coord.MaxConcurrentChildren {
-			log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
-		}
+		return r.acquireChildAdmission(ctx, task, r.childrenAdmissionScope(parentTask, coord.MaxConcurrentChildren), waiting)
 	}
 
 	return ctrl.Result{}, nil, false
+}
+
+func (r *TaskReconciler) acquireChildAdmission(ctx context.Context, task *corev1alpha1.Task, children taskAdmissionScope, waiting *bool) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	granted, err := r.acquireTaskAdmissionSlot(ctx, task, children)
+	if err != nil {
+		if r.MaxTasksPerNamespace > 0 {
+			if relErr := r.releaseTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace)); relErr != nil {
+				log.Error(relErr, "failed to release namespace task slot after child admission error")
+			}
+		}
+		log.Error(err, "failed to acquire a coordination child slot")
+		return ctrl.Result{}, err, true
+	}
+	if granted {
+		return ctrl.Result{}, nil, false
+	}
+	if r.MaxTasksPerNamespace > 0 {
+		if err := r.releaseTaskAdmissionSlot(ctx, task, r.namespaceAdmissionScope(task.Namespace, r.MaxTasksPerNamespace)); err != nil {
+			log.Error(err, "failed to release a namespace task slot")
+			return ctrl.Result{}, err, true
+		}
+	}
+	log.Info("coordination concurrency limit reached", "max", children.limit)
+	*waiting = true
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
 }
 
 func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*corev1alpha1.Provider, error) {
@@ -1489,6 +1673,11 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if holdErr := r.ControllerEpochManager.StorageHold(); holdErr != nil {
+		log.Info("not creating the Task Job while storage is held for recovery", "reason", holdErr.Error())
+		return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+	}
+
 	latest := &corev1alpha1.Task{}
 	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
@@ -1664,7 +1853,13 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	}
 
 	if !existingGatewayJob {
-		err = r.Create(ctx, job)
+		err = r.ControllerEpochManager.AdmitWork(ctx, func(ctx context.Context) error {
+			return r.Create(ctx, job)
+		})
+		if errors.Is(err, store.ErrStorageRecoveryRequired) || errors.Is(err, store.ErrNotReady) {
+			log.Info("not creating the Task Job while storage is held for recovery", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+		}
 	}
 	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
 		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
@@ -2327,7 +2522,7 @@ func (r *TaskReconciler) handleFinalizing(
 			if err := r.markACPTaskAttachmentEpoch(ctx, task, revocationEpoch); err != nil {
 				return ctrl.Result{}, err
 			}
-			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
+			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, task, revocationEpoch); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -2360,7 +2555,7 @@ func (r *TaskReconciler) handleFinalizing(
 			acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 			if acpWorkspace {
 				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
-				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
+				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, task, revocationEpoch); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
@@ -3116,6 +3311,9 @@ func (r *TaskReconciler) updateAgentLastUsed(ctx context.Context, namespace, nam
 		agent := &corev1alpha1.Agent{}
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
 			return err
+		}
+		if agent.Status.LastUsed != nil && !agent.Status.LastUsed.Before(&at) {
+			return nil
 		}
 		agent.Status.LastUsed = &at
 		return r.Status().Update(ctx, agent)
@@ -3983,10 +4181,33 @@ func (r *trustedServiceReadCleanupRunnable) Start(ctx context.Context) error {
 
 func (*trustedServiceReadCleanupRunnable) NeedLeaderElection() bool { return true }
 
+func effectiveTaskMaxConcurrentReconciles(configured int) (int, error) {
+	return effectiveMaxConcurrentReconciles("task", configured, DefaultTaskMaxConcurrentReconciles, MaxTaskMaxConcurrentReconciles)
+}
+
+func effectiveMaxConcurrentReconciles(controllerName string, configured, defaultValue, maximum int) (int, error) {
+	if configured == 0 {
+		return defaultValue, nil
+	}
+	if configured < 1 || configured > maximum {
+		return 0, fmt.Errorf("%s controller concurrent reconciles must be between 1 and %d, got %d", controllerName, maximum, configured)
+	}
+	return configured, nil
+}
+
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	workers, err := effectiveTaskMaxConcurrentReconciles(r.MaxConcurrentReconciles)
+	if err != nil {
+		return err
+	}
 	r.Recorder = mgr.GetEventRecorderFor("task-controller") //nolint:staticcheck
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
+	}
+	if strings.TrimSpace(r.ControllerNamespace) != "" {
+		if err := mgr.Add(&taskAdmissionLedgerReaper{reconciler: r, interval: taskAdmissionLedgerReapInterval}); err != nil {
+			return fmt.Errorf("register task admission ledger reaper: %w", err)
+		}
 	}
 	if !r.EnforceNamespaceIsolation {
 		var cleanup manager.Runnable = &trustedServiceReadCleanupRunnable{reconciler: r}
@@ -4010,12 +4231,24 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return fmt.Errorf("register Task webhook delivery: %w", err)
 		}
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.Task{}).
 		Owns(&batchv1.Job{}).
 		Owns(&networkingv1.NetworkPolicy{}).
-		Owns(&corev1alpha1.Task{}).
-		Named("task").
+		Owns(&corev1alpha1.Task{})
+	builder, err = registerACPTaskWakeWatches(context.Background(), mgr, builder)
+	if err != nil {
+		return fmt.Errorf("register ACP workspace Task wakeups: %w", err)
+	}
+	if informer, informerErr := mgr.GetCache().GetInformer(context.Background(), &corev1alpha1.Task{}); informerErr == nil {
+		if _, handlerErr := informer.AddEventHandler(toolscache.ResourceEventHandlerDetailedFuncs{
+			AddFunc: acpPreDispatchTaskAdded,
+		}); handlerErr != nil {
+			mgr.GetLogger().Error(handlerErr, "ACP pre-dispatch informer timing unavailable")
+		}
+	}
+	return builder.Named("task").
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: workers}).
 		Complete(r)
 }
 
@@ -4471,7 +4704,10 @@ func (r *TaskReconciler) createOrUpdateTrustedServiceRole(ctx context.Context, d
 	current := &rbacv1.Role{}
 	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		if err = r.Create(ctx, desired); !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		err = r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	}
 	if err != nil {
 		return err
@@ -4486,7 +4722,10 @@ func (r *TaskReconciler) createOrUpdateTrustedServiceRoleBinding(ctx context.Con
 	current := &rbacv1.RoleBinding{}
 	err := r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
+		if err = r.Create(ctx, desired); !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		err = r.trustedServiceReadReader().Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, current)
 	}
 	if err != nil {
 		return err
@@ -4598,11 +4837,23 @@ func (r *TaskReconciler) ensureWorkerRoleBinding(ctx context.Context, namespace 
 	return nil
 }
 
+func (r *TaskReconciler) deleteExactStaleWorkerRoleBinding(ctx context.Context, binding *rbacv1.RoleBinding) error {
+	uid := binding.UID
+	options := []client.DeleteOption{}
+	if uid != "" {
+		options = append(options, client.Preconditions{UID: &uid})
+	}
+	if err := r.Delete(ctx, binding, options...); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return err
+	}
+	return nil
+}
+
 func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespace string, spec workerRBACSpec, current, desired *rbacv1.RoleBinding) (*rbacv1.RoleBinding, error) {
 	log := logf.FromContext(ctx)
 	log.Info("Recreating worker RoleBinding with stale RoleRef", "namespace", namespace, "binding", spec.roleBindingName, "currentKind", current.RoleRef.Kind, "currentName", current.RoleRef.Name, "desiredKind", desired.RoleRef.Kind, "desiredName", desired.RoleRef.Name)
 
-	if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.deleteExactStaleWorkerRoleBinding(ctx, current); err != nil {
 		return nil, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s: %w", namespace, spec.roleBindingName, current.RoleRef.Kind, current.RoleRef.Name, err)
 	}
 
@@ -4620,7 +4871,7 @@ func (r *TaskReconciler) recreateWorkerRoleBinding(ctx context.Context, namespac
 				return true, nil
 			}
 
-			if err := r.Delete(ctx, latest); err != nil && !apierrors.IsNotFound(err) {
+			if err := r.deleteExactStaleWorkerRoleBinding(ctx, latest); err != nil {
 				return false, fmt.Errorf("deleting worker RoleBinding %s/%s with stale RoleRef %s/%s during retry: %w", namespace, spec.roleBindingName, latest.RoleRef.Kind, latest.RoleRef.Name, err)
 			}
 			return false, nil

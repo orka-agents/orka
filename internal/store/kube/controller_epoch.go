@@ -854,6 +854,9 @@ func (s *Store) syncControllerEpochStatus(
 				UpdatedAt:            metaTime(epoch.UpdatedAt),
 				LeaseName:            lease.Name,
 				LeaseResourceVersion: lease.ResourceVersion,
+				StorageEpochs:        object.Status.StorageEpochs,
+				StorageRecovery:      object.Status.StorageRecovery,
+				Conditions:           object.Status.Conditions,
 			}
 			if err := s.client.Status().Update(ctx, object); err != nil {
 				return err
@@ -880,6 +883,12 @@ func (s *Store) syncControllerEpochStatus(
 }
 
 func (s *Store) requireControllerEpoch(ctx context.Context, fence store.ControllerEpochFence) (store.ControllerEpochFence, epochSnapshot, error) {
+	return s.lockControllerEpochMutation(ctx, fence, false)
+}
+
+func (s *Store) lockControllerEpochMutation(
+	ctx context.Context, fence store.ControllerEpochFence, allowHeld bool,
+) (store.ControllerEpochFence, epochSnapshot, error) {
 	normalized, err := store.NormalizeEpochFence(fence)
 	if err != nil {
 		return store.ControllerEpochFence{}, epochSnapshot{}, err
@@ -939,6 +948,9 @@ func (s *Store) requireControllerEpoch(ctx context.Context, fence store.Controll
 		}
 		if err := validateControllerEpochObjectForLease(object, current, lease.Name); err != nil {
 			return store.ControllerEpochFence{}, epochSnapshot{}, err
+		}
+		if hold := storageRecordFromObject(object).Hold; hold != nil && !allowHeld {
+			return store.ControllerEpochFence{}, epochSnapshot{}, &store.StorageHoldError{Hold: *hold}
 		}
 		active, expiresAt, err := controllerEpochMutationLock(lease)
 		if err != nil {

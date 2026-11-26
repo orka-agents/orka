@@ -11,7 +11,7 @@ non-obvious decision in `cmd/`, `api/`, `scripts/`, `hack/`, `test/`, `examples/
 ## Context
 
 Round 2 of the comment cleanup classified every comment left after
-[ADR 0063](0063-code-comment-decisions-round-1.md). In `cmd/`, `api/`, `scripts/`, `hack/`, `test/`, `examples/`, and the skill scripts it found 850 distinct decisions
+[ADR 0063](0063-code-comment-decisions-round-1.md). In `cmd/`, `api/`, `scripts/`, `hack/`, `test/`, `examples/`, and the skill scripts it found 864 distinct decisions
 that a reader of the code alone could get wrong. Comments that stated the same rule in several
 places are merged into one entry. Where an earlier ADR already records a decision, the entry
 links it.
@@ -86,6 +86,8 @@ grouped by package and ordered by source position as of round 2.
 - **Requested waits arm only after their attempt succeeds** (`v1alpha1.TaskWaitStateRequested`): A wait in state Requested takes effect only after the exact attempt that asked for it settles Succeeded; otherwise it becomes Abandoned, is never armed, and nothing resumes. See [ADR 0041](0041-data-only-parked-turns.md).
 - **Continuation Task names are reserved before creation** (`v1alpha1.TaskWaitStateResuming`): The Resuming wait state durably reserves the continuation Task name before the Task is created, so continuation creation is exactly-once across controller restarts.
 - **Forwarded writes require approval unless explicitly None** (`v1alpha1.HTTPForwardWrites.WriteApprovalRequired`): HTTPForwardWrites.WriteApprovalRequired treats nil writes or an unset approval as Required; only an explicit None sends forwarded writes without a person's approval.
+- **Storage recovery holds are released by annotation** (`v1alpha1.StorageRecoveryAcknowledgedAnnotation`): v1alpha1.StorageRecoveryAcknowledgedAnnotation releases the storage recovery hold whose ID it names; an operator sets it after recovering storage, on the ControllerEpoch for an installation hold or on the held Task for a record hold.
+- **Unsafe database switches hold the installation** (`v1alpha1.StorageRecoveryUnsafeSwitch`): v1alpha1.StorageRecoveryUnsafeSwitch marks a hold raised when the database of a dataset whose durability class can lose acknowledged writes in a failover restarted or switched.
 
 ### `cmd`
 
@@ -179,6 +181,7 @@ grouped by package and ordered by source position as of round 2.
 - **Webhook certificates publish atomically via ..data swap** (`main.publishWebhookCertificate`): publishWebhookCertificate writes a complete cert/key generation into a new directory before swapping the ..data link, like a projected Secret volume, because independent renames of cert and key could expose a mismatched pair.
 - **Cert publication reclaims only its own stale generations** (`main.publishWebhookCertificate`): Interrupted publications can survive container restarts in emptyDir, so publishWebhookCertificate reclaims only this writer's inactive ..cert- directories, never the active one, before allocating another pair.
 - **Removing the previous generation wakes certwatcher** (`main.publishWebhookCertificate`): After swapping ..data, publishWebhookCertificate removes the previous ..cert- generation directory because removing the old inode wakes certwatcher's file watches; it only removes generation directories owned by this writer, including across Pod restarts.
+- **SQLite synchronous mode sets the durability class** (`main.openControllerSQLiteStore`): The controller's SQLite synchronous mode reaches the store it opens: FULL makes the dataset local-fsync, and without it the dataset stays local-buffered.
 
 ### `cmd/build/helmify`
 
@@ -230,6 +233,8 @@ grouped by package and ordered by source position as of round 2.
 - **Release JSON decode errors are generic** (`release.workflow JSON decoding`): Release workflow JSON decode failures return a generic error because JSON errors can contain snippets of credential-bearing command responses.
 - **Qualification wait leaves time within the runner limit** (`release.workflow qualification wait`): The release workflow waits at most 5h40m for qualification so the parent job keeps time to record evidence within GitHub's six-hour runner limit.
 - **Pending qualification runs indicate concurrency contention** (`release.workflow qualification status`): A GitHub Actions run status of pending indicates concurrency-group contention, unlike approval waiting or a queued runner, so the release workflow reports it as queued behind another run.
+- **Releases tag the nested storage module** (`release.storageModuleTagPrefix`): Each release also tags the nested storage contract module as pkg/storage/<version> (release.storageModuleTagPrefix), so a separately built storage extension can require the contract at the release version.
+- **Storage module tag retries require the same commit** (`release.workflow.createStorageModuleTag`): release.workflow.createStorageModuleTag points pkg/storage/<version> at the released commit; a retry accepts an existing tag only when it already points at that same commit.
 
 ### `cmd/cli`
 
@@ -395,6 +400,14 @@ grouped by package and ordered by source position as of round 2.
 - **Watch frames reprint only when their state key changes** (`cli.watchFrame`): cli.watchFrame.Key is a stable description of the state that matters (names, phases, stage counts) and must exclude relative ages, because watchLoop reprints only when the key changes. A frame with empty Text that is not Done means nothing to show yet, so the loop keeps polling silently.
 - **Watch separators keep json and yaml machine-readable** (`cli.watchSeparator`): cli.watchSeparator prints a timestamp line between table frames, nothing between json frames so the output is a stream of concatenated JSON documents a streaming decoder can read, and a bare --- document marker between yaml frames. Adding human text between structured frames would break consumers.
 - **watchLoop drops frames rendered after its context ends** (`cli.watchLoop`): cli.watchLoop treats Ctrl-C or an ended context as a normal stop, not an error, and drops any frame rendered after the context ended, matching how orka task wait rejects a success that lands after its deadline; reporting done therefore means the final frame was actually printed.
+- **A manually set token is not a session** (`cli config set token`): Setting a token with the config command clears session and OIDC metadata, because a hand-set token is not a session from orka login or orka auth login and must not be refreshed or scoped as one.
+- **OIDC CLI tokens refresh and stay with their server** (`cli.tokenKindOIDC`): cli.tokenKindOIDC marks a token saved by orka auth login: it refreshes itself through its stored refresh token and is sent only to the SessionServer it was signed in against, like GitHub sessions (see cli.configuredOIDCToken).
+- **OIDC login clears a GitHub session's namespace** (`cli auth login (OIDC)`): When orka auth login replaces a GitHub session, it clears the saved namespace so OIDC namespace isolation is not tripped by the stale session namespace.
+- **OIDC login records only the granted scope** (`cli auth login (OIDC)`): orka auth login stores only the scope the provider actually granted, and refresh omits scope to reuse the granted scope as RFC 6749 section 6 allows.
+- **OIDC token expiry prefers the JWT exp** (`cli.selectOIDCBearerToken`): cli.selectOIDCBearerToken applies expires_in only to the access_token (RFC 6749 section 5.1); for an id_token, or when the JWT's exp is earlier, it uses exp so refresh runs before Orka rejects the token.
+- **Entra logins request a resource scope** (`cli OIDC default scope`): For Microsoft Entra issuers, the CLI requests <audience>/.default plus offline_access, because Entra v2 issues an access token with the app's audience only for a resource scope and returns refresh tokens only with offline_access.
+- **OIDC CLI tokens refresh and stay with their server** (`cli.configuredOIDCToken`): cli.configuredOIDCToken refreshes the saved OIDC token when it is near or past expiry and, like GitHub sessions, sends it only to the server it was signed in against.
+- **OIDC refresh never adopts another login** (`cli.configuredOIDCToken`): If another login replaced or cleared the OIDC session while cli.configuredOIDCToken waited for the config lock, it keeps the token it read and never adopts another account's credentials for this command (cli.holdsOIDCSession).
 
 ### `cmd/orka-acp-exec-helper`
 
@@ -933,6 +946,7 @@ grouped by package and ordered by source position as of round 2.
 - **file_read e2e stages its file with file_write** (`e2e.Describe(Tools)`): code_exec runs in its own Pod by default, so a file it writes is not visible to file_read in the AI worker; the file_read e2e stages the file with file_write instead.
 - **Custom Tool receiver is probed through Service DNS** (`e2e.Describe(Tools)`): The custom Tool e2e probes the echo receiver with kubectl exec from inside the Pod so it exercises Service DNS and routing, not the API-server proxy or a port-forward.
 - **web_fetch e2e checks the SSRF guard on IPs and names** (`e2e.Describe(Tools)`): The web_fetch e2e fixture fetches the link-local metadata address and the in-cluster aimock Service instead of the internet, so it checks the SSRF guard on both an IP literal and a resolved name and needs no internet access.
+- **Child serialization e2e checks recorded intervals** (`e2e serialized children spec`): The serialized-children e2e both samples running children and checks that their recorded startTime/completionTime intervals do not overlap, so concurrent execution is caught even when children finish between polls; requiring all three to succeed proves waiting children are admitted.
 
 ### `test/fixtures/aimockauthority`
 

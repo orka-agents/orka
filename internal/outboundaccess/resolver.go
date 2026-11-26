@@ -213,6 +213,7 @@ type KubernetesResolver struct {
 	MaxDelegationAge         time.Duration
 	Now                      func() time.Time
 	AuditLog                 logr.Logger
+	AuditSink                AgentIdentityAuditSink
 	AuditPseudonymKey        []byte
 	DelegationLive           func(context.Context, AgentIdentityBinding) error
 	ReservedServiceAccount   ReservedServiceAccount

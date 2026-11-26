@@ -242,6 +242,12 @@ type TaskExecutionStatus struct {
 	// +kubebuilder:validation:MaxLength=253
 	ForgeCredentialResourceVersion string `json:"forgeCredentialResourceVersion,omitempty"`
 
+	// CommitSigningCredentialResourceVersion freezes the SSH commit signing
+	// Secret version used only during clean-room publication preparation.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	CommitSigningCredentialResourceVersion string `json:"commitSigningCredentialResourceVersion,omitempty"`
+
 	// Message contains bounded, sanitized execution context.
 	// +kubebuilder:validation:MaxLength=1024
 	// +optional

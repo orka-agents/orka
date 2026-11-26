@@ -87,12 +87,15 @@ func newConnectCmd() *cobra.Command {
 					"this account's token, whatever the link's mode.\n", args[0])
 			}
 			fmt.Fprintf(out, "Authorize %s (%s) at:\n%s\n", args[0], mode, started.AuthorizeURL) //nolint:errcheck
+			if callbackHost, local := authorizeCallbackIsLocalhost(started.AuthorizeURL); local {
+				fmt.Fprintf(out, "Note: this server's OAuth callback targets %s. Open the link in a browser on the controller host (or with port forwarding to %s); if you consent on another device (such as a phone), the redirect to %s will fail with the provider's 'code' and 'state' URL — reopen that failed callback URL where %s is reachable first, then copy the resulting '#completion=...' URL and pass it to --completion below.\n", callbackHost, callbackHost, callbackHost, callbackHost) //nolint:errcheck
+			}
 			if noOpen {
 				fmt.Fprintln(out, "Browser opening skipped. Open the URL above in your browser to finish.") //nolint:errcheck
 			} else if err := openBrowser(started.AuthorizeURL); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Could not open browser: %v\nOpen the URL above manually.\n", err) //nolint:errcheck
 			}
-			fmt.Fprintf(out, "After consenting, the dashboard finishes the link if it is signed in as you. Otherwise copy the value after '#completion=' from the address bar and run:\n  %s\n", completionCommand(started.Connection)) //nolint:errcheck
+			fmt.Fprintf(out, "After consenting, the dashboard finishes the link if it is signed in as you. Otherwise copy the value after '#completion=' (or the full redirect URL) from the address bar and run:\n  %s\n", completionCommand(started.Connection)) //nolint:errcheck
 			if noWait {
 				return nil
 			}
@@ -150,6 +153,63 @@ func completionCommand(connection connectionView) string {
 		command += " --namespace " + connection.Namespace
 	}
 	return command + " --completion <value>"
+}
+
+func authorizeCallbackIsLocalhost(authorizeURL string) (string, bool) {
+	parsed, err := url.Parse(authorizeURL)
+	if err != nil {
+		return "", false
+	}
+	redirectURI := strings.TrimSpace(parsed.Query().Get("redirect_uri"))
+	if redirectURI == "" {
+		return "", false
+	}
+	cb, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", false
+	}
+	if isLoopbackHostname(cb.Hostname()) {
+		return cb.Host, true
+	}
+	return "", false
+}
+
+func extractCompletionValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "://") {
+		if parsed, err := url.Parse(value); err == nil {
+			if frag := parsed.Fragment; frag != "" {
+				if q, err := url.ParseQuery(frag); err == nil {
+					if v := strings.TrimSpace(q.Get("completion")); v != "" {
+						return v
+					}
+				}
+			}
+			if v := strings.TrimSpace(parsed.Query().Get("completion")); v != "" {
+				return v
+			}
+		}
+	}
+	if _, after, ok := strings.Cut(value, "#completion="); ok {
+		if v, _, _ := strings.Cut(after, "&"); strings.TrimSpace(v) != "" {
+			if unescaped, err := url.QueryUnescape(strings.TrimSpace(v)); err == nil {
+				return unescaped
+			}
+			return strings.TrimSpace(v)
+		}
+	}
+	if after, ok := strings.CutPrefix(value, "completion="); ok {
+		if v, _, _ := strings.Cut(after, "&"); strings.TrimSpace(v) != "" {
+			if unescaped, err := url.QueryUnescape(strings.TrimSpace(v)); err == nil {
+				return unescaped
+			}
+			return strings.TrimSpace(v)
+		}
+	}
+	return value
 }
 
 func providerReadiness(ctx context.Context, c *client.Client) (map[string]bool, error) {
@@ -387,7 +447,7 @@ func newConnectionCompleteCmd() *cobra.Command {
 			"finish the link as yourself; it is accepted exactly once.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			completion = strings.TrimSpace(completion)
+			completion = extractCompletionValue(completion)
 			if completion == "" {
 				return errors.New("--completion is required")
 			}
@@ -408,7 +468,7 @@ func newConnectionCompleteCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&completion, "completion", "", "The value after '#completion=' in the dashboard URL the provider callback opened")
+	cmd.Flags().StringVar(&completion, "completion", "", "The value after '#completion=' (or the full redirect URL) from the browser address bar")
 	return cmd
 }
 

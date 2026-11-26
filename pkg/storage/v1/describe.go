@@ -41,11 +41,12 @@ func IsValidDurabilityClass(class DurabilityClass) bool {
 }
 
 type ProviderLimits struct {
-	MaxArtifactBytes      int64
-	MaxResultBytes        int64
-	MaxValueBytes         int64
-	ReceiptRetention      time.Duration
-	MaxReceiptResultBytes int64
+	MaxArtifactBytes       int64
+	MaxResultBytes         int64
+	MaxMessageContentBytes int64
+	MaxValueBytes          int64
+	ReceiptRetention       time.Duration
+	MaxReceiptResultBytes  int64
 }
 
 type DatasetState string
@@ -91,6 +92,8 @@ type ProviderInfo struct {
 	Bootstrap        DatasetBootstrap
 	Usage            *DatasetUsage
 	Binding          *DatasetBinding
+	Source           *DatasetSource
+	MigratedTo       []MigrationMarker
 }
 
 type ProviderDescriber interface {

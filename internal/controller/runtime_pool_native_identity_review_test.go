@@ -156,7 +156,7 @@ func TestExternalNativeRuntimeColdSequenceRotatesOpaqueIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.r.publishExternalWorkspaceWorkload(t.Context(), &pool, cfg, w, auth, provider); err != nil {
+	if _, err := f.r.publishExternalWorkspaceWorkload(t.Context(), &pool, cfg, w, auth, provider, false); err != nil {
 		t.Fatal(err)
 	}
 	next := f.currentWorkspace(t).Spec.Workload

@@ -15,7 +15,12 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/store"
 )
+
+const maxCheckMessagesResponseBytes = 6*(store.MaxMessageBatchBytes+
+	store.MaxMessageBatch*4*store.MaxControlIdentifierBytes) + store.MaxMessageBatch*1024
 
 type CheckMessagesTool struct{}
 
@@ -115,9 +120,12 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCheckMessagesResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+	if len(body) > maxCheckMessagesResponseBytes {
+		return "", fmt.Errorf("failed to check messages: the controller response exceeds %d bytes", maxCheckMessagesResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

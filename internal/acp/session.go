@@ -58,12 +58,20 @@ type RuntimeSessionConfig struct {
 	MaxBufferedEventBytes int
 }
 
+type StartupTimings struct {
+	ProcessStart    time.Duration
+	Initialize      time.Duration
+	Authenticate    time.Duration
+	ProviderSession time.Duration
+}
+
 type RuntimeSession struct {
 	id                string
 	generation        int64
 	profileDigest     string
 	providerSessionID string
 	config            RuntimeSessionConfig
+	startup           StartupTimings
 
 	mu                  sync.Mutex
 	process             *Process
@@ -267,7 +275,7 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 
 	initCtx, cancel := context.WithTimeout(ctx, cfg.InitializeTimeout)
 	defer cancel()
-	process, capabilities, err := session.launchAdapter(initCtx)
+	process, capabilities, err := session.launchAdapter(initCtx, &session.startup)
 	if process == nil {
 		return nil, err
 	}
@@ -279,10 +287,12 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		if !capabilities.SessionCapability(SessionCapabilityResume) {
 			return nil, initializationFailed(session, fmt.Errorf("ACP adapter did not advertise session/resume support"))
 		}
+		resumeStarted := time.Now()
 		resumed, err := process.Client().ResumeSession(initCtx, ResumeSessionRequest{
 			SessionID: cfg.ResumeSessionID, CWD: cfg.Process.Paths.Workspace,
 			MCPServers: append([]MCPServer{}, cfg.MCPServers...), Meta: newSessionMeta,
 		})
+		session.startup.ProviderSession = time.Since(resumeStarted)
 		if err != nil {
 			return nil, initializationFailed(session, fmt.Errorf("resume ACP provider session: %w", err))
 		}
@@ -293,11 +303,13 @@ func NewRuntimeSession(ctx context.Context, cfg RuntimeSessionConfig) (*RuntimeS
 		}
 		return session, nil
 	}
+	newSessionStarted := time.Now()
 	newSession, err := process.Client().NewSession(initCtx, NewSessionRequest{
 		CWD:        cfg.Process.Paths.Workspace,
 		MCPServers: append([]MCPServer{}, cfg.MCPServers...),
 		Meta:       newSessionMeta,
 	})
+	session.startup.ProviderSession = time.Since(newSessionStarted)
 	if err != nil {
 		return nil, initializationFailed(session, fmt.Errorf("create ACP provider session: %w", err))
 	}
@@ -322,9 +334,15 @@ func verifySessionMode(modes json.RawMessage, required string) error {
 	return nil
 }
 
-func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapabilities, error) {
+func (s *RuntimeSession) launchAdapter(ctx context.Context, timings *StartupTimings) (*Process, AgentCapabilities, error) {
 	cfg := s.config
+	var discard StartupTimings
+	if timings == nil {
+		timings = &discard
+	}
+	stepStarted := time.Now()
 	process, err := StartProcess(cfg.Process)
+	timings.ProcessStart = time.Since(stepStarted)
 	if err != nil {
 		return nil, AgentCapabilities{}, err
 	}
@@ -332,6 +350,7 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 	if clientInfo.Name == "" {
 		clientInfo = Implementation{Name: "orka-acp-runtime", Version: "development"}
 	}
+	stepStarted = time.Now()
 	initialized, err := process.Client().Initialize(ctx, InitializeRequest{
 		ProtocolVersion: ProtocolVersion,
 		ClientInfo:      &clientInfo,
@@ -341,6 +360,7 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 			Session:  map[string]any{"notices": map[string]any{}},
 		},
 	})
+	timings.Initialize = time.Since(stepStarted)
 	if err != nil {
 		return process, AgentCapabilities{}, fmt.Errorf("initialize ACP adapter: %w", err)
 	}
@@ -351,7 +371,10 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 		if !containsAuthMethod(initialized.AuthMethods, cfg.AuthMethodID) {
 			return process, AgentCapabilities{}, fmt.Errorf("ACP adapter did not advertise authentication method %q", cfg.AuthMethodID)
 		}
-		if err := process.Client().Authenticate(ctx, cfg.AuthMethodID); err != nil {
+		stepStarted = time.Now()
+		err := process.Client().Authenticate(ctx, cfg.AuthMethodID)
+		timings.Authenticate = time.Since(stepStarted)
+		if err != nil {
 			return process, AgentCapabilities{}, fmt.Errorf("authenticate ACP adapter: %w", err)
 		}
 	}
@@ -361,6 +384,8 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 func (s *RuntimeSession) ID() string                { return s.id }
 func (s *RuntimeSession) Generation() int64         { return s.generation }
 func (s *RuntimeSession) ProviderSessionID() string { return s.providerSessionID }
+
+func (s *RuntimeSession) StartupTimings() StartupTimings { return s.startup }
 
 func (s *RuntimeSession) Process() *Process {
 	s.mu.Lock()
@@ -489,7 +514,7 @@ func (s *RuntimeSession) resumeAdapter(ctx context.Context, exited *Process, lea
 			return nil, AgentCapabilities{}, fmt.Errorf("revalidate workspace before adapter relaunch: %w", err)
 		}
 	}
-	process, capabilities, err := s.launchAdapter(resumeCtx)
+	process, capabilities, err := s.launchAdapter(resumeCtx, nil)
 	if err != nil {
 		if process != nil {
 			_ = stopProcessBestEffort(process, cfg.CancelGrace)

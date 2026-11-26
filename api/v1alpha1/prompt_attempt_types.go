@@ -19,7 +19,7 @@ type PromptAttemptDeliveryState string
 // PromptCredentialBinding freezes one role-specific Secret identity without
 // storing credential material.
 type PromptCredentialBinding struct {
-	// +kubebuilder:validation:Enum=SourceRead;TargetRead;TargetWrite;Forge
+	// +kubebuilder:validation:Enum=SourceRead;TargetRead;TargetWrite;Forge;CommitSign
 	Role string `json:"role"`
 
 	// +kubebuilder:validation:MinLength=1
@@ -89,7 +89,7 @@ type PromptAttemptSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=role
-	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:MaxItems=5
 	CredentialBindings []PromptCredentialBinding `json:"credentialBindings,omitempty"`
 }
 

@@ -56,7 +56,34 @@ func init() {
 }
 
 func NewDB(path string) (*sql.DB, error) {
-	return newDB(path, false)
+	return newDB(path, false, SynchronousNormal)
+}
+
+type Synchronous string
+
+const (
+	SynchronousNormal Synchronous = "normal"
+	SynchronousFull   Synchronous = "full"
+)
+
+func ParseSynchronous(value string) (Synchronous, error) {
+	switch mode := Synchronous(strings.ToLower(strings.TrimSpace(value))); mode {
+	case SynchronousNormal, SynchronousFull:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unknown SQLite synchronous mode %q; use normal or full", value)
+	}
+}
+
+func (mode Synchronous) pragma() (string, error) {
+	switch mode {
+	case "", SynchronousNormal:
+		return "PRAGMA synchronous=NORMAL", nil
+	case SynchronousFull:
+		return "PRAGMA synchronous=FULL", nil
+	default:
+		return "", fmt.Errorf("unknown SQLite synchronous mode %q", mode)
+	}
 }
 
 func sqliteDSN(path string) string {
@@ -67,7 +94,11 @@ func sqliteDSN(path string) string {
 	return path + separator + "_timezone=UTC"
 }
 
-func newDB(path string, allowMigration bool) (*sql.DB, error) {
+func newDB(path string, allowMigration bool, synchronous Synchronous) (*sql.DB, error) {
+	synchronousPragma, err := synchronous.pragma()
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
@@ -80,7 +111,7 @@ func newDB(path string, allowMigration bool) (*sql.DB, error) {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA synchronous=NORMAL",
+		synchronousPragma,
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA secure_delete=ON",
 	}
@@ -1046,12 +1077,29 @@ func NewStore(db *sql.DB, dbPath string) *Store {
 	return s
 }
 
-func OpenLockedStore(path string) (*Store, error) {
+type OpenOption func(*openOptions)
+
+type openOptions struct {
+	synchronous Synchronous
+}
+
+func WithSynchronous(mode Synchronous) OpenOption {
+	return func(options *openOptions) { options.synchronous = mode }
+}
+
+func OpenLockedStore(path string, options ...OpenOption) (*Store, error) {
+	selected := openOptions{synchronous: SynchronousNormal}
+	for _, option := range options {
+		option(&selected)
+	}
+	if _, err := selected.synchronous.pragma(); err != nil {
+		return nil, err
+	}
 	lock, err := lockDatabaseFile(path)
 	if err != nil {
 		return nil, err
 	}
-	db, err := newDB(path, true)
+	db, err := newDB(path, true, selected.synchronous)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err

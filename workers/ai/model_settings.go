@@ -21,7 +21,7 @@ type modelSettings struct {
 }
 
 func parseModelSettings(workerEnv workerenv.AIWorkerEnv) (modelSettings, error) {
-	settings := modelSettings{maxTokens: 4096}
+	settings := modelSettings{}
 	if workerEnv.Temperature != "" {
 		temperature, err := strconv.ParseFloat(workerEnv.Temperature, 64)
 		if err != nil || math.IsNaN(temperature) || math.IsInf(temperature, 0) || temperature < 0 || temperature > 2 {

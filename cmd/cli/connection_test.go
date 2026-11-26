@@ -71,6 +71,66 @@ func TestConnectStartsConsentOpensBrowserAndWaits(t *testing.T) {
 	}
 }
 
+func TestConnectWarnsWhenCallbackTargetsLocalhost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections" {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"connection":   map[string]any{"name": "entra-abc", "namespace": "team-a", "provider": "entra", "mode": "readOnly", "state": "Pending"},
+				"authorizeURL": "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fapi%2Fv1%2Fconnectors%2Fcallback&state=signed",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"connect", "entra", "--server", srv.URL, "--token", "person-token", "--no-open", "--no-wait"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if !strings.Contains(out.String(), "OAuth callback targets localhost:8080") {
+		t.Fatalf("expected localhost callback warning in output:\n%s", out.String())
+	}
+}
+
+func TestConnectionCompleteAcceptsFullRedirectURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/connections/entra-abc/complete" {
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"name": "entra-abc", "provider": "entra", "mode": "readOnly", "state": "Ready", "ready": true,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{
+		"connection", "complete", "entra-abc",
+		"--server", srv.URL,
+		"--token", "person-token",
+		"--completion", "http://localhost:8080/settings/connectors?status=pending&connection=entra-abc#completion=one-time-token-42",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if gotBody["completion"] != "one-time-token-42" {
+		t.Fatalf("sent completion = %q, want one-time-token-42", gotBody["completion"])
+	}
+}
+
 func TestConnectWaitsForTheNewConsentWhenAlreadyLinked(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	polls := 0

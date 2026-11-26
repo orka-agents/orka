@@ -13,6 +13,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -142,7 +143,7 @@ func (d *ACPDispatcher) scheduleStaleAttemptRecoveries(ctx context.Context, task
 			err := d.recoverStaleCandidate(recoveryCtx, task, fence)
 			cancel()
 			d.unmarkActive(task.UID)
-			if err != nil && !errors.Is(err, context.Canceled) {
+			if _, held := errors.AsType[*taskStorageRecordHoldError](err); err != nil && !held && !errors.Is(err, context.Canceled) {
 				logf.FromContext(ctx).Error(err, "ACP Task remains blocked on epoch recovery", "namespace", task.Namespace, "task", task.Name)
 			}
 		}
@@ -626,7 +627,9 @@ func (d *ACPDispatcher) patchRestoredTaskTerminal(
 		latest.Status.Execution.LastTransitionTime = &now
 		latest.Status.Delivery = delivery.DeepCopy()
 		latest.Status.CompletionTime = &now
-		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		return admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		})
 	})
 }
 
@@ -662,9 +665,26 @@ func (d *ACPDispatcher) readRecoverableTask(
 }
 
 func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
-	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 ||
-		acpTaskHasRestoredSourceIdentityBinding(task) || !taskScopedRuntimeSessionCleanupComplete(task) {
+	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 {
 		return false, nil
+	}
+	if acpTaskHasRestoredSourceIdentityBinding(task) {
+		if meta.FindStatusCondition(task.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) == nil {
+			return false, nil
+		}
+		attemptID, err := promptAttemptIDFromTaskUID(task, task.Status.AgentExecutionBinding.Task.UID)
+		if err != nil {
+			return false, err
+		}
+		attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return attempt.ExecutionState == store.PromptExecutionSettling ||
+			store.IsTerminalPromptExecutionState(attempt.ExecutionState), nil
 	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
@@ -677,6 +697,13 @@ func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev
 	if err != nil {
 		return false, err
 	}
+	if meta.FindStatusCondition(task.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) != nil &&
+		(attempt.ExecutionState == store.PromptExecutionSettling || store.IsTerminalPromptExecutionState(attempt.ExecutionState)) {
+		return true, nil
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(task) {
+		return false, nil
+	}
 	switch attempt.ExecutionState {
 	case store.PromptExecutionQueued, store.PromptExecutionReserved,
 		store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
@@ -688,6 +715,13 @@ func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev
 	}
 	return task.Spec.SessionRef == nil && store.IsTerminalPromptExecutionState(attempt.ExecutionState) &&
 		store.IsTerminalPromptDeliveryState(attempt.DeliveryState), nil
+}
+
+func (d *ACPDispatcher) handOffSettledDeletingTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
+	if task.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	return d.patchRecoveredTerminalEpoch(ctx, task, fence.Epoch)
 }
 
 func acpTaskExecutionBeforeSubmission(state corev1alpha1.TaskExecutionState) bool {
@@ -746,6 +780,8 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 			if err := d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
 				return err
 			}
+		} else if err := d.recordRecoveredValidationOutcome(ctx, task, attempt); err != nil {
+			return err
 		}
 		cleanupComplete, cleanupErr := d.cleanupRecoveredTaskScopedRuntimeSession(ctx, task)
 		if cleanupErr != nil {
@@ -792,6 +828,9 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 			message = requested + "; " + message
 		}
 		recoveredAt := time.Now().UTC()
+		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
+			return err
+		}
 		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
 			return err
 		}
@@ -801,7 +840,10 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		if err := d.finalizeRecoveredSessionUnknown(ctx, task, fence, attempt.ID, reason); err != nil {
 			return err
 		}
-		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateOutcomeUnknown, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, reason, message)
+		if err := d.failTask(ctx, task, corev1alpha1.TaskExecutionStateOutcomeUnknown, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, reason, message); err != nil {
+			return err
+		}
+		return d.handOffSettledDeletingTask(ctx, task, fence)
 	case store.PromptExecutionSucceeded:
 		if err := d.recoverSucceededTaskProjection(ctx, task, attempt, fence); err != nil {
 			return err
@@ -983,14 +1025,24 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 	if err != nil {
 		return nil, err
 	}
+	journaled := evidence != nil
 	if evidence == nil {
-		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity)
+		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity, fence)
 		if err != nil || evidence == nil {
 			return attempt, err
 		}
 	}
 	switch evidence.TerminalEvent {
 	case harnessv2.EventCompleted:
+		if journaled {
+			receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
+			if err != nil {
+				return nil, err
+			}
+			if receiptState == settlingReceiptLossAcknowledged {
+				return attempt, nil
+			}
+		}
 		if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return attempt, nil
@@ -1069,20 +1121,33 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 	if err != nil {
 		return false, err
 	}
+	journaled := evidence != nil
 	if evidence == nil {
-		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity)
+		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity, fence)
 		if err != nil || evidence == nil {
 			return false, err
 		}
 	}
 	if evidence.TerminalEvent != harnessv2.EventCompleted {
+		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
+			return true, err
+		}
 		session, err := d.recoveredTaskSession(ctx, task, attempt)
 		if err != nil {
 			return true, err
 		}
-		return true, d.finishNonSuccessWithCancellationReason(
+		if err := d.finishNonSuccessWithCancellationReason(
 			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent}, evidence.CancellationReason,
-		)
+		); err != nil {
+			return true, err
+		}
+		return true, d.handOffSettledDeletingTask(ctx, task, fence)
+	}
+	if journaled {
+		receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
+		if err != nil || receiptState == settlingReceiptLossAcknowledged {
+			return false, err
+		}
 	}
 	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1133,56 +1198,178 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 	return true, d.patchRecoveredTerminalEpoch(ctx, task, fence.Epoch)
 }
 
+type settlingReceiptState int
+
+const (
+	settlingWithoutReceipt settlingReceiptState = iota
+	settlingReceiptVerified
+	settlingReceiptLossAcknowledged
+)
+
+func (d *ACPDispatcher) verifySettlingResultReceipt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	fence store.ControllerEpochFence,
+) (settlingReceiptState, error) {
+	if attempt.ExecutionState != store.PromptExecutionSettling || attempt.Version < 2 {
+		return settlingWithoutReceipt, nil
+	}
+	receiptVersion := attempt.Version - 1
+	settledLast := attempt.LastOperationID == acpSettlingOperationID(receiptVersion)
+	validating := !settledLast && attempt.DeliveryState != store.PromptDeliveryNotRequested
+	if !settledLast && !validating {
+		return settlingWithoutReceipt, nil
+	}
+	receipts, ok := d.ResultStore.(store.PromptResultReceiptStore)
+	if !ok {
+		return settlingWithoutReceipt, fmt.Errorf("ACP settling recovery requires a result store with prompt result receipts")
+	}
+	observed := taskStorageRecordObservation{fence: fence, attempt: *attempt}
+	hold := taskStorageRecordHold{record: promptResultReceiptRecord, key: attempt.ID}
+	if settledLast {
+		hold.expected = attempt.LastOperationDigest
+	}
+	receipt, receiptErr := receipts.GetPromptResultReceipt(ctx, attempt.ID)
+	switch {
+	case receiptErr == nil:
+		if state, done, err := d.verifyPresentSettlingResultReceipt(ctx, task, attempt, receipt, receiptVersion, settledLast, validating, observed, hold); done || err != nil {
+			return state, err
+		}
+	case errors.Is(receiptErr, store.ErrNotFound):
+		if state, done, err := d.verifyMissingSettlingResultReceipt(ctx, task, attempt, receiptVersion, settledLast, observed, hold); done || err != nil {
+			return state, err
+		}
+	default:
+		return settlingWithoutReceipt, receiptErr
+	}
+	if err := d.clearTaskStorageRecordHold(ctx, task, observed); err != nil {
+		return settlingWithoutReceipt, err
+	}
+	return settlingReceiptVerified, nil
+}
+
+func (d *ACPDispatcher) verifyPresentSettlingResultReceipt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	receipt *store.PromptResultReceipt,
+	receiptVersion int64,
+	settledLast bool,
+	validating bool,
+	observed taskStorageRecordObservation,
+	hold taskStorageRecordHold,
+) (settlingReceiptState, bool, error) {
+	version := receiptVersion
+	if validating {
+		parsed, parsedOK := acpSettlingOperationVersion(receipt.OperationID)
+		if !parsedOK || parsed >= attempt.Version {
+			hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+			state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+			return state, true, err
+		}
+		version = parsed
+	}
+	digest, err := acpSettlingTransitionDigest(attempt.ID, version, receipt.Data)
+	if err != nil {
+		return settlingWithoutReceipt, true, err
+	}
+	if receipt.Namespace != task.Namespace || receipt.TaskName != task.Name ||
+		receipt.OperationID != acpSettlingOperationID(version) || receipt.OperationDigest != digest ||
+		(settledLast && attempt.LastOperationDigest != digest) {
+		hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+		state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+		return state, true, err
+	}
+	if validating {
+		existing, getErr := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
+			return settlingWithoutReceipt, true, getErr
+		}
+		if getErr == nil {
+			if !bytes.Equal(existing, receipt.Data) {
+				hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+				state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+				return state, true, err
+			}
+			return settlingWithoutReceipt, false, nil
+		}
+	}
+	if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
+		return settlingWithoutReceipt, true, err
+	}
+	return settlingWithoutReceipt, false, nil
+}
+
+func (d *ACPDispatcher) verifyMissingSettlingResultReceipt(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	receiptVersion int64,
+	settledLast bool,
+	observed taskStorageRecordObservation,
+	hold taskStorageRecordHold,
+) (settlingReceiptState, bool, error) {
+	matched := false
+	if settledLast {
+		result, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return settlingWithoutReceipt, true, err
+		}
+		if err == nil {
+			digest, digestErr := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
+			if digestErr != nil {
+				return settlingWithoutReceipt, true, digestErr
+			}
+			matched = attempt.LastOperationDigest == digest
+		}
+	}
+	if !matched {
+		hold.reason = corev1alpha1.StorageRecoveryMissingRecordReason
+		state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
+		return state, true, err
+	}
+	return settlingWithoutReceipt, false, nil
+}
+
+func acpSettlingOperationID(version int64) string {
+	return acpSettlingOperation + "-" + strconv.FormatInt(version, 10)
+}
+
+func acpSettlingOperationVersion(operationID string) (int64, bool) {
+	suffix, found := strings.CutPrefix(operationID, acpSettlingOperation+"-")
+	if !found {
+		return 0, false
+	}
+	version, err := strconv.ParseInt(suffix, 10, 64)
+	if err != nil || version < 1 {
+		return 0, false
+	}
+	return version, true
+}
+
+func (d *ACPDispatcher) settleSettlingReceiptHold(
+	ctx context.Context, task *corev1alpha1.Task, observed taskStorageRecordObservation, hold taskStorageRecordHold,
+) (settlingReceiptState, error) {
+	if err := d.settleTaskStorageRecordHold(ctx, task, observed, hold); err != nil {
+		return settlingWithoutReceipt, err
+	}
+	return settlingReceiptLossAcknowledged, nil
+}
+
 func (d *ACPDispatcher) recoverSettlingResultTerminal(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	attempt *store.PromptAttempt,
 	identity v2eventjournal.MappedUpdateIdentity,
+	fence store.ControllerEpochFence,
 ) (*v2eventjournal.PromptTerminalEvidence, error) {
-	if attempt.ExecutionState != store.PromptExecutionSettling || attempt.Version < 2 {
+	receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
+	if err != nil || receiptState != settlingReceiptVerified {
+		return nil, err
+	}
+	if attempt.LastOperationID != acpSettlingOperationID(attempt.Version-1) {
 		return nil, nil
-	}
-	receiptVersion := attempt.Version - 1
-	operationID := acpSettlingOperation + "-" + strconv.FormatInt(receiptVersion, 10)
-	var result []byte
-	receipts, ok := d.ResultStore.(store.PromptResultReceiptStore)
-	if !ok {
-		return nil, fmt.Errorf("ACP settling recovery requires a result store with prompt result receipts")
-	}
-	receipt, receiptErr := receipts.GetPromptResultReceipt(ctx, attempt.ID)
-	switch {
-	case receiptErr == nil:
-		digest, err := acpSettlingTransitionDigest(attempt.ID, receiptVersion, receipt.Data)
-		if err != nil {
-			return nil, err
-		}
-		if receipt.Namespace != task.Namespace || receipt.TaskName != task.Name ||
-			receipt.OperationID != operationID || receipt.OperationDigest != digest ||
-			attempt.LastOperationID != operationID || attempt.LastOperationDigest != digest {
-			return nil, nil
-		}
-		result = receipt.Data
-		if err := d.persistTaskResult(ctx, task, result); err != nil {
-			return nil, err
-		}
-	case errors.Is(receiptErr, store.ErrNotFound):
-		var err error
-		result, err = d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		digest, err := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
-		if err != nil {
-			return nil, err
-		}
-		if attempt.LastOperationID != operationID || attempt.LastOperationDigest != digest {
-			return nil, nil
-		}
-	default:
-		return nil, receiptErr
 	}
 	if attempt.UpdatedAt.IsZero() {
 		return nil, fmt.Errorf("settling prompt attempt %s has no receipt timestamp", attempt.ID)
@@ -2104,7 +2291,7 @@ func (d *ACPDispatcher) validateExistingStandaloneTaskProjection(
 		return false, err
 	}
 	if task.Spec.SessionRef != nil && bound {
-		return false, nil
+		return d.validateExistingSessionTaskProjection(ctx, task, attempt)
 	}
 	projectionID := standaloneTaskTerminalProjectionID(task, int32(attempt.Key.Attempt))
 	projection, err := d.Store.GetOutboxProjection(ctx, projectionID)
@@ -2137,6 +2324,70 @@ func (d *ACPDispatcher) validateExistingStandaloneTaskProjection(
 	return true, nil
 }
 
+func (d *ACPDispatcher) validateExistingSessionTaskProjection(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+) (bool, error) {
+	if attempt.ExecutionState != store.PromptExecutionSucceeded {
+		return false, nil
+	}
+	key := store.SessionTurnKey{
+		SessionUID: attempt.SessionUID, LeaseGeneration: attempt.SessionLeaseGeneration,
+		TaskUID: attempt.Key.TaskUID, Attempt: attempt.Key.Attempt, PromptID: attempt.Key.PromptID,
+	}
+	turnID, err := key.CanonicalID()
+	if err != nil {
+		return false, nil
+	}
+	turn, err := d.Store.GetSessionTurn(ctx, turnID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if turn.State != store.SessionTurnFinalized || turn.ProjectionID == "" {
+		return false, nil
+	}
+	if turn.PromptAttemptID != attempt.ID {
+		return false, fmt.Errorf("%w: SessionTurn %q belongs to another PromptAttempt", store.ErrConflict, turn.ID)
+	}
+	projection, err := d.Store.GetOutboxProjection(ctx, turn.ProjectionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if projection.AggregateKind != "SessionTurn" || projection.AggregateID != turn.ID ||
+		projection.ProjectionKind != taskTerminalProjectionKind || turn.ProjectionKind != projection.ProjectionKind ||
+		projection.PayloadDigest != turn.ProjectionDigest {
+		return false, fmt.Errorf("%w: Session terminal projection %q has mismatched identity", store.ErrConflict, turn.ProjectionID)
+	}
+	var payload taskTerminalProjection
+	if err := json.Unmarshal(projection.Payload, &payload); err != nil {
+		return false, fmt.Errorf("decode Session terminal projection %q: %w", turn.ProjectionID, err)
+	}
+	if payload.Namespace != task.Namespace || payload.Task != task.Name || payload.TaskUID != string(task.UID) || int64(payload.Attempt) != attempt.Key.Attempt {
+		return false, fmt.Errorf("%w: Session terminal projection %q payload identity does not match its Task", store.ErrConflict, turn.ProjectionID)
+	}
+	projectedDelivery := store.PromptDeliveryNotRequested
+	if payload.Delivery != nil {
+		projectedDelivery = store.PromptDeliveryState(payload.Delivery.State)
+	}
+	if string(payload.Execution.State) != string(attempt.ExecutionState) || projectedDelivery != attempt.DeliveryState {
+		return false, nil
+	}
+	latest := &corev1alpha1.Task{}
+	if err := d.Client.Get(ctx, clientObjectKey(task), latest); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return latest.UID == task.UID && latest.Status.Phase == payload.Phase &&
+		latest.Status.Execution != nil && latest.Status.Execution.State == payload.Execution.State &&
+		latest.Status.Delivery != nil && store.PromptDeliveryState(latest.Status.Delivery.State) == projectedDelivery, nil
+}
+
 func (d *ACPDispatcher) patchRecoveredTerminalEpoch(ctx context.Context, task *corev1alpha1.Task, epoch int64) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -2148,7 +2399,17 @@ func (d *ACPDispatcher) patchRecoveredTerminalEpoch(ctx context.Context, task *c
 			return nil
 		}
 		latest.Status.Execution.ControllerEpoch = epoch
-		return d.Client.Status().Update(ctx, latest)
+		released, err := d.releaseSettledTaskStorageHold(ctx, latest)
+		if err != nil {
+			return err
+		}
+		update := func(ctx context.Context) error {
+			return d.Client.Status().Update(ctx, latest)
+		}
+		if released {
+			return d.Epochs.AdmitWork(ctx, update)
+		}
+		return update(ctx)
 	})
 }
 
@@ -2372,6 +2633,69 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 	return finalizeErr
 }
 
+const (
+	acpRecoveredWorkspaceLostOperation = "controller-restart-workspace-lost"
+	acpRecoveredWorkspaceLostMessage   = "runtime workspace was lost before durable validation completed"
+	acpRecoveredWorkspaceLostReason    = corev1alpha1.TaskDeliveryReason("RuntimeWorkspaceLost")
+)
+
+func (d *ACPDispatcher) settleRecoveredWorkspaceValidation(
+	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence,
+) error {
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return err
+	}
+	switch attempt.DeliveryState {
+	case store.PromptDeliveryValidating:
+		if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict,
+			acpRecoveredWorkspaceLostOperation, acpRecoveredWorkspaceLostMessage); err != nil {
+			return err
+		}
+	case store.PromptDeliveryConflict:
+	default:
+		return nil
+	}
+	if task.Status.Delivery != nil && task.Status.Delivery.State == corev1alpha1.TaskDeliveryStateDeliveryConflict {
+		return nil
+	}
+	status := corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
+		Reason: acpRecoveredWorkspaceLostReason, Message: acpRecoveredWorkspaceLostMessage, LastTransitionTime: nowMeta(),
+	}
+	if err := d.patchDeliveryStatus(ctx, task, status); err != nil {
+		return err
+	}
+	recorded := taskDeliveryStatusForKubernetes(task, status)
+	task.Status.Delivery = &recorded
+	return nil
+}
+
+func (d *ACPDispatcher) recordRecoveredValidationOutcome(
+	ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt,
+) error {
+	if task.Status.Execution == nil || task.Status.Execution.State == corev1alpha1.TaskExecutionStateOutcomeUnknown ||
+		attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || !abandonedValidationDelivery(attempt, task) {
+		return nil
+	}
+	exists, err := d.validateExistingStandaloneTaskProjection(ctx, task, attempt)
+	if err != nil || exists {
+		return err
+	}
+	if err := d.recoverMissingStandaloneTerminalProjection(ctx, task, attempt); err != nil {
+		return err
+	}
+	latest := &corev1alpha1.Task{}
+	if err := uncachedReader(d.APIReader, d.Client).Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+		return err
+	}
+	if latest.UID != task.UID {
+		return fmt.Errorf("%w: Task identity changed while recovery recorded its outcome", store.ErrConflict)
+	}
+	latest.DeepCopyInto(task)
+	return nil
+}
+
 func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, fence store.ControllerEpochFence) error {
 	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
 		return err
@@ -2383,7 +2707,7 @@ func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task
 		switch attempt.DeliveryState {
 		case store.PromptDeliveryValidating:
 			if err := d.transitionDelivery(ctx, attempt.ID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict,
-				"controller-restart-workspace-lost", "runtime workspace was lost before durable validation completed"); err != nil {
+				acpRecoveredWorkspaceLostOperation, acpRecoveredWorkspaceLostMessage); err != nil {
 				return err
 			}
 			updatedAttempt, err := d.Store.GetPromptAttempt(ctx, attempt.ID)
@@ -2396,7 +2720,7 @@ func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task
 			}
 			status := corev1alpha1.TaskDeliveryStatus{
 				State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
-				Reason: "RuntimeWorkspaceLost", Message: "runtime workspace was lost before durable validation completed", LastTransitionTime: nowMeta(),
+				Reason: acpRecoveredWorkspaceLostReason, Message: acpRecoveredWorkspaceLostMessage, LastTransitionTime: nowMeta(),
 			}
 			return d.failTaskForDelivery(ctx, task, status, status.Message)
 		case store.PromptDeliveryPreparing, store.PromptDeliveryPrepared, store.PromptDeliveryPublishing, store.PromptDeliveryVerifying:

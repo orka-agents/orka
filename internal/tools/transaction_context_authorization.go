@@ -86,6 +86,7 @@ func validateChildTaskAgainstParentTransaction(ctx context.Context, k8sClient cl
 			{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 			{role: "target-write", ref: workspace.PublicationCredentialRef},
 			{role: "forge", ref: workspace.ForgeCredentialRef},
+			{role: "commit-sign", ref: workspace.CommitSigningCredentialRef},
 		} {
 			if credential.ref == nil || strings.TrimSpace(credential.ref.Name) == "" {
 				continue

@@ -11,7 +11,7 @@ non-obvious decision in `internal/api`. The comment was deleted, and the decisio
 ## Context
 
 Round 2 of the comment cleanup classified every comment left after
-[ADR 0063](0063-code-comment-decisions-round-1.md). In `internal/api` it found 1044 distinct decisions
+[ADR 0063](0063-code-comment-decisions-round-1.md). In `internal/api` it found 1050 distinct decisions
 that a reader of the code alone could get wrong. Comments that stated the same rule in several
 places are merged into one entry. Where an earlier ADR already records a decision, the entry
 links it.
@@ -1067,6 +1067,12 @@ grouped by package and ordered by source position as of round 2.
 - **PR index keys fold like strings.EqualFold** (`api.usageRepositoryFoldKey`): usageRepositoryFoldKey maps each rune to the smallest rune of its simple-fold orbit so map lookups in the usage PR index match exactly the repositories strings.EqualFold would treat as equal.
 - **Reserved usage content keys match every case fold** (`usage.hasFieldFold`): usage.hasFieldFold matches reserved usage content keys with strings.EqualFold because encoding/json decodes any key equal under EqualFold into a tagged field, including non-ASCII folds such as U+017F for s; an exact-match check would let a differently spelled key slip through.
 - **Usage ownership is frozen before streaming detaches** (`api.usageRequestContext`): usageRequestContext resolves the namespace UID before streaming can detach and outlive the namespace, and keeps a lookup failure as well, so a namespace recreated later under the same name cannot claim the request's usage.
+- **Broker signing keys are base64-encoded PEM** (`api.Server credential broker (signing key encoding)`): The credential broker base64-encodes PEM signing keys so each broker response stays a single line without CR/LF while preserving the exact key bytes; trimming or re-encoding the PEM would corrupt the key.
+- **Identity audit reads are redacted and fail closed** (`api.Handlers.ListAgentIdentityAudit`): Handlers.ListAgentIdentityAudit returns agent-identity audit records scoped to the caller's namespace and visible Tasks, applying the same context-token, Gateway, and hidden-Task checks as ListTasks. Records never carry tokens, headers, bodies, full URLs, or raw error text, and any record whose Task binding is missing or whose Task cannot be resolved in the caller's namespace is omitted.
+- **Identity audit filters visibility before applying the limit** (`api.Handlers.ListAgentIdentityAudit`): Handlers.ListAgentIdentityAudit reads every retained matching candidate before per-Task visibility filtering, then applies the limit, so records of hidden or unresolvable Tasks never truncate the visible result below the requested limit.
+- **Private AHP turns look missing in identity audit** (`api.Handlers.resolveAuditedTask`): Handlers.resolveAuditedTask returns 404, not 403, for another person's private AHP turn Task, matching a missing Task so its existence is not revealed, and then enforces normal Task visibility.
+- **Memory proposal provenance is server-owned on create** (`api.rejectClientProposalProvenance`): rejectClientProposalProvenance refuses a client-set memory_proposal source or source proposal ID, because only applying a reviewed proposal records that provenance. Empty values name nothing and are accepted, so older clients that send every key keep working.
+- **Memory updates cannot rewrite proposal provenance** (`api.rejectClientProposalSourceUpdate`): rejectClientProposalSourceUpdate keeps the source server-owned on update: an update cannot relabel a memory as applied from a proposal or change the source of a memory with a non-blank sourceProposalId, and update never changes sourceProposalId. Omitting the source or repeating the stored one is accepted so a client can send back a memory it read, and for a legacy applied memory relabeled before this guard existed, restoring the canonical memory_proposal source is allowed while any other change is rejected.
 
 ## Consequences
 

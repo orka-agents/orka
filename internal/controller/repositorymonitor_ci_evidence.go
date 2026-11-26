@@ -45,6 +45,10 @@ const (
 	repositoryMonitorCIEvidenceMaxChecks             = 10
 	repositoryMonitorCIEvidenceMaxPendingChecks      = 10
 	repositoryMonitorCIEvidenceMaxAnnotationChecks   = 5
+	repositoryMonitorCIEvidenceMaxJobLogChecks       = 3
+	repositoryMonitorCIEvidenceJobLogBytes           = 2048
+	repositoryMonitorCIEvidenceJobLogLines           = 40
+	repositoryMonitorCIEvidenceJobLogRawReadLimit    = 256 << 10
 	repositoryMonitorCIEvidenceAnnotationPages       = 2
 	repositoryMonitorCIEvidenceAnnotationsPerPage    = 50
 	repositoryMonitorCIEvidenceMaxAnnotations        = 10
@@ -76,6 +80,7 @@ const (
 	repositoryMonitorEvidenceTruncatedFieldURL       = "url"
 	repositoryMonitorEvidenceTruncatedFieldAnnots    = "annotations"
 	repositoryMonitorEvidenceTruncatedFieldAnnotText = "annotationText"
+	repositoryMonitorEvidenceTruncatedFieldLogTail   = "logTail"
 
 	repositoryMonitorCIEvidenceDigestMetadataKey       = "ciEvidenceDigest"
 	repositoryMonitorCIEvidenceIDsMetadataKey          = "ciEvidenceIDs"
@@ -107,6 +112,7 @@ type repositoryMonitorCheckEvidence struct {
 	URL             string                                  `json:"url,omitempty"`
 	Title           string                                  `json:"title,omitempty"`
 	Summary         string                                  `json:"summary,omitempty"`
+	LogTail         string                                  `json:"logTail,omitempty"`
 	Description     string                                  `json:"description,omitempty"`
 	AnnotationCount int                                     `json:"annotationCount,omitempty"`
 	Annotations     []repositoryMonitorCheckAnnotationEntry `json:"annotations,omitempty"`
@@ -232,7 +238,9 @@ type repositoryMonitorEvidenceFetch struct {
 	tokenErr                    error
 	rateLimited                 bool
 	annotationChecks            int
+	jobLogChecks                int
 	text                        bool
+	jobLogs                     bool
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, repo string, pr repositoryMonitorPullRequest, failures repositoryMonitorCIFailures) repositoryMonitorCIEvidence {
@@ -240,7 +248,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIEvidenceFor(ctx context
 	evidence.ChecksIncomplete = failures.headIncomplete
 	ctx, cancel := context.WithTimeout(ctx, repositoryMonitorCIEvidenceFetchBudget)
 	defer cancel()
-	fetch := &repositoryMonitorEvidenceFetch{text: monitor.Spec.Repair.CIEvidence.Text}
+	fetch := &repositoryMonitorEvidenceFetch{
+		text:    monitor.Spec.Repair.CIEvidence.Text,
+		jobLogs: monitor.Spec.Repair.CIEvidence.Text && monitor.Spec.Repair.CIEvidence.JobLogs,
+	}
 	evidence.TextOmitted = !fetch.text
 	fetch.token, fetch.tokenErr = r.repositoryMonitorGitHubToken(ctx, monitor)
 	if owner, name, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL); err == nil {
@@ -347,6 +358,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckEvidenceFor(ctx cont
 	if entry.AnnotationCount > 0 {
 		r.repositoryMonitorAddCheckAnnotations(ctx, fetch, failure.id, &entry)
 	}
+	if fetch.jobLogs && strings.EqualFold(entry.App, "github-actions") && failure.id > 0 {
+		r.repositoryMonitorAddActionsJobLogTail(ctx, fetch, failure.id, &entry)
+	}
 	if entry.Availability == repositoryMonitorEvidenceAvailable && len(entry.Truncated) > 0 {
 		entry.Availability = repositoryMonitorEvidenceTruncated
 	}
@@ -415,6 +429,112 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorAddCheckAnnotations(ctx c
 	}
 }
 
+func (r *RepositoryMonitorReconciler) repositoryMonitorAddActionsJobLogTail(ctx context.Context, fetch *repositoryMonitorEvidenceFetch, jobID int64, entry *repositoryMonitorCheckEvidence) {
+	if fetch.rateLimited || fetch.tokenErr != nil || fetch.jobLogChecks >= repositoryMonitorCIEvidenceMaxJobLogChecks {
+		return
+	}
+	fetch.jobLogChecks++
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", fetch.baseURL, url.PathEscape(fetch.owner), url.PathEscape(fetch.repo), jobID)
+	rawLog, err := r.fetchRepositoryMonitorActionsJobLog(ctx, endpoint, fetch.token)
+	if err != nil {
+		if availability, _ := repositoryMonitorEvidenceErrorAvailability(err); availability == repositoryMonitorEvidenceRateLimited {
+			fetch.rateLimited = true
+		}
+		return
+	}
+	if strings.TrimSpace(rawLog) == "" {
+		return
+	}
+	tail, cut := repositoryMonitorEvidenceTailText(rawLog, repositoryMonitorCIEvidenceJobLogBytes, repositoryMonitorCIEvidenceJobLogLines)
+	if tail == "" {
+		return
+	}
+	entry.LogTail = tail
+	if cut && !slices.Contains(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldLogTail) {
+		entry.Truncated = append(entry.Truncated, repositoryMonitorEvidenceTruncatedFieldLogTail)
+	}
+}
+
+func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorActionsJobLog(ctx context.Context, endpoint, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	repositoryMonitorSetGitHubHeaders(req, token)
+	baseClient := repositoryMonitorHTTPClient(r)
+	clientCopy := *baseClient
+	clientCopy.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects")
+		}
+		if strings.EqualFold(req.URL.Scheme, "https") && !strings.EqualFold(next.URL.Scheme, "https") {
+			return fmt.Errorf("refusing redirect from https to %s", next.URL.Scheme)
+		}
+		if !strings.EqualFold(next.URL.Scheme, req.URL.Scheme) || !strings.EqualFold(next.URL.Host, req.URL.Host) {
+			next.Header.Del("Authorization")
+		}
+		return nil
+	}
+	resp, err := clientCopy.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	body, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorCIEvidenceJobLogRawReadLimit)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", &repositoryMonitorGitHubAPIError{Operation: "fetch Actions job log", StatusCode: resp.StatusCode, Body: string(body)}
+	}
+	return string(body), nil
+}
+
+func repositoryMonitorEvidenceTailText(value string, maxBytes, maxLines int) (string, bool) {
+	value = stripActionsLogTimestamps(value)
+	lines, sanitizeCut := repositoryMonitorEvidenceSanitizedLines(value, len(value)+1)
+	text, bounded := repositoryMonitorEvidenceBoundTail(lines, maxBytes, maxLines)
+	return text, sanitizeCut || bounded
+}
+
+func stripActionsLogTimestamps(value string) string {
+	rawLines := strings.Split(value, "\n")
+	for i, line := range rawLines {
+		trimmed := strings.TrimPrefix(line, "\ufeff")
+		if space := strings.IndexByte(trimmed, ' '); space >= 20 && space <= 35 {
+			if _, err := time.Parse(time.RFC3339Nano, trimmed[:space]); err == nil {
+				rawLines[i] = trimmed[space+1:]
+			}
+		}
+	}
+	return strings.Join(rawLines, "\n")
+}
+
+func repositoryMonitorEvidenceBoundTail(lines []string, maxBytes, maxLines int) (string, bool) {
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	kept, size := 0, 0
+	for _, line := range slices.Backward(lines) {
+		next := size + len(line)
+		if kept > 0 {
+			next++
+		}
+		if kept == maxLines || next > maxBytes {
+			break
+		}
+		kept, size = kept+1, next
+	}
+	if kept == 0 && len(lines) > 0 {
+		return repositoryMonitorEvidenceCutRunes(lines[len(lines)-1], maxBytes), true
+	}
+	start := len(lines) - kept
+	return strings.Join(lines[start:], "\n"), start > 0
+}
+
 func repositoryMonitorAnnotationLevelRank(level string) int {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "failure":
@@ -444,6 +564,10 @@ func fitRepositoryMonitorCheckEvidence(entry repositoryMonitorCheckEvidence, max
 	if entry.Summary != "" && repositoryMonitorEvidenceEncodedSize(entry) > maxBytes {
 		entry.Summary = ""
 		markTruncated(repositoryMonitorEvidenceTruncatedFieldSummary)
+	}
+	if entry.LogTail != "" && repositoryMonitorEvidenceEncodedSize(entry) > maxBytes {
+		entry.LogTail = ""
+		markTruncated(repositoryMonitorEvidenceTruncatedFieldLogTail)
 	}
 	if entry.Title != "" && repositoryMonitorEvidenceEncodedSize(entry) > maxBytes {
 		entry.Title = ""

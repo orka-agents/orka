@@ -337,6 +337,8 @@ func main() {
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
 	var taskWebhookDeliveryWorkers int
+	var taskMaxConcurrentReconciles int
+	var runtimePoolMaxConcurrentReconciles int
 	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
@@ -354,6 +356,7 @@ func main() {
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
 	var acpWorkspaceAllowProviderTokenInSandbox bool
+	var acpWorkspaceDefaultSuspendAfterDetach time.Duration
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
@@ -641,6 +644,15 @@ func main() {
 	flag.IntVar(&taskWebhookDeliveryWorkers, "task-webhook-delivery-workers", controller.DefaultTaskWebhookDeliveryWorkers,
 		fmt.Sprintf("Task webhook attempts the controller sends at once (1-%d). Delivery runs outside Task reconciliation, "+
 			"so slow receivers only delay other webhook notices once this many attempts are in flight.", controller.MaxTaskWebhookDeliveryWorkers))
+	flag.IntVar(&runtimePoolMaxConcurrentReconciles, "runtime-pool-max-concurrent-reconciles",
+		controller.DefaultRuntimePoolMaxConcurrentReconciles,
+		fmt.Sprintf("Different RuntimePools the RuntimePool controller reconciles at once (1-%d); a pool is never "+
+			"reconciled concurrently with itself, so concurrent cold starts publish their workloads without "+
+			"queueing behind each other.", controller.MaxRuntimePoolMaxConcurrentReconciles))
+	flag.IntVar(&taskMaxConcurrentReconciles, "task-max-concurrent-reconciles", controller.DefaultTaskMaxConcurrentReconciles,
+		fmt.Sprintf("Different Tasks the Task controller reconciles at once (1-%d); a Task is never reconciled "+
+			"concurrently with itself, and --max-tasks-per-namespace and coordination maxConcurrentChildren "+
+			"grant slots through a resourceVersion-checked ledger, so they stay exact.", controller.MaxTaskMaxConcurrentReconciles))
 	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
 		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
 			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
@@ -656,7 +668,7 @@ func main() {
 	flag.BoolVar(&enforceNamespaceIsolation, "enforce-namespace-isolation", false,
 		"When true, restrict users to their ServiceAccount's namespace for all operations.")
 	flag.IntVar(&maxTasksPerNamespace, "max-tasks-per-namespace", 0,
-		"Maximum active tasks per namespace (0 = unlimited).")
+		fmt.Sprintf("Maximum admitted tasks per namespace (0 = unlimited, at most %d).", controller.MaxTaskAdmissionSlots))
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
 	flag.DurationVar(&acpPermissionTimeout, "acp-permission-timeout", envDurationDefault("ORKA_ACP_PERMISSION_TIMEOUT", 0),
@@ -707,6 +719,12 @@ func main() {
 		"Allow built-in Agents to declare runtime.skills (Agent Skills read from digest-pinned images). Off by default; requires --acp-toolboxes-enabled, whose registry allowlist, pull secrets, node selector, and mount method skills reuse.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
+	flag.DurationVar(&acpWorkspaceDefaultSuspendAfterDetach, "acp-workspace-default-suspend-after-detach",
+		controller.DefaultACPWorkspaceSuspendAfterDetach,
+		"Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets no "+
+			"spec.retention.suspendAfterDetach (ADR 0057). Existing workspaces keep what they froze. 0 disables only the controller default; "+
+			"the ExecutionWorkspaceClass annotation "+controller.ACPWorkspaceClassDefaultSuspendAfterDetachAnnotation+
+			" still sets a per-class window, and \"disabled\" opts a class out.")
 	flag.BoolVar(&acpWorkspaceAllowProviderTokenInSandbox, "acp-workspace-allow-provider-token-in-sandbox", strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX"), "true"),
 		"Deliver the provider-proxy token into gateway-enforced native workspace runtimes when their provider cannot inject it at the egress gateway; when false, such workspaces fail admission.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
@@ -925,6 +943,10 @@ func main() {
 		setupLog.Error(nativeSessionMaxBytesErr, "invalid native session size configuration")
 		os.Exit(1)
 	}
+	if err := controller.ValidateACPWorkspaceDefaultSuspendAfterDetach(acpWorkspaceDefaultSuspendAfterDetach); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid --acp-workspace-default-suspend-after-detach: %v\n", err)
+		os.Exit(1)
+	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
 	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
 	agentIdentityEntraTenantID = strings.TrimSpace(agentIdentityEntraTenantID)
@@ -998,6 +1020,16 @@ func main() {
 	if taskWebhookDeliveryWorkers < 1 || taskWebhookDeliveryWorkers > controller.MaxTaskWebhookDeliveryWorkers {
 		fmt.Fprintf(os.Stderr, "invalid --task-webhook-delivery-workers %d: must be between 1 and %d\n",
 			taskWebhookDeliveryWorkers, controller.MaxTaskWebhookDeliveryWorkers)
+		os.Exit(1)
+	}
+	if runtimePoolMaxConcurrentReconciles < 1 || runtimePoolMaxConcurrentReconciles > controller.MaxRuntimePoolMaxConcurrentReconciles {
+		fmt.Fprintf(os.Stderr, "invalid --runtime-pool-max-concurrent-reconciles %d: must be between 1 and %d\n",
+			runtimePoolMaxConcurrentReconciles, controller.MaxRuntimePoolMaxConcurrentReconciles)
+		os.Exit(1)
+	}
+	if taskMaxConcurrentReconciles < 1 || taskMaxConcurrentReconciles > controller.MaxTaskMaxConcurrentReconciles {
+		fmt.Fprintf(os.Stderr, "invalid --task-max-concurrent-reconciles %d: must be between 1 and %d\n",
+			taskMaxConcurrentReconciles, controller.MaxTaskMaxConcurrentReconciles)
 		os.Exit(1)
 	}
 
@@ -1428,6 +1460,7 @@ func main() {
 		registerAdmissionWebhooks()
 	}
 
+	agentIdentityAuditBuffer := outboundaccess.NewAgentIdentityAuditBuffer(0)
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
 		Reader:                 mgr.GetAPIReader(),
 		ReservedServiceAccount: controllerServiceAccount,
@@ -1435,6 +1468,7 @@ func main() {
 		Trust:                  outboundAccessTrust,
 		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
 		AuditLog:               agentIdentityAuditLog,
+		AuditSink:              agentIdentityAuditBuffer,
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
@@ -1509,13 +1543,18 @@ func main() {
 	}
 	storageLog.Info("storage configuration loaded")
 
+	sqliteSynchronous, err := sqlite.ParseSynchronous(storageFlags.SQLiteSynchronous)
+	if err != nil {
+		setupLog.Error(err, "invalid --store-sqlite-synchronous")
+		os.Exit(1)
+	}
 	sqliteStore, appStorage, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
 		if agentExecutionSnapshotSecretOpts.enabled() {
 			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
 		}
 		return loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
-	})
+	}, sqlite.WithSynchronous(sqliteSynchronous))
 	if err != nil {
 		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)
@@ -1764,7 +1803,12 @@ func main() {
 	acpOpencodeRuntimeImage = images.Opencode
 
 	sessionManager.SetGatewayEventStore(appStorage)
-	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
+	if maxTasksPerNamespace < 0 || maxTasksPerNamespace > controller.MaxTaskAdmissionSlots {
+		setupLog.Error(nil, fmt.Sprintf("invalid --max-tasks-per-namespace: must be between 0 (unlimited) and %d", controller.MaxTaskAdmissionSlots),
+			"maxTasksPerNamespace", maxTasksPerNamespace)
+		os.Exit(1)
+	}
+	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // validated to 0..MaxTaskAdmissionSlots
 	gatewayConfig := gatewayruntime.Config{
 		Enabled: gatewayEnabled, Namespace: watchNamespace, PendingPerSession: gatewayPendingPerSession,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
@@ -1863,12 +1907,13 @@ func main() {
 
 	var runtimeAvailability api.ACPRuntimeAvailability
 	runtimePoolReconciler := &controller.RuntimePoolReconciler{
-		SubstrateRouter:      runtimePoolSubstrateRouter,
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Scheme:               mgr.GetScheme(),
-		RuntimeNamespace:     acpRuntimeNamespace,
-		WorkspaceCleanupOnly: !workspaceProviderAPIEnabled,
+		MaxConcurrentReconciles: runtimePoolMaxConcurrentReconciles,
+		SubstrateRouter:         runtimePoolSubstrateRouter,
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Scheme:                  mgr.GetScheme(),
+		RuntimeNamespace:        acpRuntimeNamespace,
+		WorkspaceCleanupOnly:    !workspaceProviderAPIEnabled,
 	}
 	providerProxyLabels, err := parseExactLabels(acpProviderProxyPodLabels)
 	if err != nil {
@@ -1939,6 +1984,7 @@ func main() {
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
 		WebhookDeliveryWorkers:       taskWebhookDeliveryWorkers,
+		MaxConcurrentReconciles:      taskMaxConcurrentReconciles,
 		KubeClient:                   kubeClient,
 		ResultStore:                  appStorage,
 		PlanStore:                    appStorage,
@@ -1971,6 +2017,8 @@ func main() {
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+
+		ACPWorkspaceDefaultSuspendAfterDetach: acpWorkspaceDefaultSuspendAfterDetach,
 
 		AIWorkerServiceAccountName:        aiWorkerServiceAccountName,
 		VendorWorkerServiceAccountName:    vendorWorkerServiceAccountName,
@@ -2009,9 +2057,9 @@ func main() {
 		Identity:        agentIdentityConfig,
 		SubstrateRouter: runtimePoolSubstrateRouter,
 		Client:          mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
-		EventStore: appStorage, PlanStore: appStorage,
-		Snapshots: agentExecutionSnapshotStore,
-		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
+		Informers:  mgr.GetCache(),
+		EventStore: appStorage, Snapshots: agentExecutionSnapshotStore,
+		Epochs: controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
 		ArtifactReservations: artifactRetentionWiring.collector,
 		AdmissionGate:        acpAdmissionGate,
@@ -2307,6 +2355,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	var branchRebaser controller.RepositoryMonitorBranchRebaser
+	if publisherClient != nil {
+		branchRebaser = publisherClient
+	}
 	if err := (&controller.RepositoryMonitorReconciler{
 		Client:                    mgr.GetClient(),
 		Scheme:                    mgr.GetScheme(),
@@ -2316,6 +2368,7 @@ func main() {
 		DurableControlStore:       kubeControlStore,
 		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		BranchRebaser:             branchRebaser,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
@@ -2434,6 +2487,7 @@ func main() {
 		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
 		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
 		TaskWebhookKeys:          taskWebhookKeys,
+		AgentIdentityAudit:       agentIdentityAuditBuffer,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,

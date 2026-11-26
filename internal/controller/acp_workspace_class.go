@@ -67,6 +67,7 @@ type ACPWorkspaceClassBinding struct {
 	SuspendMode              string
 	SandboxVolume            *ACPSandboxDurableVolume
 	MaxSuspendedWorkspaces   *int32
+	SuspendAfterDetach       string
 	DefaultOnDetach          string
 	AllowedOnDetach          []string
 	DetachTimeout            string
@@ -637,6 +638,15 @@ func validateACPWorkspaceClassLifecycleValues(class *ACPWorkspaceClassBinding) e
 	if class.MaxSuspendedWorkspaces != nil && *class.MaxSuspendedWorkspaces < 0 {
 		return fmt.Errorf("frozen execution workspace class binding retention cap is negative")
 	}
+	if class.SuspendAfterDetach != "" {
+		if _, err := parseACPWorkspaceSuspendAfterDetach(class.SuspendAfterDetach); err != nil {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window is invalid: %w", err)
+		}
+		if class.SuspendMode != acpWorkspaceSuspendDataOnly ||
+			!slices.Contains(class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window requires a DataOnly Suspend policy")
+		}
+	}
 	if class.SandboxVolume != nil {
 		if class.SuspendMode != acpWorkspaceSuspendDataOnly {
 			return fmt.Errorf("frozen execution workspace class binding carries a durable volume without a DataOnly suspension policy")
@@ -712,6 +722,15 @@ func validateACPWorkspaceClassTimeouts(class *ACPWorkspaceClassBinding) error {
 	}
 	if class.IdleTimeout != "" && class.MaxLifetime != "" && maxLifetime < idleTimeout {
 		return fmt.Errorf("frozen execution workspace class binding maximum lifetime must be greater than or equal to idle timeout")
+	}
+	if class.SuspendAfterDetach != "" {
+		window, err := parseACPWorkspaceSuspendAfterDetach(class.SuspendAfterDetach)
+		if err != nil {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window is invalid: %w", err)
+		}
+		if err := validateACPWorkspaceSuspendAfterDetachBounds(window, idleTimeout, maxLifetime); err != nil {
+			return fmt.Errorf("frozen execution workspace class binding warm-detach window is invalid: %w", err)
+		}
 	}
 	return nil
 }

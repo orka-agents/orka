@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -132,7 +133,18 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		return "", false, fmt.Errorf("%w: workspace %s: %w; delete the workspace or start a new Session",
 			errACPWorkspaceTerminalFailure, workspace.Name, operatoraccess.ErrTainted)
 	}
+	if acpWorkspaceRetainedDataLost(workspace) && !acpWorkspaceRevocationStampMatchesCurrentEpoch(workspace) {
+		next := "start a new Session"
+		if strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
+			next = "retry the Task"
+		}
+		return "", false, fmt.Errorf("%w: workspace %s: its runtime stopped without retained data and cannot be resumed; %s",
+			errACPWorkspaceTerminalFailure, workspace.Name, next)
+	}
 	if err := r.backfillACPWorkspaceSuspendedCap(ctx, workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
+		return "", false, err
+	}
+	if err := r.backfillACPWorkspaceSuspendAfterDetach(ctx, workspace, binding.Class.SuspendAfterDetach); err != nil {
 		return "", false, err
 	}
 	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
@@ -141,16 +153,19 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
 		switch workspace.Status.State {
 		case workspacev1alpha1.ExecutionWorkspaceStateSuspended:
-			base := workspace.DeepCopy()
-			workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
-			if workspace.Annotations == nil {
-				workspace.Annotations = map[string]string{}
+			now := time.Now()
+			if acpWorkspaceSpeculativeResumePending(workspace, now) {
+				return "", false, nil
 			}
-			now := time.Now().UTC().Format(time.RFC3339Nano)
-			workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] = now + " " + task.Name + " " + string(task.UID)
-			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = binding.Class.EffectiveOnDetach
-			workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
-			if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			deadline, owner, recorded := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+			ownExpired := recorded && owner == string(task.UID) && !now.Before(deadline)
+			if !ownExpired && acpWorkspaceSuspendCapable(workspace) && acpWorkspaceRetainedDataAvailable(workspace) {
+				if err := r.requestACPWorkspaceSpeculativeResume(ctx, workspace, task, binding, plan.PoolName, now); err != nil {
+					return "", false, client.IgnoreNotFound(err)
+				}
+				return "", false, nil
+			}
+			if err := r.flipACPWorkspaceForColdResume(ctx, workspace, task, binding.Class.EffectiveOnDetach); err != nil {
 				return "", false, client.IgnoreNotFound(err)
 			}
 			return "", false, nil
@@ -225,6 +240,15 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if err := r.linkTaskToACPWorkspace(ctx, task, workspace); err != nil {
 		return "", false, err
 	}
+	if err := r.stampACPWorkspaceWarmDemand(ctx, workspace, task, time.Now()); err != nil {
+		if apierrors.IsConflict(err) {
+			return "", false, nil
+		}
+		return "", false, client.IgnoreNotFound(err)
+	}
+	if r.acpWorkspaceAwaitsStagedInstall(ctx, workspace, task, plan.PoolName, time.Now()) {
+		return "", false, nil
+	}
 	manager := WorkspaceAttachmentManager{Client: r.Client, APIReader: r.APIReader, LeaseTTL: acpWorkspaceAttachmentTTL}
 	attachment, err := manager.attach(ctx, workspace, task, map[string]string{
 		acpWorkspaceDetachActionAnnotation: binding.Class.EffectiveOnDetach,
@@ -243,6 +267,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
+	acpPreDispatch.mark(task, acpPreDispatchWorkspaceAttachRequested)
 	if err := r.markACPTaskAttachmentEpoch(ctx, task, attachment.Epoch); err != nil {
 		return "", false, err
 	}
@@ -268,6 +293,23 @@ func refuseOperatorTaintedACPWorkspaceHandoff(
 	return nil
 }
 
+func validateUnattachedACPClassWorkspaceReuse(workspace *workspacev1alpha1.ExecutionWorkspace, now time.Time) error {
+	if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+		return fmt.Errorf("workspace desired state %q is not reusable for direct attachment", workspace.Spec.DesiredState)
+	}
+	if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open {
+		drained := strings.TrimSpace(workspace.Annotations[acpWorkspaceWarmWindowDrainedAnnotation]) != ""
+		limit := deadline
+		if !drained {
+			limit = deadline.Add(acpWorkspaceWarmExpiryGrace)
+		}
+		if !now.Before(limit) {
+			return fmt.Errorf("workspace warm-detach window expired at %s; wait for suspension", deadline.UTC().Format(time.RFC3339))
+		}
+	}
+	return nil
+}
+
 func validateACPClassWorkspaceAttachmentAttempt(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
@@ -281,6 +323,11 @@ func validateACPClassWorkspaceAttachmentAttempt(
 	if operatoraccess.Tainted(workspace.Annotations) &&
 		(workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID) {
 		return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
+	}
+	if workspace.Spec.Attachment == nil {
+		if err := validateUnattachedACPClassWorkspaceReuse(workspace, now); err != nil {
+			return err
+		}
 	}
 	err := validateWorkspaceAttachmentAttempt(workspace, task, now)
 	if err == nil || binding.Class.ControllerName == "" || workspace.Spec.Attachment != nil {
@@ -300,6 +347,9 @@ func validateACPClassWorkspaceAttachmentAttempt(
 	if request != nil && observation != nil && observation.State == workspacev1alpha1.AllocationStopped &&
 		observation.Sequence == request.Sequence && observation.Key == request.Key &&
 		observation.Identity.RequestRevision == request.Revision && observation.Startup == nil && observation.RetainedData != nil {
+		return nil
+	}
+	if acpWorkspaceSpeculativeStartAttachable(workspace) {
 		return nil
 	}
 	return err
@@ -322,9 +372,13 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	binding *ACPRuntimeWorkspaceBinding,
 ) error {
 	action := binding.Class.EffectiveOnDetach
+	_, warmDeadline := workspace.Annotations[acpWorkspaceSuspendAtAnnotation]
+	_, warmPending := workspace.Annotations[acpWorkspaceSuspendPendingAnnotation]
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action &&
 		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" &&
-		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
+		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" && !warmDeadline && !warmPending &&
+		workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] == "" &&
+		workspace.Annotations[acpWorkspaceAttachmentIntentAnnotation] == "" {
 		return nil
 	}
 	base := workspace.DeepCopy()
@@ -334,6 +388,11 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = action
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
+	delete(workspace.Annotations, acpWorkspaceAttachmentIntentAnnotation)
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
@@ -582,6 +641,16 @@ func (r *TaskReconciler) createACPClassWorkspace(
 	if binding.Class.SuspendMode != "" {
 		workspace.Annotations[acpWorkspaceSuspendModeAnnotation] = binding.Class.SuspendMode
 	}
+	defaultWindow, err := r.acpWorkspaceDefaultSuspendAfterDetachAnnotations(ctx, task.Namespace, binding)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(workspace.Annotations, defaultWindow)
+	if binding.Class.SuspendMode == acpWorkspaceSuspendDataOnly &&
+		slices.Contains(binding.Class.AllowedOnDetach, string(workspacev1alpha1.WorkspaceOnDetachSuspend)) {
+		workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation] =
+			formatACPWorkspaceSpeculativeStart(time.Now().Add(acpWorkspaceSpeculativeStartTTL), task.UID)
+	}
 	if binding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
 		if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
 			return nil, fmt.Errorf("session-reused execution workspace requires spec.sessionRef.name")
@@ -610,6 +679,9 @@ func (r *TaskReconciler) createACPClassWorkspace(
 	if err := r.Create(ctx, workspace); err != nil {
 		return nil, err
 	}
+	if _, recorded := workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]; recorded {
+		acpPreDispatch.mark(task, acpPreDispatchSpeculativeStart)
+	}
 	return workspace, nil
 }
 
@@ -630,6 +702,9 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName,
 	}
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
+	}
+	if binding.Class.SuspendAfterDetach != "" {
+		annotations[acpWorkspaceSuspendAfterDetachAnnotation] = binding.Class.SuspendAfterDetach
 	}
 	if runtimeNamespace != "" {
 		annotations[acpWorkspaceRuntimeNamespaceAnnotation] = runtimeNamespace
@@ -659,6 +734,9 @@ func verifyACPClassWorkspace(
 		return err
 	}
 	if err := validateACPWorkspaceSuspendedCap(workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
+		return err
+	}
+	if err := validateACPWorkspaceSuspendAfterDetach(workspace, binding.Class.SuspendAfterDetach); err != nil {
 		return err
 	}
 	if workspace.Spec.Slot != binding.WorkspaceSlot {
@@ -827,6 +905,9 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if task.Annotations[acpTaskWorkspaceSettledAnnotation] != "" {
 		return true, nil
 	}
+	if changed, err := r.releaseACPWorkspaceSpeculativeClaims(ctx, workspace, task); err != nil || changed {
+		return false, err
+	}
 	taskOwnsLiveAttachment := workspace.Spec.Attachment != nil &&
 		workspace.Spec.Attachment.TaskRef.UID == task.UID
 	taskOwnsPendingResumeDemand := acpWorkspaceResumeDemandBelongsToTask(
@@ -864,7 +945,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		if err := r.markACPTaskAttachmentEpoch(ctx, task, attachment.Epoch); err != nil {
 			return false, err
 		}
-		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, attachment.Epoch); err != nil {
+		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, task, attachment.Epoch); err != nil {
 			return false, err
 		}
 		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
@@ -874,8 +955,10 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	}
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
-		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, epoch); err != nil {
-			return false, err
+		if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, task, epoch); err != nil {
+				return false, err
+			}
 		}
 		if err := manager.FinalizeRevocation(ctx, workspace, epoch, attachmentSecretName(workspace.Name, epoch)); err != nil {
 			expired, deadlineErr := r.quarantineACPWorkspacePastDetachTimeout(ctx, workspace)
@@ -924,6 +1007,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if terminallyFailed && !operatorTainted &&
 		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 		failedACPWorkspaceRetainsCheckpoint(workspace, time.Now()) {
+		if err := clearACPWorkspaceSuspendAt(ctx, r.Client, workspace, false, time.Now()); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
 		return true, r.markACPTaskWorkspaceSettled(ctx, task)
 	}
 
@@ -933,13 +1022,21 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			taskEpoch := acpTaskRecordedAttachmentEpoch(task)
 			existingUID, existingEpoch, existingOK := parseACPWorkspaceSettlementReceipt(
 				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation])
-			if existingUID != string(task.UID) && (!existingOK || existingEpoch <= taskEpoch) {
+			clearDemand := acpWorkspaceResumeDemandBelongsToTask(
+				workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID))
+			writeReceipt := existingUID != string(task.UID) && (!existingOK || existingEpoch <= taskEpoch)
+			if writeReceipt || clearDemand {
 				base := workspace.DeepCopy()
 				if workspace.Annotations == nil {
 					workspace.Annotations = map[string]string{}
 				}
-				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
-					formatACPWorkspaceSettlementReceipt(string(task.UID), taskEpoch)
+				if writeReceipt {
+					workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+						formatACPWorkspaceSettlementReceipt(string(task.UID), taskEpoch)
+				}
+				if clearDemand {
+					delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+				}
 				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 						return false, nil
@@ -959,6 +1056,13 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			}
 			return true, nil
 		}
+		if applied, retry, warmErr := r.settleACPWorkspaceWarm(ctx, workspace, task, time.Now()); warmErr != nil {
+			return false, warmErr
+		} else if retry {
+			return false, nil
+		} else if applied {
+			return true, r.markACPTaskWorkspaceSettled(ctx, task)
+		}
 		reader := client.Reader(r.Client)
 		if r.APIReader != nil {
 			reader = r.APIReader
@@ -975,6 +1079,12 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		)
 		switch {
 		case errors.Is(err, errACPSuspendQuotaExhausted):
+			if clearErr := clearACPWorkspaceSuspendAt(ctx, r.Client, workspace, false, time.Now()); clearErr != nil {
+				if apierrors.IsConflict(clearErr) || apierrors.IsNotFound(clearErr) {
+					return false, nil
+				}
+				return false, clearErr
+			}
 			if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
 				return false, deferErr
 			} else if retry {
@@ -1190,8 +1300,12 @@ func settlementWorkspaceBelongsToTask(workspace *workspacev1alpha1.ExecutionWork
 func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
 	epoch int64,
 ) error {
+	if workspace.Spec.Attachment == nil && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		return nil
+	}
 	if stampedEpoch, _, ok := parseACPWorkspaceRevocationStamp(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]); ok && stampedEpoch == epoch {
 		return nil
 	}
@@ -1199,9 +1313,17 @@ func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	if workspace.Annotations == nil {
 		workspace.Annotations = map[string]string{}
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	startedAt := time.Now().UTC()
+	now := startedAt.Format(time.RFC3339Nano)
 	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s", epoch, now)
 	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
+	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	if window := acpWorkspaceWarmDetachWindow(workspace, task); window > 0 {
+		workspace.Annotations[acpWorkspaceSuspendAtAnnotation] = startedAt.Add(window).Format(time.RFC3339Nano)
+	} else {
+		delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	}
 	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}

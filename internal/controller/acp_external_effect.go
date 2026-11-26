@@ -174,7 +174,7 @@ func runExternalEffectWithReplayMode[T any](
 	}
 	callCtx, cancelCall := context.WithTimeout(ctx, callTimeout)
 	response, callErr := call(callCtx)
-	callCtxErr := callCtx.Err()
+	callCtxErr := externalEffectContextExpired(callCtx)
 	cancelCall()
 	if callErr != nil {
 		return zero, false, callErr
@@ -249,7 +249,7 @@ func runACPExternalEffectWithRetryPolicy[T any](
 		defer cancel()
 		for {
 			value, err := call(retryCtx)
-			if retryErr := retryCtx.Err(); retryErr != nil {
+			if retryErr := externalEffectContextExpired(retryCtx); retryErr != nil {
 				return zero, fmt.Errorf("bounded external-effect reconciliation expired: %w", retryErr)
 			}
 			if err == nil {
@@ -267,6 +267,16 @@ func runACPExternalEffectWithRetryPolicy[T any](
 			}
 		}
 	})
+}
+
+func externalEffectContextExpired(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func retryableACPExternalEffectError(err error) bool {

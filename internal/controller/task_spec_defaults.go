@@ -48,6 +48,7 @@ func taskSpecWithServerDefaults(spec corev1alpha1.TaskSpec) corev1alpha1.TaskSpe
 			out.Workspace.PublicationReadCredentialRef,
 			out.Workspace.PublicationCredentialRef,
 			out.Workspace.ForgeCredentialRef,
+			out.Workspace.CommitSigningCredentialRef,
 		} {
 			if ref != nil && ref.Key == "" {
 				ref.Key = taskSpecDefaultCredentialKey

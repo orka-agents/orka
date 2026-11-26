@@ -83,6 +83,7 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/tasks/:id/approvals": coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/attention":           coreAPIPolicy("list", "tasks", ""),
 	"GET /api/v1/approvals":           coreAPIPolicy("list", "tasks", ""),
+	"GET /api/v1/audit/identity":      coreAPIPolicy("list", "tasks", ""),
 	"POST /api/v1/tasks/:id/approvals/:approvalID/decision": coreAPIPolicy("update", "tasks/approvals", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "patch", "id"}),
 	"POST /api/v1/tasks/:id/fork": coreAPIPolicy("get", "tasks", "id",

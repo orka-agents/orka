@@ -45,6 +45,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -69,10 +70,11 @@ var (
 )
 
 const (
-	runtimePoolFinalizer          = "orka.ai/runtime-pool-cleanup"
-	runtimePoolRequeue            = 10 * time.Second
-	runtimePoolProbeTimeout       = 10 * time.Second
-	runtimePoolPort         int32 = 8080
+	runtimePoolFinalizer            = "orka.ai/runtime-pool-cleanup"
+	runtimePoolRequeue              = 10 * time.Second
+	runtimePoolProbeTimeout         = 10 * time.Second
+	runtimePoolBootingRequeue       = time.Second
+	runtimePoolPort           int32 = 8080
 
 	runtimePoolManagedByLabel                     = "app.kubernetes.io/managed-by"
 	runtimePoolManagedByLabelValue                = "orka"
@@ -338,12 +340,20 @@ type RuntimePoolReconciler struct {
 
 	WorkspaceCredentialSeeder func(ctx context.Context, endpoint, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) (alreadyComplete bool, err error)
 
-	SupervisorClient RuntimePoolSupervisorClient
-	HTTPClient       *http.Client
-	SubstrateRouter  *RuntimePoolSubstrateRouter
-	Rand             io.Reader
-	Now              func() time.Time
+	SupervisorClient        RuntimePoolSupervisorClient
+	HTTPClient              *http.Client
+	SubstrateRouter         *RuntimePoolSubstrateRouter
+	Rand                    io.Reader
+	Now                     func() time.Time
+	MaxConcurrentReconciles int
+
+	externalTimings externalRuntimeTimingReports
 }
+
+const (
+	DefaultRuntimePoolMaxConcurrentReconciles = 4
+	MaxRuntimePoolMaxConcurrentReconciles     = 64
+)
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=runtimepools/status,verbs=get;update;patch
@@ -517,10 +527,7 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 	pool *corev1alpha1.RuntimePool,
 	cfg runtimePoolConfig,
 ) (bool, error) {
-	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
-	if condition != nil && condition.Status == metav1.ConditionTrue &&
-		condition.ObservedGeneration > 0 && condition.ObservedGeneration <= pool.Generation &&
-		condition.Reason == acpRuntimePoolImageProvenanceReason {
+	if runtimePoolImageProvenanceRecorded(pool) {
 		return true, nil
 	}
 	if pool.Spec.ExecutionWorkspace != nil {
@@ -545,6 +552,13 @@ func (r *RuntimePoolReconciler) historicalRuntimePoolImageAuthorized(
 		}
 	}
 	return historicalRuntimePoolTemplateMatches(pool, cfg, deployment.Spec.Template), nil
+}
+
+func runtimePoolImageProvenanceRecorded(pool *corev1alpha1.RuntimePool) bool {
+	condition := meta.FindStatusCondition(pool.Status.Conditions, acpRuntimePoolImageProvenanceCondition)
+	return condition != nil && condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration > 0 && condition.ObservedGeneration <= pool.Generation &&
+		condition.Reason == acpRuntimePoolImageProvenanceReason
 }
 
 func (r *RuntimePoolReconciler) backfillHistoricalWorkspaceRuntimePoolImageProvenance(
@@ -1109,7 +1123,11 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		return r.finishEnrolledRuntimePoolServing(ctx, pool, status, boot)
 	}
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	requeue := runtimePoolRequeue
+	if probe.Status.Lifecycle == harnessv2.SupervisorLifecycleBooting && !probe.Status.Drain.Requested {
+		requeue = runtimePoolBootingRequeue
+	}
+	return r.finishRuntimePoolStatus(ctx, pool, status, requeue)
 }
 
 func (r *RuntimePoolReconciler) reconcileRuntimePoolInPlaceSupervisorRestart(
@@ -1909,31 +1927,30 @@ func runtimePoolBootstrapInstanceBindingFromAnnotation(
 	return &binding, nil
 }
 
-func (r *RuntimePoolReconciler) bindWorkspaceRuntimePoolBootstrapInstance(
-	ctx context.Context,
+func desiredRuntimePoolBootstrapInstanceBinding(
 	pool *corev1alpha1.RuntimePool,
 	authSecret *corev1.Secret,
 	workloadUID types.UID,
-) error {
+) (string, error) {
 	if authSecret == nil || authSecret.UID == "" || workloadUID == "" {
-		return fmt.Errorf("RuntimePool bootstrap auth Secret and workload UIDs are required")
+		return "", fmt.Errorf("RuntimePool bootstrap auth Secret and workload UIDs are required")
 	}
 	desired := runtimePoolBootstrapInstanceBinding{AuthSecretUID: authSecret.UID, WorkloadUID: workloadUID}
 	existing, err := runtimePoolBootstrapInstanceBindingFromAnnotation(pool)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if existing != nil {
 		if *existing == desired {
-			return nil
+			return "", nil
 		}
-		return errRuntimePoolBootstrapInstanceConflict
+		return "", errRuntimePoolBootstrapInstanceConflict
 	}
 	value, err := json.Marshal(desired)
 	if err != nil {
-		return fmt.Errorf("encode RuntimePool bootstrap instance binding: %w", err)
+		return "", fmt.Errorf("encode RuntimePool bootstrap instance binding: %w", err)
 	}
-	return r.patchRuntimePoolAnnotation(ctx, pool, runtimePoolBootstrapInstanceBindingAnnotation, string(value))
+	return string(value), nil
 }
 
 func (r *RuntimePoolReconciler) rotateConsumedWorkspaceRuntimePoolAuthSecret(
@@ -3386,6 +3403,9 @@ func (r *RuntimePoolReconciler) recordRuntimePoolStatus(ctx context.Context, poo
 		return false, err
 	}
 	recordRuntimePoolMetrics(pool, status)
+	if runtimePoolHasExternalWorkspace(pool) {
+		r.observeExternalRuntimeTransition(ctx, pool, base.Status, status)
+	}
 	if scaledToZero {
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}
@@ -3939,6 +3959,11 @@ func runtimePoolRequestForChild(_ context.Context, object client.Object) []recon
 }
 
 func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	workers, err := effectiveMaxConcurrentReconciles("runtimepool", r.MaxConcurrentReconciles,
+		DefaultRuntimePoolMaxConcurrentReconciles, MaxRuntimePoolMaxConcurrentReconciles)
+	if err != nil {
+		return err
+	}
 	builder := ctrl.NewControllerManagedBy(mgr).For(&corev1alpha1.RuntimePool{})
 	if _, err := mgr.GetRESTMapper().RESTMapping(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace").GroupKind(), workspacev1alpha1.GroupVersion.Version); err == nil {
 		builder = builder.Watches(&workspacev1alpha1.ExecutionWorkspace{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
@@ -3958,5 +3983,6 @@ func (r *RuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&networkingv1.NetworkPolicy{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Watches(&policyv1.PodDisruptionBudget{}, handler.EnqueueRequestsFromMapFunc(runtimePoolRequestForChild)).
 		Named("runtimepool").
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: workers}).
 		Complete(r)
 }

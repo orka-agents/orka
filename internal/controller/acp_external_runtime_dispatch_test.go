@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -435,7 +437,7 @@ func newExternalACPDispatchFixtureWithOptions(
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
-		EventStore: persistence, PlanStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+		EventStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity,
 		PromptLeases: &ACPMCPPromptLeaseRegistry{},
 	}
 	return &externalACPDispatchFixture{
@@ -443,6 +445,153 @@ func newExternalACPDispatchFixtureWithOptions(
 		reconciler: reconciler, dispatcher: dispatcher,
 		agent: agent, runtime: externalRuntime, createCalls: createCalls, createRequests: createRequests, mcpPolicy: policy,
 		deleteCalls: deleteCalls, deleteRequests: deleteRequests,
+	}
+}
+
+func newExternalRuntimeTestProxyServer(t *testing.T, name string, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			t.Errorf("enable full-duplex %s proxy: %v", name, err)
+			return
+		}
+		handler(w, request)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+type lateEOFCheckBody struct {
+	io.ReadCloser
+	remaining   int64
+	atEOFOnce   sync.Once
+	atEOF       chan struct{}
+	release     <-chan struct{}
+	eofDoneOnce sync.Once
+	eofDone     chan struct{}
+	eofResult   chan error
+}
+
+func (b *lateEOFCheckBody) Read(p []byte) (int, error) {
+	isTrailing := b.remaining <= 0
+	if isTrailing {
+		b.atEOFOnce.Do(func() {
+			close(b.atEOF)
+		})
+		<-b.release
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	if isTrailing {
+		select {
+		case b.eofResult <- err:
+		default:
+		}
+		b.eofDoneOnce.Do(func() {
+			close(b.eofDone)
+		})
+	}
+	return n, err
+}
+
+func TestExternalRuntimeTestProxyServerKeepsStreamWhenBodyEOFCheckIsLate(t *testing.T) {
+	const lines = 5
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	atEOF := make(chan struct{})
+	releaseEOF := make(chan struct{})
+	eofDone := make(chan struct{})
+	eofResult := make(chan error, 1)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseEOF)
+		})
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", harnessv2.NDJSONMediaType)
+		for sequence := range lines {
+			_, _ = fmt.Fprintf(w, "{\"sequence\":%d}\n", sequence)
+			w.(http.Flusher).Flush()
+			if sequence == 0 {
+				select {
+				case <-eofDone:
+				case <-r.Context().Done():
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	server := newExternalRuntimeTestProxyServer(t, "late EOF check", func(w http.ResponseWriter, request *http.Request) {
+		request.Body = &lateEOFCheckBody{
+			ReadCloser: request.Body,
+			remaining:  request.ContentLength,
+			atEOF:      atEOF,
+			release:    releaseEOF,
+			eofDone:    eofDone,
+			eofResult:  eofResult,
+		}
+		proxy.ServeHTTP(w, request)
+	})
+	defer release()
+
+	const targetPayloadBytes = 16 << 10
+	const wrapperLen = len(`{"prompt":""}`)
+	payload, err := json.Marshal(map[string]string{"prompt": strings.Repeat("x", targetPayloadBytes-wrapperLen)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) != targetPayloadBytes {
+		t.Fatalf("expected %d-byte payload, got %d", targetPayloadBytes, len(payload))
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, server.URL+"/v2/runtime-sessions/session/prompts/prompt", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close() //nolint:errcheck
+	received := 0
+	scanner := bufio.NewScanner(response.Body)
+	for scanner.Scan() {
+		received++
+		if received == 1 {
+			select {
+			case <-atEOF:
+			case <-ctx.Done():
+				t.Fatal("proxy did not enter trailing EOF check before flushing first event")
+			}
+			release()
+		}
+	}
+	if err := scanner.Err(); err != nil || received != lines {
+		t.Fatalf("proxied stream delivered %d of %d events (read error %v)", received, lines, err)
+	}
+	select {
+	case err := <-eofResult:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("expected trailing request-body read to return io.EOF, got %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("expected trailing request-body EOF check to complete")
 	}
 }
 
@@ -476,15 +625,7 @@ func newExternalRuntimeStatusProxy(
 		response.Header.Del("Content-Length")
 		return nil
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-			t.Errorf("enable full-duplex status proxy: %v", err)
-			return
-		}
-		proxy.ServeHTTP(w, r)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	return newExternalRuntimeTestProxyServer(t, "status", proxy.ServeHTTP)
 }
 
 func newExternalRuntimeCapabilitiesProxy(
@@ -517,15 +658,7 @@ func newExternalRuntimeCapabilitiesProxy(
 		response.Header.Del("Content-Length")
 		return nil
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-			t.Errorf("enable full-duplex capabilities proxy: %v", err)
-			return
-		}
-		proxy.ServeHTTP(w, r)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	return newExternalRuntimeTestProxyServer(t, "capabilities", proxy.ServeHTTP)
 }
 
 func newExternalRuntimePromptProxy(
@@ -539,7 +672,7 @@ func newExternalRuntimePromptProxy(
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return newExternalRuntimeTestProxyServer(t, "prompt", func(w http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/prompts/") {
 			body, err := io.ReadAll(request.Body)
 			if err != nil {
@@ -556,9 +689,7 @@ func newExternalRuntimePromptProxy(
 			observe(prompt)
 		}
 		proxy.ServeHTTP(w, request)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	})
 }
 
 func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, failDelete func() bool) *httptest.Server {
@@ -573,7 +704,7 @@ func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, f
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion, Code: code, Message: message, Retryable: true})
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return newExternalRuntimeTestProxyServer(t, "fault", func(w http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/prompts/") && rejectPrompt != nil && rejectPrompt():
 			_, _ = io.Copy(io.Discard, request.Body)
@@ -584,9 +715,7 @@ func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, f
 		default:
 			proxy.ServeHTTP(w, request)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	})
 }
 
 func newExternalRuntimeWorkspaceDeltaProxy(
@@ -600,7 +729,7 @@ func newExternalRuntimeWorkspaceDeltaProxy(
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return newExternalRuntimeTestProxyServer(t, "workspace delta", func(w http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/workspace-deltas/") {
 			body, err := io.ReadAll(request.Body)
 			if err != nil {
@@ -617,9 +746,7 @@ func newExternalRuntimeWorkspaceDeltaProxy(
 			observe(delta)
 		}
 		proxy.ServeHTTP(w, request)
-	}))
-	t.Cleanup(server.Close)
-	return server
+	})
 }
 
 func testExternalACPCustomTool(name string) *corev1alpha1.Tool {

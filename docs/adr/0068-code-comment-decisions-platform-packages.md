@@ -11,7 +11,7 @@ non-obvious decision in the remaining `internal/` packages and the `workers/` ou
 ## Context
 
 Round 2 of the comment cleanup classified every comment left after
-[ADR 0063](0063-code-comment-decisions-round-1.md). In the remaining `internal/` packages and the `workers/` outside ACP it found 780 distinct decisions
+[ADR 0063](0063-code-comment-decisions-round-1.md). In the remaining `internal/` packages and the `workers/` outside ACP it found 789 distinct decisions
 that a reader of the code alone could get wrong. Comments that stated the same rule in several
 places are merged into one entry. Where an earlier ADR already records a decision, the entry
 links it.
@@ -66,6 +66,9 @@ grouped by package and ordered by source position as of round 2.
 - **Workspace class use is authorized from UserInfo** (`admission.WorkspaceClassUseValidator`): admission.WorkspaceClassUseValidator authorizes newly selected workspace classes against AdmissionRequest.UserInfo, never against forgeable fields in the submitted object. See [ADR 0026](0026-acp-class-backed-execution-workspaces.md).
 - **Checkpoint source use is checked only on creation** (`admission.WorkspaceClassUseValidator.Handle`): The checkpoint source is immutable in the CRD, so admission.WorkspaceClassUseValidator.Handle checks source use only on creation; controller finalizer updates must stay possible after the caller's permission is revoked.
 - **Tool egress credentials require Secret read access** (`admission.WorkspaceClassUseValidator.authorizeToolEgressCredentials`): admission.WorkspaceClassUseValidator.authorizeToolEgressCredentials requires the caller to be allowed to get every Secret a Substrate MCP actor egress credential references, on every create and spec update, so a Tool author cannot have the egress gateway inject a Secret they cannot read. See [ADR 0045](0045-substrate-egress-credential-injection.md).
+- **Only standalone HTML-comment skip directives count** (`admission.parseSkipDirective`): admission.parseSkipDirective treats a line as a strict-decode skip attempt only when it starts with an HTML comment containing the marker, so prose that quotes the marker cannot silently disable documented-manifest validation; a valid directive must carry a nonblank reason.
+- **Storage recovery acknowledgement requires Task status permission** (`admission gateway Task protection policy`): The Gateway Task protection policy lets a user change a Gateway-owned Task only to set the storage recovery acknowledgement annotation, and only when that user may update the Task's status subresource; permission to update the Task alone is not enough.
+- **Storage recovery acknowledgement fails closed** (`admission gateway Task protection policy`): When the authorizer cannot answer the Task status permission check, the Gateway Task protection policy refuses the storage recovery acknowledgement, while the controller and trusted workers keep their access.
 
 ### `internal/agentidentity`
 
@@ -317,6 +320,8 @@ grouped by package and ordered by source position as of round 2.
 - **Platform ServiceAccounts are never token sources** (`outboundaccess.ResolveReferences`): outboundaccess.ResolveReferences refuses a ServiceAccount source that is an Orka platform account (by platform label or configured name), because the AI worker would request its token and gain the controller's, other workers', proxies' or publisher's authority. The AI worker's own account is refused too: a TokenRequest can bind its token to any Pod that runs as the account, including another Task's worker Pod, and the internal API identifies a Task's worker by the Pod its token is bound to. Platform accounts are refused before any TokenRequest is made.
 - **Reserved credential output headers** (`outboundaccess.ValidateCredentialHeader`): Outbound access validation refuses credential output headers used for trace propagation, Content-Type and Idempotency-Key: trace propagation would overwrite or leak a credential into telemetry, every Tool request sets its own Content-Type, and brokered consequential calls carry their approval operation key in Idempotency-Key, so such a policy would collide on every call.
 - **The platform label, not the chart name, marks platform accounts** (`outboundaccess.ResolveReferences`): outboundaccess.ResolveReferences identifies platform ServiceAccounts by the platform identity label rather than app.kubernetes.io/name, because a Helm nameOverride changes the chart name.
+- **Identity audit records are redacted** (`outboundaccess.AgentIdentityAuditRecord`): outboundaccess.AgentIdentityAuditRecord shares the structured agent-identity-audit log schema and never contains tokens, headers, bodies, full URLs, or raw error text, so it is safe to expose through the API (ADR 0039).
+- **Identity audit records are served from an in-memory sink** (`outboundaccess.ResolverOptions.AuditSink`): The outbound access resolver's AuditSink also receives each redacted identity-use record so the API can serve them without requiring access to controller Pod logs.
 
 ### `internal/safesymlink`
 
@@ -635,6 +640,7 @@ grouped by package and ordered by source position as of round 2.
 - **Brokered web_search is credential-free** (`tools.NewBrokeredWebSearchTool`): NewBrokeredWebSearchTool builds the web_search used by the controller MCP broker. It ignores worker search API configuration and credentials, disables proxies, and permits only direct connections to public endpoints.
 - **DuckDuckGo search failures are errors** (`tools.WebSearchTool.duckDuckGoSearch`): duckDuckGoSearch returns every failure as an error so callers never mistake placeholder data for search results.
 - **DuckDuckGo non-200 responses are not parsed** (`tools.WebSearchTool.duckDuckGoSearch`): DuckDuckGo answers some clients with HTTP 202 and a challenge page, so duckDuckGoSearch reports any status other than 200 as an error instead of parsing the body.
+- **Message check responses are bounded, never truncated** (`tools.maxCheckMessagesResponseBytes`): tools.maxCheckMessagesResponseBytes is derived from the storage contract's batch, content and identifier limits with six-byte JSON escaping plus 1 KiB per message, so a conforming response always fits; a longer one is refused rather than truncated because the controller has already marked the batch read.
 
 ### `internal/transactiontoken`
 
@@ -873,6 +879,9 @@ grouped by package and ordered by source position as of round 2.
 - **Usage workflow E2E uses production components** (`ai.TestUsageIssueToMergedPRWorkflowE2E`): TestUsageIssueToMergedPRWorkflowE2E runs the production monitor, AI model loop, ACP journal, authenticated HTTP routes, Task finalizer, and on-disk SQLite store; only Kubernetes, provider responses, GitHub, and verified publisher delivery are fixtures, and no usage observations or PR outcomes are inserted directly into the store.
 - **Usage workflow fixture disables keep-alives** (`ai.newUsageWorkflowFixture`): newUsageWorkflowFixture uses its own transport with keep-alives disabled, because the fixture tests persisted workflow state rather than connection reuse and idle keep-alives would delay API server replacement.
 - **Usage workflow fixture retries port collisions** (`ai.usageWorkflowFixture.start`): usageWorkflowFixture.start retries a few times on bind collisions because the API Start accepts a port rather than a listener, and it accepts only readiness observed by its own store so another local server cannot satisfy it.
+- **Unset output limit is left to each provider** (`ai.modelSettings.maxTokens`): ai.modelSettings.maxTokens is zero when the Agent sets no output limit, leaving the limit to each provider, because fallbacks can switch provider and model within a Task so the worker cannot pick one value for all of them.
+- **Remote MCP timeout test keeps httptest outside the bubble** (`ai remote MCP revalidation timeout test`): The remote MCP revalidation timeout test keeps its httptest server outside the synctest bubble, because its accept loop blocks on network I/O and would stop the fake clock forever, and disables keep-alives so connections dialed in the bubble close after each response.
+- **Remote MCP timeout test runs under a fake clock** (`ai remote MCP revalidation timeout test`): The remote MCP revalidation timeout test runs in a synctest bubble so the 100ms Tool budget cannot be spent on scheduling delays or httptest round trips; only the blocked revalidation read lets the fake clock reach a deadline.
 
 ## Consequences
 

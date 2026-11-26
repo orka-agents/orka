@@ -1217,6 +1217,25 @@ type WorkspaceConfig struct {
 	// +optional
 	ForgeCredentialRef *WorkspaceCredentialReference `json:"forgeCredentialRef,omitempty"`
 
+	// CommitSigningCredentialRef references a Kubernetes Secret containing an
+	// unencrypted OpenSSH private key used only during clean-room publication
+	// preparation to sign the prepared Git commit (SSHSIG). Set Key to the
+	// Secret data key holding the private key (for example "signingKey").
+	// +optional
+	CommitSigningCredentialRef *WorkspaceCredentialReference `json:"commitSigningCredentialRef,omitempty"`
+
+	// CommitAuthorName overrides the Git author and committer name on the
+	// published commit. Defaults to "Orka Publisher".
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	CommitAuthorName string `json:"commitAuthorName,omitempty"`
+
+	// CommitAuthorEmail overrides the Git author and committer email on the
+	// published commit. Defaults to "publisher@orka.ai".
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	CommitAuthorEmail string `json:"commitAuthorEmail,omitempty"`
+
 	// SubPath is a subdirectory within the source repository used as workspace root.
 	// +kubebuilder:validation:MaxLength=1024
 	// +optional

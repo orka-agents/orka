@@ -154,7 +154,7 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 	scripts/sync-helm-crds.sh
 
 .PHONY: generate
-generate: controller-gen ## Generate DeepCopy implementations, the storage client's write envelope decorators, and the storage fault wrappers.
+generate: controller-gen generate-storage ## Generate DeepCopy implementations, the storage client's write envelope decorators, the storage fault wrappers and the orka.storage.v1 wire code.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
 	go generate ./internal/storageclient ./internal/storageclient/storagefault
 
@@ -162,9 +162,22 @@ generate: controller-gen ## Generate DeepCopy implementations, the storage clien
 verify-generated: ## Fail when `make generate manifests` changes any file. Needs a clean working tree.
 	MAKE="$(MAKE)" scripts/verify-generated.sh
 
+# The storage contract is a nested Go module (pkg/storage). The root module's
+# ./... patterns do not include it, so its targets run with go -C.
+STORAGE_MODULE := pkg/storage
+
+.PHONY: generate-storage
+generate-storage: ## Generate the orka.storage.v1 protobuf code and the Go-to-wire mapping.
+	scripts/generate-storage-proto.sh generate
+
+.PHONY: verify-storage-generated
+verify-storage-generated: ## Check that the orka.storage.v1 generated code matches its sources.
+	scripts/generate-storage-proto.sh verify
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
+	go -C $(STORAGE_MODULE) fmt ./...
 
 .PHONY: ensure-ui-embed
 ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/build without full UI build).
@@ -176,6 +189,7 @@ ensure-ui-embed: ## Create stub UI embed directory if not present (for go vet/bu
 .PHONY: vet
 vet: ensure-ui-embed ## Run go vet against code.
 	go vet ./...
+	go -C $(STORAGE_MODULE) vet ./...
 
 
 .PHONY: repository-monitor-fake-e2e
@@ -193,6 +207,7 @@ GO_TEST_TIMEOUT ?= 20m
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -timeout $(GO_TEST_TIMEOUT) -coverprofile cover.out
+	go -C $(STORAGE_MODULE) test -timeout $(GO_TEST_TIMEOUT) ./...
 
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
@@ -250,6 +265,7 @@ test-e2e-setup-only: setup-test-e2e docker-build-all ## Set up Kind cluster and 
 .PHONY: lint
 lint: ensure-ui-embed golangci-lint lint-comments ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run --new
+	cd $(STORAGE_MODULE) && "$(GOLANGCI_LINT)" run --new
 
 .PHONY: lint-comments
 lint-comments: ## Fail when a Go, shell, or Python file's comment count differs from hack/commentlint/baseline.json
@@ -263,6 +279,7 @@ comment-baseline: ## Lower hack/commentlint/baseline.json and ui/eslint-suppress
 .PHONY: lint-fix
 lint-fix: ensure-ui-embed golangci-lint ## Run golangci-lint linter and perform fixes
 	"$(GOLANGCI_LINT)" run --fix --new
+	cd $(STORAGE_MODULE) && "$(GOLANGCI_LINT)" run --fix --new
 
 ##@ Demos
 

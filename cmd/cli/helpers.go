@@ -53,14 +53,20 @@ const (
 )
 
 type orkaConfig struct {
-	Server         string     `yaml:"server,omitempty"`
-	Token          string     `yaml:"token,omitempty"`
-	Namespace      string     `yaml:"namespace,omitempty"`
-	TokenKind      string     `yaml:"tokenKind,omitempty"`
-	TokenExpiresAt *time.Time `yaml:"tokenExpiresAt,omitempty"`
-	SessionServer  string     `yaml:"sessionServer,omitempty"`
-	SessionLogin   string     `yaml:"sessionLogin,omitempty"`
-	SessionSubject string     `yaml:"sessionSubject,omitempty"`
+	Server            string     `yaml:"server,omitempty"`
+	Token             string     `yaml:"token,omitempty"`
+	Namespace         string     `yaml:"namespace,omitempty"`
+	TokenKind         string     `yaml:"tokenKind,omitempty"`
+	TokenExpiresAt    *time.Time `yaml:"tokenExpiresAt,omitempty"`
+	SessionServer     string     `yaml:"sessionServer,omitempty"`
+	SessionLogin      string     `yaml:"sessionLogin,omitempty"`
+	SessionSubject    string     `yaml:"sessionSubject,omitempty"`
+	OIDCIssuer        string     `yaml:"oidcIssuer,omitempty"`
+	OIDCAudience      string     `yaml:"oidcAudience,omitempty"`
+	OIDCClientID      string     `yaml:"oidcClientID,omitempty"`
+	OIDCTokenEndpoint string     `yaml:"oidcTokenEndpoint,omitempty"`
+	OIDCRefreshToken  string     `yaml:"oidcRefreshToken,omitempty"`
+	OIDCScope         string     `yaml:"oidcScope,omitempty"`
 }
 
 type portForwardCache struct {
@@ -168,6 +174,8 @@ func resolveClientWithTunnel(cmd *cobra.Command, server string, ownTunnel bool) 
 	session := false
 	if saved && cfg.TokenKind == tokenKindGitHubSession {
 		token, session = configuredSession(cmd, server, cfg), true
+	} else if saved && cfg.TokenKind == tokenKindOIDC {
+		token, session = configuredOIDCToken(cmd, server, cfg), true
 	}
 	txnToken, err := configuredTxnToken(cmd)
 	if err != nil {

@@ -976,6 +976,8 @@ func (s *Server) authorizePublisherParentEffect(
 		kind = "publisher.verify"
 	case publisherservice.OperationPullRequestReconcile:
 		kind = "publisher.pull-request"
+	case publisherservice.OperationBranchRebase:
+		kind = "publisher.branch-rebase"
 	default:
 		return fmt.Errorf("unsupported Publisher parent operation")
 	}

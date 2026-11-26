@@ -39,14 +39,15 @@ func newReconciler() *TaskReconciler {
 	}
 	ss := sqlite.NewStore(db, ":memory:")
 	return &TaskReconciler{
-		Client:          k8sClient,
-		Scheme:          k8sClient.Scheme(),
-		JobBuilder:      NewJobBuilder(k8sClient),
-		SessionManager:  NewSessionManager(ss),
-		WebhookNotifier: NewWebhookNotifier(),
-		Recorder:        record.NewFakeRecorder(100),
-		ResultStore:     ss,
-		PlanStore:       ss,
+		Client:              k8sClient,
+		Scheme:              k8sClient.Scheme(),
+		JobBuilder:          NewJobBuilder(k8sClient),
+		SessionManager:      NewSessionManager(ss),
+		WebhookNotifier:     NewWebhookNotifier(),
+		Recorder:            record.NewFakeRecorder(100),
+		ResultStore:         ss,
+		PlanStore:           ss,
+		ControllerNamespace: "default",
 	}
 }
 

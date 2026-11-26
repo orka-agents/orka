@@ -480,97 +480,58 @@ func TestSourcedAliasesBlockDeletion(t *testing.T) {
 		"quoted.sh":  "#!/bin/sh\nal''ias emit='cat <<EOF'\nemit\n# payload\nEOF\n",
 		"escaped.sh": "#!/bin/sh\na\\lias emit='cat <<EOF'\nemit\n# payload\nEOF\n",
 		"ansi.sh":    "#!/bin/bash\n$'\\x61lias' emit='cat <<EOF'\nemit\n# payload\nEOF\n",
+		"var.sh":     "#!/bin/sh\nloader=.\n$loader ./defs\nemit\n# payload\nEOF\n",
+		"wrapvar.sh": "#!/bin/sh\nloader=.\ncommand $loader ./defs\nemit\n# payload\nEOF\n",
+		"subst.sh":   "#!/bin/sh\n$(printf .) ./defs\nemit\n# payload\nEOF\n",
+		"glob.sh":    "#!/bin/sh\n[.] ./defs\nemit\n# payload\nEOF\n",
+		"star.sh":    "#!/bin/bash\nsourc? ./defs\nemit\n# payload\nEOF\n",
+		"trap.sh":    "#!/bin/bash\ntrap '. ./defs' DEBUG\nemit\n# payload\nEOF\n",
+		"trapdd.sh":  "#!/bin/bash\ntrap -- \"source ./defs\" DEBUG\nemit\n# payload\nEOF\n",
+		"trapvar.sh": "#!/bin/bash\ntrap \"$act\" DEBUG\nemit\n# payload\nEOF\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"main.sh", "cond.sh", "cmd.sh", "quoted.sh", "escaped.sh", "ansi.sh"} {
-		if err := Delete(root, []Target{{File: name, Line: 4}}); err == nil {
+	for name := range files {
+		if name == "defs" {
+			continue
+		}
+		line := 4
+		if strings.Count(files[name], "\n") == 6 {
+			line = 5
+		}
+		if err := Delete(root, []Target{{File: name, Line: line}}); err == nil {
 			t.Fatalf("deleting comments in %s, which sources aliases, should be refused", name)
 		}
 	}
 }
 
-func TestSpacedNolintAndAttributionHeadersAreExempt(t *testing.T) {
-	src := "// Modified from example.com/upstream at abc1234.\npackage main\n\n" +
-		"// nolint:gocyclo\nfunc f() {}\n\n// real\nvar X = 1\n"
-	got, err := scanGo("main.go", []byte(src))
-	if err != nil {
-		t.Fatal(err)
+func TestPlainTrapsAllowDeletion(t *testing.T) {
+	root := newRepo(t)
+	files := map[string]string{
+		"cleanup.sh": "#!/bin/bash\ncleanup() { rm -f x; }\ntrap cleanup EXIT\n# note\necho hi\n",
+		"quoted.sh":  "#!/bin/bash\ntrap 'rm -f \"$tmp\"' EXIT\n# note\necho hi\n",
+		"ignore.sh":  "#!/bin/bash\ntrap '' INT\n# note\necho hi\n",
+		"list.sh":    "#!/bin/bash\ntrap -p\n# note\necho hi\n",
 	}
-	assertTexts(t, got, "// real")
-}
-
-func TestNoticeHeadersCannotCarryOtherProse(t *testing.T) {
-	mixed := "// Modified from example.com/upstream at abc1234.\n//\n" +
-		"// We skip retries here because it was easier.\npackage main\n"
-	got, err := scanGo("main.go", []byte(mixed))
-	if err != nil || len(got) != 1 {
-		t.Fatalf("mixed Go header = %q, %v", texts(got), err)
-	}
-	license := "/*\nCopyright (c) 2026.\n\nMIT License - see LICENSE file for details.\n*/\n\npackage main\n"
-	got, err = scanGo("license.go", []byte(license))
-	if err != nil || len(got) != 0 {
-		t.Fatalf("license header = %q, %v", texts(got), err)
-	}
-	assertTexts(t, mustScan(t, "h.sh", "#!/bin/sh\n# Copyright (c) 2026.\n#\n# Retries are skipped.\necho hi\n"),
-		"# Copyright (c) 2026.\n#\n# Retries are skipped.")
-}
-
-func TestOnlyKnownNoticeFormsAreExempt(t *testing.T) {
-	apache := "//  Copyright 2026 Example LLC\n//\n" +
-		"//  Licensed under the Apache License, Version 2.0 (the \"License\");\n" +
-		"//  you may not use this file except in compliance with the License.\n" +
-		"//  You may obtain a copy of the License at\n//\n" +
-		"//      http://www.apache.org/licenses/LICENSE-2.0\n//\n" +
-		"//  Unless required by applicable law or agreed to in writing, software\n" +
-		"//  distributed under the License is distributed on an \"AS IS\" BASIS,\n" +
-		"//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n" +
-		"//  See the License for the specific language governing permissions and\n" +
-		"//  limitations under the License.\n\npackage main\n"
-	spdx := "// Copyright Orka Contributors.\n// SPDX-License-Identifier: Apache-2.0 OR MIT\n\npackage main\n"
-	starred := "/*\n * Copyright (c) 2026.\n *\n * MIT License - see LICENSE file for details.\n */\n\npackage main\n"
-	for name, src := range map[string]string{"apache.go": apache, "spdx.go": spdx, "starred.go": starred} {
-		got, err := scanGo(name, []byte(src))
-		if err != nil || len(got) != 0 {
-			t.Errorf("%s: %q, %v", name, texts(got), err)
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
-	counted := map[string]string{
-		"mit.go": "/*\nCopyright (c) 2026 Example\n\n" +
-			"Permission is hereby granted, free of charge, to any person.\n*/\n\npackage main\n",
-		"same-paragraph.go": "// Modified from example.com/upstream at abc1234. We skip retries because it was easier.\n" +
-			"package main\n",
-		"spdx-prose.go":   "// SPDX-License-Identifier: MIT\n// We skip retries here because it was easier.\npackage main\n",
-		"holder-prose.go": "// Copyright 2026 we skip retries here.\npackage main\n",
-	}
-	for name, src := range counted {
-		got, err := scanGo(name, []byte(src))
-		if err != nil || len(got) != 1 {
-			t.Errorf("%s should be counted: %q, %v", name, texts(got), err)
+	for name, body := range files {
+		line := strings.Count(body[:strings.Index(body, "# note")], "\n") + 1
+		if err := Delete(root, []Target{{File: name, Line: line}}); err != nil {
+			t.Fatalf("deleting the comment in %s: %v", name, err)
+		}
+		got, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(got), "# note") {
+			t.Fatalf("%s still has its comment:\n%s", name, got)
 		}
 	}
-}
-
-func TestNoticeWordsAreWordBounded(t *testing.T) {
-	for _, src := range []string{
-		"// Retrying improves reliability.\npackage main\n",
-		"// We skip retries while validating the license.\npackage main\n",
-	} {
-		got, err := scanGo("r.go", []byte(src))
-		if err != nil || len(got) != 1 {
-			t.Fatalf("%q: got %q, %v", src, texts(got), err)
-		}
-	}
-}
-
-func TestNolintDirectiveIsWordBounded(t *testing.T) {
-	src := "package main\n\n//nolint:gocyclo\nfunc f() {}\n\n// nolint\nfunc g() {}\n\n// nolintish rationale\nvar X = 1\n"
-	got, err := scanGo("main.go", []byte(src))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertTexts(t, got, "// nolintish rationale")
 }

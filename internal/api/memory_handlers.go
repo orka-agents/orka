@@ -272,13 +272,48 @@ func createNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	if strings.TrimSpace(memory.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
-	if strings.TrimSpace(memory.SourceProposalID) != "" {
-		return fiber.NewError(fiber.StatusBadRequest, "sourceProposalId is set only by applying a memory proposal")
+	if err := rejectClientProposalProvenance(memory); err != nil {
+		return err
 	}
 	if err := memoryStore.CreateMemory(c.Context(), &memory); err != nil {
 		return memoryStoreError("create memory", "memory", err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(memory)
+}
+
+func rejectClientProposalProvenance(memory store.Memory) error {
+	if isProposalSource(memory.Source) {
+		return errClientProposalSource()
+	}
+	if memory.SourceProposalID != "" {
+		return fiber.NewError(fiber.StatusBadRequest, "sourceProposalId cannot be set by clients; it is recorded when a proposal is applied")
+	}
+	return nil
+}
+
+func rejectClientProposalSourceUpdate(stored *store.Memory, req store.Memory) error {
+	if req.Source == "" || req.Source == stored.Source {
+		return nil
+	}
+	hasProposalLink := strings.TrimSpace(stored.SourceProposalID) != ""
+	if isProposalSource(req.Source) {
+		if hasProposalLink && req.Source == store.MemorySourceProposal {
+			return nil
+		}
+		return errClientProposalSource()
+	}
+	if hasProposalLink {
+		return fiber.NewError(fiber.StatusBadRequest, "source of a memory applied from a proposal cannot be changed by clients")
+	}
+	return nil
+}
+
+func isProposalSource(source string) bool {
+	return strings.EqualFold(strings.TrimSpace(source), store.MemorySourceProposal)
+}
+
+func errClientProposalSource() error {
+	return fiber.NewError(fiber.StatusBadRequest, "source "+store.MemorySourceProposal+" cannot be set by clients; it is recorded when a proposal is applied")
 }
 
 func getNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace string) error {
@@ -293,6 +328,9 @@ func updateNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	memory, err := memoryStore.GetMemory(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		return memoryStoreError("get memory", "memory", err)
+	}
+	if err := rejectClientProposalSourceUpdate(memory, req); err != nil {
+		return err
 	}
 	applyMemoryUpdate(memory, req)
 	memory.Namespace = namespace

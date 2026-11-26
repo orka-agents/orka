@@ -2550,3 +2550,30 @@ func reflectStringMapEqual(left, right map[string]string) bool {
 	}
 	return true
 }
+
+func TestRuntimePoolReconcilerReprobesBootingSupervisorQuickly(t *testing.T) {
+	scheme := runtimePoolTestScheme(t)
+	pool := runtimePoolTestObject(1)
+	pod := runtimePoolReadyPod(pool, pool.Namespace, "booting-pod", "booting-pod-uid", "10.0.0.49")
+	probe := runtimePoolValidProbe(pool, &pod, "booting-boot", false)
+	probe.Status.Lifecycle = harnessv2.SupervisorLifecycleBooting
+	supervisor := &fakeRuntimePoolSupervisorClient{probe: probe}
+	r := runtimePoolTestReconciler(t, scheme, supervisor, pool, &pod)
+
+	result := runtimePoolReconcile(t, r, pool)
+	status := runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStarting || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed {
+		t.Fatalf("booting status = %s/%s, want Starting/Closed", status.Lifecycle, status.AdmissionState)
+	}
+	if result.RequeueAfter != runtimePoolBootingRequeue || runtimePoolBootingRequeue > time.Second {
+		t.Fatalf("booting requeue = %s, want %s", result.RequeueAfter, runtimePoolBootingRequeue)
+	}
+
+	probe.Status.Lifecycle = harnessv2.SupervisorLifecycleReady
+	supervisor.probe = probe
+	runtimePoolReconcile(t, r, pool)
+	status = runtimePoolTestGetPool(t, r, pool).Status
+	if status.Lifecycle != corev1alpha1.RuntimePoolLifecycleServing || status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
+		t.Fatalf("ready status = %s/%s, want Serving/Accepting", status.Lifecycle, status.AdmissionState)
+	}
+}

@@ -96,7 +96,7 @@ func TestRepositoryMonitorUpdateBranchBudgetAndOutcome(t *testing.T) {
 	limit := int32(2)
 	monitor.Spec.Repair.MaxRepairsPerPR, monitor.Spec.Repair.MaxRepairsPerHead = &limit, &limit
 	r := &RepositoryMonitorReconciler{Store: db}
-	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: "head", HeadRepo: "orka-agents/orka", MergeableState: "dirty"}
+	pr := repositoryMonitorPullRequest{Number: 1, HeadSHA: "head", HeadRepo: "orka-agents/orka", MergeableState: "behind"}
 	for i, phase := range []string{repositoryMonitorRunPhaseFailed, repositoryMonitorRunPhaseSucceeded} {
 		if err := db.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: fmt.Sprint("update-", i), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Operation: repositoryMonitorUpdateBranchOperation, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 1, TargetSHA: "head", Status: phase, CreatedAt: time.Now().Add(time.Duration(i) * time.Second)}); err != nil {
 			t.Fatal(err)

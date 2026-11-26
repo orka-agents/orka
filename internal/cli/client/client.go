@@ -49,10 +49,12 @@ type GetOptions struct {
 }
 
 type AgentSummary struct {
-	Name    string `json:"name"`
-	Model   string `json:"model,omitempty"`
-	Runtime string `json:"runtime,omitempty"`
-	Active  int    `json:"activeTasks"`
+	Name     string `json:"name"`
+	Model    string `json:"model,omitempty"`
+	Runtime  string `json:"runtime,omitempty"`
+	Identity string `json:"identity,omitempty"`
+	Ready    bool   `json:"ready"`
+	Active   int    `json:"activeTasks"`
 }
 
 type AgentDetail map[string]any
@@ -213,6 +215,9 @@ func (c *Client) doRaw(ctx context.Context, method, reqURL string, body []byte) 
 		return nil, nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, resp.Header, fmt.Errorf("API error (HTTP 401): %s (run 'orka auth login' to refresh OIDC credentials, or 'orka login' for GitHub sign-in)", strings.TrimSpace(string(respBody)))
+	}
 	if resp.StatusCode >= 400 {
 		return nil, resp.Header, fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
@@ -346,8 +351,29 @@ func extractAgentSummary(item AgentDetail) AgentSummary {
 
 	status, _ := item["status"].(map[string]any)
 	if status != nil {
+		if v, ok := status["ready"].(bool); ok {
+			s.Ready = v
+		}
 		if v, ok := status["activeTasks"].(float64); ok {
 			s.Active = int(v)
+		}
+		if claim, ok := status["identityClaim"].(map[string]any); ok {
+			issuer := stringVal(claim["issuer"])
+			id := stringVal(claim["id"])
+			if issuer != "" && id != "" {
+				s.Identity = issuer + "/" + id
+			} else if id != "" {
+				s.Identity = id
+			}
+		}
+	}
+	if s.Identity == "" && spec != nil {
+		if identity, ok := spec["identity"].(map[string]any); ok {
+			if entra, ok := identity["entra"].(map[string]any); ok {
+				if id := strings.ToLower(strings.TrimSpace(stringVal(entra["agentIdentityID"]))); id != "" {
+					s.Identity = corev1alpha1.AgentIdentityIssuerEntra + "/" + id
+				}
+			}
 		}
 	}
 

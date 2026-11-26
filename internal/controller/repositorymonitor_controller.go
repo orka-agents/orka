@@ -31,6 +31,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/metrics"
+	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -80,6 +81,7 @@ type RepositoryMonitorReconciler struct {
 	HTTPClient                *http.Client
 	GitHubAPIBaseURL          string
 	EnforceNamespaceIsolation bool
+	BranchRebaser             RepositoryMonitorBranchRebaser
 
 	activeRunsMu sync.Mutex
 	activeRuns   map[string]struct{}
@@ -965,6 +967,15 @@ func repositoryMonitorRunFailureState(err error) string {
 		return repositoryMonitorRunRetryScheduled
 	}
 	if errors.Is(err, errRepositoryMonitorCIIncomplete) {
+		return repositoryMonitorRunRetryScheduled
+	}
+	if pubErr, ok := errors.AsType[*publisherservice.ClientError](err); ok {
+		if pubErr.Response.Retryable {
+			return repositoryMonitorRunRetryScheduled
+		}
+		return repositoryMonitorRunFailurePermanent
+	}
+	if publisherservice.TransportCause(err) != nil {
 		return repositoryMonitorRunRetryScheduled
 	}
 	if ghErr, ok := errors.AsType[*repositoryMonitorGitHubAPIError](err); ok {

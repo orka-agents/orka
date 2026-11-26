@@ -277,12 +277,15 @@ func (d *ACPDispatcher) prepareTaskSession(
 	if lineage.ConfigDigest == "" {
 		lineage.ConfigDigest = string(profileDigest)
 	}
+	steps := newACPDispatchScanTimer(time.Now, false)
+	ctx = withACPSteps(ctx, steps)
 	preparation, err := d.planTaskSession(
 		ctx, task, fence, profileDigest, mcpBindingDigest, runtimeInstanceID, supervisorBootID, lineage.WorkspaceSessionUID,
 	)
 	if err != nil {
 		return nil, err
 	}
+	steps.mark("sessionRead")
 	if preparation.nativeSession != nil && !nativeSessionsSupported {
 		return nil, errNativeSessionRuntimeUnsupported
 	}
@@ -328,6 +331,8 @@ func (d *ACPDispatcher) prepareTaskSession(
 			preparation.plan.Reason = "persisted-runtime-session-recreation"
 		}
 	}
+	logf.FromContext(ctx).V(1).Info(acpSessionPlanTimingsLogMessage,
+		append([]any{acpCancelLogKeyNamespace, task.Namespace, acpCancelLogKeyTask, task.Name}, steps.values...)...)
 	logf.FromContext(ctx).Info("ACP runtime session planned",
 		"namespace", task.Namespace, "task", task.Name, "sessionUID", preparation.control.SessionUID,
 		"reason", preparation.plan.Reason, "generation", preparation.plan.Binding.Generation,
@@ -603,6 +608,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	}); err != nil {
 		return nil, nil, err
 	}
+	markACPStep(ctx, "attemptSessionStarting")
 
 	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
 	if err != nil {
@@ -613,6 +619,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
 		return nil, nil, errors.Join(err, requeueErr)
 	}
+	markACPStep(ctx, "sessionLease")
 	turn, err := d.Sessions.OpenTurn(ctx, ACPOpenSessionTurnRequest{
 		Lease: *lease, Fence: fence, PromptAttemptID: attemptID,
 		PromptRequestDigest: task.Status.Execution.RequestDigest, UserPrompt: userPrompt,
@@ -629,6 +636,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 		}
 		return lease, recovered, nil
 	}
+	markACPStep(ctx, "turnOpen")
 	return lease, turn, nil
 }
 

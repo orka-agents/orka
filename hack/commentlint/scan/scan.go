@@ -645,26 +645,62 @@ func shellSources(path string, src []byte) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, ok := node.(*syntax.CallExpr); ok && !found {
-			found = changesParsing(call)
+			found = changesParsing(path, call)
 		}
 		return !found
 	})
 	return found
 }
 
-func changesParsing(call *syntax.CallExpr) bool {
+func changesParsing(path string, call *syntax.CallExpr) bool {
 	wrapped := false
-	for _, word := range call.Args {
+	for i, word := range call.Args {
 		name := staticWord(word)
 		switch {
 		case name == "command" || name == "builtin":
 			wrapped = true
 		case wrapped && strings.HasPrefix(name, "-"):
+		case name == "trap":
+			return trapChangesParsing(path, call.Args[i+1:])
 		default:
-			return name == "alias" || name == "source" || name == "." || name == "eval"
+			return name == "" || name == "alias" || name == "source" || name == "." || name == "eval"
 		}
 	}
 	return false
+}
+
+func trapChangesParsing(path string, args []*syntax.Word) bool {
+	for i, word := range args {
+		action := staticWord(word)
+		switch {
+		case action == "--":
+			continue
+		case action == "-p" || action == "-l" || i == len(args)-1:
+			return false
+		case action == "":
+			return !quotedEmpty(word)
+		}
+		return shellSources(path, []byte(action))
+	}
+	return false
+}
+
+func quotedEmpty(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		switch quoted := part.(type) {
+		case *syntax.SglQuoted:
+			if quoted.Value != "" {
+				return false
+			}
+		case *syntax.DblQuoted:
+			if len(quoted.Parts) != 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return len(word.Parts) > 0
 }
 
 func staticWord(word *syntax.Word) string {
@@ -678,6 +714,11 @@ func staticWord(word *syntax.Word) string {
 	})
 	if dynamic {
 		return ""
+	}
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[") {
+			return ""
+		}
 	}
 	fields, err := expand.Fields(&expand.Config{}, word)
 	if err != nil || len(fields) != 1 {

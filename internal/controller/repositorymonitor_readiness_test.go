@@ -274,7 +274,64 @@ func TestRepositoryMonitorReadinessContextSeparatesNamespaces(t *testing.T) {
 	}
 }
 
-func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
+func TestRepositoryMonitorReadinessRefreshQueuesBehindBranchUpdate(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, secret := repositoryMonitorInventoryTestObjects("fresh-behind")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Review.Publish.Enabled = true
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
+	writes := 0
+	latest := repositoryMonitorCommitStatus{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/31"):
+			_, _ = w.Write([]byte(`{"number":31,"state":"open","mergeable_state":"behind","head":{"ref":"feature","sha":"head","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"base":{"ref":"main"}}`))
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/check-runs"):
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":99,"name":"tests","status":"completed","conclusion":"success"}]}`))
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/status"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "statuses": []repositoryMonitorCommitStatus{latest}})
+		case req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/statuses/"):
+			var status repositoryMonitorCommitStatus
+			if err := json.NewDecoder(req.Body).Decode(&status); err != nil {
+				t.Error(err)
+			}
+			writes++
+			status.ID = int64(writes)
+			latest = status
+			_ = json.NewEncoder(w).Encode(status)
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer server.Close()
+	r.GitHubAPIBaseURL = server.URL
+	pr := repositoryMonitorPullRequest{Number: 31, State: "open", HeadSHA: "head", BaseBranch: "main", HeadRepo: "orka-agents/orka"}
+	item := repositoryMonitorItemFromPullRequest(monitor, pr, nil)
+	item.LastReviewID = seedRepositoryMonitorAutomergeReview(t, ctx, db, monitor.Name, pr.Number, pr.HeadSHA)
+	item.LastReviewedHeadSHA, item.LastVerdict = pr.HeadSHA, repositoryMonitorReviewVerdictPassed
+	if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item, []repositoryMonitorPullRequest{pr}); err != nil {
+		t.Fatal(err)
+	}
+	handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{ID: "fresh-behind-run"}, "orka-agents", "orka", pr, item)
+	if err != nil || !handled {
+		t.Fatalf("behind branch update selection: handled=%v err=%v", handled, err)
+	}
+	commands, _, err := db.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name})
+	if err != nil || len(commands) != 1 || commands[0].Intent != repositoryMonitorCommandIntentUpdateBranch {
+		t.Fatalf("behind PR did not queue update-branch: commands=%+v err=%v", commands, err)
+	}
+}
+
+func TestRepositoryMonitorReadinessDirtyConflictDoesNotQueueUpdateBranch(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
 	monitor, secret := repositoryMonitorInventoryTestObjects("fresh-conflict")
@@ -324,16 +381,16 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 	if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item, []repositoryMonitorPullRequest{pr}); err != nil {
 		t.Fatal(err)
 	}
-	if latest.State != repositoryMonitorStatusPending {
-		t.Fatalf("conflict readiness=%+v, want pending", latest)
+	if latest.State != repositoryMonitorStatusFailure {
+		t.Fatalf("conflict readiness=%+v, want failure", latest)
 	}
 	handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, &store.MonitorRun{ID: "fresh-conflict-run"}, "orka-agents", "orka", pr, item)
-	if err != nil || !handled {
-		t.Fatalf("conflict repair selection: handled=%v err=%v", handled, err)
+	if err != nil || handled {
+		t.Fatalf("dirty conflict must not queue update-branch: handled=%v err=%v", handled, err)
 	}
 	commands, _, err := db.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name})
-	if err != nil || len(commands) != 1 || commands[0].Intent != repositoryMonitorCommandIntentUpdateBranch {
-		t.Fatalf("conflict did not queue update-branch: commands=%+v err=%v", commands, err)
+	if err != nil || len(commands) != 0 {
+		t.Fatalf("dirty conflict queued unexpected commands=%+v err=%v", commands, err)
 	}
 }
 

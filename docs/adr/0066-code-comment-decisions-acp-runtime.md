@@ -11,7 +11,7 @@ non-obvious decision in `internal/acp`, `internal/harness`, `internal/ahphost`, 
 ## Context
 
 Round 2 of the comment cleanup classified every comment left after
-[ADR 0063](0063-code-comment-decisions-round-1.md). In `internal/acp`, `internal/harness`, `internal/ahphost`, `internal/agenthost`, and `workers/acp` it found 949 distinct decisions
+[ADR 0063](0063-code-comment-decisions-round-1.md). In `internal/acp`, `internal/harness`, `internal/ahphost`, `internal/agenthost`, and `workers/acp` it found 959 distinct decisions
 that a reader of the code alone could get wrong. Comments that stated the same rule in several
 places are merged into one entry. Where an earlier ADR already records a decision, the entry
 links it.
@@ -281,6 +281,7 @@ grouped by package and ordered by source position as of round 2.
 - **AHP tokens carry a scannable prefix** (`ahphost.TokenPrefix`): AHP connection tokens start with ahphost.TokenPrefix (orka_ahp_) so secret scanners can recognize leaked tokens; changing the prefix breaks that detection.
 - **Token owners are re-admitted on every check** (`ahphost.TokenService.Admit`): TokenService.Admit, when set, decides whether a token's owner may still connect, for example whether the OIDC subject allowlist still admits them; a refused owner's tokens are invalid at the door and on every recheck, because a token outlives the sign-in that minted it (ADR 0034). See [ADR 0034](0034-agent-host-protocol-api.md).
 - **Malformed protocol versions compare as newest** (`ahphost.compareVersions`): compareVersions treats a malformed MAJOR.MINOR.PATCH version as newer than anything, so an action or notification with an unknown introduction version is never sent to a client as if it knew it.
+- **AHP terminal tests sync notifications with a ping** (`ahphost terminals test (unsubscribe)`): Unsubscribing from terminals is a notification with no reply, so the ahphost terminals test sends a ping on the same connection and waits for its reply to prove the host has handled the unsubscribe before creating a terminal on the other connection.
 
 ### `internal/harness/v2`
 
@@ -1002,6 +1003,15 @@ grouped by package and ordered by source position as of round 2.
 - **Supervisor trace extraction ignores ambient context and baggage** (`supervisor.Server.traceOperation`): traceOperation clears any server ambient parent before extracting so missing or invalid headers cannot inherit another request's context, and it uses W3C TraceContext only, excluding baggage.
 - **Trace propagation survives disabled exporting** (`supervisor.Server.traceOperation`): When the supervisor tracer is disabled, traceOperation still returns the extracted context so propagation to delegated Tasks keeps working.
 - **Workspace validation messages never include agent-controlled paths** (`supervisor.boundedWorkspaceValidationMessage`): boundedWorkspaceValidationMessage is forwarded into controller structured logs, so it carries only the operation and safety category and never an agent-controlled path, which could be named after a credential.
+- **Provider proxy state is bound before the child starts** (`supervisor.ProviderConfig.BindProviderProxy`): BindProviderProxy writes provider state that depends on the session's provider proxy binding; it runs after PrepareSession and before the adapter child starts, so the child never sees provider state without its proxy.
+- **Codex home config defaults to the session provider proxy** (`supervisor.writeCodexHomeConfig`): writeCodexHomeConfig writes CODEX_HOME/config.toml and, when a provider base URL is set, makes the session's provider proxy the default provider, so a Codex thread started without the per-session CODEX_CONFIG override still uses the proxy rather than Codex's built-in OpenAI provider.
+- **Codex home config disables vendor background traffic** (`supervisor.codexHomeConfigTOML`): The Codex app server reads the static CODEX_HOME/config.toml (codexHomeConfigTOML) before any per-session override arrives, so it turns off the vendor traffic Codex would otherwise start on its own: update checks, analytics, the OTEL metrics exporter (on by default), and the plugin and app catalog syncs.
+- **Failed session creations always log stage and timings** (`supervisor.Server session creation failure logging`): The supervisor logs a session-creation failure with its stage and timings before any branch returns, including a create retained for unproven cleanup, and times the adapter stage whether or not the handshake succeeds, so a slow failed create still reports where its time went.
+- **Failed session creations always log stage and timings** (`supervisor.Server session creation failure logging`): The supervisor marks the adapterStartup timing before checking the handshake error, so a slow failed handshake still reports where its time went.
+- **CPU throttling is omitted when no cgroup is readable** (`supervisor.readCPUThrottle`): readCPUThrottle reports false when no cgroup cpu.stat is readable, as on a runtime without a CPU-limited cgroup, so session timings omit throttling rather than report a misleading zero.
+- **Session start timings carry no content** (`supervisor.sessionStartTimings`): supervisor.sessionStartTimings holds only stage names, durations, and CPU throttling counters for one RuntimeSession creation; it must never carry paths, credentials, or content, because it is logged and exported as span attributes.
+- **Session start timings end at the attempt's return** (`supervisor.sessionStartTimings.finish`): sessionStartTimings.finish records when the creation attempt returned, so the total includes a stage that failed before its mark, and reads the throttling counters once so the log line and the span report the same window.
+- **Backwards throttling counters are reported as unknown** (`supervisor.sessionStartTimings.throttleDelta`): sessionStartTimings.throttleDelta reports throttling as unknown when either reading is missing or the counters went backwards, since a lower reading means a different cgroup rather than a wrapped counter.
 
 ## Consequences
 

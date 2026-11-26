@@ -19,14 +19,15 @@ import (
 )
 
 const (
-	repositoryMonitorStatusPending       = "pending"
-	repositoryMonitorStatusSuccess       = "success"
-	repositoryMonitorStatusFailure       = "failure"
-	repositoryMonitorStatusSubmitting    = "submitting"
-	repositoryMonitorMergeableStateDirty = "dirty"
-	repositoryMonitorReadinessOperation  = "readiness_status"
-	repositoryMonitorReadinessTargetKind = "commit"
-	repositoryMonitorReadinessSuccess    = "Orka workflow evidence is current. GitHub controls required approvals and merging."
+	repositoryMonitorStatusPending        = "pending"
+	repositoryMonitorStatusSuccess        = "success"
+	repositoryMonitorStatusFailure        = "failure"
+	repositoryMonitorStatusSubmitting     = "submitting"
+	repositoryMonitorMergeableStateBehind = "behind"
+	repositoryMonitorMergeableStateDirty  = "dirty"
+	repositoryMonitorReadinessOperation   = "readiness_status"
+	repositoryMonitorReadinessTargetKind  = "commit"
+	repositoryMonitorReadinessSuccess     = "Orka workflow evidence is current. GitHub controls required approvals and merging."
 )
 
 func repositoryMonitorReadinessContext(monitor *corev1alpha1.RepositoryMonitor) string {
@@ -137,7 +138,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 		}
 	}
 	if pr.MergeableState == repositoryMonitorMergeableStateDirty {
-		return repositoryMonitorStatusPending, "Waiting for pull request merge conflicts to be resolved.", nil
+		return repositoryMonitorStatusFailure, "Pull request has merge conflicts that require human resolution.", nil
 	}
 	if item.LastVerdict != repositoryMonitorReviewVerdictPassed || item.LastReviewedHeadSHA != pr.HeadSHA {
 		if item.LastReviewedHeadSHA == pr.HeadSHA && (item.LastVerdict == repositoryMonitorReviewVerdictFailed || item.LastVerdict == repositoryMonitorReviewVerdictNeedsHuman || item.LastVerdict == repositoryMonitorReviewVerdictSecuritySensitive) {
@@ -198,7 +199,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 		return false, err
 	}
 	intent := repositoryMonitorCommandIntentFix
-	if pr.MergeableState == repositoryMonitorMergeableStateDirty {
+	if pr.MergeableState == repositoryMonitorMergeableStateBehind {
 		intent = repositoryMonitorCommandIntentUpdateBranch
 	}
 	reason, _, _, err := r.repositoryMonitorRepairPolicy(ctx, monitor, owner+"/"+repo, pr, "", intent)

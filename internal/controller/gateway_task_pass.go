@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -12,10 +13,11 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task, configuration harnessv2.MCPPolicyConfiguration) (*gatewayruntime.TaskGrant, error) {
+func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, configuration harnessv2.MCPPolicyConfiguration) (*gatewayruntime.TaskGrant, error) {
 	var grant *gatewayruntime.TaskGrant
 	var err error
 	if r.GatewayService != nil {
@@ -43,11 +45,31 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 		passTools = append(passTools, tool)
 		names = append(names, tool.Name)
 	}
-	if len(names) > 0 && namesDelegatingTask(task) {
-		grant, err = r.inheritGatewayTaskGrant(ctx, task)
-		if err != nil {
+	var delegated []string
+	if coordination := agent.Spec.Coordination; coordination != nil && coordination.Enabled {
+		delegated = slices.DeleteFunc(slices.Clone(coordination.DelegatedGatewayTools), func(name string) bool { return slices.Contains(names, name) })
+	}
+	inherited := false
+	if (len(names) > 0 || len(delegated) > 0) && namesDelegatingTask(task) {
+		parentGrant, err := r.inheritGatewayTaskGrant(ctx, task)
+		switch {
+		case err == nil:
+			grant, inherited = parentGrant, true
+		case len(names) > 0 || !noInheritableGatewayGrant(err):
 			return nil, err
 		}
+	}
+	if grant != nil {
+		for _, name := range delegated {
+			tool, err := r.delegatedGatewayTool(ctx, task.Namespace, name)
+			if err != nil {
+				return nil, err
+			}
+			passTools = append(passTools, tool)
+			names = append(names, tool.Name)
+		}
+	}
+	if inherited {
 		names = slices.DeleteFunc(names, func(name string) bool { return !slices.Contains(grant.Tools, name) })
 	}
 	for _, tool := range passTools {
@@ -71,9 +93,35 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 	return grant, nil
 }
 
+func (r *TaskReconciler) delegatedGatewayTool(ctx context.Context, namespace, name string) (*corev1alpha1.Tool, error) {
+	tool := &corev1alpha1.Tool{}
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, permanentACPAgentConfiguration(fmt.Errorf("delegated gateway tool %q not found", name))
+		}
+		return nil, err
+	}
+	if tool.Spec.HTTP == nil || !tool.Spec.HTTP.GatewayTaskPass {
+		return nil, permanentACPAgentConfiguration(fmt.Errorf("delegated gateway tool %q is not a gateway task pass tool", name))
+	}
+	if err := workerexecutor.ValidateGatewayTaskPassTool(tool); err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
+	return tool, nil
+}
+
+var (
+	errNoParentGatewayGrant          = errors.New("parent has no frozen gateway grant")
+	errChildGatewayPassesUnprotected = errors.New("child gateway task passes require Task provenance admission")
+)
+
+func noInheritableGatewayGrant(err error) bool {
+	return errors.Is(err, errNoParentGatewayGrant) || errors.Is(err, errChildGatewayPassesUnprotected)
+}
+
 func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task) (*gatewayruntime.TaskGrant, error) {
 	if !r.TaskProvenanceProtected {
-		return nil, permanentACPAgentConfiguration(errors.New("child gateway task passes require Task provenance admission"))
+		return nil, permanentACPAgentConfiguration(errChildGatewayPassesUnprotected)
 	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	parent, err := gatewayPassParent(ctx, reader, task)
@@ -84,14 +132,14 @@ func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *core
 		return nil, err
 	}
 	if parent.Status.AgentExecutionBinding == nil {
-		return nil, permanentACPAgentConfiguration(errors.New("parent has no frozen gateway grant"))
+		return nil, permanentACPAgentConfiguration(errNoParentGatewayGrant)
 	}
 	inherited, err := loadGatewayPassSnapshot(ctx, reader, r.AgentExecutionSnapshots, parent)
 	if err != nil {
 		return nil, err
 	}
 	if inherited == nil {
-		return nil, permanentACPAgentConfiguration(errors.New("parent has no frozen gateway grant"))
+		return nil, permanentACPAgentConfiguration(errNoParentGatewayGrant)
 	}
 	chain, err := gatewayPassChain(ctx, reader, r.AgentExecutionSnapshots, r.GatewayService, parent, inherited, "", task)
 	if err != nil {

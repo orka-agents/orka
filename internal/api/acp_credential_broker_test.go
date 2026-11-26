@@ -122,6 +122,70 @@ func TestPublisherCredentialBrokerBindsPublicationAndForgePurpose(t *testing.T) 
 	}
 }
 
+func TestPublisherCredentialBrokerAuthorizesCommitSigningOnlyOnPrepare(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	publisherToken := strings.Repeat("p", 32)
+	writeAPISecretFile(t, envWorkspacePublisherControllerTokenFile, "publisher-token", []byte(publisherToken))
+	pemKey := "-----BEGIN OPENSSH PRIVATE KEY-----\ntest-line\n-----END OPENSSH PRIVATE KEY-----\n"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "signed-task", UID: types.UID("signed-task-uid")},
+		Spec: corev1alpha1.TaskSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+			Intent:                     corev1alpha1.WorkspaceIntentWrite,
+			CommitSigningCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "git-signing-key", Key: "signingKey"},
+		}},
+		Status: corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
+			Attempt: 1, PromptID: "prompt", CommitSigningCredentialResourceVersion: "21",
+		}},
+	}
+	publicationID := controller.ACPPublicationIDForTask(task)
+	publication := &corev1alpha1.Publication{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publication"},
+		Spec:       corev1alpha1.PublicationSpec{ID: publicationID, TaskUID: string(task.UID)},
+		Status:     corev1alpha1.PublicationStatus{State: corev1alpha1.PublicationControlState("Preparing")},
+	}
+	signingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "git-signing-key", UID: "signing-secret-uid", ResourceVersion: "21"},
+		Data:       map[string][]byte{"signingKey": []byte(pemKey)},
+	}
+	attempt := &corev1alpha1.PromptAttempt{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "attempt"},
+		Spec: corev1alpha1.PromptAttemptSpec{
+			TaskUID: string(task.UID), Attempt: 1, PromptID: "prompt",
+			CredentialBindings: []corev1alpha1.PromptCredentialBinding{{
+				Role: "CommitSign", Namespace: "default", SecretName: "git-signing-key", SecretKey: "signingKey",
+				SecretUID: "signing-secret-uid", ResourceVersion: "21",
+			}},
+		},
+	}
+	prepareOp := controller.ACPPublicationOperationID("prepare", task)
+	effect := publisherEffectForTest("signing-credential-effect", "publisher.prepare", publicationID, prepareOp)
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, publication, signingSecret, attempt, effect).Build()
+
+	request := publisherservice.CredentialMaterialRequest{
+		ParentOperation: publisherservice.OperationPublicationPrepare,
+		Metadata:        publisherservice.OperationMetadata{Namespace: "default", PublicationID: publicationID, OperationID: prepareOp},
+		Reference:       publisherservice.CredentialReference{Name: "git-signing-key", Kind: publisherservice.CredentialSSHSigningKey, Role: publisherservice.CredentialRoleCommitSign},
+	}
+	response := callPublisherCredentialBroker(t, kubeClient, publisherToken, request, effect)
+	decoded, err := base64.StdEncoding.DecodeString(response.Material)
+	if err != nil || string(decoded) != strings.TrimSpace(pemKey) || response.ResourceVersion != "21" {
+		t.Fatalf("unexpected signing broker response: decoded=%q err=%v rv=%q", string(decoded), err, response.ResourceVersion)
+	}
+
+	badReq := request
+	badReq.ParentOperation = publisherservice.OperationPublicationPublish
+	if err := badReq.Validate(); err == nil {
+		t.Fatalf("expected CommitSign to be rejected on OperationPublicationPublish")
+	}
+}
+
 func TestPublisherCredentialBrokerUsesFreshSucceededTaskAndPromptAttemptState(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -271,6 +335,7 @@ func TestFormatPublisherCredentialForGitAndForge(t *testing.T) {
 		{name: "bearer forge header is unwrapped", kind: publisherservice.CredentialForgeToken, value: "Authorization: Bearer forge-token", want: "forge-token"},
 		{name: "basic forge header is rejected", kind: publisherservice.CredentialForgeToken, value: "Authorization: Basic " + basicValue, wantErr: true},
 		{name: "malformed basic header is rejected", kind: publisherservice.CredentialHTTPExtraHeader, value: "Authorization: Basic not-base64", wantErr: true},
+		{name: "ssh signing key is base64 encoded", kind: publisherservice.CredentialSSHSigningKey, value: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----", want: base64.StdEncoding.EncodeToString([]byte("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

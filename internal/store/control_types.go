@@ -224,6 +224,7 @@ const (
 	PromptCredentialTargetRead  PromptCredentialRole = "TargetRead"
 	PromptCredentialTargetWrite PromptCredentialRole = "TargetWrite"
 	PromptCredentialForge       PromptCredentialRole = "Forge"
+	PromptCredentialCommitSign  PromptCredentialRole = "CommitSign"
 )
 
 type PromptCredentialBinding struct {
@@ -237,7 +238,7 @@ type PromptCredentialBinding struct {
 
 func (b PromptCredentialBinding) Validate() error {
 	switch b.Role {
-	case PromptCredentialSourceRead, PromptCredentialTargetRead, PromptCredentialTargetWrite, PromptCredentialForge:
+	case PromptCredentialSourceRead, PromptCredentialTargetRead, PromptCredentialTargetWrite, PromptCredentialForge, PromptCredentialCommitSign:
 	default:
 		return ValidationErrorf("unsupported prompt credential role %q", b.Role)
 	}

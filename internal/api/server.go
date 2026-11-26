@@ -36,6 +36,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/operatoraccess"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
@@ -112,6 +113,7 @@ type ServerConfig struct {
 	AgentUseAuthorization     bool
 	ProviderUseAuthorization  bool
 	TaskWebhookKeys           taskwebhook.KeySource
+	AgentIdentityAudit        outboundaccess.AgentIdentityAuditReader
 }
 
 type Server struct {
@@ -200,8 +202,11 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		Connectors:                config.Connectors,
 		GitHubSignIn:              config.GitHubSignIn,
 		OIDCEnabled:               config.OIDC.Enabled(),
+		OIDCIssuer:                config.OIDC.Issuer,
+		OIDCAudience:              config.OIDC.Audience,
 		AHP:                       config.AHP,
 		SubstrateMCPProxy:         config.SubstrateMCPProxy,
+		AgentIdentityAudit:        config.AgentIdentityAudit,
 	})
 	if config.AHP != nil && config.AHPBackend != nil {
 		backend := newAHPBackend(server.handlers, config.AHP.Store(), config.LiveEvents, *config.AHPBackend)
@@ -416,6 +421,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/approvals", s.handlers.ahpTaskPrivate(s.handlers.ListTaskApprovals))
 	api.Get("/attention", s.handlers.ListAttention)
 	api.Get("/approvals", s.handlers.ListPendingApprovals)
+	api.Get("/audit/identity", s.handlers.ListAgentIdentityAudit)
 	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.ahpTaskPrivate(s.handlers.DecideTaskApproval))
 	api.Post("/tasks/:id/fork", s.handlers.ahpTaskPrivate(s.handlers.ForkTask))
 	api.Get("/tasks/:id/result", s.handlers.ahpTaskPrivate(s.handlers.GetTaskResult))

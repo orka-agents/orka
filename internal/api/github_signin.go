@@ -81,8 +81,14 @@ func (c GitHubSignInConfig) authenticateSession(ctx context.Context, token strin
 }
 
 type AuthConfigResponse struct {
-	OIDC   bool                    `json:"oidc"`
-	GitHub *GitHubAuthConfigOption `json:"github,omitempty"`
+	OIDC       bool                    `json:"oidc"`
+	OIDCConfig *OIDCAuthConfigOption   `json:"oidcConfig,omitempty"`
+	GitHub     *GitHubAuthConfigOption `json:"github,omitempty"`
+}
+
+type OIDCAuthConfigOption struct {
+	Issuer   string `json:"issuer"`
+	Audience string `json:"audience"`
 }
 
 type GitHubAuthConfigOption struct {
@@ -117,6 +123,12 @@ func (h *Handlers) signInProvider(ctx context.Context) (*corev1alpha1.ConnectorP
 
 func (h *Handlers) GetAuthConfig(c fiber.Ctx) error {
 	response := AuthConfigResponse{OIDC: h.oidcEnabled}
+	if h.oidcEnabled && h.oidcIssuer != "" && h.oidcAudience != "" {
+		response.OIDCConfig = &OIDCAuthConfigOption{
+			Issuer:   h.oidcIssuer,
+			Audience: h.oidcAudience,
+		}
+	}
 	if cfg := h.githubSignIn; cfg.Enabled {
 		provider, err := h.signInProvider(c.Context())
 		if err != nil {
