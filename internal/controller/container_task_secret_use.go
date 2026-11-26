@@ -61,6 +61,11 @@ type ContainerTaskSecretUsePolicy struct {
 	// the one identity the policy exempts. Empty means the Task's namespace,
 	// which is the same in a standard installation.
 	ControllerNamespace string
+	// ControllerServiceAccount is the name of the controller's own
+	// ServiceAccount. When set, policy drift checks require the policy's
+	// scheduled-run exemption to match this exact ServiceAccount rather than
+	// any ServiceAccount in ControllerNamespace.
+	ControllerServiceAccount string
 }
 
 func (p ContainerTaskSecretUsePolicy) policyName() string {
@@ -262,7 +267,11 @@ func (b *JobBuilder) checkContainerTaskSecretUseBinding(
 	if controllerNamespace == "" {
 		controllerNamespace = namespace
 	}
-	if reason := containerTaskSecretUseCoverageGap(policy, binding, namespace, controllerNamespace); reason != "" {
+	controllerServiceAccount := strings.TrimSpace(b.ContainerTaskSecretUse.ControllerServiceAccount)
+	if controllerServiceAccount == "" {
+		return time.Time{}, fmt.Errorf("the controller's own ServiceAccount is unknown, so container Task Secret use policy %q cannot be verified", name)
+	}
+	if reason := containerTaskSecretUseCoverageGap(policy, binding, namespace, controllerNamespace, controllerServiceAccount); reason != "" {
 		return time.Time{}, fmt.Errorf("the container Task Secret use admission policy %q %s, so container Tasks cannot receive Secrets", name, reason)
 	}
 	return latestChange(&policy.ObjectMeta, &binding.ObjectMeta).Add(containerTaskSecretUsePropagation), nil
@@ -276,9 +285,9 @@ func (b *JobBuilder) checkContainerTaskSecretUseBinding(
 func containerTaskSecretUseCoverageGap(
 	policy *admissionregistrationv1.ValidatingAdmissionPolicy,
 	binding *admissionregistrationv1.ValidatingAdmissionPolicyBinding,
-	namespace, controllerNamespace string,
+	namespace, controllerNamespace, controllerServiceAccount string,
 ) string {
-	if reason := containerTaskSecretUsePolicyDrift(policy, controllerNamespace); reason != "" {
+	if reason := containerTaskSecretUsePolicyDrift(policy, controllerNamespace, controllerServiceAccount); reason != "" {
 		return reason
 	}
 	if binding.Spec.ParamRef != nil {
@@ -364,7 +373,7 @@ var shippedContainerTaskSecretUsePolicy []byte
 
 // controllerUsernameLiteral matches the one installation-specific value in
 // the shipped policy: the quoted username of the controller's ServiceAccount.
-var controllerUsernameLiteral = regexp.MustCompile(`'system:serviceaccount:([^':]+):[^']+'`)
+var controllerUsernameLiteral = regexp.MustCompile(`'system:serviceaccount:([^':]+):([^':]+)'`)
 
 const controllerUsernamePlaceholder = "'system:serviceaccount:ORKA_NAMESPACE:CONTROLLER_SA'"
 
@@ -379,9 +388,12 @@ var expectedSecretUsePolicySpec = sync.OnceValues(func() (admissionregistrationv
 
 // containerTaskSecretUsePolicyDrift returns why an installed policy is not
 // the shipped one, or "". The only value an installation may change is the
-// controller's ServiceAccount, which must be in controllerNamespace. Fields the API
-// server defaults are compared after the same defaulting.
-func containerTaskSecretUsePolicyDrift(policy *admissionregistrationv1.ValidatingAdmissionPolicy, controllerNamespace string) string {
+// controller's own ServiceAccount (controllerNamespace/controllerServiceAccount).
+// Fields the API server defaults are compared after the same defaulting.
+func containerTaskSecretUsePolicyDrift(
+	policy *admissionregistrationv1.ValidatingAdmissionPolicy,
+	controllerNamespace, controllerServiceAccount string,
+) string {
 	expected, err := expectedSecretUsePolicySpec()
 	if err != nil {
 		return "cannot be compared with the shipped policy"
@@ -393,6 +405,9 @@ func containerTaskSecretUsePolicyDrift(policy *admissionregistrationv1.Validatin
 		for _, match := range controllerUsernameLiteral.FindAllStringSubmatch(expression, -1) {
 			if match[1] != controllerNamespace {
 				return fmt.Sprintf("exempts a ServiceAccount outside the controller's namespace %q", controllerNamespace)
+			}
+			if match[2] != controllerServiceAccount {
+				return fmt.Sprintf("exempts ServiceAccount %q instead of the controller's ServiceAccount %q", match[2], controllerServiceAccount)
 			}
 			usernames++
 		}

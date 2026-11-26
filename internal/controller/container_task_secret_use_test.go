@@ -37,6 +37,7 @@ const (
 	// secretUseControllerNS differs from the Tasks' namespace so the tests
 	// check the exempt ServiceAccount against the controller's namespace.
 	secretUseControllerNS = "orka-controller-ns"
+	secretUseControllerSA = "orka-controller"
 )
 
 func secretUseScheme(t *testing.T) *runtime.Scheme {
@@ -92,7 +93,12 @@ func secretUseBuilder(t *testing.T, objects ...client.Object) *JobBuilder {
 	t.Setenv(directSecretMountsEnvVar, "false")
 	reader := fake.NewClientBuilder().WithScheme(secretUseScheme(t)).WithObjects(objects...).Build()
 	builder := setupJobBuilder()
-	builder.ContainerTaskSecretUse = ContainerTaskSecretUsePolicy{Enabled: true, Reader: reader, ControllerNamespace: secretUseControllerNS}
+	builder.ContainerTaskSecretUse = ContainerTaskSecretUsePolicy{
+		Enabled:                  true,
+		Reader:                   reader,
+		ControllerNamespace:      secretUseControllerNS,
+		ControllerServiceAccount: secretUseControllerSA,
+	}
 	return builder
 }
 
@@ -467,6 +473,13 @@ func TestContainerTaskSecretUseRequiresThePolicyToCoverTheNamespace(t *testing.T
 					"system:serviceaccount:"+secretUseControllerNS+":", "system:serviceaccount:elsewhere:")
 			}
 		},
+		"another ServiceAccount in the controller namespace": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
+			for i := range p.Spec.Variables {
+				p.Spec.Variables[i].Expression = strings.ReplaceAll(p.Spec.Variables[i].Expression,
+					"system:serviceaccount:"+secretUseControllerNS+":"+secretUseControllerSA,
+					"system:serviceaccount:"+secretUseControllerNS+":orka-ai-worker")
+			}
+		},
 		"a policy that never checks use": func(p *admissionregistrationv1.ValidatingAdmissionPolicy, _ *admissionregistrationv1.ValidatingAdmissionPolicyBinding) {
 			p.Spec.Validations = []admissionregistrationv1.Validation{{Expression: "true"}}
 		},
@@ -510,9 +523,15 @@ func TestContainerTaskSecretUseAcceptsTheShippedPolicyAsTheAPIServerStoresIt(t *
 	policy.Spec = normalizedPolicySpec(policy.Spec)
 	for i := range policy.Spec.Variables {
 		policy.Spec.Variables[i].Expression = strings.ReplaceAll(policy.Spec.Variables[i].Expression,
-			"system:serviceaccount:"+secretUseControllerNS+":orka-controller", "system:serviceaccount:"+secretUseControllerNS+":test-orka")
+			"system:serviceaccount:"+secretUseControllerNS+":"+secretUseControllerSA,
+			"system:serviceaccount:"+secretUseControllerNS+":test-orka")
 	}
-	requireSecretDelivered(t, secretUseBuilder(t, objects...), secretUseContainerTask())
+	builder := secretUseBuilder(t, objects...)
+	builder.ContainerTaskSecretUse.ControllerServiceAccount = "test-orka"
+	requireSecretDelivered(t, builder, secretUseContainerTask())
+
+	builder.ContainerTaskSecretUse.ControllerServiceAccount = ""
+	requireSecretRefused(t, builder, secretUseContainerTask(), "controller's own ServiceAccount is unknown")
 }
 
 func TestEmbeddedSecretUsePolicyMatchesTheShippedOne(t *testing.T) {

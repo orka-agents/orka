@@ -1959,11 +1959,21 @@ func main() {
 				"invalid container Task Secret configuration")
 			os.Exit(1)
 		}
+		if controllerServiceAccountErr != nil {
+			setupLog.Error(controllerServiceAccountErr,
+				"container Task Secret use authorization requires the controller to know its own ServiceAccount")
+			os.Exit(1)
+		}
+		controllerNamespace := controllerServiceAccount.Namespace
+		if controllerNamespace == "" {
+			controllerNamespace = currentPodNamespace()
+		}
 		jobBuilder.ContainerTaskSecretUse = controller.ContainerTaskSecretUsePolicy{
-			Enabled:             true,
-			PolicyName:          containerTaskSecretUsePolicyName,
-			Reader:              mgr.GetAPIReader(),
-			ControllerNamespace: currentPodNamespace(),
+			Enabled:                  true,
+			PolicyName:               containerTaskSecretUsePolicyName,
+			Reader:                   mgr.GetAPIReader(),
+			ControllerNamespace:      controllerNamespace,
+			ControllerServiceAccount: controllerServiceAccount.Name,
 		}
 	}
 	if contextTokenTTSConfig.Enabled() {
