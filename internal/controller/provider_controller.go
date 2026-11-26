@@ -44,8 +44,8 @@ const (
 	// providerCredentialRecheck is how often a keyless Provider's identity
 	// is verified with its issuer while its generation is unchanged.
 	providerCredentialRecheck = time.Hour
-	// providerCredentialRetry is how soon an unanswered verification is
-	// retried.
+	// providerCredentialRetry is how soon a refused or unanswered
+	// verification is retried.
 	providerCredentialRetry = time.Minute
 	providerVerifyTimeout   = 30 * time.Second
 )
@@ -152,7 +152,8 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // verifyCredential returns the CredentialReady condition of a keyless
 // Provider and when to verify it again. The issuer is asked at most once per
 // providerCredentialRecheck for an unchanged generation, identity and
-// endpoint, and again after providerCredentialRetry when it did not answer.
+// endpoint, and again after providerCredentialRetry when it refused or did
+// not answer.
 // Only the issuer's error code reaches the condition.
 func (r *ProviderReconciler) verifyCredential(ctx context.Context, provider *corev1alpha1.Provider) (metav1.Condition, time.Duration) {
 	identity, baseURL := provider.EntraIdentity(), provider.Spec.BaseURL
@@ -161,7 +162,7 @@ func (r *ProviderReconciler) verifyCredential(ctx context.Context, provider *cor
 	if cached, ok := r.verifications.Load(key); ok {
 		last := cached.(providerVerification)
 		interval := providerCredentialRecheck
-		if last.condition.Status == metav1.ConditionUnknown {
+		if last.condition.Status != metav1.ConditionTrue {
 			interval = providerCredentialRetry
 		}
 		if last.uid == provider.UID && last.generation == provider.Generation && last.identity == identity && last.baseURL == baseURL {
@@ -193,8 +194,11 @@ func (r *ProviderReconciler) verifyCredential(ctx context.Context, provider *cor
 		requeue = providerCredentialRetry
 		r.issuerBackoff.Store(identity, now.Add(providerCredentialRetry))
 	default:
+		// A refusal is usually fixed outside the Provider, in the federated
+		// credential or a consent, so it is retried as soon as an outage.
 		condition.Status, condition.Reason = metav1.ConditionFalse, reasonTokenRefused
 		condition.Message = fmt.Sprintf("Provider identity %q could not obtain a token: %v", identity, err)
+		requeue = providerCredentialRetry
 	}
 	if condition.Status != metav1.ConditionUnknown {
 		r.issuerBackoff.Delete(identity)
