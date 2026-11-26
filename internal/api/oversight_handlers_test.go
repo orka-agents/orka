@@ -312,6 +312,21 @@ func TestOversightSearchSimilarGroupsAndFeedback(t *testing.T) {
 	status, _ = e.do(t, http.MethodPost, "/api/v1/oversight/decisions/a@0/feedback?namespace=team",
 		"system:serviceaccount:team:orka-ai-worker", oversightv1.FeedbackRequest{Label: "false_alarm"})
 	require.Equal(t, http.StatusForbidden, status, "an agent cannot label its own findings")
+
+	// Single-decision checks name the decoded decision ID, so a grant limited
+	// by resourceNames applies; bulk feedback checks without a name.
+	*e.reviews = nil
+	status, body = e.do(t, http.MethodGet, "/api/v1/oversight/decisions/a%400?namespace=team", viewer, nil)
+	require.Equal(t, http.StatusOK, status, string(body))
+	status, body = e.do(t, http.MethodPost, "/api/v1/oversight/decisions/a%400/feedback?namespace=team", viewer,
+		oversightv1.FeedbackRequest{Label: oversightv1.FeedbackFalseAlarm})
+	require.Equal(t, http.StatusOK, status, string(body))
+	require.Contains(t, *e.reviews, authorizationv1.ResourceAttributes{
+		Namespace: "team", Verb: "get", Group: "core.orka.ai", Resource: "oversightdecisions", Name: "a@0",
+	})
+	require.Contains(t, *e.reviews, authorizationv1.ResourceAttributes{
+		Namespace: "team", Verb: "create", Group: "core.orka.ai", Resource: "oversightdecisions", Subresource: "feedback", Name: "a@0",
+	})
 }
 
 func TestOversightPostureInAuditModeIsNeverWarranted(t *testing.T) {

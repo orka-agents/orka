@@ -79,8 +79,9 @@ func oversightStorageError(action string, err error) error {
 }
 
 // authorizeOversightRead resolves the namespace and checks the caller may
-// read its oversight decisions.
-func (h *Handlers) authorizeOversightRead(c fiber.Ctx, action, verb string) (string, error) {
+// read its oversight decisions. name is the decision ID for single-decision
+// reads, so a grant limited by resourceNames applies; it is empty otherwise.
+func (h *Handlers) authorizeOversightRead(c fiber.Ctx, action, verb, name string) (string, error) {
 	if err := h.requireOversight(); err != nil {
 		return "", err
 	}
@@ -92,7 +93,7 @@ func (h *Handlers) authorizeOversightRead(c fiber.Ctx, action, verb string) (str
 		return "", err
 	}
 	if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c), namespace, verb,
-		corev1alpha1.GroupVersion.Group, oversightResource, ""); err != nil {
+		corev1alpha1.GroupVersion.Group, oversightResource, name); err != nil {
 		return "", fiber.NewError(fiber.StatusForbidden, "not authorized to read oversight decisions")
 	}
 	return namespace, nil
@@ -265,7 +266,7 @@ func (h *Handlers) oversightViews(ctx context.Context, namespace string, records
 // ListOversightDecisions handles GET /api/v1/oversight/decisions.
 // Results are newest first; continue= pages back. q= is the search grammar.
 func (h *Handlers) ListOversightDecisions(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "listOversightDecisions", "list")
+	namespace, err := h.authorizeOversightRead(c, "listOversightDecisions", "list", "")
 	if err != nil {
 		return err
 	}
@@ -298,11 +299,11 @@ func (h *Handlers) ListOversightDecisions(c fiber.Ctx) error {
 
 // GetOversightDecision handles GET /api/v1/oversight/decisions/{id}.
 func (h *Handlers) GetOversightDecision(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "getOversightDecision", "get")
+	id, err := oversightDecisionIDParam(c)
 	if err != nil {
 		return err
 	}
-	id, err := oversightDecisionIDParam(c)
+	namespace, err := h.authorizeOversightRead(c, "getOversightDecision", "get", id)
 	if err != nil {
 		return err
 	}
@@ -329,7 +330,7 @@ func (h *Handlers) oversightDecision(ctx context.Context, namespace, id string) 
 // It ranks decisions by their deterministic behavioural signature, so each
 // result can say exactly which features it shares.
 func (h *Handlers) SimilarOversightDecisions(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "similarOversightDecisions", "list")
+	namespace, err := h.authorizeOversightRead(c, "similarOversightDecisions", "list", "")
 	if err != nil {
 		return err
 	}
@@ -386,7 +387,7 @@ func (h *Handlers) SimilarOversightDecisions(c fiber.Ctx) error {
 // GroupOversightDecisions handles GET /api/v1/oversight/decisions/groups?by=agent|task.
 // It answers "has this happened before, and where?" for a query.
 func (h *Handlers) GroupOversightDecisions(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "groupOversightDecisions", "list")
+	namespace, err := h.authorizeOversightRead(c, "groupOversightDecisions", "list", "")
 	if err != nil {
 		return err
 	}
@@ -415,7 +416,7 @@ func (h *Handlers) GroupOversightDecisions(c fiber.Ctx) error {
 
 // GetOversightPosture handles GET /api/v1/oversight/posture?window=24h.
 func (h *Handlers) GetOversightPosture(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "getOversightPosture", "list")
+	namespace, err := h.authorizeOversightRead(c, "getOversightPosture", "list", "")
 	if err != nil {
 		return err
 	}
@@ -461,7 +462,7 @@ func (h *Handlers) GetOversightPosture(c fiber.Ctx) error {
 // CharterDeclaration, and previewCharterRevisions a comma-separated list of
 // revisions labelled "preview rule check, audit only".
 func (h *Handlers) GetOversightConfig(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "getOversightConfig", "list")
+	namespace, err := h.authorizeOversightRead(c, "getOversightConfig", "list", "")
 	if err != nil {
 		return err
 	}
@@ -549,7 +550,7 @@ func (h *Handlers) RecordOversightFeedback(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	return h.recordOversightFeedback(c, []string{id}, req.Label, req.Note)
+	return h.recordOversightFeedback(c, []string{id}, id, req.Label, req.Note)
 }
 
 // oversightDecisionIDParam returns the decision ID path segment, decoded:
@@ -571,10 +572,13 @@ func (h *Handlers) BulkOversightFeedback(c fiber.Ctx) error {
 	if len(req.IDs) == 0 || len(req.IDs) > oversightv1.MaxBulkFeedback {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("ids holds 1 to %d decisions", oversightv1.MaxBulkFeedback))
 	}
-	return h.recordOversightFeedback(c, req.IDs, req.Label, req.Note)
+	return h.recordOversightFeedback(c, req.IDs, "", req.Label, req.Note)
 }
 
-func (h *Handlers) recordOversightFeedback(c fiber.Ctx, ids []string, label oversightv1.FeedbackLabel, note string) error {
+// recordOversightFeedback stores one label for ids. name is the decision ID
+// when the request labels a single decision, so a grant limited by
+// resourceNames applies; bulk requests check with an empty name.
+func (h *Handlers) recordOversightFeedback(c fiber.Ctx, ids []string, name string, label oversightv1.FeedbackLabel, note string) error {
 	if err := h.requireOversight(); err != nil {
 		return err
 	}
@@ -587,7 +591,7 @@ func (h *Handlers) recordOversightFeedback(c fiber.Ctx, ids []string, label over
 		return fiber.NewError(fiber.StatusForbidden, "outcome labels come from people")
 	}
 	if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, userInfo, namespace, "create",
-		corev1alpha1.GroupVersion.Group, oversightFeedbackResource, ""); err != nil {
+		corev1alpha1.GroupVersion.Group, oversightFeedbackResource, name); err != nil {
 		return fiber.NewError(fiber.StatusForbidden, "not authorized to label oversight decisions")
 	}
 	feedback := oversightv1.DecisionFeedback{Label: label, Note: note}
@@ -625,7 +629,7 @@ func (h *Handlers) recordOversightFeedback(c fiber.Ctx, ids []string, label over
 // It replays matching decisions after the cursor, then polls for new ones,
 // writing each as an SSE "decision" frame whose id is its Seq.
 func (h *Handlers) StreamOversightDecisions(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "streamOversightDecisions", "list")
+	namespace, err := h.authorizeOversightRead(c, "streamOversightDecisions", "list", "")
 	if err != nil {
 		return err
 	}
@@ -760,7 +764,7 @@ const (
 // declared producers merged with those seen in the last 24 hours. Declared
 // trust states are never reported as verified.
 func (h *Handlers) ListOversightProducers(c fiber.Ctx) error {
-	namespace, err := h.authorizeOversightRead(c, "listOversightProducers", "list")
+	namespace, err := h.authorizeOversightRead(c, "listOversightProducers", "list", "")
 	if err != nil {
 		return err
 	}
