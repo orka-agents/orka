@@ -167,6 +167,17 @@ func TestRankSimilarExplainsMatches(t *testing.T) {
 	require.Equal(t, "agent-a", groups[0].Key)
 	require.Equal(t, 2, groups[0].Count)
 	require.Equal(t, []string{"a"}, groups[0].Tasks)
+
+	// An agentless decision groups under the empty key, never its Task name,
+	// so it cannot merge with an Agent that shares the Task's name.
+	agentless := view(t, 6, decision("agent-a@0", "agent-a"), "")
+	agentless.AgentName = ""
+	groups = Group([]oversightv1.DecisionView{source, agentless}, GroupByAgent)
+	require.Len(t, groups, 2)
+	require.Equal(t, "agent-a", groups[0].Key)
+	require.Equal(t, 1, groups[0].Count)
+	require.Empty(t, groups[1].Key)
+	require.Equal(t, []string{"agent-a"}, groups[1].Tasks)
 }
 
 func TestPostureIsHonestByConstruction(t *testing.T) {

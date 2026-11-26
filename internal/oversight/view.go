@@ -129,14 +129,15 @@ const (
 	GroupByTask  = "task"
 )
 
-// Group summarizes views by agent or Task. A decision without an agent is
-// grouped under its Task's name.
+// Group summarizes views by agent or Task. By agent, decisions without an
+// agent share the group with an empty key, which never merges with a named
+// Agent and is not a searchable agent: term.
 func Group(views []oversightv1.DecisionView, by string) []oversightv1.DecisionGroup {
 	index := map[string]int{}
 	var groups []oversightv1.DecisionGroup
 	for _, view := range views {
 		key := view.TaskName
-		if by == GroupByAgent && view.AgentName != "" {
+		if by == GroupByAgent {
 			key = view.AgentName
 		}
 		i, ok := index[key]
