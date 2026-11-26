@@ -157,6 +157,24 @@ Each setting takes the first source that has a value, so an exported `ORKA_TOKEN
 - **Token:** `--token`, then `--token-file`, then `ORKA_TOKEN`, then the config file's token. Passing both `--token` and `--token-file` is an error. When none is set and the CLI reached the server through the kubeconfig, it sends the bearer token of that context's user, if the kubeconfig gives one as `token` or `tokenFile`. It reads that token, including the `tokenFile`, with the context, before it connects. It never sends that token to a server named by `--server`, `ORKA_SERVER` or the config file, or to the `http://localhost:8080` fallback.
 - **Namespace:** `--namespace`, then `ORKA_NAMESPACE`, then the config file's namespace. With none of these, the CLI sends no namespace and the server uses the namespace it watches. The kubeconfig context's namespace only tells the CLI where else to look for the Orka Service. `orka session migrate` needs one of these three.
 
+### Sign in with OIDC
+
+When the server has OIDC configured, `orka auth login` signs you in with your identity provider's device-code flow. It reads the issuer and audience from the server and saves the token in the config file. Later commands refresh it with the saved refresh token when it is near expiry.
+
+```bash
+orka auth login --server https://orka.example.com
+orka auth whoami
+```
+
+`orka auth token` prints the token the CLI sends to the server, so another client, such as an [MCP client](../guides/mcp-server.md#use-your-orka-sign-in) or a script, can act as you. It refreshes a saved sign-in first:
+
+```bash
+curl -H "Authorization: Bearer $(orka auth token)" https://orka.example.com/api/v1/auth/whoami
+orka auth token --format header-json   # {"Authorization":"Bearer <token>"}
+```
+
+It takes the token from the same sources as every other command, in the same order. A saved sign-in that has expired and can't be refreshed makes it fail rather than print the stale token. It never prints a session saved by `orka login`, which reaches only your own connections and agent host, and it never prints a kubeconfig user's credential, so it needs a server from `--server`, `ORKA_SERVER` or the config file. The output is a credential: don't log it or paste it into shared files.
+
 Validate auth before running larger workflows:
 
 ```bash

@@ -136,6 +136,31 @@ In `.vscode/mcp.json`. VS Code prompts for the token once and stores it securely
 To use a transaction token instead, send `"Txn-Token": "<token>"` in `headers` and
 omit `Authorization`.
 
+### Use your Orka sign-in
+
+If you signed in with `orka auth login`, `orka auth token` prints your current token,
+refreshing it first when it is near expiry; see the
+[CLI reference](../reference/cli.md#sign-in-with-oidc). Claude Code can run it whenever it
+connects, so the header doesn't go stale:
+
+```json
+{
+  "mcpServers": {
+    "orka": {
+      "type": "http",
+      "url": "https://orka.example.com/mcp",
+      "headersHelper": "orka auth token --format header-json"
+    }
+  }
+}
+```
+
+Claude Code runs a project's `headersHelper` only once you trust the workspace. For a
+client that reads the header from the environment, export the token before you start
+it: `export ORKA_TOKEN="$(orka auth token)"`. That copy doesn't refresh, and while it is
+exported, `orka auth token` prints it rather than your saved sign-in; unset it and run
+the command again when it expires.
+
 ## Tools
 
 Every tool takes an optional `namespace`. Namespace resolution, `--watch-namespace`,

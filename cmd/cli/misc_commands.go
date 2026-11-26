@@ -41,7 +41,7 @@ func newAuthCmd() *cobra.Command {
 		},
 	}
 	addOutputFlag(whoami, outputTable)
-	cmd.AddCommand(newAuthLoginCmd(), validate, whoami)
+	cmd.AddCommand(newAuthLoginCmd(), newAuthTokenCmd(), validate, whoami)
 	return cmd
 }
 
