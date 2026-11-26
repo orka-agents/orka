@@ -867,6 +867,13 @@ func TestValidateCoordination(t *testing.T) {
 			Model: &corev1alpha1.ModelConfig{Provider: "openai"},
 		},
 	}
+	passTool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "lookup", Namespace: testNS}, Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: "https://gateway.example/v1/task-tools/lookup", GatewayTaskPass: true}}}
+	plainTool := &corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: testNS}, Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: "https://example.com/plain"}}}
+	delegatingAgent := func(tool string) *corev1alpha1.Agent {
+		a := baseAgent("coord-delegated-" + tool)
+		a.Spec.Coordination = &corev1alpha1.CoordinationConfig{Enabled: true, DelegatedGatewayTools: []string{tool}}
+		return a
+	}
 
 	tests := []struct {
 		name      string
@@ -936,6 +943,24 @@ func TestValidateCoordination(t *testing.T) {
 					Spec:       corev1alpha1.AgentSpec{Model: &corev1alpha1.ModelConfig{Provider: "openai"}},
 				},
 			},
+		},
+		{
+			name:  "delegated gateway tool is a task pass tool",
+			agent: delegatingAgent("lookup"),
+			objs:  []runtime.Object{passTool},
+		},
+		{
+			name:      "delegated gateway tool not found",
+			agent:     delegatingAgent("missing"),
+			wantErr:   true,
+			errSubstr: `delegated gateway tool "missing" not found`,
+		},
+		{
+			name:      "delegated gateway tool without a task pass",
+			agent:     delegatingAgent("plain"),
+			objs:      []runtime.Object{plainTool},
+			wantErr:   true,
+			errSubstr: `delegated gateway tool "plain" is not a gateway task pass tool`,
 		},
 	}
 

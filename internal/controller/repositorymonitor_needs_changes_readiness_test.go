@@ -28,6 +28,7 @@ func TestRepositoryMonitorNeedsChangesReadinessReflectsRepairEligibility(t *test
 		active        bool
 		exhausted     bool
 		ciFailed      bool
+		behind        bool
 		conflicted    bool
 		want          string
 		wantIntent    string
@@ -39,8 +40,9 @@ func TestRepositoryMonitorNeedsChangesReadinessReflectsRepairEligibility(t *test
 		{name: "active repair action", repairable: true, active: true, want: repositoryMonitorStatusPending},
 		{name: "eligible review repair", repairEnabled: true, repairer: true, repairable: true, want: repositoryMonitorStatusPending, wantIntent: repositoryMonitorCommandIntentFix},
 		{name: "eligible CI repair", repairEnabled: true, repairer: true, ciFailed: true, want: repositoryMonitorStatusPending, wantIntent: repositoryMonitorCommandIntentFixCI},
-		{name: "eligible agentless conflict repair", repairEnabled: true, conflicted: true, want: repositoryMonitorStatusPending, wantIntent: repositoryMonitorCommandIntentUpdateBranch},
-		{name: "conflict repair disabled", conflicted: true, want: repositoryMonitorStatusFailure},
+		{name: "eligible agentless behind branch update", repairEnabled: true, behind: true, want: repositoryMonitorStatusPending, wantIntent: repositoryMonitorCommandIntentUpdateBranch},
+		{name: "behind branch update disabled", behind: true, want: repositoryMonitorStatusFailure},
+		{name: "dirty conflict fails readiness even when repair enabled", repairEnabled: true, conflicted: true, want: repositoryMonitorStatusFailure},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := setupControllerSQLiteStore(t)
@@ -81,6 +83,9 @@ func TestRepositoryMonitorNeedsChangesReadinessReflectsRepairEligibility(t *test
 			}
 			const prBody = `{"number":1,"title":"Needs changes","state":"open","draft":false,"mergeable_state":"clean","base":{"ref":"main","sha":"base1","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`
 			body := prBody
+			if tc.behind {
+				body = strings.Replace(body, `"mergeable_state":"clean"`, `"mergeable_state":"behind"`, 1)
+			}
 			if tc.conflicted {
 				body = strings.Replace(body, `"mergeable_state":"clean"`, `"mergeable_state":"dirty"`, 1)
 			}

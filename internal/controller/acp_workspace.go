@@ -544,3 +544,12 @@ func publisherForgeCredentialReference(reference *corev1alpha1.WorkspaceCredenti
 		Name: strings.TrimSpace(reference.Name), Kind: publisherservice.CredentialForgeToken, Role: publisherservice.CredentialRoleForge,
 	}
 }
+
+func publisherCommitSigningCredentialReference(reference *corev1alpha1.WorkspaceCredentialReference) *publisherservice.CredentialReference {
+	if reference == nil || strings.TrimSpace(reference.Name) == "" {
+		return nil
+	}
+	return &publisherservice.CredentialReference{
+		Name: strings.TrimSpace(reference.Name), Kind: publisherservice.CredentialSSHSigningKey, Role: publisherservice.CredentialRoleCommitSign,
+	}
+}

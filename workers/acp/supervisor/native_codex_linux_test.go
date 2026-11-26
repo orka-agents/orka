@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -58,12 +59,37 @@ func TestPinnedNativeCodexACPRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNativeBundleExcludesCredentials(t, data, revokedSourceCredential)
-	first := runPinnedNativeTurn(t, data, threadID, "first-current-test-credential", "NATIVE_ORka_REPLY_ONE", "", harnessv2.WorkspaceIntentRead, "gpt-5.4", "high")
-	second := runPinnedNativeTurn(t, first.Data, threadID, "second-current-test-credential", "NATIVE_ORka_REPLY_TWO", "NATIVE_ORka_REPLY_ONE", harnessv2.WorkspaceIntentRead, "gpt-6-astra", "max")
+	t.Run("429_after_tool", func(t *testing.T) {
+		testPinnedCodexRejectedContinuation(t, data, threadID)
+	})
+	t.Run("429_without_hint", func(t *testing.T) {
+		_, posts := runPinnedNativeTurn(t, data, threadID, "no-hint-fixture", "NATIVE_ORka_NO_HINT", "", harnessv2.WorkspaceIntentRead, "gpt-5.4", "high", func(w http.ResponseWriter, n int) bool {
+			if n != 1 {
+				return false
+			}
+			http.Error(w, "scripted rejection without a delay", http.StatusTooManyRequests)
+			return true
+		})
+		if len(posts) != 2 || posts[1].at.Sub(posts[0].at) > 30*time.Second {
+			t.Fatalf("transient 429 without hints: want two POSTs within the retry budget, got %d", len(posts))
+		}
+	})
+	t.Run("inference_failures", func(t *testing.T) {
+		testPinnedCodexInferenceFailures(t, data, threadID)
+	})
+	t.Run("cancel_after_429", func(t *testing.T) {
+		testPinnedCodexCancelAfterRejection(t, data, threadID)
+	})
+	first, _ := runPinnedNativeTurn(t, data, threadID, "first-current-test-credential", "NATIVE_ORka_REPLY_ONE", "", harnessv2.WorkspaceIntentRead, "gpt-5.4", "high", nil)
+	second, _ := runPinnedNativeTurn(t, first.Data, threadID, "second-current-test-credential", "NATIVE_ORka_REPLY_TWO", "NATIVE_ORka_REPLY_ONE", harnessv2.WorkspaceIntentRead, "gpt-6-astra", "max", nil)
 	if second.ProviderSessionID != threadID || first.DataDigest == second.DataDigest {
 		t.Fatal("return transfer did not preserve native UUID and append the second turn")
 	}
-	written := runPinnedNativeTurn(t, second.Data, threadID, "write-current-test-credential", "NATIVE_ORka_WRITE", "NATIVE_ORka_REPLY_TWO", harnessv2.WorkspaceIntentWrite, "gpt-5.4", "high")
+	written, controlPosts := runPinnedNativeTurn(t, second.Data, threadID, "write-current-test-credential", "NATIVE_ORka_WRITE", "NATIVE_ORka_REPLY_TWO", harnessv2.WorkspaceIntentWrite, "gpt-5.4", "high", nil)
+	if len(controlPosts) != 2 {
+		t.Fatalf("clean native tool turn made %d Responses POSTs, want 2", len(controlPosts))
+	}
+	assertOneNativeToolTurn(t, second.Data, written.Data)
 	if written.ProviderSessionID != threadID || written.DataDigest == second.DataDigest {
 		t.Fatal("write continuation did not preserve native UUID and append its turn")
 	}
@@ -73,11 +99,19 @@ func TestPinnedNativeCodexACPRoundTrip(t *testing.T) {
 	}
 }
 
-func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, reply, previousReply string, intent harnessv2.WorkspaceIntent, model, effort string) harnessv2.NativeSessionSnapshot {
+type pinnedInferenceFault func(http.ResponseWriter, int) bool
+
+type pinnedNativeSession struct {
+	server         *Server
+	cfg            Config
+	create         harnessv2.CreateRuntimeSessionRequest
+	prompt         harnessv2.StartPromptRequest
+	assertUploaded func(harnessv2.ArtifactReference)
+}
+
+func preparePinnedNativeSession(t *testing.T, data []byte, threadID, freshCredential, reply string, intent harnessv2.WorkspaceIntent, model, effort, upstreamURL string) pinnedNativeSession {
 	t.Helper()
-	upstream, capturedRequests := newPinnedNativeUpstream(t, freshCredential, reply, intent)
-	defer upstream.Close()
-	cfg, _ := newTestConfigWithUpstream(t, "unused", upstream.URL+"/v1", freshCredential)
+	cfg, _ := newTestConfigWithUpstream(t, "unused", upstreamURL+"/v1", freshCredential)
 	allowed := []string{providerToolRead, providerToolGrep, providerToolGlob}
 	if intent == harnessv2.WorkspaceIntentWrite {
 		allowed = nil
@@ -106,7 +140,7 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	if intent == harnessv2.WorkspaceIntentWrite {
 		cfg.ArtifactUploader, assertUploaded = pinnedNativeArtifactUploader(t, reply)
 	}
-	server, err := New(cfg)
+	server, err := newQualifiedNativeServer(t, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,9 +179,45 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	prompt.MCPAuthorization.ExpiresAt = prompt.Metadata.ExpiresAt
 	prompt.Input.Content[0].Text = "Continue this native session under the current Orka policy."
 	sealRequest(t, &prompt.Metadata.RequestDigest, prompt)
-	result := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", prompt, cfg)
-	if result.Code != http.StatusOK || !bytes.Contains(result.Body.Bytes(), []byte(reply)) {
-		t.Fatalf("pinned native prompt failed: %d %s", result.Code, result.Body.String())
+	return pinnedNativeSession{server: server, cfg: cfg, create: create, prompt: prompt, assertUploaded: assertUploaded}
+}
+
+func (s pinnedNativeSession) runPrompt(t *testing.T) (*httptest.ResponseRecorder, harnessv2.Event) {
+	t.Helper()
+	result := performMutation(t, s.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", s.prompt, s.cfg)
+	return result, s.terminal(t, result)
+}
+
+func (s pinnedNativeSession) terminal(t *testing.T, result *httptest.ResponseRecorder) harnessv2.Event {
+	t.Helper()
+	if result.Code != http.StatusOK {
+		t.Fatalf("native prompt HTTP status = %d", result.Code)
+	}
+	decoder, err := harnessv2.NewEventDecoder(bytes.NewReader(result.Body.Bytes()), eventLimits(s.cfg.Capabilities.Limits), harnessv2.EventExpectationFromMetadata(s.prompt.Metadata))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := decoder.DecodeAll()
+	if err != nil || len(events) < 2 || events[0].Type != harnessv2.EventAccepted || !events[len(events)-1].Type.IsTerminal() {
+		t.Fatalf("invalid native prompt event stream: events=%d, err=%v", len(events), err)
+	}
+	return events[len(events)-1]
+}
+
+func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, reply, previousReply string, intent harnessv2.WorkspaceIntent, model, effort string, fault pinnedInferenceFault) (harnessv2.NativeSessionSnapshot, []pinnedNativeRequest) {
+	t.Helper()
+	initialPosts := 1
+	if intent == harnessv2.WorkspaceIntentWrite {
+		initialPosts = 2
+	}
+	upstream, capturedRequests := newPinnedNativeUpstream(t, freshCredential, reply, intent, initialPosts, fault)
+	defer upstream.Close()
+	s := preparePinnedNativeSession(t, data, threadID, freshCredential, reply, intent, model, effort, upstream.URL)
+	server, cfg, create, prompt := s.server, s.cfg, s.create, s.prompt
+	_, terminal := s.runPrompt(t)
+	requests := capturedRequests()
+	if terminal.Completed == nil || len(terminal.Completed.Result.Content) != 1 || terminal.Completed.Result.Content[0].Text != reply {
+		t.Fatalf("native prompt: terminal=%s, POST /v1/responses=%d; want completed with scripted final text", terminal.Type, len(requests))
 	}
 	server.mu.Lock()
 	state := server.sessions[create.RuntimeSessionID]
@@ -180,7 +250,7 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 		if deltaResponse.Delta.State != harnessv2.WorkspaceDeltaPrepared || deltaResponse.Delta.ChangedFileCount != 1 || deltaResponse.Delta.EntryCount != 1 {
 			t.Fatalf("native write-intent continuation did not prepare its publishable delta: %+v", deltaResponse.Delta)
 		}
-		assertUploaded(*deltaResponse.Delta.Artifact)
+		s.assertUploaded(*deltaResponse.Delta.Artifact)
 		finalizePinnedNativePublication(t, server, cfg, prompt.Metadata, delta.DeltaID)
 	}
 	server.mu.Lock()
@@ -201,9 +271,8 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	if err := response.ValidateFor(request); err != nil {
 		t.Fatal(err)
 	}
-	requests := capturedRequests()
 	assertPinnedNativeReasoningEffort(t, requests, model, effort)
-	if !bytes.Contains(requests[0], []byte("Run the shell command to print the SessionKit nonce")) || previousReply != "" && !bytes.Contains(requests[0], []byte(previousReply)) {
+	if !bytes.Contains(requests[0].body, []byte("Run the shell command to print the SessionKit nonce")) || previousReply != "" && !bytes.Contains(requests[0].body, []byte(previousReply)) {
 		t.Fatal("resumed provider did not receive the native source and prior continuation history")
 	}
 	assertNativeBundleExcludesCredentials(t, response.Snapshot.Data, freshCredential, "revoked-source-test-credential")
@@ -215,19 +284,19 @@ func runPinnedNativeTurn(t *testing.T, data []byte, threadID, freshCredential, r
 	}
 	assertCurrentNativeSettings(t, bundle.Rollout, state.paths.Workspace)
 	assertSavedNativeFilesDeleted(t, server, cfg, create, state)
-	return response.Snapshot
+	return response.Snapshot, requests
 }
 
-func assertPinnedNativeReasoningEffort(t *testing.T, requests [][]byte, model, effort string) {
+func assertPinnedNativeReasoningEffort(t *testing.T, requests []pinnedNativeRequest, model, effort string) {
 	t.Helper()
-	for _, body := range requests {
+	for _, post := range requests {
 		var request struct {
 			Model     string `json:"model"`
 			Reasoning struct {
 				Effort string `json:"effort"`
 			} `json:"reasoning"`
 		}
-		if err := json.Unmarshal(body, &request); err != nil {
+		if err := json.Unmarshal(post.body, &request); err != nil {
 			t.Fatal(err)
 		}
 		if request.Model != model || request.Reasoning.Effort != effort {
@@ -236,10 +305,29 @@ func assertPinnedNativeReasoningEffort(t *testing.T, requests [][]byte, model, e
 	}
 }
 
-func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent harnessv2.WorkspaceIntent) (*httptest.Server, func() [][]byte) {
+type pinnedNativeRequest struct {
+	at   time.Time
+	body []byte
+}
+
+var scriptedChallenge = regexp.MustCompile(`^[a-f0-9]{32}\.[a-f0-9]{32}$`)
+
+func validPinnedNativeAuthorization(h http.Header, credential string, wantRetry bool) bool {
+	auth, retry, challenge := h.Values("Authorization"), h.Values(testReplayHeader), h.Values(testRouteHeader)
+	if len(auth) != 1 {
+		return false
+	}
+	if !wantRetry {
+		return len(retry) == 0 && auth[0] == "Bearer "+credential
+	}
+	return len(retry) == 1 && retry[0] == "1" && len(challenge) == 1 &&
+		scriptedChallenge.MatchString(challenge[0]) && auth[0] == "Orka-Codex-429 "+credential
+}
+
+func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent harnessv2.WorkspaceIntent, initialPosts int, fault pinnedInferenceFault) (*httptest.Server, func() []pinnedNativeRequest) {
 	t.Helper()
 	var mu sync.Mutex
-	var providerRequests [][]byte
+	var providerRequests []pinnedNativeRequest
 	var wrongCredential bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
@@ -252,10 +340,14 @@ func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent
 			return
 		}
 		mu.Lock()
-		wrongCredential = wrongCredential || r.Header.Get("Authorization") != "Bearer "+freshCredential
-		providerRequests = append(providerRequests, append([]byte(nil), body...))
+		wantRetry := len(providerRequests) >= initialPosts
+		wrongCredential = wrongCredential || !validPinnedNativeAuthorization(r.Header, freshCredential, wantRetry)
+		providerRequests = append(providerRequests, pinnedNativeRequest{time.Now(), bytes.Clone(body)})
 		requestNumber := len(providerRequests)
 		mu.Unlock()
+		if fault != nil && fault(scriptedQualificationWriter{w, r.Header.Get(testRouteHeader)}, requestNumber) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		write := func(event map[string]any) {
 			encoded, _ := json.Marshal(event)
@@ -290,14 +382,14 @@ func newPinnedNativeUpstream(t *testing.T, freshCredential, reply string, intent
 		write(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
 		write(map[string]any{"type": "response.completed", "response": map[string]any{"id": "native-test-response", "usage": map[string]any{"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}}})
 	}))
-	return upstream, func() [][]byte {
+	return upstream, func() []pinnedNativeRequest {
 		t.Helper()
 		mu.Lock()
-		requests := append([][]byte(nil), providerRequests...)
+		requests := append([]pinnedNativeRequest(nil), providerRequests...)
 		credentialFailed := wrongCredential
 		mu.Unlock()
 		if credentialFailed || len(requests) == 0 {
-			t.Fatal("resumed provider did not use the newly supplied credential")
+			t.Fatal("resumed provider did not use the expected credential and authorization scheme")
 		}
 		return requests
 	}
@@ -413,7 +505,7 @@ func pinnedNativeWriteCall(body []byte, marker string) (map[string]any, error) {
 				continue
 			}
 			arguments, err := json.Marshal(map[string]any{
-				"cmd":           "printf '%s\\n' '" + marker + "' > native-write.txt && printf '%s\\n' '" + marker + "_WRITTEN'",
+				"cmd":           "printf '%s\\n' '" + marker + "' >> native-write.txt && printf '%s\\n' '" + marker + "_WRITTEN'",
 				"yield_time_ms": 10000, "max_output_tokens": 1024,
 			})
 			if err != nil {

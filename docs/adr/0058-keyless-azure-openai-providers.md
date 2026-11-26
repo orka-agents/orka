@@ -1,4 +1,4 @@
-# 57. Keyless Azure OpenAI Providers authenticate in the controller
+# 58. Keyless Azure OpenAI Providers authenticate in the controller
 
 Date: 2026-11-20
 

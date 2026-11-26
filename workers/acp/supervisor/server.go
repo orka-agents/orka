@@ -378,6 +378,9 @@ type promptState struct {
 	untaggedOverflow bool
 	settlement       *harnessv2.PromptSettlement
 	settlementDigest string
+	// Only the bounded supervisor classification, never a raw child error.
+	// PromptSettlement does not carry the terminal event's failure detail.
+	cancelInferenceFailure error
 	// providerDrainTimedOut records that an admitted inference request was
 	// still in flight when the child settled and did not finish within the
 	// cancel grace, so the prompt's inference accounting is incomplete.
@@ -999,8 +1002,15 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
+	timings := newSessionStartTimings()
+	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid, timings)
+	timings.finish()
+	span.SetAttributes(timings.spanAttributes()...)
 	if createErr != nil {
+		// Log before any branch returns, so a create retained for unproven
+		// cleanup still reports its stage and timings.
+		slog.Error("ACP runtime session creation failed",
+			append([]any{"stage", sessionCreationStage(createErr), "runtimeSessionID", request.RuntimeSessionID}, timings.logAttrs()...)...)
 		if isNativeInstallUnknown(createErr) && paths.Root != "" {
 			s.retainUnresolvedCreate(state, request, paths, nil, nativeInstallUnknownMessage, now)
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeInstallUnknownMessage, nil, false)
@@ -1044,7 +1054,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
 		s.mu.Unlock()
-		slog.Error("ACP runtime session creation failed", "stage", sessionCreationStage(createErr))
 		writeError(w, statusCode, code, message, nil, retryable)
 		return
 	}
@@ -1076,6 +1085,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if drainCleanup {
 		go s.cleanupDrainedSession(request.RuntimeSessionID, state)
 	}
+	slog.Info("ACP runtime session created",
+		append([]any{"runtimeSessionID", request.RuntimeSessionID, "nativeRestore", request.NativeRestore != nil}, timings.logAttrs()...)...)
 	writeJSON(w, http.StatusCreated, harnessv2.CreateRuntimeSessionResponse{
 		Protocol:       harnessv2.ProtocolVersion,
 		Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
@@ -1090,6 +1101,7 @@ func (s *Server) createSession(
 	now time.Time,
 	uid int,
 	gid int,
+	timings *sessionStartTimings,
 ) (
 	resultRuntime *acp.RuntimeSession, resultDescriptor harnessv2.RuntimeSessionDescriptor, resultPaths acp.SessionPaths,
 	resultBaseline *workspacedelta.Snapshot, resultProviderProxy *providerProxySession, resultMCPProxy *mcpProxySession,
@@ -1103,6 +1115,7 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("path preparation", err)
 	}
+	timings.mark("sessionPaths")
 	cleanup := true
 	nativeJournalDir := ""
 	ownsNativeJournal := false
@@ -1267,11 +1280,13 @@ func (s *Server) createSession(
 				paths.Workspace = workspaceDir
 			}
 		}
+		timings.mark("durableWorkspace")
 	}
 	if materialize {
 		if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
 		}
+		timings.mark("workspaceMaterialization")
 	}
 	var baseline *workspacedelta.Snapshot
 	readOnly := request.Workspace.Intent == harnessv2.WorkspaceIntentRead
@@ -1314,15 +1329,18 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
 		}
 	}
+	timings.mark("baselineCapture")
 	if s.cfg.Provider.ValidateWorkspace != nil {
 		if err := s.cfg.Provider.ValidateWorkspace(paths); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationRejected(err)
 		}
+		timings.mark("workspaceValidation")
 	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
 		}
+		timings.mark("providerHome")
 	}
 	providerProxy, proxyBinding, err := s.providerProxy.newSessionForRequest(request)
 	if err != nil {
@@ -1344,6 +1362,7 @@ func (s *Server) createSession(
 			mcpProxy.close()
 		}
 	}()
+	timings.mark("proxySetup")
 	projection := ProviderSessionProjection{}
 	if s.cfg.Provider.ProjectSession != nil {
 		projection, err = s.cfg.Provider.ProjectSession(request, paths, proxyBinding)
@@ -1374,6 +1393,7 @@ func (s *Server) createSession(
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
 	}
 	maps.Copy(envValues, azureEnvironment)
+	timings.mark("providerConfiguration")
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
@@ -1398,6 +1418,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
 		}
 		resumeSessionID = snapshot.ProviderSessionID
+		timings.mark("nativeRestore")
 	}
 	// Operator file copies reopen the workspace by path once the child, which
 	// may own the session root, is running, so its identity is pinned here and
@@ -1452,6 +1473,7 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
+	timings.mark("ownershipAndEnvironment")
 	var (
 		validateAdapterRelaunch func() error
 		// relaunched is set once the RuntimeSession exists, before it is
@@ -1497,13 +1519,21 @@ func (s *Server) createSession(
 		MaxBufferedEvents:       s.cfg.Capabilities.Limits.MaxBufferedEvents,
 		MaxBufferedEventBytes:   supervisorMaxBufferedPromptEventBytes,
 	})
+	// The adapter stage is timed whether or not it succeeds, so a slow failed
+	// handshake still reports where its time went.
+	timings.mark("adapterStartup")
 	if err != nil {
-		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
+		initialization, failed := errors.AsType[*acp.InitializationError](err)
+		if failed && initialization.RuntimeSession() != nil {
+			timings.recordAdapter(initialization.RuntimeSession().StartupTimings())
+		}
+		if failed && !initialization.Cleanup.Proven {
 			cleanup = false
 			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &createCleanupUnprovenError{Err: err})
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
+	timings.recordAdapter(runtimeSession.StartupTimings())
 	relaunched = runtimeSession
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The marker commits only after the session is fully initialized: a
@@ -1537,6 +1567,7 @@ func (s *Server) createSession(
 			}
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
 		}
+		timings.mark("durableCommit")
 	}
 	cleanup = false
 	cleanupProviderProxy = false

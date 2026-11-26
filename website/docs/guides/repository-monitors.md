@@ -170,7 +170,7 @@ spec:
 | Label | Review | Fixes |
 | --- | --- | --- |
 | `orka:review` | Yes | None |
-| `orka:fix` | Yes | Review findings, CI the pull request broke, and merge conflicts |
+| `orka:fix` | Yes | Review findings, CI the pull request broke, and behind branches (via GitHub update-branch; merge conflicts fail readiness and require human resolution) |
 | `orka:fix-ci` | No | CI the pull request broke |
 
 A pull request with a `repair.includeLabels` label is reviewed even when `targets.pullRequests.includeLabels` does not list that label. Each head is reviewed before it is repaired, so the label runs a review-fix loop: findings from a `needs_changes` review are fixed first, CI is fixed once the review has nothing to fix, and every pushed fix is reviewed again. The loop stops when the review passes and no check the pull request broke is failing, or when the repair limits are reached.
@@ -396,7 +396,7 @@ Every entry has an `availability`: `available`, `truncated` (the `truncated` lis
 
 By default, evidence is structured only and `failingCheckEvidence.textOmitted` is `true`. CI tools write check output, annotation text, and commit status descriptions, and they can print credentials that GitHub does not mask, such as a password in a shell trace or a registry config dump. So none of that free text reaches the prompt: no `output.title`, `output.summary`, or `output.text`, no annotation title, message, or `raw_details`, and no status description. Links are kept only when they point to a check run or GitHub Actions run, attempt, or job of the monitored repository on `github.com` (`https://github.com/OWNER/REPO/runs/ID` or `https://github.com/OWNER/REPO/actions/runs/ID[/attempts/N][/job/ID]`), without their query or fragment. Any other link is left out whole, path included, in every mode: a commit status `target_url` on an external CI server, or a link on a GitHub Enterprise host.
 
-To include the free text, set `spec.repair.ciEvidence.text: true`:
+To include the free text, set `spec.repair.ciEvidence.text: true` (and optionally `spec.repair.ciEvidence.jobLogs: true` to also fetch bounded, redacted tail excerpts from failing GitHub Actions job logs; requires Actions read permission on `spec.forgeCredentialRef`):
 
 ```yaml
 spec:
@@ -404,6 +404,7 @@ spec:
     enabled: true
     ciEvidence:
       text: true
+      jobLogs: true
 ```
 
 With `text: true`, check runs also carry `title`, `summary`, and annotation `title` and `message`, and commit statuses carry `description`.
@@ -440,6 +441,60 @@ Evidence limits:
 | Time for annotation reads | 20 seconds |
 
 The repair Task's prompt freezes the evidence for that attempt. If Orka retries the handoff after the Task was created, it reuses the evidence in the Task's prompt rather than reading GitHub again. The repair work action's metadata records `ciEvidenceDigest`, `ciEvidenceIDs`, and `ciEvidenceAvailability`, and so does the `repair_task_created` monitor event. Reading check runs and annotations uses the `forgeCredentialRef` token and needs Checks read access.
+
+### Commit identity, DCO sign-off, and SSH commit signing
+
+By default, Orka's clean-room publisher commits as `Orka Publisher <publisher@orka.ai>` without a signature or DCO trailer. For repositories that enforce DCO (`Signed-off-by`) or verified commit signatures, configure `spec.commit`:
+
+```yaml
+spec:
+  commit:
+    authorName: "Orka Bot"
+    authorEmail: "orka-bot@example.com"
+    signOff: true
+    signingCredentialRef:
+      name: repo-monitor-commit-signing-key
+```
+
+- `authorName` and `authorEmail` override the Git author and committer identity on repair and implementation commits.
+- `signOff: true` appends `Signed-off-by: <authorName> <<authorEmail>>` to every commit message.
+- `signingCredentialRef` references a distinct Kubernetes Secret in the monitor namespace containing an unencrypted OpenSSH private key (`ssh-ed25519` or `ssh-rsa`) under `signingKey` (or `key` / `id_ed25519`). Register the matching public key as a GitHub SSH signing key for the bot account. The controller validates and binds the Secret reference in memory, and the clean-room publisher fetches the key in memory during `publication.prepare` to produce deterministic OpenSSH `SSHSIG` signatures — it never enters the ACP runtime Pod or disk.
+
+### External review comments (humans and review bots)
+
+By default, `fix` repairs address only Orka's own review findings. To also read, fix, reply to, and optionally resolve unresolved review threads from human reviewers and allowlisted review bots (such as `coderabbitai[bot]`), enable `spec.repair.externalComments`:
+
+```yaml
+spec:
+  repair:
+    enabled: true
+    externalComments:
+      enabled: true
+      requireAuthorPermission: write
+      allowedBots:
+        - coderabbitai[bot]
+      replyOnFix: true
+      resolveBots: true
+      resolveOnFix: false
+```
+
+- Human review-thread authors must hold at least `requireAuthorPermission` (`write`, `maintain`, or `admin`, default `write`) on the repository. Unaffiliated accounts are ignored before any comment enters a repair prompt.
+- Bot accounts are admitted only when explicitly listed in `allowedBots`.
+- After the repair commit is verified (`VerifiedExact`), Orka posts an idempotent reply referencing the pushed commit SHA on each addressed thread, and resolves threads only when allowed (`resolveBots` for allowlisted bots, `resolveOnFix` for human reviewers).
+- For immediate pickup without waiting for the polling interval, also subscribe your GitHub webhook to `Pull request reviews` (`pull_request_review`) and `Pull request review comments` (`pull_request_review_comment`) events.
+
+### Clean-room rebase for `update_branch`
+
+By default, `update_branch` calls GitHub's `PUT /pulls/{number}/update-branch` endpoint (`spec.repair.updateBranchStrategy: merge`). For repositories that require linear history without merge commits, set `spec.repair.updateBranchStrategy: rebase`:
+
+```yaml
+spec:
+  repair:
+    enabled: true
+    updateBranchStrategy: rebase
+```
+
+In `rebase` mode, Orka replays the PR's linear commit chain onto the base commit inside the clean-room publisher (preserving commit authors, optionally appending DCO `Signed-off-by` trailers and re-signing with `spec.commit.signingCredentialRef`) and pushes with exact `--force-with-lease`. If any commit conflicts or contains a merge commit, the rebase aborts fail-closed without mutating the remote branch.
 
 ### Pull requests from forks
 

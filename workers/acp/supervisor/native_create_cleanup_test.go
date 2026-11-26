@@ -180,10 +180,15 @@ func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
 				}
 			}
 			fixture.server.cfg.CancelGrace = time.Nanosecond
+			logs := captureSupervisorLogs(t)
 			response := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
 			var failure harnessv2.ErrorResponse
 			if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || response.Code != http.StatusConflict || failure.Code != harnessv2.ErrorCodeCleanupUnproven || failure.Retryable {
 				t.Fatalf("unproven create: %d %s", response.Code, response.Body.String())
+			}
+			// A retained create still logs its failure stage and timings.
+			if line := createFailureLogLine(t, logs); line.Stage == "" || line.TotalMs == nil {
+				t.Fatalf("retained create failure line = %+v", line)
 			}
 			fixture.server.mu.Lock()
 			state := fixture.server.sessions[fixture.request.RuntimeSessionID]

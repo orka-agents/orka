@@ -174,3 +174,32 @@ func TestRepositoryMonitorRepairCommitMessageOmitsRestrictedFindings(t *testing.
 		t.Fatalf("restricted message = %q err=%v, want only the unrestricted finding", restricted, err)
 	}
 }
+
+func TestRepositoryMonitorRepairCommitMessageSignOffAndIdentity(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, _ := repositoryMonitorInventoryTestObjects("commit-signoff")
+	monitor.Spec.Commit = corev1alpha1.RepositoryMonitorCommitSpec{
+		AuthorName:  "Dynamo Bot",
+		AuthorEmail: "dynamo-bot@example.com",
+		SignOff:     true,
+	}
+	r := &RepositoryMonitorReconciler{Store: db}
+	pr := repositoryMonitorPullRequest{Number: 91, HeadSHA: "head91", BaseBranch: "main"}
+	got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFixCI, "monrepair-91", pr, &store.MonitorItem{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "fix: repair failing CI on #91\n\nOrka-Task: monrepair-91\nSigned-off-by: Dynamo Bot <dynamo-bot@example.com>\n"
+	if got != want {
+		t.Fatalf("signoff message =\n%s\nwant\n%s", got, want)
+	}
+	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Workspace: &corev1alpha1.WorkspaceConfig{
+		CommitMessage:     got,
+		CommitAuthorName:  "Dynamo Bot",
+		CommitAuthorEmail: "dynamo-bot@example.com",
+	}}}
+	if err := validateTaskPullRequestText(task); err != nil {
+		t.Fatalf("validateTaskPullRequestText() error = %v", err)
+	}
+}

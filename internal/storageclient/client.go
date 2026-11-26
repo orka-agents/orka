@@ -32,6 +32,7 @@ package storageclient
 import (
 	"context"
 	"errors"
+	"maps"
 	"reflect"
 	"sync/atomic"
 
@@ -78,6 +79,7 @@ type Client struct {
 
 	state     storagev1.StateProvider
 	artifacts storagev1.ArtifactProvider
+	datasets  map[string]Dataset
 	ops       *operations
 }
 
@@ -114,13 +116,19 @@ func New(options Options) (*Client, error) {
 			return nil, err
 		}
 	}
+	state := envelopedState{StateProvider: options.State, ops: ops}
+	artifacts := envelopedArtifacts{ArtifactProvider: options.Artifacts, ops: ops}
 	return &Client{
-		StateProvider: envelopedState{StateProvider: options.State, ops: ops},
-		ArtifactStore: envelopedArtifacts{ArtifactProvider: options.Artifacts, ops: ops},
+		StateProvider: state,
+		ArtifactStore: artifacts,
 		Embedded:      options.Embedded,
 		state:         options.State,
 		artifacts:     options.Artifacts,
-		ops:           ops,
+		datasets: map[string]Dataset{
+			storagev1.StateContract:     state,
+			storagev1.ArtifactsContract: artifacts,
+		},
+		ops: ops,
 	}, nil
 }
 
@@ -131,19 +139,20 @@ func (c *Client) BindFences(source FenceSource) error {
 	return c.ops.bindFences(source)
 }
 
-// Dataset is a store whose controller epoch Orka advances.
+// Dataset is a store whose controller epoch and write watermark Orka
+// advances.
 type Dataset interface {
 	storagev1.ProviderDescriber
 	storagev1.ControllerEpochAdvancer
+	storagev1.WriteWatermarkStore
 }
 
 // Datasets returns the provider that serves each contract, keyed by contract
-// name, so the controller epoch manager can advance each dataset.
+// name, so the controller epoch manager can advance each dataset. Reads and
+// the epoch advance reach the provider unchanged; AdvanceWriteWatermark runs
+// as a write of the client, under the contract's fence and envelope.
 func (c *Client) Datasets() map[string]Dataset {
-	return map[string]Dataset{
-		storagev1.StateContract:     c.state,
-		storagev1.ArtifactsContract: c.artifacts,
-	}
+	return maps.Clone(c.datasets)
 }
 
 // UnresolvedOperations returns how many writes have an outcome the client is

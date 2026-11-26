@@ -143,7 +143,7 @@ jobs:
           done
 
       - name: Preserve the exact candidate chart
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: chart-${{ github.run_id }}-${{ steps.candidate.outputs.artifact_attempt }}
           path: cr-release-packages/orka-*.tgz
@@ -250,7 +250,7 @@ jobs:
           }
 
       - name: Preserve CLI archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cli-${{ matrix.os }}-${{ matrix.arch }}-${{ needs.validate-release.outputs.artifact_attempt }}
           path: ${{ runner.temp }}/cli-dist/orka_*
@@ -311,7 +311,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -355,7 +355,7 @@ jobs:
           "${SYFT_CMD}" scan --platform linux/arm64 "${IMAGE_REF}@${IMAGE_DIGEST}" -o spdx-json="sbom-${{ matrix.image }}-linux-arm64.spdx.json"
 
       - name: Preserve image digest and platform SBOMs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-${{ matrix.image }}-${{ needs.validate-release.outputs.artifact_attempt }}
           path: |
@@ -443,7 +443,7 @@ jobs:
             platform_slug: linux-arm64
     steps:
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -471,7 +471,7 @@ jobs:
           exit-code: "0"
 
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: trivy-${{ matrix.image }}-${{ matrix.platform_slug }}.sarif
           category: trivy-${{ matrix.image }}-${{ matrix.platform_slug }}
@@ -513,7 +513,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -622,7 +622,7 @@ jobs:
         run: go run ./cmd/build/release bundle "${RUNNER_TEMP}/release-candidate" "${RELEASE_VERSION}" "${CANDIDATE_SHA}" "${ARTIFACT_ATTEMPT}"
 
       - name: Upload candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-candidate-${{ github.run_id }}-${{ needs.validate-release.outputs.artifact_attempt }}
           # SBOMs remain in the image artifacts and signed attestations. The
@@ -673,7 +673,7 @@ jobs:
         run: echo "name=release-qualified-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
 
       - name: Preserve candidate and qualification evidence for approval
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.evidence.outputs.name }}
           path: ${{ runner.temp }}/release-candidate
@@ -715,7 +715,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -758,7 +758,7 @@ jobs:
       - name: Mint a tap token
         id: token
         if: steps.app.outputs.enabled
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ vars.HOMEBREW_TAP_APP_CLIENT_ID }}
           private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}

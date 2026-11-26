@@ -127,16 +127,29 @@ func TestProviderReconcileKeylessRefusalAndOutage(t *testing.T) {
 	now := time.Now()
 	identities := &fakeProviderIdentities{verifyErr: errors.New("Entra refused the token request: invalid_client (AADSTS700016, HTTP 400)")}
 	r, c := newKeylessReconciler(identities, &now, keylessTestProvider())
-	got, _ := reconcileKeyless(t, r, c)
+	got, result := reconcileKeyless(t, r, c)
 	credential := meta.FindStatusCondition(got.Status.Conditions, ConditionProviderCredentialReady)
 	if got.Status.Ready || credential == nil || credential.Status != metav1.ConditionFalse || credential.Reason != reasonTokenRefused ||
 		!strings.Contains(credential.Message, "invalid_client") {
 		t.Fatalf("Ready = %v, CredentialReady = %+v; want a refusal", got.Status.Ready, credential)
 	}
+	if result.RequeueAfter != providerCredentialRetry {
+		t.Fatalf("RequeueAfter = %v, want a refusal retried like an outage", result.RequeueAfter)
+	}
+	// An operator fixes the federated credential without touching the
+	// Provider: the next verification after the retry interval sees it.
+	identities.verifyErr = nil
+	now = now.Add(providerCredentialRetry)
+	got, _ = reconcileKeyless(t, r, c)
+	if credential = meta.FindStatusCondition(got.Status.Conditions, ConditionProviderCredentialReady); !got.Status.Ready ||
+		credential == nil || credential.Status != metav1.ConditionTrue || identities.verifies != 2 {
+		t.Fatalf("Ready = %v, CredentialReady = %+v, verifies = %d; want the fix seen after the retry interval",
+			got.Status.Ready, credential, identities.verifies)
+	}
 
 	identities = &fakeProviderIdentities{verifyErr: fmt.Errorf("down: %w", provideridentity.ErrIssuerUnavailable)}
 	r, c = newKeylessReconciler(identities, &now, keylessTestProvider())
-	got, result := reconcileKeyless(t, r, c)
+	got, result = reconcileKeyless(t, r, c)
 	credential = meta.FindStatusCondition(got.Status.Conditions, ConditionProviderCredentialReady)
 	if !got.Status.Ready || credential == nil || credential.Status != metav1.ConditionUnknown || credential.Reason != reasonIssuerUnavailable {
 		t.Fatalf("Ready = %v, CredentialReady = %+v; want Unknown without blocking the Provider", got.Status.Ready, credential)

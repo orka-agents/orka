@@ -13,7 +13,7 @@ controller obtains short-lived tokens and adds them to the requests it sends.
 
 Keyless Providers serve chat, the compatibility APIs, and
 `type: ai` Tasks. The design is
-[ADR 0057](https://github.com/orka-agents/orka/blob/main/docs/adr/0057-keyless-azure-openai-providers.md).
+[ADR 0058](https://github.com/orka-agents/orka/blob/main/docs/adr/0058-keyless-azure-openai-providers.md).
 
 ## How it fits together
 
