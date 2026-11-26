@@ -1016,9 +1016,13 @@ func TestTaskReconcilerInitializesApprovalTrackingWithStatus(t *testing.T) {
 			if _, err := reconcileThenDeliver(context.Background(), reconciler, request); err != nil {
 				t.Fatal(err)
 			}
+			// An agent Task's first pass continues from its Pending write into
+			// admission, which this harness, configured with no runtime,
+			// settles in the same pass. Approval tracking comes from the
+			// status-initializing write either way.
 			stored := h.task()
-			if stored.Status.Phase != corev1alpha1.TaskPhasePending {
-				t.Fatalf("phase = %q, want status initialized", stored.Status.Phase)
+			if stored.Status.Phase == "" {
+				t.Fatal("phase is empty, want status initialized")
 			}
 			if len(selected) == 0 {
 				if stored.Status.ApprovalWebhooks != nil {

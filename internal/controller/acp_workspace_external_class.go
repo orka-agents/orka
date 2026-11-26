@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
@@ -113,31 +114,69 @@ func validateExternalACPProvider(ctx context.Context, c client.Client, provider 
 	return nil
 }
 
-func externalACPProfilePolicy(profile *unstructured.Unstructured, class *workspacev1alpha1.ExecutionWorkspaceClass) (string, *int32, error) {
+// externalACPProfileRetention is the retention policy core reads from an
+// external provider profile as unstructured data.
+type externalACPProfileRetention struct {
+	// SuspendMode is the permitted suspension scope; empty forbids Suspend.
+	SuspendMode string
+	// MaxSuspendedWorkspaces is the class retention cap, or nil.
+	MaxSuspendedWorkspaces *int32
+	// SuspendAfterDetach is the warm-detach window (ADR 0055), or zero.
+	SuspendAfterDetach time.Duration
+}
+
+func externalACPProfilePolicy(profile *unstructured.Unstructured, class *workspacev1alpha1.ExecutionWorkspaceClass) (externalACPProfileRetention, error) {
 	mode, _, err := unstructured.NestedString(profile.Object, "spec", "suspend", "mode")
 	if err != nil || (mode != "" && mode != "DataOnly") {
-		return "", nil, fmt.Errorf("profile suspension must preserve data only")
+		return externalACPProfileRetention{}, fmt.Errorf("profile suspension must preserve data only")
 	}
 	var cap *int32
 	raw, exists, err := unstructured.NestedInt64(profile.Object, "spec", "retention", "maxSuspendedWorkspaces")
 	if err != nil || (exists && (raw < 0 || raw > 2147483647)) {
-		return "", nil, fmt.Errorf("profile retention cap is invalid")
+		return externalACPProfileRetention{}, fmt.Errorf("profile retention cap is invalid")
 	}
 	if exists {
 		value := int32(raw)
 		cap = &value
 	}
 	suspend := slices.Contains(class.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
-	if suspend && (mode == "" || !slices.Contains(class.Spec.AllowedReuseScopes, workspacev1alpha1.WorkspaceReuseScopeSession)) {
-		return "", nil, fmt.Errorf("suspension requires a DataOnly profile and Session reuse")
+	sessionReuse := slices.Contains(class.Spec.AllowedReuseScopes, workspacev1alpha1.WorkspaceReuseScopeSession)
+	if suspend && (mode == "" || !sessionReuse) {
+		return externalACPProfileRetention{}, fmt.Errorf("suspension requires a DataOnly profile and Session reuse")
 	}
 	if suspend && class.Spec.Lifecycle.MaxLifetime == nil && (class.Spec.Lifecycle.IdleTimeout == nil || cap != nil) {
-		return "", nil, fmt.Errorf("suspended workspace lifetime must be bounded")
+		return externalACPProfileRetention{}, fmt.Errorf("suspended workspace lifetime must be bounded")
 	}
 	if cap != nil && *cap == 0 && class.Spec.Lifecycle.DefaultOnDetach == workspacev1alpha1.WorkspaceOnDetachSuspend {
-		return "", nil, fmt.Errorf("default suspension cannot use a zero retention cap")
+		return externalACPProfileRetention{}, fmt.Errorf("default suspension cannot use a zero retention cap")
 	}
-	return mode, cap, nil
+	policy := externalACPProfileRetention{SuspendMode: mode, MaxSuspendedWorkspaces: cap}
+	rawWindow, windowSet, err := unstructured.NestedString(profile.Object, "spec", "retention", "suspendAfterDetach")
+	if err != nil {
+		return externalACPProfileRetention{}, fmt.Errorf("profile retention suspendAfterDetach must be a duration string")
+	}
+	if !windowSet {
+		return policy, nil
+	}
+	window, err := parseACPWorkspaceSuspendAfterDetach(rawWindow)
+	if err != nil {
+		return externalACPProfileRetention{}, fmt.Errorf("profile retention %w", err)
+	}
+	if !suspend || mode == "" || !sessionReuse {
+		return externalACPProfileRetention{}, fmt.Errorf("suspendAfterDetach requires a class that allows Suspend with a DataOnly profile and Session reuse")
+	}
+	var idleTimeout, maxLifetime time.Duration
+	if class.Spec.Lifecycle.IdleTimeout != nil {
+		idleTimeout = class.Spec.Lifecycle.IdleTimeout.Duration
+	}
+	if class.Spec.Lifecycle.MaxLifetime != nil {
+		maxLifetime = class.Spec.Lifecycle.MaxLifetime.Duration
+	}
+	if err := validateACPWorkspaceSuspendAfterDetachBounds(window, idleTimeout, maxLifetime); err != nil {
+		return externalACPProfileRetention{}, err
+	}
+	policy.SuspendAfterDetach = window
+	return policy, nil
 }
 
 func externalACPClassProfileHash(class *workspacev1alpha1.ExecutionWorkspaceClass, provider *workspacev1alpha1.ExecutionWorkspaceProvider,
@@ -239,7 +278,7 @@ func (r *TaskReconciler) resolveExternalACPWorkspaceClass(ctx context.Context, r
 	if hash != class.Status.ProfileHash {
 		return nil, fmt.Errorf("class profile drifted from its pinned hash; create a new class")
 	}
-	mode, cap, err := externalACPProfilePolicy(profile, class)
+	retention, err := externalACPProfilePolicy(profile, class)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +297,7 @@ func (r *TaskReconciler) resolveExternalACPWorkspaceClass(ctx context.Context, r
 			ControllerName: provider.Spec.ControllerName, LifecycleContractVersion: workspacev1alpha1.LifecycleContractV1,
 			ProviderConfigRef: provider.Spec.ParametersRef.DeepCopy(), ProviderConfigBinding: configBinding,
 			ParametersRef: class.Spec.ParametersRef.DeepCopy(), ParametersBinding: parametersBinding,
-			SuspendMode: mode, MaxSuspendedWorkspaces: cap, DefaultOnDetach: string(class.Spec.Lifecycle.DefaultOnDetach),
+			SuspendMode: retention.SuspendMode, MaxSuspendedWorkspaces: retention.MaxSuspendedWorkspaces, DefaultOnDetach: string(class.Spec.Lifecycle.DefaultOnDetach),
 			AllowedOnDetach: onDetachActionsToStrings(class.Spec.Lifecycle.AllowedOnDetach), DetachTimeout: class.Spec.Lifecycle.DetachTimeout.Duration.String(),
 			DeletionPolicy: ACPWorkspaceClassDeletionPolicy{ProviderResources: string(class.Spec.Lifecycle.DeletionPolicy.ProviderResources), PersistentVolumes: string(class.Spec.Lifecycle.DeletionPolicy.PersistentVolumes), Checkpoints: string(class.Spec.Lifecycle.DeletionPolicy.Checkpoints)},
 		}}
@@ -267,6 +306,9 @@ func (r *TaskReconciler) resolveExternalACPWorkspaceClass(ctx context.Context, r
 	}
 	if class.Spec.Lifecycle.MaxLifetime != nil {
 		resolved.Binding.MaxLifetime = class.Spec.Lifecycle.MaxLifetime.Duration.String()
+	}
+	if retention.SuspendAfterDetach > 0 {
+		resolved.Binding.SuspendAfterDetach = retention.SuspendAfterDetach.String()
 	}
 	if resolved.Binding.DeletionPolicy.ProviderResources != string(workspacev1alpha1.WorkspaceDeletionActionDelete) || resolved.Binding.DeletionPolicy.PersistentVolumes != string(workspacev1alpha1.WorkspaceDeletionActionDelete) || resolved.Binding.DeletionPolicy.Checkpoints != string(workspacev1alpha1.WorkspaceDeletionActionDelete) {
 		return nil, fmt.Errorf("ACP workspace deletion policy must delete every category")

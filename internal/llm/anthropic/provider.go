@@ -105,11 +105,7 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	if idled(streamCtx) && ctx.Err() == nil {
 		// A stalled connection, like a broken one, has shown the caller
 		// nothing, so the retry layer may try again.
-		return acc.failed(&llm.ProviderError{
-			Provider:   providerName,
-			Message:    "anthropic stream sent nothing for " + streamIdleTimeout.String(),
-			StatusCode: http.StatusBadGateway,
-		})
+		return acc.failed(stalledStreamError())
 	}
 	if err := stream.Err(); err != nil {
 		pe := toProviderError(err)
@@ -301,7 +297,7 @@ func buildToolParams(tools []llm.Tool) []anthropic.ToolUnionParam {
 
 // buildRequestParams creates Anthropic MessageNewParams from a completion request.
 func buildRequestParams(req *llm.CompletionRequest) anthropic.MessageNewParams {
-	maxTokens := int64(4096)
+	maxTokens := defaultMaxTokens(req.Model)
 	if req.MaxTokens > 0 {
 		maxTokens = int64(req.MaxTokens)
 	}
@@ -498,7 +494,17 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 	go func() {
 		defer close(ch)
 
+		params := buildRequestParams(req)
+		streamCtx, guard := newIdleGuard(ctx)
+		defer guard.stop()
+		stream := p.client.Messages.NewStreaming(streamCtx, params, guard.middleware())
+		defer func() { _ = stream.Close() }()
+
 		send := func(chunk llm.StreamChunk) bool {
+			// A slow reader is not a stalled upstream, so the idle timer
+			// waits while a chunk does.
+			guard.pause()
+			defer guard.touch()
 			select {
 			case ch <- chunk:
 				return true
@@ -506,9 +512,6 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 				return false
 			}
 		}
-
-		params := buildRequestParams(req)
-		stream := p.client.Messages.NewStreaming(ctx, params)
 
 		var currentToolCall *llm.ToolCall
 		var toolCallArgs []byte
@@ -521,12 +524,27 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 			}
 		}
 
+		if idled(streamCtx) && ctx.Err() == nil {
+			send(llm.StreamChunk{Error: stalledStreamError(), Done: true})
+			return
+		}
 		if err := stream.Err(); err != nil {
 			send(llm.StreamChunk{Error: toProviderError(err), Done: true})
 		}
 	}()
 
 	return ch, nil
+}
+
+// stalledStreamError reports a stream the idle guard abandoned. A stalled
+// connection, like a broken one, is a gateway failure, which the retry layer
+// retries while the caller has seen none of the output.
+func stalledStreamError() *llm.ProviderError {
+	return &llm.ProviderError{
+		Provider:   providerName,
+		Message:    "anthropic stream sent nothing for " + streamIdleTimeout.String(),
+		StatusCode: http.StatusBadGateway,
+	}
 }
 
 // streamErrorStatus maps the type of an error event that arrives inside a

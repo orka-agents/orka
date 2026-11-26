@@ -1,0 +1,151 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package controller
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+// Workspace RuntimePool admission timing: from the first reconcile that sees
+// the provider's startup evidence for the current workspace generation,
+// through the sealed credential bootstrap, to the pool serving and accepting
+// on its authenticated probe. A runtime admitted once can be admitted again
+// in the same workload sequence when the pool closes and reopens, such as
+// after a Task's attachment changes the workspace generation; such lines are
+// marked readmission, with the lifecycle the pool reopened from. Times are taken in this process; the provider's
+// DataPlaneReady condition time has whole-second precision and is not used.
+
+const (
+	// acpLogKeyRuntimePool is the log key for a RuntimePool name.
+	acpLogKeyRuntimePool                 = "runtimePool"
+	acpLogKeySequence                    = "sequence"
+	acpRuntimeAdmissionTimingsLogMessage = "ACP workspace runtime admission timings"
+	acpRuntimeAdmissionMaxRecords        = 1024
+	acpRuntimeAdmissionRetention         = 30 * time.Minute
+)
+
+type acpRuntimeAdmissionKey struct {
+	pool     types.UID
+	sequence int64
+}
+
+type acpRuntimeAdmissionRecord struct {
+	observed time.Time
+	seeded   time.Time
+	// readmission is set when the pool already had an active instance, so
+	// this admission reopens a runtime that served before, as after a
+	// Task's attachment changed the workspace generation; reopenedFrom is
+	// the lifecycle the pool reopened from.
+	readmission  bool
+	reopenedFrom corev1alpha1.RuntimePoolLifecycle
+}
+
+type acpRuntimeAdmissionTimings struct {
+	now     func() time.Time
+	mu      sync.Mutex
+	records map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord
+}
+
+var acpRuntimeAdmission = &acpRuntimeAdmissionTimings{
+	now: time.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{},
+}
+
+// startupObserved records the first reconcile that sees current startup
+// evidence for the pool's workload sequence while the pool is not yet
+// admitting, as on a cold start, a resume, or re-admission after a warm
+// re-attach closed it. A pool already serving and accepting starts nothing.
+func (t *acpRuntimeAdmissionTimings) startupObserved(pool *corev1alpha1.RuntimePool, sequence int64) {
+	if pool == nil || pool.UID == "" || (pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting) {
+		return
+	}
+	now := t.now()
+	key := acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.records[key] != nil {
+		return
+	}
+	if len(t.records) >= acpRuntimeAdmissionMaxRecords {
+		for existing, record := range t.records {
+			if now.Sub(record.observed) >= acpRuntimeAdmissionRetention {
+				delete(t.records, existing)
+			}
+		}
+		if len(t.records) >= acpRuntimeAdmissionMaxRecords {
+			return
+		}
+	}
+	t.records[key] = &acpRuntimeAdmissionRecord{
+		observed: now, readmission: pool.Status.ActiveInstance != nil, reopenedFrom: pool.Status.Lifecycle,
+	}
+}
+
+// credentialsSeeded records the first successful credential bootstrap.
+func (t *acpRuntimeAdmissionTimings) credentialsSeeded(pool *corev1alpha1.RuntimePool, sequence int64) {
+	if pool == nil {
+		return
+	}
+	now := t.now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if record := t.records[acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}]; record != nil && record.seeded.IsZero() {
+		record.seeded = now
+	}
+}
+
+func runtimePoolAdmitting(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting
+}
+
+// served logs the sequence's admission once the pool's stored status serves
+// and accepts. The pass's own copy is not enough: it is set before the status
+// write, which can conflict without an error, so the stored pool is read and
+// an admission still pending keeps its record for the pass that lands it.
+func (t *acpRuntimeAdmissionTimings) served(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool, sequence int64) {
+	if !runtimePoolAdmitting(pool) {
+		return
+	}
+	key := acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}
+	t.mu.Lock()
+	open := t.records[key] != nil
+	t.mu.Unlock()
+	if !open {
+		return
+	}
+	stored := &corev1alpha1.RuntimePool{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), stored); err != nil ||
+		stored.UID != pool.UID || !runtimePoolAdmitting(stored) {
+		return
+	}
+	now := t.now()
+	t.mu.Lock()
+	record := t.records[key]
+	delete(t.records, key)
+	t.mu.Unlock()
+	if record == nil {
+		return
+	}
+	values := []any{acpCancelLogKeyNamespace, pool.Namespace, acpLogKeyRuntimePool, pool.Name, acpLogKeySequence, sequence,
+		"readmission", record.readmission, "reopenedFrom", string(record.reopenedFrom),
+		"totalMs", acpPreDispatchMillis(now.Sub(record.observed))}
+	if !record.seeded.IsZero() {
+		values = append(values,
+			"attestAndBootstrapMs", acpPreDispatchMillis(record.seeded.Sub(record.observed)),
+			"probeToServingMs", acpPreDispatchMillis(now.Sub(record.seeded)))
+	}
+	logf.FromContext(ctx).Info(acpRuntimeAdmissionTimingsLogMessage, values...)
+}

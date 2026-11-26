@@ -29,6 +29,7 @@ import (
 	"k8s.io/apiserver/pkg/admission/plugin/webhook/matchconditions"
 	celconfig "k8s.io/apiserver/pkg/apis/cel"
 	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/cel/environment"
 	"sigs.k8s.io/yaml"
 
@@ -307,6 +308,15 @@ type admissionPolicyEvaluator struct {
 	compiler    *admissioncel.CompositedCompiler
 	conditions  admissioncel.ConditionEvaluator
 	validations admissioncel.ConditionEvaluator
+	// authorizer answers the policy's authorizer checks. It denies every
+	// check unless a test supplies one.
+	authorizer authorizer.UnconditionalAuthorizer
+}
+
+// withAuthorizer returns the evaluator answering authorizer checks with a.
+func (p admissionPolicyEvaluator) withAuthorizer(a authorizer.UnconditionalAuthorizer) admissionPolicyEvaluator {
+	p.authorizer = a
+	return p
 }
 
 func compileGatewayTaskProtection(t *testing.T) admissionPolicyEvaluator {
@@ -337,7 +347,7 @@ func compileAdmissionPolicy(t *testing.T, file string, replacements *strings.Rep
 
 	compiler, err := admissioncel.NewCompositedCompiler(environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion()))
 	require.NoError(t, err)
-	options := admissioncel.OptionalVariableDeclarations{}
+	options := admissioncel.OptionalVariableDeclarations{HasAuthorizer: true}
 	for _, variable := range policy.Spec.Variables {
 		result := compiler.CompileAndStoreVariable(&validating.Variable{
 			Name: variable.Name, Expression: variable.Expression,
@@ -356,6 +366,7 @@ func compileAdmissionPolicy(t *testing.T, file string, replacements *strings.Rep
 		compiler:    compiler,
 		conditions:  compiler.CompileCondition(conditions, options, environment.NewExpressions),
 		validations: compiler.CompileCondition(validations, options, environment.NewExpressions),
+		authorizer:  fixedAuthorizer(false),
 	}
 	require.Empty(t, evaluator.conditions.CompilationErrors())
 	require.Empty(t, evaluator.validations.CompilationErrors())
@@ -409,7 +420,8 @@ func (p admissionPolicyEvaluator) admitsAs(
 	}
 	request := admissioncel.CreateAdmissionRequest(attributes, metav1.GroupVersionResource(resource), metav1.GroupVersionKind(kind))
 	ctx := p.compiler.CreateContext(context.Background())
-	conditions, budget, err := p.conditions.ForInput(ctx, versioned, request, admissioncel.OptionalVariableBindings{}, nil, celconfig.RuntimeCELCostBudget)
+	bindings := admissioncel.OptionalVariableBindings{Authorizer: p.authorizer}
+	conditions, budget, err := p.conditions.ForInput(ctx, versioned, request, bindings, nil, celconfig.RuntimeCELCostBudget)
 	require.NoError(t, err)
 	require.NotEmpty(t, conditions)
 	for _, condition := range conditions {
@@ -418,7 +430,7 @@ func (p admissionPolicyEvaluator) admitsAs(
 			return true
 		}
 	}
-	validations, _, err := p.validations.ForInput(ctx, versioned, request, admissioncel.OptionalVariableBindings{}, nil, budget)
+	validations, _, err := p.validations.ForInput(ctx, versioned, request, bindings, nil, budget)
 	require.NoError(t, err)
 	require.NotEmpty(t, validations)
 	for _, validation := range validations {

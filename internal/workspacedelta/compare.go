@@ -32,7 +32,9 @@ func BuildWithLimitsContext(ctx context.Context, baseline *Snapshot, postRoot st
 	// Content flags and fingerprints describe the trusted baseline only;
 	// re-running those heuristics over every post-prompt file would cost a
 	// full secret scan of the workspace on each delta.
-	post, err := capture(ctx, postRoot, baseline.options.withoutContentPolicy(), false)
+	// New paths the baseline's ignore rules match are left out of the post
+	// capture entirely: build output is not hashed, counted or published.
+	post, err := capture(ctx, postRoot, baseline.options.withoutContentPolicy(), false, baseline)
 	if err != nil {
 		return Result{}, err
 	}

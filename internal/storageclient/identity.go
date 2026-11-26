@@ -73,7 +73,7 @@ func requireStampedSessionMessages(method string, messages []store.SessionMessag
 
 // GetMessages implements Orka's message store over the provider contract: a
 // consuming read is ConsumeMessages and a plain one ListUnreadMessages, each
-// bounded to MaxMessageBatch messages.
+// bounded to MaxMessageBatch messages and MaxMessageBatchBytes of content.
 func (c *Client) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
 	return store.ReadMessages(ctx, c.StateProvider, namespace, taskName, parentTask, markRead)
 }

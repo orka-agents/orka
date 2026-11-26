@@ -232,6 +232,9 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 	if err := r.backfillACPWorkspaceSuspendedCap(ctx, workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
 		return "", false, err
 	}
+	if err := r.backfillACPWorkspaceSuspendAfterDetach(ctx, workspace, binding.Class.SuspendAfterDetach); err != nil {
+		return "", false, err
+	}
 	// The settlement link is persisted as soon as the deterministic workspace
 	// exists: a Task deleted while core admission is still pending must be
 	// able to settle (and apply its frozen detach action to) the session
@@ -406,6 +409,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
+	acpPreDispatch.mark(task, acpPreDispatchWorkspaceAttachRequested)
 	// The epoch this Task now holds is recorded IMMEDIATELY: a Task
 	// cancelled between Attach and the later attached-ready pass would
 	// otherwise settle with a zero recorded epoch, and the displaced-receipt
@@ -465,6 +469,18 @@ func validateACPClassWorkspaceAttachmentAttempt(
 		(workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID) {
 		return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
 	}
+	if workspace.Spec.Attachment == nil {
+		if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+			// The class path cold-resumes a Suspended workspace through its
+			// explicit Ready flip, never by attaching it. Rejecting here keeps an
+			// attach retry from reversing a suspension (for example the delayed
+			// Suspend of a warm-detach window) that landed after the first read.
+			return fmt.Errorf("workspace desired state %q is not reusable for direct attachment", workspace.Spec.DesiredState)
+		}
+		if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open && !now.Before(deadline) {
+			return fmt.Errorf("workspace warm-detach window expired at %s; wait for suspension", deadline.UTC().Format(time.RFC3339))
+		}
+	}
 	err := validateWorkspaceAttachmentAttempt(workspace, task, now)
 	if err == nil || binding.Class.ControllerName == "" || workspace.Spec.Attachment != nil {
 		return err
@@ -512,9 +528,11 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	binding *ACPRuntimeWorkspaceBinding,
 ) error {
 	action := binding.Class.EffectiveOnDetach
+	_, warmDeadline := workspace.Annotations[acpWorkspaceSuspendAtAnnotation]
+	_, warmPending := workspace.Annotations[acpWorkspaceSuspendPendingAnnotation]
 	if workspace.Annotations[acpWorkspaceDetachActionAnnotation] == action &&
 		workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] == "" &&
-		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" {
+		workspace.Annotations[acpWorkspaceResumeRequestedAnnotation] == "" && !warmDeadline && !warmPending {
 		return nil
 	}
 	base := workspace.DeepCopy()
@@ -527,6 +545,11 @@ func (r *TaskReconciler) recordACPWorkspaceDetachAction(
 	// its own revocation, and retention resumes ordinary idle handling.
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	// A continuation attached during a warm-detach window (ADR 0055) ends
+	// it: the warm runtime now serves this attachment.
+	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
@@ -882,6 +905,9 @@ func workspaceCreationAnnotations(binding *ACPRuntimeWorkspaceBinding, poolName,
 	if binding.Class.MaxSuspendedWorkspaces != nil {
 		annotations[acpWorkspaceMaxSuspendedAnnotation] = strconv.FormatInt(int64(*binding.Class.MaxSuspendedWorkspaces), 10)
 	}
+	if binding.Class.SuspendAfterDetach != "" {
+		annotations[acpWorkspaceSuspendAfterDetachAnnotation] = binding.Class.SuspendAfterDetach
+	}
 	if runtimeNamespace != "" {
 		// Freeze the realized runtime namespace so deletion proofs probe the
 		// ORIGINAL provider-children namespace even if the controller flag
@@ -921,6 +947,9 @@ func verifyACPClassWorkspace(
 		return err
 	}
 	if err := validateACPWorkspaceSuspendedCap(workspace, binding.Class.MaxSuspendedWorkspaces); err != nil {
+		return err
+	}
+	if err := validateACPWorkspaceSuspendAfterDetach(workspace, binding.Class.SuspendAfterDetach); err != nil {
 		return err
 	}
 	if workspace.Spec.Slot != binding.WorkspaceSlot {
@@ -1194,7 +1223,7 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		// The pending-detach stamp becomes durable BEFORE the attachment
 		// clears: a continuation observing a nil attachment must also see the
 		// pending Delete settlement and wait for the fresh workspace.
-		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, attachment.Epoch); err != nil {
+		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, task, attachment.Epoch); err != nil {
 			return false, err
 		}
 		if err := manager.BeginRevocation(ctx, workspace, attachment.Epoch); err != nil {
@@ -1210,9 +1239,15 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 	if workspace.Spec.Attachment == nil && workspace.Spec.AttachmentEpoch > 0 {
 		epoch := workspace.Spec.AttachmentEpoch
 		// Restart-safe: ensure the deadline stamp exists for exactly this
-		// epoch before enforcing it.
-		if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, epoch); err != nil {
-			return false, err
+		// epoch before enforcing it, unless retention has already moved the
+		// workspace to Suspended (for example, warm-window expiry after epoch
+		// release and before Task settlement). Restamping an already-Suspended
+		// workspace would leave a stale revocation stamp behind and block a
+		// continuation even after cold resume.
+		if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+			if err := r.markACPWorkspaceRevocationStarted(ctx, workspace, task, epoch); err != nil {
+				return false, err
+			}
 		}
 		if err := manager.FinalizeRevocation(ctx, workspace, epoch, attachmentSecretName(workspace.Name, epoch)); err != nil {
 			// The adapter has not cleared the enforced epoch yet. The frozen
@@ -1286,7 +1321,14 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 		failedACPWorkspaceRetainsCheckpoint(workspace, time.Now()) {
 		// The provider stops the failed attempt without capturing or replaying
 		// it. Keep the source Failed for explicit recovery export; existing
-		// idle/maxLifetime retention still owns its deadline.
+		// idle/maxLifetime retention still owns its deadline, so a warm
+		// window opened at revocation must not expire it first.
+		if err := clearACPWorkspaceSuspendAt(ctx, r.Client, workspace, false, time.Now()); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, err
+		}
 		return true, r.markACPTaskWorkspaceSettled(ctx, task)
 	}
 
@@ -1337,6 +1379,16 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			}
 			return true, nil
 		}
+		// ADR 0055: an eligible detach keeps the committed workspace Ready
+		// and its runtime warm until the deadline stamped at revocation;
+		// retention applies the frozen Suspend when it passes.
+		if applied, retry, warmErr := r.settleACPWorkspaceWarm(ctx, workspace, task, time.Now()); warmErr != nil {
+			return false, warmErr
+		} else if retry {
+			return false, nil
+		} else if applied {
+			return true, r.markACPTaskWorkspaceSettled(ctx, task)
+		}
 		reader := client.Reader(r.Client)
 		if r.APIReader != nil {
 			reader = r.APIReader
@@ -1357,6 +1409,14 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			// Delete. A live queued continuation can take the still-Ready
 			// workspace directly; otherwise settlement remains pending until
 			// capacity opens or maxLifetime independently forces cleanup.
+			// A warm window opened at revocation has already elapsed here, so
+			// it ends now and the runtime stops while the Suspend is pending.
+			if clearErr := clearACPWorkspaceSuspendAt(ctx, r.Client, workspace, false, time.Now()); clearErr != nil {
+				if apierrors.IsConflict(clearErr) || apierrors.IsNotFound(clearErr) {
+					return false, nil
+				}
+				return false, clearErr
+			}
 			if deferred, retry, deferErr := r.deferACPSettlementToSuccessor(ctx, workspace, task); deferErr != nil {
 				return false, deferErr
 			} else if retry {
@@ -1642,11 +1702,20 @@ func settlementWorkspaceBelongsToTask(workspace *workspacev1alpha1.ExecutionWork
 // is measured per revocation: a stale stamp from a previous epoch can never
 // serve as a later attachment's deadline and instantly quarantine a live
 // workspace.
+//
+// The same patch opens or clears this detach's warm window (ADR 0055): the
+// attachment clears as soon as revocation begins, and the RuntimePool demand
+// rule must already see the deadline then, or the pool would scale to zero
+// and start an irreversible drain before settlement could keep it warm.
 func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
 	epoch int64,
 ) error {
+	if workspace.Spec.Attachment == nil && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		return nil
+	}
 	if stampedEpoch, _, ok := parseACPWorkspaceRevocationStamp(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]); ok && stampedEpoch == epoch {
 		return nil
 	}
@@ -1654,11 +1723,21 @@ func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	if workspace.Annotations == nil {
 		workspace.Annotations = map[string]string{}
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	startedAt := time.Now().UTC()
+	now := startedAt.Format(time.RFC3339Nano)
 	workspace.Annotations[acpWorkspaceRevocationStartedAnnotation] = fmt.Sprintf("%d %s", epoch, now)
 	// The detach instant is stamped as revocation begins so idle retention
 	// never falls back to the creation timestamp while the epoch settles.
 	workspace.Annotations[acpWorkspaceLastDetachedAnnotation] = now
+	// Each detach gets its own window: a deadline left by an earlier epoch is
+	// replaced, never carried into this one.
+	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	if window := acpWorkspaceWarmDetachWindow(workspace, task); window > 0 {
+		workspace.Annotations[acpWorkspaceSuspendAtAnnotation] = startedAt.Add(window).Format(time.RFC3339Nano)
+	} else {
+		delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	}
 	if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
 	}

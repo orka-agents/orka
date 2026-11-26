@@ -1532,7 +1532,7 @@ func TestACPWorkspaceRevocationFencesReplacementIncarnation(t *testing.T) {
 		t.Fatalf("read original workspace: %v", err)
 	}
 
-	if err := r.markACPWorkspaceRevocationStarted(ctx, original, 4); err == nil {
+	if err := r.markACPWorkspaceRevocationStarted(ctx, original, nil, 4); err == nil {
 		t.Fatal("revocation stamp patch succeeded across workspace replacement")
 	}
 	replacement := &workspacev1alpha1.ExecutionWorkspace{}

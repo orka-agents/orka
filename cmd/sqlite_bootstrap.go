@@ -15,9 +15,9 @@ import (
 // sealed record before bootstrap completes, and SQLite only ever stores
 // sealed bytes.
 func openControllerSQLiteStore(
-	path string, loadKey func(sqlite.DatasetInfo) ([]byte, error),
+	path string, loadKey func(sqlite.DatasetInfo) ([]byte, error), options ...sqlite.OpenOption,
 ) (*sqlite.Store, *storageclient.Client, []byte, error) {
-	s, err := sqlite.OpenLockedStore(path)
+	s, err := sqlite.OpenLockedStore(path, options...)
 	if err != nil {
 		return nil, nil, nil, err
 	}
