@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/test/mocks/server'
 
@@ -32,6 +32,19 @@ describe('useOversightStream', () => {
     await waitFor(() => expect(result.current.decisions.map((d) => d.seq)).toEqual([6, 5]), { timeout: 3000 })
     expect(afters.slice(0, 3)).toEqual(['2', '5', '5'])
     expect(result.current.lastSeq).toBe(6)
+    unmount()
+  })
+
+  it('drops the previous namespace\'s decisions on a switch while paused', async () => {
+    server.use(http.get('/api/v1/oversight/decisions/stream', () =>
+      new HttpResponse(`event: ready\ndata: {}\n\n${frame(7)}`, { headers: { 'Content-Type': 'text/event-stream' } })))
+    const { result, rerender, unmount } = renderHook(({ enabled }) => useOversightStream({ q: '', enabled, after: 0, reconnectDelayMs: 5 }), { initialProps: { enabled: true } })
+    await waitFor(() => expect(result.current.decisions.map((d) => d.seq)).toEqual([7]))
+    rerender({ enabled: false })
+    expect(result.current.decisions.map((d) => d.seq)).toEqual([7])
+    act(() => useUIStore.setState({ namespace: 'other' }))
+    await waitFor(() => expect(result.current.decisions).toEqual([]))
+    expect(result.current.lastSeq).toBe(0)
     unmount()
   })
 

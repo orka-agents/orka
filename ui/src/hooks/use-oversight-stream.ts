@@ -100,6 +100,9 @@ export function useOversightStream({ q, enabled, after, cap = 500, reconnectDela
   const generationRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The namespace the held decisions belong to. Pausing keeps them; a
+  // namespace switch drops them even while paused.
+  const ownerRef = useRef(namespace)
 
   const accept = useCallback((decision: DecisionView, frameId?: string) => {
     const seq = decision.seq ?? (frameId ? Number(frameId) : NaN)
@@ -189,8 +192,17 @@ export function useOversightStream({ q, enabled, after, cap = 500, reconnectDela
     const generation = generationRef.current
     abortRef.current?.abort()
     if (timerRef.current) clearTimeout(timerRef.current)
+    const namespaceChanged = ownerRef.current !== namespace
+    ownerRef.current = namespace
     if (!enabled) {
       setStatus('idle')
+      if (namespaceChanged) {
+        seenRef.current = new Set()
+        cursorRef.current = afterRef.current
+        setDecisions([])
+        setError(null)
+        setLastSeq(afterRef.current)
+      }
       return
     }
     seenRef.current = new Set()
@@ -217,7 +229,7 @@ export function useOversightStream({ q, enabled, after, cap = 500, reconnectDela
       abortRef.current?.abort()
       if (timerRef.current) clearTimeout(timerRef.current)
     }
-  }, [enabled, connect, reconnectDelayMs])
+  }, [enabled, connect, reconnectDelayMs, namespace])
 
   return { decisions, status, error, lastSeq }
 }
