@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -226,7 +225,7 @@ func (b *JobBuilder) checkScheduledRunSecretReferences(
 	}
 	// The run must be the copy the controller made: same image, command,
 	// Secrets and everything else that decides what receives the Secrets.
-	if !reflect.DeepEqual(scheduledRunSpec(parent), scheduledRunSpec(task)) {
+	if !equality.Semantic.DeepEqual(scheduledRunSpec(parent), scheduledRunSpec(task)) {
 		return nil, fmt.Errorf("scheduled run's spec differs from its scheduled Task %q, so it cannot receive Secrets", parent.Name)
 	}
 	return parent, nil
