@@ -33,19 +33,19 @@ func ParseMCPResourceURL(raw string) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", fmt.Errorf("MCP resource URL %q must be an absolute URL with no credentials, query or fragment", raw)
+		return "", errors.New("MCP resource URL must be an absolute URL with no credentials, query or fragment")
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	if scheme != "https" && (scheme != "http" || !isLoopbackHostname(parsed.Hostname())) {
-		return "", fmt.Errorf("MCP resource URL %q must use https, or http only for localhost", raw)
+		return "", errors.New("MCP resource URL must use https, or http only for localhost")
 	}
 	if strings.ContainsFunc(parsed.Host, func(r rune) bool {
 		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]", r)
 	}) {
-		return "", fmt.Errorf("MCP resource URL %q has a host Orka cannot quote in a WWW-Authenticate challenge", raw)
+		return "", errors.New("MCP resource URL has a host Orka cannot quote in a WWW-Authenticate challenge")
 	}
 	if parsed.EscapedPath() != mcpEndpointPath {
-		return "", fmt.Errorf("MCP resource URL %q must end in the endpoint path %s, with no prefix", raw, mcpEndpointPath)
+		return "", fmt.Errorf("MCP resource URL must end in the endpoint path %s, with no prefix", mcpEndpointPath)
 	}
 	return scheme + "://" + strings.ToLower(parsed.Host) + mcpEndpointPath, nil
 }

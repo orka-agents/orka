@@ -56,6 +56,21 @@ func TestParseMCPResourceURL(t *testing.T) {
 	}
 }
 
+func TestParseMCPResourceURLKeepsRejectedValuesOutOfErrors(t *testing.T) {
+	for _, raw := range []string{
+		"https://hunter2-secret@orka.example.com/mcp",
+		"https://orka.example.com/mcp?access_token=hunter2-secret",
+		"https://orka.example.com/mcp#hunter2-secret",
+		"http://hunter2-secret.example.com/mcp",
+		"https://orka.example.com/hunter2-secret/mcp",
+		"https://orka.example.com/mcp\x00hunter2-secret",
+	} {
+		_, err := ParseMCPResourceURL(raw)
+		require.Error(t, err, raw)
+		require.NotContains(t, err.Error(), "hunter2-secret", "the startup log must not repeat a rejected URL")
+	}
+}
+
 func TestParseOIDCScopes(t *testing.T) {
 	scopes, err := ParseOIDCScopes(" openid profile,email  offline_access,groups ")
 	require.NoError(t, err)
