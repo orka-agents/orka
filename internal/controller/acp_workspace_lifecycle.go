@@ -1420,13 +1420,21 @@ func (r *TaskReconciler) settleACPClassWorkspace(ctx context.Context, task *core
 			// queued continuation that died before attachment has epoch zero;
 			// overwriting a later attached Task's receipt would let that older
 			// settlement re-apply Suspend after a subsequent resume.
-			if existingUID != string(task.UID) && (!existingOK || existingEpoch <= taskEpoch) {
+			clearDemand := acpWorkspaceResumeDemandBelongsToTask(
+				workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID))
+			writeReceipt := existingUID != string(task.UID) && (!existingOK || existingEpoch <= taskEpoch)
+			if writeReceipt || clearDemand {
 				base := workspace.DeepCopy()
 				if workspace.Annotations == nil {
 					workspace.Annotations = map[string]string{}
 				}
-				workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
-					formatACPWorkspaceSettlementReceipt(string(task.UID), taskEpoch)
+				if writeReceipt {
+					workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
+						formatACPWorkspaceSettlementReceipt(string(task.UID), taskEpoch)
+				}
+				if clearDemand {
+					delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+				}
 				if err := r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 					if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 						return false, nil

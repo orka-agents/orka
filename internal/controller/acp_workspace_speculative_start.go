@@ -732,6 +732,28 @@ func (r *TaskReconciler) releaseACPWorkspaceStagedAttachmentObjects(
 		*lease.Spec.HolderIdentity != string(task.UID) || lease.Annotations[workspaceAttachmentLeaseEpochAnnotation] != epoch {
 		return nil
 	}
+	// Renew our Lease before deleting the Secret so a concurrent successor
+	// cannot take over an expired Lease and install this next-epoch Secret
+	// while we are deleting it. If the Lease already changed hands, the
+	// optimistic-lock Patch conflicts and we leave the successor's Secret alone.
+	now := metav1.NewMicroTime(time.Now().UTC())
+	leaseBase := lease.DeepCopy()
+	lease.Spec.RenewTime = &now
+	if err := r.Patch(ctx, lease, client.MergeFromWithOptions(leaseBase, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	// Reconfirm the workspace has not moved past this epoch before deleting the
+	// Secret.
+	freshWS := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(workspace), freshWS); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if freshWS.UID != workspace.UID || freshWS.Spec.AttachmentEpoch >= next {
+		return nil
+	}
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: attachmentSecretName(workspace.Name, next)}, secret); err == nil {
 		secretOwner := metav1.GetControllerOf(secret)
