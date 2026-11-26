@@ -2749,7 +2749,7 @@ func (r *TaskReconciler) handleFinalizing(
 			if err := r.markACPTaskAttachmentEpoch(ctx, task, revocationEpoch); err != nil {
 				return ctrl.Result{}, err
 			}
-			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
+			if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, task, revocationEpoch); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -2782,7 +2782,7 @@ func (r *TaskReconciler) handleFinalizing(
 			acpWorkspace := workspaceHasACPControllerOwnership(workspaceObject)
 			if acpWorkspace {
 				revocationEpoch = acpWorkspaceRevocationEpochForTask(task, workspaceObject, revocationEpoch)
-				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, revocationEpoch); err != nil {
+				if err := r.markACPWorkspaceRevocationStarted(ctx, workspaceObject, task, revocationEpoch); err != nil {
 					return ctrl.Result{}, err
 				}
 			}

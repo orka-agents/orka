@@ -15,6 +15,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
 func TestWorkspaceRuntimePoolReconcilerDemandAndRetirementPreserveProviderStatus(t *testing.T) {
@@ -67,6 +69,70 @@ func TestWorkspaceRuntimePoolReconcilerDemandAndRetirementPreserveProviderStatus
 			}
 			if test.expired && (current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || current.Spec.Attachment == nil || !current.DeletionTimestamp.IsZero()) {
 				t.Fatal("pool demand reconciliation took ownership of workspace lifetime expiry")
+			}
+		})
+	}
+}
+
+func TestWorkspaceRuntimePoolReconcilerKeepsReplicasOnlyDuringWarmDetachWindow(t *testing.T) {
+	future := time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339Nano)
+	past := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano)
+	suspend := string(workspacev1alpha1.WorkspaceOnDetachSuspend)
+	for _, test := range []struct {
+		name         string
+		mutate       func(*workspacev1alpha1.ExecutionWorkspace)
+		wantReplicas int32
+	}{
+		{name: "warm window keeps the runtime", wantReplicas: 1, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = future
+		}},
+		{name: "elapsed deadline is retention's to end", wantReplicas: 1, mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = past
+		}},
+		{name: "no deadline", mutate: func(*workspacev1alpha1.ExecutionWorkspace) {}},
+		{name: "malformed deadline", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = "soon"
+		}},
+		{name: "recorded Delete action", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = future
+			w.Annotations[acpWorkspaceDetachActionAnnotation] = string(workspacev1alpha1.WorkspaceOnDetachDelete)
+		}},
+		{name: "operator tainted", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = future
+			w.Annotations[operatoraccess.TaintAnnotation] = "x"
+		}},
+		{name: "quarantined", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = future
+			w.Labels[workspacev1alpha1.QuarantinedLabel] = booleanTrueValue
+		}},
+		{name: "failed", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Annotations[acpWorkspaceSuspendAtAnnotation] = future
+			w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
+		}},
+		{name: "suspended by retention", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newExternalRuntimePoolFixture(t)
+			workspace := f.currentWorkspace(t)
+			workspace.Annotations[acpWorkspaceDetachActionAnnotation] = suspend
+			test.mutate(workspace)
+			status := workspace.Status.DeepCopy()
+			if err := f.r.Update(ctx, workspace); err != nil {
+				t.Fatal(err)
+			}
+			workspace.Status = *status
+			if err := f.r.Status().Update(ctx, workspace); err != nil {
+				t.Fatal(err)
+			}
+			reconciler := &WorkspaceRuntimePoolReconciler{Client: f.r.Client, APIReader: f.r.Client}
+			if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(workspace)}); err != nil {
+				t.Fatal(err)
+			}
+			if got := runtimePoolTestGetPool(t, f.r, f.pool).Spec.DesiredReplicas; got != test.wantReplicas {
+				t.Fatalf("pool replicas = %d, want %d", got, test.wantReplicas)
 			}
 		})
 	}

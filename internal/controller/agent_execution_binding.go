@@ -193,12 +193,16 @@ type agentExecutionSnapshotWorkspaceClass struct {
 	SuspendMode              string                                    `json:"suspendMode,omitempty"`
 	SandboxVolume            *agentExecutionSnapshotSandboxVolume      `json:"sandboxVolume,omitempty"`
 	MaxSuspended             *int32                                    `json:"maxSuspended,omitempty"`
-	DefaultOnDetach          string                                    `json:"defaultOnDetach"`
-	AllowedOnDetach          []string                                  `json:"allowedOnDetach"`
-	DetachTimeout            string                                    `json:"detachTimeout"`
-	IdleTimeout              string                                    `json:"idleTimeout,omitempty"`
-	MaxLifetime              string                                    `json:"maxLifetime,omitempty"`
-	DeletionPolicy           struct {
+	// SuspendAfterDetach is omitted when unset; downgrade precondition: a
+	// controller release from before ADR 0055 rejects snapshots that carry a
+	// nonempty suspendAfterDetach field (DisallowUnknownFields).
+	SuspendAfterDetach string   `json:"suspendAfterDetach,omitempty"`
+	DefaultOnDetach    string   `json:"defaultOnDetach"`
+	AllowedOnDetach    []string `json:"allowedOnDetach"`
+	DetachTimeout      string   `json:"detachTimeout"`
+	IdleTimeout        string   `json:"idleTimeout,omitempty"`
+	MaxLifetime        string   `json:"maxLifetime,omitempty"`
+	DeletionPolicy     struct {
 		ProviderResources string `json:"providerResources"`
 		PersistentVolumes string `json:"persistentVolumes"`
 		Checkpoints       string `json:"checkpoints"`
@@ -1147,6 +1151,7 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		ParametersBinding:        class.ParametersBinding.DeepCopy(),
 		EffectiveOnDetach:        class.EffectiveOnDetach,
 		SuspendMode:              class.SuspendMode,
+		SuspendAfterDetach:       class.SuspendAfterDetach,
 		DefaultOnDetach:          class.DefaultOnDetach,
 		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
 		DetachTimeout:            class.DetachTimeout,
@@ -1194,6 +1199,7 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 		ParametersBinding:        class.ParametersBinding.DeepCopy(),
 		EffectiveOnDetach:        class.EffectiveOnDetach,
 		SuspendMode:              class.SuspendMode,
+		SuspendAfterDetach:       class.SuspendAfterDetach,
 		DefaultOnDetach:          class.DefaultOnDetach,
 		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
 		DetachTimeout:            class.DetachTimeout,

@@ -653,6 +653,11 @@ func (d *ACPDispatcher) runtimePoolIdlePolicy(
 		return d.IdlePoolTTL, false, nil
 	}
 	attached := workspace.Spec.Attachment != nil
+	// A detached workspace inside an open warm-detach window (ADR 0055) must not
+	// be scaled to zero by the idle reaper before retention ends the window.
+	if acpWorkspaceWarmWindowHoldsPool(workspace) {
+		attached = true
+	}
 	idleTimeout := workspace.Spec.Lifecycle.IdleTimeout
 	if idleTimeout == nil {
 		return d.IdlePoolTTL, attached, nil
