@@ -259,6 +259,20 @@ The embedded dashboard shows the same state under **Monitors**:
 - detail page with open PR count, pending reviews, blocked items, merge-ready count, recent runs, and PR queue
 - manual **Run** action for an immediate monitor run
 
+### Decision events
+
+Monitor events that record a decision carry the same three metadata fields:
+
+| Field | Meaning |
+| --- | --- |
+| `decision` | `accepted`, `refused`, `held`, `blocked`, `acted`, or `failed` |
+| `reason` | A reason code, such as `draft`, `repair_pr_budget_exhausted`, or `patch_path_not_allowed` |
+| `policy` | The spec clause that decided, with its effective value when it is a scalar, such as `spec.repair.maxRepairsPerPR=5` or `spec.policy.protectedLabels`. Fixed rules that no setting changes are named `builtin:<name>`. Absent when GitHub state or a runtime failure decided |
+
+Command intake writes `command_accepted`, `command_rejected`, or `command_blocked` for each label or API command. A label command that reaches a monitor for its repository but falls outside its target scope (a closed issue, issue targets disabled, or an excluded or missing required label) writes `command_rejected` with no command record. A finished repair writes `repair_succeeded`, naming the push's GitHub mutation record, or `repair_failed` with its reason. A branch update that does not complete writes `update_branch_failed`. Events that describe the monitor's own lifecycle, such as `run_started` or `item_selected`, carry no decision.
+
+Event IDs are derived from the decision, so a step retried after a restart is recorded once. A `held` or `refused` decision is recorded once per item, head, reason, policy, and command, not on every poll: an unchanged draft pull request has one `item_skipped` event however often the monitor polls it, and a new head is recorded anew.
+
 ## Review workspace context
 
 The review Task is pinned to the exact PR head SHA with `workspace.intent: read`. Before creating it, the controller fetches the pull request identity, lists the pull request's changed files with their patches, and refetches the pull request to ensure the base, head, and head repository did not change during context assembly. The drift check runs even when the file listing failed, so a race fails closed instead of queueing a stale review; a GitHub read failure does not fail the run and instead marks the context `contextUnavailable`.

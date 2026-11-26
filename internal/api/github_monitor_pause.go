@@ -147,21 +147,22 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 }
 
 func (h *Handlers) recordRepositoryMonitorPauseRejection(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, payload githubLabelWebhookPayload, target githubLabelTarget, delivery, permission string) error {
-	metadata, err := json.Marshal(map[string]string{
-		apiFieldAction: payload.Action, apiFieldLabel: payload.Label.Name,
-		"delivery": delivery, "repository": payload.Repository.FullName,
-		"sender": payload.Sender.Login, "permission": permission,
-	})
-	if err != nil {
-		return err
-	}
-	event := &store.MonitorEvent{
+	event, err := store.NewRepositoryMonitorEvent(store.RepositoryMonitorEventInput{
 		ID:               "mevt-" + githubRepositoryMonitorExactRunID(monitor, delivery+"|pause-rejected"),
 		MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
 		ItemKind: target.Kind, ItemNumber: int64(target.Number), ItemSHA: target.HeadSHA,
-		EventType: "pause_label_rejected", Actor: "github-webhook",
-		Summary:      "Pause-label reconciliation trigger rejected: sender permission is not allowed for this monitor",
-		MetadataJSON: string(metadata),
+		EventType: "pause_label_rejected", Actor: repositoryMonitorWebhookEventActor,
+		Summary: "Pause-label reconciliation trigger rejected: sender permission is not allowed for this monitor",
+		Metadata: map[string]any{
+			apiFieldAction: payload.Action, apiFieldLabel: payload.Label.Name,
+			repositoryMonitorEventDeliveryField: delivery, "repository": payload.Repository.FullName,
+			repositoryMonitorEventSenderField: payload.Sender.Login, "permission": permission,
+			store.RepositoryMonitorEventReasonField: repositoryMonitorCommandReasonPermission,
+		},
+		Policy: repositoryMonitorPermissionPolicy(monitor, permission, ""),
+	})
+	if err != nil {
+		return err
 	}
 	if err := h.repositoryMonitorStore.CreateMonitorEvent(c.Context(), event); err != nil {
 		// Delivery retries retain one rejection receipt, like accepted intake.

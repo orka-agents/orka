@@ -193,7 +193,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusSucceeded, item.WorkflowPhase, "", reason); err != nil {
 			return 0, err
 		}
-		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_skipped", fmt.Sprintf("Issue #%d implement command skipped: %s", item.Number, reason), map[string]any{repositoryMonitorEventActionKindKey: repositoryMonitorIssueActionImplementation, "phase": item.WorkflowPhase})
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_skipped", fmt.Sprintf("Issue #%d implement command skipped: %s", item.Number, reason), map[string]any{repositoryMonitorEventActionKindKey: repositoryMonitorIssueActionImplementation, "phase": item.WorkflowPhase, eventReasonField: "implementation_already_active", commandEventIDField: command.ID})
 	}
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequirePlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhasePlanned {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
@@ -214,7 +214,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, actionKind, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", reason); err != nil {
 			return 0, err
 		}
-		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d command blocked: %s", item.Number, reason), map[string]any{repositoryMonitorEventActionKindKey: actionKind, "fromPhase": item.WorkflowPhase, "toPhase": phase})
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d command blocked: %s", item.Number, reason), map[string]any{repositoryMonitorEventActionKindKey: actionKind, "fromPhase": item.WorkflowPhase, "toPhase": phase, eventReasonField: "phase_transition_not_allowed", commandEventIDField: command.ID})
 	}
 	if !repositoryMonitorIssuePhaseEnabled(monitor, actionKind) {
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
@@ -228,7 +228,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return 0, err
 		}
-		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind, eventReasonField: item.SkipReason, commandEventIDField: command.ID})
 	}
 	if actionKind == repositoryMonitorIssueActionImplementation {
 		planID := ""
@@ -251,7 +251,7 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
 			return 0, err
 		}
-		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: no agent configured for %s", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
+		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: no agent configured for %s", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind, eventReasonField: item.SkipReason, commandEventIDField: command.ID})
 	}
 	taskName, created, err := r.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, owner, repository, actionKind, phase, agent)
 	if err != nil {
@@ -354,7 +354,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorIssueImplementation(
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", item.SkipReason); err != nil {
 			return 0, err
 		}
-		return 0, r.Store.UpsertMonitorItem(ctx, item)
+		return 0, r.saveBlockedRepositoryMonitorIssueImplementation(ctx, monitor, run, command, item)
 	}
 	if monitor.Spec.Agents.Implementer == nil || strings.TrimSpace(monitor.Spec.Agents.Implementer.Name) == "" {
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
@@ -362,7 +362,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorIssueImplementation(
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", item.SkipReason); err != nil {
 			return 0, err
 		}
-		return 0, r.Store.UpsertMonitorItem(ctx, item)
+		return 0, r.saveBlockedRepositoryMonitorIssueImplementation(ctx, monitor, run, command, item)
 	}
 	existingTaskName := repositoryMonitorIssueActionTaskName(monitor, run, item, repositoryMonitorIssueActionImplementation)
 	if reason, err := r.issueImplementationBudgetBlockReason(ctx, monitor, item, existingTaskName); err != nil {
@@ -373,7 +373,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorIssueImplementation(
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, repositoryMonitorIssueActionImplementation, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", reason); err != nil {
 			return 0, err
 		}
-		return 0, r.Store.UpsertMonitorItem(ctx, item)
+		return 0, r.saveBlockedRepositoryMonitorIssueImplementation(ctx, monitor, run, command, item)
 	}
 	taskName, created, err := r.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, owner, repository, repositoryMonitorIssueActionImplementation, repositoryMonitorIssuePhaseImplementationQueued, monitor.Spec.Agents.Implementer)
 	if err != nil {

@@ -579,6 +579,7 @@ func (r *RepositoryMonitorReconciler) finishRepositoryMonitorReviewPublish(ctx c
 	metadata["phase"] = record.Phase
 	if record.SkipReason != "" {
 		metadata["skipReason"] = record.SkipReason
+		metadata[eventReasonField] = record.SkipReason
 	}
 	if record.Error != "" {
 		metadata[errorField] = record.Error

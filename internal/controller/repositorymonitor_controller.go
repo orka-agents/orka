@@ -815,7 +815,10 @@ func (r *RepositoryMonitorReconciler) executeClaimedMonitorRun(ctx context.Conte
 	if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 		return nil, 0, err
 	}
-	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_started", "Repository monitor run started", nil); err != nil {
+	// A retried run starts again under the same ID; its start time tells the
+	// attempts' events apart.
+	attempt := repositoryMonitorRunAttempt(&run)
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", "run_started", "Repository monitor run started", map[string]any{repositoryMonitorRunAttemptField: attempt}); err != nil {
 		completedAt := time.Now()
 		run.CompletedAt = &completedAt
 		run.Phase = repositoryMonitorRunPhaseFailed
@@ -847,7 +850,7 @@ func (r *RepositoryMonitorReconciler) executeClaimedMonitorRun(ctx context.Conte
 				if err := r.Store.UpdateMonitorRun(ctx, &run); err != nil {
 					return nil, 0, err
 				}
-				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{stateField: failureState}); eventErr != nil {
+				if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed; retry scheduled"), map[string]any{stateField: failureState, repositoryMonitorRunAttemptField: attempt}); eventErr != nil {
 					return nil, 0, eventErr
 				}
 				return &run, repositoryMonitorCommandRetryDelay, nil
@@ -861,7 +864,7 @@ func (r *RepositoryMonitorReconciler) executeClaimedMonitorRun(ctx context.Conte
 			return nil, 0, err
 		}
 		metrics.RecordRepositoryMonitorBlock(failureState)
-		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{stateField: failureState}); eventErr != nil {
+		if eventErr := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, repositoryScanConditionMessage(processErr.Error(), "repository monitor run failed"), map[string]any{stateField: failureState, repositoryMonitorRunAttemptField: attempt}); eventErr != nil {
 			return nil, 0, eventErr
 		}
 		return &run, 0, nil
@@ -924,8 +927,9 @@ func (r *RepositoryMonitorReconciler) failStaleRunningMonitorRun(ctx context.Con
 		return nil, 0, err
 	}
 	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, run.Error, map[string]any{
-		eventReasonField: "stale_running_run",
-		"timeout":        repositoryMonitorRunningRunTimeout.String(),
+		eventReasonField:                 "stale_running_run",
+		"timeout":                        repositoryMonitorRunningRunTimeout.String(),
+		repositoryMonitorRunAttemptField: repositoryMonitorRunAttempt(&run),
 	}); err != nil {
 		run.Error = fmt.Sprintf("%s; additionally failed to record recovery event: %v", run.Error, err)
 	}
@@ -971,6 +975,10 @@ func (r *RepositoryMonitorReconciler) finalizeInterruptedMonitorRun(ctx context.
 	if err := r.Store.UpdateMonitorRun(ctx, run); err != nil {
 		return err
 	}
+	if details == nil {
+		details = map[string]any{}
+	}
+	details[repositoryMonitorRunAttemptField] = repositoryMonitorRunAttempt(run)
 	if err := r.createMonitorEvent(ctx, monitor, run.ID, "", 0, "", repositoryMonitorRunFailurePermanent, run.Error, details); err != nil {
 		run.Error = fmt.Sprintf("%s; additionally failed to record recovery event: %v", run.Error, err)
 	}

@@ -780,16 +780,20 @@ func (r *RepositoryMonitorReconciler) completeRepositoryMonitorUpdateBranch(ctx 
 		return pendingMutationProjectionError("event lookup", err)
 	}
 	if len(events) == 0 {
-		metadata, err := json.Marshal(map[string]string{repositoryMonitorFieldBaseSHA: pr.BaseSHA, repositoryMonitorFieldHeadSHA: pr.HeadSHA})
+		event, err := store.NewRepositoryMonitorEvent(store.RepositoryMonitorEventInput{
+			ID: eventID, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID,
+			ItemKind: repositoryMonitorPullRequestKind, ItemNumber: pr.Number, ItemSHA: pr.HeadSHA,
+			EventType: "update_branch_succeeded", Actor: controllerNameValue,
+			Summary: fmt.Sprintf("Pull request #%d branch updated", pr.Number),
+			Metadata: map[string]any{
+				repositoryMonitorFieldBaseSHA: pr.BaseSHA, repositoryMonitorFieldHeadSHA: pr.HeadSHA,
+				repositoryMonitorEventMutationIDField: mutation.ID, commandEventIDField: command.ID,
+			},
+		})
 		if err != nil {
 			return pendingMutationProjectionError("event metadata", err)
 		}
-		if err := r.Store.CreateMonitorEvent(ctx, &store.MonitorEvent{
-			ID: eventID, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, RunID: run.ID,
-			ItemKind: repositoryMonitorPullRequestKind, ItemNumber: pr.Number, ItemSHA: pr.HeadSHA,
-			EventType: "update_branch_succeeded", Actor: "controller", //nolint:goconst // Audit actors are independent of workspace namespace strategies.
-			Summary: fmt.Sprintf("Pull request #%d branch updated", pr.Number), MetadataJSON: string(metadata),
-		}); err != nil {
+		if err := r.Store.CreateMonitorEvent(ctx, event); err != nil {
 			return pendingMutationProjectionError("event", err)
 		}
 	}
@@ -808,6 +812,9 @@ func (r *RepositoryMonitorReconciler) failRepositoryMonitorUpdateBranch(ctx cont
 	item.RepairState = repositoryMonitorRepairPhaseFailed
 	item.SkipReason = repositoryMonitorUpdateBranchFailure
 	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+		return err
+	}
+	if err := r.recordRepositoryMonitorUpdateBranchFailure(ctx, monitor, run, command, item, mutation, reason); err != nil {
 		return err
 	}
 	return r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, item.Number, command.HeadSHA, "", command.Intent, repositoryMonitorWorkActionStatusFailed, repositoryMonitorRepairPhaseFailed, "", reason)
@@ -996,13 +1003,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 		}
 		cursor = next
 	}
-	maxPR, maxHead := 5, 2
-	if max := monitor.Spec.Repair.MaxRepairsPerPR; max != nil {
-		maxPR = int(*max)
-	}
-	if max := monitor.Spec.Repair.MaxRepairsPerHead; max != nil {
-		maxHead = int(*max)
-	}
+	maxPR, maxHead := repositoryMonitorMaxRepairsPerPR(monitor.Spec), repositoryMonitorMaxRepairsPerHead(monitor.Spec)
 	if repairCountPR >= maxPR {
 		return repositoryMonitorRepairPRBudgetReason, repairCountPR, repairCountHead, nil
 	}
@@ -1765,6 +1766,9 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 			pushMutation.Status = repositoryMonitorRunPhaseFailed
 		}
 		if err := r.updateRepositoryMonitorGitHubMutation(ctx, monitor, pushMutation); err != nil {
+			return ingested, err
+		}
+		if err := r.recordRepositoryMonitorRepairOutcome(ctx, monitor, &job, &task, commandID, pushMutationID); err != nil {
 			return ingested, err
 		}
 		completedAt := time.Now()

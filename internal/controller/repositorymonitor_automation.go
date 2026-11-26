@@ -267,16 +267,11 @@ func (r *RepositoryMonitorReconciler) refuseRepositoryMonitorAutomaticRepair(ctx
 	item.RepairState = repositoryMonitorRepairPhaseFailed
 	item.SkipReason = reason
 	// Review selection may replace the item's skip reason, so the refusal is
-	// also kept as an event, once per head and reason rather than every poll.
+	// also kept as an event. Its ID is derived from the head and reason, so
+	// it is recorded once per head and reason rather than every poll.
 	summary := fmt.Sprintf("Pull request #%d automatic repair refused: %s", pr.Number, reason)
-	recent, _, err := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: pr.Number, EventType: repositoryMonitorEventRepairRefused, Limit: 1})
-	if err != nil {
+	if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, repositoryMonitorEventRepairRefused, summary, map[string]any{eventReasonField: reason}); err != nil {
 		return false, err
-	}
-	if len(recent) == 0 || recent[0].ItemSHA != pr.HeadSHA || recent[0].Summary != summary {
-		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, repositoryMonitorEventRepairRefused, summary, map[string]any{eventReasonField: reason}); err != nil {
-			return false, err
-		}
 	}
 	if repositoryMonitorPullRequestReviewed(monitor.Spec, pr) {
 		fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, pr.HeadSHA)

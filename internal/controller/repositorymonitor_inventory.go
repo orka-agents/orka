@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1601,16 +1600,11 @@ func readRepositoryMonitorGitHubResponse(body io.Reader, limit int64) ([]byte, e
 	return respBody, nil
 }
 
+// createMonitorEvent records one monitor audit event with its decision and
+// the policy clause behind its reason. The event ID is deterministic, so a
+// replayed step or a repeated hold is recorded once.
 func (r *RepositoryMonitorReconciler) createMonitorEvent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, runID, itemKind string, itemNumber int64, itemSHA, eventType, summary string, metadata map[string]any) error {
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	metadataJSON, err := json.Marshal(metadata)
-	if err != nil {
-		return err
-	}
-	return r.Store.CreateMonitorEvent(ctx, &store.MonitorEvent{
-		ID:               "mevt-" + uuid.NewString(),
+	event, err := store.NewRepositoryMonitorEvent(store.RepositoryMonitorEventInput{
 		MonitorNamespace: monitor.Namespace,
 		MonitorName:      monitor.Name,
 		RunID:            runID,
@@ -1620,6 +1614,11 @@ func (r *RepositoryMonitorReconciler) createMonitorEvent(ctx context.Context, mo
 		EventType:        eventType,
 		Actor:            controllerNameValue,
 		Summary:          summary,
-		MetadataJSON:     string(metadataJSON),
+		Metadata:         metadata,
+		Policy:           repositoryMonitorEventPolicy(monitor, itemKind, metadata),
 	})
+	if err != nil {
+		return err
+	}
+	return store.RecordRepositoryMonitorEvent(ctx, r.Store, event)
 }

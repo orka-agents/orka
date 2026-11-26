@@ -23,3 +23,11 @@ run_go_test ./internal/controller 'TestRepositoryMonitor(IssueImplementToPRFakeG
 run_go_test ./internal/store/sqlite 'TestMonitorWorkflowStoresActionsJobsAndMutations'
 
 run_go_test ./workers/ai '^TestUsageIssueToMergedPRWorkflowE2E$'
+
+# Decision events: each monitor decision is recorded once, with its reason and
+# the policy clause that decided it.
+run_go_test ./internal/store 'Test(RepositoryMonitorEventDecisionCoversDecisionTypesOnly|NewRepositoryMonitorEventStampsDecisionAndPolicy|NewRepositoryMonitorEventIDs|RecordRepositoryMonitorEventTreatsConflictAsRecorded)$'
+
+run_go_test ./internal/api 'Test(GitHubWebhook_LabelCommandIntakeRecordsOneDecisionEvent|GitHubWebhook_OutOfScopeLabelCommandRecordsRejectionWithoutCommand|RepositoryMonitorPermissionPolicyNamesTheDecidingClause)$'
+
+run_go_test ./internal/controller 'TestRepositoryMonitor(ItemSkippedIsRecordedOncePerHeadAndReason|BlockedImplementationRecordsDecisionEvent|FailedUpdateBranchRecordsDecisionEvent|RunAttemptsKeepTheirOwnEvents|EventPolicyNamesSpecClauses|RepairAppliesImplementationPathLimits)$'
