@@ -18,12 +18,20 @@ import (
 	"strings"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
 
-const internalMemoryToolBodyLimit = 1 << 20 // 1MB
+// MemoryRecallResultLimit is the largest encoded recall result an agent
+// receives: the native tool reads at most this much of the controller's
+// response, and the ACP broker refuses a larger tool result. A recall whose
+// result is larger is not counted, since the agent never gets all of it.
+const MemoryRecallResultLimit = 1 << 20
+
+const internalMemoryToolBodyLimit = MemoryRecallResultLimit
 
 // RecallMemoryTool retrieves durable namespace-scoped memories relevant to the current task.
 type RecallMemoryTool struct{}
@@ -127,7 +135,14 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 		if memories == nil {
 			memories = []store.Memory{}
 		}
-		return marshalMemoryToolResult(memories)
+		result, err := marshalMemoryToolResult(memories)
+		if err != nil {
+			return "", err
+		}
+		if len(result) <= MemoryRecallResultLimit {
+			RecordMemoryRecall(ctx, toolCtx.MemoryRecallRecorder, cfg.Namespace, memories)
+		}
+		return result, nil
 	}
 
 	values := url.Values{}
@@ -144,6 +159,9 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if a.IncludeDisabled || a.IncludeDisabledCamel {
 		values.Set("includeDisabled", trueStr)
 	}
+	// Mark the request as a recall, so the controller counts the memories it
+	// returns. A prompt's memory context uses the same route without it.
+	values.Set(MemoryListPurposeParam, MemoryListPurposeRecall)
 
 	endpoint := cfg.url("/internal/v1/memories/"+url.PathEscape(cfg.Namespace), values)
 	body, err := doInternalControllerRequest(ctx, cfg, http.MethodGet, endpoint, nil)
@@ -151,6 +169,71 @@ func (t *RecallMemoryTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("failed to recall memory: %w", err)
 	}
 	return body, nil
+}
+
+// MemoryListPurposeParam and MemoryListPurposeRecall mark an internal memory
+// list request as an agent recall, which the controller counts.
+const (
+	MemoryListPurposeParam  = "purpose"
+	MemoryListPurposeRecall = "recall"
+)
+
+// MemoryRecallRecordTimeout bounds one recall count. It is longer than the
+// storage client's own retry horizon, so a count normally finishes, or fails,
+// on its own: cancelling a write midway would leave its outcome unknown, and
+// the storage client holds later writes until it resolves one.
+var MemoryRecallRecordTimeout = time.Minute
+
+// memoryRecallSlots bounds how many recall counts run at once. A recall that
+// finds every slot taken is not counted.
+var memoryRecallSlots = make(chan struct{}, 16)
+
+// RecordMemoryRecall counts the memories a recall returned, without delaying
+// the recall: the count runs in the background, on a fresh context that
+// keeps only the caller's logger, since a request's context can be cancelled
+// or reused once it returns. Counting is best effort, so a count that fails,
+// or finds no free slot, is logged and dropped.
+func RecordMemoryRecall(ctx context.Context, recorder MemoryRecallRecorder, namespace string, memories []store.Memory) {
+	RecordAuthorizedMemoryRecall(ctx, nil, recorder, namespace, memories)
+}
+
+// RecordAuthorizedMemoryRecall is RecordMemoryRecall for a recall that counts
+// only when authorize allows it. Authorize runs in the background before the
+// count, on the count's context, so checking the caller never delays the
+// recall either.
+func RecordAuthorizedMemoryRecall(ctx context.Context, authorize func(context.Context) bool, recorder MemoryRecallRecorder,
+	namespace string, memories []store.Memory) {
+	if recorder == nil || len(memories) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(memories))
+	for _, memory := range memories {
+		ids = append(ids, memory.ID)
+	}
+	if len(ids) > store.MaxMemoryRecallIDs {
+		ids = ids[:store.MaxMemoryRecallIDs]
+	}
+	recall := store.MemoryRecall{Namespace: namespace, IDs: ids, RecalledAt: time.Now().UTC()}
+	logger := log.FromContext(ctx)
+	select {
+	case memoryRecallSlots <- struct{}{}:
+	default:
+		logger.Info("dropped a memory recall count: too many counts are running", "namespace", namespace, "memories", len(ids))
+		return
+	}
+	countCtx := log.IntoContext(context.Background(), logger)
+	timeout := MemoryRecallRecordTimeout
+	go func() {
+		defer func() { <-memoryRecallSlots }()
+		ctx, cancel := context.WithTimeout(countCtx, timeout)
+		defer cancel()
+		if authorize != nil && !authorize(ctx) {
+			return
+		}
+		if err := recorder.RecordMemoryRecall(ctx, recall); err != nil {
+			logger.Error(err, "failed to record a memory recall", "namespace", namespace, "memories", len(ids))
+		}
+	}()
 }
 
 // ProposeMemoryTool submits memory-adjacent governance proposals for coordinator review.

@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,13 +30,18 @@ const (
 	defaultReadHeaderTimeout     = 5 * time.Second
 	defaultIdleTimeout           = 30 * time.Second
 	defaultMaxConcurrentRequests = 32
+	codexRejectionDetailTimeout  = 250 * time.Millisecond
+	codexRejectionWriteGrace     = time.Second
 	authorizationHeader          = "Authorization"
 )
 
 var errRequestBodyTooLarge = errors.New("provider request body exceeds limit")
+var errCodexRetryPrecondition = errors.New("the Codex retry route is no longer qualified")
 
 type proxyConfig struct {
 	UpstreamBaseURL       string
+	Codex429RetryBaseURL  string
+	Codex429RetryModel    string
 	MaxRequestBytes       int64
 	MaxResponseBytes      int64
 	ResponseHeaderTimeout time.Duration
@@ -44,6 +50,9 @@ type proxyConfig struct {
 
 type providerAuthProxy struct {
 	upstreamBase     *url.URL
+	codex429RouteID  string
+	codex429Target   string
+	codex429Model    string
 	tokens           *bearerTokenStore
 	maxRequestBytes  int64
 	maxResponseBytes int64
@@ -58,6 +67,10 @@ func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStor
 	}
 	if tokens == nil {
 		return nil, fmt.Errorf("provider auth token store is required")
+	}
+	routeID, err := providerproxy.Codex429EgressID(upstream, normalized.Codex429RetryBaseURL, normalized.Codex429RetryModel)
+	if err != nil {
+		return nil, err
 	}
 	transport := &http.Transport{
 		Proxy:                  nil,
@@ -75,6 +88,9 @@ func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStor
 	}
 	return &providerAuthProxy{
 		upstreamBase:     upstream,
+		codex429RouteID:  routeID,
+		codex429Target:   normalized.Codex429RetryBaseURL + "/v1/responses",
+		codex429Model:    normalized.Codex429RetryModel,
 		tokens:           tokens,
 		maxRequestBytes:  normalized.MaxRequestBytes,
 		maxResponseBytes: normalized.MaxResponseBytes,
@@ -146,7 +162,7 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serveHealth(w, r)
 		return
 	}
-	if !p.authorized(r.Header.Values(authorizationHeader)) {
+	if !p.authorized(r.Header) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="orka-provider-auth-proxy"`)
 		providerproxy.WriteError(w, http.StatusUnauthorized, "provider proxy authentication required")
 		return
@@ -174,8 +190,25 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := providerproxy.Target(p.upstreamBase, r.URL.Path, r.URL.RawQuery)
-	body := &boundedReadCloser{ReadCloser: r.Body, remaining: p.maxRequestBytes}
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), body)
+	body, challenge, err := p.requestBody(r, target)
+	if err != nil {
+		switch {
+		case errors.Is(err, errRequestBodyTooLarge):
+			providerproxy.WriteError(w, http.StatusRequestEntityTooLarge, errRequestBodyTooLarge.Error())
+		case errors.Is(err, errCodexRetryPrecondition):
+			providerproxy.WriteError(w, http.StatusPreconditionFailed, errCodexRetryPrecondition.Error())
+		default:
+			providerproxy.WriteError(w, http.StatusBadRequest, "provider request body could not be read")
+		}
+		return
+	}
+	ctx := r.Context()
+	var cancel context.CancelFunc
+	if challenge != "" {
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
+	upstreamRequest, err := http.NewRequestWithContext(ctx, r.Method, target.String(), body)
 	if err != nil {
 		providerproxy.WriteError(w, http.StatusBadGateway, "provider request could not be prepared")
 		return
@@ -207,6 +240,15 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providerproxy.CopyResponseHeaders(w.Header(), response.Header)
+	confirmedRejection := challenge != "" && response.StatusCode == http.StatusTooManyRequests
+	if confirmedRejection {
+		deadline := time.Now().Add(codexRejectionDetailTimeout + codexRejectionWriteGrace)
+		_ = http.NewResponseController(w).SetWriteDeadline(deadline)
+		timer := time.AfterFunc(codexRejectionDetailTimeout, cancel)
+		defer timer.Stop()
+		w.Header().Del("Content-Length")
+		w.Header().Set(providerproxy.Codex429RouteHeader, challenge)
+	}
 	w.WriteHeader(response.StatusCode)
 	flusher, _ := w.(http.Flusher)
 	// Flush headers before waiting for the first upstream body chunk, then flush
@@ -214,13 +256,49 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if flusher != nil {
 		flusher.Flush()
 	}
+	if confirmedRejection {
+		limit := min(providerproxy.Codex429RejectionDetailBytes, p.maxResponseBytes)
+		_ = providerproxy.StreamBoundedResponse(w, io.LimitReader(response.Body, limit), limit, flusher)
+		return
+	}
 	if err := providerproxy.StreamBoundedResponse(w, response.Body, p.maxResponseBytes, flusher); err != nil {
 		panic(http.ErrAbortHandler)
 	}
 }
 
-func (p *providerAuthProxy) authorized(values []string) bool {
-	return p.tokens.authorized(values)
+// Ordinary requests still stream without buffering. Only a challenge for our
+// independently pinned physical route needs a bounded check of the actual
+// model selector. A stale conditional resend must not reach another gateway.
+func (p *providerAuthProxy) requestBody(r *http.Request, target *url.URL) (io.ReadCloser, string, error) {
+	var body io.ReadCloser = &boundedReadCloser{ReadCloser: r.Body, remaining: p.maxRequestBytes}
+	var challenge string
+	if r.Method == http.MethodPost && !r.URL.ForceQuery && target.String() == p.codex429Target && r.URL.RawPath == "" && providerproxy.DirectCodexHeaders(r.Header) {
+		challenge = providerproxy.Codex429Challenge(r.Header, p.codex429RouteID)
+	}
+	if challenge != "" {
+		data, err := io.ReadAll(body)
+		_ = body.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		if !providerproxy.DirectCodexBody(data, p.codex429Model) {
+			challenge = ""
+		}
+		// In particular, do not give net/http GetBody for an idempotency-keyed POST.
+		body = io.NopCloser(bytes.NewReader(data))
+	}
+	if retry := r.Header.Values(providerproxy.Codex429RetryHeader); len(retry) > 0 && (len(retry) != 1 || retry[0] != "1" || challenge == "") {
+		return nil, "", errCodexRetryPrecondition
+	}
+	return body, challenge, nil
+}
+
+func (p *providerAuthProxy) authorized(h http.Header) bool {
+	auth := h.Values(authorizationHeader)
+	if retry := h.Values(providerproxy.Codex429RetryHeader); len(retry) > 0 {
+		return len(retry) == 1 && retry[0] == "1" && p.tokens.authorizedScheme(auth, providerproxy.Codex429RetryAuthScheme)
+	}
+	return p.tokens.authorized(auth)
 }
 
 func serveHealth(w http.ResponseWriter, r *http.Request) {

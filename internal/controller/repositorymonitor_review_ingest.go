@@ -733,7 +733,7 @@ func validateRepositoryMonitorValidationWorkspace(reviewTask, validationTask *co
 		!reflect.DeepEqual(workspace.ReadCredentialRef, reviewWorkspace.ReadCredentialRef) {
 		return fmt.Errorf("validation task workspace does not match the exact reviewed head")
 	}
-	if strings.TrimSpace(workspace.Branch) != "" || strings.TrimSpace(workspace.PublicationGitRepo) != "" || workspace.PublicationReadCredentialRef != nil || workspace.PublicationCredentialRef != nil || workspace.ForgeCredentialRef != nil || strings.TrimSpace(workspace.PushBranch) != "" || workspace.CreatePR {
+	if strings.TrimSpace(workspace.Branch) != "" || strings.TrimSpace(workspace.PublicationGitRepo) != "" || workspace.PublicationReadCredentialRef != nil || workspace.PublicationCredentialRef != nil || workspace.ForgeCredentialRef != nil || workspace.CommitSigningCredentialRef != nil || strings.TrimSpace(workspace.PushBranch) != "" || workspace.CreatePR {
 		return fmt.Errorf("validation task workspace contains publication capabilities")
 	}
 	return nil

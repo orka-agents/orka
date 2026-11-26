@@ -261,4 +261,55 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 					ReportEntryVisibilityAlways)
 			})
 		}
+
+		var skillImage string
+		for _, provider := range runtimeEvalProviders {
+			It("does not use repository agent configuration with "+provider.kind, func() {
+				DeferCleanup(func() { providerProxyMockLLM.injectFixtures() })
+				var tasks, agents []string
+				DeferCleanup(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+					defer cancel()
+					if len(tasks) != 0 {
+						cleanup, err := newE2ECleanup(apiBaseURL, token)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(cleanup.tasks(ctx, tasks, false)).To(Succeed())
+					}
+					for _, agent := range agents {
+						deleteE2EObjects("agent", agent)
+					}
+				})
+				// Each case needs its own pool, and the earlier cases' idle
+				// pools would otherwise hold more runtime Pods than a small CI
+				// node can schedule.
+				soulEvalParkRuntimePools()
+				ref := fakeForgeState().Branches[fakeForgeRepository][fakeforge.RepositoryConfigBranch]
+				Expect(ref).To(MatchRegexp(`^[0-9a-f]{40}$`), "fake forge has no repository config branch")
+				testCase := runtimeEvalRepositoryConfigCase{
+					provider: provider.kind, model: provider.model, runID: runID,
+					name:    runID + "-" + provider.kind + "-config",
+					repoURL: "https://" + fakeForgeHost() + "/" + fakeForgeRepository + ".git", ref: ref,
+					readCredential: credentials[fakeforge.RoleRead].(map[string]any),
+					applyAgent: func(agent map[string]any) {
+						Expect(applyManifestJSON(agent)).To(Succeed())
+						agents = append(agents, agent["metadata"].(map[string]any)["name"].(string))
+					},
+					applyTask: func(task map[string]any) {
+						Expect(applyManifestJSON(task)).To(Succeed())
+						tasks = append(tasks, task["metadata"].(map[string]any)["name"].(string))
+					},
+				}
+				// Orka runtime skills exist for Claude, Codex, and OpenCode; the
+				// OpenCode workspace is refused before any skill could load.
+				if provider.kind == "claude" || provider.kind == "codex" {
+					if skillImage == "" {
+						image, err := buildRepositoryConfigSkillImage()
+						Expect(err).NotTo(HaveOccurred(), "could not publish the runtime skill image")
+						skillImage = image
+					}
+					testCase.skillImage = skillImage
+				}
+				testCase.run()
+			})
+		}
 	})

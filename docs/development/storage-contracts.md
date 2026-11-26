@@ -14,8 +14,11 @@ selection.
 the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
-whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 5` identifies this metadata layout. Opening a database
+whether the installation has detached it, and when the binding last changed,
+and the dataset's write watermark with the time it last advanced.
+`PRAGMA user_version = 10` identifies this layout, which adds the write
+watermark columns to the version 9 layout of the GitHub sign-in session table
+and the version 8 Agent Host Protocol tables. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -26,25 +29,37 @@ adds the metadata table, the 168-to-169 transition adds operation receipts and
 the epoch advance columns, the 169-to-170 transition adds the binding columns,
 the 170-to-171 transition makes a `retry_pending` work action own its dedupe
 key, the 171-to-172 transition adds the write stamp columns of results and
-artifacts, and the upgrade records an adopted identity. A store at an earlier
-schema version upgrades through numbered version steps under the same lock,
-backup and transaction: a version-1 store (the 159-object layout) gains the
-168-to-169, 169-to-170 and 170-to-171 objects and the 171-to-172 columns, a
-version-2 store gains the 169-to-170 columns, the 170-to-171 index and the
-171-to-172 columns, a version-3 store gains the 170-to-171 index and the
-171-to-172 columns, a version-4 store gains the 171-to-172 columns, and all
+artifacts, the 172-to-173 transition adds memory generations and consolidation
+proposal targets, the 173-to-174 transition adds memory consolidation runs, the
+174-to-175 transition adds the empty Agent Host Protocol tables, the
+175-to-176 transition adds the empty GitHub sign-in session table, the
+176-to-177 transition adds the write watermark columns, and the
+upgrade records an adopted identity. A store at an earlier schema version
+upgrades through numbered version steps under the same lock, backup and
+transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
+169-to-170 and 170-to-171 objects and every later step, a version-2 store gains
+the 169-to-170 columns and every later step, a version-3 store gains the
+170-to-171 index and every later step, a version-4 store gains the 171-to-172
+columns and every later step, a version-5 store gains the 172-to-173 columns
+and every later step, a version-6 store gains the 173-to-174 table and every
+later step, a version-7 store gains the empty 174-to-175 and 175-to-176
+tables and the 176-to-177 columns, a version-8 store gains the empty
+175-to-176 table and the 176-to-177 columns, a version-9 store gains the
+176-to-177 columns, and all
 keep their identity row, records and bootstrap state unchanged. Before the
 170-to-171 index is rebuilt, a `retry_pending` work action that shares its
 dedupe key with a queued, leased or running action, or with a newer
 `retry_pending` one, is cancelled with reason `dedupe_superseded`. Existing
-results and artifacts get the write stamp (0, 0). An installation a version-2
-store's epoch advance recorded stays its owner, at switch generation 0 with no
-record. Missing or malformed
+results and artifacts get the write stamp (0, 0), and the write watermark
+starts at zero.
+An installation a version-2 store's epoch advance recorded stays its owner, at
+switch generation 0 with no record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
-or failed checkpoint fails startup; ordinary writes retain their existing
-`synchronous=NORMAL` setting.
+or failed checkpoint fails startup; ordinary writes use the configured
+synchronous mode, `synchronous=NORMAL` by default (see "Durability, switch
+detection and recovery holds").
 The frozen historical fingerprints, migration SQL and unsupported #700 layout
 remain unchanged. See [the upgrade procedure](../../website/docs/operations/upgrading.md).
 
@@ -96,12 +111,15 @@ Kubernetes authority remains separate from either boundary.
 | `SessionCleanupPersistenceStore`, `SessionTurnCleanupReceiptStore` | Cleanup identity, durable intents, completion tombstones and retained turn receipts; state. | Kubernetes composite and cleanup recovery. These close crash windows across Kubernetes deletion and transcript deletion. |
 | `GatewayEventStore`, `GatewayDeliveryStore` | Ingress deduplication/claims, canonical transcript projection, deliveries, budgets, retries and event tombstones; state. | Gateway service, adapters, task reconciliation and conversation reply tools. Existing grouped admission/projection and delivery idempotency must survive a future adapter. |
 | `GatewayTaskCleanupReceiptStore`, `GatewayTaskCleanupReceiptMaintenanceStore`, `GatewaySessionCleanupCandidateStore` | Compaction ownership evidence and retained transcript candidates; state. | Gateway retention/recovery. Live uncached Kubernetes absence checks precede receipt deletion. |
+| `MemoryConsolidationStore` | Memory consolidation runs: one per Task UID, the window of Sessions each reads, its report, and the namespace cursor that only completed runs move; state. | Internal memory consolidation routes. Completion creates the run's proposals in the same transaction; Orka redacts them and the report first. |
 | `MemoryStore`, `MemoryProposalStore` | Durable namespace memories and governance proposals/review/application history; state. | Memory APIs and worker tools. Proposal review does not apply a memory. Redaction and authorization remain Orka responsibilities. |
 | `PlanStore`, `ExecutionEventStore`, `DeduplicatingExecutionEventStore`, `AtomicExecutionEventPlanStore` | Plan state, ordered event streams, sequence projections and deduplication; state. | Task reconciliation, runtime event capture, SSE/API and worker tools. Plan-aware append groups event and plan update. Existing event retention is preserved. |
 | `MessageStore` | Inter-agent messages and read state; state. | Worker APIs, task message tools and Task cleanup. A consuming read is a write that marks exactly the messages it returns, and its replay returns the same messages (see "Messages, counters and chat turns"). |
 | `SecurityStore` | Scan runs, ingestion receipts, slices, threat models, findings, dropped findings and patch proposals; state. | RepositoryScan reconciler and security APIs. Ingestion groups result application, run changes and receipt. Kubernetes RepositoryScan/Task identity remains authoritative. |
 | `RepositoryMonitorStore`, `tools.RepositoryValidationBindingStore` | Monitor snapshots/runs/items, actions, review/publication records, commands, implementation/repair jobs, GitHub mutation records and monitor events; state. | RepositoryMonitor reconciler, APIs and repository validation tools. The narrow binding interface uses monitor-event persistence; it is not a separate database. |
-| `UsageStore` | Immutable work ownership, Task observations, PR links/outcomes and retention watermark; state. | Usage reconciler, monitor workflows, event ingestion and usage API. Observation retries are idempotent; usage retention is independent of transcript cleanup. |
+| `UsageStore` | Immutable work ownership, Task observations, PR links/outcomes, each Task's requester and AHP turn mark, and retention watermark; state. | Usage reconciler, monitor workflows, event ingestion and usage API. Observation retries are idempotent; usage retention is independent of transcript cleanup. |
+| `AHPStore` | Agent Host Protocol connection tokens (hashes only), client bindings, and each user's sequence, replay journal, channel states, session catalog and session backend records; state. | AHP host and its Orka session backend. Everything but tokens and clients is keyed by an opaque user key; a journal append is refused unless it continues the user's sequence. |
+| `AuthSessionStore` | GitHub sign-in sessions (token hashes only) with the person's issuer, subject, login and namespace, and their expiry and revocation; state. | GitHub sign-in (ADR 0037). Each write drops sessions that ended and keeps a person's `MaxAuthSessionsPerSubject` most recently issued ones; a session renews once, revoking itself and storing its successor in one write. |
 | `TaskJobAuthorityStore`, `TaskDataFenceStore` | Job revocations and Task/namespace cleanup generations; state, also fencing colocated artifact writes. | Worker API and brokered tool access, Task finalization and cleanup. Authorization is checked against live Kubernetes identity with no store transaction open; each fenced data call then checks the cleanup generation and authorized Jobs in its own transaction. |
 | `ControllerEpochMirror` | A subordinate copy of the Kubernetes-acquired epoch for payload transaction fences; state. | Controller epoch manager and SQLite turn/outbox persistence. A mirror cannot elect or advance controller ownership. |
 | `ArtifactStore` | Public Task artifact bytes, filename, content type, size and timestamps in one record; artifacts. | Worker uploads/downloads, task APIs, scan workflows and cleanup. Metadata cannot be detached into state when selecting a future artifact backend. |
@@ -138,9 +156,9 @@ event vocabulary and two provider interfaces:
   data fences, execution events (including grouped appends), gateway records,
   security records (including scan Task ingestion), repository monitors,
   usage, memories with their proposals (creation, review, archiving and
-  application), SessionTurn records with their finalization, and sealed
-  execution snapshots, native session records and connector custody (see
-  "Key custody and sealing").
+  application), Agent Host Protocol state, SessionTurn records with their
+  finalization, and sealed execution snapshots, native session records and
+  connector custody (see "Key custody and sealing").
 - `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
 
 `internal/store` keeps aliases for the moved names, so Orka callers keep their
@@ -196,13 +214,18 @@ the observable parts.
   retention removes it to be recorded, and one requires binding a cleanup
   identity to a Session created during the call to succeed or report it
   missing, never a conflict.
-- **Durability.** A nil error means the change survives a provider restart and
-  any failover the provider declares automatic. `Describe` reports a
-  `DurabilityClass` so Orka can refuse automatic continuation after a failover
-  that may lose acknowledged writes. The embedded SQLite store reports
-  `local-buffered`: it runs in WAL mode with `synchronous=NORMAL`, so a commit
-  survives a process restart, but the most recent commits can be lost if the
-  host fails before the WAL is synced.
+- **Durability.** A nil error means the change and its operation receipt,
+  which commit together, survive what the provider's `DurabilityClass`
+  promises: a provider restart, and any failover the provider declares
+  automatic. `Describe` reports the class so Orka can refuse automatic
+  continuation after a failover that may lose acknowledged writes (see
+  "Durability, switch detection and recovery holds" below). The embedded
+  SQLite store runs in WAL mode. By default it uses `synchronous=NORMAL` and
+  reports `local-buffered`: a commit survives a process restart, but the most
+  recent commits can be lost if the host fails before the WAL is synced. With
+  `--store-sqlite-synchronous=full` (chart value `store.sqliteSynchronous`) it
+  syncs every commit and reports `local-fsync`; `Describe` reads the mode the
+  connection actually uses.
 - **No cross-contract transactions.** No operation or transaction spans
   `state.v1` and `artifacts.v1`. A fenced `SaveArtifact` checks the cleanup
   generation and Job revocations in the artifact provider's own transaction,
@@ -258,9 +281,15 @@ the observable parts.
 - **Provider description.** `Describe(ctx)` on both providers returns
   `ProviderInfo`: the contract version and parts served, the dataset ID and
   its origin (`new`, `adopted` or `migrated`), the provider's schema version,
-  optional capabilities beyond the contract parts (none in v1), size limits
-  and the durability class. It is there for startup validation (step 4),
-  installation binding (step 5) and migration; nothing in Orka calls it yet.
+  optional capabilities beyond the contract parts (`export.v1`, see
+  "Migration export and import"), size limits and the durability class. An
+  imported dataset also names its source (`Source`), and a dataset whose
+  contract parts moved lists its migration markers (`MigratedTo`). It is
+  there for startup validation (step 4), installation binding (step 5) and
+  migration, and the controller epoch
+  manager reads the dataset ID, state, incarnation and durability class at
+  takeover and once a minute (see "Durability, switch detection and recovery
+  holds").
   It also reports the contract revision the provider implements, the
   dataset's state, an `Incarnation` that changes when the serving database
   may have restarted or switched and stays the same otherwise, the provider
@@ -305,7 +334,32 @@ the observable parts.
   carries (see "Messages, counters and chat turns" and "Lease clocks").
   Revision 8 orders the replacement of a whole result or artifact file by
   write stamp and limits results to `MaxResultBytes` (see "Result and
-  artifact replacement order").
+  artifact replacement order"). Revision 9 adds `RecordMemoryRecall`, which
+  counts an agent recall of memories without updating them. Revision 10
+  gives every memory a `Generation` and adds the consolidation proposal
+  types `memory_merge`, `memory_supersede` and `memory_retire`, which apply
+  only while every target memory is at the generation the proposal names.
+  Revision 11 adds `MemoryConsolidationStore`, which records memory
+  consolidation runs and creates a run's proposals with its report. Its
+  begin, complete, get and session-list methods check a Task data fence;
+  begin refuses a window whose mode's cursor has since moved; and the
+  controller releases the run of a Task that ended, which abandons an
+  unfinished run and clears its transcripts, and, once the Task is
+  deleted, clears its report and removes the runs no cursor needs.
+  Revision 12 adds the Agent Host Protocol family (`AHPStore`) to `state.v1`.
+  Revision 13 adds `ListUsageTasksInSessions` and the requester and AHP turn
+  mark a usage Task keeps.
+  Revision 14 adds the GitHub sign-in session family (`AuthSessionStore`) to
+  `state.v1`.
+  Revision 15 requires the write watermark, `AdvanceWriteWatermark` and
+  `GetWriteWatermark`, on both provider contracts (see "Durability, switch
+  detection and recovery holds").
+  Revision 16 bounds inter-agent messages by bytes: `SendMessage` refuses
+  content over `MaxMessageContentBytes` and a namespace or task name over
+  `MaxControlIdentifierBytes`, a message batch stops before its
+  content passes `MaxMessageBatchBytes`, and the limit is reported in
+  `ProviderLimits.MaxMessageContentBytes` (see "Messages, counters and chat
+  turns").
   The revision Orka requires for each part belongs to Orka, not to the
   contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
@@ -326,9 +380,9 @@ the observable parts.
 - **Call classes.** The method catalog gives every method a call class, which
   a storage client uses to choose its deadline, retries and concurrency limit
   and a network transport uses to carry bulk transfers on their own
-  connection: `control` for `HealthCheck`, `Describe` and the controller epoch
-  and operation resolution methods, which must get through when everything
-  else is saturated; `background` for retention, receipt pruning and recovery
+  connection: `control` for `HealthCheck`, `Describe` and the controller epoch,
+  write watermark and operation resolution methods, which must get through
+  when everything else is saturated; `background` for retention, receipt pruning and recovery
   scans; `bulk` for results, prompt result receipts, artifacts, sealed
   execution snapshots and native session records (including the turn
   finalization that carries one), which move whole bodies of up to several
@@ -357,11 +411,16 @@ the observable parts.
   Persisted fields such as gateway claim ownership, lease expiry, the frozen
   Task tool policy, usage phase history, scan-run cancellation state and
   finding decision times are tagged `json:"-"`, so a provider that sends these
-  structs as JSON loses them. The
-  network protocol (step 6) defines its own wire records with a round-trip
-  test over every record type. `ExecutionEvent.Usage` is also tagged
-  `json:"-"`: it carries the usage observation Orka derived from the event
-  (see "Orka policy above the client").
+  structs as JSON loses them. The wire protocol (see "Wire protocol" below)
+  defines its own wire records, carries every field including the `json:"-"`
+  ones, and round-trips every record type in a test. `ExecutionEvent.Usage` is
+  also tagged `json:"-"`: it carries the usage observation Orka derived from
+  the event (see "Orka policy above the client").
+- **What the wire preserves.** Nil and empty slices and maps are equivalent,
+  so a caller must not tell a nil result apart from an empty one. Strings are
+  valid UTF-8. Times are within 0001-01-01 and 9999-12-31 UTC; the zero
+  `time.Time` means "no time", and a `*time.Time` keeps nil apart from a
+  pointer to the zero time.
 - **Artifacts.** Requests carry an `ArtifactOwner` (namespace, Task name and
   Task UID) so the identity can grow with a Job and cleanup generation without
   another signature change. The Task UID is reserved: Orka passes it where it
@@ -378,11 +437,11 @@ the observable parts.
 These rules make retried writes safe and keep a replaced controller from
 writing (#512 step 3). The types are in `pkg/storage/v1`: `WriteEnvelope`,
 `RequestDigest`, the method catalog (`LookupMethod`, `Methods`),
-`OperationReceiptStore`, `ControllerEpochAdvancer`, the errors
-`ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted` and
-`ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
-`OperationReceiptStore` and `ControllerEpochAdvancer`, and check every write
-when it commits. SQLite does, and the shared suite's
+`OperationReceiptStore`, `ControllerEpochAdvancer`, `WriteWatermarkStore`,
+the errors `ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted`
+and `ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
+`OperationReceiptStore`, `ControllerEpochAdvancer` and `WriteWatermarkStore`,
+and check every write when it commits. SQLite does, and the shared suite's
 write catalog (`storagetest`) runs the dataset, receipt, age, fence and
 resolution checks for every write method, the sealed families, Task data
 fences and conditional commands included.
@@ -402,7 +461,9 @@ write without one.
   Reading an inbox is two methods, the plain read `ListUnreadMessages` and
   the consuming write `ConsumeMessages`, so each is classified once.
   `IsLocked` counts as a write, because SQLite clears an expired Task lock
-  when it finds one. A contract
+  when it finds one. `AdvanceWriteWatermark` is a write that both contract
+  parts serve, so its catalog entry names no contract; it carries the
+  envelope of the dataset that serves the provider it is called on. A contract
   test fails when a provider interface method is missing from the catalog, so
   no new method can ship unclassified. A write may also name its natural key:
   request values, such as a dedupe key or a cleanup operation ID, by which the
@@ -433,8 +494,9 @@ write without one.
      `MaxClockSkew` (30 seconds) after it returns `ErrClockSkew`;
   4. the dataset state: `migrating` or `importing` returns `ErrNotReady`
      (an `incompatible` dataset refuses every call with `ErrIncompatible`),
-     and a dataset its installation has detached returns
-     `ErrDatasetDetached`, which matches `ErrNotReady`;
+     a dataset its installation has detached returns `ErrDatasetDetached`,
+     and a write to a contract part migrated to another dataset returns
+     `ErrDatasetMigrated`; both match `ErrNotReady`;
   5. the fence, which must equal the dataset's stored controller epoch, or
      `ErrFenced`. The provider reads it under a lock that conflicts with an
      epoch advance;
@@ -540,7 +602,18 @@ write without one.
   not return is never marked at any isolation level; its replay returns the
   same messages, without any that Task cleanup deleted in between. Both
   return at most `MaxMessageBatch` (500) messages per call, so a longer
-  backlog is read over several calls. Orka's own message store keeps one
+  backlog is read over several calls. Messages are also bounded by bytes.
+  `SendMessage` refuses content over `MaxMessageContentBytes` (1 MiB) with a
+  `TooLargeError` and stores nothing, and a state.v1 provider reports exactly
+  that limit in `ProviderLimits.MaxMessageContentBytes`. It also refuses a
+  `Namespace`, `FromTask`, `ToTask` or `ParentTask` over
+  `MaxControlIdentifierBytes` (1 KiB) with `ErrValidation`, so a full batch
+  carries at most 2 MiB of identifiers. A batch stops before
+  the message that would take its total content past `MaxMessageBatchBytes`
+  (4 MiB), and a non-empty inbox always yields at least one message. The
+  batch is sized before `ConsumeMessages` marks anything, so a message left
+  out stays unread for the next call, and a consumed batch with its metadata
+  always fits one wire response. Orka's own message store keeps one
   `GetMessages(markRead)`, which the client maps onto the two. SQLite keeps
   the consumed IDs with the receipt and reads the messages again on replay,
   which is why a provider never reuses a message ID.
@@ -590,26 +663,30 @@ write without one.
   waits for fenced writes in progress, and once it returns, no write with an
   older fence commits, however long it was delayed. At takeover Orka
   acquires the epoch in Kubernetes. The full protocol, including acknowledgement
-  tracking, for each distinct dataset it is bound to is:
-  1. reads the last durable acknowledgement and advances the dataset with
-     `AcknowledgedEpoch` set to that
-     acknowledgement. The provider checks its stored epoch against this floor
-     atomically with the advance, before changing any epoch or installation.
-     An absent epoch counts as zero. A lower stored epoch returns `ErrNotReady`
-     without changing anything, and Orka stops for recovery. Every later
-     takeover supplies the same acknowledgement until a new one is recorded,
-     so a controller crash cannot erase the rollback evidence; checking only
-     `Previous` after an advance would lose that evidence on the next advance;
-  2. records the new acknowledgement in Kubernetes, in the ControllerEpoch
+  tracking, for each storage contract is:
+  1. stops for recovery if the contract is served by another dataset than the
+     one that acknowledged it before, because that is a storage switch;
+  2. reads the write watermark the dataset holds, once per distinct dataset,
+     and stops for recovery if it is lower than any contract acknowledged on
+     that dataset, because the store lost acknowledged writes or was restored
+     from an older copy;
+  3. advances the dataset, once per distinct dataset, with the exact record
+     the compare-and-swap produced, the ControllerEpoch UID and
+     `AcknowledgedEpoch` set to the last durable acknowledgement. The provider
+     checks its stored epoch against this floor atomically with the advance,
+     before changing any epoch or installation. An absent epoch counts as
+     zero. A lower stored epoch returns `ErrNotReady` without changing
+     anything, and Orka stops for recovery. Every later takeover supplies the
+     same acknowledgement until a new one is recorded, so a controller crash
+     cannot erase the rollback evidence; checking only `Previous` after an
+     advance would lose that evidence on the next advance;
+  4. records the new acknowledgement in Kubernetes, in the ControllerEpoch
      status until an installation record exists;
-  3. opens that dataset's fence for writes.
+  5. opens that contract's fence for writes.
 
-  The controller epoch manager currently advances each
-  dataset with the exact record the compare-and-swap produced and the
-  ControllerEpoch UID, and refuses to open a dataset whose advance is
-  refused, then opens that dataset's fence. It leaves `AcknowledgedEpoch` zero:
-  persisting and reading dataset acknowledgements, supplying the floor, and
-  recovery holds remain future work.
+  A dataset whose advance is refused for any other reason stops the manager.
+  "Durability, switch detection and recovery holds" below describes the
+  record and the holds.
 
   Each dataset's fence opens independently, and a write waits only for the
   fence of the contract that serves it (`MethodInfo.Contract`), so an
@@ -633,7 +710,8 @@ write without one.
   either carries its operation receipts and aborted records with it or gives
   the imported dataset a new dataset ID, so a resolution can never report a
   committed operation as aborted. `Describe` reports the state. SQLite keeps
-  its process lock as well.
+  its process lock as well. "Writer exclusivity and schema migration for
+  adapters" below lists what a network provider does instead.
 - **Lease clocks.** A provider decides a lease only by comparing times passed
   in the same request with stored times that came from requests. It never
   compares a caller's time with its own clock. Leases are therefore decided on
@@ -711,18 +789,24 @@ write without one.
   a missing pre-switch outcome remains unknown unless independently recovered,
   even after the gate opens. Orka stops affected work until recovery and never
   repeats it as a new operation merely because the switch was acknowledged.
+  Orka also checks each dataset's write watermark after every change and
+  holds the installation when the dataset lost acknowledged writes, and it
+  holds the installation when it sees an `async-replicated` dataset's
+  incarnation change; that hold adds to the provider's gate and does not
+  replace it. See "Durability, switch detection and recovery holds" below.
 - **Detection and recovery holds.** Orka detects missing or conflicting
   records at three levels. At the dataset level, a store's epoch is below its
-  Kubernetes acknowledgement, or a periodic write watermark is below the value
+  Kubernetes acknowledgement, or its write watermark is below the value
   Kubernetes recorded, which also catches a restore from an older copy with
-  the same identity. At the record level, a Kubernetes record requires a
-  store record that is missing or different, such as a settling prompt
-  attempt without its result receipt. At the operation level, an outcome
-  cannot be settled. A dataset-level signal places a recovery hold on the
-  whole installation; a record-level signal holds the affected Task or Session
-  with a `StorageRecoveryRequired` condition. Held work makes no side effects,
-  is never retried as a new operation and never reports success. An operator
-  releases a hold explicitly after recovery.
+  the same identity; such a signal places a recovery hold on the whole
+  installation. At the operation level, an outcome cannot be settled, and the
+  storage client refuses new writes to that dataset until it is. At the
+  record level, a Kubernetes record requires a store record that is missing
+  or different, such as a settling prompt attempt without its result receipt;
+  such a signal holds only the affected Task, with a
+  `StorageRecoveryRequired` condition (see "Record holds" below). Held work
+  makes no side effects, is never retried as a new operation and never
+  reports success. An operator releases a hold explicitly after recovery.
 - **Store halves of the Kubernetes control protocols.** Session turn
   creation, finalization and projection activation, outbox enqueue, claim and
   completion, Session cleanup preparation and completion, prompt result
@@ -737,7 +821,8 @@ write without one.
   intent. Session turn creation and finalization are recognized by the turn
   key, and projection activation is idempotent by the state it changes. SQLite
   also checks the fence each Session turn step carries against the dataset's
-  controller epoch when it commits.
+  controller epoch when it commits. "Kubernetes control protocols" below lists
+  each protocol step by step.
 - **Execution event dedupe keys.** A repeated dedupe key returns the stored
   event only for a request with the same Task, Session and tool call;
   anything else returns `ErrDuplicateMismatch`, so a reused key is not
@@ -820,6 +905,587 @@ later.
   and repeating the identical request synchronizes again. A row whose binding columns contradict one another is refused when the
   store opens, never repaired.
 
+### Durability, switch detection and recovery holds
+
+A nil error means the change and its operation receipt survive the failures
+the provider's `DurabilityClass` promises. What Orka does after it sees the
+serving database restart or switch depends on the class:
+
+| Class | Provider or controller restart | Database restart | Host or disk loss | Automatic database switch | After a detected restart or switch, Orka |
+| --- | --- | --- | --- | --- | --- |
+| `synchronous-replicated` | Survives | Survives | Survives on the replica | Loses no acknowledged write | Checks the dataset again and continues |
+| `local-fsync` | Survives | Survives | Survives a host crash, not a disk loss | None | Checks the dataset again and continues |
+| `local-buffered` | Survives | Survives | A host crash may lose the latest acknowledged writes | None | Checks the dataset again and continues |
+| `async-replicated` | Survives | Survives | May lose recent acknowledged writes | May lose acknowledged writes | Holds the installation until an operator acknowledges it |
+
+**Settings behind each class.**
+
+- SQLite: WAL with `synchronous=NORMAL`, the default, is `local-buffered`;
+  `synchronous=FULL` is `local-fsync`. A sync on every commit can slow the
+  single writer on network-attached volumes, so the default is unchanged.
+- PostgreSQL: `synchronous-replicated` needs `fsync = on`,
+  `full_page_writes = on`, `synchronous_commit = on` (or `remote_apply`) for
+  every adapter transaction, which the adapter sets per transaction, and a
+  synchronous standby (`synchronous_standby_names`, or a managed service's
+  documented synchronous high availability). An adapter checks the settings
+  it can see at startup (`SHOW synchronous_commit`, `fsync`,
+  `full_page_writes`, `synchronous_standby_names`) and never declares
+  `synchronous-replicated` when one of them fails. High availability its role
+  cannot observe is operator-declared configuration.
+- Azure Database for PostgreSQL flexible server with zone-redundant or
+  same-zone high availability acknowledges a commit once the standby has
+  persisted its log, which matches `synchronous_commit = on`, so it is
+  `synchronous-replicated`. Its server admin is not a superuser and cannot see
+  replication details, so the class follows the server's documented
+  high-availability setting. A server without high availability (including
+  Burstable) has no automatic switch and is `local-fsync`.
+- CloudNativePG is `synchronous-replicated` with
+  `.spec.postgresql.synchronous` and `dataDurability: required`, and
+  `async-replicated` otherwise.
+- Read replicas never serve `state.v1` reads. Point-in-time restore and
+  geo-restore create a server with older content and the same dataset
+  identity, so they are never an automatic path; the checks below hold the
+  installation after one.
+- Under synchronous replication, a commit can be visible to other sessions
+  before the standby confirms it. An adapter therefore answers a replay or a
+  `ResolveOperation` call from a transaction that writes, so its answer is
+  never an outcome a failover could still lose.
+
+**Write watermark.** `WriteWatermarkStore` gives every dataset a counter that
+only fenced writes increase: `AdvanceWriteWatermark` adds one and returns the
+new value, and `GetWriteWatermark` reads it. SQLite keeps it in the dataset's
+identity row, so a copy of the file keeps the value it had when it was taken.
+
+**What Kubernetes records.** The ControllerEpoch status holds, for each
+storage contract, the dataset that serves it, the controller epoch that
+dataset acknowledged and the highest write watermark it acknowledged
+(`status.storageEpochs`). Orka writes an entry only after the dataset returned
+success, never lowers an epoch or watermark for the same dataset, and refuses
+every write to the record under a fence other than the epoch the object
+holds. The status sync of a later epoch carries the record across. It moves
+into the installation record once that exists.
+
+**Checks.** At takeover, the epoch manager compares each dataset with the
+record before it advances the dataset or opens the contract's fence (see
+"Controller ownership" above). From then on, about once a minute, it
+describes each dataset that has passed, without waiting for datasets that
+are still unreachable, and compares its incarnation with the last one
+checked, starting with the one described before the takeover advanced it. When the
+dataset's incarnation changed, the manager closes the fences of the
+contracts it serves until it has been checked again, and a passed check
+reopens only those whose acknowledgement is recorded; once it is ready, the
+manager checks that the dataset still holds this controller's epoch and at
+least its acknowledged watermark, and holds the installation for an `async-replicated`
+dataset whatever it holds. It then advances the watermark with a fenced
+write through the storage client and records the new value once the dataset
+returned it. A value that is not above the recorded one also means the
+dataset lost writes. SQLite runs in the controller process, so its
+incarnation changes only when the controller restarts, and a host crash
+looks like a restart; the takeover checks against the recorded epoch and
+watermark are what detect such a loss, and a restore from an older copy.
+
+**Startup order.** The controller opens SQLite under its process lock,
+activates the snapshot key and completes the dataset bootstrap before the
+controller epoch manager takes over. Activating the key only reads: it
+authenticates every retained sealed record. Completing the bootstrap is an
+administrative flag that never reverts. Neither waits for a write fence or is
+stopped by a recorded hold, so a restored dataset is bootstrapped first and
+then held by the takeover, and no other write reaches a dataset before its
+fence opens.
+
+**Installation hold.** A check that fails closes every fence at once and
+then records a hold in `status.storageRecovery`, with its ID, reason (`EpochRegressed`,
+`WatermarkRegressed`, `DatasetChanged` or `UnsafeSwitch`), contract, dataset
+and the acknowledged and stored values, and sets the `StorageRecoveryRequired`
+condition. While it is recorded, every contract's write fence and
+`CurrentFence` refuse with an error that matches `ErrNotReady` (and
+`store.ErrStorageRecoveryRequired`), so the storage client refuses every
+write, control-store changes stop, no Task Job is created and no Task reports
+success; reads continue. A Task reports success in its phase, in the workload
+outcome it records, and in the state or outcome of its ACP execution, which a
+Task whose delivery failed or was cancelled keeps under a failed or cancelled
+phase; every status write that newly reports success on any of these waits
+for the hold. The storage client checks the fence again before
+each retry, so a write whose first attempt came before the hold is not
+retried into the held dataset: it is refused, or resolved when its outcome
+is unknown. A call or retry horizon that ends while a retry waits for the
+fence ends the retries as it does between attempts: the write returns the
+last attempt's error, or is resolved when an attempt's outcome was unknown.
+The hold is recorded under the controller epoch mutation
+interlock that control-store changes take, and that interlock refuses every
+change while a hold is recorded, so a change in progress finishes before the
+hold and none commits after it, also under a fence obtained before the hold.
+Task Jobs also
+wait while any contract's fence is closed, so a restarted controller starts no
+work before every dataset passed its takeover checks, and `CurrentFence` waits
+whenever the state fence is closed. The `orka_storage_recovery_hold` metric is 1 with the reason.
+A restarted controller reads the hold and stays held: it checks and opens
+nothing, and only advances each dataset that still serves the contract it
+acknowledged, so a replaced controller cannot write to it. Each such advance
+supplies the dataset's acknowledged epoch as `AcknowledgedEpoch`, so a
+dataset that lost that epoch refuses it and keeps the evidence until the
+hold is released. An advance that fails with an error a retry may fix, such
+as a dataset that does not answer yet, is tried again while the hold lasts. A check after a
+restart or switch that cannot read the dataset is not a pass: the fences of
+the contracts the dataset serves stay closed until a later check finishes. An operator releases the hold,
+after the recovery procedure, by setting the
+`storage.orka.ai/recovery-acknowledged` annotation of the ControllerEpoch to
+the hold's ID. The controller then records the epoch and watermark each
+dataset holds now as acknowledged and clears the hold in the same update,
+without advancing anything first, so every advance keeps supplying the
+recorded acknowledgement as its floor; each contract's fence opens again once
+its dataset passes the takeover checks against the new record. An annotation naming another hold releases
+nothing. A hold removed from `status.storageRecovery` without that
+annotation is recorded again with the same ID, because the takeover checks
+cannot detect again a switch of an `async-replicated` dataset that kept its
+epoch and watermark; a controller that restarts before it records the hold
+again no longer knows it (see **Not yet covered**). Meanwhile every fence
+stays closed, and each held dataset is still fenced: an advance the dataset
+has not answered yet is tried again. A hold that leaves the record after the annotation
+named it, without the controller releasing it, opens no fence before the
+takeover checks pass. A release retried after its update committed but its response was
+lost succeeds when the record, under the same controller epoch, shows
+exactly that release: no hold, the acknowledgement of that hold, the
+condition the release set and the acknowledgements it recorded; any other
+record still refuses it. A dataset that passed its own checks opens its fence without
+waiting for the others, so another dataset's hold can close a fence that was
+already open.
+
+**Record holds.** A Kubernetes record that requires a store record the
+store no longer holds, or holds with other content, holds only the affected
+object. Recovery does this for a settling prompt attempt whose result
+receipt is missing or conflicts (P5 in "Kubernetes control protocols"
+below): the Task gets `StorageRecoveryRequired=True` with reason
+`MissingRecord` or `ConflictingRecord`, and the message names the record,
+its key, the digest Kubernetes recorded and a hold ID derived from them.
+Recovery writes the condition under its controller epoch, and only while the
+PromptAttempt is as recovery read it and still `Settling`. A write from a
+replaced controller that the API server applies late carries the Task's
+earlier resourceVersion, so it lands only before that resourceVersion next
+changes. The successor's terminal epoch write releases such a hold once
+recovery settled the attempt from its record: after it recorded success from
+the restored receipt, or recorded the outcome as unknown while the store
+holds a receipt matching the attempt's own settling operation, as for an
+attempt in workspace validation whose receipt recovery found but whose
+completion the journal no longer showed. While held, the prompt is not run
+again, the attempt stays `Settling`, the outcome is not guessed, success is
+not reported and nothing is deleted.
+When the record is found again, after a restore, the condition becomes
+`False` with reason `RecordFound` and recovery settles the Task from it. An
+operator who cannot restore it sets the Task's
+`storage.orka.ai/recovery-acknowledged` annotation to the hold ID; recovery
+then records the outcome as unknown, as it did before record holds existed,
+and the condition becomes `False` with reason `RecoveryAcknowledged`. An
+annotation naming another hold releases nothing. The Gateway Task admission
+policy admits an update of a Gateway-owned Task that changes only this
+annotation, from a user who may also update that Task's status. A recovery
+pass that starts while the installation is held acts on no Task, and one
+already under way changes a Task's record hold condition only through the
+same admission as Job creation, so record holds are placed and released once
+the installation hold clears. Recovery keeps acting on a held Task that is
+marked for deletion, without replaying its prompt, so the deletion completes
+once the hold is released.
+
+**Not yet covered.** Record holds for a finalized turn without its store
+record and for reclamation without the turn cleanup receipt come with the
+Session turn protocols (P2 and P6). Once workspace validation records a
+delivery transition, the PromptAttempt no longer carries the settling
+digest, so a receipt is checked only against its own settling operation: a
+receipt replaced with another result and a matching digest is not detected.
+That needs the settling digest kept on the PromptAttempt across delivery
+transitions. Such a late hold write is not yet released on a Task restored
+under a new UID, or when the store loses the receipt again after recovery
+found it and before its terminal epoch write; there the Task reports the
+hold while its outcome stays the one recovery settled. Detecting a restart
+or switch of an `async-replicated` dataset that happened while no controller
+ran needs the incarnation recorded with the acknowledgement, and so does
+keeping an installation hold across a controller restart when it was
+removed from `status.storageRecovery` without being acknowledged.
+
+**Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
+Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
+restart and after each declared failover the change, its receipt, the
+dataset's identity, controller epoch, installation and watermark survive, and
+a replay changes nothing. The receipt is resolved before the replay, so a
+receipt the switch lost fails the case before a replay can record it again. Each failover must change the incarnation. Before
+each failover, `HoldWrites` keeps watermark writes waiting inside the
+database, and the suite checks that they were in flight when the switch
+began. Each must then settle through `ResolveOperation` as its error said.
+A write that returned nil survives. One refused with `ErrUnavailable` or
+`ErrNotReady` settles as aborted, because those errors tell the caller
+nothing committed and it may repeat the action as a new operation. A
+provider that cannot rule out the commit returns `ErrOutcomeUnknown`, and
+only such a write may settle as committed or aborted. The watermark counts
+exactly the committed writes, and an aborted write that arrives late is
+refused. A `local-fsync` or `local-buffered` provider declares no
+failover, and a `synchronous-replicated` one declares at least one. An
+`async-replicated` provider declares none either: its switch may lose
+acknowledged writes, which these cases do not allow, and Orka holds the
+installation after one. SQLite supplies `Restart` by closing and reopening its file.
+
+### Kubernetes control protocols
+
+The Kubernetes control store (`store/kube`) runs four protocols whose store
+half is a `state.v1` family: outbox delivery (P3), Session cleanup (P4),
+prompt result receipts (P5) and Gateway Task cleanup receipts (P7).
+Controller ownership (P1) is the takeover sequence in "Controller ownership"
+above. Session turn open and finalization (P2) and Task reclamation barriers
+(P6) are not written up here yet.
+
+In the tables, K is a Kubernetes step and S a store step. Every store step
+is a write with an envelope, so it commits only under the current fence, and
+a replay of the same operation returns its original outcome. The idempotency
+key says how a step run again as a new operation, for example by a successor
+controller, is recognized; where a step has none, its protocol says why
+running it again is safe or why Orka does not. When the storage client cannot
+settle a step's outcome, the protocol's caller sees `ErrOutcomeUnknown`,
+reports no success and goes on as each protocol says below. The shared
+suite's `protocols` family drives each store half step by step: it loses
+store steps' responses and retries them, runs them again as new operations,
+replaces the controller between steps, and delivers steps the replaced
+controller issued after the takeover.
+
+**P3. Outbox projection delivery.** The ACP outbox projector delivers Task
+status projections. `store/kube` checks the Kubernetes controller epoch
+around each store step.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | `EnqueueOutboxProjectionRecord`, alone or inside Session turn finalization | Projection ID and payload digest |
+| 2 | S | `ClaimOutboxProjectionRecords(fence, worker, lease, now)` | The state it changes: a claim leases only due or expired records |
+| 3 | K | Apply the projection's terminal phase, execution and delivery status to the Task | None; applying it again writes the same terminal status |
+| 4 | S | `CompleteOutboxProjectionRecord(id, expected version, lease owner, operation ID and digest, new state)` | Operation ID and digest |
+
+- A lost claim response is retried with the same operation and returns the
+  same claim. A claim whose outcome stays unknown only delays its records
+  until the lease expires; a new claim before then finds nothing due.
+- The projector claims again on its next pass, so a claim or completion
+  whose outcome stays unknown is settled then: a completed projection is no
+  longer due, and an uncompleted one is claimed again once its lease expired.
+- A controller that stops after step 3 leaves the claim to expire; the
+  successor claims again, applies the projection again, which rewrites the
+  same terminal status with a new transition time, and completes.
+- A delayed step 4 from the replaced controller returns `ErrFenced`, and the
+  successor's claim and completion stand.
+- Store obligations: a claim returns only due or expired records; a
+  completion requires the exact version, lease owner, operation ID and
+  digest; a completion run again returns the stored projection.
+
+**P4. Session cleanup, including Gateway retention cleanup.** Session
+deletion and Gateway transcript retention reclaim a Session.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | Read the intent, or the completion; a completion for the same operation means: verify the Kubernetes records are absent and stop | — |
+| 2 | S | `PrepareSessionCleanup(intent)`: the operation ID and digest, the expected Kubernetes versions and UIDs, and the BranchClaim expectations | Namespace, Session and operation, while the intent is pending |
+| 3 | local | Retire the resident runtime, outside the epoch interlock | — |
+| 4 | K | Delete the BranchClaims, the Session Lease and the RuntimeSessionControl with exact UID and version preconditions, and check they are gone | Exact UIDs and versions |
+| 5 | S | `CompleteSessionCleanup`: delete the transcript, Session row and intent, write the completion and archive turn cleanup receipts, in one transaction | Namespace, Session, operation ID and digest |
+
+- From step 2 on, the intent refuses new work on the Session in the
+  transaction of each write: transcript appends, Task locks, chat turns and
+  turn commits return `ErrConflict`, and Gateway admission returns
+  `ErrGatewaySessionCleanupPending`. `HasSessionCleanupFenceForUID` fences the
+  Session UID.
+- The intent covers the crash window between the Kubernetes deletes (step 4)
+  and the transcript delete (step 5): a successor's `ResumeSessionCleanups`
+  runs every intent again under its own fence, with the operation ID the
+  intent holds.
+- A lost step 5 response is retried; once the intent is gone, the next run
+  finds the completion for the same operation in step 1 and stops.
+- A delayed step 2 or step 5 from the replaced controller returns
+  `ErrFenced`. Step 2 depends on this: once the cleanup completed it has no
+  natural key, and only step 1 keeps Orka from preparing it again.
+- Store obligations: preparation returns the pending intent for the same
+  operation and refuses another operation while one is pending; completion
+  is idempotent; the intent check runs in the transaction of every write it
+  blocks; a completion keeps fencing the Session UID and reserves the name of
+  a Session with a Kubernetes identity. A transcript-only Session, which has
+  none, may be created again, which removes its completion.
+- A Kubernetes record that reappears after a completion, such as a
+  RuntimeSessionControl, fails the cleanup with `ErrConflict` and deletes
+  nothing.
+
+**P5. Prompt result receipt before settling.** The ACP dispatcher settles a
+completed prompt.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | `SavePromptResultReceipt(attempt ID, operation ID and digest, result)` | Attempt ID; a receipt is immutable |
+| 2 | K | Move the PromptAttempt from `Running` to `Settling`, recording the same operation ID and digest | The attempt's expected version, operation ID and digest |
+| 3 | S | `SaveResult` | The Task; a write replaces the result only with a later issue stamp |
+| 4 | K | Settle the attempt, then deliver | The attempt's expected version, operation ID and digest |
+
+- A successor repairs a result write interrupted after step 2 by reading the
+  receipt and running step 3 again.
+- The dispatcher does not run step 1 or step 3 again itself when its outcome
+  stays unknown, and reports no success. A Session Task's prompt is recorded
+  as unknown at once; a standalone Task waits for recovery after the next
+  takeover, which records an attempt still `Running` as unknown and repairs
+  step 3 from the receipt for one already `Settling`. An attempt whose
+  workspace validation had started is settled only when the journal records
+  the prompt's completion, and otherwise its outcome is recorded as unknown;
+  either way the validation, which recovery cannot finish, ends as a
+  delivery conflict.
+- A delayed step 1 or step 3 from the replaced controller returns
+  `ErrFenced`.
+- Step 2 moves a PromptAttempt to `Settling` only after its receipt was
+  stored, so a missing receipt, with no result that matches the recorded
+  digest, or a receipt that differs from the recorded digest, holds the Task
+  (see "Record holds" above), also when the journal already records the
+  prompt's completion. Workspace validation starts while the attempt is still
+  `Settling` and records a later operation on it; from then on the receipt is
+  checked against its own settling operation, and a missing one holds the
+  Task whatever result is stored. An attempt that reached `Settling` another
+  way never had a receipt, and its recovery is unchanged. Recovery reads the
+  receipt record itself: a step 1 replay answered from its operation receipt
+  does not show that the record is still stored.
+- A repair whose result write ends with its outcome unknown ends that
+  recovery pass without success; the next pass writes the receipt's result
+  again as a new operation, which replaces the result with the same bytes.
+
+**P7. Gateway Task cleanup receipts.** Gateway retention removes the Tasks
+of compacted events.
+
+| Step | Side | Operation | Idempotency key |
+| --- | --- | --- | --- |
+| 1 | S | `MaintainGatewayRecords` compacts terminal events past retention and writes a `GatewayTaskCleanupReceipt` for each event's Task | The state it changes: compaction run again finds nothing left to compact |
+| 2 | K | Request ordinary deletion of the exact Task UID the receipt names, and prove with an uncached read that it is gone | Task UID precondition |
+| 3 | S | `DeleteGatewayTaskCleanupReceipt` | The state it changes: deleting a missing receipt succeeds |
+
+- A delayed step 1 from the replaced controller returns `ErrFenced` and
+  leaves the event, so the successor's own compaction writes the receipt.
+- A delayed step 3 returns `ErrFenced`; the successor deletes the receipt
+  itself once it proved the Task gone.
+- A Task with no event, tombstone, receipt or archive is never deleted.
+
+**Grouped writes.** Each grouped write commits all of its parts or none. The
+shared suite's `grouped-writes` family makes the part a provider would write
+last fail and checks that no part is visible: an execution event and plan
+update whose usage observation reuses a stored observation ID, a chat turn
+whose last message reuses a stored message ID with other content, and a
+Gateway terminal projection and expiry whose delivery ID belongs to another
+delivery. The ACP dispatcher writes a plan update only together with its
+execution event, through `AppendExecutionEventWithPlanIfAbsent`.
+
+### Writer exclusivity and schema migration for adapters
+
+| Property | Embedded SQLite | Network provider |
+| --- | --- | --- |
+| One active writer | Process file lock, leader election and one replica | Leader election and the epoch compare-and-swap pick the controller; the store refuses writes under any other fence, and a dataset bound to one installation refuses another installation's advance. |
+| A second controller opening the dataset | Cannot take the file lock | May read (`Describe`, validation); cannot write until it wins the compare-and-swap and advances the store. |
+| Schema migration | At open, under the file lock and `BEGIN IMMEDIATE` | Adapter-owned, by one migrator that holds a dataset-wide lock for the whole migration, with the dataset `migrating` so writes are refused. |
+
+A network adapter migrates its schema in three steps: it enters `migrating`
+in a transaction that takes the same lock as an epoch advance, so writes in
+progress finish first and later new writes return `ErrNotReady`; applies the
+change and records the new schema version; and returns to `ready`. One
+migrator owns the whole migration, from before it reads the schema version
+until the dataset is `ready` again, so concurrent migrators serialize, and
+the second finds the target version and does nothing. A crash leaves the
+dataset `migrating`, refusing writes, until the migration runs again. For
+PostgreSQL:
+
+- Run the migration on one direct connection (port 5432 on Azure), never
+  through a transaction-pooling PgBouncer (port 6432), which does not keep a
+  session for one client.
+- Make that session the owner. Take `SELECT pg_advisory_lock(<constant>)` on
+  it before reading the schema version, run every step on the same
+  connection, including steps outside a transaction, and release the lock
+  with `pg_advisory_unlock` only once the dataset is `ready` again. A
+  transaction-level lock (`pg_advisory_xact_lock`) is not enough: it ends
+  when the transaction that enters `migrating` commits, before steps such as
+  `CREATE INDEX CONCURRENTLY` run. The lock belongs to the session that runs
+  the steps, so it is held while any of them runs, and PostgreSQL releases
+  it when that session ends, also after the migrator crashes.
+- Enter `migrating` in one transaction that locks the controller epoch row
+  (`SELECT ... FROM orka_controller_epoch FOR UPDATE`) and then sets
+  `orka_dataset.state` to `migrating`.
+- Use transactional DDL where possible. Steps that cannot run in a
+  transaction, such as `CREATE INDEX CONCURRENTLY`, run only while the state
+  is `migrating`, and can run again: a concurrent index build that failed
+  leaves an invalid index, which the next owner drops and builds again.
+- Set `lock_timeout` on DDL, so a migration cannot stall behind a long reader.
+
+Orka treats `migrating` as a temporary storage outage: writes answer 503 and
+reconcilers retry, and nothing restarts the controller. The shared suite's
+`storagetest.WithMaintenance(MaintenanceHarness{Enter, Exit})` checks, for
+every write in the write catalog, that while the dataset is migrating the
+write is refused with `ErrNotReady` and changes nothing, a replay and reads
+are still served, `Describe` reports `migrating`, and `ResolveOperation`
+records nothing new; and that the refused operation commits once the dataset
+is ready. The suite observes Sessions through `IsLocked`, which the catalog
+lists as a write because it clears an expired lock; a provider that refuses
+it while migrating sets `RefusesReadingWrites`, and those cases are then
+compared through their reads alone while migrating. SQLite migrates only while it
+opens, so its harness holds the dataset in `migrating` through a test hook,
+and sets `RefusesReadingWrites`. The `installations` cases check, for both
+contracts, that a second installation can neither advance a dataset bound to
+the first, with an equal or newer epoch and the same or another holder, nor
+move its write watermark, and that the first keeps writing and advancing; the SQLite package
+also checks that a second `OpenLockedStore` on the same file is refused.
+
+### Migration export and import
+
+An existing installation moves its data to another provider, for example from
+embedded SQLite to a network backend, by copying the dataset while writes are
+stopped. Behavioral methods cannot copy a dataset: they assign sequences, IDs
+and times, apply quotas and deduplication, and some records have no public
+writer. `pkg/storage/v1` therefore defines a raw record surface that a
+provider reporting the `export.v1` capability implements for every contract
+part it serves: `DatasetExporter`, `DatasetImporter` and
+`MigrationMarkerStore`. Backup can reuse it. Nothing in Orka calls it yet,
+and no provider implements it yet; the SQLite exporter and importer, the
+migration Job with its verification, and rollback come later. The surface
+has no wire RPCs yet either: export and import run in process until the
+migration Job needs them over the network. `export.v1` is an optional
+capability, so it does not raise `ContractRevision`.
+
+- **Families.** `ExportSchemas` lists every family of `state.v1` and
+  `artifacts.v1`, in the order an import copies them, Sessions before the
+  records that belong to a Session. A family's schema names its fields, their
+  kinds (string, int, bool, time or bytes), whether each may be absent, and
+  the key fields that identify a record. A family holds what the contract
+  requires a provider to keep for one kind of record, field for field,
+  including provider-assigned values (IDs, sequences, versions and
+  generations), domain tombstones, natural-key receipts, cleanup intents and
+  completions, usage watermarks and every time to the nanosecond. Field names
+  are the embedded store's column names, which also serve as the canonical
+  names; other providers map their own layout to them. `sequence_heads` holds
+  the last value each provider-assigned sequence issued, which can be higher
+  than the largest value still stored after records were deleted, so an import
+  never issues a value a client may have seen. Agent Host Protocol
+  connection tokens and sign-in sessions are copied with their token hashes,
+  so one issued before a migration stays valid after it; no family holds a
+  raw token. Three fields carry an order a
+  provider may keep implicitly, so a copy keeps it even when keys sort
+  differently. `security_scan_runs.admission_seq` is the order runs were
+  admitted in, which `ListScanRuns` and the newer-run guard of
+  `UpdateScanRun` follow; the embedded store keeps it as the rowid. An import
+  keeps that order, and a run admitted later is newer than every imported
+  run. `auth_sessions.issued_seq` is the order sign-in sessions were
+  issued in, which `CreateAuthSession` follows to keep a person's most
+  recently issued sessions when creation times are equal; the embedded store
+  keeps it as the rowid, and a session issued after an import is newer than
+  every imported one. `execution_events.session_seq` is the effective session sequence, so
+  an event stored before session sequences existed exports the sequence it
+  is listed under. A test pins the families to
+  SQLite's layout: every table is a family with the same columns and primary
+  key, or is excluded with a reason.
+- **What is not copied.** Operation receipts: writes are stopped and
+  retries drained before the export, so no operation is unresolved, and the
+  imported dataset has a new dataset ID, so a late request naming the old one
+  is refused with `ErrDatasetMismatch` and `ResolveOperation` on the target
+  cannot resolve an operation sent to the source. The write stamps of
+  results and artifacts (`write_epoch`, `write_seq`): they are relative to
+  the source's controller epochs, which are not copied either, so the target
+  stores (0, 0), as the schema upgrade does for existing rows, and every
+  enveloped write is above it. The controller epoch mirror and the write
+  watermark, which start over on the target. The dataset
+  identity and binding, which the import mints and an explicit storage switch
+  creates. The duplicate SQL control tables (see "Kubernetes control
+  authority and retained SQL compatibility"). The harness-v1 wrapper ledger
+  and the ACP artifact transport are outside both contracts.
+- **Encoding.** A `RawRecord` carries its family, its key, the encoding name
+  `orka.storage.v1/export/<family>/v<version>` and the canonical body: the
+  field count, then each field in schema order as a tag byte and its value
+  (strings and bytes length-prefixed and byte for byte, integers as varints,
+  times as Unix seconds and nanoseconds). A record has exactly one encoding,
+  and `ExportFamilySchema.Decode` refuses any other, including a key that
+  does not match the key fields. The encoding does not use the records' JSON
+  tags.
+- **Sealed records move as they are.** Snapshot, native session and
+  connector ciphertext, nonces and the fields bound into their associated
+  data are copied byte for byte. Associated data binds row identity, never
+  the dataset or the backend, so every copied record still authenticates
+  under the installation's key, and the providers never receive key
+  material.
+- **Digests.** `FamilyDigester` computes a family's count and an
+  order-independent digest: SHA-256 over the family's encoding, the count and
+  the sorted digests of the records. `ExportDigest` returns it from the
+  provider, and `ManifestDigest` summarizes the digests of every copied
+  family.
+- **Schema versions.** Each provider numbers its own schemas, so
+  `DatasetSource.SchemaVersion` is informational and never compared with the
+  target's. Whether a record can be copied rests on its family's encoding
+  name and record version.
+- **Import.** `BeginImport` requires a dataset whose `Describe` reports
+  origin `new`, `ready`, `Bootstrap.Complete` false and `Bootstrap.Empty`
+  true, no binding and no marker, and that holds no controller epoch, write
+  watermark or record of any kind.
+  It records the source dataset, its schema version and the manifest digest,
+  mints a new dataset ID and moves the dataset to `importing`, where every
+  write, the controller epoch advance, `BindDataset` and
+  `MarkDatasetMigrated` return `ErrNotReady`, so an aborted import leaves no
+  marker.
+  `ImportRecords` commits one batch atomically; batches are numbered per
+  family, a repeated batch is accepted only when the family already holds its
+  records unchanged, and a record whose key is held with another body, or
+  that appears twice in the batch with two bodies, returns `ErrConflict`. A
+  record beyond the target's `ProviderLimits`, such as a result over
+  `MaxResultBytes` or message content over `MaxMessageContentBytes`, returns
+  a `TooLargeError`, so a target with lower limits
+  refuses the import instead of truncating it. A message with an identifier
+  over `MaxControlIdentifierBytes` returns `ErrValidation`, as `SendMessage`
+  does, so an imported inbox still fits a consumed batch in one response. References
+  between families can be circular, so a provider
+  never refuses a record because a record it refers to has not arrived yet; it
+  checks references, if it does, when the import completes. `CompleteImport`
+  compares every family with the manifest (`ImportVerificationError` names the
+  first that differs), moves every provider-assigned sequence past both its
+  imported head and the largest imported value, and leaves the dataset
+  `ready`, unbound, with origin `migrated`, `ProviderInfo.Source` naming
+  the source, no controller epoch and a write watermark of zero, until an
+  explicit storage switch binds it with the `migrated` bind mode. `AbortImport` discards the import and leaves an empty dataset
+  under another new dataset ID.
+- **Markers.** After the copy, the source records a write-once
+  `MigrationMarker` for each moved contract part, naming the dataset it moved
+  to. While a contract part is marked, its writes return `ErrDatasetMigrated`
+  (which matches `ErrNotReady`), with or without a write envelope; reads,
+  exports, the replay of an operation that committed before the marker and
+  the other contract part are unaffected, so a retry whose response was lost
+  still gets its committed outcome, and state can move while artifacts stay.
+  A marker does not block that replay, but a Task data fence carried in the
+  context is still checked first, so a replay after the cleanup or Job
+  revocation it guards returns `ErrTaskDataCleanupChanged` or
+  `ErrTaskJobRevoked`. `AdvanceWriteWatermark`, which both parts serve, is refused
+  only once every part the provider serves is marked. Writing or clearing a
+  marker does not advance the watermark. Only an explicit rollback clears a
+  marker. A target is marked at most once: an import fills only a dataset
+  with origin `new`, so a rolled-back target is never filled again and a later
+  migration copies into a new dataset. The caller never marks a contract part
+  again for a target whose marker it cleared, so a retried clear whose first
+  outcome was unknown cannot remove a newer marker. `Describe` reports markers in `ProviderInfo.MigratedTo`, and the
+  wire carries a refused write as `DATASET_MIGRATED`.
+- **Switch detection.** Kubernetes records, per contract part, the dataset
+  that serves it with its acknowledged controller epoch and write watermark
+  (see "Durability, switch detection and recovery holds"). The migrated
+  target has another dataset ID, a fresh controller epoch and watermark zero,
+  so the storage switch that binds it must replace that record in the same
+  step; otherwise the next takeover treats the target as a dataset that lost
+  writes and holds the installation.
+- **Suite.** `storagetest.RunExportImport` copies a seeded dataset between two
+  providers and checks the families, canonical records and digests, the
+  import's lifecycle and refusals, completion, abort and markers. `RunState`
+  and `RunArtifacts` run it for a provider that reports `export.v1`, with
+  seeds whose highest message ID and session event sequences were deleted
+  before the export, and check that the imported dataset continues message
+  IDs, transcript order and event sequences past them, serves a security
+  finding with its evidence and scan run unchanged, refuses writes while it
+  imports and refuses writes to a marked contract part. The state seed
+  also consumes one message and leaves one unread, and the suite checks that
+  both keep their read state and that the Session keeps its creation time,
+  which identifies its incarnation. A target that reports a result limit
+  must refuse a larger imported result. For results and artifacts, the suite
+  checks that an object written at a high stamp on the source is replaced by
+  the target's first write under its own fence, that a writer whose envelope
+  names the source dataset is refused with `ErrDatasetMismatch`, and that a
+  writer whose fence the target's next takeover superseded is refused with
+  `ErrFenced`. Sequences the
+  contract does not expose, such as usage accounting order, are left to a
+  provider's own tests. An in-memory reference provider in the suite's own
+  tests runs the shared cases today.
+
 ### Rules reserved for later steps
 
 The contract states these now so later slices build on them; code follows in
@@ -861,12 +1527,6 @@ the named step.
   `state.v1` targets a transactional database with secondary indexes; a
   key-value provider is not a goal. Moving these methods above the client onto
   primitive reads is needed only if that changes.
-- **Migration export and import.** Behavioral methods cannot copy a dataset:
-  they assign sequences, IDs and times, apply quotas and deduplication, and
-  some records have no public writer. Migration (step 3 or 5) uses a reserved
-  per-family raw record surface, `Export(family, cursor)` and
-  `Import(family, records)` into an empty dataset, with the wire encoding
-  above. Backup can reuse it.
 - **Suite isolation.** A suite factory may return a fresh isolated dataset on
   a shared provider (a schema or key prefix) instead of a new provider per
   case, so the suite stays practical against a managed database.
@@ -898,10 +1558,17 @@ obligation; see "No cross-contract transactions" above.
 The suite attaches a write envelope to every write it sends without one,
 naming the dataset `Describe` reports and the epoch the dataset holds, so a
 provider that refuses writes without an envelope passes it; the cases that
-test envelopes send their own. The SQLite provider runs it directly, refusing
-writes without an envelope as in production, and the storage client runs it
-over SQLite with `ProviderAttachesEnvelopes`, so the client attaches the
-envelopes.
+test envelopes send their own. The options `WithMaintenance` and
+`WithDurability` add the cases that need a harness only the provider's own
+tests can supply; a harness is given the provider the factory returned. The
+SQLite provider runs it directly with both options, refusing writes without
+an envelope as in production, and again over the wire loopback (see "Wire
+protocol"), and the storage client runs it over SQLite with
+`ProviderAttachesEnvelopes`, so the client attaches the envelopes. The
+`Parallel` option runs every family, the harness families included, in
+parallel for a factory that returns isolated datasets concurrently. A harness
+that restarts or fails over a database the other families share would
+disconnect them, so a suite with one omits `Parallel`.
 
 `internal/storageclient/storagefault` injects storage faults for Orka's own
 tests. It wraps a state provider, an artifact provider or the embedded store
@@ -923,6 +1590,231 @@ SQLite also implements the duplicate SQL control-record methods described in
 not part of the provider contract or the client. A client test fails if any
 other SQLite method is missing from the client, so a consumer's type assertion
 cannot silently lose a capability.
+
+### Wire protocol
+
+`pkg/storage` is its own Go module, `github.com/orka-agents/orka/pkg/storage`,
+so a separately built provider imports the contract, the suite and the wire
+library without Orka's module graph. Its only direct requirements are gRPC,
+protobuf, the `google.rpc` status types and the assertion library the suite
+uses, and no package in it imports Orka's internal packages. The root module
+requires it through a `replace` directive, so Dockerfiles copy
+`pkg/storage/go.mod` and `go.sum` before downloading modules, and root `./...`
+patterns do not include it: `make fmt`, `vet`, `test` and `lint` run it
+separately. Each release also tags the module as `pkg/storage/<version>`.
+
+The protocol is gRPC with protobuf. The hand-written `.proto`
+files under `pkg/storage/proto/orka/storage/v1` are the wire source of truth:
+one service per contract family, one RPC per contract method, named after it,
+and wire records named after the Go records, with fields in snake case.
+`make generate-storage` (part of `make generate`) compiles them with a pinned
+buf and protoc plugins into `pkg/storage/v1/wire/storagepb`, then runs
+`wiregen`, which reads the Go contract and the descriptors and writes the
+mapping in `pkg/storage/v1/wire`. Parameters map to request fields by name and
+results to response fields by position. A method whose only parameter is the
+record named after its request message, such as `ConsumeMessagesRequest`,
+sends that record as the whole request. A response field marked `write_back`
+carries back the record a pointer parameter of the same name points to, so
+the ID `SendMessage` assigns reaches the caller's `Message` as it does in
+process. Each RPC declares its kind (`READ`, `WRITE` or `ADMIN`), which must
+be the kind and contract part the method catalog (`storagev1.LookupMethod`)
+gives it; an RPC that streams a blob must be in the catalog's `CallBulk`
+class, an upload a write and a download or list stream a read. Generation fails when a method of a Go interface a service names
+(`go_interface`) has no RPC or an RPC no method, when an RPC's kind or contract
+part differs from the catalog, when any parameter, result or record field,
+including a `json:"-"` field, has no wire field or the reverse, when two Go
+fields claim one wire field, or when a pair of types is outside the mapping
+table. A family whose service does not exist yet is not checked.
+CI regenerates the code and fails on a difference.
+
+The wire currently serves `Describe` and `HealthCheck`, inter-agent messages,
+plan state, Task results, prompt result receipts and the `artifacts.v1`
+artifact store. The other families stay in process until their RPCs land.
+`wiretest.State` serves a provider over an in-memory loopback with TLS 1.3 and
+bearer authentication, sending each family that has RPCs through the server
+library and the generated client, and `wiretest.Artifacts` does the same for
+an artifacts provider, keeping its epoch, receipt, binding, watermark and
+export families in process. The SQLite provider passes the suite's state and
+artifacts families that way; its maintenance and durability harnesses and the
+artifact-fence cases run only in process.
+
+- **Call metadata.** Every request names `orka-storage-contract`
+  (`orka.storage.v1`) and its `orka-storage-revision`; the server refuses a
+  call without them (`CONTRACT_MISMATCH`). Every call except `Describe` and
+  `HealthCheck` names the dataset it expects in the binary header
+  `orka-storage-dataset-bin`, as a dataset ID may hold any UTF-8 text. Before
+  the provider runs, the server refuses a call that leaves it out or names it
+  twice (`VALIDATION`) or names another dataset (`DATASET_MISMATCH`), and,
+  when its provider's `Describe` fails, a call that names one (the
+  `UNAVAILABLE`, `UNAUTHENTICATED` or `INCOMPATIBLE` that `Describe` may
+  return, or `UNAVAILABLE` for any other error). The server describes the
+  provider again before every read or administrative call that names a
+  dataset, so a provider whose dataset changed before such a call never
+  answers it for the dataset it served before. A switch while the provider
+  runs the call is not detected: its response can carry records from the new
+  dataset under the dataset the check named. Closing that window is open in
+  the provider contract, either by a provider serving one dataset for its
+  lifetime or by each read checking the dataset it reads. A write is compared against
+  the dataset the provider last described, on the first call that names a
+  dataset or on any later `Describe` or read, and is still checked by its
+  envelope's dataset. A
+  client without a dataset can call only `Describe` and `HealthCheck`, and a bound client
+  leaves the dataset off those two, so its `Describe` reports whichever
+  dataset the server serves, as in process. Responses name the contract, the
+  server's revision and, once the server knows it, the serving dataset; a
+  bound client refuses any other response for another dataset, as
+  `ErrOutcomeUnknown` for a write or an administrative call and
+  `ErrDatasetMismatch` for a read. It refuses an error for another dataset the
+  same way, unless the server can send that error before its dataset check
+  (`UNAUTHENTICATED`, `CONTRACT_MISMATCH`, `UNSUPPORTED_FIELD`,
+  `DATASET_MISMATCH`, `UNAVAILABLE`, `INCOMPATIBLE` or `OVERLOADED`), so another dataset's
+  `NOT_FOUND` or refused write is never taken as an answer for its own. A
+  write's `WriteEnvelope` travels as the binary header
+  `orka-storage-envelope-bin`, and the server puts it in the
+  provider's context with `WithWriteEnvelope`. A read or an administrative
+  call never carries one: the client leaves it off, and the server refuses one
+  (`VALIDATION`). A write's envelope names the dataset its call names: the
+  bound client refuses one for another dataset before sending, and the server
+  refuses it before the provider runs (`DATASET_MISMATCH`), so a write never
+  commits to a dataset other than the one its response names. A call made under a Task data fence carries the
+  `TaskDataFence` as the binary header `orka-storage-task-data-fence-bin`, and
+  the server puts it in the provider's context with `WithTaskDataFence`.
+- **Request digests.** Before the provider runs a write that carries an
+  envelope, the server recomputes `RequestDigest` from the decoded arguments
+  and refuses a mismatch with `VALIDATION`, so an operation ID is never bound
+  to a request other than the one its client digested. The server decodes the
+  numbers in dynamic values as `json.Number`, so the provider stores and the
+  digest covers them exactly as the caller wrote them; the client decodes a
+  response's dynamic values as `encoding/json` does by default, as an
+  in-process provider returns them.
+- **Blob framing.** Task results, prompt result receipts and artifacts move
+  on streaming RPCs. The request or response field marked with the `blob`
+  option crosses in messages of at most 1 MiB: the first message carries every
+  other field and the first part of the blob, and each later message only the
+  next part. The headers `orka-storage-blob-size` and
+  `orka-storage-blob-sha256` describe the whole blob, so the receiver refuses
+  an oversized blob before reading it. The server calls the provider once,
+  after the client ends the stream and the reassembled blob matches its size
+  and digest; a stream that ends early or fails its digest is refused as
+  `UNAVAILABLE`, one over the server's limit (64 MiB by default, and the
+  provider's `MaxArtifactBytes` for an artifact) as `TOO_LARGE`, and one that
+  breaks the framing as `VALIDATION`, so a refused upload never reaches the
+  provider. The client refuses a blob over its own limit, or an artifact over
+  the provider's described limit, without sending it. A server refuses a blob
+  limit below `MaxResultBytes` with a state provider and below
+  `MaxArtifactBytes` with an artifacts provider, the sizes the contract
+  requires, and describes the smaller of its limit and each provider's. Given a second
+  connection (`ClientConfig.Bulk`), the client sends blob streams over it,
+  so a large transfer has its own HTTP/2 flow-control window. Protobuf cannot
+  tell empty bytes from absent ones, so decoded bytes are never nil: a
+  provider receives an empty result, receipt or artifact as an empty slice,
+  as it would in process.
+- **List streaming.** `ListArtifacts` returns a list the contract does not
+  bound in length, so it is a server-streaming read whose response field
+  marked with the `list` option crosses in parts of at most 1 MiB of encoded
+  items (a single larger item travels alone). The header
+  `orka-storage-list-count` declares the number of items in all parts; the
+  first message carries every other response field and the first part, and
+  each later message only the next part, with at least one item. The client
+  joins the parts in order and refuses, as `ErrIncompatible`, a stream that
+  carries more or fewer items than it declared or breaks the framing; a
+  stream that ends with an error fails the call. A partial list is never
+  returned. A list stream keeps its method's call class.
+- **Unknown fields.** The server refuses a request with a field it does not
+  know anywhere in its message tree, including any message of a stream
+  (`UNSUPPORTED_FIELD`), so an older server
+  never ignores a newer precondition. The protocol revision starts at 1 and is 2
+  since the result, receipt and artifact RPCs; a release raises it when it adds RPCs or request fields, and the client calls
+  an RPC only on a server of at least the revision that introduced it. A
+  newer field of a read or an administrative call is sent only to such a
+  server; on an older one the client refuses a call that sets it
+  (`ErrIncompatible`) and sends one that leaves it unset. Generation refuses
+  a newer field on a write's request, whose digest would then differ between
+  revisions.
+- **Server limits.** A server can cap the calls it runs at once per call
+  class of the method catalog (`CallControl` for `Describe` and
+  `HealthCheck`, `CallInteractive`, `CallBackground`, and `CallBulk` for
+  results, receipts, artifact transfers and every blob stream) and how long each class may run. A call over its
+  class's limit is refused with `OVERLOADED` before the provider runs, which
+  the client returns as `ErrUnavailable`; a revision 1 client, which does not
+  know `OVERLOADED`, is refused with `UNAVAILABLE`. The duration limit covers the whole
+  call, including the first description of the providers and every message a
+  streaming call receives or sends, so an upload or download whose peer stalls,
+  or never sends its request, is ended as `UNAVAILABLE` and frees its slot.
+  Ending a download frees its slot and handler, not the transport: a message
+  the server already queued for a peer that stopped reading stays on its
+  HTTP/2 stream, and the peer receives the status behind it, until the peer
+  reads, resets the stream or closes the connection. A caller therefore
+  bounds a download with its own deadline, on which the client resets the
+  stream. A
+  write whose response cannot be sent in time after its provider ran is
+  `OUTCOME_UNKNOWN`, since the provider may have committed. The limit
+  reaches a provider only through its context's cancellation: a call whose
+  admission outlasts the limit, such as one whose provider described its
+  dataset late, starts no provider work and is refused as `UNAVAILABLE`.
+  A successful response names the dataset the call was admitted against.
+  A client checks a download's declared size from the response headers before
+  it receives any of the blob, and a server describes the artifact limit it
+  enforces, which its own blob limit can lower.
+- **Errors.** Every status the server library produces for a storage call
+  carries a `google.rpc.ErrorInfo` in domain `storage.orka.ai` whose reason
+  names the contract error; every contract sentinel has one. The client rebuilds
+  the typed error, so `errors.Is` and `errors.As` behave as in process,
+  including a `FencedError` or `PreconditionFailedError` that matches
+  `ErrConflict` and an `ErrDatasetDetached` that matches `ErrNotReady`. Only
+  `VALIDATION`, `FENCED`, `PRECONDITION_FAILED` and `CONFLICT` forward their
+  message, bounded and stripped of control characters: the first three the
+  message of the typed error, whether the provider wrapped its value or a
+  pointer to it, so `errors.As` finds the text it finds in process,
+  and `CONFLICT` the error's text as the provider wrote it. `TOO_LARGE` forwards
+  its typed fields, and `BINDING_CONFLICT` the `BindingConflictError` itself as
+  a second status detail. A server over a class's concurrency limit
+  answers `OVERLOADED`, which the client returns as `ErrUnavailable`. A failed authentication is `ErrUnauthenticated`, as
+  is any call to a server with an `Authenticator` that reached it through a
+  transport that runs no gRPC tap, such as `grpc.Server.ServeHTTP`, and a
+  call the server refuses for its contract headers or an unknown field, or an
+  RPC it does not serve, is `ErrIncompatible`. Any other provider error, and a
+  provider panic, is reported without its text as `PROVIDER_ERROR` with a
+  correlation ID the server logs; the client returns it as `ErrOutcomeUnknown`
+  for a write or an administrative call and a plain error for a read. An error
+  that matches several sentinels crosses as the first of them in the codec's
+  order, so only that sentinel matches on the client.
+- **Send evidence.** A status without that ErrorInfo came from the gRPC
+  library or a proxy. On a connection built with `wire.Dial`, which takes TLS
+  credentials, per-call credentials and a dialer but no interceptors, and
+  given to the client directly rather than wrapped, the client's stats
+  handler records whether a call's request headers could have left the
+  process: a call that never sent them is `ErrUnavailable`, and a write or an
+  administrative call that may have been sent is `ErrOutcomeUnknown`. On any other connection, a
+  write's transport failure is `ErrOutcomeUnknown`. Storage connections disable gRPC's configured retries;
+  only its transparent retries of attempts the server never processed remain.
+  The client refuses invalid UTF-8, out-of-range times and requests over the
+  16 MiB message limit before sending anything. The server reports a
+  response over that limit as `PROVIDER_ERROR`, since gRPC would otherwise
+  fail it with a status that reads as a transport failure. The message byte
+  budgets and identifier bounds keep a contract-conforming provider's unary
+  responses well under it, and a list the contract does not bound, such as
+  `ListArtifacts`, streams in parts instead.
+
+`pkg/storage/v1/wire/adapterkit` serves a provider as a separately deployed
+adapter. `adapterkit.Serve` requires TLS 1.3 with a serving certificate and
+key from files, reloaded when they change, and at least one client
+authentication method: bearer tokens from a mounted directory (every file named
+`token*` is accepted, so a token rotates by adding a second key, moving clients
+to it and removing the first), an mTLS client CA bundle with the client URI or
+DNS names it allows, or both, in which case a call must pass both. Every call
+verifies the client certificate again against the current CA bundle and clock,
+so removing a CA or a certificate expiring stops a connection already open. It applies
+per-class concurrency and duration limits, serves `/healthz`, `/readyz` (the
+providers describe a dataset and pass their health checks) and `/metrics` on a
+separate plain HTTP port that carries no stored data, and on shutdown reports
+not ready and lets calls in progress finish for up to a grace period (30
+seconds by default), after which it closes the remaining connections and
+returns. `adapterkit.SettleContext` gives a provider a context, bounded by a
+settle timeout (10 seconds by default), to finish a commit it has already sent
+after the caller's context ends, so the outcome the client reports as unknown
+is settled for its retry or resolution; the grace period should exceed the
+settle timeout.
 
 ### Orka policy above the client
 
@@ -956,7 +1848,12 @@ persist:
   registry and nothing is counted twice. The append duration runs from the
   start of the client call, so it includes Orka's sanitization and, for a
   remote provider, network time. The embedded SQLite store still records
-  `orka_store_db_size_bytes` from its database file.
+  `orka_store_db_size_bytes` from its database file, its connection pool
+  statistics as `go_sql_*{db_name="orka_store_sqlite"}`, and, by method, the
+  connection wait and hold time (`orka_store_sqlite_write_wait_seconds`,
+  `orka_store_sqlite_write_hold_seconds`) of each contract write that carries
+  a write envelope and of receipt pruning. Other users of the connection,
+  such as reads, appear only in the pool statistics.
 - **Usage from execution events.** The client derives the usage observation
   that a worker usage report or the controller's ACP journal carries and
   sends it as `ExecutionEvent.Usage`, unless Orka code attached an
@@ -1264,8 +2161,9 @@ Reads and administrative methods reach the provider unchanged.
   set: new writes to that dataset are refused with `ErrNotReady` while the
   client keeps resolving the set in the background. An operation that
   `ResolveOperation` finds too old to settle leaves the set with its outcome
-  permanently unknown; holding the affected work for recovery comes with the
-  recovery holds.
+  permanently unknown. A Kubernetes protocol step in that state goes on as
+  its protocol says in "Kubernetes control protocols" above. Holding the work
+  that other writes affect is not covered yet.
 - **Sealed writes and callback protocols.** The client seals a record, or
   computes a conditional command, once per write, and every retry resends the
   same request with the same envelope. A seal uses a fresh nonce, so a
@@ -1345,7 +2243,7 @@ report a changed target with `ErrConflict`.
 
 | Operation | Protocol |
 | --- | --- |
-| Memory proposal application (`ApplyMemoryProposal`, `AuthorizeExistingMemory`) | `ResolveMemoryProposalApplication` returns the memory ID the application would return (the applied memory, or one already created from the proposal) and the proposal status and applied ID it read, but no memory content. Orka authorizes that exact memory for an external caller; a new memory is covered by the caller's create permission, and Orka builds and redacts it from the stored proposal. `CommitMemoryProposalApplication` applies only if the proposal still resolves to the same target. Competing applications create one memory: the losers' retries resolve, authorize and return the winner's memory. |
+| Memory proposal application (`ApplyMemoryProposal`, `AuthorizeExistingMemory`, `AuthorizeMemoryChange`) | `ResolveMemoryProposalApplication` returns the memory ID the application would return (the applied memory, or one already created from the proposal) and the proposal status and applied ID it read, but no memory content. Orka authorizes that exact memory for an external caller; a new memory is covered by the caller's create permission, and Orka builds and redacts it from the stored proposal. `CommitMemoryProposalApplication` applies only if the proposal still resolves to the same target. Competing applications create one memory: the losers' retries resolve, authorize and return the winner's memory. A consolidation proposal also needs `update` on every memory it targets; the provider changes those targets in the same transaction, and only while each is at the generation the proposal names, otherwise it returns `ErrConflict` and changes nothing. |
 | Task data access (`WithAuthorizedTaskDataAccess`, `WithTaskDataAccess`, which replace the task-data transaction methods) | `ResolveTaskDataFence` returns the namespace or Task cleanup generation. A Task is registered (`RegisterTaskDataFence`) only after a first successful authorization, and the registration is released when the access it was created for fails. Orka authorizes against live Kubernetes state, then sends the fence, with the authorized Job identities, in the context of each data call. Trusted controller access (`WithTaskDataAccess`) registers a Task only for the duration of the access, so it leaves nothing behind for a Task that may already be finalized. Every fence-checking method listed on `TaskDataFenceStore` refuses a moved generation with `ErrTaskDataCleanupChanged` or a revoked Job with `ErrTaskJobRevoked` in the same transaction as its own reads and writes. The calls of one access are separate operations: each either completes before an invalidating cleanup, which then removes its effect, or is refused, and callers retry with fresh authorization. A definitely uncommitted refusal that a caller turned into its own error is still reported as the fence error. An uncertain write or an unreadable committed result remains `ErrOutcomeUnknown`, even after handler error translation or a joined cleanup error, and is never automatically repeated under fresh authorization. A parent's request to cancel a child first commits a deduplicated `TaskCancellationRequested` execution event, bound to both Task UIDs, under the parent Job and cleanup fence. That commit orders cancellation against revocation: revocation before the intent refuses the action, while an intent committed first may finish publishing its Kubernetes annotation after revocation. Publication retains the child's UID and resourceVersion preconditions and never holds a provider transaction open. Evidence that must not be recorded in part, such as a recovered approval decision and its execution outcome, uses one grouped append (`AppendExecutionEventsIfAbsent`). |
 | Scan Task ingestion (`SecurityStore.ApplyScanTaskIngestion`) | Orka reads the receipt and the run, validates the live RepositoryScan identity before applying and again before committing, and runs the application logic against a store that records its reads, with the results it saw, and its writes. A read of records an earlier recorded write may have changed is answered by `PreviewScanTaskIngestion`, which runs the steps so far with the provider's own write semantics and keeps nothing. `CommitScanTaskIngestion` applies the writes, the run update and the receipt in one transaction only while the stored run equals the run Orka read and every recorded read still returns what Orka saw, compared field by field with an empty list equal to an absent one and times compared as instants (`ScanRunsEqual`, `ScanIngestionReadsEqual`); a step's provider-assigned times come from the commit's time, so a preview and its commit agree. A changed run or read returns `ErrPreconditionFailed` with nothing changed, and the reconciler repeats the ingestion from fresh state. |
 

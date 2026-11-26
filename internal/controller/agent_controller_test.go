@@ -33,7 +33,8 @@ func TestValidateAgentRuntimeReasoningEffort(t *testing.T) {
 	}{
 		{name: "codex none", runtime: corev1alpha1.AgentRuntimeCodex, effort: agentReasoningEffortNone},
 		{name: "codex high", runtime: corev1alpha1.AgentRuntimeCodex, effort: agentReasoningEffortHigh},
-		{name: "codex max rejected", runtime: corev1alpha1.AgentRuntimeCodex, effort: "max", wantError: "none, low, medium, high, or xhigh"},
+		{name: "codex max", runtime: corev1alpha1.AgentRuntimeCodex, effort: "max"},
+		{name: "codex unknown effort rejected", runtime: corev1alpha1.AgentRuntimeCodex, effort: "ultra", wantError: "none, low, medium, high, xhigh, or max"},
 		{name: "claude none rejected", runtime: corev1alpha1.AgentRuntimeClaude, effort: agentReasoningEffortNone, wantError: "low, medium, high, xhigh, or max"},
 		{name: "claude max", runtime: corev1alpha1.AgentRuntimeClaude, effort: "max"},
 		{name: "copilot rejected", runtime: corev1alpha1.AgentRuntimeCopilot, effort: agentReasoningEffortHigh, wantError: "does not support"},

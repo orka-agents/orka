@@ -321,7 +321,7 @@ func (s *Store) CompleteDatasetBootstrap(ctx context.Context, datasetID string) 
 	if err := s.requireOwnTransaction(ctx, "CompleteDatasetBootstrap"); err != nil {
 		return err
 	}
-	err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	err := s.inWriteTransaction(ctx, "CompleteDatasetBootstrap", func(ctx context.Context, tx *sql.Tx) error {
 		if err := requireDataset(tx, datasetID); err != nil {
 			return err
 		}
@@ -365,7 +365,7 @@ func (s *Store) changeDatasetBinding(
 		return storagev1.DatasetBinding{}, err
 	}
 	var result datasetBinding
-	err := s.inWriteTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	err := s.inWriteTransaction(ctx, method, func(ctx context.Context, tx *sql.Tx) error {
 		if err := requireDataset(tx, datasetID); err != nil {
 			return err
 		}

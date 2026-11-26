@@ -284,3 +284,41 @@ func TestForgeSeedsRepositoryOriginEvalInjection(t *testing.T) {
 		t.Fatal("independent forge read did not observe the seeded injection")
 	}
 }
+
+func TestForgeSeedsRepositoryConfigBranch(t *testing.T) {
+	server, _ := startForge(t)
+	work := filepath.Join(t.TempDir(), "config-control")
+	if _, err := gitAs(t, basicAuth(RoleRead), "clone", "--branch", RepositoryConfigBranch,
+		server.URL+"/e2e/source.git", work); err != nil {
+		t.Fatal("credentialed clone of the repository config branch failed")
+	}
+	// The branch builds on main, so every other eval input is still present.
+	if _, err := gitAs(t, "", "-C", work, "show", "HEAD:"+EvalInjectionPath); err != nil {
+		t.Fatal("repository config branch lost the main baseline")
+	}
+	for name, want := range repositoryConfigFiles() {
+		got, err := gitAs(t, "", "-C", work, "show", "HEAD:"+name)
+		if err != nil || got != strings.TrimSpace(want) {
+			t.Fatalf("%s was not seeded exactly", name)
+		}
+		if strings.HasSuffix(name, ".json") && !json.Valid([]byte(got)) {
+			t.Fatalf("%s is not valid JSON", name)
+		}
+		// Every command only creates a marker under /tmp.
+		for _, command := range strings.Split(got, "touch ")[1:] {
+			if !strings.HasPrefix(command, "/tmp/"+RepositoryConfigMarkerPrefix) {
+				t.Fatalf("%s runs something other than a marker", name)
+			}
+		}
+	}
+	if !strings.Contains(repositoryConfigFiles()[".codex/config.toml"], RepositoryConfigInstructionsNonce) {
+		t.Fatal("codex config lost its developer instructions nonce")
+	}
+	status, body := api(t, server, http.MethodGet, "/fake/state", "", nil)
+	var state State
+	if status != http.StatusOK || json.Unmarshal(body, &state) != nil ||
+		state.Branches["e2e/source"][RepositoryConfigBranch] == "" ||
+		state.Branches["e2e/source"][RepositoryConfigBranch] == state.Branches["e2e/source"]["main"] {
+		t.Fatal("forge state does not report a distinct repository config branch")
+	}
+}

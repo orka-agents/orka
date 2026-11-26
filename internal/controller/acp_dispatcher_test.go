@@ -30,11 +30,13 @@ import (
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -73,15 +75,8 @@ func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispat
 			dispatcher.EventStore = eventStore
 		}
 	}
-	if dispatcher.PlanStore == nil {
-		if planStore, ok := dispatcher.ResultStore.(store.PlanStore); ok {
-			dispatcher.PlanStore = planStore
-		} else if planStore, ok := dispatcher.Store.(store.PlanStore); ok {
-			dispatcher.PlanStore = planStore
-		}
-	}
-	if dispatcher.EventStore == nil || dispatcher.PlanStore == nil {
-		t.Fatal("ACP dispatcher test requires execution event and plan stores")
+	if dispatcher.EventStore == nil {
+		t.Fatal("ACP dispatcher test requires an execution event store")
 	}
 	task, target, err := dispatcher.reserveTask(ctx, queued)
 	if err != nil {
@@ -159,7 +154,6 @@ func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
 		Store:       persistence,
 		ResultStore: persistence,
 		EventStore:  baseOnlyExecutionEventStore{ExecutionEventStore: persistence},
-		PlanStore:   persistence,
 		Snapshots:   persistence,
 		Epochs:      NewControllerEpochManager(persistence, "start-event-store-controller"),
 	}
@@ -184,7 +178,6 @@ func TestACPDispatcherStartRequiresAtomicPlanProjection(t *testing.T) {
 		EventStore: dedupeOnlyExecutionEventStore{
 			DeduplicatingExecutionEventStore: persistence,
 		},
-		PlanStore: persistence,
 		Snapshots: persistence,
 		Epochs:    NewControllerEpochManager(persistence, "start-plan-store-controller"),
 	}
@@ -260,107 +253,22 @@ func TestAssistantTranscriptForPersistenceOmitsOverflowedPrefix(t *testing.T) {
 	}
 }
 
-func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
-	t.Run("transient failure", func(t *testing.T) {
-		planStore := &retryPlanStore{saveErrors: []error{errors.New("transient")}}
-		plan := &store.PlanState{TaskName: acpDispatcherTestTaskName, Namespace: acpDispatcherTestNamespace, Summary: "working"}
-		if err := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan); err != nil {
-			t.Fatalf("save plan with retry: %v", err)
-		}
-		if planStore.saveCalls != 2 || planStore.lastPlan != plan {
-			t.Fatalf("save calls = %d plan=%p, want 2 and %p", planStore.saveCalls, planStore.lastPlan, plan)
-		}
-	})
-
-	t.Run("persistent failure", func(t *testing.T) {
-		firstErr := errors.New("first")
-		retryErr := errors.New("retry")
-		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
-		err := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, &store.PlanState{})
-		if !errors.Is(err, firstErr) || !errors.Is(err, retryErr) {
-			t.Fatalf("persistent save error = %v", err)
-		}
-		if planStore.saveCalls != 2 {
-			t.Fatalf("save calls = %d, want 2", planStore.saveCalls)
-		}
-	})
-
-	t.Run("reconciles after journal append", func(t *testing.T) {
-		firstErr := errors.New("first")
-		retryErr := errors.New("retry")
-		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
-		plan := &store.PlanState{TaskName: acpDispatcherTestTaskName, Namespace: acpDispatcherTestNamespace, Summary: "working"}
-		planErr := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan)
-		if err := reconcileACPPlanUpdateAfterJournal(
-			context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan, planErr, nil,
-		); err != nil {
-			t.Fatalf("reconcile plan after journal append: %v", err)
-		}
-		if planStore.saveCalls != 3 || planStore.lastPlan != plan {
-			t.Fatalf("save calls = %d plan=%p, want 3 and %p", planStore.saveCalls, planStore.lastPlan, plan)
-		}
-	})
-
-	t.Run("does not reconcile before journal append", func(t *testing.T) {
-		planErr := errors.New("plan unavailable")
-		journalErr := errors.New("journal unavailable")
-		planStore := &retryPlanStore{}
-		err := reconcileACPPlanUpdateAfterJournal(
-			context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, &store.PlanState{}, planErr, journalErr,
-		)
-		if !errors.Is(err, planErr) || planStore.saveCalls != 0 {
-			t.Fatalf("pre-journal reconciliation error = %v calls=%d", err, planStore.saveCalls)
-		}
-	})
-}
-
 func TestACPUpdatePersistenceError(t *testing.T) {
-	if err := acpUpdatePersistenceError(nil, nil); err != nil {
-		t.Fatalf("nil persistence errors = %v", err)
+	if err := acpUpdatePersistenceError(nil); err != nil {
+		t.Fatalf("nil persistence error = %v", err)
 	}
 	journalErr := errors.New("journal unavailable")
-	planErr := errors.New("plan unavailable")
-	err := acpUpdatePersistenceError(journalErr, planErr)
-	if !errors.Is(err, journalErr) || !errors.Is(err, planErr) {
-		t.Fatalf("joined persistence error = %v", err)
+	err := acpUpdatePersistenceError(journalErr)
+	if !errors.Is(err, journalErr) {
+		t.Fatalf("persistence error = %v", err)
 	}
-	var persistenceErr *acpExecutionUpdatePersistenceError
-	if !errors.As(err, &persistenceErr) {
+	if _, ok := errors.AsType[*acpExecutionUpdatePersistenceError](err); !ok {
 		t.Fatalf("persistence error type = %T, want *acpExecutionUpdatePersistenceError", err)
 	}
-	if !persistenceErr.journalFailed() {
-		t.Fatal("combined persistence error did not retain journal failure provenance")
-	}
-	if !strings.Contains(err.Error(), "persist ACP execution update") ||
-		!strings.Contains(err.Error(), "persist ACP plan update") {
+	if !strings.Contains(err.Error(), "persist ACP execution update") {
 		t.Fatalf("persistence error context = %v", err)
 	}
-	planOnly := acpUpdatePersistenceError(nil, planErr)
-	if !errors.As(planOnly, &persistenceErr) || persistenceErr.journalFailed() {
-		t.Fatalf("plan-only persistence error provenance = %#v", persistenceErr)
-	}
 }
-
-type retryPlanStore struct {
-	saveErrors []error
-	saveCalls  int
-	lastPlan   *store.PlanState
-}
-
-func (s *retryPlanStore) SavePlan(_ context.Context, _, _ string, plan *store.PlanState) error {
-	s.lastPlan = plan
-	s.saveCalls++
-	if s.saveCalls <= len(s.saveErrors) {
-		return s.saveErrors[s.saveCalls-1]
-	}
-	return nil
-}
-
-func (*retryPlanStore) GetPlan(context.Context, string, string) (*store.PlanState, error) {
-	return nil, store.ErrNotFound
-}
-
-func (*retryPlanStore) DeletePlan(context.Context, string, string) error { return nil }
 
 func prepareBoundACPDispatcherTaskForTest(
 	t *testing.T,
@@ -860,6 +768,19 @@ func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
 	if got := runtimeSessionStartFailureMessage(errors.New("raw-secret")); got != fallback {
 		t.Fatalf("raw error message = %q", got)
 	}
+	for _, message := range []string{acp.WorkspaceValidationFailedMessage, acp.OpenCodeProjectConfigurationRejectedMessage} {
+		rejected := &harnessv2.ClientError{StatusCode: http.StatusBadRequest, Code: harnessv2.ErrorCodeInvalidRequest, Message: message}
+		if got := runtimeSessionStartFailureMessage(rejected); got != message {
+			t.Fatalf("workspace rejection message = %q, want %q", got, message)
+		}
+	}
+	rejectedWithDetail := &harnessv2.ClientError{
+		StatusCode: http.StatusBadRequest, Code: harnessv2.ErrorCodeInvalidRequest,
+		Message: acp.OpenCodeProjectConfigurationRejectedMessage + ": found secret-path",
+	}
+	if got := runtimeSessionStartFailureMessage(rejectedWithDetail); got != fallback {
+		t.Fatalf("workspace rejection with appended detail = %q", got)
+	}
 }
 
 func TestMarkTaskRuntimePoolWorkspaceResumeLost(t *testing.T) {
@@ -1160,7 +1081,7 @@ func TestPromptStreamDiagnosticIsBoundedAndClassified(t *testing.T) {
 	if got := promptStreamDiagnostic(errors.New("provider-secret-must-not-leak")); got != "non-client prompt stream error" {
 		t.Fatalf("generic diagnostic = %q", got)
 	}
-	if got := promptStreamDiagnostic(acpUpdatePersistenceError(errors.New("store unavailable"), nil)); got != "local execution update persistence failed" {
+	if got := promptStreamDiagnostic(acpUpdatePersistenceError(errors.New("store unavailable"))); got != "local execution update persistence failed" {
 		t.Fatalf("persistence diagnostic = %q", got)
 	}
 }
@@ -1316,7 +1237,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	if err := dispatcher.handlePromptStreamError(
 		ctx, nil, runtimeClient, "runtime-session-1", task.DeepCopy(), attempt.ID, fence, runtimeFence,
 		nil, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(errors.New("event store unavailable"), nil), nil,
+		acpUpdatePersistenceError(errors.New("event store unavailable")), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1519,7 +1440,7 @@ func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
 	for _, persistenceFailure := range []bool{false, true} {
 		name := "cancelled stream"
 		if persistenceFailure {
-			name = "plan persistence failure"
+			name = "execution update persistence failure"
 		}
 		t.Run(name, func(t *testing.T) {
 			fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
@@ -1534,7 +1455,7 @@ func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
 			var streamErr = context.Canceled
 			wantState := corev1alpha1.TaskExecutionStateCancelled
 			if persistenceFailure {
-				streamErr = acpUpdatePersistenceError(nil, errors.New("plan store unavailable"))
+				streamErr = acpUpdatePersistenceError(errors.New("execution event store unavailable"))
 				wantState = corev1alpha1.TaskExecutionStateFailed
 			}
 			if err := fixture.dispatcher.handlePromptStreamError(
@@ -1556,33 +1477,6 @@ func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *testing.T) {
-	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
-		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
-		StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
-	})
-	if err := fixture.dispatcher.handlePromptStreamError(
-		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
-		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")), nil,
-	); err != nil {
-		t.Fatal(err)
-	}
-	request := <-fixture.cancelRequests
-	if request.Reason != harnessv2.CancelReasonStreamDisconnected {
-		t.Fatalf("cancel reason = %q", request.Reason)
-	}
-	completed := &corev1alpha1.Task{}
-	if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
-		t.Fatal(err)
-	}
-	if completed.Status.Execution == nil || completed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
-		completed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpExecutionEventPersistenceFailureReason) {
-		t.Fatalf("plan persistence failure status = %#v", completed.Status.Execution)
-	}
-	fixture.assertTerminalLifecycle(t, harnessv2.EventCancelled, true)
 }
 
 func TestPromptStreamFailureClosesLifecycleBeforeOutcomeUnknown(t *testing.T) {
@@ -1895,7 +1789,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
 		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+		LiveEvents: liveevents.NewBroker(0),
 	}
+	live := dispatcher.LiveEvents.Subscribe(task.Namespace, task.Name)
+	defer live.Close()
 	prepareAdditionalTask := func(
 		name string,
 		uid types.UID,
@@ -1966,6 +1863,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		return additional, additionalAttemptID, parentID
 	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
+	assertACPDispatcherPublishedLiveEvents(t, live, task)
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
@@ -3989,6 +3887,7 @@ type dispatcherRuntimeServerOptions struct {
 	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
+	nativePermissionAsk              bool
 	// rejectCreate answers a create request with the returned error response
 	// and status instead of creating the session when the response is non-nil.
 	// resident makes the runtime keep reporting the exact requested session as
@@ -4048,7 +3947,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 			RuntimeProfileDigest: digest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 			AdapterDigests: profile.AdapterDigests, Limits: limits,
-			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: !options.disablePermissions, SupportsTools: true},
+			Provider: harnessv2.ProviderCapabilities{
+				ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true,
+				SupportsPermissions: !options.disablePermissions, SupportsTools: true, SupportsNativePermissionAsk: options.nativePermissionAsk,
+			},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
 			SupportsNativeSessions:            options.nativeSnapshot != nil,
@@ -4130,7 +4032,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				Sequence: seq, RequestDigest: request.Metadata.RequestDigest, Timestamp: at,
 			}
 		}
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1}})
+		// Like a current supervisor, confirm live updates when asked.
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1, LiveUpdates: r.Header.Get(harnessv2.LiveUpdatesHeader) == "1",
+		}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(2, now.Add(time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello "}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(3, now.Add(2*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Kind: acpDispatcherToolKind, Status: harnessv2.ToolCallStatusPending}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(4, now.Add(3*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Status: harnessv2.ToolCallStatusCompleted, Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: acpDispatcherToolResultPath}}}}})
@@ -5004,6 +4909,65 @@ func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstance(t *testing.T) {
 				t.Fatalf("waitForPromptCapacityReservation = %v, %v; want %v", lease, err, test.want)
 			}
 		})
+	}
+}
+
+// A retiring instance whose running prompts still hold every slot refuses a
+// prompt for capacity, not admission. The prompt was never accepted, so it is
+// requeued for the replacement instead of waiting on the retiring instance
+// until the runtime context ends. A serving instance at capacity keeps waiting.
+func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstanceAtCapacity(t *testing.T) {
+	evicted := map[string]string{externalRuntimeEvictionAnnotation: "{}"}
+	for _, test := range []struct {
+		name        string
+		admission   corev1alpha1.RuntimePoolAdmissionState
+		annotations map[string]string
+		want        error
+	}{
+		{name: "evicted instance at capacity", admission: corev1alpha1.RuntimePoolAdmissionClosed, annotations: evicted, want: errACPPromptAdmissionInstanceRetiring},
+		{name: "serving instance at capacity", admission: corev1alpha1.RuntimePoolAdmissionAccepting, want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+			dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+			current := promptAdmissionWorkspacePool(t, kubeClient, pool, true, corev1alpha1.RuntimePoolLifecycleServing, test.admission, test.annotations)
+			current.Status.Capacity.RunningPrompts = current.Status.Capacity.MaxRunningPrompts
+			if err := kubeClient.Status().Update(context.Background(), current); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := dispatcher.claimRuntimePoolReservation(context.Background(), task, current.Name, store.ControllerEpochFence{Epoch: 1}, 0); !errors.Is(err, errACPRuntimePoolAtCapacity) {
+				t.Fatalf("claim error = %v, want a capacity refusal", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, "pod-uid.boot-id")
+			if lease != nil || !errors.Is(err, test.want) {
+				t.Fatalf("waitForPromptCapacityReservation = %v, %v; want %v", lease, err, test.want)
+			}
+		})
+	}
+}
+
+// A prompt-only reservation is not gated on admission, so capacity can open on
+// an instance that started retiring while the prompt waited. The reservation
+// is released and the prompt requeued for the replacement rather than retried
+// on the retiring instance.
+func TestWaitForPromptCapacityDoesNotReuseCapacityOnARetiringInstance(t *testing.T) {
+	dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
+	dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
+	current := promptAdmissionWorkspacePool(t, kubeClient, pool, true, corev1alpha1.RuntimePoolLifecycleServing,
+		corev1alpha1.RuntimePoolAdmissionClosed, map[string]string{externalRuntimeEvictionAnnotation: "{}"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	lease, err := dispatcher.waitForPromptCapacityReservation(ctx, task, acpDispatchTarget{pool: current}, store.ControllerEpochFence{Epoch: 1}, "pod-uid.boot-id")
+	if lease != nil || !errors.Is(err, errACPPromptAdmissionInstanceRetiring) {
+		t.Fatalf("waitForPromptCapacityReservation = %v, %v; want the retiring instance refused", lease, err)
+	}
+	if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(current), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Status.Capacity.Reservations) != 0 {
+		t.Fatalf("reservations = %#v, want the reservation on the retiring instance released", current.Status.Capacity.Reservations)
 	}
 }
 
@@ -6295,5 +6259,83 @@ func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
 	case <-cancelled:
 		t.Fatal("renewal loop cancelled the runtime before prompt admission")
 	default:
+	}
+}
+
+// assertACPDispatcherPublishedLiveEvents checks that every event of the
+// Task's prompt reached live subscribers in protocol order.
+func assertACPDispatcherPublishedLiveEvents(t *testing.T, live *liveevents.Subscription, task *corev1alpha1.Task) {
+	t.Helper()
+	var published []harnessv2.EventType
+	var last uint64
+	for drained := false; !drained; {
+		select {
+		case event := <-live.C():
+			if event.Runtime == nil || event.TaskUID != string(task.UID) {
+				t.Fatalf("live event = %#v", event)
+			}
+			if event.Runtime.Identity.Sequence <= last {
+				t.Fatalf("live events out of order: %d after %d", event.Runtime.Identity.Sequence, last)
+			}
+			last = event.Runtime.Identity.Sequence
+			published = append(published, event.Runtime.Type)
+		default:
+			drained = true
+		}
+	}
+	if len(published) < 3 || published[0] != harnessv2.EventAccepted || !published[len(published)-1].IsTerminal() ||
+		!slices.Contains(published, harnessv2.EventUpdate) {
+		t.Fatalf("published live events = %v", published)
+	}
+}
+
+func TestACPLivePublisherPatternRedactsTheFinalAnswer(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
+	secret := "github" + "_pat_" + "1234567890abcdefghijklmnopqrstuvwxyz"
+	completed := harnessv2.Event{Type: harnessv2.EventCompleted, Completed: &harnessv2.CompletedEvent{
+		Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "found " + secret}}},
+	}}
+	broker := liveevents.NewBroker(0)
+	live := broker.Subscribe("default", "task")
+	livePublisher := acpLivePublisher{broker: broker, task: task}
+	livePublisher.observe(harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{LiveUpdates: true}})
+	livePublisher.observe(completed)
+	live.Close()
+	var final *harnessv2.Event
+	for event := range live.C() {
+		if event.Runtime != nil && event.Runtime.Type == harnessv2.EventCompleted {
+			final = event.Runtime
+		}
+	}
+	if final == nil {
+		t.Fatal("the completed event was not published")
+	}
+	if text := final.Completed.Result.Content[0].Text; strings.Contains(text, secret) {
+		t.Fatalf("published final answer kept a credential-shaped value: %q", text)
+	}
+	if completed.Completed.Result.Content[0].Text != "found "+secret {
+		t.Fatal("redacting the published copy changed the event the journal receives")
+	}
+}
+
+func TestACPLivePublisherPublishesOnlyConfirmedPrompts(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
+	update := harnessv2.Event{Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "text"},
+	}}
+	for _, confirmed := range []bool{false, true} {
+		broker := liveevents.NewBroker(0)
+		live := broker.Subscribe("default", "task")
+		livePublisher := acpLivePublisher{broker: broker, task: task}
+		livePublisher.observe(harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{LiveUpdates: confirmed}})
+		livePublisher.observe(update)
+		live.Close()
+		published := 0
+		for range live.C() {
+			published++
+		}
+		if want := map[bool]int{false: 0, true: 2}[confirmed]; published != want {
+			t.Fatalf("confirmed=%v published %d events, want %d", confirmed, published, want)
+		}
 	}
 }

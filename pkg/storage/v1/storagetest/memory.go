@@ -156,6 +156,71 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 		require.ErrorIs(t, p.DeleteMemory(ctx, memoryOtherTenant, "mem-agent"), storagev1.ErrNotFound)
 	})
 
+	t.Run("recalls are counted without updating memories", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		for _, id := range []string{"mem-a", "mem-b", "mem-gone"} {
+			require.NoError(t, p.CreateMemory(ctx, &storagev1.Memory{ID: id, Namespace: memoryTenant, Content: id,
+				CreatedAt: at, UpdatedAt: at}))
+		}
+		forged := &storagev1.Memory{ID: "mem-forged", Namespace: memoryTenant, Content: "forged", CreatedAt: at, UpdatedAt: at,
+			RecalledCount: 99, LastRecalledAt: &at}
+		require.NoError(t, p.CreateMemory(ctx, forged))
+		require.Zero(t, forged.RecalledCount, "creation writes the reset counts back")
+		stored, err := p.GetMemory(ctx, memoryTenant, "mem-forged")
+		require.NoError(t, err)
+		require.Zero(t, stored.RecalledCount, "a new memory has no recalls, whatever it names")
+		require.Nil(t, stored.LastRecalledAt)
+		require.NoError(t, p.CreateMemory(ctx, &storagev1.Memory{ID: "mem-foreign", Namespace: memoryOtherTenant,
+			Content: "foreign", CreatedAt: at, UpdatedAt: at}))
+		require.NoError(t, p.DeleteMemory(ctx, memoryTenant, "mem-gone"))
+		before, err := p.GetMemory(ctx, memoryTenant, "mem-a")
+		require.NoError(t, err)
+
+		first := at.Add(time.Hour)
+		require.NoError(t, p.RecordMemoryRecall(ctx, storagev1.MemoryRecall{Namespace: memoryTenant,
+			IDs: []string{"mem-a", "mem-b", "mem-a", "mem-gone", "mem-foreign", "missing"}, RecalledAt: first}))
+		require.NoError(t, p.RecordMemoryRecall(ctx, storagev1.MemoryRecall{Namespace: memoryTenant,
+			IDs: []string{"mem-a"}, RecalledAt: first.Add(time.Minute)}))
+		require.NoError(t, p.RecordMemoryRecall(ctx, storagev1.MemoryRecall{Namespace: memoryTenant,
+			IDs: []string{"mem-a"}, RecalledAt: first.Add(-time.Minute)}), "a recall recorded late")
+		require.NoError(t, p.RecordMemoryRecall(ctx, storagev1.MemoryRecall{Namespace: memoryTenant, RecalledAt: first}),
+			"recording an empty recall changes nothing")
+
+		for id, want := range map[string]struct {
+			count int
+			at    *time.Time
+		}{
+			"mem-a":    {3, new(first.Add(time.Minute))},
+			"mem-b":    {1, new(first)},
+			"mem-gone": {0, nil},
+		} {
+			got, err := p.GetMemory(ctx, memoryTenant, id)
+			require.NoError(t, err)
+			require.Equal(t, want.count, got.RecalledCount, "%s: one count per recall, deleted memories ignored", id)
+			if want.at == nil {
+				require.Nil(t, got.LastRecalledAt, id)
+			} else {
+				require.NotNil(t, got.LastRecalledAt, id)
+				require.True(t, want.at.Equal(*got.LastRecalledAt), "%s: the latest recall time is kept", id)
+			}
+		}
+		after, err := p.GetMemory(ctx, memoryTenant, "mem-a")
+		require.NoError(t, err)
+		require.True(t, before.UpdatedAt.Equal(after.UpdatedAt), "a recall is not an update")
+		require.Equal(t, before.Content, after.Content)
+		foreign, err := p.GetMemory(ctx, memoryOtherTenant, "mem-foreign")
+		require.NoError(t, err)
+		require.Zero(t, foreign.RecalledCount, "a recall counts only in its namespace")
+
+		require.ErrorIs(t, p.RecordMemoryRecall(ctx, storagev1.MemoryRecall{IDs: []string{"mem-a"}, RecalledAt: first}),
+			storagev1.ErrValidation, "a namespace is required")
+		require.ErrorIs(t, p.RecordMemoryRecall(ctx, storagev1.MemoryRecall{Namespace: memoryTenant, IDs: []string{"mem-a"}}),
+			storagev1.ErrValidation, "a recall time is required")
+		require.ErrorIs(t, p.RecordMemoryRecall(ctx, storagev1.MemoryRecall{Namespace: memoryTenant,
+			IDs: make([]string, storagev1.MaxMemoryRecallIDs+1), RecalledAt: first}), storagev1.ErrValidation,
+			"a recall records at most MaxMemoryRecallIDs memories")
+	})
+
 	t.Run("proposals are reviewed once and archived", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		require.ErrorIs(t, p.CreateMemoryProposal(ctx, nil), storagev1.ErrValidation)

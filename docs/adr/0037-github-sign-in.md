@@ -43,7 +43,11 @@ signed-in person's host may do.
 2. The CLI runs the device flow against GitHub itself. It shows the code and the URL,
    polls GitHub, and never holds the client secret.
 3. It sends the GitHub access and refresh tokens to `POST /api/v1/auth/github` once.
-   Orka then:
+   The endpoint is unauthenticated and every attempt spends the App's GitHub rate
+   limit, so each API server rate-limits attempts per client and overall before the body is read;
+   one over the limit gets `429` with `Retry-After`. Clients are told apart by address, so
+   behind an Ingress all sign-ins share the proxy's limit, sized for a team signing in
+   together. Orka then:
    - checks with the check-token API that the token was issued to its own app, so a
      token another app obtained cannot sign in;
    - redeems the refresh token once, requires the access token GitHub returns to be its
@@ -64,13 +68,19 @@ signed-in person's host may do.
    by them. `orka logout` revokes it.
 
 The API's authentication accepts session tokens beside OIDC. A session's identity is a
-verified person, like an OIDC sign-in: it may link accounts and mint AHP tokens, and it
-works in the sign-in namespace, which is the watch namespace. Session tokens are never
-logged, and neither are GitHub tokens, device codes or GitHub's answers that carry them:
-requests and errors are logged by route and status, never by body. GitHub's user code and
-verification URL are shown only to the person signing in, or returned to the operator who
-started an invite. The device code that polls for the token stays with whoever polls: the
-CLI, or Orka for an invite.
+verified person in the sign-in namespace, which is the watch namespace. Session tokens are
+never logged, and neither are GitHub tokens, device codes or GitHub's answers that carry
+them: requests and errors are logged by route and status, never by body. GitHub's user
+code and verification URL are shown only to the person signing in, or returned to the
+operator who started an invite. The device code that polls for the token stays with
+whoever polls: the CLI, or Orka for an invite.
+Unlike an OIDC sign-in, a session reaches only the routes that act on the
+person's own links, agent host and connection routes; every other API route still needs OIDC
+or Kubernetes credentials. Membership of an org grants a Copilot environment, not the whole
+API.
+
+Sessions do not mint AHP tokens yet. An AHP token outlives a session, so it needs an owner
+check that ends with membership; that is a follow-up.
 
 This extends [ADR 0033](0033-user-connectors.md)'s owner rule, which admits only OIDC and
 context-token subjects. A GitHub session also owns Connections, as issuer
@@ -81,6 +91,9 @@ context-token subjects. A GitHub session also owns Connections, as issuer
 - Before a session expires, the CLI renews it at `POST /api/v1/auth/session/renew`. Orka
   refreshes the person's GitHub token from custody and checks membership again. A person
   no longer in an allowed org or team cannot renew; they sign in again, and are refused.
+  Renewals share the sign-in rate limit, per person and overall, before Orka asks GitHub
+  anything: a renewed session can renew again, so chained renewals could otherwise spend
+  the App's GitHub rate limit.
 - The agent host's token refresh under ADR 0036, at most every eight hours, checks
   membership too. If it is gone, the controller handles it as a disconnect: it stops the
   host and keeps its volume.
@@ -101,8 +114,10 @@ context-token subjects. A GitHub session also owns Connections, as issuer
   Signing in again without `--no-host` clears that, and ADR 0036 then provisions the
   host for the same Connection.
 - A host takes only a token that expires, so a sign-in starts one only when GitHub
-  confirmed its token's expiry through the refresh above. A sign-in without a refresh
-  token links the account without a host.
+  confirmed its token's expiry through the refresh above, by issuing a refresh token
+  beside it. A sign-in without a refresh token links the account without a host, under
+  a deadline Orka chooses. A host never takes such a link: a later sign-in that starts
+  one replaces it first, and lifts the decline only once its own grant is linked.
 - A link made another way, such as `orka connect`, with a token that never expires still
   gets a host, which fails with `GitHubTokenNeverExpires` and names the fix, rather than
   no host and no reason.

@@ -324,3 +324,42 @@ func TestHandlers_CreateTaskRejectsClasslessWorkspace(t *testing.T) {
 	require.NoError(t, fakeClient.List(t.Context(), tasks))
 	require.Empty(t, tasks.Items)
 }
+
+// A consolidation run's grants are reviewed for the caller's canonical
+// identity, never for a display name an OIDC caller may choose.
+func TestAuthorizeTaskMemoryConsolidationReviewsTheCanonicalIdentity(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "consolidate", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI,
+			AI: &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}}}
+	review := func(userInfo *UserInfo) []authorizationv1.SubjectAccessReviewSpec {
+		t.Helper()
+		var specs []authorizationv1.SubjectAccessReviewSpec
+		clientset := kubefake.NewSimpleClientset()
+		clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+			sar := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+			specs = append(specs, sar.Spec)
+			sar.Status.Allowed = true
+			return true, sar, nil
+		})
+		require.NoError(t, authorizeTaskMemoryConsolidation(context.Background(), clientset, userInfo, task))
+		return specs
+	}
+
+	for _, authType := range []string{AuthTypeOIDC, AuthTypeContextToken} {
+		specs := review(&UserInfo{AuthType: authType, Username: "cluster-admin", Issuer: "https://issuer.example",
+			Subject: "subject-1", Groups: []string{"system:masters"}})
+		require.Len(t, specs, 4)
+		for _, spec := range specs {
+			require.Equal(t, "https://issuer.example#subject-1", spec.User, "%s: never the chosen display name", authType)
+			require.Equal(t, []string{"https://issuer.example#system:masters"}, spec.Groups, "%s: groups carry the issuer", authType)
+		}
+	}
+	specs := review(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:curator", UID: "uid",
+		Groups: []string{"system:serviceaccounts"}})
+	require.Equal(t, "system:serviceaccount:default:curator", specs[0].User, "a TokenReview user is as Kubernetes authenticated it")
+	require.Equal(t, []string{"system:serviceaccounts"}, specs[0].Groups)
+
+	clientset := kubefake.NewSimpleClientset()
+	require.Error(t, authorizeTaskMemoryConsolidation(context.Background(), clientset,
+		&UserInfo{AuthType: AuthTypeOIDC, Username: "cluster-admin"}, task), "an OIDC caller without issuer and subject is refused")
+}

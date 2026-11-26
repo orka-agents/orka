@@ -92,6 +92,24 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
+                  permissionDecisions:
+                    description: |-
+                      PermissionDecisions selects who answers the permission requests an ACP
+                      runtime sends before running a tool. Policy, the default, answers each
+                      request from the frozen tool policy, and built-in runtimes run the native
+                      tools that policy allows without asking. Requester launches the built-in
+                      runtime so it asks before every shell command and file change the policy
+                      allows; it still refuses what that policy refuses, but holds every request
+                      it would allow for the Task's verified requester to approve or decline
+                      through the Task approvals API. A request nobody answers before it expires
+                      is refused. Requester requires a built-in runtime on the harness v2 path;
+                      other Tasks are rejected. It never enters the runtime profile, but a
+                      Session's runtime session is launched in one mode: a turn with the other
+                      value starts a new runtime session from the Session transcript.
+                    enum:
+                    - Policy
+                    - Requester
+                    type: string
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               ai:
@@ -101,6 +119,52 @@ spec:
                     description: MaxTokens limits the response length
                     format: int32
                     type: integer
+                  memoryConsolidation:
+                    description: |-
+                      MemoryConsolidation makes this Task a memory consolidation run: it reads
+                      the namespace's current memories and recently changed Sessions and
+                      reports, or proposes, merges, supersessions and retirements for review
+                      (ADR 0051). The run uses a fixed Orka system prompt and no other tools;
+                      Prompt, when set, steers what it focuses on. Creating such a Task, or
+                      changing its spec, requires list and get on sessions and list on
+                      memories in the namespace, and in Propose mode create on
+                      memoryproposals.
+                    properties:
+                      lookback:
+                        description: |-
+                          Lookback is how far back the first run of its mode in a namespace
+                          reads. Later runs start where the latest completed run ended. Defaults
+                          to 168h; at most 720h.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: lookback must be between 1h and 720h
+                          rule: duration(self) >= duration('1h') && duration(self)
+                            <= duration('720h')
+                      maxOperations:
+                        description: |-
+                          MaxOperations is the most operations one run reports or proposes.
+                          Defaults to 10.
+                        format: int32
+                        maximum: 20
+                        minimum: 1
+                        type: integer
+                      minNewSessions:
+                        description: |-
+                          MinNewSessions is the fewest Sessions that must have changed since the
+                          last completed run for this run to call the model. Fewer skips the run.
+                          Defaults to 5.
+                        format: int32
+                        maximum: 50
+                        minimum: 1
+                        type: integer
+                      mode:
+                        default: DryRun
+                        description: Mode is DryRun, the default, or Propose.
+                        enum:
+                        - DryRun
+                        - Propose
+                        type: string
+                    type: object
                   model:
                     description: Model is the model identifier - required if providerRef
                       not set
@@ -1720,6 +1784,18 @@ spec:
                     description: Branch is the source branch to check out.
                     maxLength: 255
                     type: string
+                  commitAuthorEmail:
+                    description: |-
+                      CommitAuthorEmail overrides the Git author and committer email on the
+                      published commit. Defaults to "publisher@orka.ai".
+                    maxLength: 256
+                    type: string
+                  commitAuthorName:
+                    description: |-
+                      CommitAuthorName overrides the Git author and committer name on the
+                      published commit. Defaults to "Orka Publisher".
+                    maxLength: 256
+                    type: string
                   commitMessage:
                     description: |-
                       CommitMessage is the message of the commit that publishes the Task's
@@ -1733,6 +1809,31 @@ spec:
                       rule: self == '' || self.trim() != ''
                     - message: commitMessage must not contain carriage returns
                       rule: '!self.contains(''\r'')'
+                  commitSigningCredentialRef:
+                    description: |-
+                      CommitSigningCredentialRef references a Kubernetes Secret containing an
+                      unencrypted OpenSSH private key used only during clean-room publication
+                      preparation to sign the prepared Git commit (SSHSIG). Set Key to the
+                      Secret data key holding the private key (for example "signingKey").
+                    properties:
+                      key:
+                        default: token
+                        description: |-
+                          Key is the Secret data key containing one bearer token or one complete
+                          Authorization header. It defaults to "token" when omitted.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      name:
+                        description: Name is the name of the Secret in the Task namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
                   createPR:
                     default: false
                     description: |-
@@ -2051,9 +2152,20 @@ spec:
             - message: execution.workspace is only supported for agent Tasks
               rule: '!has(self.execution) || !has(self.execution.workspace) || self.type
                 == ''agent'''
+            - message: agentRuntime.permissionDecisions Requester is only supported
+                for agent Tasks
+              rule: self.type == 'agent' || !has(self.agentRuntime) || !has(self.agentRuntime.permissionDecisions)
+                || self.agentRuntime.permissionDecisions != 'Requester'
             - message: webhookEvents requires webhookURL
               rule: '!has(self.webhookEvents) || size(self.webhookEvents) == 0 ||
                 (has(self.webhookURL) && size(self.webhookURL) > 0)'
+            - message: ai.memoryConsolidation requires an ai Task without sessionRef
+              rule: '!has(self.ai) || !has(self.ai.memoryConsolidation) || (self.type
+                == ''ai'' && !has(self.sessionRef))'
+            - message: ai.memoryConsolidation is immutable
+              rule: (has(self.ai) && has(self.ai.memoryConsolidation)) == (has(oldSelf.ai)
+                && has(oldSelf.ai.memoryConsolidation)) && (!has(self.ai) || !has(self.ai.memoryConsolidation)
+                || self.ai.memoryConsolidation == oldSelf.ai.memoryConsolidation)
           status:
             description: |-
               TaskStatus defines the observed state of Task
@@ -2807,6 +2919,12 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
+                  commitSigningCredentialResourceVersion:
+                    description: |-
+                      CommitSigningCredentialResourceVersion freezes the SSH commit signing
+                      Secret version used only during clean-room publication preparation.
+                    maxLength: 253
+                    type: string
                   controllerEpoch:
                     description: ControllerEpoch is the durable controller epoch fencing
                       this attempt.
@@ -2930,9 +3048,9 @@ spec:
                     type: string
                   runtimeSessionWorkspaceDigest:
                     description: |-
-                      RuntimeSessionWorkspaceDigest binds a reusable Session generation to the
-                      exact repository, source ref, verified baseline, intent, and relative root.
-                      It contains no credential material.
+                      RuntimeSessionWorkspaceDigest binds a reusable Session generation, or a
+                      task-scoped RuntimeSession, to the exact repository, source ref, verified
+                      baseline, intent, and relative root. It contains no credential material.
                     pattern: ^sha256:[a-f0-9]{64}$
                     type: string
                   state:

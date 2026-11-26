@@ -30,7 +30,8 @@ type sentMessage struct {
 
 // SendMessage stores a new inter-agent message and, once it has committed,
 // writes its assigned ID and creation time back into msg. A caller's creation
-// time is kept; a zero one gets the store clock.
+// time is kept; a zero one gets the store clock. Content over
+// store.MaxMessageContentBytes is rejected with store.ErrTooLarge.
 func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
 	if msg == nil {
 		return store.ValidationErrorf("message is required")
@@ -47,6 +48,18 @@ func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
 }
 
 func (s *Store) sendMessageWrite(ctx context.Context, msg store.Message) (sentMessage, error) {
+	if len(msg.Content) > store.MaxMessageContentBytes {
+		return sentMessage{}, store.TooLargeError{
+			What: "message content", Size: int64(len(msg.Content)), Limit: store.MaxMessageContentBytes,
+		}
+	}
+	for _, field := range []struct{ name, value string }{
+		{"namespace", msg.Namespace}, {"fromTask", msg.FromTask}, {"toTask", msg.ToTask}, {"parentTask", msg.ParentTask},
+	} {
+		if len(field.value) > store.MaxControlIdentifierBytes {
+			return sentMessage{}, store.ValidationErrorf("message %s exceeds %d bytes", field.name, store.MaxControlIdentifierBytes)
+		}
+	}
 	var sent sentMessage
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
 		var err error
@@ -206,7 +219,47 @@ func selectUnreadMessages(
 		return nil, err
 	}
 	defer rows.Close() //nolint:errcheck
-	return scanMessages(rows, namespace)
+	return scanMessageBatch(rows, namespace)
+}
+
+// scanMessageBatch reads an inbox selection in ID order and stops before the
+// message that would take the batch past store.MaxMessageBatchBytes, keeping
+// at least one message unless that message alone exceeds the wire-safe budget.
+// Counting both content and identifier bytes protects legacy pre-upgrade rows
+// whose identifiers or content were stored before the send-time caps existed.
+func scanMessageBatch(rows *sql.Rows, namespace string) ([]store.Message, error) {
+	var messages []store.Message
+	var batchBytes int
+	for rows.Next() {
+		m := store.Message{Namespace: namespace}
+		if err := rows.Scan(&m.ID, &m.FromTask, &m.ToTask, &m.ParentTask, &m.Content, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		rowBytes := len(m.Content)
+		idBytes := len(m.Namespace) + len(m.FromTask) + len(m.ToTask) + len(m.ParentTask)
+		if idBytes > 4*store.MaxControlIdentifierBytes {
+			// Legacy row with oversized identifiers: charge the excess against
+			// the batch budget so a consuming read never commits a batch that
+			// cannot fit in one wire response.
+			rowBytes += idBytes - 4*store.MaxControlIdentifierBytes
+		}
+		if len(messages) > 0 && batchBytes+rowBytes > store.MaxMessageBatchBytes {
+			break
+		}
+		if len(messages) == 0 && rowBytes > store.MaxMessageBatchBytes {
+			return nil, store.TooLargeError{What: "message batch", Size: int64(rowBytes), Limit: store.MaxMessageBatchBytes}
+		}
+		if messages == nil {
+			messages = make([]store.Message, 0, initialMessageBatchCapacity)
+		}
+		m.CreatedAt = m.CreatedAt.UTC()
+		batchBytes += rowBytes
+		messages = append(messages, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
 }
 
 // selectMessagesByID reads the messages a consuming read of request's inbox

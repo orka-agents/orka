@@ -32,6 +32,10 @@ const linuxGOOS = "linux"
 
 const providerProxyCanaryMode = "provider-proxy-canary"
 
+// credentialEchoMode makes the fake agent echo its provider credential through
+// every update channel.
+const credentialEchoMode = "credential-echo"
+
 // genAITelemetryMode makes one model call through the provider proxy, runs a
 // tool call and reports turn usage, so GenAI spans follow the real prompt path.
 const genAITelemetryMode = "genai-telemetry"
@@ -411,10 +415,23 @@ func TestSupervisorCreateAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode prompt events: %v\n%s", err, response.Body.String())
 	}
-	if len(events) != 3 || events[0].Type != harnessv2.EventAccepted || events[1].Type != harnessv2.EventUpdate || events[2].Type != harnessv2.EventCompleted {
+	// Assistant text arrives in one or more updates: a suffix that could begin
+	// a session credential is held until the stream ends.
+	last := len(events) - 1
+	if len(events) < 3 || events[0].Type != harnessv2.EventAccepted || events[last].Type != harnessv2.EventCompleted {
 		t.Fatalf("unexpected event sequence: %#v", events)
 	}
-	if got := events[2].Completed.Result.Content[0].Text; got != "hello from ACP" {
+	var streamed strings.Builder
+	for _, event := range events[1:last] {
+		if event.Type != harnessv2.EventUpdate || event.Update == nil || event.Update.AssistantMessage == nil {
+			t.Fatalf("unexpected event sequence: %#v", events)
+		}
+		streamed.WriteString(event.Update.AssistantMessage.Text)
+	}
+	if streamed.String() != "hello from ACP" {
+		t.Fatalf("streamed text = %q", streamed.String())
+	}
+	if got := events[last].Completed.Result.Content[0].Text; got != "hello from ACP" {
 		t.Fatalf("result text = %q", got)
 	}
 
@@ -909,12 +926,18 @@ func TestSupervisorUsesCodexFinalAnswerAsTerminalResult(t *testing.T) {
 		),
 	}
 	for _, event := range events {
-		mapped, err := server.mapRuntimeEvent(state, prompt, event)
+		// An oversized chunk is split into pieces within the per-event bound.
+		mapped, err := server.mapRuntimeEvents(state, prompt, event)
 		if err != nil {
 			t.Fatalf("map phased assistant event: %v", err)
 		}
-		if mapped == nil || mapped.Update == nil || mapped.Update.AssistantMessage == nil {
+		if len(mapped) == 0 || mapped[0].Update == nil || mapped[0].Update.AssistantMessage == nil {
 			t.Fatalf("phased assistant event was not visible: %#v", mapped)
+		}
+		for _, piece := range mapped {
+			if err := piece.Update.Validate(); err != nil {
+				t.Fatalf("assistant piece is invalid: %v", err)
+			}
 		}
 	}
 	if !prompt.assistantOverflow || !prompt.finalAnswerSeen || prompt.finalAnswerOverflow {
@@ -1075,6 +1098,100 @@ func TestSupervisorPreservesIdentityReserveAndClosesOnlySessionAdmission(t *test
 	}
 }
 
+func TestSupervisorCreateRejectsUnsafeWorkspacePermanently(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	var validated acp.SessionPaths
+	prepared := false
+	server.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
+		validated = paths
+		return &workspaceRejectedError{publicMessage: acp.OpenCodeProjectConfigurationRejectedMessage, detail: "found opencode.json"}
+	}
+	server.cfg.Provider.PrepareSession = func(acp.SessionPaths) error {
+		prepared = true
+		return nil
+	}
+	create := testCreateSessionRequest(t, cfg, profile)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe workspace create status=%d body=%s", response.Code, response.Body.String())
+	}
+	var failure harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if err := failure.Validate(); err != nil {
+		t.Fatalf("rejection response is invalid: %v", err)
+	}
+	if failure.Code != harnessv2.ErrorCodeInvalidRequest || failure.Retryable ||
+		failure.Message != acp.OpenCodeProjectConfigurationRejectedMessage {
+		t.Fatalf("unsafe workspace rejection = %#v", failure)
+	}
+	if prepared {
+		t.Fatal("provider preparation ran for a rejected workspace")
+	}
+	if validated.Root == "" {
+		t.Fatal("workspace validation did not run")
+	}
+	if _, err := os.Lstat(validated.Root); !os.IsNotExist(err) {
+		t.Fatalf("rejected create retained session root: %v", err)
+	}
+	remaining := cfg.UIDAllocator.Remaining()
+	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
+	if replay.Code != http.StatusBadRequest || cfg.UIDAllocator.Remaining() != remaining {
+		t.Fatalf("replayed rejection status=%d remaining=%d want %d body=%s", replay.Code, cfg.UIDAllocator.Remaining(), remaining, replay.Body.String())
+	}
+	if len(server.status().Sessions) != 0 {
+		t.Fatal("rejected create left a resident session")
+	}
+}
+
+func TestSupervisorCreateRejectionHidesUnclassifiedValidationErrors(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	server.cfg.Provider.ValidateWorkspace = func(acp.SessionPaths) error {
+		return errors.New("inspect /private/path: permission denied")
+	}
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", testCreateSessionRequest(t, cfg, profile), cfg)
+	var failure harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusBadRequest || failure.Retryable ||
+		failure.Message != acp.WorkspaceValidationFailedMessage {
+		t.Fatalf("unclassified validation failure status=%d response=%#v", response.Code, failure)
+	}
+}
+
+// The controller acts on the harness client's view of the rejection, which
+// enforces its own status/code mapping: the rejection must arrive as a
+// definitive, non-retryable HTTP client error carrying the fixed message.
+func TestSupervisorCreateRejectionIsDefinitiveThroughHarnessClient(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	server.cfg.Provider.ValidateWorkspace = func(acp.SessionPaths) error {
+		return &workspaceRejectedError{publicMessage: acp.OpenCodeProjectConfigurationRejectedMessage, detail: "found opencode.json"}
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	client, err := harnessv2.NewClient(httpServer.URL, harnessv2.WithControllerBearerToken(cfg.ControllerBearerToken), harnessv2.WithOperationCapabilitySecret(cfg.CapabilitySecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	create := testCreateSessionRequest(t, cfg, profile)
+	for attempt := range 2 {
+		_, err = client.CreateRuntimeSession(ctx, create)
+		clientErr, ok := errors.AsType[*harnessv2.ClientError](err)
+		if !ok {
+			t.Fatalf("attempt %d: create error = %v, want a harness client error", attempt, err)
+		}
+		if clientErr.Kind != harnessv2.ClientErrorHTTP || clientErr.StatusCode != http.StatusBadRequest ||
+			clientErr.Code != harnessv2.ErrorCodeInvalidRequest || clientErr.Retryable ||
+			clientErr.Message != acp.OpenCodeProjectConfigurationRejectedMessage {
+			t.Fatalf("attempt %d: create rejection = %#v", attempt, clientErr)
+		}
+	}
+}
+
 func TestSupervisorStatusReportsCreatingRuntimeSession(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	entered := make(chan struct{})
@@ -1190,7 +1307,7 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		Environment: map[string]string{"GO_WANT_SUPERVISOR_ACP_HELPER": "1", "SUPERVISOR_ACP_HELPER_MODE": mode},
 		AdapterName: "fake-acp", AdapterDigest: testDigest("adapter"),
 	}
-	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode || mode == genAITelemetryMode {
+	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode || mode == credentialEchoMode || mode == genAITelemetryMode {
 		provider.EnvironmentForSession = func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
 			config, err := json.Marshal(map[string]string{"openai_base_url": proxy.BaseURL})
 			if err != nil {
@@ -1431,6 +1548,7 @@ func TestSupervisorACPHelper(t *testing.T) {
 		sessionID = testNativeThreadID
 	}
 	var promptID json.RawMessage
+	var sessionCWD string
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
@@ -1479,6 +1597,12 @@ func TestSupervisorACPHelper(t *testing.T) {
 			}
 			writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "result": map[string]any{}})
 		case acp.MethodSessionNew:
+			var newSession struct {
+				CWD string `json:"cwd"`
+			}
+			if json.Unmarshal(message.Params, &newSession) == nil && newSession.CWD != "" {
+				sessionCWD = newSession.CWD
+			}
 			if strings.HasPrefix(mode, "native-resume") {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(message.ID), "error": map[string]any{"code": -32602, "message": "unexpected session/new during native restore"}})
 				continue
@@ -1544,6 +1668,12 @@ func TestSupervisorACPHelper(t *testing.T) {
 						"data": map[string]any{"service": "session", "errorName": "APIError", "detail": "provider-secret-must-not-leak"},
 					},
 				})
+				promptID = nil
+				continue
+			}
+			if mode == credentialEchoMode {
+				writeCredentialEchoUpdates(writer, sessionID, sessionCWD, strings.TrimSpace(os.Getenv("CODEX_API_KEY")))
+				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{"stopReason": acp.StopReasonEndTurn}})
 				promptID = nil
 				continue
 			}

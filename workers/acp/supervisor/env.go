@@ -1,14 +1,17 @@
 package supervisor
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/orka-agents/orka/internal/acp"
@@ -67,6 +70,8 @@ const (
 	EnvProxyCredentialScope      = "ORKA_ACP_PROXY_CREDENTIAL_SCOPE"
 	EnvResourceClass             = "ORKA_ACP_RESOURCE_CLASS"
 	EnvProviderProxyBaseURL      = "ORKA_ACP_PROVIDER_PROXY_BASE_URL"
+	EnvCodex429RetryBaseURL      = "ORKA_ACP_CODEX_429_RETRY_BASE_URL"
+	EnvCodex429RetryModel        = "ORKA_ACP_CODEX_429_RETRY_MODEL"
 	EnvProviderTokenFile         = "ORKA_ACP_PROVIDER_TOKEN_FILE"
 	EnvArtifactAPIURL            = "ORKA_ACP_ARTIFACT_API_URL"
 	EnvWorkspaceArtifactMaxBytes = "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES"
@@ -102,6 +107,7 @@ const (
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
 	openCodePermissionAllow     = "allow"
+	openCodePermissionAsk       = "ask"
 	openCodePermissionDeny      = "deny"
 	openCodeRootInstructionPath = "/opt/opencode/AGENTS.md"
 
@@ -133,6 +139,10 @@ const (
 	defaultWorkspaceArtifactDownloadBytes int64 = artifactcap.DefaultWorkspaceArtifactMaxBytes
 	defaultWorkspaceDeltaUploadBytes      int64 = 100 << 20
 )
+
+// EnvPermissionTimeout is how long a runtime waits for the answer to a
+// permission request, as a Go duration. Empty keeps the default.
+const EnvPermissionTimeout = "ORKA_ACP_PERMISSION_TIMEOUT"
 
 // EnvBrokeredToolApprovalProfileDigest opts an operator-qualified, immutable
 // runtime profile into brokered approvals. Provider identity alone is not proof
@@ -324,6 +334,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	permissionTimeout, err := permissionTimeoutFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	bootID := strings.TrimSpace(os.Getenv(EnvSupervisorBootID))
 	if bootID == "" {
 		bootID = uuid.NewString()
@@ -364,6 +378,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: providerUpstreamBaseURL(providerKind, providerBaseURL), UpstreamBearerToken: providerToken,
 			ProviderKind: providerKind, Model: model,
+			Codex429RetryBaseURL: os.Getenv(EnvCodex429RetryBaseURL), Codex429RetryModel: os.Getenv(EnvCodex429RetryModel),
 		},
 		MCPBroker:                     mcpBroker,
 		WorkspaceMaterializer:         workspaceMaterializer,
@@ -372,6 +387,7 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
+		PermissionTimeout:             permissionTimeout,
 		Skills:                        harnessv2.CloneRuntimeSkills(skills),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
@@ -401,6 +417,13 @@ const claudeSkillToolName = "Skill"
 // externalSandbox policy keeps the runtime Pod as the enforcement boundary.
 const codexAgentModeOrkaExternal = "orka-external"
 
+// codexAgentModeOrkaExternalAsk is the Orka-patched agent mode an ask session
+// launches: the same external sandbox under Codex's untrusted approval policy.
+const codexAgentModeOrkaExternalAsk = "orka-external-ask"
+
+// codexAskApprovalPolicy is the approval policy of the asking agent mode.
+const codexAskApprovalPolicy = "untrusted"
+
 var providerNativeToolNames = []string{
 	providerToolBash, providerToolEdit, providerToolGlob, providerToolGrep,
 	providerToolRead, providerToolWebFetch, providerToolWebSearch, providerToolWrite,
@@ -414,6 +437,20 @@ type providerNativePolicy struct {
 func (p providerNativePolicy) allows(name string) bool {
 	_, ok := p.allowed[name]
 	return ok
+}
+
+// grants reports whether the frozen policy lets the provider run one Orka
+// native tool; an unrestricted policy grants every one of them.
+func (p providerNativePolicy) grants(name string) bool {
+	return p.unrestricted || p.allows(name)
+}
+
+// nativePermissionsAsk reports whether the session must be launched so the
+// provider asks before each policy-allowed native tool that acts. The mode
+// changes only how those tools launch: a policy that allows none of them
+// launches exactly as in the pre-approved mode.
+func nativePermissionsAsk(request harnessv2.CreateRuntimeSessionRequest) bool {
+	return request.MCPConfiguration.NativePermissions == harnessv2.NativePermissionsAsk
 }
 
 func providerSessionPolicy(
@@ -434,7 +471,12 @@ func providerSessionPolicy(
 		request.Profile.Model != model || request.AgentConfiguration.Model != model {
 		return providerNativePolicy{}, fmt.Errorf("provider session configuration does not match runtime profile")
 	}
-	toolPolicy := request.MCPConfiguration.ToolPolicy
+	return nativePolicyFor(provider, request.MCPConfiguration.ToolPolicy)
+}
+
+// nativePolicyFor reads the native grants of one frozen tool policy the way
+// the provider's session projection launches them.
+func nativePolicyFor(provider string, toolPolicy harnessv2.MCPToolPolicy) (providerNativePolicy, error) {
 	unrestricted := toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash
 	if provider == providerKindCodex || provider == providerKindCopilot {
 		unrestricted = acp.BuiltInRuntimeNativePolicyUnrestricted(provider, toolPolicy.AllowedToolNames, toolPolicy.DisallowedToolNames, toolPolicy.AllowBash)
@@ -469,7 +511,7 @@ func providerNativePolicyLists(policy providerNativePolicy) ([]string, []string)
 	allowed := make([]string, 0, len(providerNativeToolNames))
 	disallowed := make([]string, 0, len(providerNativeToolNames))
 	for _, name := range providerNativeToolNames {
-		if policy.allows(name) {
+		if policy.grants(name) {
 			allowed = append(allowed, name)
 		} else {
 			disallowed = append(disallowed, name)
@@ -491,6 +533,7 @@ func codexSessionProjection(
 	if !policy.unrestricted && !codexReadOnlySessionPolicy(request, policy) {
 		return ProviderSessionProjection{}, fmt.Errorf("codex ACP runtime cannot exactly enforce provider-native tool restrictions")
 	}
+	ask := nativePermissionsAsk(request) && codexLaunchesAsk(policy)
 	config := codexBaseConfig(model, proxy.BaseURL)
 	if request.NativeRestore != nil {
 		// Do not inherit imported approval or sandbox settings during resume.
@@ -498,6 +541,9 @@ func codexSessionProjection(
 		// explicitly applies the orka-external agent mode's externalSandbox;
 		// the RuntimeSession boundary, not this fallback, governs workspace writes.
 		config["approval_policy"] = "on-request"
+		if ask {
+			config["approval_policy"] = codexAskApprovalPolicy
+		}
 		config["sandbox_mode"] = "read-only"
 	}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -505,6 +551,12 @@ func codexSessionProjection(
 	}
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		config["model_reasoning_effort"] = effort
+	}
+	if ask {
+		// Without a TTY a command's stdin is closed, so input written to an
+		// approved process (write_stdin) cannot run further commands that
+		// were never asked about (verified with Codex 0.160.0).
+		config["features"] = map[string]any{"unified_exec_tty": false}
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {
@@ -521,7 +573,17 @@ func codexSessionProjection(
 	// unconditionally by the controller, the supervisor owns the read-intent
 	// workspace so shell writes fail with EACCES, and the read-intent
 	// workspace delta classification fails any turn that modifies it anyway.
-	return ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}, nil
+	projection := ProviderSessionProjection{Environment: map[string]string{"CODEX_CONFIG": string(encoded)}}
+	if ask {
+		// The asking agent mode keeps the external sandbox but applies
+		// Codex's untrusted approval policy to every turn, so Codex asks
+		// before each command and each file change. An adapter without the
+		// mode would silently start in its default mode, so the session must
+		// report the mode as current or creation fails.
+		projection.Environment["INITIAL_AGENT_MODE"] = codexAgentModeOrkaExternalAsk
+		projection.RequiredModeID = codexAgentModeOrkaExternalAsk
+	}
+	return projection, nil
 }
 
 // codexBaseConfig is the Codex configuration every session starts from. The
@@ -554,6 +616,10 @@ func codexProviderDefinition(baseURL string) map[string]any {
 		"base_url":           baseURL,
 		"wire_api":           "responses",
 		"env_key":            "CODEX_API_KEY",
+		// The session proxy owns rejected-request retries. Neither a transport
+		// failure nor a broken response stream authorizes a second POST.
+		"request_max_retries": 0,
+		"stream_max_retries":  0,
 	}
 }
 
@@ -575,7 +641,7 @@ func codexReadOnlySessionPolicy(request harnessv2.CreateRuntimeSessionRequest, p
 
 func claudeSessionProjection(
 	request harnessv2.CreateRuntimeSessionRequest,
-	_ acp.SessionPaths,
+	paths acp.SessionPaths,
 	_ ProviderProxyBinding,
 	model string,
 ) (ProviderSessionProjection, error) {
@@ -583,7 +649,17 @@ func claudeSessionProjection(
 	if err != nil {
 		return ProviderSessionProjection{}, err
 	}
-	options := map[string]any{"maxTurns": request.AgentConfiguration.MaxTurns}
+	options := map[string]any{
+		"maxTurns": request.AgentConfiguration.MaxTurns,
+		// claude-agent-acp otherwise loads user, project, and local settings.
+		// Project settings come from the cloned repository and can define
+		// hooks that run shell commands outside the tool policy and env that
+		// redirects ANTHROPIC_BASE_URL with the provider credential; user
+		// settings live in the agent-writable session home. Orka projects
+		// every option it needs through this metadata instead, including its
+		// skills, which arrive as a plugin rather than as user skills.
+		"settingSources": []string{},
+	}
 	var environment map[string]string
 	if effort := request.AgentConfiguration.ReasoningEffort; effort != "" {
 		options["effort"] = effort
@@ -595,8 +671,12 @@ func claudeSessionProjection(
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
+	ask := nativePermissionsAsk(request)
 	skills := harnessv2.RuntimeSkillNames(request.Profile.Skills)
-	if !policy.unrestricted {
+	if !policy.unrestricted || ask {
+		// An ask session always names its tools: Claude Code's default
+		// preset also offers tools outside Orka's native tool model, some of
+		// which act without asking.
 		allowed, disallowed := providerNativePolicyLists(policy)
 		if len(skills) > 0 {
 			// The Skill tool only loads the instructions of the skills listed
@@ -610,12 +690,35 @@ func claudeSessionProjection(
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
 	}
+	settings := map[string]any{}
+	if ask {
+		// Claude Code (verified through 2.1.293) runs read-only Bash commands
+		// without asking in its default permission mode. A tool-wide ask rule
+		// makes it ask before every call of each acting tool, and it still
+		// asks when workspace settings set bypassPermissions, add allow rules,
+		// or a hook allows the call. It offers only allow-once and reject-once.
+		settings["permissions"] = map[string]any{"ask": claudeAskTools}
+	}
 	if len(skills) > 0 {
-		// Expose exactly the Orka skills: the SDK hides every other skill and
-		// its Skill tool rejects them. Inline shell execution in skills and
-		// slash commands from any source is turned off as well.
-		options["skills"] = skills
-		options["settings"] = map[string]any{"disableSkillShellExecution": true}
+		if !filepath.IsAbs(paths.Root) {
+			return ProviderSessionProjection{}, fmt.Errorf("claude skills require an absolute session root")
+		}
+		// The skills come from Orka's read-only plugin folder. Its MCP
+		// discovery is skipped, so the plugin can only add skills.
+		options["plugins"] = []map[string]any{{"type": "local", "path": claudeSkillPluginRoot(paths), "skipMcpDiscovery": true}}
+		// Expose exactly the Orka skills, by their plugin-qualified names: the
+		// SDK hides every other skill and its Skill tool rejects them. Inline
+		// shell execution in skills and slash commands from any source is
+		// turned off as well.
+		qualified := make([]string, 0, len(skills))
+		for _, name := range skills {
+			qualified = append(qualified, claudeSkillPluginName+":"+name)
+		}
+		options["skills"] = qualified
+		settings["disableSkillShellExecution"] = true
+	}
+	if len(settings) > 0 {
+		options["settings"] = settings
 	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -623,6 +726,10 @@ func claudeSessionProjection(
 	}
 	return ProviderSessionProjection{Environment: environment, NewSessionMeta: meta}, nil
 }
+
+// claudeAskTools are the acting native tools an ask session's rule covers.
+// A rule for a tool the session does not offer has no effect.
+var claudeAskTools = []string{providerToolBash, providerToolEdit, providerToolWrite}
 
 var copilotToolIDs = map[string][]string{
 	providerToolBash:      {openCodeToolBash, "list_bash", "read_bash", "stop_bash", "write_bash"},
@@ -682,12 +789,18 @@ func copilotSessionProjection(
 	// Copilot 1.0.96 supplies display titles, not structured tool names, in
 	// permission requests. Project the frozen native grants into CLI permission
 	// rules instead of treating those titles as authority. Exclusions above
-	// still remove every native tool outside the effective policy.
-	if policy.unrestricted || policy.allows(providerToolBash) {
-		args = append(args, "--allow-tool=shell")
-	}
-	if policy.unrestricted || policy.allows(providerToolEdit) || policy.allows(providerToolWrite) {
-		args = append(args, "--allow-tool=write")
+	// still remove every native tool outside the effective policy. An ask
+	// session leaves both rules out, so the CLI asks before every shell
+	// command and file write; copilotAskPermissionToolName then names each
+	// request from its structured kind, which only one tool group the launch
+	// kept can produce.
+	if !nativePermissionsAsk(request) {
+		if policy.grants(providerToolBash) {
+			args = append(args, "--allow-tool=shell")
+		}
+		if policy.grants(providerToolEdit) || policy.grants(providerToolWrite) {
+			args = append(args, "--allow-tool=write")
+		}
 	}
 	for _, descriptor := range request.MCPConfiguration.ToolPolicy.Tools {
 		if descriptor.Source.Brokered() {
@@ -878,7 +991,8 @@ func providerProfile(
 					openCodeProviderEnvName:                     proxy.Credential,
 				}, nil
 			},
-			PrepareSession: prepareOpenCodeConfig,
+			ValidateWorkspace: validateOpenCodeSession,
+			PrepareSession:    prepareOpenCodeConfig,
 		}, nil
 	case providerKindAgentKit, providerKindFoundry:
 		adapter, _ := externalACPAdapterFor(kind)
@@ -888,12 +1002,150 @@ func providerProfile(
 	}
 }
 
-func prepareOpenCodeConfig(paths acp.SessionPaths) error {
-	configDir := filepath.Join(paths.Config, "opencode")
-	if err := os.MkdirAll(filepath.Join(configDir, "node_modules"), 0o700); err != nil {
+// openCodeProjectConfigNames are the entries OpenCode's location config loader
+// discovers while walking up from the session directory. That loader honors
+// neither OPENCODE_DISABLE_PROJECT_CONFIG nor --pure, and it imports plugin
+// modules named by these files or placed in .opencode/plugin(s), so their
+// presence would run repository code outside the Orka tool policy.
+var openCodeProjectConfigNames = []string{".opencode", "opencode.json", "opencode.jsonc"}
+
+// rejectOpenCodeProjectConfiguration fails closed when the session directory
+// or any ancestor holds OpenCode project configuration. Rewriting the
+// workspace would alter repository content that may later be published, so
+// such workspaces are refused. Every session open, including a cold resume
+// of a durable workspace, passes through this check before OpenCode starts.
+func rejectOpenCodeProjectConfiguration(paths acp.SessionPaths) error {
+	if strings.TrimSpace(paths.Workspace) == "" {
+		return fmt.Errorf("OpenCode workspace path is required")
+	}
+	// Once the child has run it owns the session root, so before an adapter
+	// restart it could have swapped the workspace for a link to a tree whose
+	// ancestors this walk would never see. No child process runs between this
+	// check and the launch, so the answer cannot change in between.
+	if info, err := os.Lstat(paths.Workspace); err != nil {
+		return fmt.Errorf("inspect OpenCode workspace: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("OpenCode workspace is not a directory")
+	}
+	var found []string
+	for directory := filepath.Clean(paths.Workspace); ; directory = filepath.Dir(directory) {
+		for _, name := range openCodeProjectConfigNames {
+			candidate := filepath.Join(directory, name)
+			if _, err := os.Lstat(candidate); err == nil {
+				found = append(found, candidate)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("inspect OpenCode project configuration: %w", err)
+			}
+		}
+		if parent := filepath.Dir(directory); parent == directory {
+			break
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	for index, candidate := range found {
+		if relative, err := filepath.Rel(paths.Workspace, candidate); err == nil && filepath.IsLocal(relative) {
+			found[index] = relative
+		}
+	}
+	return &workspaceRejectedError{
+		publicMessage: acp.OpenCodeProjectConfigurationRejectedMessage,
+		detail: fmt.Sprintf(
+			"OpenCode %s loads project plugins even when project configuration is disabled; found %s",
+			acp.OpenCodeVersion, strings.Join(found, ", "),
+		),
+	}
+}
+
+// validateOpenCodeSession is OpenCode's workspace check. Session creation
+// runs it before the session tree exists for the child, and an idle adapter
+// restart runs it again, as the child, before the replacement starts.
+func validateOpenCodeSession(paths acp.SessionPaths) error {
+	if err := rejectOpenCodeProjectConfiguration(paths); err != nil {
 		return err
 	}
-	files := map[string][]byte{
+	return rejectOpenCodeSessionConfiguration(paths)
+}
+
+// rejectOpenCodeSessionConfiguration refuses OpenCode configuration the agent
+// could have written into its own session tree since creation. OpenCode 1.19
+// treats OPENCODE_CONFIG_DIR as its global configuration folder: it loads
+// opencode.json and opencode.jsonc there and imports plugin(s)/*.{js,ts}
+// from it even in pure mode, and it also reads $HOME/.opencode. Only what
+// prepareOpenCodeConfig writes, OpenCode's own .gitignore and dependency
+// folder, and Orka's skills may be there. At creation the folder does not
+// exist yet.
+func rejectOpenCodeSessionConfiguration(paths acp.SessionPaths) error {
+	if _, err := os.Lstat(filepath.Join(paths.Home, ".opencode")); err == nil {
+		return fmt.Errorf("OpenCode home configuration folder exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect OpenCode home configuration: %w", err)
+	}
+	dir := filepath.Join(paths.Config, "opencode")
+	relative, err := filepath.Rel(paths.Root, dir)
+	if strings.TrimSpace(paths.Root) == "" || err != nil || !filepath.IsLocal(relative) {
+		return fmt.Errorf("OpenCode configuration folder must be inside the session root")
+	}
+	// The child owns the session root, so each folder down to the
+	// configuration folder must still be a real folder, not a link.
+	current := paths.Root
+	for part := range strings.SplitSeq(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect OpenCode configuration folder: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("OpenCode configuration path is not a directory")
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list OpenCode configuration folder: %w", err)
+	}
+	expected := openCodeConfigFiles()
+	for _, entry := range entries {
+		name := entry.Name()
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil {
+			return fmt.Errorf("inspect OpenCode configuration entry: %w", err)
+		}
+		switch want, prepared := expected[name]; {
+		case prepared:
+			if !info.Mode().IsRegular() || info.Size() != int64(len(want)) {
+				return fmt.Errorf("OpenCode configuration file %s changed", name)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return fmt.Errorf("read OpenCode configuration file %s: %w", name, err)
+			}
+			if !bytes.Equal(data, want) {
+				return fmt.Errorf("OpenCode configuration file %s changed", name)
+			}
+		case name == "node_modules" || name == "skills":
+			if !info.IsDir() {
+				return fmt.Errorf("OpenCode configuration entry %s is not a directory", name)
+			}
+		case name == ".gitignore":
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("OpenCode configuration entry %s is not a regular file", name)
+			}
+		default:
+			return fmt.Errorf("OpenCode configuration folder holds unexpected entry %q", name)
+		}
+	}
+	return nil
+}
+
+// openCodeConfigFiles are the files prepareOpenCodeConfig writes into
+// OPENCODE_CONFIG_DIR. They pin OpenCode's plugin dependency, so OpenCode does
+// not fetch one at startup.
+func openCodeConfigFiles() map[string][]byte {
+	return map[string][]byte{
 		"package.json": fmt.Appendf(nil,
 			"{\n  \"private\": true,\n  \"dependencies\": {\n    \"@opencode-ai/plugin\": %q\n  }\n}\n",
 			acp.OpenCodeVersion,
@@ -903,7 +1155,14 @@ func prepareOpenCodeConfig(paths acp.SessionPaths) error {
 			acp.OpenCodeVersion,
 		),
 	}
-	for name, data := range files {
+}
+
+func prepareOpenCodeConfig(paths acp.SessionPaths) error {
+	configDir := filepath.Join(paths.Config, "opencode")
+	if err := os.MkdirAll(filepath.Join(configDir, "node_modules"), 0o700); err != nil {
+		return err
+	}
+	for name, data := range openCodeConfigFiles() {
 		if err := os.WriteFile(filepath.Join(configDir, name), data, 0o600); err != nil {
 			return err
 		}
@@ -944,16 +1203,27 @@ func openCodeSessionConfig(
 		"webfetch":           openCodePermissionDeny,
 		"websearch":          openCodePermissionDeny,
 	}
+	// An ask session asks before every policy-allowed shell command and file
+	// mutation. OpenCode (verified through 1.19.0) asks for bash even for
+	// read-only commands, and asks for write, edit and apply_patch under the
+	// single edit permission.
+	actingAction := openCodePermissionAllow
+	if nativePermissionsAsk(request) {
+		actingAction = openCodePermissionAsk
+	}
 	for _, permission := range []string{openCodeToolBash, openCodeToolGlob, openCodeToolGrep, "read"} {
-		if openCodeToolPolicyAllows(toolPolicy, permission) {
-			permissions[permission] = openCodePermissionAllow
-		} else {
+		switch {
+		case !openCodeToolPolicyAllows(toolPolicy, permission):
 			permissions[permission] = openCodePermissionDeny
+		case permission == openCodeToolBash:
+			permissions[permission] = actingAction
+		default:
+			permissions[permission] = openCodePermissionAllow
 		}
 	}
 	mutationAction := openCodePermissionDeny
 	if openCodeMutationPolicyAllows(toolPolicy) {
-		mutationAction = openCodePermissionAllow
+		mutationAction = actingAction
 	}
 	for _, permission := range []string{openCodeToolApplyPatch, openCodeToolEdit, openCodeToolWrite} {
 		permissions[permission] = mutationAction
@@ -1205,7 +1475,8 @@ func prepareCodexHome(paths acp.SessionPaths) error {
 
 // codexHomeConfigTOML is the static CODEX_HOME/config.toml; the per-session
 // provider definition travels in CODEX_CONFIG (see codexBaseConfig).
-const codexHomeConfigTOML = "check_for_update_on_startup = false\n"
+// Codex 0.160.0's connection retry loop is independent of stream_max_retries.
+const codexHomeConfigTOML = "check_for_update_on_startup = false\nfeatures.unbounded_connection_retries = false\n"
 
 func openAIProxyURL(base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
@@ -1247,6 +1518,21 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
 		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+func permissionTimeoutFromEnv() (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(EnvPermissionTimeout))
+	if raw == "" {
+		return 0, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration", EnvPermissionTimeout)
+	}
+	if err := acp.ValidatePermissionTimeout(timeout); err != nil {
+		return 0, fmt.Errorf("%s: %w", EnvPermissionTimeout, err)
+	}
+	return timeout, nil
 }
 
 // maxRuntimeCapacity matches the RuntimePool capacity API bound.

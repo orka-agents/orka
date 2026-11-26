@@ -679,16 +679,16 @@ func TestExecuteAgentLoop_PreservesModelSettings(t *testing.T) {
 		wantSet         bool
 		wantMaxTokens   int
 	}{
-		{name: "defaults", wantMaxTokens: 4096},
+		{name: "defaults", wantMaxTokens: 0},
 		{name: "explicit zero and small cap", temperature: "0", maxTokens: "256", wantSet: true, wantMaxTokens: 256},
 		{
 			name: "positive temperature and large cap", temperature: "0.75", maxTokens: "8192",
 			wantTemperature: 0.75, wantSet: true, wantMaxTokens: 8192,
 		},
-		{name: "temperature only", temperature: "2", wantTemperature: 2, wantSet: true, wantMaxTokens: 4096},
+		{name: "temperature only", temperature: "2", wantTemperature: 2, wantSet: true, wantMaxTokens: 0},
 		{name: "cap only", maxTokens: "256", wantMaxTokens: 256},
-		{name: "zero cap", maxTokens: "0", wantMaxTokens: 4096},
-		{name: "negative cap", maxTokens: "-256", wantMaxTokens: 4096},
+		{name: "zero cap", maxTokens: "0", wantMaxTokens: 0},
+		{name: "negative cap", maxTokens: "-256", wantMaxTokens: 0},
 	}
 	paths := []struct {
 		name         string

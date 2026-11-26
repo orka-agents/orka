@@ -850,7 +850,7 @@ func (e *SubstrateWorkspaceExecutor) Describe(ctx context.Context, req DescribeR
 	placement, density := e.substrateTelemetry(ctx, actor)
 	return &Description{
 		Ref:       substrateRef(req.Ref.Namespace, actor),
-		Template:  TemplateRef{Namespace: actor.TemplateNamespace, Name: actor.TemplateName},
+		Template:  TemplateRef{Namespace: actor.TemplateNamespace, Name: actor.TemplateName, UID: actor.TemplateUID},
 		Phase:     substratePhase(actor),
 		Retained:  retained,
 		Message:   "workspace described",

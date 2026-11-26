@@ -195,9 +195,9 @@ type TaskExecutionStatus struct {
 	// +optional
 	RuntimeSessionMCPDigest string `json:"runtimeSessionMCPDigest,omitempty"`
 
-	// RuntimeSessionWorkspaceDigest binds a reusable Session generation to the
-	// exact repository, source ref, verified baseline, intent, and relative root.
-	// It contains no credential material.
+	// RuntimeSessionWorkspaceDigest binds a reusable Session generation, or a
+	// task-scoped RuntimeSession, to the exact repository, source ref, verified
+	// baseline, intent, and relative root. It contains no credential material.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	// +optional
 	RuntimeSessionWorkspaceDigest string `json:"runtimeSessionWorkspaceDigest,omitempty"`
@@ -248,6 +248,12 @@ type TaskExecutionStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	ForgeCredentialResourceVersion string `json:"forgeCredentialResourceVersion,omitempty"`
+
+	// CommitSigningCredentialResourceVersion freezes the SSH commit signing
+	// Secret version used only during clean-room publication preparation.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	CommitSigningCredentialResourceVersion string `json:"commitSigningCredentialResourceVersion,omitempty"`
 
 	// Message contains bounded, sanitized execution context.
 	// +kubebuilder:validation:MaxLength=1024

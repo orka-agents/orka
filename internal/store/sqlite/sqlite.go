@@ -15,11 +15,20 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	_ "modernc.org/sqlite" // SQLite driver registration
 )
+
+// dbStatsName labels the connection pool statistics of the store
+// OpenLockedStore opens, exported as the go_sql_* series.
+const dbStatsName = "orka_store_sqlite"
+
+// writeTransactionBuckets span a free single connection through the 60s
+// budget of the controller's longest detached store write.
+var writeTransactionBuckets = []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60}
 
 var (
 	dbSizeBytes = prometheus.NewGauge(
@@ -28,17 +37,77 @@ var (
 			Help: "Size of the SQLite database file in bytes",
 		},
 	)
+	// writeWaitSeconds and writeHoldSeconds split the time of a contract
+	// write with a write envelope, or of receipt pruning: the wait for the
+	// store's single connection, and the time the operation then holds it
+	// until it commits or rolls back. Other users of the connection appear
+	// only in the pool statistics. A long wait
+	// with short holds is pool contention or a starved process; a long hold
+	// is slow SQL, or a holder the host descheduled.
+	writeWaitSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_store_sqlite_write_wait_seconds",
+			Help:    "Time a SQLite store write operation waited for the single connection before its transaction began",
+			Buckets: writeTransactionBuckets,
+		},
+		[]string{"method"},
+	)
+	writeHoldSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_store_sqlite_write_hold_seconds",
+			Help:    "Time a SQLite store write operation held the single connection, from the start of its transaction to its commit or rollback",
+			Buckets: writeTransactionBuckets,
+		},
+		[]string{"method"},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(dbSizeBytes)
+	metrics.Registry.MustRegister(dbSizeBytes, writeWaitSeconds, writeHoldSeconds)
 }
 
 // NewDB opens a SQLite database with recommended pragmas for WAL mode,
 // busy timeout, synchronous mode, and foreign keys. It creates or validates the
 // current schema; upgrades require OpenLockedStore's exclusive controller lock.
 func NewDB(path string) (*sql.DB, error) {
-	return newDB(path, false)
+	return newDB(path, false, SynchronousNormal)
+}
+
+// Synchronous is the SQLite synchronous mode a store commits under, which
+// decides the durability class it reports.
+type Synchronous string
+
+const (
+	// SynchronousNormal syncs the write-ahead log only at checkpoints. A
+	// commit survives a process restart, but the most recent commits can be
+	// lost if the host or its storage fails first. Describe reports
+	// local-buffered. It is the default.
+	SynchronousNormal Synchronous = "normal"
+	// SynchronousFull syncs the write-ahead log on every commit, so a commit
+	// also survives a host failure. Describe reports local-fsync. Each commit
+	// waits for the sync, which limits the single writer on slow storage.
+	SynchronousFull Synchronous = "full"
+)
+
+// ParseSynchronous parses a synchronous mode name, normal or full.
+func ParseSynchronous(value string) (Synchronous, error) {
+	switch mode := Synchronous(strings.ToLower(strings.TrimSpace(value))); mode {
+	case SynchronousNormal, SynchronousFull:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unknown SQLite synchronous mode %q; use normal or full", value)
+	}
+}
+
+func (mode Synchronous) pragma() (string, error) {
+	switch mode {
+	case "", SynchronousNormal:
+		return "PRAGMA synchronous=NORMAL", nil
+	case SynchronousFull:
+		return "PRAGMA synchronous=FULL", nil
+	default:
+		return "", fmt.Errorf("unknown SQLite synchronous mode %q", mode)
+	}
 }
 
 // sqliteDSN makes the driver write and read every time.Time in UTC. SQL
@@ -54,7 +123,11 @@ func sqliteDSN(path string) string {
 	return path + separator + "_timezone=UTC"
 }
 
-func newDB(path string, allowMigration bool) (*sql.DB, error) {
+func newDB(path string, allowMigration bool, synchronous Synchronous) (*sql.DB, error) {
+	synchronousPragma, err := synchronous.pragma()
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
@@ -71,7 +144,7 @@ func newDB(path string, allowMigration bool) (*sql.DB, error) {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA synchronous=NORMAL",
+		synchronousPragma,
 		"PRAGMA foreign_keys=ON",
 		// Deleted content is overwritten with zeros rather than left in free
 		// pages: connector custody rows are crypto-shredded on disconnect,
@@ -287,7 +360,9 @@ func currentSchemaStatements() []string {
 			created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			last_recalled_at TIMESTAMP,
-			recalled_count   INTEGER NOT NULL DEFAULT 0
+			recalled_count   INTEGER NOT NULL DEFAULT 0,
+			generation       INTEGER NOT NULL DEFAULT 1,
+			superseded_by    TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memories_recall
 			ON memories(namespace, deleted, disabled, updated_at DESC)`,
@@ -315,12 +390,33 @@ func currentSchemaStatements() []string {
 			created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			reviewed_at       TIMESTAMP,
-			applied_at        TIMESTAMP
+			applied_at        TIMESTAMP,
+			targets_json      TEXT NOT NULL DEFAULT '[]',
+			sources_json      TEXT NOT NULL DEFAULT '[]'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_status
 			ON memory_proposals(namespace, status, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_memory_proposals_task
 			ON memory_proposals(namespace, task_name, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS memory_consolidation_runs (
+			namespace    TEXT NOT NULL,
+			task_uid     TEXT NOT NULL,
+			task_name    TEXT NOT NULL,
+			mode         TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL,
+			window_start TIMESTAMP NOT NULL,
+			window_end   TIMESTAMP NOT NULL,
+			input        BLOB,
+			report       BLOB,
+			created_at   TIMESTAMP NOT NULL,
+			completed_at TIMESTAMP,
+			task_deleted INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (namespace, task_uid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_consolidation_runs_cursor
+			ON memory_consolidation_runs(namespace, status, window_end)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_updated
+			ON sessions(namespace, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id          INTEGER PRIMARY KEY AUTOINCREMENT,
 			namespace   TEXT NOT NULL,
@@ -978,7 +1074,9 @@ func currentSchemaStatements() []string {
 	statements = append(statements, agentExecutionSchemaStatements()...)
 	statements = append(statements, nativeSessionSchemaStatements()...)
 	statements = append(statements, connectorSchemaStatements()...)
-	return append(statements, operationReceiptSchemaStatements()...)
+	statements = append(statements, operationReceiptSchemaStatements()...)
+	statements = append(statements, ahpSchemaStatements()...)
+	return append(statements, authSessionSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.
@@ -992,7 +1090,10 @@ type Store struct {
 	processLock   io.Closer
 	// ownsProcessLock is set for a store OpenLockedStore opened under the
 	// process lock, which an embedded dataset binding requires.
-	ownsProcessLock  bool
+	ownsProcessLock bool
+	// dbStats exports the connection pool statistics of a store
+	// OpenLockedStore opened; close unregisters it.
+	dbStats          prometheus.Collector
 	executionEventMu sync.Mutex
 	// pendingWALTruncate remembers a connector custody deletion whose log
 	// truncation found the log busy; the next custody operation finishes it.
@@ -1043,16 +1144,36 @@ func NewStore(db *sql.DB, dbPath string) *Store {
 	return s
 }
 
+// OpenOption configures OpenLockedStore.
+type OpenOption func(*openOptions)
+
+type openOptions struct {
+	synchronous Synchronous
+}
+
+// WithSynchronous selects the synchronous mode the store commits under.
+// Without it, a store uses SynchronousNormal.
+func WithSynchronous(mode Synchronous) OpenOption {
+	return func(options *openOptions) { options.synchronous = mode }
+}
+
 // OpenLockedStore acquires the process-lifetime filesystem lock adjacent to
 // path before SQLite is opened. Production controller wiring must use this
 // constructor so overlapping Pods or releases cannot initialize or write
 // the same database even if Kubernetes ownership fencing is misconfigured.
-func OpenLockedStore(path string) (*Store, error) {
+func OpenLockedStore(path string, options ...OpenOption) (*Store, error) {
+	selected := openOptions{synchronous: SynchronousNormal}
+	for _, option := range options {
+		option(&selected)
+	}
+	if _, err := selected.synchronous.pragma(); err != nil {
+		return nil, err
+	}
 	lock, err := lockDatabaseFile(path)
 	if err != nil {
 		return nil, err
 	}
-	db, err := newDB(path, true)
+	db, err := newDB(path, true, selected.synchronous)
 	if err != nil {
 		_ = lock.Close()
 		return nil, err
@@ -1060,7 +1181,19 @@ func OpenLockedStore(path string) (*Store, error) {
 	s := &Store{db: db, dbPath: path, processLock: lock, ownsProcessLock: true}
 	s.pendingWALTruncate.Store(true)
 	s.incarnation = uuid.NewString()
+	s.registerDBStats()
 	return s, nil
+}
+
+// registerDBStats exports the connection pool statistics of the store, so a
+// wait for its single connection is visible. The process lock admits one
+// such store per database, and the controller opens one; when another store
+// of this process already exports them, this one does not.
+func (s *Store) registerDBStats() {
+	collector := collectors.NewDBStatsCollector(s.db, dbStatsName)
+	if err := metrics.Registry.Register(collector); err == nil {
+		s.dbStats = collector
+	}
 }
 
 // Start runs background maintenance and blocks until ctx is cancelled,
@@ -1098,6 +1231,10 @@ func (s *Store) Start(ctx context.Context) error {
 func (s *Store) NeedLeaderElection() bool { return true }
 
 func (s *Store) close() error {
+	if s.dbStats != nil {
+		metrics.Registry.Unregister(s.dbStats)
+		s.dbStats = nil
+	}
 	dbErr := s.db.Close()
 	var lockErr error
 	if s.processLock != nil {

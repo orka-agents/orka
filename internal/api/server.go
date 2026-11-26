@@ -22,9 +22,11 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/requestid"
 	"github.com/valyala/fasthttp"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
@@ -32,7 +34,9 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/operatoraccess"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
@@ -88,20 +92,34 @@ type ServerConfig struct {
 	ExternalEffects           store.ExternalEffectIdentityReader
 	MemoryStore               store.MemoryStore
 	MemoryProposalStore       store.MemoryProposalStore
-	SecurityStore             store.SecurityStore
-	RepositoryMonitorStore    store.RepositoryMonitorStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	HealthChecker             store.HealthChecker
-	Clientset                 kubernetes.Interface
-	APIReader                 client.Reader
-	TaskProvenanceProtected   bool
-	ControllerEpochs          ControllerEpochFenceSource
-	E2EPromptFaultEnabled     bool
-	Connectors                ConnectorConfig
-	ConnectorTools            ConnectorToolExecutionConfig
+	// MemoryConsolidationStore records memory consolidation runs (ADR 0051).
+	MemoryConsolidationStore store.MemoryConsolidationStore
+	SecurityStore            store.SecurityStore
+	RepositoryMonitorStore   store.RepositoryMonitorStore
+	ExecutionEventStore      store.ExecutionEventStore
+	GatewayEventStore        store.GatewayEventStore
+	GatewayDeliveryStore     store.GatewayDeliveryStore
+	GatewayService           *gatewayruntime.Service
+	HealthChecker            store.HealthChecker
+	Clientset                kubernetes.Interface
+	APIReader                client.Reader
+	TaskProvenanceProtected  bool
+	ControllerEpochs         ControllerEpochFenceSource
+	E2EPromptFaultEnabled    bool
+	Connectors               ConnectorConfig
+	ConnectorTools           ConnectorToolExecutionConfig
+	// GitHubSignIn signs people in with GitHub and issues Orka sessions.
+	GitHubSignIn GitHubSignInConfig
+	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
+	// leaves /ahp unrouted and the token routes answering 501.
+	AHP *ahphost.Host
+	// AHPBackend, with AHP, serves Orka's built-in runtimes as AHP agents.
+	AHPBackend *AHPBackendConfig
+	// LiveEvents carries running Tasks' events from the ACP dispatcher to live
+	// event streams and the AHP backend; nil disables them.
+	LiveEvents *liveevents.Broker
+	// RESTConfig lets the API server run commands in AHP workspaces.
+	RESTConfig *rest.Config
 	// OperatorAccess configures `orka task exec` / `orka task cp`.
 	OperatorAccess OperatorAccessConfig
 	// SubstrateMCPProxy enables POST/DELETE /api/v1/tools/:name/mcp for
@@ -117,13 +135,22 @@ type ServerConfig struct {
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
 	AgentUseAuthorization bool
+	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled:
+	// API callers then need the `use` verb on every Provider a Task or Agent
+	// they create or edit newly names, and on every Provider a chat request
+	// resolves.
+	ProviderUseAuthorization bool
 	// TaskWebhookKeys publishes Task webhook verification keys at
 	// TaskWebhookJWKSPath. Nil serves an empty key set.
 	TaskWebhookKeys taskwebhook.KeySource
+	// AgentIdentityAudit serves redacted agent-identity-audit records via GET /api/v1/audit/identity.
+	AgentIdentityAudit outboundaccess.AgentIdentityAuditReader
 }
 
 // Server is the REST API server
 type Server struct {
+	// ahpBackend is the AHP session backend, when AHP serves sessions.
+	ahpBackend          *ahpBackend
 	app                 *fiber.App
 	client              client.Client
 	config              ServerConfig
@@ -144,6 +171,8 @@ type Server struct {
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
 
+	memoryConsolidationStore store.MemoryConsolidationStore
+
 	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
 	substrateMCPProxyWriteTimeout time.Duration
 }
@@ -153,6 +182,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	config.Chat.ExecutionMode = config.ExecutionMode
 	config.Chat.DashboardEnabled = config.DashboardEnabled
 	agentUseAuthorization.Store(config.AgentUseAuthorization)
+	providerUseAuthorization.Store(config.ProviderUseAuthorization)
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
@@ -175,6 +205,8 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore: config.MemoryProposalStore,
 		ExecutionEventStore: config.ExecutionEventStore,
 		GatewayEventStore:   config.GatewayEventStore,
+
+		memoryConsolidationStore: config.MemoryConsolidationStore,
 	}
 
 	server.handlers = NewHandlers(HandlersConfig{
@@ -194,15 +226,38 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		ArtifactStore:             config.ArtifactStore,
 		MemoryStore:               config.MemoryStore,
 		MemoryProposalStore:       config.MemoryProposalStore,
+		MemoryConsolidationStore:  config.MemoryConsolidationStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
+		LiveEvents:                config.LiveEvents,
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
 		Connectors:                config.Connectors,
+		GitHubSignIn:              config.GitHubSignIn,
+		OIDCEnabled:               config.OIDC.Enabled(),
+		OIDCIssuer:                config.OIDC.Issuer,
+		OIDCAudience:              config.OIDC.Audience,
+		AHP:                       config.AHP,
 		SubstrateMCPProxy:         config.SubstrateMCPProxy,
+		AgentIdentityAudit:        config.AgentIdentityAudit,
 	})
+	if config.AHP != nil && config.AHPBackend != nil {
+		backend := newAHPBackend(server.handlers, config.AHP.Store(), config.LiveEvents, *config.AHPBackend)
+		backend.emitterFor = config.AHP.Emitter
+		backend.recheckToken = config.AHP.Recheck
+		backend.updateTerminals = config.AHP.UpdateTerminals
+		backend.workspaces = &ahpWorkspaces{
+			b: backend, clientset: config.Clientset, rest: config.RESTConfig,
+			namespace: config.AHPBackend.WorkspaceNamespace, image: config.AHPBackend.WorkspaceImage,
+		}
+		if err := config.AHP.RegisterBackend(backend); err != nil {
+			log.Error(err, "register the AHP session backend")
+		} else {
+			server.ahpBackend = backend
+		}
+	}
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
@@ -286,6 +341,10 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 	}
 	if isSubstrateMCPProxyRoute(header) {
 		config.WriteTimeout = s.substrateMCPProxyWriteTimeout
+		if header.IsPost() {
+			config.MaxRequestBodySize = substrateMCPProxyMaxRequestBytes
+			config.ReadTimeout = substrateMCPProxyRequestReadTimeout
+		}
 	}
 	return config
 }
@@ -419,7 +478,22 @@ func (s *Server) setupRoutes() {
 	// state and the sealed PKCE verifier authenticate it instead.
 	s.app.Get(connectors.CallbackPath, s.handlers.ConnectionCallback)
 
-	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
+	// The AHP endpoint authenticates its own connection tokens before the
+	// WebSocket upgrade, so it sits outside the bearer-auth group.
+	if s.config.AHP != nil {
+		s.app.Get(ahpEndpointPath, ahpEndpoint(s.config.AHP))
+	}
+
+	// GitHub sign-in: clients read how to sign in, and trade a GitHub token
+	// for a session, before they hold any Orka credential.
+	s.app.Get("/api/v1/auth/config", s.handlers.GetAuthConfig)
+	s.app.Post("/api/v1/auth/github", s.handlers.SignInWithGitHub)
+
+	authConfig := AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens}
+	if s.config.GitHubSignIn.Enabled {
+		authConfig.Sessions = s.config.GitHubSignIn.authenticateSession
+	}
+	externalAuth := NewAuthMiddleware(s.client, authConfig)
 
 	// API v1 group
 	api := s.externalAPIGroup("/api/v1", externalAuth)
@@ -427,42 +501,44 @@ func (s *Server) setupRoutes() {
 	// Task endpoints
 	api.Post("/tasks", s.handlers.CreateTask)
 	api.Get("/tasks", s.handlers.ListTasks)
-	api.Get("/tasks/:id", s.handlers.GetTask)
-	api.Delete("/tasks/:id", s.handlers.DeleteTask)
-	api.Post("/tasks/:id/cancel", s.handlers.CancelTask)
-	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
-	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
-	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
-	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
-	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
+	api.Get("/tasks/:id", s.handlers.ahpTaskPrivate(s.handlers.GetTask))
+	api.Delete("/tasks/:id", s.handlers.ahpTaskPrivate(s.handlers.DeleteTask))
+	api.Post("/tasks/:id/cancel", s.handlers.ahpTaskPrivate(s.handlers.CancelTask))
+	api.Get("/tasks/:id/logs", s.handlers.ahpTaskPrivate(s.handlers.GetTaskLogs))
+	api.Get("/tasks/:id/events", s.handlers.ahpTaskPrivate(s.handlers.ListTaskEvents))
+	api.Get("/tasks/:id/stream", s.handlers.ahpTaskPrivate(s.handlers.StreamTaskEvents))
+	api.Get("/tasks/:id/trace", s.handlers.ahpTaskPrivate(s.handlers.GetTaskTrace))
+	api.Get("/tasks/:id/approvals", s.handlers.ahpTaskPrivate(s.handlers.ListTaskApprovals))
 	// Cross-Task attention read models, computed on read for one namespace.
 	api.Get("/attention", s.handlers.ListAttention)
 	api.Get("/approvals", s.handlers.ListPendingApprovals)
-	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
-	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
-	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
-	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
-	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
-	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
-	api.Get("/tasks/:id/artifacts/:filename", s.handlers.DownloadTaskArtifact)
+	api.Get("/audit/identity", s.handlers.ListAgentIdentityAudit)
+	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.ahpTaskPrivate(s.handlers.DecideTaskApproval))
+	api.Post("/tasks/:id/fork", s.handlers.ahpTaskPrivate(s.handlers.ForkTask))
+	api.Get("/tasks/:id/result", s.handlers.ahpTaskPrivate(s.handlers.GetTaskResult))
+	api.Get("/tasks/:id/memory-consolidation-report", s.handlers.ahpTaskPrivate(s.handlers.GetTaskMemoryConsolidationReport))
+	api.Get("/tasks/:id/plan", s.handlers.ahpTaskPrivate(s.handlers.GetTaskPlan))
+	api.Get("/tasks/:id/children", s.handlers.ahpTaskPrivate(s.handlers.GetTaskChildren))
+	api.Get("/tasks/:id/artifacts", s.handlers.ahpTaskPrivate(s.handlers.ListTaskArtifacts))
+	api.Get("/tasks/:id/artifacts/:filename", s.handlers.ahpTaskPrivate(s.handlers.DownloadTaskArtifact))
 	// Operator workspace debugging. Disabled unless --operator-workspace-access-enabled;
 	// each call also needs the class opt-in and the dedicated tasks/exec or
 	// tasks/files permission.
 	// Their audit envelope precedes route authorization so dedicated
-	// permission denials are audited too.
-	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationExec)).Get("/tasks/:id/exec", s.HandleOperatorExec)
-	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyOut)).Get("/tasks/:id/files", s.HandleOperatorFileDownload)
-	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyIn)).Put("/tasks/:id/files", s.HandleOperatorFileUpload)
+	// permission denials are audited too. An AHP turn's Task stays private.
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationExec)).Get("/tasks/:id/exec", s.handlers.ahpTaskPrivate(s.HandleOperatorExec))
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyOut)).Get("/tasks/:id/files", s.handlers.ahpTaskPrivate(s.HandleOperatorFileDownload))
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyIn)).Put("/tasks/:id/files", s.handlers.ahpTaskPrivate(s.HandleOperatorFileUpload))
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
-	api.Get("/sessions/:id", s.handlers.GetSession)
-	api.Get("/sessions/:id/native", s.handlers.ExportNativeSession)
-	api.Post("/sessions/:id/native", s.handlers.ImportNativeSession)
-	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
-	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
-	api.Delete("/sessions/:id", s.handlers.DeleteSession)
-	api.Post("/sessions/:id/cancel", s.handlers.CancelSession)
+	api.Get("/sessions/:id", s.handlers.ahpSessionPrivate(s.handlers.GetSession))
+	api.Get("/sessions/:id/native", s.handlers.ahpSessionPrivate(s.handlers.ExportNativeSession))
+	api.Post("/sessions/:id/native", s.handlers.ahpSessionPrivate(s.handlers.ImportNativeSession))
+	api.Get("/sessions/:id/events", s.handlers.ahpSessionPrivate(s.handlers.ListSessionEvents))
+	api.Get("/sessions/:id/stream", s.handlers.ahpSessionPrivate(s.handlers.StreamSessionEvents))
+	api.Delete("/sessions/:id", s.handlers.ahpSessionPrivate(s.handlers.DeleteSession))
+	api.Post("/sessions/:id/cancel", s.handlers.ahpSessionPrivate(s.handlers.CancelSession))
 
 	// Generic gateway operator endpoints.
 	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)
@@ -607,9 +683,19 @@ func (s *Server) setupRoutes() {
 	api.Delete("/connections/:name", s.handlers.DeleteConnection)
 	api.Post("/connections/:name/authorize", s.handlers.AuthorizeConnection)
 	api.Post("/connections/:name/complete", s.handlers.CompleteConnection)
+	api.Post("/auth/session/renew", s.handlers.RenewSession)
+	api.Delete("/auth/session", s.handlers.SignOut)
 	api.Get("/agent-hosts/me", s.handlers.GetOwnAgentHost)
 	api.Post("/agent-hosts/me/wake", s.handlers.WakeOwnAgentHost)
 	api.Delete("/agent-hosts/me", s.handlers.DeleteOwnAgentHost)
+	api.Post("/agent-hosts/invites", s.handlers.CreateInvite)
+	api.Get("/agent-hosts/invites/:id", s.handlers.GetInvite)
+
+	// AHP connection tokens. Every handler re-checks that the caller is a
+	// verified human identity and owns the token.
+	api.Post("/ahp-tokens", s.handlers.CreateAHPToken)
+	api.Get("/ahp-tokens", s.handlers.ListAHPTokens)
+	api.Delete("/ahp-tokens/:id", s.handlers.RevokeAHPToken)
 
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
@@ -652,15 +738,16 @@ func (s *Server) setupRoutes() {
 			s.MessageStore,
 			s.ArtifactStore,
 			InternalHandlersConfig{
-				Client:                  s.client,
-				APIReader:               s.config.APIReader,
-				MemoryStore:             s.MemoryStore,
-				MemoryProposalStore:     s.MemoryProposalStore,
-				ExecutionEventStore:     s.ExecutionEventStore,
-				GatewayEventStore:       s.GatewayEventStore,
-				GatewayService:          s.config.GatewayService,
-				TaskProvenanceProtected: s.config.TaskProvenanceProtected,
-				ConnectorTools:          s.config.ConnectorTools,
+				Client:                   s.client,
+				APIReader:                s.config.APIReader,
+				MemoryStore:              s.MemoryStore,
+				MemoryProposalStore:      s.MemoryProposalStore,
+				MemoryConsolidationStore: s.memoryConsolidationStore,
+				ExecutionEventStore:      s.ExecutionEventStore,
+				GatewayEventStore:        s.GatewayEventStore,
+				GatewayService:           s.config.GatewayService,
+				TaskProvenanceProtected:  s.config.TaskProvenanceProtected,
+				ConnectorTools:           s.config.ConnectorTools,
 			},
 		)
 		internal := s.app.Group("/internal/v1")
@@ -701,6 +788,8 @@ func (s *Server) setupRoutes() {
 		internal.Post("/memory-proposals/:namespace/:id/review", s.internalHandlers.ReviewMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/apply", s.internalHandlers.ApplyMemoryProposal)
 		internal.Post("/memory-proposals/:namespace/:id/archive", s.internalHandlers.ArchiveMemoryProposal)
+		internal.Post("/memory-consolidation/:namespace/begin", s.internalHandlers.BeginMemoryConsolidation)
+		internal.Post("/memory-consolidation/:namespace/complete", s.internalHandlers.CompleteMemoryConsolidation)
 	}
 }
 
@@ -721,6 +810,9 @@ func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.config.Port)
 	log.Info("starting API server", "address", addr)
 
+	if s.ahpBackend != nil {
+		go s.ahpBackend.workspaces.collectIdle(ctx)
+	}
 	// Start server in a goroutine
 	errCh := make(chan error, 1)
 	go func() {

@@ -91,8 +91,35 @@ test -x "$kindctl"
      --context "$("$kindctl" kubectl config current-context)"
    ```
 
-   Confirm the controller arguments include the workspace provider API, ACP
-   dispatch, class-use admission, and provenance admission before continuing.
+   The script runs `make deploy`, which enables none of these flags. Add them
+   to the controller afterwards. `--enable-workspace-provider-api` refuses to
+   start without `--workspace-class-use-admission-enabled`, and that flag makes
+   the manager start its own webhook server. `make deploy` mounts no
+   certificate for it, so the controller crash-loops on
+   `open /tmp/k8s-webhook-server/serving-certs/tls.crt` unless you mount the
+   existing `orka-admission-tls` Secret and pass `--webhook-cert-path`. Every
+   webhook configuration in `config/` targets `orka-admission`, so this server
+   only has to start:
+
+   ```bash
+   "$kindctl" kubectl -n orka-system patch deployment orka-controller-manager --type=json -p '[
+     {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--enable-workspace-provider-api=true"},
+     {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--acp-workspace-dispatch-enabled=true"},
+     {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--workspace-class-use-admission-enabled=true"},
+     {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--task-provenance-admission-external=true"},
+     {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--webhook-cert-path=/var/run/orka/webhook-tls"},
+     {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"webhook-tls","secret":{"secretName":"orka-admission-tls","items":[{"key":"tls.crt","path":"tls.crt"},{"key":"tls.key","path":"tls.key"}]}}},
+     {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"webhook-tls","mountPath":"/var/run/orka/webhook-tls","readOnly":true}}
+   ]'
+   "$kindctl" kubectl -n orka-system rollout status deployment/orka-controller-manager --timeout=180s
+   ```
+
+   `make deploy` also installs the `orka-admission` webhook configuration,
+   which is why provenance uses `--task-provenance-admission-external`.
+   Rerunning the deploy script reapplies the controller manifest and drops the
+   added arguments, so add them again afterwards. Confirm the controller
+   arguments include the workspace provider API, ACP dispatch, class-use
+   admission, and provenance admission before continuing.
 
 3. **Install the agent-sandbox backend** against the kindctl kubeconfig:
 
@@ -132,7 +159,9 @@ test -x "$kindctl"
    Allow `Suspend` only when the profile enables it.
 
 6. **Optional: model proxy (vekil) — pause for the human.** Skip this for
-   model-free validation. For a model-backed smoke, satisfy the registry
+   model-free validation, which can run class-backed Tasks on orka-workspace's
+   deterministic fixture agent instead (see "Model-free class-backed Tasks" in
+   `references/validate.md`). For a model-backed smoke, satisfy the registry
    precondition, then rerun the installer with `AGENTIC=1`:
 
    ```bash

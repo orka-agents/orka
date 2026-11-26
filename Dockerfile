@@ -17,6 +17,8 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
+COPY pkg/storage/go.mod pkg/storage/go.mod
+COPY pkg/storage/go.sum pkg/storage/go.sum
 # Download modules into BuildKit's module cache, which the Go builds of the
 # other images share; the build step mounts it and the Go build cache too.
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
@@ -42,7 +44,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot@sha256:d62067879de890a1def9da0e7766b7d20810a5e5555cef8506b752437d7a3e88
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/orka-admission .

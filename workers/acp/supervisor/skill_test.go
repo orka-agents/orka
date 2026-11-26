@@ -118,7 +118,7 @@ func TestLoadConfigFromEnvSkillsJoinTheProfileDigest(t *testing.T) {
 func TestNativeSkillsDirPerRuntime(t *testing.T) {
 	paths := acp.SessionPaths{Root: "/sessions/s", Home: "/sessions/s/home", Config: "/sessions/s/xdg/config"}
 	want := map[string]string{
-		providerKindClaude:   "/sessions/s/home/.claude/skills",
+		providerKindClaude:   "/sessions/.claude-skill-plugin/skills",
 		providerKindCodex:    "/sessions/s/home/.agents/skills",
 		providerKindOpencode: "/sessions/s/xdg/config/opencode/skills",
 	}
@@ -127,8 +127,10 @@ func TestNativeSkillsDirPerRuntime(t *testing.T) {
 		if err != nil || got != dir {
 			t.Errorf("%s skills folder = %q, %v; want %q", provider, got, err, dir)
 		}
-		if !strings.HasPrefix(got, paths.Root+"/") {
-			t.Errorf("%s skills folder %q is outside the session root, so it would not be owned by the session identity", provider, got)
+		// Claude's skills form a plugin, which can carry code, so no session
+		// identity may own them; every other copy belongs to the session.
+		if inside := strings.HasPrefix(got, paths.Root+"/"); inside == (provider == providerKindClaude) {
+			t.Errorf("%s skills folder %q has the wrong owner: inside the session root = %t", provider, got, inside)
 		}
 	}
 	for _, provider := range []string{providerKindCopilot, providerKindAgentKit, providerKindFoundry, "unknown"} {
@@ -147,7 +149,6 @@ func TestNativeSkillsDirMatchesProviderEnvironment(t *testing.T) {
 		envName string
 		suffix  string
 	}{
-		providerKindClaude:   {envName: "CLAUDE_CONFIG_DIR", suffix: "skills"},
 		providerKindOpencode: {envName: "OPENCODE_CONFIG_DIR", suffix: "skills"},
 	}
 	for provider, tc := range cases {
@@ -172,6 +173,25 @@ func TestNativeSkillsDirMatchesProviderEnvironment(t *testing.T) {
 		if want := filepath.Join(env[tc.envName], tc.suffix); dir != want {
 			t.Errorf("%s skills folder %q does not follow %s=%q", provider, dir, tc.envName, env[tc.envName])
 		}
+	}
+	// Claude reads its skills from the plugin the session options name.
+	claude, err := providerProfile(providerKindClaude, "claude-test", harnessv2.WorkspaceIntentWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testProviderProjectionRequest(t, providerKindClaude, "claude-test", "", "", nil, nil, true)
+	request.Profile.Skills = supervisorTestSkills()
+	projection, err := claude.ProjectSession(request, paths, ProviderProxyBinding{BaseURL: "http://127.0.0.1:1", Credential: strings.Repeat("c", 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins := projection.NewSessionMeta["claudeCode"].(map[string]any)["options"].(map[string]any)["plugins"].([]map[string]any)
+	dir, err := nativeSkillsDir(providerKindClaude, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plugins) != 1 || filepath.Join(plugins[0]["path"].(string), "skills") != dir {
+		t.Errorf("claude skills folder %q does not follow the plugin option %#v", dir, plugins)
 	}
 }
 
@@ -202,6 +222,12 @@ func TestMaterializeSessionSkillsCopiesIntoNativeFolder(t *testing.T) {
 				}
 				if _, err := os.Stat(filepath.Join(dir, s.Name, "references", "guide.md")); err != nil {
 					t.Fatalf("%s supporting file: %v", s.Name, err)
+				}
+			}
+			if provider == providerKindClaude {
+				manifest, err := os.ReadFile(filepath.Join(filepath.Dir(dir), ".claude-plugin", "plugin.json"))
+				if err != nil || string(manifest) != `{"name":"orka"}` {
+					t.Fatalf("claude plugin manifest = %q, %v", manifest, err)
 				}
 			}
 			// The projection never writes to the read-only source.
@@ -283,6 +309,8 @@ func TestVerifySkillsReportsStableFailure(t *testing.T) {
 // TestMaterializedSkillsBelongToTheSessionIdentity proves the projection plus
 // session ownership finalization hands each copy to the child's own UID/GID
 // while the source stays untouched. It needs root, as the runtime Pod does.
+// Claude's shared plugin is the exception; see
+// TestClaudeSkillPluginIsReadOnlyForTheSessionChild.
 func TestMaterializedSkillsBelongToTheSessionIdentity(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		t.Skip("requires root to assign a distinct session identity")
@@ -294,14 +322,14 @@ func TestMaterializedSkillsBelongToTheSessionIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := materializeSessionSkills(providerKindClaude, skills, mounts, paths); err != nil {
+	if err := materializeSessionSkills(providerKindCodex, skills, mounts, paths); err != nil {
 		t.Fatal(err)
 	}
 	const uid, gid = 20042, 20042
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		t.Fatal(err)
 	}
-	dir, err := nativeSkillsDir(providerKindClaude, paths)
+	dir, err := nativeSkillsDir(providerKindCodex, paths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +360,7 @@ func TestMaterializedSkillsBelongToTheSessionIdentity(t *testing.T) {
 }
 
 func TestClaudeSkillProjectionExposesOnlyOrkaSkills(t *testing.T) {
-	paths := acp.SessionPaths{Home: "/sessions/private/home"}
+	paths := acp.SessionPaths{Root: "/sessions/private", Home: "/sessions/private/home"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "test-auth-token"}
 	claude, err := providerProfile(providerKindClaude, "claude-test", harnessv2.WorkspaceIntentRead)
 	if err != nil {
@@ -353,22 +381,30 @@ func TestClaudeSkillProjectionExposesOnlyOrkaSkills(t *testing.T) {
 	if !slices.Contains(tools, claudeSkillToolName) || !slices.Contains(tools, providerToolRead) || slices.Contains(tools, providerToolBash) {
 		t.Fatalf("restricted tools with skills = %v", tools)
 	}
-	if !slices.Equal(restricted["skills"].([]string), []string{"code-review", "release-notes"}) {
+	if !slices.Equal(restricted["skills"].([]string), []string{"orka:code-review", "orka:release-notes"}) {
 		t.Fatalf("skills filter = %#v", restricted["skills"])
+	}
+	// The skills come from Orka's plugin; no settings file is loaded.
+	plugins := restricted["plugins"].([]map[string]any)
+	if len(plugins) != 1 || plugins[0]["type"] != "local" || plugins[0]["path"] != "/sessions/.claude-skill-plugin" || plugins[0]["skipMcpDiscovery"] != true {
+		t.Fatalf("plugins = %#v", plugins)
+	}
+	if sources := restricted["settingSources"].([]string); len(sources) != 0 {
+		t.Fatalf("settingSources = %#v", sources)
 	}
 	settings := restricted["settings"].(map[string]any)
 	if settings["disableSkillShellExecution"] != true {
 		t.Fatalf("settings = %#v", settings)
 	}
 	unrestricted := options(t, nil, nil, true, supervisorTestSkills())
-	if _, present := unrestricted["tools"]; present || !slices.Equal(unrestricted["skills"].([]string), []string{"code-review", "release-notes"}) {
+	if _, present := unrestricted["tools"]; present || !slices.Equal(unrestricted["skills"].([]string), []string{"orka:code-review", "orka:release-notes"}) {
 		t.Fatalf("unrestricted options with skills = %#v", unrestricted)
 	}
 	without := options(t, []string{providerToolRead}, nil, false, nil)
 	if slices.Contains(without["tools"].([]string), claudeSkillToolName) {
 		t.Fatal("a session without skills must not gain the Skill tool")
 	}
-	for _, key := range []string{"skills", "settings"} {
+	for _, key := range []string{"skills", "settings", "plugins"} {
 		if _, present := without[key]; present {
 			t.Fatalf("a session without skills must not set %s: %#v", key, without)
 		}

@@ -12,8 +12,10 @@ import (
 
 // SchemaVersion records the metadata layout. It never replaces validation of
 // every schema object; every upgrade, from an unversioned layout or from an
-// earlier version, requires the locked migration path.
-const SchemaVersion = 5
+// earlier version, requires the locked migration path. Version 8 adds the
+// Agent Host Protocol tables, version 9 the GitHub sign-in sessions, and
+// version 10 the dataset's write watermark.
+const SchemaVersion = 10
 
 const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -25,7 +27,9 @@ const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  switch_generation INTEGER NOT NULL DEFAULT 0 CHECK(switch_generation >= 0),
  key_fingerprint TEXT NOT NULL DEFAULT '',
  binding_state TEXT NOT NULL DEFAULT '' CHECK(binding_state IN ('', 'bound', 'detached')),
- bound_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(bound_at_ns >= 0)
+ bound_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(bound_at_ns >= 0),
+ write_watermark INTEGER NOT NULL DEFAULT 0 CHECK(write_watermark >= 0),
+ write_watermark_at_ns INTEGER NOT NULL DEFAULT 0
 )`
 
 // initializeSchema creates an empty database or checks the existing layout.

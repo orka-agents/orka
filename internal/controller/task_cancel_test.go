@@ -668,7 +668,7 @@ func TestRuntimeWatcherStopsARunOnACancelRequest(t *testing.T) {
 	dispatcher := &ACPDispatcher{APIReader: reader}
 	ctx, cancelTest := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelTest()
-	runCtx, stopRun := context.WithCancel(ctx)
+	runCtx, stopRun := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	go func() {
 		dispatcher.watchTaskCancellation(runCtx, stopRun, client.ObjectKeyFromObject(task))

@@ -2,15 +2,19 @@ package supervisor
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
@@ -20,7 +24,15 @@ import (
 // would.
 func runFirstPromptThenAwaitAdapterExit(t *testing.T, mode string) (*Server, Config, harnessv2.CreateRuntimeSessionRequest, *sessionState) {
 	t.Helper()
+	return runFirstPromptThenAwaitAdapterExitWith(t, mode, nil)
+}
+
+func runFirstPromptThenAwaitAdapterExitWith(t *testing.T, mode string, configure func(*Server)) (*Server, Config, harnessv2.CreateRuntimeSessionRequest, *sessionState) {
+	t.Helper()
 	server, cfg, profile := newTestServer(t, mode)
+	if configure != nil {
+		configure(server)
+	}
 	create := testCreateSessionRequest(t, cfg, profile)
 	created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
 	if created.Code != http.StatusCreated {
@@ -157,23 +169,7 @@ func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
 	}
 	// The poisoned session is retired by the supervisor's own cleanup; the
 	// controller recreates a fresh generation from the canonical transcript.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		status := server.status()
-		retired := len(status.Sessions) == 0
-		for _, session := range status.Sessions {
-			if session.RuntimeSessionUID == create.Metadata.Fence.RuntimeSessionUID {
-				retired = session.State == harnessv2.RuntimeSessionStatePoisoned || session.State == harnessv2.RuntimeSessionStateDeleting
-			}
-		}
-		if retired {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("lost-adapter session was not retired: %#v", status.Sessions)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	awaitSessionRetired(t, server, create)
 	server.mu.Lock()
 	_, resident := server.sessions[create.RuntimeSessionID]
 	_, tombstoned := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
@@ -186,5 +182,167 @@ func assertSupervisorRetiresUnresumableAdapter(t *testing.T, mode string) {
 		if !scheduled {
 			t.Fatal("lost-adapter session cleanup was not scheduled")
 		}
+	}
+}
+
+// awaitSessionRetired waits until the supervisor has poisoned, is deleting,
+// or has dropped the session create made.
+func awaitSessionRetired(t *testing.T, server *Server, create harnessv2.CreateRuntimeSessionRequest) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status := server.status()
+		retired := len(status.Sessions) == 0
+		for _, session := range status.Sessions {
+			if session.RuntimeSessionUID == create.Metadata.Fence.RuntimeSessionUID {
+				retired = session.State == harnessv2.RuntimeSessionStatePoisoned || session.State == harnessv2.RuntimeSessionStateDeleting
+			}
+		}
+		if retired {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session was not retired: %#v", status.Sessions)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Creation validates the workspace once, but the agent can write it between
+// prompts. An idle adapter restart must re-run that check before launching a
+// replacement, and retire the session rather than start the provider over
+// configuration that creation would have refused. This includes OpenCode's
+// own configuration folders, which live in the agent-writable session tree.
+func TestSupervisorRevalidatesWorkspaceBeforeIdleAdapterRelaunch(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		write func(t *testing.T, paths acp.SessionPaths)
+	}{
+		{name: "workspace opencode.json", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Workspace, "opencode.json"), "{}")
+		}},
+		{name: "workspace plugin", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Workspace, ".opencode", "plugin", "extra.js"), "export {}")
+		}},
+		{name: "config folder plugin", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Config, "opencode", "plugin", "extra.js"), "export {}")
+		}},
+		{name: "home .opencode", write: func(t *testing.T, paths acp.SessionPaths) {
+			writeTestFile(t, filepath.Join(paths.Home, ".opencode", "opencode.json"), "{}")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assertRelaunchRefusesWorkspaceChange(t, tt.write)
+		})
+	}
+}
+
+func assertRelaunchRefusesWorkspaceChange(t *testing.T, write func(*testing.T, acp.SessionPaths)) {
+	t.Helper()
+	var validations atomic.Int32
+	server, cfg, create, state := runFirstPromptThenAwaitAdapterExitWith(t, adapterResumeMode, func(server *Server) {
+		server.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
+			validations.Add(1)
+			return validateOpenCodeSession(paths)
+		}
+	})
+	if got := validations.Load(); got != 1 {
+		t.Fatalf("workspace validations after create = %d, want 1", got)
+	}
+	write(t, state.paths)
+	exited := state.runtime.Process()
+
+	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("prompt after unsafe workspace change status = %d body=%s", response.Code, response.Body.String())
+	}
+	var body harnessv2.ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != harnessv2.ErrorCodePromptNotAccepted || body.Retryable {
+		t.Fatalf("error = %#v, want non-retryable prompt-not-accepted", body)
+	}
+	if got := validations.Load(); got != 2 {
+		t.Fatalf("workspace validations after relaunch attempt = %d, want 2", got)
+	}
+	if state.runtime.AdapterRestarts() != 0 || state.runtime.Process() != exited {
+		t.Fatal("idle adapter restart launched a replacement over a rejected workspace")
+	}
+	if _, exists := state.runtime.Tombstone(string(next.Metadata.PromptID)); exists {
+		t.Fatal("rejected relaunch submitted the next ACP prompt")
+	}
+	awaitSessionRetired(t, server, create)
+}
+
+// Operator commands run as the session child. An idle adapter restart must
+// close operator admission and wait for every admitted operation to finish
+// before it checks the workspace, so no operator can change what the
+// replacement loads between the check and the launch.
+func TestSupervisorQuiescesOperatorsBeforeIdleAdapterRelaunch(t *testing.T) {
+	var (
+		server      *Server
+		create      harnessv2.CreateRuntimeSessionRequest
+		validations atomic.Int32
+		checked     atomic.Bool
+		closed      bool
+		live        int
+		admission   int
+		message     string
+	)
+	server, cfg, create, state := runFirstPromptThenAwaitAdapterExitWith(t, adapterResumeMode, func(s *Server) {
+		s.cfg.Provider.ValidateWorkspace = func(paths acp.SessionPaths) error {
+			// Creation validates before the session is published; only the
+			// relaunch check observes operator state.
+			if validations.Add(1) == 2 {
+				server.mu.Lock()
+				current := server.sessions[create.RuntimeSessionID]
+				closed, live = current.operatorsClosed, len(current.operators)
+				server.mu.Unlock()
+				_, admission, message = server.operatorTargetFor(create.RuntimeSessionID, create.Metadata)
+				checked.Store(true)
+			}
+			return validateOpenCodeSession(paths)
+		}
+	})
+	// An operator operation is running when the next prompt arrives. Its
+	// handler releases the registration once the operation is killed, as
+	// finishOperation does.
+	process := newFakeOperatorProcess()
+	server.mu.Lock()
+	if state.operators == nil {
+		state.operators = map[uint64]*operatorRegistration{}
+	}
+	state.operatorSeq++
+	token := state.operatorSeq
+	state.operators[token] = &operatorRegistration{process: process}
+	server.mu.Unlock()
+	go func() {
+		_, _, _ = process.Wait()
+		server.mu.Lock()
+		delete(state.operators, token)
+		server.mu.Unlock()
+	}()
+
+	next := testSecondPromptRequest(t, cfg, create.Metadata.Fence)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-2", next, cfg)
+	if response.Code != http.StatusOK {
+		t.Fatalf("prompt after adapter exit status = %d body=%s", response.Code, response.Body.String())
+	}
+	if !checked.Load() {
+		t.Fatal("the relaunch did not check the workspace")
+	}
+	if !process.killed.Load() {
+		t.Fatal("the running operator operation was not stopped before the relaunch")
+	}
+	if !closed || live != 0 {
+		t.Fatalf("at the relaunch check operator admission closed = %t with %d live operations; want closed with none", closed, live)
+	}
+	if admission != http.StatusConflict || !strings.Contains(message, "operator access is refused") {
+		t.Fatalf("operator admission during the relaunch = %d %q, want refusal", admission, message)
+	}
+	if state.runtime.AdapterRestarts() != 1 {
+		t.Fatalf("adapter restarts = %d, want 1", state.runtime.AdapterRestarts())
 	}
 }

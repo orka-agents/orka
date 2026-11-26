@@ -5,7 +5,8 @@ MIT License - see LICENSE file for details.
 */
 
 // Package aimockauthority supplies isolated, synthetic transaction authority
-// for deployed authorization evals. Its receipts never retain tokens or keys.
+// for deployed authorization evals, and a synthetic OIDC issuer that signs in
+// test people. Its receipts never retain tokens or keys.
 package aimockauthority
 
 import (
@@ -31,6 +32,14 @@ const EvidenceTool = "e2eauthorizationevidence"
 const NoteTool = "e2eauthorizationnote"
 const NoteNonce = "AUTHORIZATION_LOWER_TRUST_NOTE_2026"
 const keyID = "orka-eval-ephemeral-key"
+
+// OIDCPath is appended to the fixture issuer to form its OIDC issuer, which
+// serves its keys at <issuer>/oidc/jwks.
+const OIDCPath = "/oidc"
+
+// OIDCAudience is the audience of the fixture's OIDC ID tokens.
+const OIDCAudience = "orka-oidc-eval"
+const oidcKeyID = "orka-eval-oidc-key"
 const rsaAlgorithm = "RS256"
 const toolSubject = "orka-eval-tool"
 
@@ -60,10 +69,19 @@ type State struct {
 	NoteReads []string          `json:"noteReads"`
 }
 
-// Server owns a fresh, memory-only signing key for one fixture Pod lifetime.
+// OIDCIssueRequest names a synthetic person to sign in.
+type OIDCIssueRequest struct {
+	Subject  string `json:"subject"`
+	Username string `json:"username,omitempty"`
+}
+
+// Server owns fresh, memory-only signing keys for one fixture Pod lifetime:
+// one for transaction tokens and another for OIDC ID tokens, so neither
+// verifier accepts the other's tokens.
 type Server struct {
 	issuer   string
 	key      *rsa.PrivateKey
+	oidcKey  *rsa.PrivateKey
 	mu       sync.Mutex
 	state    State
 	canaries map[string][]string
@@ -77,9 +95,14 @@ func New(issuer string) (*Server, error) {
 	if err != nil {
 		return nil, errors.New("generate fixture signing key")
 	}
+	oidcKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, errors.New("generate fixture OIDC signing key")
+	}
 	return &Server{
 		issuer:   issuer,
 		key:      key,
+		oidcKey:  oidcKey,
 		state:    State{Exchanges: []ExchangeReceipt{}, Effects: []string{}, NoteReads: []string{}},
 		canaries: map[string][]string{},
 	}, nil
@@ -133,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) ObserverHandler() http.Handler {
 	mux := s.baseMux()
 	mux.HandleFunc("POST /issue", s.issue)
+	mux.HandleFunc("POST "+OIDCPath+"/issue", s.issueOIDC)
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, _ *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -153,15 +177,50 @@ func (s *Server) baseMux() *http.ServeMux {
 		writeJSON(w, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("GET /.well-known/jwks.json", s.jwks)
+	mux.HandleFunc("GET "+OIDCPath+"/jwks", s.oidcJWKS)
 	return mux
 }
 
 func (s *Server) jwks(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{"keys": []any{map[string]string{
-		"kty": "RSA", "kid": keyID, "use": "sig", "alg": rsaAlgorithm,
-		"n": base64.RawURLEncoding.EncodeToString(s.key.N.Bytes()),
-		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(s.key.E)).Bytes()),
-	}}})
+	writeJSON(w, jwkSet(keyID, &s.key.PublicKey))
+}
+
+func (s *Server) oidcJWKS(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, jwkSet(oidcKeyID, &s.oidcKey.PublicKey))
+}
+
+func jwkSet(kid string, key *rsa.PublicKey) map[string]any {
+	return map[string]any{"keys": []any{map[string]string{
+		"kty": "RSA", "kid": kid, "use": "sig", "alg": rsaAlgorithm,
+		"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+	}}}
+}
+
+// issueOIDC signs a synthetic person in: it returns an RS256 ID token for the
+// subject, issued by <issuer>/oidc for OIDCAudience. It is never retained.
+func (s *Server) issueOIDC(w http.ResponseWriter, r *http.Request) {
+	var req OIDCIssueRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&req) != nil || strings.TrimSpace(req.Subject) == "" {
+		http.Error(w, "invalid fixture OIDC request", http.StatusBadRequest)
+		return
+	}
+	username := req.Username
+	if username == "" {
+		username = req.Subject
+	}
+	now := time.Now()
+	token, err := signJWT(s.oidcKey, oidcKeyID, "JWT", map[string]any{
+		"iss": s.issuer + OIDCPath, "aud": OIDCAudience, "sub": req.Subject, "preferred_username": username,
+		"iat": now.Unix(), "exp": now.Add(30 * time.Minute).Unix(),
+	})
+	if err != nil {
+		http.Error(w, "fixture signing failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"token": token})
 }
 
 func (s *Server) issue(w http.ResponseWriter, r *http.Request) {
@@ -288,14 +347,18 @@ func (s *Server) sign(claims transactiontoken.Claims) (string, error) {
 	now := time.Now()
 	claims.Issuer, claims.Audience = s.issuer, Audience
 	claims.IssuedAt, claims.Expiration = now.Unix(), now.Add(30*time.Minute).Unix()
-	header, _ := json.Marshal(map[string]string{"alg": rsaAlgorithm, "typ": transactiontoken.JWTType, "kid": keyID})
+	return signJWT(s.key, keyID, transactiontoken.JWTType, claims)
+}
+
+func signJWT(key *rsa.PrivateKey, kid, typ string, claims any) (string, error) {
+	header, _ := json.Marshal(map[string]string{"alg": rsaAlgorithm, "typ": typ, "kid": kid})
 	body, err := json.Marshal(claims)
 	if err != nil {
 		return "", errors.New("encode fixture claims")
 	}
 	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(body)
 	digest := sha256.Sum256([]byte(unsigned))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, s.key, crypto.SHA256, digest[:])
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
 	if err != nil {
 		return "", errors.New("sign fixture claims")
 	}

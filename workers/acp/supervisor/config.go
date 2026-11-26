@@ -32,7 +32,11 @@ type ProviderProfile struct {
 	AuthMethodID          string
 	AdapterName           string
 	AdapterDigest         string
-	PrepareSession        func(acp.SessionPaths) error
+	// ValidateWorkspace rejects a materialized workspace the provider cannot
+	// run safely, before any provider state or child process exists. Its
+	// error fails the create permanently with a caller-visible reason.
+	ValidateWorkspace func(acp.SessionPaths) error
+	PrepareSession    func(acp.SessionPaths) error
 }
 
 type ProviderSessionProjection struct {
@@ -44,6 +48,10 @@ type ProviderSessionProjection struct {
 	// wrote into the ACP agent message stream instead of its own log. Nil
 	// forwards every chunk.
 	AgentDiagnosticFilter *AgentDiagnosticFilter
+	// RequiredModeID is the ACP session mode the adapter must report as
+	// current whenever it creates or resumes the provider session. Empty
+	// accepts any mode.
+	RequiredModeID string
 }
 
 // AgentDiagnosticFilter recognizes assistant text chunks that are provider

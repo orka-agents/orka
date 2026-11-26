@@ -47,10 +47,8 @@ func TestProviderModelSettingsRequestBody(t *testing.T) {
 						return
 					}
 					bodies <- body
-					if !stream {
-						w.Header().Set("Content-Type", "application/json")
-						_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","content":[{"type":"text","text":"Hello"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
-						return
+					if body["stream"] != true {
+						t.Errorf("stream = %v, want true: the provider streams every request", body["stream"])
 					}
 					w.Header().Set("Content-Type", "text/event-stream")
 					_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")

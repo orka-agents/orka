@@ -251,11 +251,13 @@ func setupTestHandlersWithAuthzStore(
 		ArtifactStore:             ss,
 		MemoryStore:               ss,
 		MemoryProposalStore:       ss,
+		MemoryConsolidationStore:  ss,
 		ContextTokenAuthorization: authz,
 	})
 
 	app := fiber.New()
 	app.Use(NewAuthMiddleware(handlers.client, AuthConfig{ContextTokens: ctxTokenConfig}))
+	app.Get("/tasks/:id/memory-consolidation-report", handlers.GetTaskMemoryConsolidationReport)
 	app.Post("/tasks", handlers.CreateTask)
 	app.Get("/tasks", handlers.ListTasks)
 	app.Get("/tasks/:id", handlers.GetTask)
@@ -5707,4 +5709,67 @@ func TestHandlers_CreateTask_RejectsServerOwnedSpecCaseVariants(t *testing.T) {
 	}
 	resp := testJSONRequest(t, app, http.MethodPost, "/tasks", body)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// A transaction token reads a consolidation run's full report only with the
+// scopes that reading the run's inputs needs: Sessions and memory.
+func TestHandlers_MemoryConsolidationReport_ContextTokenAuthorization(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	all := []string{ContextTokenScopeTaskGet, ContextTokenScopeSessionsRead, ContextTokenScopeMemoryRead}
+	tests := []struct {
+		name   string
+		scopes []string
+		want   int
+	}{
+		{name: "task read only", scopes: []string{ContextTokenScopeTaskGet}, want: http.StatusForbidden},
+		{name: "without memory read", scopes: []string{ContextTokenScopeTaskGet, ContextTokenScopeSessionsRead}, want: http.StatusForbidden},
+		{name: "without session read", scopes: []string{ContextTokenScopeTaskGet, ContextTokenScopeMemoryRead}, want: http.StatusForbidden},
+		{name: "without task read", scopes: []string{ContextTokenScopeSessionsRead, ContextTokenScopeMemoryRead}, want: http.StatusForbidden},
+		{name: "every scope", scopes: all, want: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "consolidate", Namespace: "default", UID: "consolidate-uid"},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI,
+					AI: &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}},
+			}
+			app, ss := setupTestHandlersWithAuthzStore(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, task)
+			at := time.Now().UTC()
+			require.NoError(t, ss.BeginMemoryConsolidationRun(t.Context(), &store.MemoryConsolidationRun{Namespace: "default",
+				TaskUID: "consolidate-uid", TaskName: "consolidate", Mode: "DryRun", Status: store.MemoryConsolidationRunning,
+				WindowStart: at.Add(-time.Hour), WindowEnd: at, CreatedAt: at}))
+			_, err := ss.CompleteMemoryConsolidationRun(t.Context(), store.MemoryConsolidationCompletion{Namespace: "default",
+				TaskUID: "consolidate-uid", Status: store.MemoryConsolidationCompleted, CompletedAt: at,
+				Report: []byte(`{"summary":"transcript-derived-text"}`)})
+			require.NoError(t, err)
+			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": strings.Join(tt.scopes, " ")})
+			req := httptest.NewRequest(http.MethodGet, "/tasks/consolidate/memory-consolidation-report?namespace=default", nil)
+			req.Header.Set(TransactionTokenHeaderName, token)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			require.Equal(t, tt.want, resp.StatusCode, string(body))
+			if tt.want != http.StatusOK {
+				require.NotContains(t, string(body), "transcript-derived-text")
+			}
+		})
+	}
+}
+
+func TestHandlers_CreateTask_ContextTokenMemoryConsolidationNeedsReadScopes(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	app := setupTestHandlersWithAuthz(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce)
+	token := issueTestContextToken(t, provider, nil, map[string]any{"scope": ContextTokenScopeTaskCreate})
+	body, err := json.Marshal(CreateTaskRequest{Name: "consolidate", Namespace: "default", Type: corev1alpha1.TaskTypeAI,
+		AI: &corev1alpha1.AISpec{Provider: "anthropic", Model: "model", MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{}}})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(body))
+	req.Header.Set(TransactionTokenHeaderName, token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode, "task create scope alone does not start a run that reads every Session")
 }

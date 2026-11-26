@@ -168,7 +168,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	}
 	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for _, task := range selected {
-		cancelled, err := h.recordTaskCancellation(c, task, "", message)
+		cancelled, err := h.recordTaskCancellation(ctx, task, "", message)
 		if err != nil {
 			var fiberErr *fiber.Error
 			if errors.Is(err, errCancelTaskGone) || (errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusConflict) {
@@ -303,7 +303,7 @@ func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task,
 	if err := h.authorizeTaskCancellation(c, task); err != nil {
 		return taskCancellation{}, err
 	}
-	return h.recordTaskCancellation(c, task, expectedUID, message)
+	return h.recordTaskCancellation(c.Context(), task, expectedUID, message)
 }
 
 // authorizeTaskCancellation applies the per-Task checks that depend on the
@@ -317,13 +317,12 @@ func (h *Handlers) authorizeTaskCancellation(c fiber.Ctx, task *corev1alpha1.Tas
 
 // recordTaskCancellation records a cancel request on a Task the caller is
 // already authorized to cancel.
-func (h *Handlers) recordTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task, expectedUID, message string) (taskCancellation, error) {
+func (h *Handlers) recordTaskCancellation(ctx context.Context, task *corev1alpha1.Task, expectedUID, message string) (taskCancellation, error) {
 	// The confirmed UID is compared only once the caller may act on this
 	// Task, so a refusal says nothing about the Task's identity.
 	if expectedUID != "" && string(task.UID) != expectedUID {
 		return taskCancellation{}, fiber.NewError(fiber.StatusConflict, "the task was replaced since it was confirmed; reload it")
 	}
-	ctx := c.Context()
 	key := client.ObjectKeyFromObject(task)
 	result := taskCancellation{Namespace: task.Namespace, Name: task.Name}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

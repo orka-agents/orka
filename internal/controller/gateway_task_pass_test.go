@@ -127,7 +127,7 @@ func TestGatewayTaskPassRootExecution(t *testing.T) {
 	require.Equal(t, []string{"lookup"}, body.GatewayGrant.Tools)
 	child := task.DeepCopy()
 	child.Labels["orka.ai/parent-task"] = "parent"
-	_, childErr := r.freezeGatewayTaskGrant(t.Context(), child, *body.MCPConfiguration)
+	_, childErr := r.freezeGatewayTaskGrant(t.Context(), child, agent, *body.MCPConfiguration)
 	require.True(t, isPermanentACPAgentConfigurationError(childErr), "unsupported child configuration must fail, not retry: %v", childErr)
 	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectReadOnly)
 	request.Namespace = task.Namespace
