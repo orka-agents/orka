@@ -1590,13 +1590,17 @@ func repositoryMonitorPullRequestFromGitHub(pr repositoryMonitorPullRequestRespo
 	}
 }
 
+// errRepositoryMonitorGitHubResponseTooLarge marks a GitHub response that
+// exceeded its read limit.
+var errRepositoryMonitorGitHubResponseTooLarge = errors.New("GitHub response too large")
+
 func readRepositoryMonitorGitHubResponse(body io.Reader, limit int64) ([]byte, error) {
 	respBody, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read GitHub pull request inventory response: %w", err)
 	}
 	if int64(len(respBody)) > limit {
-		return nil, fmt.Errorf("GitHub pull request inventory response exceeded %d bytes", limit)
+		return nil, fmt.Errorf("GitHub pull request inventory response exceeded %d bytes: %w", limit, errRepositoryMonitorGitHubResponseTooLarge)
 	}
 	return respBody, nil
 }

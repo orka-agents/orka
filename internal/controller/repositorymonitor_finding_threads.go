@@ -27,6 +27,12 @@ const repositoryMonitorAddressedPrefix = "✅ Addressed in `"
 // GitHub GraphQL queries.
 const repositoryMonitorGraphQLNumberVariable = "number"
 
+// repositoryMonitorPullRequestGraphQLVariables are the variables of a paged
+// GitHub GraphQL query about one pull request.
+func repositoryMonitorPullRequestGraphQLVariables(owner, repository string, number int64, after any) map[string]any {
+	return map[string]any{"owner": owner, "name": repository, repositoryMonitorGraphQLNumberVariable: number, "after": after}
+}
+
 // repositoryMonitorInlineFindingMarker matches the finding ID in the hidden
 // marker Orka appends to its inline comments.
 var repositoryMonitorInlineFindingMarker = regexp.MustCompile(`<!-- orka:repo-monitor-inline review=\S+ finding=(f-[0-9a-f]+) -->`)
@@ -302,7 +308,7 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorReviewThreads(ctx con
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		}
-		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, query, map[string]any{"owner": owner, "name": repository, repositoryMonitorGraphQLNumberVariable: number, "after": after}, &response); err != nil {
+		if err := r.repositoryMonitorGitHubGraphQL(ctx, token, query, repositoryMonitorPullRequestGraphQLVariables(owner, repository, number, after), &response); err != nil {
 			return nil, err
 		}
 		page := response.Repository.PullRequest.ReviewThreads
@@ -364,6 +370,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubGraphQL(ctx context
 	var decoded struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
+			Type    string `json:"type"`
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
@@ -371,9 +378,26 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubGraphQL(ctx context
 		return fmt.Errorf("failed to parse GitHub GraphQL response: %w", err)
 	}
 	if len(decoded.Errors) > 0 {
-		return fmt.Errorf("GitHub GraphQL error: %s", decoded.Errors[0].Message)
+		return &repositoryMonitorGraphQLError{Type: decoded.Errors[0].Type, Message: decoded.Errors[0].Message}
 	}
 	return json.Unmarshal(decoded.Data, out)
+}
+
+// repositoryMonitorGraphQLError is the first error a GitHub GraphQL response
+// reported. GitHub answers a rate-limited GraphQL request with HTTP 200 and
+// an error of type RATE_LIMITED.
+type repositoryMonitorGraphQLError struct {
+	Type    string
+	Message string
+}
+
+func (e *repositoryMonitorGraphQLError) Error() string {
+	return "GitHub GraphQL error: " + e.Message
+}
+
+// rateLimited reports whether GitHub refused the operation for a rate limit.
+func (e *repositoryMonitorGraphQLError) rateLimited() bool {
+	return strings.EqualFold(strings.TrimSpace(e.Type), "RATE_LIMITED") || repositoryMonitorGitHubErrorLooksRateLimited(e.Message)
 }
 
 func repositoryMonitorGitHubBaseURL(r *RepositoryMonitorReconciler) string {
