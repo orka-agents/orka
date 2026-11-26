@@ -58,7 +58,9 @@ func (g *askTestGitHub) serve(t *testing.T) *httptest.Server {
 			if state == "" {
 				state = "open"
 			}
-			_, _ = fmt.Fprintf(w, `{"number":88,"title":"Fix the parser","state":%q,"draft":%t,"labels":[],"base":{"ref":%q,"sha":"base-sha","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"fix","sha":"head-sha","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}}}`, state, g.prDraft, base)
+			_, _ = fmt.Fprintf(w, `{"number":88,"title":"Fix the parser","body":"Keeps the last field when the line ends early.","changed_files":1,"state":%q,"draft":%t,"labels":[],"base":{"ref":%q,"sha":"base-sha","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"fix","sha":"head-sha","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}}}`, state, g.prDraft, base)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/compare/base-sha...head-sha":
+			_, _ = w.Write([]byte(`{"files":[{"filename":"internal/parser/fields.go","status":"modified","additions":1,"deletions":1,"patch":"@@ -1 +1 @@\n-return fields[:n-1]\n+return fields[:n]"}]}`))
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
 			var payload struct {
 				Body string `json:"body"`
@@ -273,6 +275,14 @@ func TestRepositoryMonitorAskPullRequestUsesHeadAndScope(t *testing.T) {
 	if !strings.Contains(tasks[0].Spec.Prompt, `"baseSHA": "base-sha"`) {
 		t.Fatalf("PR ask prompt has no base for the diff:\n%s", tasks[0].Spec.Prompt)
 	}
+	prompt := tasks[0].Spec.Prompt
+	if !strings.Contains(prompt, "Keeps the last field when the line ends early.") {
+		t.Fatalf("PR ask prompt has no pull request description:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "\n"+repositoryMonitorReviewContextBeginMarker+"\n") || !strings.Contains(prompt, `"path": "internal/parser/fields.go"`) ||
+		!strings.Contains(prompt, `+return fields[:n]`) || !strings.Contains(prompt, `"headSHA": "head-sha"`) {
+		t.Fatalf("PR ask prompt has no SHA-bound change set:\n%s", prompt)
+	}
 
 	for name, configure := range map[string]func(*askTestGitHub, *corev1alpha1.RepositoryMonitor){
 		"other base branch": func(g *askTestGitHub, _ *corev1alpha1.RepositoryMonitor) { g.prBase = "release" },
@@ -483,5 +493,54 @@ func TestRepositoryMonitorAskFinishesRunningAsksBehindAQueuedBacklog(t *testing.
 	env.reconcile(t)
 	if replies := env.github.replyBodies(); len(replies) != 1 || !strings.Contains(replies[0], "the old answer") {
 		t.Fatalf("replies = %#v, want the running ask answered although newer asks fill the page", replies)
+	}
+}
+
+func TestRepositoryMonitorAskStaysPendingWhileAcceptedAsksRemainBeyondThePage(t *testing.T) {
+	env := newAskTestEnv(t)
+	env.github.prState = "closed"
+	for i := range repositoryMonitorAskListLimit + 1 {
+		env.addAsk(t, fmt.Sprintf("cmd-ask-closed-%d", i), repositoryMonitorPullRequestKind, 88, fmt.Sprintf("question %d", i))
+	}
+	if !env.reconcile(t) {
+		t.Fatal("accepted asks beyond the settled page must keep the monitor pending")
+	}
+	if env.reconcile(t) {
+		t.Fatal("no accepted asks remain, so the monitor must not stay pending")
+	}
+	for i := range repositoryMonitorAskListLimit + 1 {
+		if action := env.action(t, fmt.Sprintf("cmd-ask-closed-%d", i)); action.Status != repositoryMonitorWorkActionStatusBlocked {
+			t.Fatalf("action %d = %#v, want blocked", i, action)
+		}
+	}
+}
+
+func TestRepositoryMonitorAskRejectsResearcherThatIsNotReadOnly(t *testing.T) {
+	for name, configure := range map[string]func(*corev1alpha1.Agent){
+		"copilot": func(a *corev1alpha1.Agent) { a.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCopilot },
+		"external runtime": func(a *corev1alpha1.Agent) {
+			a.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newAskTestEnv(t)
+			// With issue monitoring off, monitor-level validation never
+			// checks the researcher.
+			env.monitor.Spec.Targets.Issues.Enabled = false
+			agent := repositoryMonitorControllerTestAgent("ask-researcher", corev1alpha1.AgentRuntimeClaude, "")
+			configure(agent)
+			if err := env.reconciler.Create(context.Background(), agent); err != nil {
+				t.Fatalf("create agent: %v", err)
+			}
+			env.monitor.Spec.Agents.Researcher = &corev1alpha1.AgentReference{Name: "ask-researcher"}
+			env.addAsk(t, "cmd-ask-unsafe", repositoryMonitorPullRequestKind, 88, "summarize this PR")
+			env.reconcile(t)
+			if len(env.tasks(t)) != 0 {
+				t.Fatal("a researcher that cannot run read-only must not get an ask Task")
+			}
+			if action := env.action(t, "cmd-ask-unsafe"); action.Status != repositoryMonitorWorkActionStatusBlocked || !strings.Contains(action.BlockedReason, "spec.agents.researcher") {
+				t.Fatalf("action = %#v, want blocked by researcher validation", action)
+			}
+		})
 	}
 }
