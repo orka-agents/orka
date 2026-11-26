@@ -61,7 +61,6 @@ var _ = Describe("Container Task Secret use", Ordered, Serial,
 		var tokenBase64 string
 		var tokenDigest string
 		var runID string
-		var secretLeaked bool
 		var dynamicClient dynamic.Interface
 		taskGVR := schema.GroupVersionResource{Group: "core.orka.ai", Version: "v1alpha1", Resource: "tasks"}
 
@@ -325,18 +324,10 @@ var _ = Describe("Container Task Secret use", Ordered, Serial,
 			time.Sleep(secretUseE2EPropagation)
 		})
 
-		AfterEach(func() {
-			if secretLeaked {
-				return
-			}
-			dumpDebugInfo(taskName(secretUseE2ETask), taskName(secretUseE2EScheduled))
-		})
-
 		assertNoSecretLeak := func(deliveredTask string, taskNames ...string) {
 			By("keeping the Secret value out of Task status, events, and controller logs")
 			checkClean := func(source, content string) {
 				if strings.Contains(content, token) || strings.Contains(content, tokenBase64) {
-					secretLeaked = true
 					Fail("fixture Secret value leaked into " + source)
 				}
 			}
