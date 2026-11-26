@@ -106,6 +106,17 @@ describe('seen, scoring… rows', () => {
     expect(await screen.findByTestId('pending-note', {}, { timeout: 4000 })).toHaveTextContent('watching 30 of 31 running Tasks')
   })
 
+  it('says the count is a lower bound when the Task list is cut off', async () => {
+    openStream()
+    serveTasks([], {})
+    server.use(http.get('/api/v1/tasks', ({ request }) => {
+      const page = Number(new URL(request.url).searchParams.get('continue') ?? 0)
+      return HttpResponse.json({ items: [task(`t${page}`)], metadata: { continue: String(page + 1) } })
+    }))
+    renderDashboard({})
+    expect(await screen.findByTestId('pending-note', {}, { timeout: 4000 })).toHaveTextContent('watching 5 of 5+ running Tasks')
+  })
+
   it('renders hostile event text as text', async () => {
     openStream()
     const hostile = '<img src=x onerror="window.__pwned=1">'

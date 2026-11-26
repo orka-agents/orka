@@ -42,12 +42,15 @@ export function PendingRow({ call, columns }: { call: PendingToolCall; columns: 
   )
 }
 
-/** "3 tool calls seen, awaiting decisions · 1 with no decision after 10 min · watching 30 of 42 running Tasks". */
-export function PendingNote({ pending, expired, watching, candidates }: { pending: number; expired: number; watching: number; candidates: number }) {
+/**
+ * "3 tool calls seen, awaiting decisions · 1 with no decision after 10 min · watching 30 of 42 running Tasks".
+ * When the Task list was cut off, the count reads "42+".
+ */
+export function PendingNote({ pending, expired, watching, candidates, candidatesPartial = false }: { pending: number; expired: number; watching: number; candidates: number; candidatesPartial?: boolean }) {
   const parts = [
     pending > 0 ? `${pending.toLocaleString()} tool ${pending === 1 ? 'call' : 'calls'} seen, awaiting decisions` : '',
     expired > 0 ? `${expired.toLocaleString()} with no decision after 10 min` : '',
-    candidates > watching ? `watching ${watching} of ${candidates.toLocaleString()} running Tasks` : '',
+    candidates > watching || candidatesPartial ? `watching ${watching} of ${candidates.toLocaleString()}${candidatesPartial ? '+' : ''} running Tasks` : '',
   ].filter(Boolean)
   if (parts.length === 0) return null
   return <p className="text-xs text-muted-foreground" data-testid="pending-note">{parts.join(' · ')}</p>

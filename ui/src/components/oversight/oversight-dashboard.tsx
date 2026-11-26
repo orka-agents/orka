@@ -182,7 +182,7 @@ function Results({ q, window, postureWindow, view, queryKeys, onSearch, onWindow
     enabled: view !== 'charter' && view !== 'monitors' && stream.status === 'live' && !q,
     decisions: [...stream.decisions, ...rows, ...needsRows],
   })
-  const pendingNote = <PendingNote pending={pendingCalls.pending.length} expired={pendingCalls.expired} watching={pendingCalls.watching} candidates={pendingCalls.candidates} />
+  const pendingNote = <PendingNote pending={pendingCalls.pending.length} expired={pendingCalls.expired} watching={pendingCalls.watching} candidates={pendingCalls.candidates} candidatesPartial={pendingCalls.candidatesPartial} />
   const breaks = charterBreaks(needsRows, config)
   const declaredRules = (config?.charters ?? []).reduce((n, c) => n + (c.bounds?.length ?? 0), 0)
   const charterSummary = (config?.charters?.length ?? 0) > 0 ? {
