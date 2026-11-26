@@ -70,6 +70,8 @@ const (
 	EnvProxyCredentialScope      = "ORKA_ACP_PROXY_CREDENTIAL_SCOPE"
 	EnvResourceClass             = "ORKA_ACP_RESOURCE_CLASS"
 	EnvProviderProxyBaseURL      = "ORKA_ACP_PROVIDER_PROXY_BASE_URL"
+	EnvCodex429RetryBaseURL      = "ORKA_ACP_CODEX_429_RETRY_BASE_URL"
+	EnvCodex429RetryModel        = "ORKA_ACP_CODEX_429_RETRY_MODEL"
 	EnvProviderTokenFile         = "ORKA_ACP_PROVIDER_TOKEN_FILE"
 	EnvArtifactAPIURL            = "ORKA_ACP_ARTIFACT_API_URL"
 	EnvWorkspaceArtifactMaxBytes = "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES"
@@ -376,6 +378,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProviderProxy: ProviderProxyConfig{
 			UpstreamBaseURL: providerUpstreamBaseURL(providerKind, providerBaseURL), UpstreamBearerToken: providerToken,
 			ProviderKind: providerKind, Model: model,
+			Codex429RetryBaseURL: os.Getenv(EnvCodex429RetryBaseURL), Codex429RetryModel: os.Getenv(EnvCodex429RetryModel),
 		},
 		MCPBroker:                     mcpBroker,
 		WorkspaceMaterializer:         workspaceMaterializer,
@@ -613,6 +616,10 @@ func codexProviderDefinition(baseURL string) map[string]any {
 		"base_url":           baseURL,
 		"wire_api":           "responses",
 		"env_key":            "CODEX_API_KEY",
+		// The session proxy owns rejected-request retries. Neither a transport
+		// failure nor a broken response stream authorizes a second POST.
+		"request_max_retries": 0,
+		"stream_max_retries":  0,
 	}
 }
 
@@ -1468,7 +1475,8 @@ func prepareCodexHome(paths acp.SessionPaths) error {
 
 // codexHomeConfigTOML is the static CODEX_HOME/config.toml; the per-session
 // provider definition travels in CODEX_CONFIG (see codexBaseConfig).
-const codexHomeConfigTOML = "check_for_update_on_startup = false\n"
+// Codex 0.160.0's connection retry loop is independent of stream_max_retries.
+const codexHomeConfigTOML = "check_for_update_on_startup = false\nfeatures.unbounded_connection_retries = false\n"
 
 func openAIProxyURL(base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")

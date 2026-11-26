@@ -112,6 +112,8 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		MessageStore:        ss,
 		PlanStore:           ss,
 		ExecutionEventStore: ss,
+		// Admission ledgers live in the controller namespace.
+		ControllerNamespace: "orka-system",
 	}
 }
 
@@ -1850,7 +1852,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 		t.Run(string(tt.phase), func(t *testing.T) {
 			scheme := newTestScheme()
 			parentTask := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
 				Spec: corev1alpha1.TaskSpec{
 					Type:     corev1alpha1.TaskTypeAI,
 					AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
@@ -1869,6 +1871,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sibling",
 					Namespace: "default",
+					UID:       "sibling-uid",
 					Labels:    map[string]string{labels.LabelParentTask: "parent"},
 				},
 				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
@@ -1877,6 +1880,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "child",
 					Namespace: "default",
+					UID:       "child-uid",
 					Annotations: map[string]string{
 						labels.AnnotationCoordinationDepth: "1",
 					},
@@ -1905,6 +1909,131 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 	}
 }
 
+func coordinationConcurrencyFixture(maxChildren int32) (*corev1alpha1.Task, *corev1alpha1.Agent) {
+	parentTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
+		},
+	}
+	parentAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				MaxConcurrentChildren: maxChildren,
+			},
+		},
+	}
+	return parentTask, parentAgent
+}
+
+func coordinationChildTask(name string, status corev1alpha1.TaskStatus) *corev1alpha1.Task {
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   "default",
+			UID:         types.UID(name + "-uid"),
+			Annotations: map[string]string{labels.AnnotationCoordinationDepth: "1"},
+			Labels:      map[string]string{labels.LabelParentTask: "parent"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: status,
+	}
+}
+
+// A burst of children reaches admission while the informer cache still shows
+// the sibling admitted by the previous reconcile without its phase. The check
+// must read live sibling state so the limit holds.
+func TestValidateCoordinationConstraints_ConcurrencyLimitIgnoresStaleCache(t *testing.T) {
+	scheme := newTestScheme()
+	parentTask, parentAgent := coordinationConcurrencyFixture(1)
+	staleSibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{})
+	liveSibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{
+		Phase:   corev1alpha1.TaskPhaseRunning,
+		JobName: "sibling-job",
+	})
+	childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+
+	r := newUnitReconciler(scheme, parentTask, parentAgent, staleSibling, childTask)
+	r.APIReader = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(parentTask.DeepCopy(), parentAgent.DeepCopy(), liveSibling, childTask.DeepCopy()).
+		Build()
+
+	result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+	if err != nil {
+		t.Fatalf("validateCoordinationConstraints() error = %v", err)
+	}
+	if !done || result.RequeueAfter != 10*time.Second {
+		t.Fatalf("expected the child to wait for the live running sibling, got done=%t result=%+v", done, result)
+	}
+}
+
+// Children that are all Pending and waiting for admission must not block each
+// other; otherwise a burst of children never starts.
+// createTaskJob creates the Job before it records JobName and Running. If that
+// status write fails, the sibling runs while still looking Pending and
+// unadmitted; its owned Job must still hold the slot.
+func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *testing.T) {
+	isController := true
+	tests := []struct {
+		name     string
+		jobLabel string
+		ownerUID types.UID
+		finished bool
+		wantWait bool
+	}{
+		{name: "owned job", jobLabel: "sibling", ownerUID: "sibling-uid", wantWait: true},
+		{name: "job of a deleted task with the same name", jobLabel: "sibling", ownerUID: "previous-sibling-uid", wantWait: false},
+		{name: "completed job of a sibling", jobLabel: "sibling", ownerUID: "sibling-uid", finished: true, wantWait: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			parentTask, parentAgent := coordinationConcurrencyFixture(1)
+			sibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+			sibling.UID = "sibling-uid"
+			other := coordinationChildTask("other", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+			other.UID = "other-uid"
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sibling-job",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelTask: tt.jobLabel},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: corev1alpha1.GroupVersion.String(),
+						Kind:       "Task",
+						Name:       "sibling",
+						UID:        tt.ownerUID,
+						Controller: &isController,
+					}},
+				},
+			}
+			if tt.finished {
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			}
+			childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+
+			r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, other, job, childTask)
+			result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+			if err != nil {
+				t.Fatalf("validateCoordinationConstraints() error = %v", err)
+			}
+			if done != tt.wantWait {
+				t.Fatalf("done = %t, want %t (result %+v)", done, tt.wantWait, result)
+			}
+			if tt.wantWait && result.RequeueAfter != 10*time.Second {
+				t.Fatalf("RequeueAfter = %s, want 10s (result %+v)", result.RequeueAfter, result)
+			}
+		})
+	}
+}
+
+// Marked siblings are counted first; once they fill the limit no Job list is
+// needed. Otherwise one batched list finds every unmarked sibling's Job.
 // ---------------------------------------------------------------------------
 // ensureWorkerRBAC
 // ---------------------------------------------------------------------------
@@ -5932,19 +6061,22 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 	scheme := newTestScheme()
 	// Create active tasks to hit the limit
 	active1 := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "active1", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "active1", Namespace: "default", UID: "active1-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
+	// A Pending Task holds a slot once admitted (here, its Job created); a
+	// Pending Task still waiting for a slot would not count.
 	active2 := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "active2", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "active2", Namespace: "default", UID: "active2-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, JobName: "active2-job"},
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "pending-limit",
 			Namespace:  "default",
+			UID:        "pending-limit-uid",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
@@ -5964,7 +6096,7 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 	scheme := newTestScheme()
 	finalizing := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default", UID: "finalizing-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing},
 	}
@@ -5972,6 +6104,7 @@ func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "pending-finalizing-limit",
 			Namespace:  "default",
+			UID:        "pending-finalizing-limit-uid",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},

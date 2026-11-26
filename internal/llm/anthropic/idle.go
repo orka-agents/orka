@@ -16,8 +16,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
-// streamIdleTimeout is how long Complete waits without receiving a byte
-// before it abandons a stream. The API sends ping events while the model
+// streamIdleTimeout is how long Complete and Stream wait without receiving a
+// byte before they abandon a stream. The API sends ping events while the model
 // thinks, but a proxy may buffer a whole turn and send nothing until it ends.
 // Ten minutes matches the SDK's timeout for the whole non-streaming request
 // Complete used to send, so a turn that finished then still finishes now. A
@@ -30,7 +30,7 @@ var errStreamIdle = errors.New("anthropic stream went idle")
 // idleGuard cancels its context when the response body delivers no bytes for
 // streamIdleTimeout. A non-streaming request has the SDK's request timeout,
 // and a streaming request has none, so without it a stalled upstream would
-// hold Complete until the caller's context ends.
+// hold the request until the caller's context ends.
 type idleGuard struct {
 	timer  *time.Timer
 	cancel context.CancelCauseFunc
@@ -62,6 +62,12 @@ func (g *idleGuard) middleware() option.RequestOption {
 
 func (g *idleGuard) touch() {
 	g.timer.Reset(streamIdleTimeout)
+}
+
+// pause stops the idle timer until the next touch, for time spent waiting on
+// something other than the upstream.
+func (g *idleGuard) pause() {
+	g.timer.Stop()
 }
 
 // idled reports whether the guard, not the caller, ended ctx.

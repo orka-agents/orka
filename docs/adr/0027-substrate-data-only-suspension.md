@@ -14,6 +14,15 @@ The native upstream cold path now follows [ADR 0031](0031-native-substrate-check
 It replaces this record's fork-specific DataOnly proof requirement. Full-memory
 restore remains prohibited. The earlier contract below is retained as history.
 
+Amended by [ADR 0055](0055-substrate-warm-detach-window.md): an opted-in class delays the
+detach-time suspension by a bounded warm window.
+
+Amended by [ADR 0057](0057-substrate-continuation-latency.md): on an eligible speculative
+resume, the continuation records demand while the workspace stays `Suspended` and the
+`RuntimePool` flips it back to `Ready` in the same write that publishes the next workload
+(and installs the staged attachment when present); the continuation's direct flip to
+`Ready` remains the fallback.
+
 ## Context
 
 ADR 0025 prohibits suspending a live Substrate actor because the provider's

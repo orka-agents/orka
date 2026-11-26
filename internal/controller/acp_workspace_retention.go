@@ -49,6 +49,22 @@ const (
 	// the materialized workspace so settlement enforces it without reloading
 	// the execution snapshot.
 	acpWorkspaceMaxSuspendedAnnotation = "acp.workspace.orka.ai/max-suspended"
+	// acpWorkspaceSuspendAfterDetachAnnotation freezes the class warm-detach
+	// window (ADR 0055) on the materialized workspace as a Go duration.
+	// Absent means the frozen Suspend applies at detach, as before.
+	acpWorkspaceSuspendAfterDetachAnnotation = "acp.workspace.orka.ai/suspend-after-detach"
+	// acpWorkspaceSuspendAtAnnotation is the absolute RFC3339Nano deadline
+	// of one warm-detach window. While it is present on an unattached Ready
+	// workspace whose recorded detach action is Suspend, the linked
+	// RuntimePool keeps its replicas; only retention ends the window.
+	acpWorkspaceSuspendAtAnnotation = "acp.workspace.orka.ai/suspend-at"
+	// acpWorkspaceSuspendPendingAnnotation records that a warm window ended
+	// while the retention cap was exhausted. It does not hold the RuntimePool;
+	// retention keeps retrying the frozen Suspend, as settlement does for a
+	// quota-blocked detach without a window.
+	acpWorkspaceSuspendPendingAnnotation = "acp.workspace.orka.ai/suspend-pending"
+	// maxACPWorkspaceSuspendAfterDetach bounds the warm-detach window.
+	maxACPWorkspaceSuspendAfterDetach = time.Hour
 	// acpWorkspaceLegacyRetentionDeadlineAnnotation stores a fixed fallback
 	// cleanup deadline when the normal idle clock cannot safely bound a
 	// workspace. The historical key is retained for compatibility with
@@ -195,6 +211,41 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		// also gives Task settlement a chance to execute the frozen detach
 		// action against the completed revocation.
 		return releaseQuota(ctrl.Result{RequeueAfter: time.Second})
+	}
+	// A warm-detach window (ADR 0055) ends before, and independently of,
+	// idle retention; its window is always shorter than idleTimeout.
+	if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open {
+		tainted, taintErr := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), workspace)
+		if taintErr != nil {
+			return ctrl.Result{}, taintErr
+		}
+		if !tainted && now.Before(deadline) {
+			return releaseQuota(ctrl.Result{RequeueAfter: min(deadline.Sub(now)+time.Second, lifetimeRequeue)})
+		}
+	}
+	if result, handled, err := r.reconcileWarmDetachWindow(ctx, workspace, now, lifetimeRequeue); err != nil {
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
+	}
+	if acpWorkspaceWarmSuspendRetryable(workspace) {
+		demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace, demandCutoff)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if demandOutstanding {
+			if retentionFence != nil {
+				if err := r.deleteACPWorkspaceRetentionFence(ctx, retentionFence); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
+		}
+	}
+	if result, handled, err := r.retryPendingWarmSuspend(ctx, workspace, now); err != nil {
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
@@ -1389,6 +1440,12 @@ func suspendACPWorkspaceWithinQuota(
 	// Suspension settles any pending provisioning or resume demand; a later
 	// continuation stamps fresh demand when it flips the workspace back.
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	// Suspension ends any warm-detach window in the same write.
+	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	// It also retires an unclaimed speculative start (ADR 0057).
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }

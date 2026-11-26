@@ -348,6 +348,9 @@ type KubernetesResolver struct {
 	// JSON lines, so a process that configures no logger still writes them.
 	// The controller passes a sink no diagnostic log level filters.
 	AuditLog logr.Logger
+	// AuditSink, when set, also receives each redacted identity use record
+	// so the API can serve them without requiring controller Pod log access.
+	AuditSink AgentIdentityAuditSink
 	// AuditPseudonymKey keys the requester pseudonym in Delegated-mode
 	// records. Without it, records name no requester.
 	AuditPseudonymKey []byte

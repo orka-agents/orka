@@ -5,6 +5,7 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 COPY cmd/orka-gateway-e2e-worker/ cmd/orka-gateway-e2e-worker/
 # The fixture invokes the real tool/client, including their worker dependencies.
 COPY api/ api/

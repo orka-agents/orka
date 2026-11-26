@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/publisher"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
@@ -18,6 +19,7 @@ type repositoryMonitorCredentialRefs struct {
 	publicationRead *corev1.LocalObjectReference
 	publication     *corev1.LocalObjectReference
 	forge           *corev1.LocalObjectReference
+	commitSigning   *corev1.LocalObjectReference
 }
 
 func repositoryMonitorReadCredentialRef(monitor *corev1alpha1.RepositoryMonitor) *corev1.LocalObjectReference {
@@ -39,6 +41,7 @@ func repositoryMonitorCredentialRefsForWrite(monitor *corev1alpha1.RepositoryMon
 		publicationRead: monitor.Spec.PublicationReadCredentialRef,
 		publication:     monitor.Spec.PublicationCredentialRef,
 		forge:           monitor.Spec.ForgeCredentialRef,
+		commitSigning:   monitor.Spec.Commit.SigningCredentialRef,
 	}
 	fields := []struct {
 		name string
@@ -49,7 +52,7 @@ func repositoryMonitorCredentialRefsForWrite(monitor *corev1alpha1.RepositoryMon
 		{name: "spec.publicationCredentialRef", ref: refs.publication},
 		{name: "spec.forgeCredentialRef", ref: refs.forge},
 	}
-	seen := make(map[string]string, len(fields))
+	seen := make(map[string]string, len(fields)+1)
 	for _, field := range fields {
 		name := localObjectReferenceName(field.ref)
 		if name == "" {
@@ -59,6 +62,11 @@ func repositoryMonitorCredentialRefsForWrite(monitor *corev1alpha1.RepositoryMon
 			return repositoryMonitorCredentialRefs{}, fmt.Errorf("%s and %s must reference distinct Secrets", previous, field.name)
 		}
 		seen[name] = field.name
+	}
+	if signingName := localObjectReferenceName(refs.commitSigning); signingName != "" {
+		if previous := seen[signingName]; previous != "" {
+			return repositoryMonitorCredentialRefs{}, fmt.Errorf("%s and spec.commit.signingCredentialRef must reference distinct Secrets", previous)
+		}
 	}
 	return refs, nil
 }
@@ -128,7 +136,82 @@ func (r *RepositoryMonitorReconciler) validateRepositoryMonitorCredentialRefs(ct
 		}
 		validated[name] = struct{}{}
 	}
+	if _, _, err := publisher.ValidateCommitIdentity(monitor.Spec.Commit.AuthorName, monitor.Spec.Commit.AuthorEmail); err != nil {
+		return repositoryMonitorReasonGitSecretInvalid, fmt.Sprintf("spec.commit identity is invalid: %v", err), nil
+	}
+	if signingName := localObjectReferenceName(monitor.Spec.Commit.SigningCredentialRef); signingName != "" {
+		if _, reused := validated[signingName]; reused {
+			return repositoryMonitorReasonGitSecretInvalid, "spec.commit.signingCredentialRef must reference a Secret distinct from SCM and forge credentials", nil
+		}
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Name: signingName, Namespace: monitor.Namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return repositoryMonitorReasonGitSecretInvalid, fmt.Sprintf("spec.commit.signingCredentialRef %q not found in namespace %q", signingName, monitor.Namespace), nil
+			}
+			return "", "", err
+		}
+		if _, err := repositoryMonitorSigningKeySecretKey(&secret); err != nil {
+			return repositoryMonitorReasonGitSecretInvalid, fmt.Sprintf("spec.commit.signingCredentialRef %q: %v", signingName, err), nil
+		}
+	}
 	return "", "", nil
+}
+
+var repositoryMonitorSigningKeyCandidateKeys = []string{"signingKey", "key", "id_ed25519"}
+
+func repositoryMonitorSigningKeySecretKey(secret *corev1.Secret) (string, error) {
+	if secret == nil {
+		return "", fmt.Errorf("secret is required")
+	}
+	for _, key := range repositoryMonitorSigningKeyCandidateKeys {
+		raw := secret.Data[key]
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			continue
+		}
+		if _, _, err := publisher.ParseSSHSigningKey(raw); err != nil {
+			return "", fmt.Errorf("key %q is not a valid unencrypted OpenSSH private key: %w", key, err)
+		}
+		return key, nil
+	}
+	return "", fmt.Errorf("must contain an unencrypted OpenSSH private key under signingKey, key, or id_ed25519")
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorCommitSigningCredentialRef(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (*corev1alpha1.WorkspaceCredentialReference, error) {
+	if monitor == nil {
+		return nil, nil
+	}
+	name := localObjectReferenceName(monitor.Spec.Commit.SigningCredentialRef)
+	if name == "" {
+		return nil, nil
+	}
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: monitor.Namespace}, &secret); err != nil {
+		return nil, fmt.Errorf("get commit signing Secret %q: %w", name, err)
+	}
+	key, err := repositoryMonitorSigningKeySecretKey(&secret)
+	if err != nil {
+		return nil, fmt.Errorf("commit signing Secret %q: %w", name, err)
+	}
+	return &corev1alpha1.WorkspaceCredentialReference{Name: name, Key: key}, nil
+}
+
+func repositoryMonitorCommitAuthor(monitor *corev1alpha1.RepositoryMonitor) (string, string) {
+	if monitor == nil {
+		return publisher.CommitAuthorName, publisher.CommitAuthorEmail
+	}
+	name, email, err := publisher.ValidateCommitIdentity(monitor.Spec.Commit.AuthorName, monitor.Spec.Commit.AuthorEmail)
+	if err != nil {
+		return publisher.CommitAuthorName, publisher.CommitAuthorEmail
+	}
+	return name, email
+}
+
+func repositoryMonitorCommitSignOffTrailer(monitor *corev1alpha1.RepositoryMonitor) string {
+	if monitor == nil || !monitor.Spec.Commit.SignOff {
+		return ""
+	}
+	name, email := repositoryMonitorCommitAuthor(monitor)
+	return "Signed-off-by: " + name + " <" + email + ">\n"
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorCredentialToken(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, field string, ref *corev1.LocalObjectReference) (string, error) {

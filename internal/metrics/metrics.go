@@ -140,6 +140,28 @@ var (
 		[]string{"action", labelReason},
 	)
 
+	// ACPWorkspaceRuntimePhaseDuration observes how long each phase of an
+	// execution-workspace runtime start or stop took. Labels are the bounded
+	// start path and phase; no object, class, or session names appear.
+	ACPWorkspaceRuntimePhaseDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_acp_workspace_runtime_phase_duration_seconds",
+			Help:    "Duration of each phase of starting or stopping an execution-workspace runtime, by path and phase",
+			Buckets: []float64{0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 900},
+		},
+		[]string{"path", "phase"},
+	)
+
+	// StorageRecoveryHold is 1 while the installation is held for storage
+	// recovery, labeled by the reason the hold records, and 0 otherwise.
+	StorageRecoveryHold = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "orka_storage_recovery_hold",
+			Help: "1 while the installation is held for storage recovery, by the reason the hold records",
+		},
+		[]string{labelReason},
+	)
+
 	ACPRuntimePoolDesiredReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "orka_acp_runtime_pool_desired_replicas",
@@ -380,6 +402,8 @@ func init() {
 	metrics.Registry.MustRegister(
 		ApprovalDecisionDuration,
 		ACPWorkspaceRetentionActionsTotal,
+		ACPWorkspaceRuntimePhaseDuration,
+		StorageRecoveryHold,
 		APIRequestsTotal,
 		APIRequestDuration,
 		SkillsLoaded,
@@ -633,6 +657,15 @@ func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
 // (suspend or delete) with its bounded reason.
 func RecordACPWorkspaceRetentionAction(action, reason string) {
 	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordACPWorkspaceRuntimePhase observes one phase of an execution-workspace
+// runtime start or stop. Negative durations, from clock skew, are dropped.
+func RecordACPWorkspaceRuntimePhase(path, phase string, duration time.Duration) {
+	if duration < 0 {
+		return
+	}
+	ACPWorkspaceRuntimePhaseDuration.WithLabelValues(normalizeMetricLabel(path), normalizeMetricLabel(phase)).Observe(duration.Seconds())
 }
 
 // RecordTaskWaitTransition records a parked-turn state transition. A

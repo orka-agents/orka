@@ -159,6 +159,8 @@ func isSensitiveRequestHeader(name string) bool {
 
 func isSensitiveResponseHeader(name string) bool {
 	switch name {
+	case Codex429RouteHeader, Codex429RetryHeader:
+		return true
 	case authorizationHeader, proxyAuthorizationHeader, apiKeyHeader, legacyAPIKeyHeader,
 		"Set-Cookie", "Set-Cookie2", "Location", "Server", "Alt-Svc", "Www-Authenticate", "Proxy-Authenticate",
 		contentEncodingHeader:

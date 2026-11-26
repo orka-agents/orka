@@ -34,10 +34,10 @@ func TestRepositoryMonitorReconcileRefreshesRepairInventoryWithoutPublication(t 
 			require.NoError(t, corev1.AddToScheme(scheme))
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(monitor).
 				WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
-			const listPR = `{"number":31,"title":"Conflicted","state":"open","draft":false,"base":{"ref":"main","sha":"base31","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"feature","sha":"head31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`
+			const listPR = `{"number":31,"title":"Behind","state":"open","draft":false,"base":{"ref":"main","sha":"base31","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"feature","sha":"head31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`
 			var detail map[string]any
 			require.NoError(t, json.Unmarshal([]byte(listPR), &detail))
-			detail["mergeable_state"] = "dirty"
+			detail["mergeable_state"] = "behind"
 			if headChanged {
 				detail["head"].(map[string]any)["sha"] = "head32"
 			}

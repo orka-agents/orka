@@ -1784,6 +1784,18 @@ spec:
                     description: Branch is the source branch to check out.
                     maxLength: 255
                     type: string
+                  commitAuthorEmail:
+                    description: |-
+                      CommitAuthorEmail overrides the Git author and committer email on the
+                      published commit. Defaults to "publisher@orka.ai".
+                    maxLength: 256
+                    type: string
+                  commitAuthorName:
+                    description: |-
+                      CommitAuthorName overrides the Git author and committer name on the
+                      published commit. Defaults to "Orka Publisher".
+                    maxLength: 256
+                    type: string
                   commitMessage:
                     description: |-
                       CommitMessage is the message of the commit that publishes the Task's
@@ -1797,6 +1809,31 @@ spec:
                       rule: self == '' || self.trim() != ''
                     - message: commitMessage must not contain carriage returns
                       rule: '!self.contains(''\r'')'
+                  commitSigningCredentialRef:
+                    description: |-
+                      CommitSigningCredentialRef references a Kubernetes Secret containing an
+                      unencrypted OpenSSH private key used only during clean-room publication
+                      preparation to sign the prepared Git commit (SSHSIG). Set Key to the
+                      Secret data key holding the private key (for example "signingKey").
+                    properties:
+                      key:
+                        default: token
+                        description: |-
+                          Key is the Secret data key containing one bearer token or one complete
+                          Authorization header. It defaults to "token" when omitted.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      name:
+                        description: Name is the name of the Secret in the Task namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
                   createPR:
                     default: false
                     description: |-
@@ -2882,6 +2919,12 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
+                  commitSigningCredentialResourceVersion:
+                    description: |-
+                      CommitSigningCredentialResourceVersion freezes the SSH commit signing
+                      Secret version used only during clean-room publication preparation.
+                    maxLength: 253
+                    type: string
                   controllerEpoch:
                     description: ControllerEpoch is the durable controller epoch fencing
                       this attempt.

@@ -268,7 +268,7 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka-vendor-worker", Namespace: "tenant",
 			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
 	).Build()
-	for name, wantDenied := range map[string]bool{"orka": true, "renamed": true, "workload": false, "orka-ai-worker": false, "orka-vendor-worker": true} {
+	for name, wantDenied := range map[string]bool{"orka": true, "renamed": true, "workload": false, "orka-ai-worker": true, "orka-vendor-worker": true} {
 		direct := validDirect()
 		direct.Subject = corev1alpha1.OutboundTokenSource{
 			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
@@ -279,7 +279,7 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
 			Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: direct},
 		}
-		issue, err := ResolveReferences(context.Background(), reader, policy, TrustConfig{TokenRequester: "tenant/orka-ai-worker"})
+		issue, err := ResolveReferences(context.Background(), reader, policy, TrustConfig{})
 		if err != nil {
 			t.Fatalf("%s: ResolveReferences() error = %v", name, err)
 		}
@@ -304,10 +304,9 @@ func TestResolveReferencesRejectsConfiguredPlatformServiceAccounts(t *testing.T)
 	).Build()
 	trust := TrustConfig{PlatformServiceAccounts: PlatformServiceAccountSet(
 		[]string{"system:serviceaccount:tenant:external-controller", "system:admin", "not-a-username"},
-		"tenant", "custom-ai-worker", "custom-vendor-worker", ""),
-		TokenRequester: "tenant/custom-ai-worker"}
+		"tenant", "custom-ai-worker", "custom-vendor-worker", "")}
 	for name, wantDenied := range map[string]bool{
-		"external-controller": true, "custom-vendor-worker": true, "custom-ai-worker": false, "workload": false,
+		"external-controller": true, "custom-vendor-worker": true, "custom-ai-worker": true, "workload": false,
 	} {
 		direct := validDirect()
 		direct.Subject = corev1alpha1.OutboundTokenSource{
