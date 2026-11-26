@@ -403,9 +403,15 @@ func (r *TaskReconciler) requestACPWorkspaceSpeculativeResume(
 	// same write as the flip and publication; without it the ordinary attach
 	// follows the flip.
 	intent := r.stageACPWorkspaceAttachmentIntent(ctx, workspace, task, binding, poolName)
+	if intent == "" {
+		// Another continuation may already hold the next-epoch attachment Lease;
+		// do not claim resume ownership without holding the staged Lease.
+		return nil
+	}
 	effectiveOnDetach := binding.Class.EffectiveOnDetach
 	first := true
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	claimed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := workspace
 		if !first {
 			current = &workspacev1alpha1.ExecutionWorkspace{}
@@ -415,7 +421,8 @@ func (r *TaskReconciler) requestACPWorkspaceSpeculativeResume(
 			if current.UID != workspace.UID || current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredSuspended ||
 				current.Status.State != workspacev1alpha1.ExecutionWorkspaceStateSuspended || current.Spec.Attachment != nil ||
 				acpWorkspaceSpeculativeResumePending(current, now) {
-				// Another writer moved the workspace on; the next pass decides.
+				// Another writer moved the workspace on; release our staged
+				// Secret and Lease below so the winning Task can attach.
 				return nil
 			}
 		}
@@ -428,15 +435,18 @@ func (r *TaskReconciler) requestACPWorkspaceSpeculativeResume(
 		current.Annotations[acpWorkspaceDetachActionAnnotation] = effectiveOnDetach
 		current.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
 		current.Annotations[acpWorkspaceSpeculativeStartAnnotation] = formatACPWorkspaceSpeculativeStart(now.Add(acpWorkspaceSpeculativeStartTTL), task.UID)
-		if intent != "" {
-			current.Annotations[acpWorkspaceAttachmentIntentAnnotation] = intent
-		}
+		current.Annotations[acpWorkspaceAttachmentIntentAnnotation] = intent
 		if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
+		claimed = true
 		acpPreDispatch.mark(task, acpPreDispatchSpeculativeStart)
 		return nil
 	})
+	if err != nil || !claimed {
+		_ = r.releaseACPWorkspaceStagedAttachmentObjects(ctx, workspace, task)
+	}
+	return err
 }
 
 // flipACPWorkspaceForColdResume is a continuation's own cold-resume flip: the
