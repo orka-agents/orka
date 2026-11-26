@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -94,7 +95,13 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorAskCommands(ctx 
 	if err != nil {
 		return false, err
 	}
-	active := len(running)
+	// A Task created before its action was marked running (a failed status
+	// write or a restart) is live but unrecorded; it still holds a slot.
+	unrecorded, err := r.countUnrecordedRepositoryMonitorAskTasks(ctx, monitor, running)
+	if err != nil {
+		return false, err
+	}
+	active := len(running) + unrecorded
 	// Accepted asks beyond this page are handled by a later pass, so they keep
 	// the monitor requeuing even when every ask on this page settles now.
 	pending := strings.TrimSpace(nextCursor) != ""
@@ -141,12 +148,33 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorAskCommands(ctx 
 		}
 		switch action.Status {
 		case repositoryMonitorWorkActionStatusQueued:
-			if repositoryMonitorSuspended(monitor) || active >= repositoryMonitorAskMaxActive {
+			if repositoryMonitorSuspended(monitor) {
+				pending = true
+				continue
+			}
+			// A Task an earlier pass created for this ask already holds a
+			// counted slot, so adopting it needs no free capacity.
+			adopted, err := r.adoptRepositoryMonitorAskTask(ctx, monitor, command, action, owner, repository)
+			var targetErr *errRepositoryMonitorAskTarget
+			switch {
+			case errors.As(err, &targetErr):
+				if err := r.finishRepositoryMonitorAskCommand(ctx, command, action, repositoryMonitorWorkActionStatusBlocked, targetErr.reason); err != nil {
+					return pending, err
+				}
+				continue
+			case err != nil:
+				logger.Error(err, "failed to recover repository monitor ask", commandEventIDField, command.ID)
+				pending = true
+				continue
+			case adopted:
+				pending = true
+				continue
+			}
+			if active >= repositoryMonitorAskMaxActive {
 				pending = true
 				continue
 			}
 			started, err := r.startRepositoryMonitorAsk(ctx, monitor, command, action, owner, repository)
-			var targetErr *errRepositoryMonitorAskTarget
 			switch {
 			case errors.As(err, &targetErr):
 				if err := r.finishRepositoryMonitorAskCommand(ctx, command, action, repositoryMonitorWorkActionStatusBlocked, targetErr.reason); err != nil {
@@ -155,6 +183,9 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorAskCommands(ctx 
 			case err != nil:
 				logger.Error(err, "failed to start repository monitor ask", commandEventIDField, command.ID)
 				pending = true
+				// The Task may exist even though the ask is not recorded as
+				// running, so it keeps its slot for the rest of this pass.
+				active++
 			case started:
 				active++
 				pending = true
@@ -253,36 +284,132 @@ func (r *RepositoryMonitorReconciler) startRepositoryMonitorAsk(ctx context.Cont
 		return false, err
 	}
 	if err := r.Create(ctx, task); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return false, err
+		if apierrors.IsAlreadyExists(err) {
+			// Created since the recovery check above; the next pass adopts it.
+			return false, fmt.Errorf("ask Task %s/%s appeared while starting the ask", task.Namespace, task.Name)
 		}
-		var existing corev1alpha1.Task
-		if getErr := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, &existing); getErr != nil {
-			return false, getErr
-		}
-		if validationErr := validateRepositoryMonitorRecoveredIssueActionTask(monitor, task, &existing); validationErr != nil {
-			return false, &errRepositoryMonitorAskTarget{reason: "existing ask Task does not match the ask"}
-		}
-		task = &existing
-	}
-	if err := r.retainMonitorUsageTask(ctx, task, usageWorkID, repositoryMonitorCommandIntentAsk, repositoryMonitorAskUsagePRNumber(target)); err != nil {
 		return false, err
+	}
+	return true, r.markRepositoryMonitorAskRunning(ctx, command, action, task, usageWorkID)
+}
+
+// markRepositoryMonitorAskRunning links the ask to its Task. The target SHA
+// comes from the Task's frozen workspace, so a recovered Task is recorded with
+// the commit it actually reads.
+func (r *RepositoryMonitorReconciler) markRepositoryMonitorAskRunning(ctx context.Context, command *store.CommandEvent, action *store.WorkAction, task *corev1alpha1.Task, usageWorkID string) error {
+	if err := r.retainMonitorUsageTask(ctx, task, usageWorkID, repositoryMonitorCommandIntentAsk, repositoryMonitorAskUsagePRNumber(command)); err != nil {
+		return err
 	}
 	action.Status = repositoryMonitorWorkActionStatusRunning
 	action.Phase = repositoryMonitorAskPhaseRunning
 	action.TaskName = task.Name
-	action.TargetSHA = target.HeadSHA
-	if err := r.Store.UpdateWorkAction(ctx, action); err != nil {
+	action.TargetSHA = ""
+	if task.Spec.Workspace != nil {
+		action.TargetSHA = task.Spec.Workspace.Ref
+	}
+	return r.Store.UpdateWorkAction(ctx, action)
+}
+
+func repositoryMonitorAskUsagePRNumber(command *store.CommandEvent) int64 {
+	if command.Kind == repositoryMonitorPullRequestKind {
+		return command.Number
+	}
+	return 0
+}
+
+// adoptRepositoryMonitorAskTask records a queued ask as running on the Task an
+// earlier pass created for it, if there is one.
+func (r *RepositoryMonitorReconciler) adoptRepositoryMonitorAskTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, action *store.WorkAction, owner, repository string) (bool, error) {
+	existing, err := r.recoverRepositoryMonitorAskTask(ctx, monitor, command, owner, repository)
+	if err != nil || existing == nil {
+		return false, err
+	}
+	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, owner+"/"+repository, command.Kind, command.Number)
+	if err != nil {
+		return false, err
+	}
+	if err := r.markRepositoryMonitorAskRunning(ctx, command, action, existing, usageWorkID); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func repositoryMonitorAskUsagePRNumber(target *repositoryMonitorAskTarget) int64 {
-	if target.Kind == repositoryMonitorPullRequestKind {
-		return target.Number
+// recoverRepositoryMonitorAskTask returns the ask's Task when one already
+// exists, which happens when an earlier pass created it but did not record the
+// ask as running. The Task is adopted from its own frozen input, not rebuilt
+// from live GitHub data or the current configuration, once it is shown to be
+// owned by this monitor and to keep the ask's read-only contract. An owned
+// Task that breaks the contract is deleted and the ask retried after it is
+// gone; a Task this monitor does not own blocks the ask.
+func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorAskTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, owner, repository string) (*corev1alpha1.Task, error) {
+	var existing corev1alpha1.Task
+	name := repositoryMonitorAskTaskName(monitor, command)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: name}, &existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
 	}
-	return 0
+	if !metav1.IsControlledBy(&existing, monitor) {
+		return nil, &errRepositoryMonitorAskTarget{reason: "a Task with the ask's name is not owned by this monitor"}
+	}
+	if repositoryMonitorAskTaskKeepsContract(monitor, command, owner, repository, &existing) {
+		return &existing, nil
+	}
+	if existing.DeletionTimestamp == nil {
+		if err := r.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("ask Task %s/%s does not keep the ask's read-only contract; retrying after it is deleted", existing.Namespace, existing.Name)
+}
+
+// repositoryMonitorAskTaskKeepsContract reports whether task is this ask's
+// read-only Task. Only the frozen target input (prompt, agent, and the
+// workspace repository, commit, branch, and read credential) may differ from
+// a freshly built ask Task.
+func repositoryMonitorAskTaskKeepsContract(monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, owner, repository string, task *corev1alpha1.Task) bool {
+	if task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" || task.Spec.Workspace == nil {
+		return false
+	}
+	expected := (&RepositoryMonitorReconciler{}).buildRepositoryMonitorAskTask(monitor, command, &repositoryMonitorAskTarget{Kind: command.Kind, Number: command.Number}, owner, repository, corev1alpha1.AgentReference{}, nil)
+	actual := task.DeepCopy()
+	for _, candidate := range []*corev1alpha1.Task{expected, actual} {
+		candidate.Spec.Prompt = ""
+		candidate.Spec.AgentRef = nil
+		candidate.Spec.Workspace.GitRepo = ""
+		candidate.Spec.Workspace.Ref = ""
+		candidate.Spec.Workspace.Branch = ""
+		candidate.Spec.Workspace.ReadCredentialRef = nil
+	}
+	return validateRepositoryMonitorRecoveredIssueActionTask(monitor, expected, actual) == nil
+}
+
+// countUnrecordedRepositoryMonitorAskTasks counts this monitor's unfinished
+// ask Tasks that no running ask action links to.
+func (r *RepositoryMonitorReconciler) countUnrecordedRepositoryMonitorAskTasks(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, running []store.WorkAction) (int, error) {
+	var tasks corev1alpha1.TaskList
+	if err := r.List(ctx, &tasks, client.InNamespace(monitor.Namespace), client.MatchingLabels{
+		labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
+		labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+	}); err != nil {
+		return 0, err
+	}
+	recorded := make(map[string]struct{}, len(running))
+	for i := range running {
+		recorded[running[i].TaskName] = struct{}{}
+	}
+	count := 0
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		if task.Annotations[repositoryMonitorAnnotationAskCommandID] == "" || !metav1.IsControlledBy(task, monitor) || task.Status.Phase.IsTerminal() {
+			continue
+		}
+		if _, ok := recorded[task.Name]; !ok {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // repositoryMonitorAskTarget reads the ask's issue or pull request and checks

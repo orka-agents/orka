@@ -13,10 +13,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -542,5 +544,120 @@ func TestRepositoryMonitorAskRejectsResearcherThatIsNotReadOnly(t *testing.T) {
 				t.Fatalf("action = %#v, want blocked by researcher validation", action)
 			}
 		})
+	}
+}
+
+// askFailingRunningStore fails every write that would record an ask as running.
+type askFailingRunningStore struct {
+	store.RepositoryMonitorStore
+	fail bool
+}
+
+func (s *askFailingRunningStore) UpdateWorkAction(ctx context.Context, action *store.WorkAction) error {
+	if s.fail && action.Status == repositoryMonitorWorkActionStatusRunning {
+		return fmt.Errorf("injected running write failure")
+	}
+	return s.RepositoryMonitorStore.UpdateWorkAction(ctx, action)
+}
+
+func TestRepositoryMonitorAskUnrecordedTasksHoldTheirSlots(t *testing.T) {
+	env := newAskTestEnv(t)
+	failing := &askFailingRunningStore{RepositoryMonitorStore: env.store, fail: true}
+	env.reconciler.Store = failing
+	for i := range repositoryMonitorAskMaxActive + 1 {
+		env.addAsk(t, fmt.Sprintf("cmd-ask-unrecorded-%d", i), repositoryMonitorIssueKind, 77, fmt.Sprintf("question %d", i))
+	}
+	if !env.reconcile(t) {
+		t.Fatal("unrecorded asks must stay pending")
+	}
+	if got := len(env.tasks(t)); got != repositoryMonitorAskMaxActive {
+		t.Fatalf("tasks after a failed running write = %d, want %d", got, repositoryMonitorAskMaxActive)
+	}
+	env.reconcile(t)
+	if got := len(env.tasks(t)); got != repositoryMonitorAskMaxActive {
+		t.Fatalf("tasks on the next pass = %d, want the unrecorded Tasks to keep holding %d slots", got, repositoryMonitorAskMaxActive)
+	}
+	failing.fail = false
+	env.reconcile(t)
+	if got := len(env.tasks(t)); got != repositoryMonitorAskMaxActive {
+		t.Fatalf("tasks after recovery = %d, want the existing Tasks adopted, not new ones", got)
+	}
+	recovered := 0
+	for i := range repositoryMonitorAskMaxActive + 1 {
+		if action := env.action(t, fmt.Sprintf("cmd-ask-unrecorded-%d", i)); action.Status == repositoryMonitorWorkActionStatusRunning && action.TaskName != "" {
+			recovered++
+		}
+	}
+	if recovered != repositoryMonitorAskMaxActive {
+		t.Fatalf("recovered running asks = %d, want %d", recovered, repositoryMonitorAskMaxActive)
+	}
+}
+
+func TestRepositoryMonitorAskRecoversItsTaskFromFrozenInput(t *testing.T) {
+	env := newAskTestEnv(t)
+	env.addAsk(t, "cmd-ask-recover", repositoryMonitorPullRequestKind, 88, "summarize this PR")
+	command := env.command(t, "cmd-ask-recover")
+	target := &repositoryMonitorAskTarget{Kind: repositoryMonitorPullRequestKind, Number: 88, HeadSHA: "old-head-sha", BaseSHA: "old-base-sha", GitRepo: "https://github.com/orka-agents/orka.git"}
+	task := env.reconciler.buildRepositoryMonitorAskTask(env.monitor, command, target, "orka-agents", "orka", corev1alpha1.AgentReference{Name: "earlier-researcher"}, nil)
+	task.Spec.Workspace.Ref = "old-head-sha"
+	if err := controllerutil.SetControllerReference(env.monitor, task, env.reconciler.Scheme); err != nil {
+		t.Fatalf("SetControllerReference() error = %v", err)
+	}
+	if err := env.reconciler.Create(context.Background(), task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	// The pull request has since moved to head-sha and the researcher changed;
+	// the existing Task is adopted with the commit it actually reads.
+	env.reconcile(t)
+	if tasks := env.tasks(t); len(tasks) != 1 {
+		t.Fatalf("tasks = %d, want the existing Task only", len(tasks))
+	}
+	if action := env.action(t, "cmd-ask-recover"); action.Status != repositoryMonitorWorkActionStatusRunning || action.TaskName != task.Name || action.TargetSHA != "old-head-sha" {
+		t.Fatalf("action = %#v, want running on the recovered Task at its frozen head", action)
+	}
+}
+
+func TestRepositoryMonitorAskReplacesAnOwnedTaskThatIsNotReadOnly(t *testing.T) {
+	env := newAskTestEnv(t)
+	env.addAsk(t, "cmd-ask-writable", repositoryMonitorIssueKind, 77, "what changed?")
+	command := env.command(t, "cmd-ask-writable")
+	task := env.reconciler.buildRepositoryMonitorAskTask(env.monitor, command, &repositoryMonitorAskTarget{Kind: repositoryMonitorIssueKind, Number: 77, BaseBranch: "main"}, "orka-agents", "orka", corev1alpha1.AgentReference{Name: "researcher"}, nil)
+	task.Spec.Workspace.PushBranch = "orka/ask"
+	if err := controllerutil.SetControllerReference(env.monitor, task, env.reconciler.Scheme); err != nil {
+		t.Fatalf("SetControllerReference() error = %v", err)
+	}
+	if err := env.reconciler.Create(context.Background(), task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if !env.reconcile(t) {
+		t.Fatal("the ask must stay pending while the writable Task is removed")
+	}
+	if tasks := env.tasks(t); len(tasks) != 0 {
+		t.Fatalf("tasks = %#v, want the writable Task deleted", tasks)
+	}
+	if action := env.action(t, "cmd-ask-writable"); action.Status != repositoryMonitorWorkActionStatusQueued {
+		t.Fatalf("action = %#v, want still queued", action)
+	}
+	env.reconcile(t)
+	tasks := env.tasks(t)
+	if len(tasks) != 1 || tasks[0].Spec.Workspace.PushBranch != "" {
+		t.Fatalf("tasks = %#v, want one fresh read-only ask Task", tasks)
+	}
+}
+
+func TestRepositoryMonitorAskBlocksOnATaskItDoesNotOwn(t *testing.T) {
+	env := newAskTestEnv(t)
+	env.addAsk(t, "cmd-ask-foreign", repositoryMonitorIssueKind, 77, "what changed?")
+	command := env.command(t, "cmd-ask-foreign")
+	foreign := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: repositoryMonitorAskTaskName(env.monitor, command), Namespace: env.monitor.Namespace}, Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
+	if err := env.reconciler.Create(context.Background(), foreign); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	env.reconcile(t)
+	if action := env.action(t, "cmd-ask-foreign"); action.Status != repositoryMonitorWorkActionStatusBlocked {
+		t.Fatalf("action = %#v, want blocked", action)
+	}
+	if tasks := env.tasks(t); len(tasks) != 1 {
+		t.Fatalf("tasks = %d, want the foreign Task left alone", len(tasks))
 	}
 }
