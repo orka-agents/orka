@@ -578,7 +578,9 @@ export function strongestEvidence(decision: DecisionView): string | undefined {
   if (wasBlocked(decision)) {
     const blocked = effects.notableEvents?.find((e) => e.kind.includes('blocked'))
     const where = blocked?.dest || dest
-    return `kernel saw a blocked connection${where ? ` to ${where}` : ''}; no data seen leaving`
+    return blockInferred(decision)
+      ? `kernel saw a connection attempt${where ? ` to ${where}` : ''}; no delivery seen`
+      : `kernel saw a blocked connection${where ? ` to ${where}` : ''}; no data seen leaving`
   }
   const event = mostTellingEvent(effects.notableEvents ?? [])
   if (event) {

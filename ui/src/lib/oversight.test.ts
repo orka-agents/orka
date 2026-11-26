@@ -320,6 +320,7 @@ describe('excluded events', () => {
     const observed = makeDecision({ action: { toolName: 'code_exec', effects: { blockedCount: 1,
       notableEvents: [{ id: 'b2', kind: 'dns_lookup_blocked', outcome: 'denied by policy' }] } } })
     expect(blockInferred(observed)).toBe(false)
+    expect(strongestEvidence(push)).toBe('kernel saw a connection attempt to registry.demo.svc:80; no delivery seen')
   })
 
   it('formats decision latency in seconds below two minutes and m s above', () => {
