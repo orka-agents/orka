@@ -368,7 +368,7 @@ func assertRestartTaskSettled(name string, snapshot runtimePoolSnapshot) {
 		execution.State == corev1alpha1.TaskExecutionStateOutcomeUnknown &&
 		execution.Outcome == corev1alpha1.TaskExecutionOutcomeOutcomeUnknown
 	g.Expect(succeeded || cancelled || unknown).To(BeTrue(),
-		"restart task settled as phase %s, execution %s/%s", task.Status.Phase, execution.State, execution.Outcome)
+		"restart task settled as phase %s, execution %s/%s (%s): %s", task.Status.Phase, execution.State, execution.Outcome, execution.Reason, task.Status.Message)
 	assertTaskFence(g, task, snapshot, true)
 }
 

@@ -89,7 +89,7 @@ func (d *ACPDispatcher) runtimePoolRetainedCleanupClient(
 			sessionRuntimeCleanupIdentityForExecution(latest.Status.Execution) != sessionRuntimeCleanupIdentityForExecution(e) {
 			return fmt.Errorf("%w: retained runtime Task authority changed", store.ErrConflict)
 		}
-		if !deleteOnly && (latest.Status.Execution.State != e.State || latest.Status.Delivery == nil || latest.Status.Delivery.State != corev1alpha1.TaskDeliveryStateNotRequested) {
+		if !deleteOnly && (latest.Status.Execution.State != e.State || !abandonedValidationTaskDelivery(latest)) {
 			return fmt.Errorf("%w: retained validation Task outcome changed", store.ErrConflict)
 		}
 		currentDigest, digestErr := canonicalAgentExecutionBindingDigest(*currentBinding)

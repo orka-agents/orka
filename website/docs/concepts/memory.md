@@ -246,7 +246,7 @@ curl -sS -X POST http://localhost:8080/api/v1/memories \
   }'
 ```
 
-Only applying a proposal links a memory to it, so a create request with a `sourceProposalId` is rejected with `400 Bad Request`.
+`source` defaults to `manual`. A create request that sets `source: "memory_proposal"` or a `sourceProposalId` returns `400 Bad Request`; applying a proposal records those fields. An update that changes `source` to `memory_proposal` also returns `400 Bad Request`, except when restoring the exact `memory_proposal` source on a memory that already has a non-blank `sourceProposalId`. An update that changes the `source` of a memory with a non-blank `sourceProposalId` to any other value returns `400 Bad Request`, and an update never changes `sourceProposalId`. Omitting `source`, or sending back a memory's current `source` unchanged, is accepted.
 
 ## Memory proposal API
 

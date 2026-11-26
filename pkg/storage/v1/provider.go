@@ -98,13 +98,35 @@
 // The controller epoch advance accepts only the bound installation. Both
 // providers implement it; Orka does not bind datasets yet.
 //
+// # Export and import
+//
+// A provider that reports [ExportCapability] also implements
+// [DatasetExporter], [DatasetImporter] and [MigrationMarkerStore]: a raw
+// record surface that copies a whole dataset to another provider while
+// writes are stopped, in the canonical encoding of [ExportSchemas]. Sealed
+// records move as the opaque bytes the provider stored. An imported dataset
+// gets a new dataset ID, origin [DatasetOriginMigrated] and its source in
+// [ProviderInfo.Source], and the source marks each moved contract part so it
+// refuses writes. Orka does not call it yet.
+//
 // # Records and wire format
 //
 // The records in this package carry JSON tags for Orka's API, not a storage
 // encoding: several persisted fields, such as gateway claim ownership and
 // usage phase history, are tagged json:"-". A provider that crosses a process
 // boundary defines its own wire records and must not encode these structs
-// with encoding/json.
+// with encoding/json. The orka.storage.v1 wire protocol in package wire
+// carries every field, including the json:"-" ones.
+//
+// Three rules let a record cross the wire unchanged, so callers and providers
+// must not depend on anything they do not preserve:
+//
+//   - Nil and empty slices and maps are equivalent. A caller must not tell a
+//     nil result apart from an empty one.
+//   - Strings are valid UTF-8.
+//   - Times are within 0001-01-01 and 9999-12-31 UTC. The zero time.Time is
+//     "no time"; a *time.Time keeps nil apart from a pointer to the zero
+//     time.
 //
 // The contract is unstable until a release advertises storage extension
 // support; names and semantics may change before then.
@@ -147,8 +169,15 @@ const (
 	// adds [MemoryConsolidationStore]. Revision 12 adds [AHPStore] to
 	// [StateProvider]. Revision 13 adds [UsageStore.ListUsageTasksInSessions]
 	// and the requester a [UsageTask] keeps. Revision 14 adds
-	// [AuthSessionStore] to [StateProvider].
-	ContractRevision = 14
+	// [AuthSessionStore] to [StateProvider]. Revision 15 requires
+	// [WriteWatermarkStore] on both provider contracts. Revision 16 bounds
+	// inter-agent messages: [MessageStore.SendMessage] refuses content over
+	// [MaxMessageContentBytes] and identifiers over
+	// [MaxControlIdentifierBytes], [MessageStore.ListUnreadMessages] and
+	// [MessageStore.ConsumeMessages] stop a batch before its content passes
+	// [MaxMessageBatchBytes], and the limit is reported in
+	// [ProviderLimits.MaxMessageContentBytes].
+	ContractRevision = 16
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -205,6 +234,7 @@ type StateProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -240,5 +270,6 @@ type ArtifactProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	ArtifactStore
 }

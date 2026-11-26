@@ -698,6 +698,8 @@ func (c *ACPSessionContinuity) ResumeSessionTurnFinalization(ctx context.Context
 	if err != nil {
 		return nil, fmt.Errorf("resume ACP session turn finalization: %w", err)
 	}
+	// The resumed finalization activates the turn's terminal projection.
+	wakeACPOutboxProjectors()
 	control, err := c.controls.GetSessionControl(ctx, request.SessionTurn.Lease.Session.Namespace, request.SessionTurn.Lease.Session.SessionName)
 	if err != nil {
 		return nil, fmt.Errorf("reload resumed ACP session: %w", err)
@@ -826,6 +828,9 @@ func (c *ACPSessionContinuity) finalizeTurn(
 	if err != nil {
 		return nil, fmt.Errorf("finalize ACP session turn: %w", err)
 	}
+	// Finalization activates the turn's terminal projection in the same
+	// durable write; deliver it now rather than on the idle claim cadence.
+	wakeACPOutboxProjectors()
 	control, err := c.controls.GetSessionControl(ctx, sessionTurn.Lease.Session.Namespace, sessionTurn.Lease.Session.SessionName)
 	if err != nil {
 		return nil, fmt.Errorf("reload finalized ACP session: %w", err)

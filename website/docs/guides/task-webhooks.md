@@ -417,8 +417,9 @@ identity under the default worker profile), and:
   OutboundAccessPolicy `serviceAccountRef` grants the AI worker TokenRequest
   for that account, so the controller refuses Orka's own ServiceAccounts
   there: any labeled `orka.ai/platform-identity: "true"`, plus the controller
-  and worker accounts it is configured with, labeled or not. The AI worker's
-  own account is allowed, since a token for itself gives it nothing new.
+  and worker accounts it is configured with, labeled or not. That includes
+  the AI worker's own account: a requested token can be bound to any Pod that
+  runs as the account, including another Task's worker Pod.
 - Do not keep ServiceAccount-token Secrets in the release namespace. The
   default AI worker profile can read every Secret there, so any such Secret
   hands the worker that account's token.

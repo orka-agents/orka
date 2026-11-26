@@ -61,7 +61,7 @@ func TestSchemaVersion6StoreUpgradesInPlace(t *testing.T) {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema176,
+					fingerprint:  schema177,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -137,7 +137,7 @@ func TestSchemaVersion6UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema176, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema177, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, beforeBinding, binding)

@@ -5,6 +5,7 @@ ARG TARGETARCH
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 RUN go mod download
 
 COPY api/ api/

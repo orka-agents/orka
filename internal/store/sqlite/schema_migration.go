@@ -31,6 +31,7 @@ const (
 	schema174 = "ce3aacb60e5f3f40f03cbe071637ac1218ff4255fb7fff314642e6b7b416317d" // schema version 7: memory consolidation runs
 	schema175 = "54d6dcddb755001aa9ba36a92056d29c9a6a044d60f863e9d5de64cd96ea4d6e" // schema version 8: Agent Host Protocol store
 	schema176 = "4af6f8b91484395ea51813a429338640f875baf8e919f972e3324d29de5afc13" // schema version 9: GitHub sign-in sessions
+	schema177 = "5d98d75e3cc537c5735264ac6a46a4c521c3000c3115e483e68be6fe19c6faa6" // schema version 10: write watermark
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -76,6 +77,9 @@ var migration174To175 string
 //go:embed migrations/175-to-176.sql
 var migration175To176 string
 
+//go:embed migrations/176-to-177.sql
+var migration176To177 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
@@ -98,6 +102,7 @@ func schemaMigrations() []schemaMigration {
 		{schema173, schema174, migration173To174, nil},
 		{schema174, schema175, migration174To175, nil},
 		{schema175, schema176, migration175To176, nil},
+		{schema176, schema177, migration176To177, nil},
 	}
 }
 
@@ -122,6 +127,7 @@ func versionUpgrades() []versionUpgrade {
 		{from: 6, to: 7, fromLayout: schema173, sql: migration173To174, toLayout: schema174},
 		{from: 7, to: 8, fromLayout: schema174, sql: migration174To175, toLayout: schema175},
 		{from: 8, to: 9, fromLayout: schema175, sql: migration175To176, toLayout: schema176},
+		{from: 9, to: 10, fromLayout: schema176, sql: migration176To177, toLayout: schema177},
 	}
 }
 

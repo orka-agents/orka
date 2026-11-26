@@ -3301,9 +3301,12 @@ spec:
   failurePolicy: Fail
   matchConditions:
   - expression: request.?name.orValue('') == 'orka-agent-use-enforcement' || request.?name.orValue('').startsWith('acp-suspend-quota-')
-      || request.?name.orValue('').startsWith('acp-retention-fence-') || (request.operation
+      || request.?name.orValue('').startsWith('acp-retention-fence-') || request.?name.orValue('').startsWith('orka-task-admission-')
+      || request.?name.orValue('').startsWith('orka-child-admission-') || (request.operation
       == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
-      || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
+      || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')
+      || object.metadata.?generateName.orValue('').startsWith('orka-task-admission-')
+      || object.metadata.?generateName.orValue('').startsWith('orka-child-admission-')))
     name: reserved-acp-workspace-lease-name
   matchConstraints:
     namespaceSelector:
@@ -3324,7 +3327,7 @@ spec:
   - expression: request.userInfo.username == variables.controllerUser || (request.operation
       == 'DELETE' && variables.cleanupController)
     message: only the Orka controller may create, update, or delete ACP workspace
-      coordination Leases
+      coordination and Task admission Leases
   variables:
   - expression: '''orka-system'''
     name: controllerNamespace
@@ -3779,7 +3782,7 @@ spec:
 
         (variables.garbageCollector ||
          request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller')) ||
-      variables.foregroundFinalizerRemoval || request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
+      variables.foregroundFinalizerRemoval || variables.storageRecoveryAcknowledgement || request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount || request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.containerWorkerServiceAccount
     message: gateway-owned Tasks may only be managed by the owning Orka controller,
       trusted workers, or Kubernetes cleanup controllers
   variables:
@@ -3817,6 +3820,25 @@ spec:
         (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
       dyn(oldObject.metadata).all(k, k == 'finalizers' || k == 'managedFields' || k in dyn(object.metadata))
     name: foregroundFinalizerRemoval
+  - expression: |-
+      request.operation == 'UPDATE' && (!has(request.subResource) || request.subResource == '') && has(object.metadata.annotations) && 'storage.orka.ai/recovery-acknowledged' in object.metadata.annotations && dyn(object).all(k, k == 'metadata' ||
+
+        (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+      dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) && dyn(object.metadata).all(k, k == 'annotations' || k == 'managedFields' ||
+
+        (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+      dyn(oldObject.metadata).all(k, k == 'annotations' || k == 'managedFields' || k in dyn(object.metadata)) && object.metadata.annotations.all(k, k == 'storage.orka.ai/recovery-acknowledged' ||
+
+        (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations &&
+          object.metadata.annotations[k] == oldObject.metadata.annotations[k])) &&
+      (!has(oldObject.metadata.annotations) ||
+
+        oldObject.metadata.annotations.all(k, k == 'storage.orka.ai/recovery-acknowledged' ||
+          k in object.metadata.annotations)) &&
+      authorizer.group('core.orka.ai').resource('tasks').subresource('status')
+
+        .namespace(request.namespace).name(request.name).check('update').allowed()
+    name: storageRecoveryAcknowledgement
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
