@@ -137,6 +137,11 @@ type RepositoryScanSpec struct {
 	// AnalysisAgentRef is the agent used for scan runs.
 	AnalysisAgentRef AgentReference `json:"analysisAgentRef"`
 
+	// ValidationAgentRef is the optional agent used for finding validation runs.
+	// Defaults to AnalysisAgentRef when omitted.
+	// +optional
+	ValidationAgentRef *AgentReference `json:"validationAgentRef,omitempty"`
+
 	// PatchAgentRef is the agent used for patch proposal runs.
 	// +optional
 	PatchAgentRef *AgentReference `json:"patchAgentRef,omitempty"`

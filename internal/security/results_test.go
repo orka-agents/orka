@@ -504,3 +504,46 @@ func TestReviewResultIsInconclusive(t *testing.T) {
 		t.Fatal("substantive zero-finding review with real summary should not be inconclusive")
 	}
 }
+
+func TestValidateFindingsV2StructuredThreatModelFields(t *testing.T) {
+	t.Parallel()
+	manifest := ReviewContextManifest{
+		SchemaVersion: SchemaVersionReviewContext,
+		SliceID:       "slice_api",
+		IncludedFiles: []ReviewContextIncludedFile{{
+			Path:               "internal/api/server.go",
+			Role:               "owned",
+			Readable:           true,
+			IncludedLineRanges: []ReviewContextLineRange{{StartLine: 1, EndLine: 50}},
+		}},
+	}
+	base := FindingsV2Artifact{
+		SchemaVersion: SchemaVersionFindingsV2,
+		Repository:    FindingsV2Repository{RepoURL: "https://github.com/example/repo", Branch: "main"},
+		Scan:          FindingsV2Scan{Mode: "initial", SliceID: "slice_api", Summary: "Reviewed API slice."},
+		Findings: []FindingsV2Finding{{
+			Title:         "Authorization bypass",
+			Category:      "authz",
+			Attacker:      "unauthenticated internet client",
+			TrustBoundary: "public HTTP API to admin endpoint",
+			BrokenControl: "missing RBAC check in handler",
+			Severity:      "high",
+			Confidence:    "high",
+			Summary:       "Admin handler lacks authorization.",
+			Remediation:   "Enforce RBAC middleware.",
+			Evidence:      []FindingsV2EvidenceRef{{Path: "internal/api/server.go", StartLine: 10, EndLine: 15}},
+		}},
+	}
+	res := ValidateFindingsV2(base, manifest, FindingValidationOptions{Namespace: "default", RepositoryScan: "repo", ScanRunID: "scan_1"})
+	if len(res.Accepted) != 1 || len(res.Dropped) != 0 {
+		t.Fatalf("ValidateFindingsV2(valid structured fields) = accepted:%d dropped:%d, want 1/0", len(res.Accepted), len(res.Dropped))
+	}
+
+	placeholder := base
+	placeholder.Findings = []FindingsV2Finding{base.Findings[0]}
+	placeholder.Findings[0].Attacker = "..."
+	res = ValidateFindingsV2(placeholder, manifest, FindingValidationOptions{Namespace: "default", RepositoryScan: "repo", ScanRunID: "scan_1"})
+	if len(res.Accepted) != 0 || len(res.Dropped) != 1 || !strings.Contains(res.Dropped[0].Reason, "attacker is a prompt placeholder") {
+		t.Fatalf("ValidateFindingsV2(placeholder attacker) = accepted:%d dropped:%#v, want placeholder drop", len(res.Accepted), res.Dropped)
+	}
+}

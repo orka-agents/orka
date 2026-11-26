@@ -109,6 +109,7 @@ func (h *Handlers) validateRepositoryScanAgentRuntimes(ctx context.Context, name
 		ref   *corev1alpha1.AgentReference
 	}{
 		{field: "spec.analysisAgentRef", ref: &spec.AnalysisAgentRef},
+		{field: "spec.validationAgentRef", ref: spec.ValidationAgentRef},
 		{field: "spec.patchAgentRef", ref: spec.PatchAgentRef},
 	}
 	for _, candidate := range refs {
@@ -514,6 +515,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		PolicyDigest:   policy.Digest,
 	}
 
+	validationAgentRef := securityValidationAgentRef(scan)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -531,7 +533,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:      corev1alpha1.TaskTypeAgent,
-			AgentRef:  &scan.Spec.AnalysisAgentRef,
+			AgentRef:  &validationAgentRef,
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
@@ -565,6 +567,14 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update finding: %v", err))
 	}
 	return nil
+}
+
+func securityValidationAgentRef(scan *corev1alpha1.RepositoryScan) corev1alpha1.AgentReference {
+	agentRef := scan.Spec.AnalysisAgentRef
+	if scan.Spec.ValidationAgentRef != nil && strings.TrimSpace(scan.Spec.ValidationAgentRef.Name) != "" {
+		agentRef = *scan.Spec.ValidationAgentRef
+	}
+	return agentRef
 }
 
 func securityPatchAgentRef(scan *corev1alpha1.RepositoryScan) corev1alpha1.AgentReference {
@@ -791,6 +801,11 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
 	}
+	if scan.Spec.ValidationAgentRef != nil && strings.TrimSpace(scan.Spec.ValidationAgentRef.Name) != "" {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "createRepositoryScan", scan, *scan.Spec.ValidationAgentRef); err != nil {
+			return err
+		}
+	}
 	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositoryscan", name,
 		repositoryScanSpecAgentRefs(scan.Spec), nil); err != nil {
 		return err
@@ -867,6 +882,11 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	updated.Spec = req.Spec
 	if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, updated.Spec.AnalysisAgentRef); err != nil {
 		return err
+	}
+	if updated.Spec.ValidationAgentRef != nil && strings.TrimSpace(updated.Spec.ValidationAgentRef.Name) != "" {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "updateRepositoryScan", updated, *updated.Spec.ValidationAgentRef); err != nil {
+			return err
+		}
 	}
 	if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), namespace, "repositoryscan", scan.Name,
 		repositoryScanSpecAgentRefs(updated.Spec), repositoryScanSpecAgentRefs(scan.Spec)); err != nil {
@@ -1441,7 +1461,7 @@ func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.authorizeContextTokenSecurityScanTask(c, "validateSecurityFinding", scan, scan.Spec.AnalysisAgentRef); err != nil {
+	if err := h.authorizeContextTokenSecurityScanTask(c, "validateSecurityFinding", scan, securityValidationAgentRef(scan)); err != nil {
 		return err
 	}
 

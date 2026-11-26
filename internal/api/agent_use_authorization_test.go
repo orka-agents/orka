@@ -127,9 +127,11 @@ func TestAgentRefsUseChecksOnlyNewlyNamedAgents(t *testing.T) {
 	require.Equal(t, "repairer", (*seen)[0].Name)
 
 	scanRefs := repositoryScanSpecAgentRefs(corev1alpha1.RepositoryScanSpec{
-		AnalysisAgentRef: corev1alpha1.AgentReference{Name: "repairer"},
-		PatchAgentRef:    &corev1alpha1.AgentReference{Name: "patcher"},
+		AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "repairer"},
+		ValidationAgentRef: &corev1alpha1.AgentReference{Name: "validator"},
+		PatchAgentRef:      &corev1alpha1.AgentReference{Name: "patcher"},
 	})
+	require.Len(t, scanRefs, 3)
 	requireForbidden(t, authorizeAgentRefsUse(context.Background(), clientset, user, "team-a", "repositoryscan", "scan", scanRefs, nil))
 
 	// A stored reference the controller cannot resolve is not the Agent its

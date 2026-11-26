@@ -115,6 +115,18 @@ func validateFindingRequiredFields(finding FindingsV2Finding) string {
 	if len(finding.Evidence) == 0 {
 		return "evidence is required"
 	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "attacker", value: finding.Attacker},
+		{name: "trustBoundary", value: finding.TrustBoundary},
+		{name: "brokenControl", value: finding.BrokenControl},
+	} {
+		if isPlaceholderResultText(field.value) {
+			return field.name + " is a prompt placeholder"
+		}
+	}
 	return ""
 }
 

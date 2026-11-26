@@ -8005,3 +8005,87 @@ func TestFormatReviewSliceSummaryIncludesLimitations(t *testing.T) {
 		t.Fatalf("formatReviewSliceSummary() = %q, want %q", got, want)
 	}
 }
+
+func TestEnsureValidationTaskUsesValidationAgentRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1.AddToScheme() error = %v", err)
+	}
+
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:            "https://github.com/example/repo",
+			Branch:             "main",
+			AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "scan-reviewer"},
+			ValidationAgentRef: &corev1alpha1.AgentReference{Name: "scan-validator"},
+		},
+	}
+	analysisAgent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "scan-reviewer", Namespace: defaultNS}}
+	validationAgent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "scan-validator", Namespace: defaultNS}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, analysisAgent, validationAgent)...).Build()
+	store := setupControllerSQLiteStore(t)
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: cl, Scheme: scheme, SecurityStore: store}
+	finding := &storepkg.Finding{
+		ID:               "fnd_val_agent",
+		Namespace:        defaultNS,
+		RepositoryScan:   scan.Name,
+		ScanRunID:        "scan_val_agent",
+		Fingerprint:      "fp_val_agent",
+		Title:            "Auth bypass",
+		Summary:          "Missing auth check",
+		Severity:         "high",
+		Confidence:       "high",
+		ValidationStatus: "unvalidated",
+		State:            findingStateOpen,
+	}
+	if err := store.UpsertFinding(ctx, finding); err != nil {
+		t.Fatalf("UpsertFinding() error = %v", err)
+	}
+	if err := reconciler.ensureValidationTask(ctx, scan, finding, nil); err != nil {
+		t.Fatalf("ensureValidationTask() error = %v", err)
+	}
+	valTask, err := reconciler.validationTaskForFinding(ctx, scan, finding.ID, finding.ScanRunID)
+	if err != nil || valTask == nil || valTask.Spec.AgentRef == nil {
+		t.Fatalf("validationTaskForFinding() = %#v, %v", valTask, err)
+	}
+	if valTask.Spec.AgentRef.Name != "scan-validator" {
+		t.Fatalf("validation AgentRef.Name = %q, want scan-validator", valTask.Spec.AgentRef.Name)
+	}
+}
+
+func TestFindingWithSharedAnchorDoesNotFalseMergeDistinctCategoriesAtSharedSink(t *testing.T) {
+	kept := []*storepkg.Finding{{
+		ID:       "fnd_sqli",
+		Category: "sql-injection",
+		State:    "dismissed",
+		Evidence: []storepkg.FindingEvidenceRef{{
+			Kind: "file", Path: "internal/db/query.go", StartLine: 40, EndLine: 48, Role: "sink",
+		}},
+	}}
+	distinctAtSameSink := &storepkg.Finding{
+		ID:       "fnd_authz",
+		Category: "authorization-bypass",
+		Evidence: []storepkg.FindingEvidenceRef{{
+			Kind: "file", Path: "internal/db/query.go", StartLine: 40, EndLine: 48, Role: "sink",
+		}},
+	}
+	if got := findingWithSharedAnchor(distinctAtSameSink, kept); got != nil {
+		t.Fatalf("findingWithSharedAnchor(distinct categories at shared sink) = %s, want nil to prevent false merge", got.ID)
+	}
+	sameCategoryAtSameSink := &storepkg.Finding{
+		ID:       "fnd_sqli_2",
+		Category: "sql-injection",
+		Evidence: []storepkg.FindingEvidenceRef{{
+			Kind: "file", Path: "internal/db/query.go", StartLine: 42, EndLine: 46, Role: "sink",
+		}},
+	}
+	if got := findingWithSharedAnchor(sameCategoryAtSameSink, kept); got == nil || got.ID != "fnd_sqli" {
+		t.Fatalf("findingWithSharedAnchor(same category at shared sink) = %#v, want fnd_sqli", got)
+	}
+}
