@@ -1005,6 +1005,14 @@ func (s *Store) ListMonitorEvents(ctx context.Context, filter store.MonitorEvent
 	monitorFilter(q, "item_kind", filter.ItemKind)
 	monitorFilter(q, "item_number", filter.ItemNumber)
 	monitorFilter(q, "event_type", filter.EventType)
+	if !filter.Since.IsZero() {
+		q.sql.WriteString(" AND created_at >= ?")
+		q.args = append(q.args, filter.Since.UTC())
+	}
+	if !filter.Until.IsZero() {
+		q.sql.WriteString(" AND created_at < ?")
+		q.args = append(q.args, filter.Until.UTC())
+	}
 	return queryPage(ctx, s.db, q, "created_at DESC, id DESC", filter.Cursor, filter.Limit, scanMonitorEvent)
 }
 

@@ -648,6 +648,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/monitors/repositories/:name/runs", s.handlers.CreateRepositoryMonitorRun)
 	api.Get("/monitors/repositories/:name/runs", s.handlers.ListRepositoryMonitorRuns)
 	api.Get("/monitors/repositories/:name/items", s.handlers.ListRepositoryMonitorItems)
+	api.Get("/monitors/repositories/:name/audit", s.handlers.ListRepositoryMonitorAudit)
 	api.Post("/monitors/repositories/:name/commands", s.handlers.CreateRepositoryMonitorCommandEvent)
 	api.Get("/monitors/commands", s.handlers.ListRepositoryMonitorCommandEvents)
 	api.Get("/monitors/commands/:id", s.handlers.GetRepositoryMonitorCommandEvent)

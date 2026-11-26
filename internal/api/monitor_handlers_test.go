@@ -67,6 +67,7 @@ func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenCon
 	app.Post("/monitors/repositories/:name/runs", handlers.CreateRepositoryMonitorRun)
 	app.Get("/monitors/repositories/:name/runs", handlers.ListRepositoryMonitorRuns)
 	app.Get("/monitors/repositories/:name/items", handlers.ListRepositoryMonitorItems)
+	app.Get("/monitors/repositories/:name/audit", handlers.ListRepositoryMonitorAudit)
 	app.Post("/monitors/repositories/:name/commands", handlers.CreateRepositoryMonitorCommandEvent)
 	app.Get("/monitors/work-actions", handlers.ListRepositoryMonitorWorkActions)
 	app.Get("/monitors/work-actions/:id", handlers.GetRepositoryMonitorWorkAction)

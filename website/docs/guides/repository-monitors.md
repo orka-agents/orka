@@ -273,6 +273,17 @@ Command intake writes `command_accepted`, `command_rejected`, or `command_blocke
 
 Event IDs are derived from the decision, so a step retried after a restart is recorded once. A `held` or `refused` decision is recorded once per item, head, reason, policy, and command, not on every poll: an unchanged draft pull request has one `item_skipped` event however often the monitor polls it, and a new head is recorded anew.
 
+### Audit a time window
+
+To see what a monitor decided over a period, list its decisions with their command, Task, and GitHub mutation:
+
+```bash
+orka monitor audit example-app --since 24h
+orka monitor audit example-app --since 2026-11-25T00:00:00Z --until 2026-11-26T00:00:00Z --decision refused,failed -o json
+```
+
+The CLI calls `GET /api/v1/monitors/repositories/{name}/audit`. `since` and `until` take a duration before now, such as `24h`, or an RFC 3339 time; `since` is inclusive and `until` exclusive, and either may be left out. `decision` keeps only the listed decisions. Records are newest first and include only events that record a decision. Each one carries the event's `decision`, `reason`, and `policy`; `command` with the command's intent, source, author, and status; `task` with the Task name; and `mutations` with each GitHub mutation's operation, status, and URL. A command or mutation of another monitor is shown by ID only. Up to `limit` records (default 50, at most 500) are returned per page, and `metadata.continue` resumes the next page. The route needs `list` on `repositorymonitors/audit` for the monitor.
+
 ## Review workspace context
 
 The review Task is pinned to the exact PR head SHA with `workspace.intent: read`. Before creating it, the controller fetches the pull request identity, lists the pull request's changed files with their patches, and refetches the pull request to ensure the base, head, and head repository did not change during context assembly. The drift check runs even when the file listing failed, so a race fails closed instead of queueing a stale review; a GitHub read failure does not fail the run and instead marks the context `contextUnavailable`.

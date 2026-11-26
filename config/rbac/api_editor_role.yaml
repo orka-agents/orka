@@ -82,6 +82,7 @@ rules:
   - repositoryscans/droppedfindings
   - repositoryscans/findings
   - repositorymonitors/items
+  - repositorymonitors/audit
   - monitorevents
   verbs: [list]
 - apiGroups: [core.orka.ai]

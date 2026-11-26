@@ -53,6 +53,7 @@ func newMonitorCmd() *cobra.Command {
 	cmd.AddCommand(newMonitorWatchCmd())
 	cmd.AddCommand(newMonitorTriggerLabelsCmd())
 	cmd.AddCommand(newMonitorEventsCmd())
+	cmd.AddCommand(newMonitorAuditCmd())
 	return cmd
 }
 

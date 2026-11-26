@@ -508,6 +508,10 @@ type MonitorEventFilter struct {
 	ItemKind    string
 	ItemNumber  int64
 	EventType   string
-	Limit       int
-	Cursor      string
+	// Since, when set, keeps events created at or after it.
+	Since time.Time
+	// Until, when set, keeps events created before it.
+	Until  time.Time
+	Limit  int
+	Cursor string
 }

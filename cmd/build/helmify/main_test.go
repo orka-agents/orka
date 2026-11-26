@@ -289,6 +289,7 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 		"repositorymonitors":              {"patch"},
 		"repositorymonitors/runs":         {"list", "create"},
 		"repositorymonitors/items":        {"list"},
+		"repositorymonitors/audit":        {"list"},
 		"repositorymonitors/commands":     {"create"},
 		"monitorcommands":                 {"get", "list"},
 		"monitoractions":                  {"get", "list"},

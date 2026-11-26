@@ -1956,6 +1956,7 @@ Usage:
 
 Available Commands:
   actions         Inspect repository monitor action records
+  audit           List a repository monitor's decisions in a time window
   commands        Inspect repository monitor command events
   create          Create a repository monitor resource from a manifest
   delete          Delete a repository monitor resource
@@ -2058,6 +2059,40 @@ Flags:
       --number int           Filter by target number
   -o, --output string        Output format: table, json, yaml (default "table")
       --task-name string     Filter by task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka monitor audit`
+
+```text
+List what a repository monitor decided, newest first: each accepted,
+refused, held, blocked, acted or failed decision with its reason, the spec
+clause that decided it, and the command, Task and GitHub mutation it names.
+--since and --until take a duration before now (24h) or an RFC 3339 time.
+
+Usage:
+  orka monitor audit <name> [flags]
+
+Examples:
+  orka monitor audit example-app --since 24h
+  orka monitor audit example-app --since 2026-11-25T00:00:00Z --decision refused,failed -o json
+
+Flags:
+      --continue string   Continue token from a previous page
+      --decision string   Comma-separated decisions to keep: accepted, refused, held, blocked, acted, failed
+  -h, --help              help for audit
+      --limit int         Maximum number of decisions (default 50)
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --since string      Start of the window: a duration before now or an RFC 3339 time (default "24h")
+      --until string      End of the window, exclusive: a duration before now or an RFC 3339 time
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

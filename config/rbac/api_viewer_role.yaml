@@ -54,5 +54,6 @@ rules:
   - securityfindings/patches
   - repositorymonitors/runs
   - repositorymonitors/items
+  - repositorymonitors/audit
   - monitorevents
   verbs: [list]
