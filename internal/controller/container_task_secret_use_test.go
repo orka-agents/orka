@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -402,26 +403,30 @@ func TestContainerTaskSecretUseRefusesTasksWrittenBeforeThePolicy(t *testing.T) 
 
 func TestLatestChangeCountsSpecUpdates(t *testing.T) {
 	created := metav1.NewTime(time.Now().Add(-time.Hour))
-	updated := metav1.NewTime(time.Now())
+	updated := metav1.NewTime(time.Now().Add(-30 * time.Minute))
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	policy := &metav1.ObjectMeta{CreationTimestamp: created}
-	relabelled := &metav1.ObjectMeta{UID: "relabelled", CreationTimestamp: created, Generation: 1,
+	relabelled := &metav1.ObjectMeta{UID: types.UID("relabelled-" + suffix), CreationTimestamp: created, Generation: 1,
 		ManagedFields: []metav1.ManagedFieldsEntry{{Time: &updated}}}
 	if got := latestChange(policy, relabelled); !got.Equal(created.Time) {
 		t.Fatalf("latestChange() = %v, want a metadata-only update ignored", got)
 	}
-	respecified := &metav1.ObjectMeta{UID: "respecified", CreationTimestamp: created, Generation: 2,
+	respecified := &metav1.ObjectMeta{UID: types.UID("respecified-" + suffix), CreationTimestamp: created, Generation: 2,
 		ManagedFields: []metav1.ManagedFieldsEntry{{Time: &updated}}}
-	if got := latestChange(policy, respecified); !got.Equal(updated.Time) {
-		t.Fatalf("latestChange() = %v, want the binding's later spec update %v", got, updated.Time)
+	beforeGen2 := time.Now()
+	gen2Seen := latestChange(policy, respecified)
+	if gen2Seen.Before(beforeGen2) {
+		t.Fatalf("latestChange() = %v, want first observation of generation 2 (>= %v) rather than managedFields %v", gen2Seen, beforeGen2, updated.Time)
 	}
-	relabelledLater := metav1.NewTime(updated.Add(time.Hour))
+	relabelledLater := metav1.NewTime(time.Now().Add(time.Hour))
 	respecified.ManagedFields = []metav1.ManagedFieldsEntry{{Time: &relabelledLater}}
-	if got := latestChange(policy, respecified); !got.Equal(updated.Time) {
-		t.Fatalf("latestChange() = %v, want a metadata-only update after a spec change ignored", got)
+	if got := latestChange(policy, respecified); !got.Equal(gen2Seen) {
+		t.Fatalf("latestChange() = %v, want a metadata-only update after a spec change ignored (cached %v)", got, gen2Seen)
 	}
 	respecified.Generation = 3
-	if got := latestChange(policy, respecified); !got.Equal(relabelledLater.Time) {
-		t.Fatalf("latestChange() = %v, want a new spec change %v", got, relabelledLater.Time)
+	beforeGen3 := time.Now()
+	if got := latestChange(policy, respecified); got.Before(beforeGen3) {
+		t.Fatalf("latestChange() = %v, want a new spec change observation (>= %v)", got, beforeGen3)
 	}
 	if got := latestChange(policy); !got.Equal(created.Time) {
 		t.Fatalf("latestChange() = %v, want the creation time %v", got, created.Time)
@@ -524,7 +529,11 @@ func TestEmbeddedSecretUsePolicyMatchesTheShippedOne(t *testing.T) {
 
 func TestLatestChangeWithoutManagedFieldsAfterASpecChange(t *testing.T) {
 	created := metav1.NewTime(time.Now().Add(-time.Hour))
-	reset := &metav1.ObjectMeta{UID: "reset-managed-fields", CreationTimestamp: created, Generation: 2}
+	reset := &metav1.ObjectMeta{
+		UID:               types.UID(fmt.Sprintf("reset-managed-fields-%d", time.Now().UnixNano())),
+		CreationTimestamp: created,
+		Generation:        2,
+	}
 	before := time.Now()
 	if got := latestChange(reset); got.Before(before) {
 		t.Fatalf("latestChange() = %v, want no earlier than when it was first seen (%v)", got, before)

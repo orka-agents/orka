@@ -99,11 +99,15 @@ auditing Kubernetes access.
 Container Tasks are untrusted compute. By default a Task's `spec.secretRef` is omitted and
 the Task still runs, and a `spec.env` entry that reads a Secret or ConfigMap through
 `valueFrom` makes the Task fail before its Pod is created. With the Secret use policy
-(`--container-task-secret-use-authorization-enabled`), a container Task receives a Secret it
-names only if the identity that wrote it holds the `use` verb on that Secret. Orka grants that
+(`--container-task-secret-use-authorization-enabled`), the admission policy requires the
+identity that writes a container Task to hold the `use` verb on each Secret it names (except
+for scheduled runs written by the controller, which the controller validates against their
+authorized parent scheduled Task; revoking `use` later does not stop delivery for Tasks that
+were already admitted). Orka grants that
 verb to none of its own identities, so Tasks created by agents, tools, chat, or the API never
 qualify, and the controller delivers nothing until it has confirmed the admission policy is
-bound. The legacy `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true` switch instead delivers to every
+bound and covers the namespace (clusters must have the `ValidatingAdmissionPolicy` admission
+plugin enabled). The legacy `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true` switch instead delivers to every
 container Task and cannot be combined with the policy. Task `env`
 never reaches the workspace preparation init container, which holds the clone credential;
 only `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` pass through to it. See
