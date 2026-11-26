@@ -485,6 +485,7 @@ Usage:
   orka audit [command]
 
 Available Commands:
+  identity    Query redacted agent-identity-audit records
   trace       Show tasks correlated by transaction ID
 
 Flags:
@@ -500,6 +501,33 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka audit [command] --help" for more information about a command.
+```
+
+## `orka audit identity`
+
+```text
+Query redacted agent-identity-audit records
+
+Usage:
+  orka audit identity [flags]
+
+Flags:
+      --agent string      Filter by Agent name
+  -h, --help              help for identity
+      --limit int         Maximum number of audit records to return (default 100)
+      --outcome string    Filter by outcome: issued or refused
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --task string       Filter by Task name in the active namespace
+      --task-uid string   Filter by Task UID
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka audit trace`
@@ -533,6 +561,7 @@ Usage:
   orka auth [command]
 
 Available Commands:
+  login       Sign in to Orka with OIDC (device-code flow)
   validate    Validate current credentials
   whoami      Show sanitized authenticated identity
 
@@ -549,6 +578,32 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka auth [command] --help" for more information about a command.
+```
+
+## `orka auth login`
+
+```text
+Sign in to Orka using OpenID Connect device-code flow. By default, discovers the OIDC issuer and audience from the Orka server (/api/v1/auth/config), requests a device code, saves an Orka-compatible JWT (and refresh token when issued) in your Orka config, and refreshes it on demand when a later command runs near or after expiry (otherwise run 'orka auth login' again).
+
+Usage:
+  orka auth login [flags]
+
+Flags:
+      --client-id string   OIDC public client ID (defaults to the server's advertised audience)
+  -h, --help               help for login
+      --issuer string      OIDC issuer URL (defaults to the server's advertised issuer)
+      --no-open            Print the verification URL without opening a browser
+      --scope string       Space-separated OAuth scopes to request
+      --timeout duration   Maximum time to wait for device-code approval (default 15m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka auth validate`
@@ -803,7 +858,7 @@ Usage:
   orka connection complete <name> [flags]
 
 Flags:
-      --completion string   The value after '#completion=' in the dashboard URL the provider callback opened
+      --completion string   The value after '#completion=' (or the full redirect URL) from the browser address bar
   -h, --help                help for complete
 
 Global Flags:

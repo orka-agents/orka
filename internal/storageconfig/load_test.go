@@ -170,6 +170,9 @@ func TestStoreBackendFlagDefaultIsSQLite(t *testing.T) {
 	if got := fs.Lookup("store-path").DefValue; got != DefaultStorePath {
 		t.Fatalf("--store-path default = %q, want %q", got, DefaultStorePath)
 	}
+	if got := fs.Lookup("store-sqlite-synchronous").DefValue; got != DefaultSQLiteSynchronous {
+		t.Fatalf("--store-sqlite-synchronous default = %q, want %q", got, DefaultSQLiteSynchronous)
+	}
 	if got := fs.Lookup("storage-config").DefValue; got != "" {
 		t.Fatalf("--storage-config default = %q, want empty", got)
 	}

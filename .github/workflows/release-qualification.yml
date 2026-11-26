@@ -182,7 +182,7 @@ jobs:
 
       - name: Upload evidence before cluster teardown
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-qualification-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-qualification/acceptance.json
@@ -224,7 +224,7 @@ jobs:
 
       - name: Upload final acceptance report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-qualification-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-qualification/acceptance.json

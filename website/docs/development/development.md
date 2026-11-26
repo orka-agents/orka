@@ -361,6 +361,12 @@ make build       # Now the Go build will succeed
 
 If the UI isn't built, the `ensure-ui-embed` Makefile target creates a stub `internal/uiembed/dist/index.html` so the Go build doesn't fail — but the embedded UI won't work.
 
+### Storage contract module
+
+`pkg/storage` is a nested Go module that the root module requires through a `replace` directive. Root `./...` patterns skip it, so run its tests with `go -C pkg/storage test ./...`; `make fmt`, `make vet`, `make test` and `make lint` already do. A Dockerfile that runs `go mod download` must copy `pkg/storage/go.mod` and `pkg/storage/go.sum` first.
+
+`make generate` also runs `make generate-storage`, which installs pinned buf and protoc plugins into `bin/storage-proto` on first use and regenerates the storage wire code from `pkg/storage/proto`. It needs no `protoc` install. `make verify-storage-generated` checks the committed code without changing the tree. See [storage contracts](https://github.com/orka-agents/orka/blob/main/docs/development/storage-contracts.md#wire-protocol).
+
 ### CLI version injection
 
 `make build-cli` injects Git version info via `-ldflags`:

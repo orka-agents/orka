@@ -15,7 +15,20 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/orka-agents/orka/internal/store"
 )
+
+// maxCheckMessagesResponseBytes bounds the controller's JSON response to one
+// message check. A batch carries at most store.MaxMessageBatchBytes of
+// content and store.MaxMessageBatch messages, each with four identifiers of at
+// most store.MaxControlIdentifierBytes. JSON escaping turns a byte into at most
+// six (\u00XX), and each message adds at most 1 KiB of field names, ID, flag
+// and timestamp. A response within the contract therefore always fits, and a
+// longer one is refused rather than truncated, since the controller has already
+// marked the batch read.
+const maxCheckMessagesResponseBytes = 6*(store.MaxMessageBatchBytes+
+	store.MaxMessageBatch*4*store.MaxControlIdentifierBytes) + store.MaxMessageBatch*1024
 
 // CheckMessagesTool implements checking for inter-agent messages
 type CheckMessagesTool struct{}
@@ -122,9 +135,12 @@ func (t *CheckMessagesTool) Execute(ctx context.Context, args json.RawMessage) (
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCheckMessagesResponseBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+	if len(body) > maxCheckMessagesResponseBytes {
+		return "", fmt.Errorf("failed to check messages: the controller response exceeds %d bytes", maxCheckMessagesResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
