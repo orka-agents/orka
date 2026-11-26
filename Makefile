@@ -615,6 +615,11 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.14.0
+# golangci-lint refuses to lint a module that targets a newer Go than the one it
+# was built with, and takes the target from go.mod's toolchain line when there is
+# one. `go install tool@version` ignores this module's go.mod and builds with the
+# host's Go, so build it with that toolchain explicitly. pkg/storage pins the same one.
+GOLANGCI_LINT_GOTOOLCHAIN ?= $(shell awk '$$1 == "toolchain" { t = $$2 } $$1 == "go" { g = "go" $$2 } END { print (t != "" ? t : g) }' go.mod)
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -641,22 +646,25 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION),$(GOLANGCI_LINT_GOTOOLCHAIN))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed
 # $3 - specific version of package
+# $4 - optional Go toolchain to build it with, such as go1.27.2 (a newer one is used if the
+#      package needs it); part of the installed file name, so changing it rebuilds the tool
 define go-install-tool
-@[ -f "$(1)-$(3)" ] && [ "$$(readlink -- "$(1)" 2>/dev/null)" = "$(1)-$(3)" ] || { \
+@installed="$(1)-$(3)$(if $(4),-$(4))" ;\
+[ -f "$$installed" ] && [ "$$(readlink -- "$(1)" 2>/dev/null)" = "$$installed" ] || { \
 set -e; \
 package=$(2)@$(3) ;\
-echo "Downloading $${package}" ;\
+echo "Downloading $${package}$(if $(4), with $(4))" ;\
 rm -f "$(1)" ;\
-GOBIN="$(LOCALBIN)" go install $${package} ;\
-mv "$(LOCALBIN)/$$(basename "$(1)")" "$(1)-$(3)" ;\
+$(if $(4),GOTOOLCHAIN="$(4)+auto" )GOBIN="$(LOCALBIN)" go install $${package} ;\
+mv "$(LOCALBIN)/$$(basename "$(1)")" "$$installed" ;\
 } ;\
-ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"
+ln -sf "$$(realpath "$$installed")" "$(1)"
 endef
 
 define gomodver
