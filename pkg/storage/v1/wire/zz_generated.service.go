@@ -30,6 +30,17 @@ var (
 	methodDeleteTaskMessages                   = method{name: "DeleteTaskMessages", fullName: "/orka.storage.v1.Messages/DeleteTaskMessages", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 1, stream: streamNone, contract: storagev1.StateContract}
 	methodListUnreadMessages                   = method{name: "ListUnreadMessages", fullName: "/orka.storage.v1.Messages/ListUnreadMessages", kind: storagev1.MethodRead, class: storagev1.CallInteractive, since: 1, stream: streamNone, contract: storagev1.StateContract}
 	methodSendMessage                          = method{name: "SendMessage", fullName: "/orka.storage.v1.Messages/SendMessage", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 1, stream: streamNone, contract: storagev1.StateContract}
+	methodAdvanceControllerEpoch               = method{name: "AdvanceControllerEpoch", fullName: "/orka.storage.v1.Ownership/AdvanceControllerEpoch", kind: storagev1.MethodAdmin, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodAdvanceWriteWatermark                = method{name: "AdvanceWriteWatermark", fullName: "/orka.storage.v1.Ownership/AdvanceWriteWatermark", kind: storagev1.MethodWrite, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodBindDataset                          = method{name: "BindDataset", fullName: "/orka.storage.v1.Ownership/BindDataset", kind: storagev1.MethodAdmin, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodCompleteDatasetBootstrap             = method{name: "CompleteDatasetBootstrap", fullName: "/orka.storage.v1.Ownership/CompleteDatasetBootstrap", kind: storagev1.MethodAdmin, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodDetachDatasetBinding                 = method{name: "DetachDatasetBinding", fullName: "/orka.storage.v1.Ownership/DetachDatasetBinding", kind: storagev1.MethodAdmin, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodGetControllerEpochMirror             = method{name: "GetControllerEpochMirror", fullName: "/orka.storage.v1.Ownership/GetControllerEpochMirror", kind: storagev1.MethodRead, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodGetDatasetBinding                    = method{name: "GetDatasetBinding", fullName: "/orka.storage.v1.Ownership/GetDatasetBinding", kind: storagev1.MethodRead, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodGetWriteWatermark                    = method{name: "GetWriteWatermark", fullName: "/orka.storage.v1.Ownership/GetWriteWatermark", kind: storagev1.MethodRead, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodPruneOperationReceipts               = method{name: "PruneOperationReceipts", fullName: "/orka.storage.v1.Ownership/PruneOperationReceipts", kind: storagev1.MethodAdmin, class: storagev1.CallBackground, since: 4, stream: streamNone, contract: ""}
+	methodResolveOperation                     = method{name: "ResolveOperation", fullName: "/orka.storage.v1.Ownership/ResolveOperation", kind: storagev1.MethodAdmin, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
+	methodUpdateBindingKeyFingerprint          = method{name: "UpdateBindingKeyFingerprint", fullName: "/orka.storage.v1.Ownership/UpdateBindingKeyFingerprint", kind: storagev1.MethodAdmin, class: storagev1.CallControl, since: 4, stream: streamNone, contract: ""}
 	methodDeletePlan                           = method{name: "DeletePlan", fullName: "/orka.storage.v1.Results/DeletePlan", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 1, stream: streamNone, contract: storagev1.StateContract}
 	methodDeleteResult                         = method{name: "DeleteResult", fullName: "/orka.storage.v1.Results/DeleteResult", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 2, stream: streamNone, contract: storagev1.StateContract}
 	methodGetPlan                              = method{name: "GetPlan", fullName: "/orka.storage.v1.Results/GetPlan", kind: storagev1.MethodRead, class: storagev1.CallInteractive, since: 1, stream: streamNone, contract: storagev1.StateContract}
@@ -61,6 +72,17 @@ var methodsByFullName = map[string]*method{
 	methodDeleteTaskMessages.fullName:                   &methodDeleteTaskMessages,
 	methodListUnreadMessages.fullName:                   &methodListUnreadMessages,
 	methodSendMessage.fullName:                          &methodSendMessage,
+	methodAdvanceControllerEpoch.fullName:               &methodAdvanceControllerEpoch,
+	methodAdvanceWriteWatermark.fullName:                &methodAdvanceWriteWatermark,
+	methodBindDataset.fullName:                          &methodBindDataset,
+	methodCompleteDatasetBootstrap.fullName:             &methodCompleteDatasetBootstrap,
+	methodDetachDatasetBinding.fullName:                 &methodDetachDatasetBinding,
+	methodGetControllerEpochMirror.fullName:             &methodGetControllerEpochMirror,
+	methodGetDatasetBinding.fullName:                    &methodGetDatasetBinding,
+	methodGetWriteWatermark.fullName:                    &methodGetWriteWatermark,
+	methodPruneOperationReceipts.fullName:               &methodPruneOperationReceipts,
+	methodResolveOperation.fullName:                     &methodResolveOperation,
+	methodUpdateBindingKeyFingerprint.fullName:          &methodUpdateBindingKeyFingerprint,
 	methodDeletePlan.fullName:                           &methodDeletePlan,
 	methodDeleteResult.fullName:                         &methodDeleteResult,
 	methodGetPlan.fullName:                              &methodGetPlan,
@@ -77,6 +99,7 @@ type clientStubs struct {
 	dataset   storagepb.DatasetClient
 	events    storagepb.EventsClient
 	messages  storagepb.MessagesClient
+	ownership storagepb.OwnershipClient
 	results   storagepb.ResultsClient
 }
 
@@ -86,6 +109,7 @@ func newClientStubs(conn grpc.ClientConnInterface) clientStubs {
 		dataset:   storagepb.NewDatasetClient(conn),
 		events:    storagepb.NewEventsClient(conn),
 		messages:  storagepb.NewMessagesClient(conn),
+		ownership: storagepb.NewOwnershipClient(conn),
 		results:   storagepb.NewResultsClient(conn),
 	}
 }
@@ -100,6 +124,10 @@ var (
 	_ storagev1.AtomicExecutionEventPlanStore    = (*Client)(nil)
 	_ storagev1.GroupedExecutionEventStore       = (*Client)(nil)
 	_ storagev1.MessageStore                     = (*Client)(nil)
+	_ storagev1.OperationReceiptStore            = (*Client)(nil)
+	_ storagev1.ControllerEpochAdvancer          = (*Client)(nil)
+	_ storagev1.DatasetBindingStore              = (*Client)(nil)
+	_ storagev1.WriteWatermarkStore              = (*Client)(nil)
 	_ storagev1.ResultStore                      = (*Client)(nil)
 	_ storagev1.PromptResultReceiptStore         = (*Client)(nil)
 	_ storagev1.PlanStore                        = (*Client)(nil)
@@ -599,6 +627,236 @@ func (client *Client) SendMessage(ctx context.Context, msg *storagev1.Message) e
 	return nil
 }
 
+// AdvanceControllerEpoch calls orka.storage.v1.Ownership.AdvanceControllerEpoch.
+func (client *Client) AdvanceControllerEpoch(ctx context.Context, request storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	wireRequest, err := toWireAdvanceControllerEpochRequest(request)
+	if err != nil {
+		return storagev1.ControllerEpochMirrorState{}, err
+	}
+	_ = err
+	var wireResponse *storagepb.AdvanceControllerEpochResponse
+	if err := client.invoke(ctx, &methodAdvanceControllerEpoch, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.AdvanceControllerEpoch(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.ControllerEpochMirrorState{}, err
+	}
+	var r0 storagev1.ControllerEpochMirrorState
+	if r0, err = fromWireControllerEpochMirrorState(wireResponse.State, false); err != nil {
+		return storagev1.ControllerEpochMirrorState{}, client.responseError(&methodAdvanceControllerEpoch, err)
+	}
+	return r0, nil
+}
+
+// AdvanceWriteWatermark calls orka.storage.v1.Ownership.AdvanceWriteWatermark.
+func (client *Client) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	wireRequest := &storagepb.AdvanceWriteWatermarkRequest{}
+	var err error
+	_ = err
+	var wireResponse *storagepb.AdvanceWriteWatermarkResponse
+	if err := client.invoke(ctx, &methodAdvanceWriteWatermark, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.AdvanceWriteWatermark(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.WriteWatermark{}, err
+	}
+	var r0 storagev1.WriteWatermark
+	if r0, err = fromWireWriteWatermark(wireResponse.Watermark, false); err != nil {
+		return storagev1.WriteWatermark{}, client.responseError(&methodAdvanceWriteWatermark, err)
+	}
+	return r0, nil
+}
+
+// BindDataset calls orka.storage.v1.Ownership.BindDataset.
+func (client *Client) BindDataset(ctx context.Context, request storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	wireRequest, err := toWireBindDatasetRequest(request)
+	if err != nil {
+		return storagev1.DatasetBinding{}, err
+	}
+	_ = err
+	var wireResponse *storagepb.BindDatasetResponse
+	if err := client.invoke(ctx, &methodBindDataset, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.BindDataset(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.DatasetBinding{}, err
+	}
+	var r0 storagev1.DatasetBinding
+	if r0, err = fromWireDatasetBinding(wireResponse.Binding, false); err != nil {
+		return storagev1.DatasetBinding{}, client.responseError(&methodBindDataset, err)
+	}
+	return r0, nil
+}
+
+// CompleteDatasetBootstrap calls orka.storage.v1.Ownership.CompleteDatasetBootstrap.
+func (client *Client) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
+	wireRequest := &storagepb.CompleteDatasetBootstrapRequest{}
+	var err error
+	wireRequest.DatasetId = datasetID
+	_ = err
+	if err := client.invoke(ctx, &methodCompleteDatasetBootstrap, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		_, callErr := client.stubs.ownership.CompleteDatasetBootstrap(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DetachDatasetBinding calls orka.storage.v1.Ownership.DetachDatasetBinding.
+func (client *Client) DetachDatasetBinding(ctx context.Context, request storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	wireRequest := &storagepb.DetachDatasetBindingRequest{}
+	var err error
+	if wireRequest.Request, err = toWireDetachDatasetRequest(request); err != nil {
+		return storagev1.DatasetBinding{}, err
+	}
+	_ = err
+	var wireResponse *storagepb.DetachDatasetBindingResponse
+	if err := client.invoke(ctx, &methodDetachDatasetBinding, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.DetachDatasetBinding(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.DatasetBinding{}, err
+	}
+	var r0 storagev1.DatasetBinding
+	if r0, err = fromWireDatasetBinding(wireResponse.Binding, false); err != nil {
+		return storagev1.DatasetBinding{}, client.responseError(&methodDetachDatasetBinding, err)
+	}
+	return r0, nil
+}
+
+// GetControllerEpochMirror calls orka.storage.v1.Ownership.GetControllerEpochMirror.
+func (client *Client) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	wireRequest := &storagepb.GetControllerEpochMirrorRequest{}
+	var err error
+	wireRequest.Name = name
+	_ = err
+	var wireResponse *storagepb.GetControllerEpochMirrorResponse
+	if err := client.invoke(ctx, &methodGetControllerEpochMirror, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.GetControllerEpochMirror(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.ControllerEpochMirrorState{}, err
+	}
+	var r0 storagev1.ControllerEpochMirrorState
+	if r0, err = fromWireControllerEpochMirrorState(wireResponse.State, false); err != nil {
+		return storagev1.ControllerEpochMirrorState{}, client.responseError(&methodGetControllerEpochMirror, err)
+	}
+	return r0, nil
+}
+
+// GetDatasetBinding calls orka.storage.v1.Ownership.GetDatasetBinding.
+func (client *Client) GetDatasetBinding(ctx context.Context, datasetID string) (storagev1.DatasetBinding, error) {
+	wireRequest := &storagepb.GetDatasetBindingRequest{}
+	var err error
+	wireRequest.DatasetId = datasetID
+	_ = err
+	var wireResponse *storagepb.GetDatasetBindingResponse
+	if err := client.invoke(ctx, &methodGetDatasetBinding, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.GetDatasetBinding(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.DatasetBinding{}, err
+	}
+	var r0 storagev1.DatasetBinding
+	if r0, err = fromWireDatasetBinding(wireResponse.Binding, false); err != nil {
+		return storagev1.DatasetBinding{}, client.responseError(&methodGetDatasetBinding, err)
+	}
+	return r0, nil
+}
+
+// GetWriteWatermark calls orka.storage.v1.Ownership.GetWriteWatermark.
+func (client *Client) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	wireRequest := &storagepb.GetWriteWatermarkRequest{}
+	var err error
+	_ = err
+	var wireResponse *storagepb.GetWriteWatermarkResponse
+	if err := client.invoke(ctx, &methodGetWriteWatermark, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.GetWriteWatermark(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.WriteWatermark{}, err
+	}
+	var r0 storagev1.WriteWatermark
+	if r0, err = fromWireWriteWatermark(wireResponse.Watermark, false); err != nil {
+		return storagev1.WriteWatermark{}, client.responseError(&methodGetWriteWatermark, err)
+	}
+	return r0, nil
+}
+
+// PruneOperationReceipts calls orka.storage.v1.Ownership.PruneOperationReceipts.
+func (client *Client) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
+	wireRequest := &storagepb.PruneOperationReceiptsRequest{}
+	var err error
+	wireRequest.Limit = int64(limit)
+	_ = err
+	var wireResponse *storagepb.PruneOperationReceiptsResponse
+	if err := client.invoke(ctx, &methodPruneOperationReceipts, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.PruneOperationReceipts(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return 0, err
+	}
+	var r0 int
+	if r0, err = intFromWire(wireResponse.Removed, "PruneOperationReceipts result"); err != nil {
+		return 0, client.responseError(&methodPruneOperationReceipts, err)
+	}
+	return r0, nil
+}
+
+// ResolveOperation calls orka.storage.v1.Ownership.ResolveOperation.
+func (client *Client) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	wireRequest, err := toWireResolveOperationRequest(request)
+	if err != nil {
+		return storagev1.OperationOutcome{}, err
+	}
+	_ = err
+	var wireResponse *storagepb.ResolveOperationResponse
+	if err := client.invoke(ctx, &methodResolveOperation, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.ResolveOperation(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.OperationOutcome{}, err
+	}
+	var r0 storagev1.OperationOutcome
+	if r0, err = fromWireOperationOutcome(wireResponse.Outcome, false); err != nil {
+		return storagev1.OperationOutcome{}, client.responseError(&methodResolveOperation, err)
+	}
+	return r0, nil
+}
+
+// UpdateBindingKeyFingerprint calls orka.storage.v1.Ownership.UpdateBindingKeyFingerprint.
+func (client *Client) UpdateBindingKeyFingerprint(ctx context.Context, request storagev1.UpdateBindingKeyRequest) (storagev1.DatasetBinding, error) {
+	wireRequest := &storagepb.UpdateBindingKeyFingerprintRequest{}
+	var err error
+	if wireRequest.Request, err = toWireUpdateBindingKeyRequest(request); err != nil {
+		return storagev1.DatasetBinding{}, err
+	}
+	_ = err
+	var wireResponse *storagepb.UpdateBindingKeyFingerprintResponse
+	if err := client.invoke(ctx, &methodUpdateBindingKeyFingerprint, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.ownership.UpdateBindingKeyFingerprint(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return storagev1.DatasetBinding{}, err
+	}
+	var r0 storagev1.DatasetBinding
+	if r0, err = fromWireDatasetBinding(wireResponse.Binding, false); err != nil {
+		return storagev1.DatasetBinding{}, client.responseError(&methodUpdateBindingKeyFingerprint, err)
+	}
+	return r0, nil
+}
+
 // DeletePlan calls orka.storage.v1.Results.DeletePlan.
 func (client *Client) DeletePlan(ctx context.Context, namespace string, taskName string) error {
 	wireRequest := &storagepb.DeletePlanRequest{}
@@ -758,6 +1016,7 @@ func (client *Client) SaveResult(ctx context.Context, namespace string, taskName
 
 func (s *Server) registerServices(registrar grpc.ServiceRegistrar) {
 	storagepb.RegisterDatasetServer(registrar, &datasetService{server: s, provider: s.dataset})
+	storagepb.RegisterOwnershipServer(registrar, &ownershipService{server: s, provider: s.dataset})
 	if s.state != nil {
 		storagepb.RegisterEventsServer(registrar, &eventsService{server: s, provider: s.state})
 		storagepb.RegisterMessagesServer(registrar, &messagesService{server: s, provider: s.state})
@@ -1320,6 +1579,232 @@ func (service *messagesService) SendMessage(ctx context.Context, wireRequest *st
 		if wireResponse.Msg, err = toWireMessage(*a0); err != nil {
 			return nil, service.server.encodeError(ctx, &methodSendMessage, err)
 		}
+	}
+	return wireResponse, nil
+}
+
+// ownershipService serves orka.storage.v1.Ownership from a provider.
+type ownershipService struct {
+	storagepb.UnimplementedOwnershipServer
+	server   *Server
+	provider interface {
+		storagev1.OperationReceiptStore
+		storagev1.ControllerEpochAdvancer
+		storagev1.DatasetBindingStore
+		storagev1.WriteWatermarkStore
+	}
+}
+
+func (service *ownershipService) AdvanceControllerEpoch(ctx context.Context, wireRequest *storagepb.AdvanceControllerEpochRequest) (*storagepb.AdvanceControllerEpochResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.AdvanceControllerEpochRequest
+	if a0, err = fromWireAdvanceControllerEpochRequest(wireRequest, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	var r0 storagev1.ControllerEpochMirrorState
+	r0, err = service.provider.AdvanceControllerEpoch(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodAdvanceControllerEpoch, err)
+	}
+	wireResponse := &storagepb.AdvanceControllerEpochResponse{}
+	if wireResponse.State, err = toWireControllerEpochMirrorState(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodAdvanceControllerEpoch, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) AdvanceWriteWatermark(ctx context.Context, wireRequest *storagepb.AdvanceWriteWatermarkRequest) (*storagepb.AdvanceWriteWatermarkResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	if err := service.server.checkDigest(ctx, &methodAdvanceWriteWatermark); err != nil {
+		return nil, err
+	}
+	var r0 storagev1.WriteWatermark
+	r0, err = service.provider.AdvanceWriteWatermark(ctx)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodAdvanceWriteWatermark, err)
+	}
+	wireResponse := &storagepb.AdvanceWriteWatermarkResponse{}
+	if wireResponse.Watermark, err = toWireWriteWatermark(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodAdvanceWriteWatermark, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) BindDataset(ctx context.Context, wireRequest *storagepb.BindDatasetRequest) (*storagepb.BindDatasetResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.BindDatasetRequest
+	if a0, err = fromWireBindDatasetRequest(wireRequest, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	var r0 storagev1.DatasetBinding
+	r0, err = service.provider.BindDataset(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodBindDataset, err)
+	}
+	wireResponse := &storagepb.BindDatasetResponse{}
+	if wireResponse.Binding, err = toWireDatasetBinding(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodBindDataset, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) CompleteDatasetBootstrap(ctx context.Context, wireRequest *storagepb.CompleteDatasetBootstrapRequest) (*storagepb.CompleteDatasetBootstrapResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 string
+	a0 = wireRequest.DatasetId
+	err = service.provider.CompleteDatasetBootstrap(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodCompleteDatasetBootstrap, err)
+	}
+	wireResponse := &storagepb.CompleteDatasetBootstrapResponse{}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) DetachDatasetBinding(ctx context.Context, wireRequest *storagepb.DetachDatasetBindingRequest) (*storagepb.DetachDatasetBindingResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.DetachDatasetRequest
+	if a0, err = fromWireDetachDatasetRequest(wireRequest.Request, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	var r0 storagev1.DatasetBinding
+	r0, err = service.provider.DetachDatasetBinding(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodDetachDatasetBinding, err)
+	}
+	wireResponse := &storagepb.DetachDatasetBindingResponse{}
+	if wireResponse.Binding, err = toWireDatasetBinding(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodDetachDatasetBinding, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) GetControllerEpochMirror(ctx context.Context, wireRequest *storagepb.GetControllerEpochMirrorRequest) (*storagepb.GetControllerEpochMirrorResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 string
+	a0 = wireRequest.Name
+	var r0 storagev1.ControllerEpochMirrorState
+	r0, err = service.provider.GetControllerEpochMirror(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodGetControllerEpochMirror, err)
+	}
+	wireResponse := &storagepb.GetControllerEpochMirrorResponse{}
+	if wireResponse.State, err = toWireControllerEpochMirrorState(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodGetControllerEpochMirror, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) GetDatasetBinding(ctx context.Context, wireRequest *storagepb.GetDatasetBindingRequest) (*storagepb.GetDatasetBindingResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 string
+	a0 = wireRequest.DatasetId
+	var r0 storagev1.DatasetBinding
+	r0, err = service.provider.GetDatasetBinding(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodGetDatasetBinding, err)
+	}
+	wireResponse := &storagepb.GetDatasetBindingResponse{}
+	if wireResponse.Binding, err = toWireDatasetBinding(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodGetDatasetBinding, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) GetWriteWatermark(ctx context.Context, wireRequest *storagepb.GetWriteWatermarkRequest) (*storagepb.GetWriteWatermarkResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var r0 storagev1.WriteWatermark
+	r0, err = service.provider.GetWriteWatermark(ctx)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodGetWriteWatermark, err)
+	}
+	wireResponse := &storagepb.GetWriteWatermarkResponse{}
+	if wireResponse.Watermark, err = toWireWriteWatermark(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodGetWriteWatermark, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) PruneOperationReceipts(ctx context.Context, wireRequest *storagepb.PruneOperationReceiptsRequest) (*storagepb.PruneOperationReceiptsResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 int
+	if a0, err = intFromWire(wireRequest.Limit, "PruneOperationReceipts.limit"); err != nil {
+		return nil, requestStatus(err)
+	}
+	var r0 int
+	r0, err = service.provider.PruneOperationReceipts(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodPruneOperationReceipts, err)
+	}
+	wireResponse := &storagepb.PruneOperationReceiptsResponse{}
+	wireResponse.Removed = int64(r0)
+	return wireResponse, nil
+}
+
+func (service *ownershipService) ResolveOperation(ctx context.Context, wireRequest *storagepb.ResolveOperationRequest) (*storagepb.ResolveOperationResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.ResolveOperationRequest
+	if a0, err = fromWireResolveOperationRequest(wireRequest, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	var r0 storagev1.OperationOutcome
+	r0, err = service.provider.ResolveOperation(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodResolveOperation, err)
+	}
+	wireResponse := &storagepb.ResolveOperationResponse{}
+	if wireResponse.Outcome, err = toWireOperationOutcome(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodResolveOperation, err)
+	}
+	return wireResponse, nil
+}
+
+func (service *ownershipService) UpdateBindingKeyFingerprint(ctx context.Context, wireRequest *storagepb.UpdateBindingKeyFingerprintRequest) (*storagepb.UpdateBindingKeyFingerprintResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.UpdateBindingKeyRequest
+	if a0, err = fromWireUpdateBindingKeyRequest(wireRequest.Request, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	var r0 storagev1.DatasetBinding
+	r0, err = service.provider.UpdateBindingKeyFingerprint(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodUpdateBindingKeyFingerprint, err)
+	}
+	wireResponse := &storagepb.UpdateBindingKeyFingerprintResponse{}
+	if wireResponse.Binding, err = toWireDatasetBinding(r0); err != nil {
+		return nil, service.server.encodeError(ctx, &methodUpdateBindingKeyFingerprint, err)
 	}
 	return wireResponse, nil
 }

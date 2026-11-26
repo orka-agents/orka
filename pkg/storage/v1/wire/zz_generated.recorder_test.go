@@ -29,6 +29,17 @@ var wireMethods = []string{
 	"DeleteTaskMessages",
 	"ListUnreadMessages",
 	"SendMessage",
+	"AdvanceControllerEpoch",
+	"AdvanceWriteWatermark",
+	"BindDataset",
+	"CompleteDatasetBootstrap",
+	"DetachDatasetBinding",
+	"GetControllerEpochMirror",
+	"GetDatasetBinding",
+	"GetWriteWatermark",
+	"PruneOperationReceipts",
+	"ResolveOperation",
+	"UpdateBindingKeyFingerprint",
 	"DeletePlan",
 	"DeleteResult",
 	"GetPlan",
@@ -151,6 +162,62 @@ func (p *recordingProvider) SendMessage(ctx context.Context, msg *storagev1.Mess
 	writeBackInto(p.writtenFor("SendMessage"), 0, msg)
 	_ = results
 	return err
+}
+
+func (p *recordingProvider) AdvanceControllerEpoch(ctx context.Context, request storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	results, err := p.called(ctx, "AdvanceControllerEpoch", request)
+	return resultAs[storagev1.ControllerEpochMirrorState](results, 0), err
+}
+
+func (p *recordingProvider) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	results, err := p.called(ctx, "AdvanceWriteWatermark")
+	return resultAs[storagev1.WriteWatermark](results, 0), err
+}
+
+func (p *recordingProvider) BindDataset(ctx context.Context, request storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "BindDataset", request)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
+}
+
+func (p *recordingProvider) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
+	results, err := p.called(ctx, "CompleteDatasetBootstrap", datasetID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) DetachDatasetBinding(ctx context.Context, request storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "DetachDatasetBinding", request)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
+}
+
+func (p *recordingProvider) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	results, err := p.called(ctx, "GetControllerEpochMirror", name)
+	return resultAs[storagev1.ControllerEpochMirrorState](results, 0), err
+}
+
+func (p *recordingProvider) GetDatasetBinding(ctx context.Context, datasetID string) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "GetDatasetBinding", datasetID)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
+}
+
+func (p *recordingProvider) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	results, err := p.called(ctx, "GetWriteWatermark")
+	return resultAs[storagev1.WriteWatermark](results, 0), err
+}
+
+func (p *recordingProvider) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
+	results, err := p.called(ctx, "PruneOperationReceipts", limit)
+	return resultAs[int](results, 0), err
+}
+
+func (p *recordingProvider) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	results, err := p.called(ctx, "ResolveOperation", request)
+	return resultAs[storagev1.OperationOutcome](results, 0), err
+}
+
+func (p *recordingProvider) UpdateBindingKeyFingerprint(ctx context.Context, request storagev1.UpdateBindingKeyRequest) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "UpdateBindingKeyFingerprint", request)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
 }
 
 func (p *recordingProvider) DeletePlan(ctx context.Context, namespace string, taskName string) error {

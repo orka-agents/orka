@@ -1,0 +1,223 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/common.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Ownership settles operations, advances each dataset's controller epoch,
+// binds the dataset to an installation and keeps its write watermark. Every
+// contract part requires these interfaces, so a state.v1 or an artifacts.v1
+// server serves them. Each administrative RPC carries no write envelope;
+// AdvanceWriteWatermark is a write and carries one. A transport failure after
+// an administrative RPC or a write may have been sent is an unknown outcome;
+// each is safe to repeat.
+service Ownership {
+  option (go_interface) = "OperationReceiptStore";
+  option (go_interface) = "ControllerEpochAdvancer";
+  option (go_interface) = "DatasetBindingStore";
+  option (go_interface) = "WriteWatermarkStore";
+
+  rpc ResolveOperation(ResolveOperationRequest) returns (ResolveOperationResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 4;
+  }
+  rpc PruneOperationReceipts(PruneOperationReceiptsRequest) returns (PruneOperationReceiptsResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 4;
+  }
+  rpc AdvanceControllerEpoch(AdvanceControllerEpochRequest) returns (AdvanceControllerEpochResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 4;
+  }
+  rpc GetControllerEpochMirror(GetControllerEpochMirrorRequest) returns (GetControllerEpochMirrorResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 4;
+  }
+  rpc BindDataset(BindDatasetRequest) returns (BindDatasetResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 4;
+  }
+  rpc GetDatasetBinding(GetDatasetBindingRequest) returns (GetDatasetBindingResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 4;
+  }
+  rpc DetachDatasetBinding(DetachDatasetBindingRequest) returns (DetachDatasetBindingResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 4;
+  }
+  rpc UpdateBindingKeyFingerprint(UpdateBindingKeyFingerprintRequest) returns (UpdateBindingKeyFingerprintResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 4;
+  }
+  rpc CompleteDatasetBootstrap(CompleteDatasetBootstrapRequest) returns (CompleteDatasetBootstrapResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 4;
+  }
+  rpc AdvanceWriteWatermark(AdvanceWriteWatermarkRequest) returns (AdvanceWriteWatermarkResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 4;
+  }
+  rpc GetWriteWatermark(GetWriteWatermarkRequest) returns (GetWriteWatermarkResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 4;
+  }
+}
+
+// ResolveOperationRequest is both the contract record ResolveOperation takes
+// and the RPC's request message.
+message ResolveOperationRequest {
+  string dataset_id = 1;
+  string operation_id = 2;
+  string method = 3;
+  string request_digest = 4;
+  google.protobuf.Timestamp issued_at = 5;
+}
+
+message OperationOutcome {
+  string operation_id = 1;
+  string method = 2;
+  string request_digest = 3;
+  string state = 4;
+  ControllerEpochFence fence = 5;
+  google.protobuf.Timestamp issued_at = 6;
+  google.protobuf.Timestamp recorded_at = 7;
+}
+
+message ResolveOperationResponse {
+  OperationOutcome outcome = 1;
+}
+
+message PruneOperationReceiptsRequest {
+  int64 limit = 1;
+}
+
+message PruneOperationReceiptsResponse {
+  int64 removed = 1;
+}
+
+// ControllerEpoch is the durable compare-and-swap record of controller
+// ownership.
+message ControllerEpoch {
+  string name = 1;
+  int64 epoch = 2;
+  string holder_id = 3;
+  string request_digest = 4;
+  int64 version = 5;
+  google.protobuf.Timestamp acquired_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// AdvanceControllerEpochRequest is both the contract record
+// AdvanceControllerEpoch takes and the RPC's request message.
+message AdvanceControllerEpochRequest {
+  string dataset_id = 1;
+  ControllerEpoch epoch = 2;
+  string installation_id = 3;
+  int64 acknowledged_epoch = 4;
+}
+
+message ControllerEpochMirrorState {
+  string dataset_id = 1;
+  ControllerEpoch epoch = 2;
+  string installation_id = 3;
+  ControllerEpochFence previous = 4;
+  google.protobuf.Timestamp advanced_at = 5;
+}
+
+message AdvanceControllerEpochResponse {
+  ControllerEpochMirrorState state = 1;
+}
+
+message GetControllerEpochMirrorRequest {
+  string name = 1;
+}
+
+message GetControllerEpochMirrorResponse {
+  ControllerEpochMirrorState state = 1;
+}
+
+// BindDatasetRequest is both the contract record BindDataset takes and the
+// RPC's request message.
+message BindDatasetRequest {
+  string dataset_id = 1;
+  string installation_id = 2;
+  string record_uid = 3;
+  int64 switch_generation = 4;
+  string key_fingerprint = 5;
+  string mode = 6;
+}
+
+message BindDatasetResponse {
+  DatasetBinding binding = 1;
+}
+
+message GetDatasetBindingRequest {
+  string dataset_id = 1;
+}
+
+message GetDatasetBindingResponse {
+  DatasetBinding binding = 1;
+}
+
+// DetachDatasetRequest is the contract record DetachDatasetBinding takes.
+message DetachDatasetRequest {
+  string dataset_id = 1;
+  string installation_id = 2;
+  string record_uid = 3;
+  int64 switch_generation = 4;
+}
+
+message DetachDatasetBindingRequest {
+  DetachDatasetRequest request = 1;
+}
+
+message DetachDatasetBindingResponse {
+  DatasetBinding binding = 1;
+}
+
+// UpdateBindingKeyRequest is the contract record UpdateBindingKeyFingerprint
+// takes.
+message UpdateBindingKeyRequest {
+  string dataset_id = 1;
+  string installation_id = 2;
+  string record_uid = 3;
+  int64 switch_generation = 4;
+  string previous_key_fingerprint = 5;
+  string key_fingerprint = 6;
+}
+
+message UpdateBindingKeyFingerprintRequest {
+  UpdateBindingKeyRequest request = 1;
+}
+
+message UpdateBindingKeyFingerprintResponse {
+  DatasetBinding binding = 1;
+}
+
+message CompleteDatasetBootstrapRequest {
+  string dataset_id = 1;
+}
+
+message CompleteDatasetBootstrapResponse {}
+
+message WriteWatermark {
+  string dataset_id = 1;
+  int64 value = 2;
+  google.protobuf.Timestamp advanced_at = 3;
+}
+
+message AdvanceWriteWatermarkRequest {}
+
+message AdvanceWriteWatermarkResponse {
+  WriteWatermark watermark = 1;
+}
+
+message GetWriteWatermarkRequest {}
+
+message GetWriteWatermarkResponse {
+  WriteWatermark watermark = 1;
+}
