@@ -334,6 +334,77 @@ func TestRepositoryMonitorRecoversInterruptedCommandRecordings(t *testing.T) {
 	}
 }
 
+func TestRepositoryMonitorRecoveryLeavesCommandsIntakeAlreadyAccepted(t *testing.T) {
+	retryPending := func(t *testing.T, monitorStore store.RepositoryMonitorStore, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) {
+		t.Helper()
+		if _, err := monitorStore.MarkWorkActionRetryPending(context.Background(), store.MarkWorkActionRetryPendingRequest{Namespace: monitor.Namespace,
+			ID: store.RepositoryMonitorWorkActionID(command.ID, "triage"), RunID: repositoryMonitorCommandRunIDFromCommand(command.ID),
+			BlockedReason: store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, Error: "signal failed"}); err != nil {
+			t.Fatalf("MarkWorkActionRetryPending() error = %v", err)
+		}
+	}
+	setStatus := func(status string) func(*testing.T, store.RepositoryMonitorStore, *corev1alpha1.RepositoryMonitor, *store.CommandEvent) {
+		return func(t *testing.T, monitorStore store.RepositoryMonitorStore, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) {
+			t.Helper()
+			action, err := monitorStore.GetWorkAction(context.Background(), monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, "triage"))
+			if err != nil {
+				t.Fatalf("GetWorkAction() error = %v", err)
+			}
+			action.Status = status
+			if err := monitorStore.UpdateWorkAction(context.Background(), action); err != nil {
+				t.Fatalf("UpdateWorkAction() error = %v", err)
+			}
+		}
+	}
+	cases := []struct {
+		name string
+		// acceptInStore records the redelivery's acceptance before recovery
+		// runs. Without it, the redelivery accepts the command between
+		// recovery's read of the command and its read of the action.
+		acceptInStore bool
+		advance       func(*testing.T, store.RepositoryMonitorStore, *corev1alpha1.RepositoryMonitor, *store.CommandEvent)
+		wantCommand   string
+		wantAction    string
+	}{
+		{name: "stale listing, run signal failed", acceptInStore: true, advance: retryPending, wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusRetryPending},
+		{name: "stale listing, action running", acceptInStore: true, advance: setStatus(store.RepositoryMonitorWorkActionStatusRunning), wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusRunning},
+		{name: "stale listing, action completed", acceptInStore: true, advance: setStatus(store.RepositoryMonitorWorkActionStatusCompleted), wantCommand: repositoryMonitorCommandAccepted, wantAction: store.RepositoryMonitorWorkActionStatusCompleted},
+		{name: "accepted after the command read, run signal failed", advance: retryPending, wantCommand: repositoryMonitorCommandRecording, wantAction: store.RepositoryMonitorWorkActionStatusRetryPending},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			reconciler, monitor, monitorStore := commandContextTestReconciler(t)
+			old := time.Now().Add(-repositoryMonitorCommandRecordingGrace - time.Minute)
+			command := &store.CommandEvent{ID: "cmd-accepted", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 77,
+				Source: "github_comment", CommentID: "cmd-accepted", Command: "triage", Intent: "triage", Status: repositoryMonitorCommandRecording, CreatedAt: old}
+			if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+				t.Fatalf("CreateCommandEvent() error = %v", err)
+			}
+			commandContextTestWorkAction(t, monitorStore, monitor, command, RepositoryMonitorCommandContextMetadata(SanitizeRepositoryMonitorCommandContext("look"), "maintainer", ""))
+			listed := *command
+			if tc.acceptInStore {
+				command.Status = repositoryMonitorCommandAccepted
+				if err := monitorStore.UpdateCommandEvent(ctx, command); err != nil {
+					t.Fatalf("UpdateCommandEvent() error = %v", err)
+				}
+			}
+			tc.advance(t, monitorStore, monitor, command)
+
+			settled, err := reconciler.recoverRepositoryMonitorCommandRecording(ctx, monitor, &listed)
+			if err != nil || !settled {
+				t.Fatalf("recover settled=%v err=%v, want settled without error", settled, err)
+			}
+			if got, err := monitorStore.GetCommandEvent(ctx, monitor.Namespace, command.ID); err != nil || got.Status != tc.wantCommand {
+				t.Fatalf("command = %#v err = %v, want status %q: recovery must not reject a command intake accepted", got, err, tc.wantCommand)
+			}
+			if got, err := monitorStore.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, "triage")); err != nil || got.Status != tc.wantAction {
+				t.Fatalf("action = %#v err = %v, want status %q", got, err, tc.wantAction)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorRecoveryDrainsRecordingsBeyondOnePage(t *testing.T) {
 	ctx := context.Background()
 	reconciler, monitor, monitorStore := commandContextTestReconciler(t)

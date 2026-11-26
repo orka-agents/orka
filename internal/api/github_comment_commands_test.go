@@ -602,6 +602,74 @@ func TestGitHubCommentCommand_RedeliveryFinishesAnInterruptedIntake(t *testing.T
 	}
 }
 
+// advanceAfterReadStore lets the controller start a work action right after
+// intake reads it, the interleaving an interrupted redelivery can hit.
+type advanceAfterReadStore struct {
+	store.RepositoryMonitorStore
+	actionID string
+	advanced bool
+}
+
+func (s *advanceAfterReadStore) GetWorkAction(ctx context.Context, namespace, id string) (*store.WorkAction, error) {
+	action, err := s.RepositoryMonitorStore.GetWorkAction(ctx, namespace, id)
+	if err != nil || id != s.actionID || s.advanced {
+		return action, err
+	}
+	s.advanced = true
+	running := *action
+	running.Status = store.RepositoryMonitorWorkActionStatusRunning
+	running.Phase = "plan_running"
+	running.TaskName = "plan-task"
+	if updateErr := s.RepositoryMonitorStore.UpdateWorkAction(ctx, &running); updateErr != nil {
+		return nil, updateErr
+	}
+	return action, nil
+}
+
+func TestGitHubCommentCommand_RedeliveryDoesNotRewindAnAdvancedWorkAction(t *testing.T) {
+	var advancing *advanceAfterReadStore
+	env := newCommentTestEnvWithStore(t, nil, func(inner store.RepositoryMonitorStore) store.RepositoryMonitorStore {
+		advancing = &advanceAfterReadStore{RepositoryMonitorStore: inner}
+		return advancing
+	})
+	payload := commentTestPayload{commentID: 809, body: "/orka plan keep the API stable"}
+	dedupe := repositoryMonitorCommentCommandDedupeKey(env.monitor, githubWebhookRepository{FullName: "sozercan/vekil"}, "809")
+	now := time.Now()
+	command := &store.CommandEvent{
+		ID: repositoryMonitorCommandID(dedupe), MonitorNamespace: env.monitor.Namespace, MonitorName: env.monitor.Name, Repo: "sozercan/vekil",
+		Kind: repositoryMonitorTargetKindIssue, Number: commentTestIssue, Source: githubCommandEventSourceComment, CommentID: "809",
+		Author: commentTestAuthor, Command: commandIntentPlan, Intent: commandIntentPlan, DedupeKey: dedupe, IdempotencyKey: dedupe,
+		Status: githubCommandStatusRecording, CreatedAt: now, ProcessedAt: &now,
+	}
+	if err := env.store.CreateCommandEvent(t.Context(), command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	// The interrupted intake stored the action and its context, then stopped
+	// before accepting the command.
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	if err := env.store.CreateWorkAction(t.Context(), &store.WorkAction{
+		ID: actionID, MonitorNamespace: env.monitor.Namespace, MonitorName: env.monitor.Name, CommandEventID: command.ID,
+		TargetKind: command.Kind, TargetNumber: command.Number, Intent: commandIntentPlan, DesiredAction: commandIntentPlan,
+		DedupeKey: dedupe, Status: store.RepositoryMonitorWorkActionStatusQueued, Phase: "plan_queued", CreatedAt: now,
+		MetadataJSON: `{"source":"github_comment"}`,
+	}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	advancing.actionID = actionID
+
+	env.deliver(t, "delivery-retry-advanced", payload)
+	if !advancing.advanced {
+		t.Fatal("the redelivery never read the work action")
+	}
+	action, err := env.store.GetWorkAction(t.Context(), env.monitor.Namespace, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusRunning || action.TaskName != "plan-task" {
+		t.Fatalf("action = %#v, want the controller's running state and task kept", action)
+	}
+}
+
 type failWorkActionCreateStore struct {
 	store.RepositoryMonitorStore
 }
