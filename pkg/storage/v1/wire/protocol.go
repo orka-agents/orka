@@ -8,7 +8,7 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
-const ProtocolRevision = 2
+const ProtocolRevision = 4
 
 const (
 	HeaderContract      = "orka-storage-contract"

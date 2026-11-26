@@ -400,3 +400,32 @@ func TestServerReportsCalls(t *testing.T) {
 	require.Equal(t, storagev1.CallInteractive, call.Class)
 	require.Equal(t, wire.ReasonNotFound, call.Reason)
 }
+
+func TestOwnershipIsRefusedWhenTheProvidersDisagree(t *testing.T) {
+	state := newRecordingProvider()
+	artifacts := newSeparateProvider(testDataset)
+	server, err := wire.NewServer(wire.ServerConfig{State: state, Artifacts: artifacts})
+	require.NoError(t, err)
+	client := wire.NewClient(serveInsecure(t, server), boundConfig)
+	state.set("GetWriteWatermark", []any{storagev1.WriteWatermark{DatasetID: testDataset, Value: 1}}, nil)
+	_, err = client.GetWriteWatermark(t.Context())
+	require.NoError(t, err)
+
+	artifacts.dataset.Store(new("replacement-artifacts"))
+	_, err = client.ResolveOperation(t.Context(), storagev1.ResolveOperationRequest{
+		DatasetID: testDataset, OperationID: "op", Method: "SaveArtifact", RequestDigest: "digest", IssuedAt: time.Now(),
+	})
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	_, err = client.AdvanceControllerEpoch(t.Context(), storagev1.AdvanceControllerEpochRequest{DatasetID: testDataset})
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	_, err = client.GetDatasetBinding(t.Context(), testDataset)
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	_, err = client.GetWriteWatermark(t.Context())
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	require.Empty(t, server.DatasetID())
+	for _, method := range []string{"ResolveOperation", "AdvanceControllerEpoch", "GetDatasetBinding"} {
+		require.Empty(t, state.callsTo(method), method)
+		require.Empty(t, artifacts.callsTo(method), method)
+	}
+	require.Len(t, state.callsTo("GetWriteWatermark"), 1, "only the call made while the providers agreed ran")
+}

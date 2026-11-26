@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,18 +30,24 @@ func realModel(t *testing.T) *model {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := buildModel(contract, storagev1.LookupMethod, wireFiles(), 2)
+	m, err := buildModel(contract, storagev1.LookupMethod, wireFiles(), currentRevision(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return m
 }
 
-func TestGeneratedFilesAreCurrent(t *testing.T) {
+func currentRevision(t *testing.T) int {
+	t.Helper()
 	revision, err := loadProtocolRevision(filepath.Join(testWireDir, "protocol.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	return revision
+}
+
+func TestGeneratedFilesAreCurrent(t *testing.T) {
+	revision := currentRevision(t)
 	contract, err := loadContract(testContractDir)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +82,7 @@ func expectCatalogProblem(t *testing.T, contractDir string, catalog lookupMethod
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = buildModel(contract, catalog, files, 2)
+	_, err = buildModel(contract, catalog, files, currentRevision(t))
 	if err == nil {
 		t.Fatalf("generation succeeded; want a failure naming %q", want)
 	}
@@ -220,10 +227,11 @@ func TestGenerationFailsOnATypeOutsideTheMappingTable(t *testing.T) {
 }
 
 func TestGenerationFailsOnInconsistentRevisions(t *testing.T) {
+	revision := currentRevision(t)
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
 		for _, method := range protos["orka/storage/v1/results.proto"].GetService()[0].GetMethod() {
 			if method.GetName() == "GetPlan" {
-				proto.SetExtension(method.GetOptions(), storagepb.E_RpcSince, int32(3))
+				proto.SetExtension(method.GetOptions(), storagepb.E_RpcSince, int32(revision+1))
 			}
 		}
 		for _, field := range message(t, protos, "results.proto", "SavePlanRequest").GetField() {
@@ -241,7 +249,7 @@ func TestGenerationFailsOnInconsistentRevisions(t *testing.T) {
 		}
 	})
 	expectProblem(t, testContractDir, files,
-		"orka.storage.v1.Results.GetPlan has rpc_since 3 outside 1 to 2",
+		fmt.Sprintf("orka.storage.v1.Results.GetPlan has rpc_since %d outside 1 to %d", revision+1, revision),
 		"request field orka.storage.v1.SavePlanRequest.plan has since 1",
 		"orka.storage.v1.Messages.SendMessage declares no kind")
 }
@@ -265,12 +273,12 @@ func TestNewerRequestFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = buildModel(contract, storagev1.LookupMethod, newer("SavePlanRequest"), 2)
+	_, err = buildModel(contract, storagev1.LookupMethod, newer("SavePlanRequest"), currentRevision(t))
 	if err == nil || !strings.Contains(err.Error(), "request field orka.storage.v1.SavePlanRequest.task_name of write SavePlan cannot declare since") {
 		t.Fatalf("a write with a newer request field generated: %v", err)
 	}
 
-	m, err := buildModel(contract, storagev1.LookupMethod, newer("GetPlanRequest"), 2)
+	m, err := buildModel(contract, storagev1.LookupMethod, newer("GetPlanRequest"), currentRevision(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +418,11 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 	for _, name := range []string{"Describe", "HealthCheck", "SendMessage", "ListUnreadMessages", "ConsumeMessages",
 		"DeleteTaskMessages", "DeleteParentMessages", "SavePlan", "GetPlan", "DeletePlan", "SaveResult", "GetResult",
 		"DeleteResult", "SavePromptResultReceipt", "GetPromptResultReceipt", "SaveArtifact", "GetArtifact",
-		"ListArtifacts", "DeleteArtifacts"} {
+		"ListArtifacts", "DeleteArtifacts", "AppendExecutionEvent", "ListExecutionEvents", "ListSessionExecutionEvents",
+		"GetLatestExecutionEventSeq", "GetLatestExecutionEventSeqs", "DeleteExecutionEvents", "AppendExecutionEventIfAbsent",
+		"AppendExecutionEventWithPlanIfAbsent", "AppendExecutionEventsIfAbsent", "ResolveOperation", "PruneOperationReceipts",
+		"AdvanceControllerEpoch", "GetControllerEpochMirror", "BindDataset", "GetDatasetBinding", "DetachDatasetBinding",
+		"UpdateBindingKeyFingerprint", "CompleteDatasetBootstrap", "AdvanceWriteWatermark", "GetWriteWatermark"} {
 		if !methods[name] {
 			t.Errorf("method %s has no RPC", name)
 		}
@@ -422,7 +434,9 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 	for _, name := range []string{"Message", "ConsumeMessagesRequest", "PlanState", "ProviderInfo", "ProviderLimits",
 		"DatasetBootstrap", "DatasetUsage", "DatasetBinding", "BindingConflictError", "WriteEnvelope",
 		"ControllerEpochFence", "TaskDataFence", "TaskJobIdentity", "PromptResultReceipt", "ArtifactOwner",
-		"ArtifactKey", "ArtifactMetadata", "SaveArtifactRequest"} {
+		"ArtifactKey", "ArtifactMetadata", "SaveArtifactRequest", "ExecutionEvent", "SessionExecutionEvent",
+		"ExecutionEventUsage", "UsageObservation", "ExecutionEventAppend", "ExecutionEventAppendResult", "OperationOutcome",
+		"ControllerEpoch", "ControllerEpochMirrorState", "DetachDatasetRequest", "UpdateBindingKeyRequest", "WriteWatermark"} {
 		if !records[name] {
 			t.Errorf("record %s is not mapped", name)
 		}

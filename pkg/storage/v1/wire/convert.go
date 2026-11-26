@@ -17,6 +17,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+func intFromWire(value int64, field string) (int, error) {
+	if value < math.MinInt || value > math.MaxInt {
+		return 0, storagev1.ValidationErrorf("%s is outside the supported integer range", field)
+	}
+	return int(value), nil
+}
+
 func timeToWire(t time.Time, field string) (*timestamppb.Timestamp, error) {
 	if t.IsZero() {
 		return nil, nil
@@ -107,7 +114,7 @@ func jsonMapToWire(value map[string]any, field string) (*storagepb.JSONValue, er
 }
 
 func rawJSONToWire(value json.RawMessage, field string) (*storagepb.JSONValue, error) {
-	if len(value) == 0 {
+	if len(bytes.TrimSpace(value)) == 0 {
 		return nil, nil
 	}
 	if !json.Valid(value) {

@@ -11,7 +11,7 @@ non-obvious decision in `internal/store`, `internal/storageclient`, `internal/st
 ## Context
 
 Round 2 of the comment cleanup classified every comment left after
-[ADR 0063](0063-code-comment-decisions-round-1.md). In `internal/store`, `internal/storageclient`, `internal/storageconfig`, and `pkg/storage` it found 1078 distinct decisions
+[ADR 0063](0063-code-comment-decisions-round-1.md). In `internal/store`, `internal/storageclient`, `internal/storageconfig`, and `pkg/storage` it found 1083 distinct decisions
 that a reader of the code alone could get wrong. Comments that stated the same rule in several
 places are merged into one entry. Where an earlier ADR already records a decision, the entry
 links it.
@@ -1081,6 +1081,10 @@ grouped by package and ordered by source position as of round 2.
 - **Servers refuse unknown request fields** (`wire.hasUnknownFields`): The storage server refuses any request, or any message of a request stream, carrying a field it does not know anywhere in its message tree (UNSUPPORTED_FIELD, via wire.hasUnknownFields), so an older server never silently ignores a newer precondition a client sent.
 - **Providers, not the server library, refuse writes without envelopes** (`wire.withEnvelope`): The wire server library forwards a write that carries no envelope to the provider unchanged; refusing it is the provider's job, which the conformance suite's missing-envelopes family checks over the wire. Do not add a server-side refusal that would hide a provider that fails to enforce it.
 - **Plaintext test loopback only for below-TLS fault injection** (`wire.serveInsecure`): The wire tests' serveInsecure helper serves without TLS and is reserved for tests that inject transport faults below TLS; every other test uses wiretest, which always uses TLS so the protocol is exercised as deployed.
+- **Wire integers outside int range are refused** (`wire.intFromWire`): wire.intFromWire refuses a protobuf int64 outside the architecture's int range, so a 32-bit server never silently truncates a 64-bit client's limit or count.
+- **Blank raw JSON is an absent field** (`wire.rawJSONToWire`): wire.rawJSONToWire carries json.RawMessage bytes unchanged, but empty or whitespace-only bytes are an absent field, because they are zero in a request digest and no content to a provider.
+- **The dataset's owner answers Ownership** (`wire.datasetProvider.owner`): Operation receipts, the controller epoch, the dataset binding and the write watermark are one record per dataset, so a server serving both contract parts answers Ownership from its state provider, as it answers Describe, and an artifacts-only server asks its artifacts provider.
+- **Ownership is refused when providers disagree on the dataset** (`wire.datasetProvider.owner`): When the artifacts provider reports a different dataset from the state provider, even one that changed since the last description, an Ownership call is refused before any provider runs, so an artifacts write is never resolved, fenced or bound against the state provider's records.
 
 ### `pkg/storage/v1/wire/adapterkit`
 
@@ -1132,6 +1136,7 @@ grouped by package and ordered by source position as of round 2.
 - **Write requests cannot gain revision-gated fields** (`wiregen.builder.bindParams`): wiregen.builder.bindParams refuses a since revision annotation on any request field of a write, because a write's request digest covers every parameter and an older server that does not take the field could not recompute the digest; only reads and administrative calls can gain newer request fields.
 - **Decoded byte fields are never nil** (`wiregen.fromWire`): The generated wire decoding (wiregen.fromWire) turns a nil bytes value into an empty slice because protobuf decodes empty bytes as nil, so a present record keeps the empty value a provider may require, exactly as it would receive in process.
 - **List streams stay on their call class's connection** (`wiregen.renderService`): The generated client sends a list-streaming RPC on the connection of the call's own class rather than the bulk connection, because a list is metadata, not a blob; only blob streams move to the bulk connection.
+- **Named types match aliases too** (`wiregen.isNamed`): wiregen.isNamed matches a type path.name whether it is declared as a defined type or an alias, because encoding/json.RawMessage is an alias in some Go releases.
 
 ### `pkg/storage/v1/wire/wiretest`
 
