@@ -125,6 +125,11 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion))
 		if config.BearerToken == nil {
 			opts = append(opts, azure.WithAPIKey(config.APIKey))
+		} else {
+			// openai-go needs an Azure authentication mode. The pinned
+			// bearer client attaches the token, so the SDK's own credential
+			// fetches none.
+			opts = append(opts, azure.WithTokenCredential(transportAuthenticated{}))
 		}
 		// openai-go refuses Azure credentials over plaintext HTTP. Opting in for an
 		// http:// endpoint still limits it to loopback destinations, such as a
