@@ -131,8 +131,9 @@ So the flip, the publication, and the attachment now land in **one workspace wri
   Desired state stays `Suspended`. A rival continuation waits for the flip instead of making its
   own.
 - **The RuntimePool.** It holds that pending resume's pool and treats it as not stopping. It
-  proves the previous instance terminated, rotates the consumed bootstrap material, and then, in
-  one optimistic write:
+  proves the previous instance terminated, rotates the consumed bootstrap material (usually
+  already done when the stop was proven; see ADR 0027, "Rotation timing"), and then, in one
+  optimistic write:
   - flips desired state to `Ready`;
   - publishes the next request with the retained data;
   - installs the staged attachment as `spec.attachment` at its epoch.
@@ -438,6 +439,28 @@ suite:
 Further latency now depends on the two re-admission hops that every spec write costs: core
 admission, then provider observation. Removing them would change ADR 0023's admission contract
 and is not done here.
+
+### 3. Early credential rotation on confirmed retirement (2026-11-20)
+
+Amending ADR 0027's cold-resume sequence: consumed one-time bootstrap material rotates as soon
+as the `RuntimePool` proves the stopped instance terminated and records `Stopped`, rather than
+waiting until the continuation publishes, so cold resume skips the rotation passes. The
+guarantees do not change:
+
+- **Same proof, same order.** Rotation runs only after the independent termination proof that
+  gated it at resume: exact Pod absence, or the core-authorized native-process termination of
+  the current instance. The credential path re-checks that proof, deletes the consumed Secret,
+  and observes it gone before it creates the replacement.
+- **The old instance never holds them.** The new credentials are created after the old
+  instance is proven terminated. They reach a runtime only through the sealed, signed
+  bootstrap, sent to the instance bound at the next attested startup. That startup renders the
+  rotated nonce and verification key into the template.
+- **No stale window.** The bootstrap-instance binding is cleared while no replacement request
+  exists. A request published under an older controller epoch still fails the frozen-fence
+  check.
+- **Fallback.** The early rotation is best effort. Cleanup-only controllers, an unavailable
+  epoch or configuration, or any failure leave the remaining steps to the unchanged rotation
+  before publication, which fails closed. An unused rotated Secret is deleted with the pool.
 
 ## Consequences
 

@@ -194,6 +194,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		return ctrl.Result{}, err
 	}
 	if w.Spec.Workload == nil || (w.Status.Allocation != nil && w.Status.Allocation.State == workspacev1alpha1.AllocationStopped) {
+		if externalPublishedSuccessorAwaitsProvider(w) {
+			// The provider has not reported the published request's allocation
+			// yet. Nothing is republished or rotated while it catches up.
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting,
+				"public workload request published; waiting for provider materialization")
+		}
 		if w.Spec.Workload != nil {
 			a := w.Status.Allocation
 			if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || a.Key != w.Spec.Workload.Key || a.Sequence != w.Spec.Workload.Sequence || a.Identity.RequestRevision != w.Spec.Workload.Revision || !a.Identity.Valid() || a.Startup != nil || w.Status.ObservedGeneration != w.Generation {
@@ -270,10 +276,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			return ctrl.Result{}, err
 		}
 	}
-	if err := r.bindExternalRuntimeInstanceEvidence(ctx, pool, w); err != nil {
+	// The instance evidence and the credential binding land in one pool write.
+	evidenceErr, bootstrapErr := r.bindExternalRuntimeInstanceAdmission(ctx, pool, w, auth, pod.UID)
+	if evidenceErr != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "startup conflicts with the independently observed instance fence")
 	}
-	if err := r.bindWorkspaceRuntimePoolBootstrapInstance(ctx, pool, auth, pod.UID); err != nil {
+	if bootstrapErr != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime instance conflicts with the private credential binding")
 	}
 	if err := r.recordExternalRuntimeServed(ctx, pool, w, pod); err != nil {
@@ -317,6 +325,20 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		acpRuntimeAdmission.served(ctx, uncachedReader(r.APIReader, r.Client), pool, request.Sequence)
 	}
 	return result, err
+}
+
+// externalPublishedSuccessorAwaitsProvider reports a workspace whose
+// published request is the cold boot that follows the stopped allocation the
+// provider still reports: same allocation key, the next sequence, naming that
+// exact instance as its predecessor. That is the window between publication
+// (and its core re-admission) and the provider's first report of the new
+// allocation, not a stopped allocation that fails to prove the current
+// runtime terminated.
+func externalPublishedSuccessorAwaitsProvider(w *workspacev1alpha1.ExecutionWorkspace) bool {
+	request, a := w.Spec.Workload, w.Status.Allocation
+	return request != nil && a != nil && a.State == workspacev1alpha1.AllocationStopped &&
+		a.Key == request.Key && a.Sequence+1 == request.Sequence && a.Identity.Valid() &&
+		request.PreviousInstance != nil && *request.PreviousInstance == a.Identity
 }
 
 func allocationOrEmpty(w *workspacev1alpha1.ExecutionWorkspace) workspacev1alpha1.AllocationObservation {
@@ -1035,7 +1057,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 		}
 		r.noteExternalRuntimeStopProven(pool, w)
-		return r.externalPoolStopped(ctx, pool, w)
+		// The Stopped report comes first and is unchanged. The rotation after
+		// it rests on the termination proof above, not on that record.
+		result, err := r.externalPoolStopped(ctx, pool, w)
+		if err == nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleStopped {
+			r.rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx, pool)
+		}
+		return result, err
 	}
 	tainted, err := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), w)
 	if err != nil {
@@ -1153,6 +1181,60 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		}
 	}
 	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for identity-bound provider termination and disposition")
+}
+
+// rotateWorkspaceRuntimePoolAuthAfterProvenStop rotates the private
+// credentials a stopped instance consumed once its termination is proven and
+// the pool records Stopped, instead of when a later cold boot is published,
+// so a resume does not wait for the rotation.
+//
+// It runs the same steps, in the same order, as the rotation before
+// publication (rotateConsumedWorkspaceRuntimePoolAuthSecret), under the same
+// proof: the caller has just observed the exact instance terminated, and
+// ensureExternalPrivateAuthCredential re-checks that proof before it deletes
+// the consumed Secret, observes its absence, and only then creates the fresh
+// one. The fresh credentials therefore postdate the old instance's proven
+// termination and were never delivered to it; they reach a runtime only
+// through the sealed bootstrap to the instance bound at the next attested
+// startup. The bootstrap-instance binding is cleared last, while no
+// replacement request exists.
+//
+// It is best effort. A failure leaves the remaining steps to the rotation
+// before publication, which is unchanged and still fails closed.
+func (r *RuntimePoolReconciler) rotateWorkspaceRuntimePoolAuthAfterProvenStop(ctx context.Context, pool *corev1alpha1.RuntimePool) {
+	if r.CleanupOnly || r.WorkspaceCleanupOnly {
+		return
+	}
+	if r.Epochs != nil {
+		if current, ready := r.Epochs.Current(); !ready || current.Epoch <= 0 {
+			return
+		}
+	}
+	cfg, err := r.runtimePoolConfig(pool)
+	if err != nil {
+		return
+	}
+	// Unpublish the consumed Secret, replace it, then clear the instance
+	// binding: one step per iteration, each on freshly read state.
+	for range 3 {
+		if binding, bindingErr := runtimePoolBootstrapInstanceBindingFromAnnotation(pool); bindingErr != nil || binding == nil {
+			return
+		}
+		auth, _, ensureErr := r.ensureRuntimePoolSecrets(ctx, pool, cfg)
+		if ensureErr != nil {
+			err = ensureErr
+			break
+		}
+		rotating, rotateErr := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, auth)
+		if rotateErr != nil || !rotating {
+			err = rotateErr
+			break
+		}
+	}
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("Left private credential rotation to the next cold boot",
+			"runtimePool", pool.Name, "error", err.Error())
+	}
 }
 
 // externalPoolStopped records a stopped instance. An eviction outcome is
@@ -1359,13 +1441,25 @@ func externalRuntimeEvidence(pool *corev1alpha1.RuntimePool) (*externalRuntimeIn
 }
 
 func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) error {
+	evidence, err := desiredExternalRuntimeInstanceEvidence(pool, w)
+	if err != nil || evidence == "" {
+		return err
+	}
+	return r.patchExternalRuntimeAdmissionBindings(ctx, pool, evidence, "")
+}
+
+// desiredExternalRuntimeInstanceEvidence returns the instance-evidence
+// annotation the current startup requires, or "" when the pool already
+// records exactly it. It refuses evidence that does not continue the recorded
+// instance's lineage.
+func desiredExternalRuntimeInstanceEvidence(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (string, error) {
 	a := w.Status.Allocation
 	binding := externalRuntimeInstanceEvidence{WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Endpoint: a.Startup.Endpoint}
 	if a.Startup.Process != nil {
 		var err error
 		binding.RuntimeUID, _, err = externalNativeRuntimeIdentity(w.Spec.Workload, a.Identity.InstanceID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		binding.Pod = a.Startup.Process.Worker
 		binding.NativeProcess = true
@@ -1375,25 +1469,75 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 	}
 	previous, err := externalRuntimeEvidence(pool)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if previous != nil {
 		if *previous == binding {
-			return nil
+			return "", nil
 		}
 		if previous.WorkspaceUID != w.UID || previous.Sequence+1 != binding.Sequence || w.Spec.Workload.PreviousInstance == nil || *w.Spec.Workload.PreviousInstance != previous.Identity {
-			return workspaceprovider.ErrStaleIdentity
+			return "", workspaceprovider.ErrStaleIdentity
 		}
 	}
 	encoded, err := json.Marshal(binding)
 	if err != nil {
-		return err
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+// bindExternalRuntimeInstanceAdmission records, in one optimistic pool
+// write, the independently observed instance evidence and the binding of the
+// private bootstrap credentials to that exact workload. Each is validated
+// exactly as when they were written separately: evidenceErr reports evidence
+// that conflicts with the recorded instance (nothing is written), and
+// bootstrapErr a credential binding to another workload (the evidence is
+// still recorded, as before, and the binding is not).
+func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceAdmission(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	w *workspacev1alpha1.ExecutionWorkspace,
+	authSecret *corev1.Secret,
+	workloadUID types.UID,
+) (evidenceErr, bootstrapErr error) {
+	evidence, err := desiredExternalRuntimeInstanceEvidence(pool, w)
+	if err != nil {
+		return err, nil
+	}
+	bootstrap, bootstrapErr := desiredRuntimePoolBootstrapInstanceBinding(pool, authSecret, workloadUID)
+	if bootstrapErr != nil {
+		bootstrap = ""
+	}
+	if err := r.patchExternalRuntimeAdmissionBindings(ctx, pool, evidence, bootstrap); err != nil {
+		return err, nil
+	}
+	return nil, bootstrapErr
+}
+
+// patchExternalRuntimeAdmissionBindings writes the non-empty annotation
+// values in one patch, which refreshes pool in place. Evidence keeps its
+// optimistic lock; a credential binding alone keeps its plain merge patch, as
+// when each was written on its own.
+func (r *RuntimePoolReconciler) patchExternalRuntimeAdmissionBindings(ctx context.Context, pool *corev1alpha1.RuntimePool, evidence, bootstrap string) error {
+	if evidence == "" && bootstrap == "" {
+		return nil
 	}
 	before := pool.DeepCopy()
 	if pool.Annotations == nil {
 		pool.Annotations = map[string]string{}
 	}
-	pool.Annotations[externalRuntimeEvidenceAnnotation] = string(encoded)
+	if evidence != "" {
+		pool.Annotations[externalRuntimeEvidenceAnnotation] = evidence
+	}
+	if bootstrap != "" {
+		pool.Annotations[runtimePoolBootstrapInstanceBindingAnnotation] = bootstrap
+	}
+	if evidence == "" {
+		if err := r.Patch(ctx, pool, client.MergeFrom(before)); err != nil {
+			return fmt.Errorf("record RuntimePool annotation: %w", err)
+		}
+		return nil
+	}
 	return r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
