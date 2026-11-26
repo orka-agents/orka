@@ -33,6 +33,7 @@
 #   OVERSIGHT_AIMOCK_IMAGE  the scripted model image, for a pack with a fleet
 #   OVERSIGHT_FIXTURE_IMAGE an image with python3 for the fleet's in-cluster fixtures
 #   OVERSIGHT_MAX_SCORER_CALLS  live mode soft ceiling passed to the bridge (default 500)
+#   OVERSIGHT_TAKE_ID  names the take; its record IDs end in -<id> (default take<HHMMSS>)
 #   OVERSIGHT_CONTEXT_LIVE / _REPLAY  optional context labels for the take
 #                      (JSON list of {name, value}), e.g. "Scorer: live"
 set -Eeuo pipefail
@@ -230,7 +231,8 @@ cmd_play() {
   ensure_api
   set_context
   local take_id
-  take_id="-take$(date +%H%M%S)"
+  take_id="${OVERSIGHT_TAKE_ID:-take$(date +%H%M%S)}"
+  take_id="-${take_id#-}"
   case "${MODE}" in
     replay)
       local args=()
