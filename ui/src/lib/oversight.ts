@@ -462,6 +462,21 @@ export function wasBlocked(decision: DecisionView): boolean {
 }
 
 const BLOCKED = ' (blocked by policy)'
+const NOT_DELIVERED = ' (no delivery seen)'
+
+/**
+ * A block the monitor inferred from a policy rather than observed: every
+ * blocked event says so in its outcome. Such an attempt is described as
+ * "no delivery seen", never as blocked.
+ */
+export function blockInferred(decision: DecisionView): boolean {
+  const blockedEvents = (decision.action.effects?.notableEvents ?? []).filter((e) => e.kind.includes('blocked'))
+  return blockedEvents.length > 0 && blockedEvents.every((e) => /inferred|not observed/i.test(e.outcome ?? ''))
+}
+
+function blockedSuffix(decision: DecisionView): string {
+  return blockInferred(decision) ? NOT_DELIVERED : BLOCKED
+}
 
 /** A name lookup the policy blocked: the sensor saw the attempt, not the name. */
 function blockedLookup(decision: DecisionView): boolean {
@@ -473,7 +488,7 @@ function blockedLookup(decision: DecisionView): boolean {
 function describeAction(decision: DecisionView, bytes: boolean): { kind: ActionKind; text: string } {
   const blocked = wasBlocked(decision)
   const tried = (done: string, attempt: string) => (blocked ? attempt : done)
-  const suffix = blocked ? BLOCKED : ''
+  const suffix = blocked ? blockedSuffix(decision) : ''
   const effects = decision.action.effects ?? {}
   const dest = effects.destinations?.[0]?.value
   const size = bytes && hasBytes(decision) ? ` (${formatBytes(effects.bytesSent!)})` : ''
@@ -496,7 +511,7 @@ function describeAction(decision: DecisionView, bytes: boolean): { kind: ActionK
   if (dest && hasBytes(decision)) return { kind: 'send', text: bytes ? `sent ${formatBytes(effects.bytesSent!)} to ${dest}` : `sent data to ${dest}` }
   if (dest) return { kind: 'connect', text: `${tried('connected', 'tried to connect')} to ${dest}${suffix}` }
   if (blocked && blockedLookup(decision)) {
-    return { kind: 'connect', text: 'tried to reach an outside destination (name lookup blocked by policy)' }
+    return { kind: 'connect', text: `tried to reach an outside destination${blockInferred(decision) ? NOT_DELIVERED : ' (name lookup blocked by policy)'}` }
   }
   const binary = effects.binaries?.[0]?.value ?? effects.notableEvents?.find((e) => e.binary)?.binary
   const ran = binary ? binaryName(binary) : decision.action.toolName
@@ -661,11 +676,11 @@ export function credentialStory(decisions: DecisionView[]): string | undefined {
     // A blocked name lookup reached no destination of its own; its events
     // may name only the resolver they tried.
     if (wasBlocked(d) && !(effects.destinations?.length) && blockedLookup(d)) {
-      return `read ${what}, then tried to send it out (name lookup blocked by policy)`
+      return `read ${what}, then tried to send it out${blockInferred(d) ? NOT_DELIVERED : ' (name lookup blocked by policy)'}`
     }
     if (connected && dest) {
       return wasBlocked(d)
-        ? `read ${what}, then tried to send it to ${hostOf(dest)}${BLOCKED}`
+        ? `read ${what}, then tried to send it to ${hostOf(dest)}${blockedSuffix(d)}`
         : `read ${what}, then sent it to ${hostOf(dest)}`
     }
   }

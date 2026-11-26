@@ -4,6 +4,7 @@ import {
   actionPhrase,
   excludedSummary,
   confidenceReasons,
+  blockInferred,
   credentialStory,
   destinationDomain,
   draftConcernYaml,
@@ -291,6 +292,34 @@ describe('excluded events', () => {
     })
     expect(credentialStory([{ ...lookup, id: 'r@1', seq: 2 }, read]))
       .toBe('read a token, then tried to send it out (name lookup blocked by policy)')
+  })
+
+  it('says "no delivery seen" when the block was only inferred from a policy', () => {
+    const inferred = 'NetworkPolicy run-1 denies all egress (inferred from policy; delivery not observed)'
+    const lookup = makeDecision({
+      agentName: 'report-agent',
+      action: { toolName: 'code_exec', effects: { counts: { exec: 1, dns_lookup_blocked: 4 }, blockedCount: 4,
+        notableEvents: [{ id: 'l1', kind: 'dns_lookup_blocked', dest: 'kube-dns.kube-system.svc:53', outcome: inferred }] } },
+    })
+    expect(blockInferred(lookup)).toBe(true)
+    expect(actionPhrase(lookup)).toBe('tried to reach an outside destination (no delivery seen)')
+    const push = makeDecision({
+      action: { toolName: 'code_exec', effects: { blockedCount: 1, notableEvents: [
+        { id: 'e1', kind: 'exec', args: 'docker push registry.demo.svc/prod/api:latest' },
+        { id: 'b1', kind: 'connect_blocked', dest: 'registry.demo.svc:80', outcome: inferred },
+      ] } },
+    })
+    expect(actionPhrase(push)).toBe('tried to push api:latest to registry.demo.svc/prod (no delivery seen)')
+    const read = makeDecision({
+      id: 'r@0', seq: 1,
+      action: { toolName: 'code_exec', taintFlags: ['credential_read'],
+        effects: { counts: { credential_read: 1 }, paths: [{ value: '/var/run/secrets/kubernetes.io/serviceaccount/token', count: 1 }] } },
+    })
+    expect(credentialStory([{ ...lookup, id: 'r@1', seq: 2 }, read]))
+      .toBe('read a token, then tried to send it out (no delivery seen)')
+    const observed = makeDecision({ action: { toolName: 'code_exec', effects: { blockedCount: 1,
+      notableEvents: [{ id: 'b2', kind: 'dns_lookup_blocked', outcome: 'denied by policy' }] } } })
+    expect(blockInferred(observed)).toBe(false)
   })
 
   it('formats decision latency in seconds below two minutes and m s above', () => {
