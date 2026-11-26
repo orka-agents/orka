@@ -144,6 +144,9 @@ type ACPDispatcher struct {
 	// wokenAt is when the first wakeup since the last scan arrived, in Unix
 	// nanoseconds; zero when none is pending. Timing only.
 	wokenAt atomic.Int64
+	// admissionWake marks a pending wakeup from a RuntimePool that began
+	// admitting work; see wakeForAdmission.
+	admissionWake atomic.Bool
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -254,7 +257,7 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 			lastPoolRetirement = lastScan
 		}
 		logACPScanError(ctx, d.dispatchScan(ctx, retirePools), &heldBy)
-		if !waitForNextDispatchScan(ctx, ticker.C, d.wakeChannel(), lastScan) {
+		if !waitForNextDispatchScan(ctx, ticker.C, d.wakeChannel(), lastScan, d.takeAdmissionWake) {
 			return nil
 		}
 	}
@@ -1214,9 +1217,24 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, err)
 	}
 	turnTimings.mark(acpTurnStepDispatchPreflight)
-	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(
-		runtimeCtx, target, bound.mcpConfiguration, true,
-	)
+	var runtimeClient *harnessv2.Client
+	var runtimeFence harnessv2.Fence
+	var profile harnessv2.RuntimeProfile
+	var maxResultBytes int
+	var poolCapabilities *harnessv2.CapabilitiesResponse
+	var authErr error
+	if target.pool != nil {
+		// The pool client already asked this exact instance for its
+		// capabilities and validated them; the checks below read the same
+		// response instead of a second round trip.
+		runtimeClient, runtimeFence, profile, maxResultBytes, poolCapabilities, authErr = d.runtimePoolClientWithCapabilities(
+			runtimeCtx, target.pool, true,
+		)
+	} else {
+		runtimeClient, runtimeFence, profile, maxResultBytes, authErr = d.runtimeClient(
+			runtimeCtx, target, bound.mcpConfiguration, true,
+		)
+	}
 	if authErr != nil {
 		if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 			return deadlineErr
@@ -1226,9 +1244,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	nativeSessionsSupported := false
 	nativePermissionAskSupported := false
 	if target.pool != nil {
-		capabilities, capabilityErr := runtimeClient.Capabilities(runtimeCtx)
-		if capabilityErr != nil {
-			return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, capabilityErr)
+		capabilities := poolCapabilities
+		if capabilities == nil {
+			return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, errors.New("RuntimePool capabilities are unavailable"))
 		}
 		nativeSessionsSupported = capabilities.SupportsNativeSessions && profile.ProviderKind == runtimePoolProviderCodex && d.nativeSessionStore() != nil
 		nativePermissionAskSupported = capabilities.Provider.SupportsNativePermissionAsk
@@ -1278,11 +1296,18 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		lineage.WorkspaceSessionUID = bound.plan.Workspace.SessionUID
 	}
 	if task.Spec.SessionRef != nil && d.Sessions.RecordsLineage() {
-		taskNamespace := &corev1.Namespace{}
-		if err := d.APIReader.Get(runtimeCtx, client.ObjectKey{Name: task.Namespace}, taskNamespace); err != nil {
-			return d.requeueReservedTask(ctx, task, acpReservedRetryNamespaceLineage, fmt.Errorf("resolve namespace identity for session lineage: %w", err))
+		// loadVerifiedACPDispatchExecution read the namespace uncached at the
+		// start of this turn and required its UID to equal the immutable
+		// binding's, so that verified UID is the lineage identity; reading the
+		// namespace again would only repeat the same check.
+		namespaceUID := ""
+		if bound.binding != nil {
+			namespaceUID = string(bound.binding.Task.NamespaceUID)
 		}
-		lineage.NamespaceUID = string(taskNamespace.UID)
+		if namespaceUID == "" {
+			return d.requeueReservedTask(ctx, task, acpReservedRetryNamespaceLineage, errors.New("resolve namespace identity for session lineage: the verified binding has no namespace UID"))
+		}
+		lineage.NamespaceUID = namespaceUID
 	}
 	// Every early requeue of the reservation is behind this point; the turn
 	// proceeds to its Session lease and runtime session, so the pre-dispatch
@@ -4840,25 +4865,36 @@ func (d *ACPDispatcher) runtimeClient(
 }
 
 func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha1.RuntimePool, requireAdmission bool) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, error) {
+	runtimeClient, runtimeFence, profile, maxResultBytes, _, err := d.runtimePoolClientWithCapabilities(ctx, pool, requireAdmission)
+	return runtimeClient, runtimeFence, profile, maxResultBytes, err
+}
+
+// runtimePoolClientWithCapabilities is runtimePoolClient that also returns the
+// capabilities response it validated, so a caller that needs other fields of
+// it does not ask the same exact instance a second time.
+func (d *ACPDispatcher) runtimePoolClientWithCapabilities(ctx context.Context, pool *corev1alpha1.RuntimePool, requireAdmission bool) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, *harnessv2.CapabilitiesResponse, error) {
+	fail := func(err error) (*harnessv2.Client, harnessv2.Fence, harnessv2.RuntimeProfile, int, *harnessv2.CapabilitiesResponse, error) {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, nil, err
+	}
 	active := pool.Status.ActiveInstance
 	if active == nil {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool has no active instance")
+		return fail(fmt.Errorf("RuntimePool has no active instance"))
 	}
 	fence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
+		return fail(err)
 	}
 	if active.ControllerEpoch != fence.Epoch {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool active instance is bound to stale controller epoch")
+		return fail(fmt.Errorf("RuntimePool active instance is bound to stale controller epoch"))
 	}
 	secret, err := d.runtimeAuthSecret(ctx, pool)
 	if err != nil {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
+		return fail(err)
 	}
 	controllerToken := strings.TrimSpace(string(secret.Data[runtimePoolControllerTokenKey]))
 	capabilitySecret := secret.Data[runtimePoolCapabilitySecretKey]
 	if controllerToken == "" || len(capabilitySecret) < harnessv2.MinCapabilitySecretBytes {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool auth Secret is incomplete")
+		return fail(fmt.Errorf("RuntimePool auth Secret is incomplete"))
 	}
 	endpoint := exactPodEndpoint(active.PodAddress)
 	if runtimePoolHasExternalWorkspace(pool) {
@@ -4868,14 +4904,14 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 		}
 		endpoint, err = readEndpoint(ctx, uncachedReader(d.APIReader, d.Client), pool)
 		if err != nil {
-			return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool admitted endpoint: %w", err)
+			return fail(fmt.Errorf("external RuntimePool admitted endpoint: %w", err))
 		}
 	}
 	// A routed native runtime is reachable only through the configured
 	// Substrate router; the harness client keeps its own control deadlines.
 	routedHTTPClient, err := externalRoutedPoolHTTPClient(d.SubstrateRouter, pool, 0)
 	if err != nil {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("external RuntimePool routed transport: %w", err)
+		return fail(fmt.Errorf("external RuntimePool routed transport: %w", err))
 	}
 	options := []harnessv2.ClientOption{
 		harnessv2.WithControlTimeout(runtimeSessionCreateTimeout(acpDispatchTarget{pool: pool})),
@@ -4892,28 +4928,28 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 	}
 	runtimeClient, err := harnessv2.NewClient(endpoint, options...)
 	if err != nil {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
+		return fail(err)
 	}
 	capabilities, err := runtimeClient.Capabilities(ctx)
 	if err != nil {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, err
+		return fail(err)
 	}
 	if string(capabilities.RuntimeProfileDigest) != pool.Spec.Runtime.Profile.Digest || string(capabilities.RuntimeProfileDigest) != active.ProfileDigest {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool capability profile digest mismatch")
+		return fail(fmt.Errorf("RuntimePool capability profile digest mismatch"))
 	}
 	if !capabilities.WorkspaceGovernance.Strict() {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool does not provide strict workspace governance")
+		return fail(fmt.Errorf("RuntimePool does not provide strict workspace governance"))
 	}
 	profile := runtimeProfileFromPool(pool.Spec.Runtime.Profile)
 	if profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite && !capabilities.SupportsPublicationFinalization {
-		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool does not support controller-owned RuntimeSession publication finalization required for write workspaces")
+		return fail(fmt.Errorf("RuntimePool does not support controller-owned RuntimeSession publication finalization required for write workspaces"))
 	}
 	runtimeFence := harnessv2.Fence{
 		RuntimeInstanceID: harnessv2.RuntimeInstanceID(active.RuntimeInstanceID), SupervisorBootID: harnessv2.SupervisorBootID(active.BootID),
 		ControllerEpoch: uint64(fence.Epoch), RuntimePoolUID: harnessv2.RuntimePoolUID(pool.UID), RuntimePoolGeneration: uint64(pool.Generation),
 		RuntimeProfileDigest: harnessv2.ProfileDigest(pool.Spec.Runtime.Profile.Digest), ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 	}
-	return runtimeClient, runtimeFence, profile, capabilities.Limits.MaxTerminalResultBytes, nil
+	return runtimeClient, runtimeFence, profile, capabilities.Limits.MaxTerminalResultBytes, capabilities, nil
 }
 
 func (d *ACPDispatcher) externalRuntimeClient(
