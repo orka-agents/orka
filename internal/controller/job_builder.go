@@ -142,7 +142,10 @@ type JobBuilder struct {
 	OutboundAccessTrustedGatewayServices       string
 	OutboundAccessTrustedTokenEndpointServices string
 	EnableTelemetry                            bool
-	directSecrets                              directRuntimeSecretPolicy
+	// ContainerTaskSecretUse lets container Tasks whose writers hold `use`
+	// on a Secret receive it without the direct Secret mount switch.
+	ContainerTaskSecretUse ContainerTaskSecretUsePolicy
+	directSecrets          directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -236,6 +239,19 @@ func (b *JobBuilder) directSecretMountsAllowed(task *corev1alpha1.Task) bool {
 		return false
 	}
 	return taskAllowsDirectRuntimeSecrets(task) || (b != nil && b.directSecrets.secretMounts)
+}
+
+// DirectSecretMountsEnabled reports whether the legacy direct Secret mount
+// switch is on for this process.
+func (b *JobBuilder) DirectSecretMountsEnabled() bool {
+	return b != nil && b.directSecrets.secretMounts
+}
+
+// taskSecretMountsAllowed reports whether the Task's own spec.secretRef is
+// delivered: by the direct Secret mount policy, or because the Secret use
+// policy granted it for this build. The grant never covers an Agent's Secret.
+func (b *JobBuilder) taskSecretMountsAllowed(task *corev1alpha1.Task, secretUseGranted bool) bool {
+	return secretUseGranted || b.directSecretMountsAllowed(task)
 }
 
 func taskAllowsDirectRuntimeSecrets(task *corev1alpha1.Task) bool {
@@ -418,11 +434,11 @@ func applyRepositoryMonitorValidationContainerStorageBounds(container *corev1.Co
 	container.Resources.Limits[corev1.ResourceEphemeralStorage] = repositoryValidationStorageLimit.DeepCopy()
 }
 
-func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) bool {
+func (b *JobBuilder) needsSecretVolumes(task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, secretUseGranted bool) bool {
+	if b.taskSecretMountsAllowed(task, secretUseGranted) && task != nil && task.Spec.SecretRef != nil {
+		return true
+	}
 	if b.directSecretMountsAllowed(task) {
-		if task != nil && task.Spec.SecretRef != nil {
-			return true
-		}
 		if agent != nil && agent.Spec.SecretRef != nil {
 			return true
 		}
@@ -495,7 +511,11 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
-	if err := b.validateContainerTaskEnvSources(task); err != nil {
+	secretUseGranted, err := b.containerTaskSecretUseGranted(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.validateContainerTaskEnvSources(task, secretUseGranted); err != nil {
 		return nil, err
 	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
@@ -611,8 +631,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	}
 
 	// Add secret volumes if needed
-	if b.needsSecretVolumes(task, agent, provider) {
-		b.addSecretVolumes(ctx, job, task, agent, provider)
+	if b.needsSecretVolumes(task, agent, provider, secretUseGranted) {
+		b.addSecretVolumes(ctx, job, task, agent, provider, secretUseGranted)
 	}
 
 	// Add session volume if needed
@@ -1007,7 +1027,10 @@ func otlpSignalFromEnvName(name string) string {
 // in its namespace that the controller refuses to mount from spec.secretRef.
 // Only sources that read the Pod's own metadata are always allowed; any other
 // source, including ones added to the API later, needs the operator opt-in.
-func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task) error {
+//
+// secretUseGranted admits secretKeyRef entries the Secret use policy granted;
+// it never admits the other sources.
+func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task, secretUseGranted bool) error {
 	if !isUntrustedComputeTask(task) || b.directSecretMountsAllowed(task) {
 		return nil
 	}
@@ -1019,6 +1042,9 @@ func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task) er
 		var field string
 		switch {
 		case source.SecretKeyRef != nil:
+			if secretUseGranted {
+				continue
+			}
 			field = "valueFrom.secretKeyRef"
 		case source.ConfigMapKeyRef != nil:
 			field = "valueFrom.configMapKeyRef"
@@ -1533,9 +1559,10 @@ func contextTokenTTSEnvNames() []string {
 }
 
 // addSecretVolumes adds secret volumes to the Job
-func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) {
+func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, secretUseGranted bool) {
 	allowDirectProviderSecrets := b.directProviderSecretsAllowed(task)
 	allowDirectSecretMounts := b.directSecretMountsAllowed(task)
+	allowTaskSecretMount := b.taskSecretMountsAllowed(task, secretUseGranted)
 
 	// Add provider secret (mounted as environment variable source)
 	if allowDirectProviderSecrets && provider != nil {
@@ -1614,7 +1641,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	}
 
 	// Add task secret
-	if allowDirectSecretMounts && !taskRequestsRuntimeAuthOnly(task) && task.Spec.SecretRef != nil {
+	if allowTaskSecretMount && !taskRequestsRuntimeAuthOnly(task) && task.Spec.SecretRef != nil {
 		secretName := task.Spec.SecretRef.Name
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: "task-secrets",
