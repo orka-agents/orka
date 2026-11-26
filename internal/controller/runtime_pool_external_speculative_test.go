@@ -174,9 +174,17 @@ func TestSpeculativeFastBootIsAdmittedOnce(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.suspendCapableWorkspace(t, nil)
 	requester := f.stageRequesterAttachment(t, false)
+	writes := f.recordWorkspaceSpecWrites()
 	published := f.publish(t)
 	if published.Spec.Attachment == nil || published.Spec.Attachment.TaskRef.UID != requester.UID {
 		t.Fatalf("first publication attachment = %#v, want the requester's staged attachment", published.Spec.Attachment)
+	}
+	for _, spec := range writes.all() {
+		if spec.Workload != nil && spec.Workload.Sequence == 1 {
+			if spec.Attachment == nil || spec.Attachment.TaskRef.UID != requester.UID {
+				t.Fatalf("first-turn workload write omitted the requester's staged attachment: %#v", spec.Attachment)
+			}
+		}
 	}
 	generation := published.Generation
 	// The provider observes the single write: it acknowledges the epoch and

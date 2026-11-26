@@ -50,7 +50,7 @@ func (r *TaskReconciler) stampACPWorkspaceWarmDemand(
 ) error {
 	deadline, open := acpWorkspaceWarmWindowOpen(workspace)
 	if !open || deadline.Sub(now) >= acpWorkspaceWarmExpiryGrace ||
-		strings.TrimSpace(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation]) != "" {
+		acpWorkspaceResumeDemandBelongsToTask(workspace.Annotations[acpWorkspaceResumeRequestedAnnotation], string(task.UID)) {
 		return nil
 	}
 	base := workspace.DeepCopy()

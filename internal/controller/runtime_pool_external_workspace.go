@@ -238,7 +238,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 		if err == nil && attachmentOnlyLag {
 			// ADR 0057: only an attachment or its re-admission moved the
 			// generation; the admitted instance keeps serving, untouched,
-			// until the provider and core catch up.
+			// until the provider and core catch up. Keep worker eviction checks
+			// active so a terminating worker still enters deadline-bound drain.
+			if _, attestErr := r.attestExternalWorkspaceStartup(ctx, request, w.Status.Allocation.Startup); attestErr != nil {
+				if eviction := (*externalWorkerEvictionError)(nil); errors.As(attestErr, &eviction) {
+					return r.beginExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline)
+				}
+			}
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleStarting, "waiting for current exact-instance startup evidence")
@@ -301,6 +307,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			return ctrl.Result{}, false, nil
 		})
 	if err == nil {
+		refreshed := &corev1alpha1.RuntimePool{}
+		if getErr := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(pool), refreshed); getErr == nil {
+			if recErr := r.recordExternalRuntimeServed(ctx, refreshed, w, pod); recErr != nil {
+				return ctrl.Result{}, recErr
+			}
+		}
 		acpRuntimeAdmission.served(ctx, uncachedReader(r.APIReader, r.Client), pool, request.Sequence)
 	}
 	return result, err
@@ -479,11 +491,18 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	if err := workspaceprovider.ValidateWorkloadTransition(w.Spec.Workload, request, w.Status.Allocation, slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)); err != nil {
 		return ctrl.Result{}, err
 	}
+	now := r.now()
+	if resume && !acpWorkspaceSpeculativeResumePending(w, now) {
+		// The speculative resume deadline expired while proving termination or
+		// rendering the workload; leave the workspace suspended so the Task can
+		// take its ordinary cold-resume path.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	// ADR 0057: a Task's staged attachment, rechecked against this exact
 	// object version, lands in the same write, so the provider acknowledges
 	// the epoch and starts the runtime on one observation and the runtime is
 	// admitted once.
-	attachment, err := installableACPWorkspaceAttachmentIntent(ctx, uncachedReader(r.APIReader, r.Client), w, resume, r.now())
+	attachment, err := installableACPWorkspaceAttachmentIntent(ctx, uncachedReader(r.APIReader, r.Client), w, resume, now)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -964,6 +983,22 @@ func (r *RuntimePoolReconciler) seedExternalNativeCredentials(ctx context.Contex
 
 //nolint:gocyclo // Retirement authority follows independent identity, drain, termination and disposition gates.
 func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, deleting bool) (ctrl.Result, error) {
+	if !deleting && w.Spec.Retirement == nil && pool.Spec.DesiredReplicas == 0 &&
+		pool.Annotations["orka.ai/external-runtime-retirement-requested"] != booleanTrueValue &&
+		w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
+		!externalProviderSuspendDeadlineExceeded(w) &&
+		w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
+		w.Spec.Attachment != nil {
+		// An attachment landed concurrently with DesiredReplicas -> 0
+		// scale-down; restore pool demand instead of draining and retiring a
+		// live attached runtime.
+		before := pool.DeepCopy()
+		pool.Spec.DesiredReplicas = 1
+		if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "closing admission before exact-instance retirement")
 	}

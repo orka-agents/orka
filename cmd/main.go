@@ -970,7 +970,8 @@ func main() {
 		os.Exit(1)
 	}
 	if err := controller.ValidateACPWorkspaceDefaultSuspendAfterDetach(acpWorkspaceDefaultSuspendAfterDetach); err != nil {
-		setupLog.Error(err, "invalid --acp-workspace-default-suspend-after-detach")
+		// The logger is not set up yet, so setupLog would drop this.
+		fmt.Fprintf(os.Stderr, "invalid --acp-workspace-default-suspend-after-detach: %v\n", err)
 		os.Exit(1)
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal

@@ -131,6 +131,13 @@ func TestNonAttachmentGenerationChangesStillCloseTheRuntime(t *testing.T) {
 	t.Run("no admitted record yet", func(t *testing.T) {
 		f := newExternalRuntimePoolFixture(t)
 		f.serve(t)
+		// Clear the admitted record to simulate a pool whose status transitioned
+		// before the annotation was persisted.
+		pool := runtimePoolTestGetPool(t, f.r, f.pool)
+		delete(pool.Annotations, externalRuntimeServedAnnotation)
+		if err := f.r.Update(context.Background(), &pool); err != nil {
+			t.Fatal(err)
+		}
 		f.attachWithGenerationLag(t, nil)
 		runtimePoolReconcile(t, f.r, f.pool)
 		if pool := runtimePoolTestGetPool(t, f.r, f.pool); externalRuntimePoolAdmitting(&pool) {

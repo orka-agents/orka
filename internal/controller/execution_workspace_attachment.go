@@ -570,18 +570,22 @@ func (m WorkspaceAttachmentManager) cleanupFailedAttachmentAttempt(
 	leaseClaimed bool,
 ) error {
 	current := &workspacev1alpha1.ExecutionWorkspace{}
-	workspaceErr := m.Client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current)
+	workspaceErr := uncachedReader(m.APIReader, m.Client).Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current)
 	if workspaceErr != nil && !apierrors.IsNotFound(workspaceErr) {
 		return fmt.Errorf("verify failed workspace attachment attempt: %w", workspaceErr)
 	}
 
 	workspaceHasAttachment := workspaceErr == nil && current.UID == workspace.UID && current.Spec.Attachment != nil
-	// A handed-off orphan can still race the original paused attempt. Once
-	// either Task attaches this exact Secret, cleanup must preserve the bearer;
-	// the workspace's optimistic patch decides which attachment won.
+	// A handed-off orphan or staged intent can still race the original paused
+	// attempt. Once either Task attaches this exact Secret or a staged intent
+	// still names it, cleanup must preserve the bearer; the workspace's
+	// optimistic patch decides which attachment won.
+	intent, staged := parseACPWorkspaceAttachmentIntent(current)
+	secretIsStaged := workspaceErr == nil && current.UID == workspace.UID && staged && secret != nil &&
+		intent.SecretName == secret.Name
 	secretIsActive := workspaceHasAttachment && secret != nil &&
 		current.Spec.Attachment.TokenSecretRef.Name == secret.Name
-	if secretIsActive {
+	if secretIsActive || secretIsStaged {
 		return nil
 	}
 
@@ -811,7 +815,7 @@ func (m WorkspaceAttachmentManager) prepareAttachmentIntent(
 		return nil, err
 	}
 	if err := m.renewAttachmentLeaseFence(ctx, workspace, task, staged.epoch, staged.ttl); err != nil {
-		return nil, staged.fail(err, false)
+		return nil, staged.fail(err, true)
 	}
 	return staged.attachment(), nil
 }

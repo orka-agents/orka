@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -444,7 +445,15 @@ func (r *TaskReconciler) requestACPWorkspaceSpeculativeResume(
 		return nil
 	})
 	if err != nil || !claimed {
-		_ = r.releaseACPWorkspaceStagedAttachmentObjects(ctx, workspace, task)
+		fresh := &workspacev1alpha1.ExecutionWorkspace{}
+		readErr := reader.Get(ctx, client.ObjectKeyFromObject(workspace), fresh)
+		if readErr == nil && fresh.UID == workspace.UID {
+			if cleanupErr := r.releaseACPWorkspaceStagedAttachmentObjects(ctx, fresh, task); cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+			}
+		} else if readErr != nil && !apierrors.IsNotFound(readErr) {
+			err = errors.Join(err, readErr)
+		}
 	}
 	return err
 }
@@ -483,11 +492,11 @@ func (r *TaskReconciler) flipACPWorkspaceForColdResume(
 		now.Format(time.RFC3339Nano) + " " + task.Name + " " + string(task.UID)
 	workspace.Annotations[acpWorkspaceDetachActionAnnotation] = effectiveOnDetach
 	workspace.Annotations[acpWorkspaceResumedLineageAnnotation] = booleanTrueValue
-	// A speculative start left by an earlier cycle never carries over, but an
-	// expired marker owned by this same requester stays in place so the queue
-	// path's expired-owner guard does not renew a fresh speculative TTL before
-	// attachment or settlement clears it.
-	if deadline, owner, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]); !ok || owner != string(task.UID) || now.Before(deadline) {
+	// A speculative start left by an earlier cycle never carries over, but a
+	// marker owned by this same requester stays in place (whether still open or
+	// already expired) so the queue path neither loses nor renews its original
+	// speculative budget before attachment or settlement clears it.
+	if _, owner, ok := parseACPWorkspaceSpeculativeStart(workspace.Annotations[acpWorkspaceSpeculativeStartAnnotation]); !ok || owner != string(task.UID) {
 		delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	}
 	return r.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
