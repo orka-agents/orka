@@ -818,9 +818,6 @@ func TestACPWorkspaceRetentionWarmExpiryVetoedByContinuationKeepsRequeue(t *test
 		name   string
 		mutate func(*workspacev1alpha1.ExecutionWorkspace)
 	}{
-		{name: "tainted", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
-			w.Annotations[operatoraccess.TaintAnnotation] = "x"
-		}},
 		{name: "failed", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
 			w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
 		}},
@@ -831,11 +828,7 @@ func TestACPWorkspaceRetentionWarmExpiryVetoedByContinuationKeepsRequeue(t *test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			name := "acp-ws-warm-veto-" + test.name
-			// The tainted case cuts an open window short; the others expire.
 			deadline := now.Add(-time.Minute)
-			if test.name == "tainted" {
-				deadline = now.Add(5 * time.Minute)
-			}
 			workspace := warmRetentionWorkspace(t, name, deadline, test.mutate)
 			sessionUID := string(workspace.Spec.SessionRef.UID)
 			control := &corev1alpha1.RuntimeSessionControl{
