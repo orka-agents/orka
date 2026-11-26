@@ -248,6 +248,13 @@ controller:
   dashboard:
     enabled: false
 
+  # Control-plane MCP endpoint for IDE agents, at POST /mcp on the API port. Off by default.
+  # Every tool runs with the caller's own API permissions. maxConcurrent bounds concurrent MCP
+  # requests per replica; waiting tools use a separate pool of half as many slots (at least one).
+  mcpServer:
+    enabled: false
+    maxConcurrent: 16
+
   # Require the `use` verb on an Agent before a request newly names it.
   # Off by default, because callers without a `use` grant can no longer
   # create Tasks, RepositoryScans, RepositoryMonitors, or GatewayBindings that
@@ -469,6 +476,16 @@ controller:
     trustedGatewayServices: []
     # Exact namespace/name:port tuples trusted for cross-namespace token endpoint refs.
     trustedTokenEndpointServices: []
+
+  # Extra volumes for the controller Pod, and mounts of them in its container, after the chart's
+  # own. For example, a Secrets Store CSI volume that keeps the Secret named by
+  # agentExecutionSnapshot.existingSecret synced from an external store: the driver keeps a
+  # synced Secret only while a Pod mounts its volume. Each mount must name an extraVolumes entry.
+  # Rendering fails when an extra volume reuses a chart volume's name, or an extra mount is at,
+  # inside or above a chart mount's path or the ServiceAccount token's, so neither can replace or
+  # hide the store, a credential or the webhook certificate.
+  extraVolumes: []
+  extraVolumeMounts: []
 
 # Fail-closed admission served by this release's internal webhook Service. The
 # certificate must authenticate <release>-orka-webhook.<namespace>.svc.

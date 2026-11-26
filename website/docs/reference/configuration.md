@@ -38,6 +38,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.watchNamespace` | Helm release namespace | Must match the release namespace, labeled `orka.ai/controller-mode` with the matching mode. |
 | `controller.agentExecutionSnapshot.existingSecret` | `""` | Your own snapshot encryption Secret. Empty renders an empty `<release>-agent-execution-snapshot` that the controller fills on first start. Immutable after install. See [Snapshot encryption key](#snapshot-encryption-key). |
 | `controller.agentExecutionSnapshot.key` | `key` | Item inside that Secret holding 32 raw bytes or their base64 encoding. Immutable after install. |
+| `controller.extraVolumes` / `controller.extraVolumeMounts` | `[]` / `[]` | Volumes added to the controller Pod after the chart's own, and mounts of them in the controller container. Rendering fails when an extra volume reuses a chart volume's name, a mount names a volume that isn't in `extraVolumes`, or a mount path repeats another extra mount's or is at, inside or above a chart mount or the ServiceAccount token. See [Key from an external store](#key-from-an-external-store). |
 | `controller.enforceNamespaceIsolation` | `true` | Restrict namespace-bound API callers and default Helm RBAC to their namespace |
 | `service.port` | `8080` | Controller Service port used by controller and Publisher in-cluster URLs. |
 | `clusterDomain` | `cluster.local` | Cluster DNS domain for the fully qualified controller API and provider proxy URLs the chart passes to the controller. Native workspace runtimes cannot resolve `<service>.<namespace>.svc`. |
@@ -46,6 +47,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.healthPort` | `8082` | Health probe port |
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
 | `controller.dashboard.enabled` | `false` | Serve the [web dashboard](../guides/ui.md) on the API port. |
+| `controller.mcpServer.enabled` / `.maxConcurrent` | `false` / `16` | Serve the [control-plane MCP endpoint](../guides/mcp-server.md) at `POST /mcp` on the API port, and bound its concurrent requests per replica (1 to 999999). |
 | `controller.connectors.enabled` / `controller.connectors.callbackBaseUrl` | `false` / `""` | Enable per-person [connectors](../guides/connectors.md), and the public https origin the OAuth provider redirects back to. |
 | `controller.githubSignIn.enabled` / `.allowedOrgs` / `.allowedTeams` / `.createHosts` | `false` / `[]` / `[]` / `true` | Sign people in with GitHub (`orka login`) through the agent-host GitHub App. Only active members of the allowed orgs or teams sign in, and each sign-in links their account and, with `createHosts`, starts their agent host. Needs `controller.agentHosts.github`. |
 | `controller.agentHosts.enabled` / `.namespace` / `.agentImage` | `false` / `orka-agent-hosts` / `""` | Run [agent hosts](../operations/agent-hosts.md) in a chart-created namespace with the restricted Pod Security profile. An empty `agentImage` uses the controller image, which then must set `controller.image.digest`. |
@@ -183,6 +185,39 @@ switch between the generated Secret and your own. It cannot detect changed
 bytes under the same name, so never rotate the material in place, and never
 run `helm upgrade --force`, which replaces the Secret with the chart's empty
 version.
+
+#### Key from an external store
+
+To keep the key in an external secret store, sync it into that Secret with the
+[Secrets Store CSI Driver](https://secrets-store-csi-driver.sigs.k8s.io/) and
+mount the CSI volume in the controller Pod. The driver keeps a synced Secret only
+while a Pod mounts its volume, so the controller mounts it itself:
+
+```yaml
+controller:
+  agentExecutionSnapshot:
+    existingSecret: orka-agent-snapshot-key
+    key: key
+  extraVolumes:
+    - name: snapshot-key-sync
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          # Its secretObjects sync the store's key into
+          # orka-agent-snapshot-key, item key.
+          secretProviderClass: orka-agent-snapshot-key
+  extraVolumeMounts:
+    - name: snapshot-key-sync
+      mountPath: /mnt/secrets-store
+      readOnly: true
+```
+
+The driver's provider reads the store as the controller's ServiceAccount; use
+`serviceAccount.annotations` for any workload identity it needs. The kubelet
+retries the snapshot key volume until the driver has created the Secret, so the
+controller starts once the key is synced. The same rule applies
+as for any key you bring: never write a new version of it to the store.
 
 ### Webhook certificate
 
@@ -421,8 +456,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--agent-identity-token-file` | `/var/run/secrets/orka.ai/agent-identity/token` | Projected ServiceAccount token, audienced to `api://AzureADTokenExchange`, that the controller presents as the blueprint's federated credential. The chart mounts it when `controller.agentIdentity.entra.tenantID` is set, and then also installs a ValidatingAdmissionPolicy for the controller's namespace: only the ReplicaSet controller may create Pods running as the controller ServiceAccount, and only for the controller Deployment's ReplicaSets, and nobody may change their spec or add ephemeral containers, only the Deployment controller may create such ReplicaSets or change their Pod templates, and only under the controller Deployment's name, so no other ReplicaSet running as it can create Pods even when scaled up, only the controller Deployment may name it, only the kubelet may request tokens for it, no Job, CronJob, StatefulSet, DaemonSet, or ReplicationController may run as it, no `kubernetes.io/service-account-token` Secret may be created for it or, if one already exists, changed by anyone but the token controller, and nobody may run a command (`kubectl exec`) in the controller Deployment's Pods. Delete any such Secret, and any Pod already running as the controller ServiceAccount that the controller Deployment did not create, before you enable agent identities, and enforce at least the `baseline` Pod Security profile on the namespace so no privileged or `hostPath` Pod can read the token from its node, and delete any running Pod that breaks it first, since admission evicts none (see [Security](../concepts/security.md)). Env: `ORKA_AGENT_IDENTITY_TOKEN_FILE` |
 | `--agent-identity-max-delegation-age` | `24h` | Longest `maxDelegationAge` any `agentIdentity` policy in `Delegated` mode may use; longer values are capped. Env: `ORKA_AGENT_IDENTITY_MAX_DELEGATION_AGE` |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
-| `--mcp-server-enabled` | `false` | Serve the control-plane MCP endpoint at `/mcp` on the API port so IDE agents can delegate Tasks. Every tool runs with the caller's own REST API permissions. See [MCP server](../guides/mcp-server.md). Env: `ORKA_MCP_SERVER_ENABLED` |
-| `--mcp-max-concurrent` | `16` | Max concurrent MCP requests per API replica. Waiting tools (`wait_for_task`, `tasks/result`) release their slot and use a separate pool of half as many wait slots (at least one); excess waits are refused. Excess requests receive HTTP 429 |
+| `--mcp-server-enabled` | `false` | Serve the control-plane MCP endpoint at `/mcp` on the API port so IDE agents can delegate Tasks. Every tool runs with the caller's own REST API permissions. See [MCP server](../guides/mcp-server.md). Helm: `controller.mcpServer.enabled`. Env: `ORKA_MCP_SERVER_ENABLED` |
+| `--mcp-max-concurrent` | `16` | Max concurrent MCP requests per API replica. Waiting tools (`wait_for_task`, `tasks/result`) release their slot and use a separate pool of half as many wait slots (at least one); excess waits are refused. Excess requests receive HTTP 429. Helm: `controller.mcpServer.maxConcurrent` |
 | `--connectors-enabled` | `false` | Enable per-user connector reconciliation (`ConnectorProvider` and `Connection`). Requires Task provenance admission (`--task-provenance-admission-enabled` or `--task-provenance-admission-external`); the controller refuses to start otherwise, because connector use trusts `spec.requestedBy` only when the API server provably stamped it. Env: `ORKA_CONNECTORS_ENABLED` |
 | `--enable-ahp-api` | `false` | Serve the [Agent Host Protocol](api-reference.md#agent-host-protocol) at `/ahp` and the `/api/v1/ahp-tokens` routes, offering Orka's built-in runtimes as AHP agents. Requires Task provenance admission (`--task-provenance-admission-enabled` or `--task-provenance-admission-external`). Helm: `controller.ahp.enabled`. Env: `ORKA_ENABLE_AHP_API` |
 | `--ahp-token-max-ttl` | `2160h` | Longest lifetime an AHP connection token may be minted with. The default lifetime is `720h`, or this maximum when it is lower. Helm: `controller.ahp.tokenMaxTTL` |

@@ -10,6 +10,8 @@
 {{- include "orka.validateAgentHosts" . }}
 {{- include "orka.validateAHP" . }}
 {{- include "orka.validateTaskWebhooks" . }}
+{{- include "orka.validateMCPServer" . }}
+{{- include "orka.validateControllerExtraVolumes" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -221,6 +223,10 @@ spec:
             {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
+            {{- end }}
+            {{- if dig "mcpServer" "enabled" false .Values.controller }}
+            - --mcp-server-enabled=true
+            - --mcp-max-concurrent={{ dig "mcpServer" "maxConcurrent" 16 .Values.controller }}
             {{- end }}
             {{- if include "orka.agentHostsEnabled" . }}
             - --enable-agent-hosts=true
@@ -651,6 +657,9 @@ spec:
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
               readOnly: {{ if include "orka.webhookTLSGenerated" . }}false{{ else }}true{{ end }}
+            {{- with .Values.controller.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
@@ -777,6 +786,9 @@ spec:
               - key: {{ .Values.webhooks.tls.privateKeyKey | quote }}
                 path: {{ .Values.webhooks.tls.privateKeyKey | quote }}
           {{- end }}
+        {{- with .Values.controller.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
