@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,7 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // These tests pin what the repository monitor makes visible today: the
@@ -85,8 +88,8 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 }
 
 // A repair handoff writes its repair job and started push record before it
-// creates the Task, all keyed by the command. A controller that restarts at
-// any point, before the Task exists, after it exists, or after the result was
+// creates the Task, all keyed by the command. A controller that stops at the
+// Task create, or restarts after the Task exists or after the result was
 // ingested, replays the handoff without a second Task, job or push record, and
 // never reopens a settled push.
 func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
@@ -96,9 +99,13 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
 	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA}
 	run := &store.MonitorRun{ID: "run-repair-restart"}
+	cluster, ok := first.Client.(crclient.WithWatch)
+	if !ok {
+		t.Fatalf("test client %T does not support interception", first.Client)
+	}
 	// restart returns a new reconciler over the same cluster and store.
 	restart := func() *RepositoryMonitorReconciler {
-		return &RepositoryMonitorReconciler{Client: first.Client, Scheme: first.Scheme, Store: first.Store, ResultStore: first.ResultStore, GitHubAPIBaseURL: first.GitHubAPIBaseURL}
+		return &RepositoryMonitorReconciler{Client: cluster, Scheme: first.Scheme, Store: first.Store, ResultStore: first.ResultStore, GitHubAPIBaseURL: first.GitHubAPIBaseURL}
 	}
 	handoff := func(r *RepositoryMonitorReconciler, wantCreated int) {
 		t.Helper()
@@ -124,7 +131,7 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 	}
 	assertOne := func(stage, wantPush string) {
 		t.Helper()
-		if tasks := repositoryMonitorTestTaskCount(t, first); tasks != 1 {
+		if tasks := repositoryMonitorTestTaskCount(t, restart()); tasks != 1 {
 			t.Fatalf("%s: tasks = %d, want 1", stage, tasks)
 		}
 		if got := jobs(); len(got) != 1 {
@@ -135,27 +142,43 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 		}
 	}
 
-	handoff(first, 1)
-	assertOne("first handoff", repositoryMonitorAutomergeStateStarted)
+	// The controller stops at the Task create of its first handoff. By then the
+	// repair job and the started push record must already be durable.
+	stopped := false
+	first.Client = interceptor.NewClient(cluster, interceptor.Funcs{
+		Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
+			if _, isTask := obj.(*corev1alpha1.Task); !isTask || stopped {
+				return c.Create(ctx, obj, opts...)
+			}
+			stopped = true
+			if got := jobs(); len(got) != 1 {
+				t.Errorf("repair jobs at Task create = %+v, want the job recorded first", got)
+			}
+			if got := pushes(); len(got) != 1 || got[0].Status != repositoryMonitorAutomergeStateStarted || got[0].CommandEventID != command.ID {
+				t.Errorf("push records at Task create = %+v, want one started record for the command first", got)
+			}
+			return errors.New("controller stopped before creating the Task")
+		},
+	})
+	if created, _, err := first.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, run, command, "orka-agents", "orka", pr, item, 1, 1); err == nil || created != 0 || !stopped {
+		t.Fatalf("interrupted handoff = (%d, %v) stopped=%t, want it stopped at Task creation", created, err, stopped)
+	}
+	if tasks := repositoryMonitorTestTaskCount(t, restart()); tasks != 0 {
+		t.Fatalf("tasks after the interrupted handoff = %d, want none", tasks)
+	}
 
-	// The controller stopped after recording the job and push but before the
-	// Task was created: the restarted controller creates it against the same
-	// records.
-	task := &corev1alpha1.Task{}
-	if err := first.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: jobs()[0].TaskName}, task); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.Delete(ctx, task); err != nil {
-		t.Fatal(err)
-	}
+	// The restarted controller creates the Task against the same records.
 	handoff(restart(), 1)
 	assertOne("restart before Task creation", repositoryMonitorAutomergeStateStarted)
+	if got := jobs(); got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
+		t.Fatalf("repair job after recovery = %+v, want queued without the create error", got[0])
+	}
 
 	// The controller stopped after creating the Task: the restart adopts it.
 	handoff(restart(), 0)
 	assertOne("restart after Task creation", repositoryMonitorAutomergeStateStarted)
 
-	markRepositoryMonitorTestTaskDelivered(t, ctx, first.Client, jobs()[0].TaskName, pr.HeadBranch, "pushed31")
+	markRepositoryMonitorTestTaskDelivered(t, ctx, cluster, jobs()[0].TaskName, pr.HeadBranch, "pushed31")
 	if ingested, err := restart().ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil || !ingested {
 		t.Fatalf("ingest = (%t, %v), want the delivered repair ingested", ingested, err)
 	}
