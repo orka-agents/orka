@@ -8,7 +8,6 @@ import (
 	"slices"
 
 	workspace "github.com/orka-agents/orka-workspace/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/operatoraccess"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -64,9 +63,14 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 	if !source.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, fmt.Errorf("checkpoint source workspace has changed or is deleting")
 	}
-	if operatoraccess.Tainted(source.Annotations) {
-		// Operator access forfeits checkpoint export: a tainted source is
-		// never routed to a provider, so no fork can consume its data.
+	// Operator access forfeits checkpoint export: a source tainted through its
+	// own marker or the marker of any Task linked to this exact incarnation is
+	// never routed to a provider, so no fork can consume its data.
+	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, source)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if tainted {
 		return r.failRouting(ctx, checkpoint, "SourceOperatorTainted")
 	}
 	if source.Labels[workspace.ProviderControllerLabel] == acpWorkspaceControllerLabelValue {

@@ -44,7 +44,7 @@ func applyCommandWriteConfinement(roots []string) error {
 		return fmt.Errorf("unsupported Landlock ABI %d: truncate confinement requires ABI %d", abi, minimumLandlockWriteABI)
 	}
 	access := landlockWriteAccess(abi)
-	ruleset := unix.LandlockRulesetAttr{Access_fs: access}
+	ruleset := unix.LandlockRulesetAttr{Handled_access_fs: access}
 	rulesetFD, _, errno := unix.Syscall(
 		unix.SYS_LANDLOCK_CREATE_RULESET,
 		uintptr(unsafe.Pointer(&ruleset)),

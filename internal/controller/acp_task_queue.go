@@ -260,6 +260,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		PublicationReadCredentialResourceVersion: credentialVersions.TargetRead,
 		PublicationCredentialResourceVersion:     credentialVersions.TargetWrite,
 		ForgeCredentialResourceVersion:           credentialVersions.Forge,
+		CommitSigningCredentialResourceVersion:   credentialVersions.CommitSign,
 		LastTransitionTime:                       &now,
 	}
 	if externalDispatch {

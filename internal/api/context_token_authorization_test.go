@@ -1836,6 +1836,50 @@ func TestContextTokenTaskToolCredentialFailuresUsesToolProvenance(t *testing.T) 
 	}
 }
 
+// The controller MCP broker serves its built-ins to a built-in ACP runtime,
+// so an explicit allowlist naming one needs no Tool resource. A name the broker
+// does not serve still must resolve, and the token's tool context still bounds
+// the allowlist.
+func TestContextTokenTaskCreateAcceptsBrokeredBuiltInsInBuiltInRuntimeAllowlist(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "claude", Namespace: "team-a"},
+		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+	cfg := enforceContextTokenAuthorizationConfig()
+	token := &ContextToken{Scopes: []string{ContextTokenScopeTaskCreate}}
+	resolve := func(t *testing.T, name string) contextTokenTaskCreateAuthorizationContext {
+		t.Helper()
+		authzCtx, err := resolveContextTokenTaskCreateAuthorizationContext(context.Background(), k8sClient, CreateTaskRequest{
+			Type:         corev1alpha1.TaskTypeAgent,
+			AgentRef:     &corev1alpha1.AgentReference{Name: agent.Name},
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{name}},
+		}, "team-a")
+		require.NoError(t, err)
+		require.Contains(t, authzCtx.RuntimeAllowedTools, name)
+		return authzCtx
+	}
+	for _, name := range []string{"park_until", "delegate_task", "wait_for_tasks", "recall_memory", "remember", "web_fetch"} {
+		t.Run(name, func(t *testing.T) {
+			authzCtx := resolve(t, name)
+			failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, authzCtx)
+			require.NoError(t, err)
+			require.Empty(t, failures)
+
+			// Classification grants nothing: a token restricting tools
+			// elsewhere still refuses the brokered name.
+			restricted := &ContextToken{Scopes: token.Scopes, TransactionContext: map[string]any{"allowedTools": []any{"Read"}}}
+			require.Contains(t, strings.Join(contextTokenTaskCreateFailures(restricted, cfg, authzCtx), "\n"),
+				fmt.Sprintf("tool %q is not allowed by token context", name))
+		})
+	}
+	failures, err := contextTokenTaskToolCredentialFailures(context.Background(), k8sClient, token, cfg, resolve(t, "read_incident"))
+	require.NoError(t, err)
+	require.Equal(t, []string{`Tool "read_incident" is unresolved`}, failures)
+}
+
 func TestContextTokenTaskToolCredentialFailuresAllowsLowercaseBrokeredBashWithSyntheticNativeBash(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
@@ -1962,4 +2006,32 @@ func TestContextTokenTaskToolFailuresAcceptsGenericDenyAll(t *testing.T) {
 		RuntimeAllowedTools: []string{}, RuntimeAllowBash: false,
 	})
 	require.Empty(t, failures)
+}
+
+// A transaction token creates a memory consolidation run only with the
+// scopes its run's access needs.
+func TestContextTokenMemoryConsolidationFailures(t *testing.T) {
+	cfg, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	require.NoError(t, err)
+	run := func(mode corev1alpha1.MemoryConsolidationMode, inSpec bool) CreateTaskRequest {
+		ai := &corev1alpha1.AISpec{MemoryConsolidation: &corev1alpha1.MemoryConsolidationSpec{Mode: mode}}
+		if inSpec {
+			return CreateTaskRequest{Spec: &corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AI: ai}}
+		}
+		return CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: ai}
+	}
+	token := func(scopes ...string) *ContextToken { return &ContextToken{Scopes: scopes} }
+	reads := make([]string, 0, 4)
+	reads = append(reads, ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead, ContextTokenScopeMemoryRead)
+
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate), cfg,
+		CreateTaskRequest{Type: corev1alpha1.TaskTypeAI, AI: &corev1alpha1.AISpec{}}), "an ordinary Task needs no more")
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate), cfg, run(corev1alpha1.MemoryConsolidationDryRun, false)), 2)
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(ContextTokenScopeTaskCreate, ContextTokenScopeSessionsRead), cfg,
+		run(corev1alpha1.MemoryConsolidationDryRun, true)), 1, "the field is found in spec too")
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(reads...), cfg, run(corev1alpha1.MemoryConsolidationDryRun, false)))
+	require.Len(t, contextTokenMemoryConsolidationFailures(token(reads...), cfg, run(corev1alpha1.MemoryConsolidationPropose, false)), 1,
+		"a Propose run also creates proposals")
+	require.Empty(t, contextTokenMemoryConsolidationFailures(token(append(reads, ContextTokenScopeMemoryWrite)...), cfg,
+		run(corev1alpha1.MemoryConsolidationPropose, false)))
 }

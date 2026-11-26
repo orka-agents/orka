@@ -27,18 +27,24 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// agentUseGrants allows `use` only on the listed namespace/name Agents and
-// records every check the policy makes.
+// agentUseGrants allows `use` only on the listed namespace/name Agents, or
+// objects of resource when it is set, and records every check the policy
+// makes.
 type agentUseGrants struct {
-	allowed map[string]bool
-	checked []string
+	allowed  map[string]bool
+	checked  []string
+	resource string
 }
 
 func (g *agentUseGrants) Authorize(_ context.Context, attributes authorizer.Attributes) (authorizer.Decision, string, error) {
 	key := attributes.GetNamespace() + "/" + attributes.GetName()
 	g.checked = append(g.checked, key)
+	resource := g.resource
+	if resource == "" {
+		resource = "agents"
+	}
 	if attributes.GetVerb() == "use" && attributes.GetAPIGroup() == "core.orka.ai" &&
-		attributes.GetResource() == "agents" && g.allowed[key] {
+		attributes.GetResource() == resource && g.allowed[key] {
 		return authorizer.DecisionAllow, "", nil
 	}
 	return authorizer.DecisionNoOpinion, "", nil
@@ -46,7 +52,14 @@ func (g *agentUseGrants) Authorize(_ context.Context, attributes authorizer.Attr
 
 func loadAgentUsePolicies(t *testing.T) map[string]*admissionregistrationv1.ValidatingAdmissionPolicy {
 	t.Helper()
-	documents, err := splitYAMLDocuments(filepath.Join("..", "..", "config", "agent-use-policy", "agent_use_policy.yaml"))
+	return loadUsePolicies(t, filepath.Join("..", "..", "config", "agent-use-policy", "agent_use_policy.yaml"))
+}
+
+// loadUsePolicies loads a shipped policy file, keyed by the resource each
+// policy matches, and requires every policy to fail closed with a Deny binding.
+func loadUsePolicies(t *testing.T, path string) map[string]*admissionregistrationv1.ValidatingAdmissionPolicy {
+	t.Helper()
+	documents, err := splitYAMLDocuments(path)
 	require.NoError(t, err)
 	policies := map[string]*admissionregistrationv1.ValidatingAdmissionPolicy{}
 	bindings := map[string]bool{}

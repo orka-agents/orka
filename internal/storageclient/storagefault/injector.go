@@ -291,6 +291,11 @@ func copyInfo(info storagev1.ProviderInfo) storagev1.ProviderInfo {
 		binding := *info.Binding
 		info.Binding = &binding
 	}
+	if info.Source != nil {
+		source := *info.Source
+		info.Source = &source
+	}
+	info.MigratedTo = slices.Clone(info.MigratedTo)
 	return info
 }
 

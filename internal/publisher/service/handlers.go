@@ -235,6 +235,12 @@ func (s *Server) handlePublicationPrepare(writer http.ResponseWriter, request *h
 			if err := validateCredentialReference(value.SourceCredentialRef, CredentialHTTPExtraHeader); err != nil {
 				return value.Metadata, nil, err
 			}
+			if err := validateCredentialReference(value.SigningCredentialRef, CredentialSSHSigningKey); err != nil {
+				return value.Metadata, nil, err
+			}
+			if _, _, err := publisher.ValidateCommitIdentity(value.Request.CommitAuthorName, value.Request.CommitAuthorEmail); err != nil {
+				return value.Metadata, nil, invalidRequest("commit identity is invalid", err)
+			}
 			return value.Metadata, value, nil
 		},
 		func(ctx context.Context, metadata OperationMetadata, digest string, _ journalRecord, decoded any) (int, any, error) {
@@ -248,6 +254,19 @@ func (s *Server) handlePublicationPrepare(writer http.ResponseWriter, request *h
 				return 0, nil, err
 			}
 			value.Request.DeltaArtifact = delta
+			if value.SigningCredentialRef != nil {
+				signingKey, clearSigningKey, signCredErr := s.credentials.signingKeyCredential(ctx, OperationPublicationPrepare, metadata, value.SigningCredentialRef)
+				if signCredErr != nil {
+					return 0, nil, signCredErr
+				}
+				defer clearSigningKey()
+				fingerprint, fpErr := publisher.SSHSigningKeyFingerprint(signingKey)
+				if fpErr != nil {
+					return 0, nil, apiError(ErrCredential, "invalid_credential_ref", "signing key credential is invalid", 400, false, nil)
+				}
+				value.Request.SigningKey = signingKey
+				value.Request.SigningKeyFingerprint = fingerprint
+			}
 			credential, runtime, err := s.publisherFor(ctx, OperationPublicationPrepare, metadata, value.Request.Source, value.SourceCredentialRef)
 			if err != nil {
 				return 0, nil, err
@@ -505,6 +524,67 @@ func validatePreparedTransport(prepared PreparedPublication, publicationID, comm
 		return invalidRequest("prepared publication bundle artifact is invalid", err)
 	}
 	return nil
+}
+
+func (s *Server) handleBranchRebase(writer http.ResponseWriter, request *http.Request) {
+	s.serveOperation(writer, request, OperationBranchRebase,
+		func(body []byte) (OperationMetadata, any, error) {
+			var value BranchRebaseRequest
+			if err := decodeStrict(body, &value); err != nil {
+				return value.Metadata, nil, invalidRequest("branch rebase request JSON is invalid", err)
+			}
+			if err := s.validatePublicationMetadata(value.Metadata, OperationBranchRebase, "", value.Request.OperationID); err != nil {
+				return value.Metadata, nil, err
+			}
+			if err := validateRepository(value.Request.Target, s.config.AllowFileRepositories, s.config.AllowedSCMHosts); err != nil {
+				return value.Metadata, nil, err
+			}
+			if err := validateBranchRef(value.Request.TargetRef); err != nil {
+				return value.Metadata, nil, err
+			}
+			if err := validateBranchRef(value.Request.BaseRef); err != nil {
+				return value.Metadata, nil, err
+			}
+			if err := validateObjectID(value.Request.BaseOID); err != nil {
+				return value.Metadata, nil, err
+			}
+			if err := validateObjectID(value.Request.HeadOID); err != nil {
+				return value.Metadata, nil, err
+			}
+			if err := validateCredentialReference(value.CredentialRef, CredentialHTTPExtraHeader); err != nil {
+				return value.Metadata, nil, err
+			}
+			if err := validateCredentialReference(value.SigningCredentialRef, CredentialSSHSigningKey); err != nil {
+				return value.Metadata, nil, err
+			}
+			if _, _, err := publisher.ValidateCommitIdentity(value.Request.CommitAuthorName, value.Request.CommitAuthorEmail); err != nil {
+				return value.Metadata, nil, invalidRequest("commit identity is invalid", err)
+			}
+			return value.Metadata, value, nil
+		},
+		func(ctx context.Context, metadata OperationMetadata, digest string, _ journalRecord, decoded any) (int, any, error) {
+			value := decoded.(BranchRebaseRequest)
+			if value.SigningCredentialRef != nil {
+				signingKey, clearSigningKey, signErr := s.credentials.signingKeyCredential(ctx, OperationBranchRebase, metadata, value.SigningCredentialRef)
+				if signErr != nil {
+					return 0, nil, signErr
+				}
+				defer clearSigningKey()
+				value.Request.SigningKey = signingKey
+			}
+			credential, runtime, err := s.publisherFor(ctx, OperationBranchRebase, metadata, value.Request.Target, value.CredentialRef)
+			if err != nil {
+				return 0, nil, err
+			}
+			defer credential.cleanup()
+			s.publicationMu.Lock()
+			result, rebaseErr := runtime.RebaseBranch(ctx, value.Request)
+			s.publicationMu.Unlock()
+			if rebaseErr != nil {
+				return 0, nil, rebaseErr
+			}
+			return http.StatusOK, BranchRebaseResponse{OperationID: metadata.OperationID, RequestDigest: digest, Result: result}, nil
+		})
 }
 
 func (s *Server) restorePreparedBundle(

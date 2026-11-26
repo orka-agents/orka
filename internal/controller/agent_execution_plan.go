@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 )
 
 type agentExecutionPath string
@@ -62,6 +63,52 @@ func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agent
 //
 //nolint:gocyclo // Execution planning resolves every frozen input in one deterministic pass.
 func (r *TaskReconciler) planAgentExecution(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) agentExecutionPlan {
+	plan := r.planAgentExecutionRoute(ctx, task, agent)
+	if reason := requesterPermissionDecisionsRejection(task, agent, plan); reason != "" {
+		return rejectAgentExecutionPlan(reason)
+	}
+	return plan
+}
+
+// requesterPermissionDecisionsRejection fails closed on every route that
+// cannot honor spec.agentRuntime.permissionDecisions: Requester. Only a
+// built-in runtime on the harness v2 RuntimePool path can be launched to ask
+// before each policy-allowed native tool that acts; any other route would run
+// those tools without asking the requester.
+func requesterPermissionDecisionsRejection(task *corev1alpha1.Task, agent *corev1alpha1.Agent, plan agentExecutionPlan) string {
+	if !taskPermissionDecisionsByRequester(task) {
+		return ""
+	}
+	switch plan.path {
+	case agentExecutionPathRejected:
+		return ""
+	case agentExecutionPathACP:
+		runtimeType := ""
+		if agent != nil && agent.Spec.Runtime != nil {
+			runtimeType = string(agent.Spec.Runtime.Type)
+		}
+		if acp.BuiltInRuntimeSupportsNativePermissionAsk(runtimeType) {
+			return ""
+		}
+		return fmt.Sprintf("%s: %s is not supported by the %q runtime because it cannot be launched to ask before each tool",
+			permissionDecisionsField, corev1alpha1.PermissionDecisionsRequester, runtimeType)
+	case agentExecutionPathExternal:
+		return fmt.Sprintf("%s: %s requires a built-in runtime (codex, claude, copilot or opencode); an external AgentRuntime cannot be launched to ask before each tool",
+			permissionDecisionsField, corev1alpha1.PermissionDecisionsRequester)
+	default:
+		return fmt.Sprintf("%s: %s requires a built-in runtime on the RuntimePool path, the only route launched to ask before each tool",
+			permissionDecisionsField, corev1alpha1.PermissionDecisionsRequester)
+	}
+}
+
+const permissionDecisionsField = "spec.agentRuntime.permissionDecisions"
+
+//nolint:gocyclo // Keep the mutually exclusive routing branches together.
+func (r *TaskReconciler) planAgentExecutionRoute(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,

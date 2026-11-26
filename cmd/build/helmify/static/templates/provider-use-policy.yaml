@@ -1,0 +1,94 @@
+{{- if dig "providerUseAuthorization" "enabled" false .Values.controller }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-task-provider-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["tasks"]
+  variables:
+  - name: previousProviders
+    expression: >-
+      oldObject == null ? [] :
+      [?oldObject.spec.?ai.?providerRef].map(r, (r.?namespace.orValue('') == '' ? request.namespace : r.namespace) + '/' + r.name)
+  validations:
+  - expression: >-
+      !has(object.spec.ai) || !has(object.spec.ai.providerRef) ||
+      ((object.spec.ai.providerRef.?namespace.orValue('') == '' ? request.namespace : object.spec.ai.providerRef.namespace) + '/' + object.spec.ai.providerRef.name) in variables.previousProviders ||
+      authorizer.group('core.orka.ai').resource('providers').namespace((object.spec.ai.providerRef.?namespace.orValue('') == '' ? request.namespace : object.spec.ai.providerRef.namespace)).name(object.spec.ai.providerRef.name).check('use').allowed()
+    message: caller is not authorized to use the Task's Provider
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-task-provider-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-task-provider-use
+  validationActions: [Deny]
+  # Enforce only in this release's watched namespace, so another
+  # installation on the cluster keeps its own setting.
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "orka.fullname" . }}-agent-provider-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["agents"]
+  variables:
+  - name: previousProviders
+    expression: >-
+      oldObject == null ? [] :
+      [?oldObject.spec.?providerRef].map(r, (r.?namespace.orValue('') == '' ? request.namespace : r.namespace) + '/' + r.name) +
+      oldObject.spec.?model.?fallbacks.orValue([]).map(f, request.namespace + '/' + f.providerRef)
+  validations:
+  - expression: >-
+      !has(object.spec.providerRef) ||
+      ((object.spec.providerRef.?namespace.orValue('') == '' ? request.namespace : object.spec.providerRef.namespace) + '/' + object.spec.providerRef.name) in variables.previousProviders ||
+      authorizer.group('core.orka.ai').resource('providers').namespace((object.spec.providerRef.?namespace.orValue('') == '' ? request.namespace : object.spec.providerRef.namespace)).name(object.spec.providerRef.name).check('use').allowed()
+    message: caller is not authorized to use the Agent's Provider
+    reason: Forbidden
+  - expression: >-
+      object.spec.?model.?fallbacks.orValue([]).all(f,
+        (request.namespace + '/' + f.providerRef) in variables.previousProviders ||
+        authorizer.group('core.orka.ai').resource('providers').namespace(request.namespace).name(f.providerRef).check('use').allowed())
+    message: caller is not authorized to use the Agent's fallback Provider
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "orka.fullname" . }}-agent-provider-use
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "orka.fullname" . }}-agent-provider-use
+  validationActions: [Deny]
+  # Enforce only in this release's watched namespace, so another
+  # installation on the cluster keeps its own setting.
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+{{- end }}

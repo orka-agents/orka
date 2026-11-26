@@ -13,6 +13,8 @@ func runDescribe(t *testing.T, newProvider StateFactory) {
 		info := requireValidProviderInfo(t, provider, storagev1.StateContract)
 		require.GreaterOrEqual(t, info.Limits.MaxResultBytes, int64(storagev1.MaxResultBytes),
 			"a state.v1 provider accepts results up to the contract limit")
+		require.Equal(t, int64(storagev1.MaxMessageContentBytes), info.Limits.MaxMessageContentBytes,
+			"a state.v1 provider stores message content up to exactly the contract limit")
 		require.NoError(t, provider.HealthCheck(t.Context()), "a fresh dataset is healthy")
 	})
 

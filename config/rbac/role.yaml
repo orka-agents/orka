@@ -135,7 +135,6 @@ rules:
   - controllerepochs
   - externaleffects
   - promptattempts
-  - providers
   - publications
   - repositorymonitors
   - repositoryscans
@@ -224,6 +223,7 @@ rules:
   - core.orka.ai
   resources:
   - agents
+  - providers
   verbs:
   - create
   - delete
@@ -243,6 +243,19 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memories
+  verbs:
+  - list
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - memoryproposals
+  verbs:
+  - create
+  - list
 - apiGroups:
   - core.orka.ai
   resources:

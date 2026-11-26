@@ -76,6 +76,14 @@ rules:
   - update
   - delete
   - use
+# use lets delegated child Tasks and create_agent name Providers under
+# --provider-use-authorization-enabled
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - providers
+  verbs:
+  - use
 # Registered external runtime policy lookup for delegate_task materialization
 - apiGroups:
   - core.orka.ai
@@ -278,6 +286,14 @@ rules:
   - create
   - update
   - delete
+  - use
+# use lets delegated child Tasks and create_agent name Providers under
+# --provider-use-authorization-enabled
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - providers
+  verbs:
   - use
 # Registered external runtime policy lookup for delegate_task materialization
 - apiGroups:

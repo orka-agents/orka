@@ -20,7 +20,18 @@ type resolvedAISoul struct {
 	Binding    corev1alpha1.TaskSoulBinding
 }
 
+// memoryConsolidationRun reports whether task is a memory consolidation run,
+// which uses Orka's fixed consolidation prompt and never its Agent's soul.
+func memoryConsolidationRun(task *corev1alpha1.Task) bool {
+	return task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil
+}
+
 func resolveAISoul(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*resolvedAISoul, error) {
+	if memoryConsolidationRun(task) {
+		// The run sends none of the Agent's prompts, so its soul is neither
+		// read nor bound, and a missing soul ConfigMap cannot block the run.
+		return nil, nil
+	}
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || agent == nil || agent.Spec.Soul == nil {
 		if task != nil && task.Status.SoulBinding != nil {
 			return nil, invalidAISoulConfiguration("AI soul configuration was removed after binding")
@@ -222,7 +233,7 @@ func (m *SessionManager) validateSoulContext(ctx context.Context, task *corev1al
 }
 
 func validatePreparedAISoul(task *corev1alpha1.Task, agent *corev1alpha1.Agent, prepared *resolvedAISoul) error {
-	if agent == nil || agent.Spec.Soul == nil {
+	if agent == nil || agent.Spec.Soul == nil || memoryConsolidationRun(task) {
 		if prepared != nil || task.Status.SoulBinding != nil {
 			return invalidAISoulConfiguration("AI soul configuration is missing")
 		}

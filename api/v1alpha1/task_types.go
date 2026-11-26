@@ -168,7 +168,10 @@ const (
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
+// +kubebuilder:validation:XValidation:rule="self.type == 'agent' || !has(self.agentRuntime) || !has(self.agentRuntime.permissionDecisions) || self.agentRuntime.permissionDecisions != 'Requester'",message="agentRuntime.permissionDecisions Requester is only supported for agent Tasks"
 // +kubebuilder:validation:XValidation:rule="!has(self.webhookEvents) || size(self.webhookEvents) == 0 || (has(self.webhookURL) && size(self.webhookURL) > 0)",message="webhookEvents requires webhookURL"
+// +kubebuilder:validation:XValidation:rule="!has(self.ai) || !has(self.ai.memoryConsolidation) || (self.type == 'ai' && !has(self.sessionRef))",message="ai.memoryConsolidation requires an ai Task without sessionRef"
+// +kubebuilder:validation:XValidation:rule="(has(self.ai) && has(self.ai.memoryConsolidation)) == (has(oldSelf.ai) && has(oldSelf.ai.memoryConsolidation)) && (!has(self.ai) || !has(self.ai.memoryConsolidation) || self.ai.memoryConsolidation == oldSelf.ai.memoryConsolidation)",message="ai.memoryConsolidation is immutable"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -450,6 +453,61 @@ type AISpec struct {
 	// Tools lists the tools available for this task
 	// +optional
 	Tools []string `json:"tools,omitempty"`
+
+	// MemoryConsolidation makes this Task a memory consolidation run: it reads
+	// the namespace's current memories and recently changed Sessions and
+	// reports, or proposes, merges, supersessions and retirements for review
+	// (ADR 0051). The run uses a fixed Orka system prompt and no other tools;
+	// Prompt, when set, steers what it focuses on. Creating such a Task, or
+	// changing its spec, requires list and get on sessions and list on
+	// memories in the namespace, and in Propose mode create on
+	// memoryproposals.
+	// +optional
+	MemoryConsolidation *MemoryConsolidationSpec `json:"memoryConsolidation,omitempty"`
+}
+
+// MemoryConsolidationMode selects what a memory consolidation run does with
+// the operations it finds.
+// +kubebuilder:validation:Enum=DryRun;Propose
+type MemoryConsolidationMode string
+
+const (
+	// MemoryConsolidationDryRun reports the operations without creating
+	// proposals.
+	MemoryConsolidationDryRun MemoryConsolidationMode = "DryRun"
+	// MemoryConsolidationPropose also creates a memory proposal for each
+	// accepted operation.
+	MemoryConsolidationPropose MemoryConsolidationMode = "Propose"
+)
+
+// MemoryConsolidationSpec configures a memory consolidation run.
+type MemoryConsolidationSpec struct {
+	// Mode is DryRun, the default, or Propose.
+	// +kubebuilder:default=DryRun
+	// +optional
+	Mode MemoryConsolidationMode `json:"mode,omitempty"`
+
+	// MinNewSessions is the fewest Sessions that must have changed since the
+	// last completed run for this run to call the model. Fewer skips the run.
+	// Defaults to 5.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MinNewSessions *int32 `json:"minNewSessions,omitempty"`
+
+	// MaxOperations is the most operations one run reports or proposes.
+	// Defaults to 10.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +optional
+	MaxOperations *int32 `json:"maxOperations,omitempty"`
+
+	// Lookback is how far back the first run of its mode in a namespace
+	// reads. Later runs start where the latest completed run ended. Defaults
+	// to 168h; at most 720h.
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1h') && duration(self) <= duration('720h')",message="lookback must be between 1h and 720h"
+	// +optional
+	Lookback *metav1.Duration `json:"lookback,omitempty"`
 }
 
 // MarshalJSON preserves an explicitly empty native tool policy instead of
@@ -1062,6 +1120,19 @@ const (
 	AgentRuntimeOpencode AgentRuntimeType = "opencode"
 )
 
+// PermissionDecisionMode selects who answers an agent's permission requests.
+// +kubebuilder:validation:Enum=Policy;Requester
+type PermissionDecisionMode string
+
+const (
+	// PermissionDecisionsPolicy answers every permission request from the
+	// frozen tool policy.
+	PermissionDecisionsPolicy PermissionDecisionMode = "Policy"
+	// PermissionDecisionsRequester holds each permission request the frozen
+	// tool policy would allow for the Task's verified requester to decide.
+	PermissionDecisionsRequester PermissionDecisionMode = "Requester"
+)
+
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.
 // Runtime type and credentials come from the referenced Agent CRD.
 // Unknown fields reach admission so removed fields are rejected.
@@ -1084,16 +1155,32 @@ type AgentRuntimeSpec struct {
 	// AllowBash enables the agent to run bash commands (overrides Agent default)
 	// +optional
 	AllowBash *bool `json:"allowBash,omitempty"`
+
+	// PermissionDecisions selects who answers the permission requests an ACP
+	// runtime sends before running a tool. Policy, the default, answers each
+	// request from the frozen tool policy, and built-in runtimes run the native
+	// tools that policy allows without asking. Requester launches the built-in
+	// runtime so it asks before every shell command and file change the policy
+	// allows; it still refuses what that policy refuses, but holds every request
+	// it would allow for the Task's verified requester to approve or decline
+	// through the Task approvals API. A request nobody answers before it expires
+	// is refused. Requester requires a built-in runtime on the harness v2 path;
+	// other Tasks are rejected. It never enters the runtime profile, but a
+	// Session's runtime session is launched in one mode: a turn with the other
+	// value starts a new runtime session from the Session transcript.
+	// +optional
+	PermissionDecisions PermissionDecisionMode `json:"permissionDecisions,omitempty"`
 }
 
 // MarshalJSON preserves the distinction between an omitted task tool override
 // and an explicitly empty deny-all override.
 func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 	type agentRuntimeSpecJSON struct {
-		MaxTurns        *int32    `json:"maxTurns,omitempty"`
-		AllowedTools    *[]string `json:"allowedTools,omitempty"`
-		DisallowedTools []string  `json:"disallowedTools,omitempty"`
-		AllowBash       *bool     `json:"allowBash,omitempty"`
+		MaxTurns            *int32                 `json:"maxTurns,omitempty"`
+		AllowedTools        *[]string              `json:"allowedTools,omitempty"`
+		DisallowedTools     []string               `json:"disallowedTools,omitempty"`
+		AllowBash           *bool                  `json:"allowBash,omitempty"`
+		PermissionDecisions PermissionDecisionMode `json:"permissionDecisions,omitempty"`
 	}
 	var allowedTools *[]string
 	if in.AllowedTools != nil {
@@ -1101,10 +1188,11 @@ func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 		allowedTools = &tools
 	}
 	return json.Marshal(agentRuntimeSpecJSON{
-		MaxTurns:        in.MaxTurns,
-		AllowedTools:    allowedTools,
-		DisallowedTools: in.DisallowedTools,
-		AllowBash:       in.AllowBash,
+		MaxTurns:            in.MaxTurns,
+		AllowedTools:        allowedTools,
+		DisallowedTools:     in.DisallowedTools,
+		AllowBash:           in.AllowBash,
+		PermissionDecisions: in.PermissionDecisions,
 	})
 }
 
@@ -1173,6 +1261,25 @@ type WorkspaceConfig struct {
 	// request reconciliation when createPR=true.
 	// +optional
 	ForgeCredentialRef *WorkspaceCredentialReference `json:"forgeCredentialRef,omitempty"`
+
+	// CommitSigningCredentialRef references a Kubernetes Secret containing an
+	// unencrypted OpenSSH private key used only during clean-room publication
+	// preparation to sign the prepared Git commit (SSHSIG). Set Key to the
+	// Secret data key holding the private key (for example "signingKey").
+	// +optional
+	CommitSigningCredentialRef *WorkspaceCredentialReference `json:"commitSigningCredentialRef,omitempty"`
+
+	// CommitAuthorName overrides the Git author and committer name on the
+	// published commit. Defaults to "Orka Publisher".
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	CommitAuthorName string `json:"commitAuthorName,omitempty"`
+
+	// CommitAuthorEmail overrides the Git author and committer email on the
+	// published commit. Defaults to "publisher@orka.ai".
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	CommitAuthorEmail string `json:"commitAuthorEmail,omitempty"`
 
 	// SubPath is a subdirectory within the source repository used as workspace root.
 	// +kubebuilder:validation:MaxLength=1024

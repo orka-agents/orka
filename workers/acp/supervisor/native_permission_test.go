@@ -153,3 +153,44 @@ func TestResolvePermissionEnforcesNativeToolPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestResolvePermissionRefusesALateAnswerWithoutPoisoningTheSession(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	create := testCreateSessionRequest(t, cfg, profile)
+	if created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg); created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body=%s", created.Code, created.Body.String())
+	}
+	prompt := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+	now := time.Now().UTC()
+	mutations := newBlockingPromptMutator()
+	close(mutations.resolveRelease)
+	server.mu.Lock()
+	state := server.sessions[create.RuntimeSessionID]
+	state.prompt = &promptState{request: prompt}
+	state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
+	state.promptMutations = mutations
+	state.permissions["permission-1"] = permissionState{
+		requestID: "permission-1", toolName: providerToolBash, title: providerToolBash,
+		requestedAt: now.Add(-6 * time.Minute), expiresAt: now.Add(-time.Minute),
+		options: map[string]harnessv2.PermissionOptionKind{"reject": harnessv2.PermissionOptionRejectOnce},
+	}
+	proxyState := state.mcpProxy.state
+	server.mu.Unlock()
+
+	request := harnessv2.ResolvePermissionRequest{
+		Protocol: harnessv2.ProtocolVersion, Metadata: testMetadata(create.Metadata.Fence, "permission-operation-1", true),
+		RequestID: "permission-1", Decision: harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionSelected, OptionID: "reject"},
+	}
+	sealRequest(t, &request.Metadata.RequestDigest, request)
+	path := "/v2/runtime-sessions/session-1/prompts/" + string(request.Metadata.PromptID) + "/permissions/permission-1"
+	response := performMutation(t, server.Handler(), http.MethodPut, path, request, cfg)
+	if response.Code != http.StatusGone || mutations.resolveCalls.Load() != 0 {
+		t.Fatalf("late answer status=%d calls=%d, want 410 without reaching the runtime; body=%s",
+			response.Code, mutations.resolveCalls.Load(), response.Body.String())
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if state.mcpProxy.state != proxyState {
+		t.Fatalf("proxy state = %s, want %s: a late answer must not poison the session", state.mcpProxy.state, proxyState)
+	}
+}

@@ -262,6 +262,11 @@ func (h *Handlers) ApplyMemoryProposal(c fiber.Ctx) error {
 			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
 				namespace, "get", "core.orka.ai", "memories", id)
 		}
+		// A consolidation proposal changes the memories it targets.
+		apply.AuthorizeMemoryChange = func(ctx context.Context, namespace, id string) error {
+			return authorizeKubernetesResourceAction(ctx, h.clientset, ui,
+				namespace, "update", "core.orka.ai", "memories", id)
+		}
 	}
 	return applyNamespaceMemoryProposal(c, h.memoryProposalStore, apply)
 }
@@ -287,10 +292,63 @@ func createNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	if strings.TrimSpace(memory.Content) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "content is required")
 	}
+	// Only applying a proposal links a memory to it. A memory created with a
+	// proposal's ID would be returned as that proposal's application, or,
+	// for a consolidation proposal, would block it from ever applying.
+	if err := rejectClientProposalProvenance(memory); err != nil {
+		return err
+	}
 	if err := memoryStore.CreateMemory(c.Context(), &memory); err != nil {
 		return memoryStoreError("create memory", "memory", err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(memory)
+}
+
+// rejectClientProposalProvenance keeps proposal provenance server-owned: only
+// applying a reviewed proposal records a memory_proposal source and the
+// proposal the memory came from. Empty values name nothing, so older clients
+// that send every key keep working.
+func rejectClientProposalProvenance(memory store.Memory) error {
+	if isProposalSource(memory.Source) {
+		return errClientProposalSource()
+	}
+	if memory.SourceProposalID != "" {
+		return fiber.NewError(fiber.StatusBadRequest, "sourceProposalId cannot be set by clients; it is recorded when a proposal is applied")
+	}
+	return nil
+}
+
+// rejectClientProposalSourceUpdate keeps the source server-owned on update. An
+// update cannot relabel a memory as applied from a proposal, and cannot change
+// the source of a memory that carries apply's provenance (a non-blank
+// sourceProposalId). Omitting the source or repeating the stored one unchanged
+// is accepted, so a client can send back a memory it read. For a legacy applied
+// memory whose source was relabeled before this guard existed, restoring the
+// canonical memory_proposal source is allowed while changing to another source
+// is rejected. Update never changes sourceProposalId.
+func rejectClientProposalSourceUpdate(stored *store.Memory, req store.Memory) error {
+	if req.Source == "" || req.Source == stored.Source {
+		return nil
+	}
+	hasProposalLink := strings.TrimSpace(stored.SourceProposalID) != ""
+	if isProposalSource(req.Source) {
+		if hasProposalLink && req.Source == store.MemorySourceProposal {
+			return nil
+		}
+		return errClientProposalSource()
+	}
+	if hasProposalLink {
+		return fiber.NewError(fiber.StatusBadRequest, "source of a memory applied from a proposal cannot be changed by clients")
+	}
+	return nil
+}
+
+func isProposalSource(source string) bool {
+	return strings.EqualFold(strings.TrimSpace(source), store.MemorySourceProposal)
+}
+
+func errClientProposalSource() error {
+	return fiber.NewError(fiber.StatusBadRequest, "source "+store.MemorySourceProposal+" cannot be set by clients; it is recorded when a proposal is applied")
 }
 
 func getNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace string) error {
@@ -305,6 +363,9 @@ func updateNamespaceMemory(c fiber.Ctx, memoryStore store.MemoryStore, namespace
 	memory, err := memoryStore.GetMemory(c.Context(), namespace, c.Params("id"))
 	if err != nil {
 		return memoryStoreError("get memory", "memory", err)
+	}
+	if err := rejectClientProposalSourceUpdate(memory, req); err != nil {
+		return err
 	}
 	applyMemoryUpdate(memory, req)
 	memory.Namespace = namespace

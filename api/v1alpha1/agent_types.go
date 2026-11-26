@@ -139,7 +139,7 @@ type AgentCLIRuntime struct {
 	DefaultAllowBash *bool `json:"defaultAllowBash,omitempty"`
 
 	// DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
-	// Runtime adapters reject values they do not support (none is Codex-only; max is Claude-only).
+	// Only Codex accepts none. Codex and Claude accept max when the model and provider support it.
 	// +kubebuilder:validation:Enum=none;low;medium;high;xhigh;max
 	// +optional
 	DefaultReasoningEffort string `json:"defaultReasoningEffort,omitempty"`
@@ -487,6 +487,7 @@ type SessionConfig struct {
 }
 
 // CoordinationConfig enables agent-to-agent delegation
+// +kubebuilder:validation:XValidation:rule="!has(self.delegatedGatewayTools) || size(self.delegatedGatewayTools) == 0 || self.enabled",message="delegatedGatewayTools requires coordination to be enabled"
 type CoordinationConfig struct {
 	// Enabled indicates if coordination is enabled
 	// +kubebuilder:default=false
@@ -525,6 +526,15 @@ type CoordinationConfig struct {
 	// Built-in tools such as request_approval, delegate_task, and web_search are rejected.
 	// +optional
 	ApprovalRequiredTools []string `json:"approvalRequiredTools,omitempty"`
+
+	// DelegatedGatewayTools names gateway task-pass Tools (http.gatewayTaskPass)
+	// that this agent may pass on to the children it delegates to, without
+	// calling them itself. They join this agent's frozen gateway grant only,
+	// never its tool policy; a child still gets a tool only when its own
+	// policy lists it too.
+	// +listType=set
+	// +optional
+	DelegatedGatewayTools []string `json:"delegatedGatewayTools,omitempty"`
 }
 
 // AllowedAgent defines an agent that can be delegated to

@@ -62,9 +62,11 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/agentidentity"
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -74,8 +76,10 @@ import (
 	"github.com/orka-agents/orka/internal/envutil"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/githubauth"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
@@ -295,6 +299,7 @@ func main() {
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
+	var providerUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var agentIdentityEntraAuthority, agentIdentityTokenFile string
 	var agentIdentityMaxDelegationAge time.Duration
@@ -328,6 +333,12 @@ func main() {
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
 	var connectorsEnabled bool
+	var githubSignInEnabled, githubSignInCreateHosts bool
+	var githubSignInProvider, githubSignInAllowedOrgs, githubSignInAllowedTeams string
+	var ahpAPIEnabled bool
+	var ahpTokenMaxTTL time.Duration
+	var ahpBackendConfig api.AHPBackendConfig
+	var ahpWorkspaceConnectorProvider string
 	var dashboardEnabled bool
 	var mcpServerEnabled bool
 	var mcpMaxConcurrent int
@@ -362,6 +373,7 @@ func main() {
 	var claimNamespaceModeEnabled bool
 	var executionModeControllerUsernames string
 	var acpIdlePoolTTL time.Duration
+	var acpPermissionTimeout time.Duration
 	var acpCodexRuntimeImage string
 	var acpClaudeRuntimeImage string
 	var acpCopilotRuntimeImage string
@@ -528,6 +540,9 @@ func main() {
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
+	flag.BoolVar(&providerUseAuthorizationEnabled, "provider-use-authorization-enabled",
+		envBool("ORKA_PROVIDER_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on a Provider before API callers create a Task or create or edit an Agent naming it, or send a chat request through it. Pair with the provider-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -566,6 +581,36 @@ func main() {
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
+	flag.BoolVar(&githubSignInEnabled, "github-sign-in-enabled", false,
+		"Sign people in with GitHub (orka login) and issue Orka sessions. Needs --connectors-enabled and an allow-list.")
+	flag.StringVar(&githubSignInProvider, "github-sign-in-provider", "github",
+		"ConnectorProvider in the watch namespace whose GitHub App signs people in; a sign-in links the person through it.")
+	flag.StringVar(&githubSignInAllowedOrgs, "github-sign-in-allowed-orgs", "",
+		"Comma-separated GitHub orgs whose active members may sign in.")
+	flag.StringVar(&githubSignInAllowedTeams, "github-sign-in-allowed-teams", "",
+		"Comma-separated org/team slugs whose active members may sign in.")
+	flag.BoolVar(&githubSignInCreateHosts, "github-sign-in-create-hosts", true,
+		"Give each person who signs in with GitHub an agent host; false records every sign-in as declining one.")
+	flag.BoolVar(&ahpAPIEnabled, "enable-ahp-api", envBool("ORKA_ENABLE_AHP_API"),
+		"Serve the Agent Host Protocol at /ahp and the AHP connection token routes, offering Orka's built-in runtimes as AHP agents. "+
+			"Requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external).")
+	flag.DurationVar(&ahpTokenMaxTTL, "ahp-token-max-ttl", ahphost.DefaultMaxTokenTTL,
+		"Longest lifetime an AHP connection token may be minted with.")
+	flag.StringVar(&ahpBackendConfig.GitCredentialSecret, "ahp-git-credential-secret", os.Getenv("ORKA_AHP_GIT_CREDENTIAL_SECRET"),
+		"Secret in each AHP user's namespace whose token key clones and publishes their github.com repositories; it is never sent to another host. Without it, AHP sessions clone public repositories read-only.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceClass, "ahp-workspace-class", os.Getenv("ORKA_AHP_WORKSPACE_CLASS"),
+		"ExecutionWorkspaceClass for session-scoped AHP workspaces, so a session's files stay warm between turns. Empty publishes each write turn and starts the next from it.")
+	flag.DurationVar(&ahpBackendConfig.TurnTimeout, "ahp-turn-timeout", 2*time.Hour,
+		"Timeout of each AHP turn's Task.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceNamespace, "ahp-workspace-namespace",
+		envutil.String("ORKA_AHP_WORKSPACE_NAMESPACE", "orka-ahp-workspaces"),
+		"Namespace for AHP users' workspace Pods: git checkouts of their projects and sessions, and their terminals.")
+	flag.StringVar(&ahpBackendConfig.WorkspaceImage, "ahp-workspace-image", os.Getenv("ORKA_AHP_WORKSPACE_IMAGE"),
+		"Digest-pinned image with sh, git and the common tools Orka's scripts run there (cat, dirname, find, grep, head, ls, mkdir, mktemp, mv, readlink, rm, sed, sleep, stat) for AHP workspaces. Empty disables workspaces and terminals.")
+	flag.DurationVar(&ahpBackendConfig.WorkspaceIdleTimeout, "ahp-workspace-idle-timeout", 4*time.Hour,
+		"Remove an AHP workspace this long after its last use when no shell or turn runs and nothing in it is unpushed. Zero keeps workspaces until their user's last session and shell end.")
+	flag.StringVar(&ahpWorkspaceConnectorProvider, "ahp-workspace-connector-provider", os.Getenv("ORKA_AHP_WORKSPACE_CONNECTOR_PROVIDER"),
+		"ConnectorProvider, in each user's namespace, whose github.com links give that user's AHP workspace read access to their private repositories. Requires --connectors-enabled. Empty keeps workspaces to public repositories.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
 		"Serve the embedded web dashboard on the API port. The API, the CLI, and connector consent work without it.")
 	flag.BoolVar(&mcpServerEnabled, "mcp-server-enabled", envBool("ORKA_MCP_SERVER_ENABLED"),
@@ -640,6 +685,9 @@ func main() {
 		"Maximum active tasks per namespace (0 = unlimited).")
 	flag.DurationVar(&acpIdlePoolTTL, "acp-idle-pool-ttl", envDurationDefault("ORKA_ACP_IDLE_POOL_TTL", controller.DefaultACPIdlePoolTTL),
 		"Scale an idle ACP RuntimePool to zero after this duration.")
+	flag.DurationVar(&acpPermissionTimeout, "acp-permission-timeout", envDurationDefault("ORKA_ACP_PERMISSION_TIMEOUT", 0),
+		"How long an ACP runtime waits for the answer to a permission request, between 1m and 1h. "+
+			"Tasks whose requester decides permission requests get at most this long to answer. Zero keeps the 5m default.")
 	flag.StringVar(&acpCodexRuntimeImage, "acp-codex-runtime-image", os.Getenv("ORKA_ACP_CODEX_RUNTIME_IMAGE"),
 		"Codex ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpClaudeRuntimeImage, "acp-claude-runtime-image", os.Getenv("ORKA_ACP_CLAUDE_RUNTIME_IMAGE"),
@@ -1160,7 +1208,6 @@ func main() {
 		PlatformServiceAccounts: outboundaccess.PlatformServiceAccountSet(
 			splitCommaList(executionModeControllerUsernames), watchNamespace,
 			aiWorkerServiceAccountName, vendorWorkerServiceAccountName, containerWorkerServiceAccountName),
-		TokenRequester: watchNamespace + "/" + aiWorkerServiceAccountName,
 	}
 	if err := validateStaticTrustedServiceReferences(watchNamespace, outboundAccessTrust); err != nil {
 		setupLog.Error(err, "invalid static-controller outbound trust configuration")
@@ -1453,6 +1500,7 @@ func main() {
 		registerAdmissionWebhooks()
 	}
 
+	agentIdentityAuditBuffer := outboundaccess.NewAgentIdentityAuditBuffer(0)
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
 		Reader:                 mgr.GetAPIReader(),
@@ -1461,6 +1509,7 @@ func main() {
 		Trust:                  outboundAccessTrust,
 		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
 		AuditLog:               agentIdentityAuditLog,
+		AuditSink:              agentIdentityAuditBuffer,
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
@@ -1550,13 +1599,18 @@ func main() {
 	// consumers reach storage only through the storage client, which holds
 	// the snapshot key; the SQLite store is its in-process provider and a
 	// manager runnable.
+	sqliteSynchronous, err := sqlite.ParseSynchronous(storageFlags.SQLiteSynchronous)
+	if err != nil {
+		setupLog.Error(err, "invalid --store-sqlite-synchronous")
+		os.Exit(1)
+	}
 	sqliteStore, appStorage, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
 		if agentExecutionSnapshotSecretOpts.enabled() {
 			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
 		}
 		return loadAgentExecutionSnapshotKey(agentExecutionSnapshotKeyFile)
-	})
+	}, sqlite.WithSynchronous(sqliteSynchronous))
 	if err != nil {
 		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)
@@ -1647,6 +1701,10 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if strings.TrimSpace(ahpWorkspaceConnectorProvider) != "" && !connectorsEnabled {
+		setupLog.Error(nil, "--ahp-workspace-connector-provider requires --connectors-enabled")
+		os.Exit(1)
+	}
 	// chatLinkedAccounts lets chat and the compatibility proxies run the
 	// GitHub built-ins as the signed-in person; nil until connectors exist.
 	var chatLinkedAccounts api.LinkedAccountsFactory
@@ -1656,19 +1714,57 @@ func main() {
 	if connectorsEnabled {
 		// Connection-mode outbound access resolves a person's credential only
 		// here, in the controller. Worker Pods keep a nil source and fail closed.
-		connectionCredentials := &credential.Source{
+		connectionSource := &credential.Source{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
 			Credentials: appStorage,
 			OAuth:       connectorOAuthClient,
 		}
-		outboundAccessResolver.Connections = connectionCredentials
-		hostCredentials = connectionCredentials
+		outboundAccessResolver.Connections = connectionSource
+		hostCredentials = connectionSource
+		if provider := strings.TrimSpace(ahpWorkspaceConnectorProvider); provider != "" {
+			// A person's workspace reads their repositories with their own
+			// linked account, and only from github.com.
+			ahpBackendConfig.RepositoryCredential = func(ctx context.Context, namespace, issuer, subject string) (string, error) {
+				linked, err := connectionSource.ResolveGitHubPersonCredential(ctx, namespace, provider, issuer, subject, api.AHPWorkspaceTokenHorizon)
+				return linked.AccessToken, err
+			}
+		}
 		chatLinkedAccounts = func(namespace string, requester *corev1alpha1.RequestedBy) tools.LinkedAccountCredentials {
 			// Fresh point reads from the API server; namespace-wide scans
 			// (providers, the authoritative Connection listing) from the cache.
 			return controller.LiveLinkedAccountsWithCache(mgr.GetAPIReader(), mgr.GetClient(), tools.DefaultRegistry, outboundAccessResolver.Connections, namespace, requester)
 		}
+	}
+	// GitHub sign-in (ADR 0037) admits only members of its allow-list, and
+	// links each person through the agent-host provider's GitHub App.
+	var githubSignIn api.GitHubSignInConfig
+	if githubSignInEnabled {
+		allowed, err := githubauth.ParseAllowed(githubSignInAllowedOrgs, githubSignInAllowedTeams)
+		switch {
+		case err != nil:
+			setupLog.Error(err, "invalid GitHub sign-in allow-list")
+			os.Exit(1)
+		case allowed.Empty():
+			setupLog.Error(errors.New("no org or team is allowed"), "GitHub sign-in needs --github-sign-in-allowed-orgs or --github-sign-in-allowed-teams")
+			os.Exit(1)
+		case !connectorsEnabled || hostCredentials == nil:
+			setupLog.Error(errors.New("connectors are disabled"), "GitHub sign-in needs --connectors-enabled: each sign-in links the person's account")
+			os.Exit(1)
+		case strings.TrimSpace(githubSignInProvider) == "":
+			setupLog.Error(errors.New("no provider"), "GitHub sign-in needs --github-sign-in-provider")
+			os.Exit(1)
+		case githubSignInCreateHosts && !agentHostsEnabled:
+			setupLog.Error(errors.New("agent hosts are disabled"),
+				"GitHub sign-in creates agent hosts only with --enable-agent-hosts; pass --github-sign-in-create-hosts=false to sign in without them")
+			os.Exit(1)
+		}
+		githubSignIn = api.GitHubSignInConfig{
+			Enabled: true, Provider: strings.TrimSpace(githubSignInProvider), Allowed: allowed,
+			CreateHosts: githubSignInCreateHosts, Sessions: appStorage, Credentials: hostCredentials,
+		}
+		setupLog.Info("GitHub sign-in enabled", "provider", githubSignIn.Provider,
+			"allowedOrgs", len(allowed.Orgs), "allowedTeams", len(allowed.Teams))
 	}
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
@@ -1692,6 +1788,8 @@ func main() {
 	acpAdmissionGate := controller.NewACPAdmissionGate()
 	sessionManager := controller.NewSessionManager(appStorage)
 	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
+	// The ACP dispatcher publishes running Tasks' events here for in-process consumers.
+	liveEvents := liveevents.NewBroker(0)
 
 	// Agent Substrate v1 native workspaces are reached only through atenet-router
 	// with the controller's allowlisted pod certificate. Build it from the
@@ -1918,6 +2016,13 @@ func main() {
 	runtimePoolReconciler.ControllerAPIPort = int32(apiPort)
 	runtimePoolReconciler.WorkspaceArtifactMaxBytes = publisherWorkspaceArtifactMaxBytes
 	runtimePoolReconciler.NativeSessionMaxBytes = nativeSessionMaxBytes
+	if acpPermissionTimeout != 0 {
+		if err := acp.ValidatePermissionTimeout(acpPermissionTimeout); err != nil {
+			setupLog.Error(err, "invalid --acp-permission-timeout")
+			os.Exit(1)
+		}
+		runtimePoolReconciler.PermissionTimeout = acpPermissionTimeout
+	}
 	runtimePoolReconciler.AllowProviderTokenInSandbox = acpWorkspaceAllowProviderTokenInSandbox
 	runtimePoolReconciler.ProviderProxy = controller.RuntimePoolProviderProxyConfig{
 		BaseURL:         acpProviderProxyBaseURL,
@@ -2002,6 +2107,7 @@ func main() {
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
 		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
+		ProviderUseAuthorization:     providerUseAuthorizationEnabled,
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
@@ -2046,9 +2152,8 @@ func main() {
 		Identity:        agentIdentityConfig,
 		SubstrateRouter: runtimePoolSubstrateRouter,
 		Client:          mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
-		EventStore: appStorage, PlanStore: appStorage,
-		Snapshots: agentExecutionSnapshotStore,
-		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
+		EventStore: appStorage, Snapshots: agentExecutionSnapshotStore,
+		Epochs: controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
 		ArtifactReservations: artifactRetentionWiring.collector,
 		AdmissionGate:        acpAdmissionGate,
@@ -2056,6 +2161,7 @@ func main() {
 		MaxConcurrent:        acpDispatchMaxConcurrentTasks,
 		MCPRegistry:          acpMCPRegistry,
 		PromptLeases:         acpPromptLeases,
+		LiveEvents:           liveEvents,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,
@@ -2269,6 +2375,7 @@ func main() {
 			IdleStatus:      agenthost.HTTPStatusReader{},
 			HostCredentials: hostCredentials,
 			GitHubAccounts:  agenthost.GitHubAccounts{},
+			Membership:      agentHostMembership(githubSignIn),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "AgentHost")
 			os.Exit(1)
@@ -2371,6 +2478,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	var branchRebaser controller.RepositoryMonitorBranchRebaser
+	if publisherClient != nil {
+		branchRebaser = publisherClient
+	}
 	if err := (&controller.RepositoryMonitorReconciler{
 		Client:                    mgr.GetClient(),
 		Scheme:                    mgr.GetScheme(),
@@ -2380,6 +2491,7 @@ func main() {
 		DurableControlStore:       kubeControlStore,
 		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		BranchRebaser:             branchRebaser,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
@@ -2416,6 +2528,41 @@ func main() {
 		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
 		connectorToolEffects = kubeControlStore
 	}
+	oidcConfig := api.OIDCConfig{
+		Issuer:          oidcIssuer,
+		Audience:        oidcAudience,
+		JWKSURL:         oidcJWKSURL,
+		AllowedSubjects: splitCommaList(oidcAllowedSubjects),
+		Namespace:       oidcNamespace,
+	}
+	var ahpHost *ahphost.Host
+	if ahpAPIEnabled {
+		if err := validateAHPSignIn(oidcConfig); err != nil {
+			setupLog.Error(err, "invalid AHP configuration")
+			os.Exit(1)
+		}
+		if err := validateAHPProvenance(taskProvenanceProtected); err != nil {
+			setupLog.Error(err, "invalid AHP configuration")
+			os.Exit(1)
+		}
+		if err := validateAHPWorkspaceClass(ahpBackendConfig.WorkspaceClass, workspaceProviderAPIEnabled, acpWorkspaceDispatchEnabled); err != nil {
+			setupLog.Error(err, "invalid AHP configuration")
+			os.Exit(1)
+		}
+		if err := validateAHPWorkspace(ahpBackendConfig, watchNamespace, controlNamespace, acpRuntimeNamespace); err != nil {
+			setupLog.Error(err, "invalid AHP workspace configuration")
+			os.Exit(1)
+		}
+		ahpHost, err = newAHPHost(appStorage, ahpTokenMaxTTL, api.AHPTokenOwnerCheck(oidcConfig))
+		if err != nil {
+			setupLog.Error(err, "unable to set up the AHP host")
+			os.Exit(1)
+		}
+		if err := mgr.Add(ahpHost); err != nil {
+			setupLog.Error(err, "unable to add the AHP host")
+			os.Exit(1)
+		}
+	}
 	apiServer := api.NewServer(mgr.GetClient(), sessionManager, api.ServerConfig{
 		SubstrateMCPProxy:         api.SubstrateMCPProxyConfig{Router: substrateMCPRouter},
 		Port:                      apiPort,
@@ -2423,13 +2570,7 @@ func main() {
 		WatchNamespace:            watchNamespace,
 		ExecutionMode:             mode,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
-		OIDC: api.OIDCConfig{
-			Issuer:          oidcIssuer,
-			Audience:        oidcAudience,
-			JWKSURL:         oidcJWKSURL,
-			AllowedSubjects: splitCommaList(oidcAllowedSubjects),
-			Namespace:       oidcNamespace,
-		},
+		OIDC:                      oidcConfig,
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
 		ResultStore:               appStorage,
@@ -2442,9 +2583,11 @@ func main() {
 		ExternalEffects:           kubeControlStore,
 		MemoryStore:               appStorage,
 		MemoryProposalStore:       appStorage,
+		MemoryConsolidationStore:  appStorage,
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
 		ExecutionEventStore:       appStorage,
+		LiveEvents:                liveEvents,
 		GatewayEventStore:         appStorage,
 		GatewayDeliveryStore:      appStorage,
 		GatewayService:            gatewayService,
@@ -2455,6 +2598,10 @@ func main() {
 		TaskProvenanceProtected:   taskProvenanceProtected,
 		E2EPromptFaultEnabled:     strings.TrimSpace(acpE2EPromptWriteAmbiguityMarker) != "",
 		Connectors:                connectorConfig,
+		GitHubSignIn:              githubSignIn,
+		AHP:                       ahpHost,
+		AHPBackend:                ahpBackendFor(ahpHost, ahpBackendConfig),
+		RESTConfig:                mgr.GetConfig(),
 		ConnectorTools: api.ConnectorToolExecutionConfig{
 			Enabled:                          connectorsEnabled,
 			OutboundAccess:                   outboundAccessResolver,
@@ -2465,11 +2612,13 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled:      dashboardEnabled,
-		AgentUseAuthorization: agentUseAuthorizationEnabled,
-		OperatorAccess:        api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
-		MCP:                   api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
-		TaskWebhookKeys:       taskWebhookKeys,
+		DashboardEnabled:         dashboardEnabled,
+		AgentUseAuthorization:    agentUseAuthorizationEnabled,
+		ProviderUseAuthorization: providerUseAuthorizationEnabled,
+		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
+		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
+		TaskWebhookKeys:          taskWebhookKeys,
+		AgentIdentityAudit:       agentIdentityAuditBuffer,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2533,7 +2682,7 @@ func main() {
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				GatewayReplySender: gatewayReplySender,
 				DashboardEnabled:   dashboardEnabled,
-				MemoryReader:       appStorage, MemoryProposalWriter: appStorage,
+				MemoryReader:       appStorage, MemoryRecallRecorder: appStorage, MemoryProposalWriter: appStorage,
 				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), appStorage, appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 			}, nil
@@ -3177,4 +3326,15 @@ func envStringDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// agentHostMembership checks a host's refreshed token against the GitHub
+// sign-in allow-list, or nothing without GitHub sign-in.
+func agentHostMembership(signIn api.GitHubSignInConfig) controller.GitHubMembershipChecker {
+	if !signIn.Enabled {
+		return nil
+	}
+	return func(ctx context.Context, token, login string) error {
+		return signIn.GitHub.RequireMember(ctx, token, login, signIn.Allowed)
+	}
 }

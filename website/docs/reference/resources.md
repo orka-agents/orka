@@ -78,7 +78,7 @@ spec:
 | `prompt` | `ai`, `agent` | What to do. |
 | `image`, `command`, `args` | `container` | The container to run. See [Container tasks](../guides/container-tasks.md). |
 | `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. A container Task's `valueFrom.secretKeyRef` and `valueFrom.configMapKeyRef` follow the `secretRef` policy; see [Container tasks](../guides/container-tasks.md#other-fields). |
-| `ai` | `ai` | Settings for a Task without an Agent, or overrides for one: `providerRef`, `model`, `systemPrompt`, `temperature`, `maxTokens`, `skills`, and `tools`. |
+| `ai` | `ai` | Settings for a Task without an Agent, or overrides for one: `providerRef`, `model`, `systemPrompt`, `temperature`, `maxTokens`, `skills`, and `tools`. `ai.memoryConsolidation` makes the Task a [memory consolidation run](../concepts/memory.md#consolidation-runs). |
 | `workspace` | `agent`, `container` | The git repository to work in. See [Workspace](#workspace). |
 | `agentRuntime` | `agent` | Per-Task overrides of the Agent's runtime defaults: `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. |
 | `sessionRef` | `ai`, `agent` | Conversation continuity: `name`, `create` (default `false`), `append` (default `true`), and `maxMessages` (default `50`). Immutable after creation. |
@@ -234,7 +234,6 @@ spec:
     nodeSelector:
       sandbox-runtime: kata
   model:
-    temperature: 0.7
     maxTokens: 4096
   systemPrompt:
     inline: "You are a research specialist..."
@@ -258,7 +257,7 @@ spec:
 | Field | Description |
 | --- | --- |
 | `providerRef` | The [Provider](#provider) for a native Agent. Mutually exclusive with `runtime`. |
-| `model` | `name` (optional when the Provider sets `defaultModel`), `temperature` (0–2), `maxTokens`, `contextWindow`, and [`fallbacks`](#model-fallbacks). |
+| `model` | `name` (optional when the Provider sets `defaultModel`), `temperature` (0–2; an `anthropic` Provider doesn't send it to Claude Opus 4.7 and later models, which reject it), `maxTokens` (when unset, the Provider chooses: `anthropic` sends 64,000 to Claude 4.5 and later models and 4,096 to others, and `openai` and `azure-openai` send no limit, so the model's maximum applies), `contextWindow`, and [`fallbacks`](#model-fallbacks). |
 | `systemPrompt` | `inline` text, or `configMapRef` to read it from a ConfigMap key. |
 | `tools` | Native Agents only. Tools the Agent may call: [built-in tools](built-in-tools.md) and custom [Tool](#tool) resources by name. An entry with `enabled: false` is skipped. Runtime Agents use `runtime.defaultAllowedTools` instead. |
 | `skills` | Native Agents only. [Skills](#skill) whose content is added to the system prompt. |
@@ -362,7 +361,7 @@ spec:
 | `runtime.defaultMaxTurns` | Default turn limit per Task, 1–1000. |
 | `runtime.defaultAllowedTools` | Tools the CLI may use by default, such as `Read`, `Grep`, `Glob`, `Edit`, and `Bash`. |
 | `runtime.defaultAllowBash` | Whether shell use is allowed by default. Defaults to `true`. Codex requires `true`. |
-| `runtime.defaultReasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, or `max`. Runtimes reject values they do not support: `none` is Codex-only and `max` is Claude-only. |
+| `runtime.defaultReasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, or `max`. Only Codex accepts `none`. Codex and Claude accept `max` on compatible models. Orka forwards an explicit Codex `max` unchanged; support depends on the client, model, and provider. Omit the field to use the runtime default. |
 | `runtime.runtimeRef` | Selects an external [AgentRuntime](../guides/bring-your-own-agent-runtime.md) instead of a built-in type. |
 | `runtime.toolboxes` | Built-in types only. Read-only [toolbox](../guides/toolboxes.md) images whose tool folders are added to the agent's `PATH`. |
 | `runtime.skills` | `codex`, `claude`, and `opencode` only. [Agent Skills](../guides/runtime-skills.md) (`name`, digest-pinned `image`, optional `path` under `/skills`) copied into each session's native skills folder. |
@@ -411,9 +410,14 @@ spec:
       - Bash
       - Glob
       - Grep
+    # permissionDecisions: Requester
 ```
 
-[Agent runtimes](../concepts/agent-runtimes.md) explains how these Tasks run.
+[Agent runtimes](../concepts/agent-runtimes.md) explains how these Tasks run. With
+`permissionDecisions: Requester`, the built-in runtime is launched to ask before every shell
+command and file change, and each request the policy would allow waits for the Task's
+requester to decide; see
+[Permission requests from built-in runtimes](../guides/human-approval-v2.md#permission-requests-from-built-in-runtimes).
 
 ## Provider
 

@@ -272,7 +272,10 @@ func (h *AnthropicCompatHandler) HandleMessages(c fiber.Ctx) error {
 			return authorizeContextTokenProviderReference(c, h.contextTokenAuthorization, "anthropicMessagesProviderReference", namespace, provider)
 		},
 		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
-			return authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, provider, model)
+			if err := authorizeContextTokenProviderUse(c, h.contextTokenAuthorization, "anthropicMessages", namespace, provider, model); err != nil {
+				return err
+			}
+			return authorizeChatProviderUse(c, h.kubeClient, "anthropicMessages", provider)
 		},
 		RequireModel: true,
 		// Enforced scoped context tokens get no implicit Provider selection.
