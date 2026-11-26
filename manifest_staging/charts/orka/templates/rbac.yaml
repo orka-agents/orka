@@ -512,7 +512,7 @@ rules:
     resources: ["repositorymonitors/runs", "repositorymonitors/commands"]
     verbs: ["create"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["repositorymonitors/runs", "repositorymonitors/items", "monitorevents"]
+    resources: ["repositorymonitors/runs", "repositorymonitors/items", "repositorymonitors/audit", "monitorevents"]
     verbs: ["list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["monitorcommands", "monitoractions", "monitorworkactions", "monitorimplementationjobs", "monitormutations"]

@@ -554,6 +554,7 @@ orka monitor list -o json
 orka monitor runs my-monitor -o json
 orka monitor items my-monitor -o json
 orka monitor events my-monitor -o json
+orka monitor audit my-monitor --since 24h
 orka monitor delete my-monitor
 ```
 

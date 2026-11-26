@@ -31,3 +31,9 @@ run_go_test ./internal/store 'Test(RepositoryMonitorEventDecisionCoversDecisionT
 run_go_test ./internal/api 'Test(GitHubWebhook_LabelCommandIntakeRecordsOneDecisionEvent|GitHubWebhook_OutOfScopeLabelCommandRecordsRejectionWithoutCommand|RepositoryMonitorPermissionPolicyNamesTheDecidingClause|RepositoryMonitorCommandDecisionKeepsOneReceiptPerCommand)$'
 
 run_go_test ./internal/controller 'TestRepositoryMonitor(ItemSkippedIsRecordedOncePerHeadAndReason|BlockedImplementationRecordsDecisionEvent|FailedUpdateBranchRecordsDecisionEvent|UpdateBranchFailurePathsRecordOneEvent|RunAttemptsKeepTheirOwnEvents|EventPolicyNamesSpecClauses|RepairAppliesImplementationPathLimits)$'
+
+# Audit view: a time window of decisions joined with their command, Task and
+# mutation, over the API and the CLI.
+run_go_test ./internal/api 'TestRepositoryMonitorAudit(JoinsDecisionsInWindow|PagesAcrossLifecycleEvents|RejectsInvalidQueries)$'
+
+run_go_test ./cmd/cli '^TestPrintMonitorAuditTableShowsOneRowPerDecision$'

@@ -761,6 +761,7 @@ rules:
   - repositoryscans/droppedfindings
   - repositoryscans/findings
   - repositorymonitors/items
+  - repositorymonitors/audit
   - monitorevents
   verbs:
   - list
@@ -853,6 +854,7 @@ rules:
   - securityfindings/patches
   - repositorymonitors/runs
   - repositorymonitors/items
+  - repositorymonitors/audit
   - monitorevents
   verbs:
   - list

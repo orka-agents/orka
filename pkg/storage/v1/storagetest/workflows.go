@@ -845,6 +845,24 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		other, _, err := p.ListMonitorEvents(ctx, storagev1.MonitorEventFilter{Namespace: workflowOtherNamespace})
 		require.NoError(t, err)
 		require.Empty(t, other)
+
+		// Since is inclusive and Until exclusive, whatever zone the bounds use.
+		east := time.FixedZone("east", 5*60*60)
+		window, _, err := p.ListMonitorEvents(ctx, storagev1.MonitorEventFilter{Namespace: workflowNamespace,
+			EventType: "observed", Since: workflowAt(1).In(east), Until: workflowAt(4).In(east)})
+		require.NoError(t, err)
+		windowIDs := make([]string, 0, len(window))
+		for _, event := range window {
+			windowIDs = append(windowIDs, event.ID)
+		}
+		require.Equal(t, []string{"event-3", "event-2", "event-1"}, windowIDs)
+		since, _, err := p.ListMonitorEvents(ctx, storagev1.MonitorEventFilter{Namespace: workflowNamespace, Since: workflowAt(3)})
+		require.NoError(t, err)
+		require.Len(t, since, 2)
+		until, _, err := p.ListMonitorEvents(ctx, storagev1.MonitorEventFilter{Namespace: workflowNamespace, Until: workflowAt(0)})
+		require.NoError(t, err)
+		require.Len(t, until, 1)
+		require.Equal(t, "binding", until[0].ID)
 	})
 }
 

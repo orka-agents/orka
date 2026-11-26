@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 168 authenticated external route registrations, including 69
+The table covers all 169 authenticated external route registrations, including 69
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -57,8 +57,8 @@ resource and subresource fields and to the same slash-separated string in RBAC.
   Validation and patch action grants include their fixed pending/proposal state
   transitions. General finding mutations, such as dismiss and reopen, require
   `update` on `securityfindings`.
-- `repositorymonitors/runs`, `repositorymonitors/items`, and
-  `repositorymonitors/commands` use the parent monitor name. `monitorcommands`,
+- `repositorymonitors/runs`, `repositorymonitors/items`, `repositorymonitors/audit`,
+  and `repositorymonitors/commands` use the parent monitor name. `monitorcommands`,
   `monitoractions`, `monitorworkactions`, `monitorimplementationjobs`,
   `monitormutations`, and `monitorevents` authorize the corresponding stored
   ledgers. Their collection filters do not narrow a namespace-wide `list` grant.
@@ -343,6 +343,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/monitors/repositories/:name/runs` | `core.orka.ai` | `repositorymonitors/runs` | `create` | `:name` | `Q` | `patch` on `core.orka.ai/repositorymonitors`, `:name` |
 | `GET` | `/api/v1/monitors/repositories/:name/runs` | `core.orka.ai` | `repositorymonitors/runs` | `list` | `:name` | `Q` | none |
 | `GET` | `/api/v1/monitors/repositories/:name/items` | `core.orka.ai` | `repositorymonitors/items` | `list` | `:name` | `Q` | none |
+| `GET` | `/api/v1/monitors/repositories/:name/audit` | `core.orka.ai` | `repositorymonitors/audit` | `list` | `:name` | `Q` | none |
 | `POST` | `/api/v1/monitors/repositories/:name/commands` | `core.orka.ai` | `repositorymonitors/commands` | `create` | `:name` | `Q` | `create` on `core.orka.ai/repositorymonitors/runs`, `:name`; `patch` on `core.orka.ai/repositorymonitors`, `:name` |
 | `GET` | `/api/v1/monitors/commands` | `core.orka.ai` | `monitorcommands` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/monitors/commands/:id` | `core.orka.ai` | `monitorcommands` | `get` | `:id` | `Q` | none |
