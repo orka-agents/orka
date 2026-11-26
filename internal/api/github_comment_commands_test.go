@@ -620,7 +620,7 @@ func (s *advanceAfterReadStore) GetWorkAction(ctx context.Context, namespace, id
 	running.Status = store.RepositoryMonitorWorkActionStatusRunning
 	running.Phase = "plan_running"
 	running.TaskName = "plan-task"
-	if updateErr := s.RepositoryMonitorStore.UpdateWorkAction(ctx, &running); updateErr != nil {
+	if updateErr := s.UpdateWorkAction(ctx, &running); updateErr != nil {
 		return nil, updateErr
 	}
 	return action, nil
@@ -667,6 +667,29 @@ func TestGitHubCommentCommand_RedeliveryDoesNotRewindAnAdvancedWorkAction(t *tes
 	}
 	if action.Status != store.RepositoryMonitorWorkActionStatusRunning || action.TaskName != "plan-task" {
 		t.Fatalf("action = %#v, want the controller's running state and task kept", action)
+	}
+}
+
+func TestGitHubCommentCommand_RunLinkDoesNotRewindAnAdvancedWorkAction(t *testing.T) {
+	var advancing *advanceAfterReadStore
+	env := newCommentTestEnvWithStore(t, nil, func(inner store.RepositoryMonitorStore) store.RepositoryMonitorStore {
+		advancing = &advanceAfterReadStore{RepositoryMonitorStore: inner}
+		return advancing
+	})
+	dedupe := repositoryMonitorCommentCommandDedupeKey(env.monitor, githubWebhookRepository{FullName: "sozercan/vekil"}, "810")
+	// Intake creates the action, then reads it again to link its run. The
+	// controller starts the action right after that read.
+	advancing.actionID = store.RepositoryMonitorWorkActionID(repositoryMonitorCommandID(dedupe), commandIntentPlan)
+	env.deliver(t, "delivery-run-link", commentTestPayload{commentID: 810, body: "/orka plan keep the API stable"})
+	if !advancing.advanced {
+		t.Fatal("intake never read the work action back")
+	}
+	action, err := env.store.GetWorkAction(t.Context(), env.monitor.Namespace, advancing.actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusRunning || action.TaskName != "plan-task" || action.RunID == "" {
+		t.Fatalf("action = %#v, want the controller's running state and task kept with the run linked", action)
 	}
 }
 
