@@ -1,4 +1,4 @@
-# 57. Start a workspace runtime before its attachment settles, and keep new Substrate workspaces warm by default
+# 57. Start a workspace runtime before its attachment settles, with operator-configured default warm windows
 
 Date: 2026-11-19
 
@@ -9,10 +9,9 @@ Accepted, approved by the project owner. It amends:
 - ADR 0026: RuntimePool demand may now come before the attachment, but prompt demand still may not.
 - ADR 0027: on cold resume, the pool intent lifts when the continuation flips the workspace back to Ready, not after the attachment handshake.
 - ADR 0029: through ADR 0055, retention now also ends default windows.
-- ADR 0055: its **No default** rule changes. New eligible Substrate workspaces get a controller default window.
+- ADR 0055: its **No default** rule gains an operator-configured controller flag and per-class annotation override (both default off at `0`).
 
-ADR 0030's full-memory gate, ADR 0031's data-only cold path, ADR 0049's credential model, and
-ADR 0056's shared-worker evidence are unchanged.
+ADR 0030's full-memory gate, ADR 0031's data-only cold path, and ADR 0049's credential model are unchanged.
 
 ## Context
 
@@ -301,7 +300,7 @@ under it and waited 60 s for the suspension. A window that an eviction or upgrad
 ### 2. Default warm window for new Substrate workspaces
 
 - **Where the default comes from.** The controller flag
-  `--acp-workspace-default-suspend-after-detach` sets it, with a default of `5m`.
+  `--acp-workspace-default-suspend-after-detach` sets it, with a default of `0` (disabled).
   - `0` disables only the controller default; a class annotation still applies.
   - The value must be at most 1 h; otherwise the controller refuses to start.
 - **When it applies.** Only when Core materializes a new class-backed workspace whose binding is:
@@ -423,8 +422,7 @@ suite:
    - captures `VOLUMES` only and reports `Stopped` with `RetainedData` bound to that instance;
    - fails without replacing the last retained data.
 
-   Its sandbox gets the same deny-all egress and termination evidence as any retirement (ADR
-   0056 on shared workers).
+   Its sandbox gets the same deny-all egress and termination evidence as any retirement.
 4. **One write from `Suspended`.** A single generation that moves a settled `Suspended` workspace
    to desired `Ready`, sets `spec.workload` to the next sequence (`previousInstance` and
    `retainedData` from the stopped observation), clears `spec.retirement`, and sets
@@ -458,14 +456,11 @@ and is not done here.
   publication write.
 - **Expected saving on a first turn: about 1.0–1.5 s.** The pool is created at workspace
   creation and publishes at core admission, carrying the staged attachment.
-- **Default warm window.** Most follow-ups within five minutes take ADR 0055's warm path (about
-  6.1 s today) instead of a cold resume. Each eligible Session holds one idle Actor slot for up
-  to five minutes after each detach:
-  - on shared workers (ADR 0056), that is one Actor's CPU and memory reservation inside an
-    existing worker;
-  - on private workers, it is one worker Pod.
-
-  Operators who cannot afford that set the flag to `0` or opt classes out.
+- **Default warm window.** When operators opt in via `--acp-workspace-default-suspend-after-detach`
+  or a class annotation, follow-ups within the configured window take ADR 0055's warm path
+  instead of a cold resume. Each eligible Session holds one idle private worker Pod for up to
+  the configured window after each detach. Because the controller flag defaults to `0`, existing
+  scale-to-zero behavior is preserved unless explicitly opted in.
 - **Wasted boots.** A cancelled or rejected follow-up may boot and retire a runtime it never
   uses. That costs one extra `VOLUMES` Tag and up to two minutes of an idle runtime. Session data
   is never lost: the same retained data is re-captured or kept.

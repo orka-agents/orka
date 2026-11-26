@@ -30,8 +30,10 @@ import (
 
 const (
 	// DefaultACPWorkspaceSuspendAfterDetach is the controller's default
-	// warm-detach window for new eligible workspaces.
-	DefaultACPWorkspaceSuspendAfterDetach = 5 * time.Minute
+	// warm-detach window for new eligible workspaces (0 disables it by default;
+	// operators opt in via --acp-workspace-default-suspend-after-detach or a
+	// class annotation).
+	DefaultACPWorkspaceSuspendAfterDetach = time.Duration(0)
 	// ACPWorkspaceClassDefaultSuspendAfterDetachAnnotation on an
 	// ExecutionWorkspaceClass overrides the controller default for new
 	// workspaces of that class: a duration such as "10m", or "disabled".

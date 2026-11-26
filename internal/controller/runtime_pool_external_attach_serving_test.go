@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/operatoraccess"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -102,6 +103,17 @@ func TestNonAttachmentGenerationChangesStillCloseTheRuntime(t *testing.T) {
 			w.Status.Conditions = []metav1.Condition{{Type: string(workspacev1alpha1.ConditionWorkspaceAdmitted), Status: metav1.ConditionFalse,
 				Reason: "ClassDeleting", ObservedGeneration: w.Generation}}
 		}},
+		{name: "core admission condition missing", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.Conditions = nil
+		}},
+		{name: "core admission condition unknown", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.Conditions = []metav1.Condition{{Type: string(workspacev1alpha1.ConditionWorkspaceAdmitted), Status: metav1.ConditionUnknown,
+				Reason: "Pending", ObservedGeneration: w.Spec.CoreAdmission.AdmittedGeneration}}
+		}},
+		{name: "core admission condition stale generation", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
+			w.Status.Conditions = []metav1.Condition{{Type: string(workspacev1alpha1.ConditionWorkspaceAdmitted), Status: metav1.ConditionTrue,
+				Reason: string(workspacev1alpha1.ReasonReady), ObservedGeneration: w.Spec.CoreAdmission.AdmittedGeneration - 1}}
+		}},
 		{name: "operator tainted", mutate: func(w *workspacev1alpha1.ExecutionWorkspace) {
 			w.Annotations[operatoraccess.TaintAnnotation] = "x"
 		}},
@@ -145,4 +157,78 @@ func TestAttachmentOnlyLagRequiresTheAdmittedBoot(t *testing.T) {
 	if externalAttachmentOnlyLag(&pool, w) {
 		t.Fatal("a pool without an active instance passed as serving")
 	}
+}
+
+// TestAttachmentOnlyLagDispatchBoundary distinguishes uninterrupted same-holder
+// bearer rotation from revocation, different holder, and stale queued work:
+// keeping the pool Serving across an attachment-only generation lag never
+// allows a Task whose attachment is unacknowledged, revoked, or owned by a
+// different holder to pass acpWorkspacePoolReadinessFailure and queue/dispatch.
+func TestAttachmentOnlyLagDispatchBoundary(t *testing.T) {
+	now := metav1.Now().Time
+	makeWorkspace := func() (*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.RuntimePool) {
+		f := servedExternalPool(t)
+		pool := runtimePoolTestGetPool(t, f.r, f.pool)
+		w := f.currentWorkspace(t)
+		if w.Annotations == nil {
+			w.Annotations = map[string]string{}
+		}
+		w.Annotations[acpExecutionWorkspacePoolAnnotation] = pool.Name
+		w.Spec.AttachmentEpoch = 2
+		w.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+			Epoch:     2,
+			TaskRef:   workspacev1alpha1.ObjectIdentityReference{Name: "holder-a", UID: "task-a-uid"},
+			ExpiresAt: metav1.NewTime(now.Add(10 * 60e9)),
+		}
+		w.Status.AttachedEpoch = 2
+		w.Status.Conditions = append(w.Status.Conditions, metav1.Condition{
+			Type:               string(workspacev1alpha1.ConditionWorkspaceAttached),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(workspacev1alpha1.ReasonReady),
+			ObservedGeneration: w.Generation,
+		})
+		return w, &pool
+	}
+
+	t.Run("same holder bearer rotation blocks re-queueing until observed and re-admitted", func(t *testing.T) {
+		w, pool := makeWorkspace()
+		// Simulate same-holder bearer rotation: epoch advances 2 -> 3, generation
+		// bumps, core admission & provider observation lag behind.
+		w.Spec.AttachmentEpoch = 3
+		w.Spec.Attachment.Epoch = 3
+		w.Generation++
+		if !externalAttachmentOnlyLag(pool, w) {
+			t.Fatal("expected pool to remain Serving during same-holder bearer rotation lag")
+		}
+		// While the rotation lags, a fresh Task queueing pass still sees
+		// errACPWorkspaceRecoveryPending (cannot bypass handshake).
+		err := acpWorkspacePoolReadinessFailure(w, pool, string(w.UID), "task-a-uid", now)
+		if err == nil {
+			t.Fatal("expected readiness gate to hold new queueing while rotation generation lags")
+		}
+		// A different holder cannot queue at all (hard refusal, not recovery pending).
+		errOther := acpWorkspacePoolReadinessFailure(w, pool, string(w.UID), "task-b-uid", now)
+		if errOther == nil || errOther.Error() != "the linked workspace is attached to a different Task" {
+			t.Fatalf("different holder error = %v, want different-Task refusal", errOther)
+		}
+	})
+
+	t.Run("revocation blocks dispatch even while pool stays serving during lag", func(t *testing.T) {
+		w, pool := makeWorkspace()
+		// Settlement revokes attachment (Attachment=nil) and bumps generation.
+		w.Spec.Attachment = nil
+		w.Generation++
+		err := acpWorkspacePoolReadinessFailure(w, pool, string(w.UID), "task-a-uid", now)
+		if err == nil || err.Error() != "the linked workspace attachment is being revoked" {
+			t.Fatalf("revoked attachment error = %v, want revocation refusal", err)
+		}
+	})
+
+	t.Run("stale queued work with mismatched workspace UID is refused", func(t *testing.T) {
+		w, pool := makeWorkspace()
+		err := acpWorkspacePoolReadinessFailure(w, pool, "stale-workspace-uid", "task-a-uid", now)
+		if err == nil || err.Error() != "the linked workspace was replaced" {
+			t.Fatalf("stale workspace UID error = %v, want replacement refusal", err)
+		}
+	})
 }

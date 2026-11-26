@@ -33,7 +33,7 @@ func defaultWindowTestBinding(mutate ...func(*ACPRuntimeWorkspaceBinding)) *ACPR
 func TestValidateACPWorkspaceDefaultSuspendAfterDetach(t *testing.T) {
 	t.Parallel()
 	for window, valid := range map[time.Duration]bool{
-		0: true, DefaultACPWorkspaceSuspendAfterDetach: true, time.Hour: true,
+		0: true, 5 * time.Minute: true, time.Hour: true,
 		-time.Second: false, time.Hour + time.Second: false,
 	} {
 		if err := ValidateACPWorkspaceDefaultSuspendAfterDetach(window); (err == nil) != valid {
@@ -256,7 +256,7 @@ func TestDefaultWarmWindowLeavesBindingAndProfileHashesUnchanged(t *testing.T) {
 		}
 		return binding
 	}
-	off, on := resolve(0), resolve(DefaultACPWorkspaceSuspendAfterDetach)
+	off, on := resolve(0), resolve(5*time.Minute)
 	if off.BindingDigest != on.BindingDigest || off.Class.ProfileHash != on.Class.ProfileHash || on.Class.SuspendAfterDetach != "" {
 		t.Fatalf("the controller default changed frozen hashes: %s/%s vs %s/%s", off.BindingDigest, off.Class.ProfileHash, on.BindingDigest, on.Class.ProfileHash)
 	}

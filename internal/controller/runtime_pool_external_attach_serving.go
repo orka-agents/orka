@@ -76,8 +76,9 @@ func externalRuntimePoolAdmitting(pool *corev1alpha1.RuntimePool) bool {
 //   - the provider's last observation names the same allocation, instance,
 //     and request revision, Ready with startup evidence, and the pool's active
 //     Pod UID and boot ID are the admitted ones;
-//   - core admission is lagging, not withdrawn: the immutable bindings still
-//     match and no Admitted=False condition exists;
+//   - core admission is lagging, not withdrawn or unverified: the immutable
+//     bindings still match and the workspace carries a positive prior
+//     Admitted=True (ReasonReady) condition for its last admitted generation;
 //   - the workspace is not deleting, Failed, quarantined, or tainted, and the
 //     pool has no retirement or eviction pending.
 //
@@ -99,8 +100,10 @@ func externalAttachmentOnlyLag(pool *corev1alpha1.RuntimePool, w *workspacev1alp
 	if !workspaceHasCoreAdmission(w) || w.Spec.CoreAdmission.AdmittedGeneration <= 0 {
 		return false
 	}
-	if admitted := workspaceprovider.FindCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted)); admitted != nil &&
-		admitted.Status == metav1.ConditionFalse {
+	admitted := workspaceprovider.FindCondition(w.Status.Conditions, string(workspacev1alpha1.ConditionWorkspaceAdmitted))
+	if admitted == nil || admitted.Status != metav1.ConditionTrue ||
+		admitted.Reason != string(workspacev1alpha1.ReasonReady) ||
+		admitted.ObservedGeneration != w.Spec.CoreAdmission.AdmittedGeneration {
 		return false
 	}
 	a := w.Status.Allocation
