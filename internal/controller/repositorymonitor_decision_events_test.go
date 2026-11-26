@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -206,6 +207,71 @@ func TestRepositoryMonitorFailedUpdateBranchRecordsDecisionEvent(t *testing.T) {
 	}
 }
 
+// Every path that ends a branch update without updating the branch records
+// the failure once, keyed by its mutation, whichever path ends it first.
+func TestRepositoryMonitorUpdateBranchFailurePathsRecordOneEvent(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T, name string) (*RepositoryMonitorReconciler, store.RepositoryMonitorStore, *corev1alpha1.RepositoryMonitor, *store.CommandEvent, *store.MonitorItem, *store.GitHubMutationRecord) {
+		t.Helper()
+		monitorStore := setupControllerSQLiteStore(t)
+		monitor := repositoryMonitorReviewIngestTestMonitor(name)
+		command := &store.CommandEvent{ID: "cmd-" + name, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 9, Intent: repositoryMonitorCommandIntentUpdateBranch, HeadSHA: "head9"}
+		item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "9", Number: 9, HeadSHA: "head9"}
+		if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+		mutation := &store.GitHubMutationRecord{ID: repositoryMonitorUpdateBranchMutationID(command.ID), CommandEventID: command.ID, Operation: repositoryMonitorUpdateBranchOperation, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 9, TargetSHA: "head9", Status: repositoryMonitorAutomergeStatePending}
+		reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+		if err := reconciler.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
+			t.Fatal(err)
+		}
+		return reconciler, monitorStore, monitor, command, item, mutation
+	}
+	assertOneFailure := func(t *testing.T, monitorStore store.RepositoryMonitorStore, monitor *corev1alpha1.RepositoryMonitor, mutation *store.GitHubMutationRecord, wantRunID string) {
+		t.Helper()
+		failed := repositoryMonitorTestEventsOfType(t, monitorStore, monitor, repositoryMonitorUpdateBranchFailure)
+		if len(failed) != 1 || failed[0].ItemNumber != 9 || failed[0].ItemSHA != "head9" || failed[0].RunID != wantRunID {
+			t.Fatalf("update_branch_failed events = %#v, want one for run %q", failed, wantRunID)
+		}
+		metadata := repositoryMonitorTestEventMetadata(t, failed[0])
+		if metadata[store.RepositoryMonitorEventDecisionField] != store.RepositoryMonitorDecisionFailed || metadata[eventReasonField] != repositoryMonitorUpdateBranchFailure ||
+			metadata[repositoryMonitorEventMutationIDField] != mutation.ID {
+			t.Fatalf("failed metadata = %v, want a failure naming mutation %s", metadata, mutation.ID)
+		}
+	}
+	run := &store.MonitorRun{ID: "run-update-branch"}
+
+	t.Run("rejected submission", func(t *testing.T) {
+		reconciler, monitorStore, monitor, command, item, mutation := setup(t, "rejected-submission")
+		rejected := &repositoryMonitorGitHubAPIError{Operation: "update branch", StatusCode: http.StatusUnprocessableEntity, Body: "merge conflict"}
+		if _, _, err := reconciler.recordRepositoryMonitorUpdateBranchSubmissionError(ctx, monitor, run, command, item, mutation, repositoryMonitorPullRequest{Number: 9, HeadSHA: "head9"}, rejected); !errors.Is(err, rejected) {
+			t.Fatalf("recordRepositoryMonitorUpdateBranchSubmissionError() error = %v, want the rejection", err)
+		}
+		assertOneFailure(t, monitorStore, monitor, mutation, run.ID)
+	})
+
+	t.Run("terminalized command", func(t *testing.T) {
+		reconciler, monitorStore, monitor, command, _, mutation := setup(t, "terminalized-command")
+		for range 2 {
+			if preserve, err := reconciler.terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, run, *command, "stale command"); err != nil || preserve {
+				t.Fatalf("terminalizeRepositoryMonitorUpdateBranch() = preserve %v, err %v", preserve, err)
+			}
+		}
+		assertOneFailure(t, monitorStore, monitor, mutation, run.ID)
+	})
+
+	t.Run("terminalized after failure", func(t *testing.T) {
+		reconciler, monitorStore, monitor, command, item, mutation := setup(t, "terminalized-after-failure")
+		if err := reconciler.failRepositoryMonitorUpdateBranch(ctx, monitor, run, command, item, mutation, "pull request closed before the branch update completed"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reconciler.terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, nil, *command, "stale command"); err != nil {
+			t.Fatal(err)
+		}
+		assertOneFailure(t, monitorStore, monitor, mutation, run.ID)
+	})
+}
+
 // A retried run starts under the same ID; each attempt keeps its own
 // run_started and run_failed, which the retry budget counts.
 func TestRepositoryMonitorRunAttemptsKeepTheirOwnEvents(t *testing.T) {
@@ -255,6 +321,11 @@ func TestRepositoryMonitorEventPolicyNamesSpecClauses(t *testing.T) {
 		{name: "research disabled", metadata: map[string]any{eventReasonField: "issue_workflow_phase_disabled", repositoryMonitorEventActionKindKey: repositoryMonitorIssueActionResearch}, want: "spec.issueWorkflow.research.enabled=false"},
 		{name: "max rounds", metadata: map[string]any{eventReasonField: repositoryMonitorReviewMaxRoundsReason}, want: "spec.review.maxRounds=4"},
 		{name: "control path", metadata: map[string]any{eventReasonField: repositoryMonitorPatchPathDenied}, want: repositoryMonitorRepositoryControlPathsPolicy},
+		{name: "publishing disabled", metadata: map[string]any{eventReasonField: repositoryMonitorPublishSkipDisabled}, want: "spec.review.publish.enabled=false"},
+		{name: "passed not posted", metadata: map[string]any{eventReasonField: repositoryMonitorPublishSkipVerdictNotConfigured, eventVerdictField: repositoryMonitorReviewVerdictPassed}, want: "spec.review.publish.postPassed=false"},
+		{name: "needs changes not posted", metadata: map[string]any{eventReasonField: repositoryMonitorPublishSkipVerdictNotConfigured, eventVerdictField: repositoryMonitorReviewVerdictNeedsChanges}, want: "spec.review.publish.postNeedsChanges=false"},
+		{name: "needs human not posted", metadata: map[string]any{eventReasonField: repositoryMonitorPublishSkipVerdictNotConfigured, eventVerdictField: repositoryMonitorReviewVerdictNeedsHuman}, want: "spec.review.publish.postNeedsHuman=false"},
+		{name: "security sensitive not posted", metadata: map[string]any{eventReasonField: repositoryMonitorPublishSkipSecuritySensitiveNotPublic}, want: "spec.review.publish.postSecuritySensitive=false"},
 		{name: "runtime failure", metadata: map[string]any{eventReasonField: repositoryMonitorRepairTaskNotSucceededReason}},
 		{name: "no reason", metadata: map[string]any{}},
 	}

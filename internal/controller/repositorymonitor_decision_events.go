@@ -87,8 +87,10 @@ func repositoryMonitorRepairFailureReason(job *store.RepairJob, task *corev1alph
 
 // recordRepositoryMonitorUpdateBranchFailure records that a branch update
 // ended without updating the branch. The event keeps a reason code; the
-// mutation record it names keeps the failure detail.
-func (r *RepositoryMonitorReconciler) recordRepositoryMonitorUpdateBranchFailure(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, item *store.MonitorItem, mutation *store.GitHubMutationRecord, detail string) error {
+// mutation record it names keeps the failure detail. A mutation fails once,
+// so the event is keyed by the mutation and every path that ends it, or
+// replays its end, records one event.
+func (r *RepositoryMonitorReconciler) recordRepositoryMonitorUpdateBranchFailure(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, mutation *store.GitHubMutationRecord, detail string) error {
 	reason := repositoryMonitorUpdateBranchFailure
 	if detail == repositoryMonitorUpdateBranchTimeoutReason {
 		reason = "update_branch_timeout"
@@ -101,7 +103,17 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorUpdateBranchFailure
 	if command != nil && strings.TrimSpace(command.ID) != "" {
 		metadata[commandEventIDField] = command.ID
 	}
-	return r.createMonitorEvent(ctx, monitor, runID, repositoryMonitorPullRequestKind, item.Number, mutation.TargetSHA, repositoryMonitorUpdateBranchFailure, fmt.Sprintf("Pull request #%d branch update failed: %s", item.Number, reason), metadata)
+	event, err := store.NewRepositoryMonitorEvent(store.RepositoryMonitorEventInput{
+		ID: "mevt-" + mutation.ID + "-failed", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, RunID: runID,
+		ItemKind: repositoryMonitorPullRequestKind, ItemNumber: mutation.TargetNumber, ItemSHA: mutation.TargetSHA,
+		EventType: repositoryMonitorUpdateBranchFailure, Actor: controllerNameValue,
+		Summary:  fmt.Sprintf("Pull request #%d branch update failed: %s", mutation.TargetNumber, reason),
+		Metadata: metadata,
+	})
+	if err != nil {
+		return err
+	}
+	return store.RecordRepositoryMonitorEvent(ctx, r.Store, event)
 }
 
 // saveBlockedRepositoryMonitorIssueImplementation saves an issue whose
@@ -215,8 +227,30 @@ func repositoryMonitorEventPolicy(monitor *corev1alpha1.RepositoryMonitor, itemK
 		return repositoryMonitorRepositoryControlPathsPolicy
 	case repositoryMonitorPatchPathNotAllowed:
 		return "spec.issueWorkflow.implementation.allowedPaths"
+	case repositoryMonitorPublishSkipDisabled:
+		return "spec.review.publish.enabled=false"
+	case repositoryMonitorPublishSkipVerdictNotConfigured:
+		verdict, _ := metadata[eventVerdictField].(string)
+		return repositoryMonitorPublishVerdictPolicy(verdict)
+	case repositoryMonitorPublishSkipSecuritySensitiveNotPublic:
+		return "spec.review.publish.postSecuritySensitive=false"
 	}
 	return ""
+}
+
+// repositoryMonitorPublishVerdictPolicy names the publish flag that turned
+// off posting a review with verdict.
+func repositoryMonitorPublishVerdictPolicy(verdict string) string {
+	switch strings.TrimSpace(verdict) {
+	case repositoryMonitorReviewVerdictPassed:
+		return "spec.review.publish.postPassed=false"
+	case repositoryMonitorReviewVerdictNeedsChanges:
+		return "spec.review.publish.postNeedsChanges=false"
+	case repositoryMonitorReviewVerdictNeedsHuman:
+		return "spec.review.publish.postNeedsHuman=false"
+	default:
+		return ""
+	}
 }
 
 func repositoryMonitorAgentPolicy(actionKind string) string {

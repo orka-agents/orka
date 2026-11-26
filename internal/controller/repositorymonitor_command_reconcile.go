@@ -293,7 +293,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 func (r *RepositoryMonitorReconciler) terminalizeRepositoryMonitorFailedCommand(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command store.CommandEvent, run *store.MonitorRun, reason string) error {
 	actionKind := repositoryMonitorCommandActionKind(command.Intent)
 	if command.Intent == repositoryMonitorCommandIntentUpdateBranch {
-		preserveSuccess, err := r.terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, command, reason)
+		preserveSuccess, err := r.terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, run, command, reason)
 		if err != nil {
 			return err
 		}

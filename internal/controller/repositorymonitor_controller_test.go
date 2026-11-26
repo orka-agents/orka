@@ -7880,7 +7880,7 @@ func TestRepositoryMonitorUpdateBranchTerminalProjectionRejectsMonitorRepository
 		t.Fatalf("UpsertMonitorItem() error = %v", err)
 	}
 
-	preserveSuccess, err := (&RepositoryMonitorReconciler{Store: monitorStore}).terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, command, "stale command")
+	preserveSuccess, err := (&RepositoryMonitorReconciler{Store: monitorStore}).terminalizeRepositoryMonitorUpdateBranch(ctx, monitor, nil, command, "stale command")
 	if err != nil || preserveSuccess {
 		t.Fatalf("terminalizeRepositoryMonitorUpdateBranch() = preserve %v, err %v", preserveSuccess, err)
 	}

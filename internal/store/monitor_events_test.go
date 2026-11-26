@@ -99,6 +99,12 @@ func TestNewRepositoryMonitorEventIDs(t *testing.T) {
 	if accepted == id("review_task_created", "run-2", "head-a", "", "", map[string]any{"taskName": "t"}) {
 		t.Fatal("a new run reused an accepted step's event ID")
 	}
+	if accepted != id("review_task_created", "run-1", "head-a", "", "", map[string]any{"taskName": "t", "created": false}) {
+		t.Fatal("adopting a created Task got a new event ID")
+	}
+	if accepted == id("review_task_created", "run-1", "head-a", "", "", map[string]any{"taskName": "u"}) {
+		t.Fatal("a new Task reused an accepted step's event ID")
+	}
 	if RepositoryMonitorEventID("a", "b|c", "", 0, "", "t") == RepositoryMonitorEventID("a|b", "c", "", 0, "", "t") {
 		t.Fatal("event ID parts are ambiguous")
 	}

@@ -39,6 +39,7 @@ const (
 	RepositoryMonitorEventPolicyField   = "policy"
 
 	repositoryMonitorEventCommandIDField = "commandEventID"
+	repositoryMonitorEventTaskNameField  = "taskName"
 )
 
 // Event types for command intake decisions.
@@ -123,13 +124,17 @@ type RepositoryMonitorEventInput struct {
 // A held or refused decision is identified by its item, head, event type,
 // reason, policy and command, but not by its run: polling the same item
 // again records it once, and a new head, reason or policy records it anew.
-// Other events are also identified by their run, summary and metadata, so a
+// An accepted event that names a Task is identified by its run and Task, so
+// creating the Task and adopting it after a restart record it once. Other
+// events are identified by their run, summary and metadata, so a
 // replay of the same step after a restart records it once while each new
 // step is kept. Writers of events that legitimately repeat within one run,
 // such as run_failed on each retry, put the attempt in the metadata.
 func NewRepositoryMonitorEvent(input RepositoryMonitorEventInput) (*MonitorEvent, error) {
-	metadata := make(map[string]any, len(input.Metadata)+2)
-	maps.Copy(metadata, input.Metadata)
+	metadata := maps.Clone(input.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
 	decision := RepositoryMonitorEventDecision(input.EventType)
 	if decision != "" {
 		metadata[RepositoryMonitorEventDecisionField] = decision
@@ -145,13 +150,18 @@ func NewRepositoryMonitorEvent(input RepositoryMonitorEventInput) (*MonitorEvent
 	id := strings.TrimSpace(input.ID)
 	if id == "" {
 		var occurrence []string
-		switch decision {
-		case RepositoryMonitorDecisionHeld, RepositoryMonitorDecisionRefused:
+		taskName := repositoryMonitorEventMetadataString(metadata, repositoryMonitorEventTaskNameField)
+		switch {
+		case decision == RepositoryMonitorDecisionHeld || decision == RepositoryMonitorDecisionRefused:
 			occurrence = []string{
 				repositoryMonitorEventMetadataString(metadata, RepositoryMonitorEventReasonField),
 				policy,
 				repositoryMonitorEventMetadataString(metadata, repositoryMonitorEventCommandIDField),
 			}
+		case decision == RepositoryMonitorDecisionAccepted && taskName != "":
+			// Creating a Task and adopting it after a restart accept the same
+			// step, so the Task, not how it was obtained, identifies it.
+			occurrence = []string{input.RunID, taskName}
 		default:
 			occurrence = []string{input.RunID, input.Summary, string(metadataJSON)}
 		}
