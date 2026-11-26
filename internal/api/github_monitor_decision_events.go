@@ -36,8 +36,9 @@ const (
 )
 
 // recordRepositoryMonitorCommandDecision records the intake decision for
-// command as a monitor event. Its ID is derived from the command, so a
-// redelivered command records it once. labels are the target's current
+// command as a monitor event. Its ID is derived from the command and the
+// decision alone, so a redelivered command keeps its original receipt even
+// when the monitor's policy has changed since. labels are the target's current
 // labels, which name the guard behind a blocked command.
 func (h *Handlers) recordRepositoryMonitorCommandDecision(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, labels []string) error {
 	if monitor == nil || command == nil || h.repositoryMonitorStore == nil {
@@ -74,6 +75,7 @@ func (h *Handlers) recordRepositoryMonitorCommandDecision(ctx context.Context, m
 		itemSHA = strings.TrimSpace(command.IssueSnapshotDigest)
 	}
 	event, err := store.NewRepositoryMonitorEvent(store.RepositoryMonitorEventInput{
+		ID:               store.RepositoryMonitorEventID(monitor.Namespace, monitor.Name, command.Kind, command.Number, itemSHA, eventType, command.ID),
 		MonitorNamespace: monitor.Namespace,
 		MonitorName:      monitor.Name,
 		ItemKind:         command.Kind,

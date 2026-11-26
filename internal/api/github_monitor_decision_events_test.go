@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -228,5 +229,53 @@ func TestGitHubWebhook_OutOfScopeLabelCommandRecordsRejectionWithoutCommand(t *t
 				t.Fatalf("policy = %q, want %q", policy, tt.wantPolicy)
 			}
 		})
+	}
+}
+
+// A redelivered command keeps its original intake receipt after the
+// monitor's policy changes, and each command gets its own receipt.
+func TestRepositoryMonitorCommandDecisionKeepsOneReceiptPerCommand(t *testing.T) {
+	monitor := &corev1alpha1.RepositoryMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "receipt-monitor", Namespace: "demo"},
+		Spec: corev1alpha1.RepositoryMonitorSpec{
+			RepoURL: monitorTestRepoURL,
+			Agents:  corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "reviewer"}},
+		},
+	}
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionMaintain
+	_, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, monitor)
+	command := &store.CommandEvent{ID: "cmd-receipt", MonitorNamespace: "demo", MonitorName: monitor.Name, Kind: "issue", Number: 5, Source: "github_label",
+		Author: "octocat", Intent: githubActionImplement, Status: githubCommandStatusRejected, Permission: githubPermissionWrite, IssueSnapshotDigest: "sha256:receipt"}
+	if err := handlers.recordRepositoryMonitorCommandDecision(t.Context(), monitor, command, nil); err != nil {
+		t.Fatal(err)
+	}
+	monitor.Spec.Triggers.GitHub.Labels.RequireActorPermission = githubPermissionAdmin
+	if err := handlers.recordRepositoryMonitorCommandDecision(t.Context(), monitor, command, nil); err != nil {
+		t.Fatal(err)
+	}
+	other := *command
+	other.ID = "cmd-receipt-2"
+	if err := handlers.recordRepositoryMonitorCommandDecision(t.Context(), monitor, &other, nil); err != nil {
+		t.Fatal(err)
+	}
+	events, _, err := handlers.repositoryMonitorStore.ListMonitorEvents(t.Context(), store.MonitorEventFilter{Namespace: "demo", MonitorName: monitor.Name, EventType: store.RepositoryMonitorEventCommandRejected, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := map[string]string{}
+	for _, event := range events {
+		var metadata map[string]any
+		if err := json.Unmarshal([]byte(event.MetadataJSON), &metadata); err != nil {
+			t.Fatal(err)
+		}
+		commandID, _ := metadata["commandEventID"].(string)
+		policy, _ := metadata[store.RepositoryMonitorEventPolicyField].(string)
+		if _, dup := policies[commandID]; dup {
+			t.Fatalf("command %s has two receipts: %#v", commandID, events)
+		}
+		policies[commandID] = policy
+	}
+	if len(policies) != 2 || policies["cmd-receipt"] != "spec.triggers.github.labels.requireActorPermission=maintain" {
+		t.Fatalf("receipts = %v, want one per command with the original policy", policies)
 	}
 }

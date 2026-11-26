@@ -148,6 +148,10 @@ func repositoryMonitorShortSHA(sha string) string {
 // attempts of a retried run apart: each attempt starts the run anew.
 const repositoryMonitorRunAttemptField = "attemptStartedAt"
 
+// repositoryMonitorEventLabelField is the single label a publication hold
+// names.
+const repositoryMonitorEventLabelField = "label"
+
 func repositoryMonitorRunAttempt(run *store.MonitorRun) string {
 	return run.StartedAt.UTC().Format(time.RFC3339Nano)
 }
@@ -192,7 +196,7 @@ func repositoryMonitorEventPolicy(monitor *corev1alpha1.RepositoryMonitor, itemK
 		return fmt.Sprintf("spec.repair.maxValidationRetries=%d", repositoryMonitorMaxValidationRetries(spec))
 	case repositoryMonitorRepairSkipLabelActorNotPermitted:
 		return "spec.triggers.github.labels.requireActorPermission=" + repositoryMonitorRequiredActorPermission(spec)
-	case repositoryMonitorSkipReasonDraft:
+	case repositoryMonitorSkipReasonDraft, repositoryMonitorPublishSkipDraftPR:
 		return "spec.targets.pullRequests.includeDrafts=false"
 	case repositoryMonitorSkipReasonBlockedLabel:
 		if repositoryMonitorMatchingLabel(spec.Policy.ProtectedLabels, repositoryMonitorEventLabels(metadata)) != "" {
@@ -283,21 +287,24 @@ func repositoryMonitorIssuePhasePolicy(actionKind string) string {
 	}
 }
 
+// repositoryMonitorEventLabels returns the labels an event names: the
+// observed label list, or the single blocking label a publication hold names.
 func repositoryMonitorEventLabels(metadata map[string]any) []string {
+	var out []string
 	switch labels := metadata[objectLabelsField].(type) {
 	case []string:
-		return labels
+		out = append(out, labels...)
 	case []any:
-		out := make([]string, 0, len(labels))
 		for _, label := range labels {
 			if value, ok := label.(string); ok {
 				out = append(out, value)
 			}
 		}
-		return out
-	default:
-		return nil
 	}
+	if label, ok := metadata[repositoryMonitorEventLabelField].(string); ok && label != "" {
+		out = append(out, label)
+	}
+	return out
 }
 
 func repositoryMonitorMaxRepairsPerPR(spec corev1alpha1.RepositoryMonitorSpec) int {
