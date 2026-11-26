@@ -321,9 +321,11 @@ func (l *goAwayListener) goAwayOnFirstStream(conn net.Conn) {
 		case frameType == 0x4 && flags&0x1 == 0:
 			_, _ = conn.Write([]byte{0, 0, 0, 0x4, 0x1, 0, 0, 0, 0}) // SETTINGS ACK
 		case frameType == 0x1:
+			// Signal before the GOAWAY goes out: once the client reads it,
+			// the retried call can return before this goroutine runs again.
+			close(l.sawHeaders)
 			// GOAWAY: last processed stream 0, NO_ERROR.
 			_, _ = conn.Write([]byte{0, 0, 8, 0x7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
-			close(l.sawHeaders)
 			_, _ = io.Copy(io.Discard, conn)
 			return
 		}

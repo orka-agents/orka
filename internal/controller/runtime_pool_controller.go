@@ -408,6 +408,10 @@ type RuntimePoolReconciler struct {
 	// concurrently with itself. Zero selects
 	// DefaultRuntimePoolMaxConcurrentReconciles.
 	MaxConcurrentReconciles int
+
+	// externalTimings deduplicates execution-workspace runtime start and stop
+	// timing reports. It never affects reconciliation.
+	externalTimings externalRuntimeTimingReports
 }
 
 const (
@@ -3589,6 +3593,9 @@ func (r *RuntimePoolReconciler) recordRuntimePoolStatus(ctx context.Context, poo
 		return false, err
 	}
 	recordRuntimePoolMetrics(pool, status)
+	if runtimePoolHasExternalWorkspace(pool) {
+		r.observeExternalRuntimeTransition(ctx, pool, base.Status, status)
+	}
 	if scaledToZero {
 		orkametrics.RecordACPRuntimePoolScaleToZero(pool.Namespace, pool.Name)
 	}
