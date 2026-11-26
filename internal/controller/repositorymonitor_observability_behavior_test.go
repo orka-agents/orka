@@ -56,39 +56,35 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 	const claimed = repositoryMonitorStatusPending + ": Waiting for verified workflow completion."
 
 	wantContext := repositoryMonitorReadinessContext(monitor)
-	poll()
-	if got := forge.descriptions("head-1", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
-		t.Fatalf("head-1 statuses after first poll = %q, want the claim then one draft hold", got)
-	}
-	for range 4 {
+	assertDraftHoldOnce := func(head string, extraPolls int) *store.GitHubMutationRecord {
+		t.Helper()
 		poll()
+		if got := forge.descriptions(head, wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
+			t.Fatalf("%s statuses after first poll = %q, want the claim then one draft hold", head, got)
+		}
+		for range extraPolls {
+			poll()
+		}
+		if got := forge.descriptions(head, wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
+			t.Fatalf("%s statuses after %d polls = %q, want no extra writes after the first poll", head, extraPolls+1, got)
+		}
+		mutation, err := db.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, head))
+		wantID := strconv.FormatInt(forge.latestID(head), 10)
+		if err != nil || mutation.Status != repositoryMonitorRunPhaseSucceeded || mutation.Reason != "The pull request is a draft." || mutation.ExternalID != wantID {
+			t.Fatalf("%s readiness mutation = %+v err=%v, want the draft hold recorded with ID %s", head, mutation, err, wantID)
+		}
+		return mutation
 	}
-	if got := forge.descriptions("head-1", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
-		t.Fatalf("head-1 statuses after 5 polls = %q, want no extra writes after the first poll", got)
-	}
-	mutation, err := db.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, "head-1"))
-	if err != nil || mutation.Status != repositoryMonitorRunPhaseSucceeded || mutation.Reason != "The pull request is a draft." || mutation.ExternalID != "101" {
-		t.Fatalf("head-1 readiness mutation = %+v err=%v, want the draft hold recorded", mutation, err)
-	}
+
+	mutation := assertDraftHoldOnce("head-1", 4)
 
 	// A new head is still a draft: it gets its own status on the first poll, written once.
 	forge.set("head-2", true)
 	pr.HeadSHA = "head-2"
 	item = repositoryMonitorItemFromPullRequest(monitor, pr, item)
-	poll()
-	if got := forge.descriptions("head-2", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
-		t.Fatalf("head-2 statuses after first poll = %q, want the claim then one draft hold", got)
-	}
-	for range 2 {
-		poll()
-	}
-	if got := forge.descriptions("head-2", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
-		t.Fatalf("head-2 statuses = %q, want no extra writes after the first poll", got)
-	}
-	head2Mutation, err := db.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, "head-2"))
-	wantHead2ID := strconv.FormatInt(forge.latestID("head-2"), 10)
-	if err != nil || head2Mutation.Status != repositoryMonitorRunPhaseSucceeded || head2Mutation.Reason != "The pull request is a draft." || head2Mutation.ExternalID != wantHead2ID || head2Mutation.ExternalID == mutation.ExternalID {
-		t.Fatalf("head-2 readiness mutation = %+v err=%v, want distinct draft hold ID %s", head2Mutation, err, wantHead2ID)
+	head2Mutation := assertDraftHoldOnce("head-2", 2)
+	if head2Mutation.ExternalID == mutation.ExternalID {
+		t.Fatalf("head-2 readiness mutation = %+v, want distinct external ID from head-1 %s", head2Mutation, mutation.ExternalID)
 	}
 
 	// Marking it ready replaces the hold on the first poll with the next blocker.
@@ -116,107 +112,180 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 	ctx := context.Background()
 	monitor, first, monitorStore := newRepositoryMonitorPolicyReconciler(t, "repair-restart", nil, nil)
-	newCommand := func() *store.CommandEvent {
-		return &store.CommandEvent{ID: "cmd-repair-restart", Intent: repositoryMonitorCommandIntentFix, Source: "api"}
-	}
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
-	newItem := func() *store.MonitorItem {
-		return &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA}
-	}
-	newRun := func() *store.MonitorRun {
-		return &store.MonitorRun{ID: "run-repair-restart"}
-	}
-	commandID := newCommand().ID
 	cluster, ok := first.Client.(crclient.WithWatch)
 	if !ok {
 		t.Fatalf("test client %T does not support interception", first.Client)
 	}
-	// restart returns a new reconciler over the same cluster and store.
-	restart := func() *RepositoryMonitorReconciler {
-		return &RepositoryMonitorReconciler{Client: cluster, Scheme: first.Scheme, Store: first.Store, ResultStore: first.ResultStore, GitHubAPIBaseURL: first.GitHubAPIBaseURL}
-	}
-	handoff := func(r *RepositoryMonitorReconciler, wantCreated int) {
-		t.Helper()
-		if created, _, err := r.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1); err != nil || created != wantCreated {
-			t.Fatalf("repair Task handoff = (%d, %v), want created=%d", created, err, wantCreated)
-		}
-	}
-	jobs := func() []store.RepairJob {
-		t.Helper()
-		records, _, err := monitorStore.ListRepairJobs(ctx, store.RepairJobFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: 31, Limit: 10})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return records
-	}
-	pushes := func() []store.GitHubMutationRecord {
-		t.Helper()
-		records, _, err := monitorStore.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Operation: pushBranchAction, Limit: 10})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return records
-	}
-	assertOne := func(stage, wantPush string) {
-		t.Helper()
-		if tasks := repositoryMonitorTestTaskCount(t, restart()); tasks != 1 {
-			t.Fatalf("%s: tasks = %d, want 1", stage, tasks)
-		}
-		if got := jobs(); len(got) != 1 {
-			t.Fatalf("%s: repair jobs = %+v, want one", stage, got)
-		}
-		if got := pushes(); len(got) != 1 || got[0].Status != wantPush || got[0].CommandEventID != commandID {
-			t.Fatalf("%s: push records = %+v, want one %s record for the command", stage, got, wantPush)
-		}
+	h := &repairRestartHarness{
+		t:            t,
+		ctx:          ctx,
+		monitor:      monitor,
+		monitorStore: monitorStore,
+		cluster:      cluster,
+		base:         first,
+		pr:           pr,
+		commandID:    "cmd-repair-restart",
 	}
 
 	// The controller crashes at the Task create of its first handoff, before
 	// error handling can update the job. By then the repair job and the started
 	// push record must already be durable.
+	h.runCrashBeforeTaskCreate()
+
+	// Next, an ordinary Create error records LastError without creating a Task;
+	// a subsequent restart still recovers against the same records and clears it.
+	h.runTransientCreateError()
+
+	// The restarted controller creates the Task in the API server, then crashes
+	// before it can observe the Create response or run post-Create bookkeeping.
+	h.runCrashAfterTaskCreate()
+	h.assertOne("crash after API server stored Task", repositoryMonitorAutomergeStateStarted)
+
+	// The next restart adopts the already-created Task against the same records
+	// and clears the earlier create error.
+	h.handoff(h.restart(), 0)
+	h.assertOne("restart after Task creation", repositoryMonitorAutomergeStateStarted)
+	if got := h.jobs(); got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
+		t.Fatalf("repair job after adopting Task = %+v, want queued without the create error", got[0])
+	}
+
+	markRepositoryMonitorTestTaskDelivered(t, ctx, cluster, h.jobs()[0].TaskName, pr.HeadBranch, "pushed31")
+	if ingested, err := h.restart().ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil || !ingested {
+		t.Fatalf("ingest = (%t, %v), want the delivered repair ingested", ingested, err)
+	}
+	h.assertOne("ingest", repositoryMonitorRunPhaseSucceeded)
+
+	// A restart after ingestion that replays the handoff and the ingest
+	// neither creates work nor reopens the settled push.
+	after := h.restart()
+	h.handoff(after, 0)
+	if ingested, err := after.ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil || ingested {
+		t.Fatalf("replayed ingest = (%t, %v), want nothing to ingest", ingested, err)
+	}
+	h.assertOne("restart after ingest", repositoryMonitorRunPhaseSucceeded)
+	if got := h.pushes(); got[0].ExternalID != "pushed31" {
+		t.Fatalf("push record = %+v, want pushed31 kept", got[0])
+	}
+}
+
+type repairRestartHarness struct {
+	t            *testing.T
+	ctx          context.Context
+	monitor      *corev1alpha1.RepositoryMonitor
+	monitorStore store.RepositoryMonitorStore
+	cluster      crclient.WithWatch
+	base         *RepositoryMonitorReconciler
+	pr           repositoryMonitorPullRequest
+	commandID    string
+}
+
+func (h *repairRestartHarness) newCommand() *store.CommandEvent {
+	return &store.CommandEvent{ID: h.commandID, Intent: repositoryMonitorCommandIntentFix, Source: "api"}
+}
+
+func (h *repairRestartHarness) newItem() *store.MonitorItem {
+	return &store.MonitorItem{MonitorNamespace: h.monitor.Namespace, MonitorName: h.monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: h.pr.HeadSHA}
+}
+
+func (h *repairRestartHarness) newRun() *store.MonitorRun {
+	return &store.MonitorRun{ID: "run-repair-restart"}
+}
+
+func (h *repairRestartHarness) restart() *RepositoryMonitorReconciler {
+	return &RepositoryMonitorReconciler{Client: h.cluster, Scheme: h.base.Scheme, Store: h.base.Store, ResultStore: h.base.ResultStore, GitHubAPIBaseURL: h.base.GitHubAPIBaseURL}
+}
+
+func (h *repairRestartHarness) handoff(r *RepositoryMonitorReconciler, wantCreated int) {
+	h.t.Helper()
+	if created, _, err := r.createRepositoryMonitorRepairTaskWithEvidence(h.ctx, h.monitor, h.newRun(), h.newCommand(), "orka-agents", "orka", h.pr, h.newItem(), 1, 1); err != nil || created != wantCreated {
+		h.t.Fatalf("repair Task handoff = (%d, %v), want created=%d", created, err, wantCreated)
+	}
+}
+
+func (h *repairRestartHarness) jobs() []store.RepairJob {
+	h.t.Helper()
+	records, _, err := h.monitorStore.ListRepairJobs(h.ctx, store.RepairJobFilter{Namespace: h.monitor.Namespace, MonitorName: h.monitor.Name, PRNumber: 31, Limit: 10})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return records
+}
+
+func (h *repairRestartHarness) pushes() []store.GitHubMutationRecord {
+	h.t.Helper()
+	records, _, err := h.monitorStore.ListGitHubMutationRecords(h.ctx, store.GitHubMutationRecordFilter{Namespace: h.monitor.Namespace, MonitorName: h.monitor.Name, Operation: pushBranchAction, Limit: 10})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return records
+}
+
+func (h *repairRestartHarness) assertOne(stage, wantPush string) {
+	h.t.Helper()
+	if tasks := repositoryMonitorTestTaskCount(h.t, h.restart()); tasks != 1 {
+		h.t.Fatalf("%s: tasks = %d, want 1", stage, tasks)
+	}
+	if got := h.jobs(); len(got) != 1 {
+		h.t.Fatalf("%s: repair jobs = %+v, want one", stage, got)
+	}
+	if got := h.pushes(); len(got) != 1 || got[0].Status != wantPush || got[0].CommandEventID != h.commandID {
+		h.t.Fatalf("%s: push records = %+v, want one %s record for the command", stage, got, wantPush)
+	}
+}
+
+func expectSimulatedCrash(t *testing.T, label string, sentinel any, fn func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected simulated crash %s", label)
+		}
+		if r != sentinel {
+			panic(r)
+		}
+	}()
+	fn()
+}
+
+func (h *repairRestartHarness) runCrashBeforeTaskCreate() {
+	h.t.Helper()
 	type crashBeforeTaskCreate struct{}
 	crashed := false
-	first.Client = interceptor.NewClient(cluster, interceptor.Funcs{
+	h.base.Client = interceptor.NewClient(h.cluster, interceptor.Funcs{
 		Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
 			if _, isTask := obj.(*corev1alpha1.Task); !isTask || crashed {
 				return c.Create(ctx, obj, opts...)
 			}
 			crashed = true
-			if got := jobs(); len(got) != 1 || got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
-				t.Errorf("repair jobs at Task create = %+v, want one queued job with no error recorded first", got)
+			if got := h.jobs(); len(got) != 1 || got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
+				h.t.Errorf("repair jobs at Task create = %+v, want one queued job with no error recorded first", got)
 			}
-			if got := pushes(); len(got) != 1 || got[0].Status != repositoryMonitorAutomergeStateStarted || got[0].CommandEventID != commandID {
-				t.Errorf("push records at Task create = %+v, want one started record for the command first", got)
+			if got := h.pushes(); len(got) != 1 || got[0].Status != repositoryMonitorAutomergeStateStarted || got[0].CommandEventID != h.commandID {
+				h.t.Errorf("push records at Task create = %+v, want one started record for the command first", got)
 			}
 			panic(crashBeforeTaskCreate{})
 		},
 	})
-	func() {
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatal("expected simulated crash at Task creation")
-			}
-			if _, ok := r.(crashBeforeTaskCreate); !ok {
-				panic(r)
-			}
-		}()
-		_, _, _ = first.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1)
-	}()
+	expectSimulatedCrash(h.t, "at Task creation", crashBeforeTaskCreate{}, func() {
+		_, _, _ = h.base.createRepositoryMonitorRepairTaskWithEvidence(h.ctx, h.monitor, h.newRun(), h.newCommand(), "orka-agents", "orka", h.pr, h.newItem(), 1, 1)
+	})
 	if !crashed {
-		t.Fatal("interrupted handoff did not reach Task creation")
+		h.t.Fatal("interrupted handoff did not reach Task creation")
 	}
-	if tasks := repositoryMonitorTestTaskCount(t, restart()); tasks != 0 {
-		t.Fatalf("tasks after the crashed handoff = %d, want none", tasks)
+	if tasks := repositoryMonitorTestTaskCount(h.t, h.restart()); tasks != 0 {
+		h.t.Fatalf("tasks after the crashed handoff = %d, want none", tasks)
 	}
-	if got := jobs(); len(got) != 1 || got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
-		t.Fatalf("repair job after crash = %+v, want queued without create error", got)
+	if got := h.jobs(); len(got) != 1 || got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
+		h.t.Fatalf("repair job after crash = %+v, want queued without create error", got)
 	}
+}
 
-	// Next, an ordinary Create error records LastError without creating a Task;
-	// a subsequent restart still recovers against the same records and clears it.
+func (h *repairRestartHarness) runTransientCreateError() {
+	h.t.Helper()
 	failedCreate := false
-	retrying := restart()
-	retrying.Client = interceptor.NewClient(cluster, interceptor.Funcs{
+	retrying := h.restart()
+	retrying.Client = interceptor.NewClient(h.cluster, interceptor.Funcs{
 		Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
 			if _, isTask := obj.(*corev1alpha1.Task); !isTask || failedCreate {
 				return c.Create(ctx, obj, opts...)
@@ -225,22 +294,23 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 			return errors.New("transient apiserver create error")
 		},
 	})
-	if created, _, err := retrying.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1); err == nil || created != 0 || !failedCreate {
-		t.Fatalf("failed create handoff = (%d, %v) failedCreate=%t, want error at Task creation", created, err, failedCreate)
+	if created, _, err := retrying.createRepositoryMonitorRepairTaskWithEvidence(h.ctx, h.monitor, h.newRun(), h.newCommand(), "orka-agents", "orka", h.pr, h.newItem(), 1, 1); err == nil || created != 0 || !failedCreate {
+		h.t.Fatalf("failed create handoff = (%d, %v) failedCreate=%t, want error at Task creation", created, err, failedCreate)
 	}
-	if tasks := repositoryMonitorTestTaskCount(t, restart()); tasks != 0 {
-		t.Fatalf("tasks after failed Task creation = %d, want none", tasks)
+	if tasks := repositoryMonitorTestTaskCount(h.t, h.restart()); tasks != 0 {
+		h.t.Fatalf("tasks after failed Task creation = %d, want none", tasks)
 	}
-	if got := jobs(); len(got) != 1 || got[0].LastError == "" {
-		t.Fatalf("repair job after create error = %+v, want LastError recorded", got)
+	if got := h.jobs(); len(got) != 1 || got[0].LastError == "" {
+		h.t.Fatalf("repair job after create error = %+v, want LastError recorded", got)
 	}
+}
 
-	// The restarted controller creates the Task in the API server, then crashes
-	// before it can observe the Create response or run post-Create bookkeeping.
+func (h *repairRestartHarness) runCrashAfterTaskCreate() {
+	h.t.Helper()
 	type crashAfterTaskCreate struct{}
 	crashedAfterCreate := false
-	creating := restart()
-	creating.Client = interceptor.NewClient(cluster, interceptor.Funcs{
+	creating := h.restart()
+	creating.Client = interceptor.NewClient(h.cluster, interceptor.Funcs{
 		Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
 			if _, isTask := obj.(*corev1alpha1.Task); !isTask || crashedAfterCreate {
 				return c.Create(ctx, obj, opts...)
@@ -252,47 +322,11 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 			panic(crashAfterTaskCreate{})
 		},
 	})
-	func() {
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatal("expected simulated crash after Task creation")
-			}
-			if _, ok := r.(crashAfterTaskCreate); !ok {
-				panic(r)
-			}
-		}()
-		_, _, _ = creating.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1)
-	}()
+	expectSimulatedCrash(h.t, "after Task creation", crashAfterTaskCreate{}, func() {
+		_, _, _ = creating.createRepositoryMonitorRepairTaskWithEvidence(h.ctx, h.monitor, h.newRun(), h.newCommand(), "orka-agents", "orka", h.pr, h.newItem(), 1, 1)
+	})
 	if !crashedAfterCreate {
-		t.Fatal("handoff did not reach post-Create crash")
-	}
-	assertOne("crash after API server stored Task", repositoryMonitorAutomergeStateStarted)
-
-	// The next restart adopts the already-created Task against the same records
-	// and clears the earlier create error.
-	handoff(restart(), 0)
-	assertOne("restart after Task creation", repositoryMonitorAutomergeStateStarted)
-	if got := jobs(); got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
-		t.Fatalf("repair job after adopting Task = %+v, want queued without the create error", got[0])
-	}
-
-	markRepositoryMonitorTestTaskDelivered(t, ctx, cluster, jobs()[0].TaskName, pr.HeadBranch, "pushed31")
-	if ingested, err := restart().ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil || !ingested {
-		t.Fatalf("ingest = (%t, %v), want the delivered repair ingested", ingested, err)
-	}
-	assertOne("ingest", repositoryMonitorRunPhaseSucceeded)
-
-	// A restart after ingestion that replays the handoff and the ingest
-	// neither creates work nor reopens the settled push.
-	after := restart()
-	handoff(after, 0)
-	if ingested, err := after.ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil || ingested {
-		t.Fatalf("replayed ingest = (%t, %v), want nothing to ingest", ingested, err)
-	}
-	assertOne("restart after ingest", repositoryMonitorRunPhaseSucceeded)
-	if got := pushes(); got[0].ExternalID != "pushed31" {
-		t.Fatalf("push record = %+v, want pushed31 kept", got[0])
+		h.t.Fatal("handoff did not reach post-Create crash")
 	}
 }
 
@@ -346,40 +380,50 @@ func TestRepositoryMonitorGitHubTimeoutFailsRunWithBoundedRetries(t *testing.T) 
 			t.Fatalf("attempt %d run_failed events = %d, want %d", attempt, len(failures), attempt)
 		}
 		if attempt <= repositoryMonitorCommandMaxRetries {
-			if run.Phase != repositoryMonitorRunPhaseQueued || run.Error != "" || !run.StartedAt.After(time.Now()) {
-				t.Fatalf("attempt %d run = %+v, want a delayed retry", attempt, run)
-			}
-			for _, failure := range failures {
-				if failure.RunID != run.ID || !strings.Contains(failure.MetadataJSON, `"state":"`+repositoryMonitorRunRetryScheduled+`"`) || !strings.Contains(failure.Summary, "pull request inventory request failed") || !strings.Contains(failure.Summary, "Client.Timeout exceeded") {
-					t.Fatalf("attempt %d failure event = %+v, want a scheduled retry", attempt, failure)
-				}
-			}
-			// Make the delayed retry due now.
-			run.StartedAt = time.Now().Add(-time.Second)
-			if err := monitorStore.UpdateMonitorRun(ctx, run); err != nil {
-				t.Fatal(err)
-			}
+			assertRepositoryMonitorTimeoutRetryScheduled(t, ctx, monitorStore, run, failures, attempt)
 			continue
 		}
-		if run.Phase != repositoryMonitorRunPhaseFailed || !strings.HasPrefix(run.Error, "["+repositoryMonitorRunFailurePermanent+"] retry_attempts_exhausted:") || !strings.Contains(run.Error, "Client.Timeout exceeded") {
-			t.Fatalf("final run = %+v, want failed after exhausting retries on the timeout", run)
-		}
-		terminalEvents := 0
-		for _, failure := range failures {
-			if failure.RunID != run.ID || !strings.Contains(failure.Summary, "pull request inventory request failed") || !strings.Contains(failure.Summary, "Client.Timeout exceeded") {
-				t.Fatalf("final failure event = %+v, want inventory timeout for this run", failure)
-			}
-			if !strings.Contains(failure.MetadataJSON, `"state":"`+repositoryMonitorRunRetryScheduled+`"`) {
-				terminalEvents++
-			}
-		}
-		if terminalEvents != 1 {
-			t.Fatalf("terminal run_failed events = %d (all=%+v), want 1 non-retry terminal event", terminalEvents, failures)
-		}
+		assertRepositoryMonitorTimeoutTerminalFailure(t, run, failures)
 	}
 	var tasks corev1alpha1.TaskList
 	if err := cl.List(ctx, &tasks); err != nil || len(tasks.Items) != 0 {
 		t.Fatalf("tasks = %d err=%v, want none", len(tasks.Items), err)
+	}
+}
+
+func assertRepositoryMonitorTimeoutRetryScheduled(t *testing.T, ctx context.Context, monitorStore store.RepositoryMonitorStore, run *store.MonitorRun, failures []store.MonitorEvent, attempt int) {
+	t.Helper()
+	if run.Phase != repositoryMonitorRunPhaseQueued || run.Error != "" || !run.StartedAt.After(time.Now()) {
+		t.Fatalf("attempt %d run = %+v, want a delayed retry", attempt, run)
+	}
+	for _, failure := range failures {
+		if failure.RunID != run.ID || !strings.Contains(failure.MetadataJSON, `"state":"`+repositoryMonitorRunRetryScheduled+`"`) || !strings.Contains(failure.Summary, "pull request inventory request failed") || !strings.Contains(failure.Summary, "Client.Timeout exceeded") {
+			t.Fatalf("attempt %d failure event = %+v, want a scheduled retry", attempt, failure)
+		}
+	}
+	// Make the delayed retry due now.
+	run.StartedAt = time.Now().Add(-time.Second)
+	if err := monitorStore.UpdateMonitorRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRepositoryMonitorTimeoutTerminalFailure(t *testing.T, run *store.MonitorRun, failures []store.MonitorEvent) {
+	t.Helper()
+	if run.Phase != repositoryMonitorRunPhaseFailed || !strings.HasPrefix(run.Error, "["+repositoryMonitorRunFailurePermanent+"] retry_attempts_exhausted:") || !strings.Contains(run.Error, "Client.Timeout exceeded") {
+		t.Fatalf("final run = %+v, want failed after exhausting retries on the timeout", run)
+	}
+	terminalEvents := 0
+	for _, failure := range failures {
+		if failure.RunID != run.ID || !strings.Contains(failure.Summary, "pull request inventory request failed") || !strings.Contains(failure.Summary, "Client.Timeout exceeded") {
+			t.Fatalf("final failure event = %+v, want inventory timeout for this run", failure)
+		}
+		if !strings.Contains(failure.MetadataJSON, `"state":"`+repositoryMonitorRunRetryScheduled+`"`) {
+			terminalEvents++
+		}
+	}
+	if terminalEvents != 1 {
+		t.Fatalf("terminal run_failed events = %d (all=%+v), want 1 non-retry terminal event", terminalEvents, failures)
 	}
 }
 

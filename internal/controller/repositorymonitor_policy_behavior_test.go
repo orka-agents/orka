@@ -357,11 +357,13 @@ func TestRepositoryMonitorIssueCommandWithoutAgentIsBlocked(t *testing.T) {
 			if err != nil || action.Status != repositoryMonitorWorkActionStatusBlocked || action.BlockedReason != tt.wantSkip {
 				t.Fatalf("work action = %+v err=%v, want blocked with %s", action, err, tt.wantSkip)
 			}
+			blocked := repositoryMonitorTestEvents(t, monitorStore, monitor, "issue_action_blocked")
 			if tt.wantEvent {
-				blocked := repositoryMonitorTestEvents(t, monitorStore, monitor, "issue_action_blocked")
 				if len(blocked) != 1 || !strings.Contains(blocked[0].Summary, "no agent configured") {
 					t.Fatalf("issue_action_blocked events = %+v, want one naming the missing agent", blocked)
 				}
+			} else if len(blocked) != 0 {
+				t.Fatalf("issue_action_blocked events = %+v, want none when implementer is missing", blocked)
 			}
 			if tasks := repositoryMonitorTestTaskCount(t, reconciler); tasks != 0 {
 				t.Fatalf("blocked issue command created %d Tasks", tasks)
