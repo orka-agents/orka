@@ -488,6 +488,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 	if err != nil {
 		return err
 	}
+	pinnedCommit := strings.TrimSpace(finding.CommitSHA)
 	if h.securityStore != nil && strings.TrimSpace(finding.ScanRunID) != "" {
 		run, err := h.securityStore.GetScanRun(ctx, scan.Namespace, finding.ScanRunID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -495,6 +496,9 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		}
 		if run != nil && (run.Phase == securityScanRunPhasePending || run.Phase == securityScanRunPhaseRunning) && run.PolicyDigest != "" && policy.Digest != "" && run.PolicyDigest != policy.Digest {
 			return fiber.NewError(fiber.StatusConflict, "scanner policy changed during active scan run")
+		}
+		if run != nil && strings.TrimSpace(run.HeadCommit) != "" {
+			pinnedCommit = strings.TrimSpace(run.HeadCommit)
 		}
 	}
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
@@ -531,7 +535,7 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, pinnedCommit),
 		},
 	}
 	if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(ctx, h.uncachedReader(), task); err != nil {

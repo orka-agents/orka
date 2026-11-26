@@ -608,15 +608,13 @@ finding rows.
 
 ## Metrics
 
-The following repository-security Prometheus metrics are **planned but not yet registered**.
-They do not exist in `internal/metrics/` today; treat them as a design target, not a series
-you can scrape. (For metrics Orka actually exposes, see
-[Configuration → Prometheus Metrics](../reference/configuration.md#prometheus-metrics).)
+The repository-security Prometheus metrics are registered in `internal/metrics/metrics.go` with low-cardinality labels (no repository URLs, scan IDs, or finding titles):
 
 - `orka_security_scan_runs_total{mode,status}`
-- `orka_security_review_slices_total{status}`
-- `orka_security_findings_ingested_total{schema_version,result}`
-- `orka_security_findings_dropped_total{reason}`
+- `orka_security_review_slices_total{status}` (`reviewed`, `inconclusive`, `failed`, `skipped`)
+- `orka_security_findings_ingested_total{schema_version,result}` (`accepted`, `duplicate`, `dropped`)
+- `orka_security_findings_dropped_total{layer,reason}`
+- `orka_security_validation_outcomes_total{status}` (`validated`, `failed`, `skipped`, `error`)
 - `orka_security_review_context_bytes`
 - `orka_security_patch_verification_total{result,reason}`
 - `orka_security_threat_model_updates_total{source}`

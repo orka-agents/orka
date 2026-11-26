@@ -285,6 +285,9 @@ func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, e
 	if content == "" {
 		return "", fmt.Errorf("threatModel is required")
 	}
+	if content == "# Threat Model\n\n..." || isPlaceholderResultText(content) {
+		return "", fmt.Errorf("threatModel is a prompt placeholder")
+	}
 	if !strings.HasPrefix(content, "#") {
 		return "", fmt.Errorf("threatModel must be markdown beginning with a heading")
 	}
@@ -483,6 +486,28 @@ func truncateUTF8(value string, limit int) string {
 	return value
 }
 
+// isPlaceholderResultText reports text that merely echoes the prompt's example
+// placeholder (such as "..." or "…") instead of a substantive review or verdict.
+func isPlaceholderResultText(value string) bool {
+	trimmed := strings.TrimSpace(stripUnsafeTextRunes(value))
+	return trimmed == truncationSuffix || trimmed == "…"
+}
+
+// ReviewResultIsInconclusive reports a zero-finding review result that carries
+// no substantive evidence of inspection (no reviewed files, no resolved
+// questions, and an empty or placeholder summary). Such results must be retried
+// or treated as inconclusive rather than clean.
+func ReviewResultIsInconclusive(artifact FindingsV2Artifact) bool {
+	if len(artifact.Findings) > 0 {
+		return false
+	}
+	if len(artifact.Scan.ReviewedFiles) > 0 || len(artifact.Scan.ResolvedQuestions) > 0 {
+		return false
+	}
+	summary := strings.TrimSpace(stripUnsafeTextRunes(artifact.Scan.Summary))
+	return summary == "" || isPlaceholderResultText(summary)
+}
+
 func validateFindingsResultArtifact(artifact FindingsV2Artifact, expected FindingsResultExpectation) error {
 	if artifact.SchemaVersion != SchemaVersionFindingsV2 {
 		return fmt.Errorf("unsupported findings schemaVersion %d", artifact.SchemaVersion)
@@ -504,6 +529,9 @@ func validateFindingsResultArtifact(artifact FindingsV2Artifact, expected Findin
 	}
 	if err := boundedString("findings scan.summary", artifact.Scan.Summary, maxFindingSummaryBytes); err != nil {
 		return err
+	}
+	if isPlaceholderResultText(artifact.Scan.Summary) {
+		return fmt.Errorf("findings scan.summary is a prompt placeholder")
 	}
 	for i := range artifact.Findings {
 		if err := validateBoundedFinding(i, artifact.Findings[i]); err != nil {
@@ -570,6 +598,9 @@ func validateValidationArtifact(artifact ValidationArtifact, finding *store.Find
 	}
 	if strings.TrimSpace(artifact.Summary) == "" {
 		return fmt.Errorf("validation summary is required")
+	}
+	if isPlaceholderResultText(artifact.Summary) {
+		return fmt.Errorf("validation summary is a prompt placeholder")
 	}
 	for _, field := range []struct {
 		name  string

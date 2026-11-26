@@ -277,6 +277,72 @@ var (
 		},
 	)
 
+	// Repository security scanner funnel metrics. Labels stay bounded to
+	// controller vocabularies (no repository URLs, scan IDs, or finding titles).
+	SecurityScanRunsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_scan_runs_total",
+			Help: "Total repository security scan runs completed by mode and terminal status",
+		},
+		[]string{"mode", labelStatus},
+	)
+
+	SecurityReviewSlicesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_review_slices_total",
+			Help: "Total repository security review slice outcomes by status (reviewed, inconclusive, failed, skipped)",
+		},
+		[]string{labelStatus},
+	)
+
+	SecurityFindingsIngestedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_findings_ingested_total",
+			Help: "Total repository security findings processed by schema version and result",
+		},
+		[]string{"schema_version", labelResult},
+	)
+
+	SecurityFindingsDroppedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_findings_dropped_total",
+			Help: "Total repository security findings dropped by layer and low-cardinality reason",
+		},
+		[]string{"layer", labelReason},
+	)
+
+	SecurityValidationOutcomesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_validation_outcomes_total",
+			Help: "Total repository security finding validation outcomes by status",
+		},
+		[]string{labelStatus},
+	)
+
+	SecurityReviewContextBytes = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "orka_security_review_context_bytes",
+			Help:    "Bounded review context prompt size in bytes for security review slices",
+			Buckets: []float64{4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288},
+		},
+	)
+
+	SecurityThreatModelUpdatesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_threat_model_updates_total",
+			Help: "Total repository security threat model updates by source",
+		},
+		[]string{"source"},
+	)
+
+	SecurityPatchVerificationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_security_patch_verification_total",
+			Help: "Total repository security patch verification attempts by result and reason",
+		},
+		[]string{labelResult, labelReason},
+	)
+
 	// Execution event metrics. Labels intentionally exclude task/session IDs.
 	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -427,6 +493,14 @@ func init() {
 		RepositoryMonitorReviewsTotal,
 		RepositoryMonitorReviewFindingsTotal,
 		RepositoryMonitorReviewRoundsToPass,
+		SecurityScanRunsTotal,
+		SecurityReviewSlicesTotal,
+		SecurityFindingsIngestedTotal,
+		SecurityFindingsDroppedTotal,
+		SecurityValidationOutcomesTotal,
+		SecurityReviewContextBytes,
+		SecurityThreatModelUpdatesTotal,
+		SecurityPatchVerificationTotal,
 		ExecutionEventsAppendedTotal,
 		ExecutionEventAppendFailuresTotal,
 		ExecutionEventAppendDuration,
@@ -651,6 +725,57 @@ func RecordRepositoryMonitorReviewFindings(priority, outcome string, count int) 
 // request needed before its first passed review.
 func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
 	RepositoryMonitorReviewRoundsToPass.Observe(float64(rounds))
+}
+
+// RecordSecurityScanRun records a completed repository security scan run.
+func RecordSecurityScanRun(mode, status string) {
+	SecurityScanRunsTotal.WithLabelValues(normalizeMetricLabel(mode), normalizeMetricLabel(status)).Inc()
+}
+
+// RecordSecurityReviewSlice records one review slice outcome (reviewed,
+// inconclusive, failed, skipped).
+func RecordSecurityReviewSlice(status string) {
+	SecurityReviewSlicesTotal.WithLabelValues(normalizeMetricLabel(status)).Inc()
+}
+
+// RecordSecurityFindingsIngested adds count findings with one schema version
+// and ingestion result (accepted, duplicate, dropped).
+func RecordSecurityFindingsIngested(schemaVersion, result string, count int) {
+	if count <= 0 {
+		return
+	}
+	SecurityFindingsIngestedTotal.WithLabelValues(normalizeMetricLabel(schemaVersion), normalizeMetricLabel(result)).Add(float64(count))
+}
+
+// RecordSecurityFindingDropped records one dropped security finding with its
+// layer and bounded reason bucket.
+func RecordSecurityFindingDropped(layer, reason string) {
+	SecurityFindingsDroppedTotal.WithLabelValues(normalizeMetricLabel(layer), normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordSecurityValidationOutcome records one validation verdict status
+// (validated, failed, skipped, error).
+func RecordSecurityValidationOutcome(status string) {
+	SecurityValidationOutcomesTotal.WithLabelValues(normalizeMetricLabel(status)).Inc()
+}
+
+// RecordSecurityReviewContextBytes observes the bounded review context prompt
+// size in bytes for a review slice.
+func RecordSecurityReviewContextBytes(bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	SecurityReviewContextBytes.Observe(float64(bytes))
+}
+
+// RecordSecurityThreatModelUpdate records a persisted threat model update.
+func RecordSecurityThreatModelUpdate(source string) {
+	SecurityThreatModelUpdatesTotal.WithLabelValues(normalizeMetricLabel(source)).Inc()
+}
+
+// RecordSecurityPatchVerification records a security patch verification result.
+func RecordSecurityPatchVerification(result, reason string) {
+	SecurityPatchVerificationTotal.WithLabelValues(normalizeMetricLabel(result), normalizeMetricLabel(reason)).Inc()
 }
 
 // RecordACPWorkspaceRetentionAction records one retention enforcement action

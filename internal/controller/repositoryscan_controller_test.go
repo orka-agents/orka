@@ -7885,3 +7885,123 @@ func TestReviewTaskWindowKnowsThePoolFromTheThreatModel(t *testing.T) {
 		t.Fatalf("reviewTaskWindow(threat model on an eight-prompt pool) = %d, want 32", got)
 	}
 }
+
+func TestRepositoryScanPinsReviewAndValidationWorkspaceToObservedCommit(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("corev1.AddToScheme() error = %v", err)
+	}
+
+	headSHA := strings.Repeat("a", 40)
+	otherSHA := strings.Repeat("b", 40)
+	scan := &corev1alpha1.RepositoryScan{
+		TypeMeta:   metav1.TypeMeta{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "RepositoryScan"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kaset", Namespace: defaultNS},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          "https://github.com/example/repo",
+			Branch:           "main",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "scan-reviewer"},
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "scan-reviewer", Namespace: defaultNS},
+	}
+	targetTask := newSucceededSecurityTask("kaset-threat", "scan_pin", security.StageThreatModel, metav1.Now())
+	targetTask.Spec.Workspace = repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryScanTestObjects(scan, agent, targetTask)...).Build()
+	store := setupControllerSQLiteStore(t)
+	reconciler := &RepositoryScanReconciler{Client: cl, APIReader: cl, Scheme: scheme, SecurityStore: store}
+	run := &storepkg.ScanRun{
+		ID:             "scan_pin",
+		Namespace:      defaultNS,
+		RepositoryScan: scan.Name,
+		TaskName:       targetTask.Name,
+		Mode:           "initial",
+		Phase:          scanRunPhaseRunning,
+		HeadCommit:     headSHA,
+		StartedAt:      time.Now(),
+	}
+	if err := store.CreateScanRun(ctx, run); err != nil {
+		t.Fatalf("CreateScanRun() error = %v", err)
+	}
+	reviewSlice := storepkg.ReviewSlice{
+		ID: "slice_api", RepositoryScan: scan.Name, Source: "deterministic",
+		Title: "API", Kind: "package", Status: reviewSliceStatusPending, LastScanRunID: run.ID,
+	}
+	bindReviewSliceContext(t, &reviewSlice)
+	if err := reconciler.createReviewTasks(ctx, scan, run, "", []storepkg.ReviewSlice{reviewSlice}); err != nil {
+		t.Fatalf("createReviewTasks() error = %v", err)
+	}
+	var tasks corev1alpha1.TaskList
+	if err := cl.List(ctx, &tasks, client.InNamespace(defaultNS)); err != nil {
+		t.Fatalf("List(Task) error = %v", err)
+	}
+	var reviewTask *corev1alpha1.Task
+	for i := range tasks.Items {
+		if taskSecurityStage(&tasks.Items[i]) == security.StageReview {
+			reviewTask = &tasks.Items[i]
+			break
+		}
+	}
+	if reviewTask == nil || reviewTask.Spec.Workspace == nil {
+		t.Fatalf("review task missing workspace: %#v", reviewTask)
+	}
+	if reviewTask.Spec.Workspace.Branch != "main" || reviewTask.Spec.Workspace.Ref != headSHA {
+		t.Fatalf("review workspace = branch:%q ref:%q, want branch:main ref:%s", reviewTask.Spec.Workspace.Branch, reviewTask.Spec.Workspace.Ref, headSHA)
+	}
+	// Branch-scoped finding identity stays "main" even though Ref is pinned to headSHA.
+	repo, problem := trustedFindingsRepositoryForRunTask(scan, run, reviewTask)
+	if problem != "" || repo.Branch != "main" || repo.HeadSHA != headSHA {
+		t.Fatalf("trustedFindingsRepositoryForRunTask() = %#v, %q; want branch=main head=%s", repo, problem, headSHA)
+	}
+	// A mismatched pinned commit on the review task must be rejected.
+	mismatched := reviewTask.DeepCopy()
+	mismatched.Spec.Workspace.Ref = otherSHA
+	if _, problem := trustedFindingsRepositoryForRunTask(scan, run, mismatched); !strings.Contains(problem, "does not match scan run head commit") {
+		t.Fatalf("trustedFindingsRepositoryForRunTask(mismatched) problem = %q, want commit mismatch", problem)
+	}
+
+	// Automatic validation task also pins Workspace.Ref to run.HeadCommit.
+	finding := &storepkg.Finding{
+		ID:               "fnd_pin",
+		Namespace:        defaultNS,
+		RepositoryScan:   scan.Name,
+		ScanRunID:        run.ID,
+		Fingerprint:      "fp_pin",
+		Title:            "Auth bypass",
+		Summary:          "Missing auth check",
+		Severity:         "high",
+		Confidence:       "high",
+		ValidationStatus: "unvalidated",
+		State:            findingStateOpen,
+		CommitSHA:        headSHA,
+	}
+	if err := store.UpsertFinding(ctx, finding); err != nil {
+		t.Fatalf("UpsertFinding() error = %v", err)
+	}
+	if err := reconciler.ensureValidationTask(ctx, scan, finding, nil); err != nil {
+		t.Fatalf("ensureValidationTask() error = %v", err)
+	}
+	valTask, err := reconciler.validationTaskForFinding(ctx, scan, finding.ID, run.ID)
+	if err != nil || valTask == nil || valTask.Spec.Workspace == nil {
+		t.Fatalf("validationTaskForFinding() = %#v, %v", valTask, err)
+	}
+	if valTask.Spec.Workspace.Branch != "main" || valTask.Spec.Workspace.Ref != headSHA {
+		t.Fatalf("validation workspace = branch:%q ref:%q, want branch:main ref:%s", valTask.Spec.Workspace.Branch, valTask.Spec.Workspace.Ref, headSHA)
+	}
+}
+
+func TestFormatReviewSliceSummaryIncludesLimitations(t *testing.T) {
+	got := formatReviewSliceSummary("slice_api", security.FindingsV2Scan{
+		Summary:     "Reviewed auth middleware.",
+		Limitations: []string{"no Go compiler in sandbox", "prod config unavailable"},
+	})
+	want := "Reviewed auth middleware. (limitations: no Go compiler in sandbox; prod config unavailable)"
+	if got != want {
+		t.Fatalf("formatReviewSliceSummary() = %q, want %q", got, want)
+	}
+}

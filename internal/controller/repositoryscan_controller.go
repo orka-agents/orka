@@ -41,6 +41,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -1059,6 +1060,25 @@ func trustedFindingsRepositoryForRunTask(scan *corev1alpha1.RepositoryScan, run 
 	if err != nil {
 		return security.FindingsV2Repository{}, err.Error()
 	}
+	if task.Spec.Workspace != nil {
+		if expectedCommit := strings.TrimSpace(run.HeadCommit); expectedCommit != "" &&
+			store.ValidateGitObjectID("scan head commit", expectedCommit) == nil {
+			if actualRef := strings.TrimSpace(task.Spec.Workspace.Ref); actualRef != "" &&
+				store.ValidateGitObjectID("review workspace commit", actualRef) == nil &&
+				actualRef != expectedCommit {
+				return security.FindingsV2Repository{}, "review task workspace commit does not match scan run head commit"
+			}
+		}
+		if pinnedRef := strings.TrimSpace(task.Spec.Workspace.Ref); pinnedRef != "" &&
+			run != nil && strings.TrimSpace(run.HeadCommit) != "" &&
+			pinnedRef == strings.TrimSpace(run.HeadCommit) &&
+			strings.TrimSpace(task.Spec.Workspace.Branch) != "" &&
+			store.ValidateGitObjectID("pinned scan commit", pinnedRef) == nil {
+			// Branch-scoped review tasks pin Workspace.Ref to run.HeadCommit so
+			// the checkout cannot drift, while preserving branch-scoped finding identity.
+			taskScan.Spec.Ref = ""
+		}
+	}
 	return trustedFindingsRepository(taskScan, run), ""
 }
 
@@ -1169,6 +1189,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 		PolicyDigest:   policy.Digest,
 		ContextDigest:  digest,
 	}
+	metrics.RecordSecurityReviewContextBytes(manifest.PromptBytes)
 	prompt := security.BuildReviewResultPrompt(
 		scan, run.Mode, run.BaseCommit, run.HeadCommit, threatModel, reviewSlice,
 		resultBinding, *manifest, trustedFindingsRepository(scan, run), policy.PromptPolicy(),
@@ -1201,7 +1222,7 @@ func (r *RepositoryScanReconciler) buildReviewTask(
 			Prompt:    prompt,
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, run.HeadCommit),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -1690,6 +1711,7 @@ func (r *RepositoryScanReconciler) progressScanRunAfterMapper(ctx context.Contex
 		if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 			return false, err
 		}
+		metrics.RecordSecurityScanRun(run.Mode, run.Phase)
 		if err := r.updateNoopScanStatus(ctx, scan, run); err != nil {
 			return false, err
 		}
@@ -1706,6 +1728,7 @@ func (r *RepositoryScanReconciler) progressScanRunAfterMapper(ctx context.Contex
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return false, err
 	}
+	metrics.RecordSecurityScanRun(run.Mode, run.Phase)
 	if err := r.updateNoopScanStatus(ctx, scan, run); err != nil {
 		return false, err
 	}
@@ -1886,6 +1909,7 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 	if err := r.SecurityStore.SaveThreatModel(ctx, model); err != nil {
 		return err
 	}
+	metrics.RecordSecurityThreatModelUpdate(model.Source)
 
 	return nil
 }
@@ -2384,6 +2408,9 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
 		return err
 	}
+	if !terminalScanRunPhase(previousPhase) && terminalScanRunPhase(run.Phase) {
+		metrics.RecordSecurityScanRun(run.Mode, run.Phase)
+	}
 	if !updateStatus {
 		return nil
 	}
@@ -2563,6 +2590,10 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 		PolicyDigest:   policy.Digest,
 	}
 
+	pinnedCommit := strings.TrimSpace(finding.CommitSHA)
+	if run != nil && strings.TrimSpace(run.HeadCommit) != "" {
+		pinnedCommit = strings.TrimSpace(run.HeadCommit)
+	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -2583,7 +2614,7 @@ func (r *RepositoryScanReconciler) ensureValidationTask(ctx context.Context, sca
 			Prompt:    security.BuildValidationResultPrompt(scan, finding, resultBinding, policy.PromptPolicy()),
 			Timeout:   &timeout,
 			Priority:  &priority,
-			Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+			Workspace: repositoryScanTaskWorkspaceAtCommit(scan, corev1alpha1.WorkspaceIntentRead, pinnedCommit),
 		},
 	}
 	if err := controllerutil.SetControllerReference(scan, task, r.Scheme); err != nil {
@@ -3756,6 +3787,11 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 				return retryErr
 			}
 		}
+		if strings.HasPrefix(validationProblem, "review result is inconclusive:") {
+			metrics.RecordSecurityReviewSlice("inconclusive")
+		} else {
+			metrics.RecordSecurityReviewSlice(reviewSliceStatusFailed)
+		}
 		message := validationProblem
 		if sliceID != "" {
 			message = fmt.Sprintf("slice %s: %s", sliceID, validationProblem)
@@ -3880,13 +3916,123 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		current.AcceptedFindings += newlyAccepted
 		current.DroppedFindings += len(dropped)
 		current.ReviewedSliceCount++
-		current.Summary = findingsV2.Scan.Summary
-		if current.Summary == "" {
-			current.Summary = fmt.Sprintf("Reviewed slice %s", sliceID)
-		}
+		current.Summary = formatReviewSliceSummary(sliceID, findingsV2.Scan)
 		ingestion.Completed = false
+		metrics.RecordSecurityReviewSlice(reviewSliceStatusReviewed)
+		metrics.RecordSecurityFindingsIngested("v2", "accepted", newlyAccepted)
+		metrics.RecordSecurityFindingsIngested("v2", "duplicate", len(duplicates))
+		metrics.RecordSecurityFindingsIngested("v2", "dropped", len(dropped))
+		for _, drop := range dropped {
+			metrics.RecordSecurityFindingDropped(drop.Layer, securityDroppedReasonBucket(drop.Layer, drop.Reason))
+		}
 		return nil
 	})
+}
+
+// formatReviewSliceSummary produces the scan run summary for a reviewed slice,
+// appending any reported reviewer limitations so missing tools or capabilities
+// stay visible without bloating the summary.
+func formatReviewSliceSummary(sliceID string, scan security.FindingsV2Scan) string {
+	summary := strings.TrimSpace(scan.Summary)
+	if summary == "" {
+		summary = fmt.Sprintf("Reviewed slice %s", sliceID)
+	}
+	if len(scan.Limitations) == 0 {
+		return summary
+	}
+	const maxSummaryLimitations = 3
+	shown := make([]string, 0, min(len(scan.Limitations), maxSummaryLimitations))
+	for _, limitation := range scan.Limitations {
+		limitation = strings.TrimSpace(limitation)
+		if limitation == "" {
+			continue
+		}
+		shown = append(shown, limitation)
+		if len(shown) == maxSummaryLimitations {
+			break
+		}
+	}
+	if len(shown) == 0 {
+		return summary
+	}
+	suffix := " (limitations: " + strings.Join(shown, "; ")
+	if extra := len(scan.Limitations) - len(shown); extra > 0 {
+		suffix += fmt.Sprintf("; +%d more", extra)
+	}
+	suffix += ")"
+	return summary + suffix
+}
+
+func securityDroppedReasonBucket(layer, reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch strings.ToLower(strings.TrimSpace(layer)) {
+	case "cap":
+		return "run_cap"
+	case "filter":
+		switch {
+		case strings.Contains(normalized, "docs-only"):
+			return "docs_only"
+		case strings.Contains(normalized, "test-only"):
+			return "test_only"
+		case strings.Contains(normalized, "demo or example"):
+			return "example_only"
+		case strings.Contains(normalized, "dependency"):
+			return "dependency_version"
+		case strings.Contains(normalized, "rate-limit") || strings.Contains(normalized, "rate limit"):
+			return "generic_rate_limit"
+		case strings.Contains(normalized, "dos") || strings.Contains(normalized, "exhaustion"):
+			return "generic_dos"
+		case strings.Contains(normalized, "client-side"):
+			return "client_side_auth"
+		case strings.Contains(normalized, "react xss"):
+			return "react_xss"
+		case strings.Contains(normalized, "command-injection") || strings.Contains(normalized, "shell"):
+			return "shell_no_untrusted_input"
+		case strings.Contains(normalized, "logging"):
+			return "non_sensitive_logging"
+		case strings.Contains(normalized, "prompt-injection"):
+			return "generic_prompt_injection"
+		case strings.Contains(normalized, "best-practice") || strings.Contains(normalized, "hardening"):
+			return "generic_hardening"
+		default:
+			return "filter_other"
+		}
+	case security.StageValidation:
+		switch {
+		case strings.Contains(normalized, "required"):
+			return "missing_required_field"
+		case strings.Contains(normalized, "severity") || strings.Contains(normalized, "confidence"):
+			return "unsupported_enum"
+		case strings.Contains(normalized, "quote"):
+			return "quote_mismatch"
+		case strings.Contains(normalized, "line") || strings.Contains(normalized, "range"):
+			return "invalid_line_range"
+		case strings.Contains(normalized, "evidence") || strings.Contains(normalized, "path") || strings.Contains(normalized, "manifest"):
+			return "invalid_evidence"
+		default:
+			return "validation_other"
+		}
+	default:
+		return "other"
+	}
+}
+
+func securityPatchFailureReasonBucket(reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(normalized, "changedfiles"):
+		return "changed_files_mismatch"
+	case strings.Contains(normalized, "diff"):
+		return "diff_mismatch"
+	case strings.Contains(normalized, "publication") || strings.Contains(normalized, "commit"):
+		return "publication_unverified"
+	case strings.Contains(normalized, "artifact"):
+		return "artifact_missing_or_invalid"
+	case strings.Contains(normalized, "credential") || strings.Contains(normalized, "token"):
+		return "credential_unavailable"
+	default:
+		return "verification_failed"
+	}
 }
 
 // leaveReviewSliceUnreviewed records a slice whose retry prompt also failed
@@ -3907,6 +4053,7 @@ func (r *RepositoryScanReconciler) leaveReviewSliceUnreviewed(
 				return err
 			}
 		}
+		metrics.RecordSecurityReviewSlice(reviewSliceStatusFailed)
 		current.Summary = fmt.Sprintf("Review slice %s could not be reviewed after a retry: %s", sliceID, message)
 		return nil
 	})
@@ -3986,6 +4133,9 @@ func (r *RepositoryScanReconciler) validateReviewTaskResult(
 	if err != nil {
 		return nil, nil, err.Error(), true, nil
 	}
+	if security.ReviewResultIsInconclusive(*findings) {
+		return nil, nil, "review result is inconclusive: zero findings with no reviewed files, resolved questions, or summary", true, nil
+	}
 	return manifest, findings, "", false, nil
 }
 
@@ -4023,6 +4173,16 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	targetScan, err := repositoryScanWithFrozenWorkspaceTarget(scan, sourceTask.Spec.Workspace)
 	if err != nil {
 		return false, err
+	}
+	if sourceTask.Spec.Workspace != nil {
+		if pinnedRef := strings.TrimSpace(sourceTask.Spec.Workspace.Ref); pinnedRef != "" &&
+			strings.TrimSpace(run.HeadCommit) != "" &&
+			pinnedRef == strings.TrimSpace(run.HeadCommit) &&
+			strings.TrimSpace(sourceTask.Spec.Workspace.Branch) != "" &&
+			store.ValidateGitObjectID("pinned scan commit", pinnedRef) == nil {
+			// Restore branch-scoped identity before buildReviewTask re-pins Workspace.Ref.
+			targetScan.Spec.Ref = ""
+		}
 	}
 
 	desired, err := r.buildReviewTask(ctx, targetScan, run, threatModel, *reviewSlice, policy, securityReviewRetryAttempt)
@@ -4507,6 +4667,9 @@ func (r *RepositoryScanReconciler) ingestMapperTask(ctx context.Context, scan *c
 		}
 		current.SliceCount = len(artifact.Slices)
 		current.SkippedSliceCount = skippedSlices
+		for range skippedSlices {
+			metrics.RecordSecurityReviewSlice(reviewSliceStatusSkipped)
+		}
 		switch {
 		case incrementalSelection && skippedSlices == len(artifact.Slices):
 			current.Summary = fmt.Sprintf("Threat model generated; no review slices matched %d changed files", len(artifact.ChangedFiles))
@@ -4617,6 +4780,16 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 		if strings.TrimSpace(task.Labels[labels.LabelSecurityScanID]) != strings.TrimSpace(finding.ScanRunID) {
 			validationProblem = "validation task scan identity does not match finding"
 		}
+		if validationProblem == "" && task.Spec.Workspace != nil {
+			expectedCommit := strings.TrimSpace(finding.CommitSHA)
+			if expectedCommit != "" && store.ValidateGitObjectID("finding commit", expectedCommit) == nil {
+				if actualRef := strings.TrimSpace(task.Spec.Workspace.Ref); actualRef != "" &&
+					store.ValidateGitObjectID("validation workspace commit", actualRef) == nil &&
+					actualRef != expectedCommit {
+					validationProblem = "validation task workspace commit does not match finding commit"
+				}
+			}
+		}
 		policy, policyErr := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 		if policyErr != nil {
 			return policyErr
@@ -4644,8 +4817,10 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 		}
 		if validationProblem != "" {
 			recordValidationError(finding, validationProblem)
+			metrics.RecordSecurityValidationOutcome(findingValidationStatusError)
 		} else if artifact != nil {
 			finding.ValidationStatus = strings.TrimSpace(artifact.Status)
+			metrics.RecordSecurityValidationOutcome(finding.ValidationStatus)
 			data, err := json.Marshal(artifact)
 			if err != nil {
 				return err
@@ -4659,6 +4834,7 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 		}
 	} else {
 		recordValidationError(finding, r.pipelineTaskSummary(ctx, task, "validation task failed"))
+		metrics.RecordSecurityValidationOutcome(findingValidationStatusError)
 	}
 
 	if finding.DuplicateOf == "" {
@@ -5102,6 +5278,7 @@ func (r *RepositoryScanReconciler) updatePatchProposalFromSucceededTask(ctx cont
 	proposal.PRURL = publication.prURL
 	proposal.PublicationEvidence = publication.publication
 	proposal.Status = patchProposalStatusPROpened
+	metrics.RecordSecurityPatchVerification("verified", "ok")
 	r.decorateSecurityPatchPullRequest(ctx, scan, task, findingID, publication.prNumber, publication.publication.PRIntent.PublicationGeneration, verified.summaryArtifact)
 	return nil
 }
@@ -5115,6 +5292,7 @@ func (r *RepositoryScanReconciler) failPatchProposal(ctx context.Context, task *
 	// the supplied result kind); strip controls and redact credential shapes
 	// before the reason is persisted and logged.
 	proposal.Reason = boundACPStatusMessage(repositoryMonitorReviewContextSanitize(reason))
+	metrics.RecordSecurityPatchVerification("failed", securityPatchFailureReasonBucket(reason))
 	log.FromContext(ctx).Info("security patch proposal failed verification",
 		"namespace", task.Namespace, "task", task.Name, "finding", proposal.FindingID, "proposal", proposal.ID, "reason", proposal.Reason)
 }
