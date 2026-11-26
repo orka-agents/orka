@@ -952,8 +952,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		r.noteExternalRuntimeStopProven(pool, w)
 		return r.externalPoolStopped(ctx, pool, w)
 	}
+	tainted, err := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), w)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	action := externalRetirementAction(w, deleting, tainted)
 	if w.Spec.Retirement == nil {
-		if externalRetirementAction(w, deleting) == workspacev1alpha1.WorkloadRetirementSuspend && r.externalEvictionDeadlineExceeded(pool, w) {
+		if action == workspacev1alpha1.WorkloadRetirementSuspend && r.externalEvictionDeadlineExceeded(pool, w) {
 			// The worker kills the instance when its eviction window ends. A
 			// suspension issued at or after that point could not prove that it
 			// captured settled work, so it is never authorized: the instance is
@@ -991,7 +996,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "exact runtime materialization is unavailable for drain")
 				}
-				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, externalRetirementAction(w, deleting)); err != nil {
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, action); err != nil {
 					return ctrl.Result{}, err
 				}
 				validationPool, cfg, err := runtimePoolPodTemplateValidationTarget(pool, w.Spec.Workload.Runtime.Template)
@@ -1010,11 +1015,11 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil || !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "runtime drain fence changed")
 				}
-				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status, externalRetirementAction(w, deleting)); err != nil {
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status, action); err != nil {
 					return ctrl.Result{}, err
 				}
 				if !probe.Status.Drain.Requested {
-					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, externalRetirementDrainReason(externalRetirementAction(w, deleting))); err != nil {
+					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, externalRetirementDrainReason(action)); err != nil {
 						return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "authenticated runtime drain request is unavailable")
 					}
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for authenticated drain settlement")
@@ -1029,7 +1034,6 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 			}
 		}
 	}
-	action := externalRetirementAction(w, deleting)
 	if w.Spec.Retirement != nil && w.Spec.Retirement.Action == workspacev1alpha1.WorkloadRetirementSuspend && action == workspacev1alpha1.WorkloadRetirementSuspend {
 		// Termination can begin after Suspend was authorized and before the
 		// provider started it. Keep collecting the exact worker's signal while

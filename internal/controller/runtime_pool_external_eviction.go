@@ -171,10 +171,10 @@ func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time,
 // externalWorkspaceSuspendable reports whether an eviction of the workspace's
 // current instance may drain for a data-only suspension. Operator access
 // forfeits retention (ADR 0044), so a tainted workspace never announces one.
-func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace) bool {
+func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace, tainted bool) bool {
 	return w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed &&
-		!operatoraccess.Tainted(w.Annotations) &&
+		!tainted && !operatoraccess.Tainted(w.Annotations) &&
 		slices.Contains(w.Spec.Lifecycle.AllowedOnDetach, workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
@@ -182,7 +182,7 @@ func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace) bool 
 // exact current instance once its drain settles. Drain requests carry it so a
 // supervisor whose worker is terminated afterward knows whether its data must
 // remain suspendable.
-func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting bool) workspacev1alpha1.WorkloadRetirementAction {
+func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting, tainted bool) workspacev1alpha1.WorkloadRetirementAction {
 	// Quarantine is terminal and never reusable, so it never earns the data-preserving
 	// Suspend authorization that a Suspend-capable class otherwise receives. Providers
 	// act on quarantine only through a Stop (or Delete) authorization.
@@ -194,7 +194,7 @@ func externalRetirementAction(w *workspacev1alpha1.ExecutionWorkspace, deleting 
 	// never captured into a data checkpoint, so it never earns a new Suspend
 	// authorization either. Task settlement and retention delete it; until
 	// then, scale-down retires its instance with Stop.
-	tainted := operatoraccess.Tainted(w.Annotations)
+	tainted = tainted || operatoraccess.Tainted(w.Annotations)
 	switch {
 	case deleting:
 		return workspacev1alpha1.WorkloadRetirementDelete
@@ -317,9 +317,13 @@ func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 	if w.Spec.Workload == nil || a == nil || !a.Identity.Valid() || a.Sequence != w.Spec.Workload.Sequence || a.Key != w.Spec.Workload.Key {
 		return nil, errExternalEvictionUnbound
 	}
+	tainted, err := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), w)
+	if err != nil {
+		return nil, err
+	}
 	record := externalRuntimeEviction{
 		WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Source: source,
-		SignaledAt: signaledAt.UTC(), Deadline: deadline.UTC(), Suspendable: externalWorkspaceSuspendable(w),
+		SignaledAt: signaledAt.UTC(), Deadline: deadline.UTC(), Suspendable: externalWorkspaceSuspendable(w, tainted),
 	}
 	existing, malformed := currentExternalRuntimeEviction(pool, w)
 	if malformed {

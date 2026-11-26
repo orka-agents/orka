@@ -1056,27 +1056,39 @@ func TestExternalRetirementActionRefusesSuspendForTaintedWorkspace(t *testing.T)
 	workspace.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{workspacev1alpha1.WorkspaceOnDetachSuspend}
 	workspace.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 2}
 	workspace.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: 2, Identity: identity}
-	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementStop {
+	if got := externalRetirementAction(workspace, false, false); got != workspacev1alpha1.WorkloadRetirementStop {
 		t.Fatalf("tainted retirement = %s, want Stop", got)
 	}
-	if externalWorkspaceSuspendable(workspace) {
+	if externalWorkspaceSuspendable(workspace, false) {
 		t.Fatal("tainted workspace announced a data-only eviction suspension")
 	}
-	if got := externalRetirementAction(workspace, true); got != workspacev1alpha1.WorkloadRetirementDelete {
+	if got := externalRetirementAction(workspace, true, false); got != workspacev1alpha1.WorkloadRetirementDelete {
 		t.Fatalf("tainted deletion retirement = %s, want Delete", got)
 	}
 	// Only a Suspend authorized for the exact current instance is kept.
 	workspace.Spec.Retirement = &workspacev1alpha1.WorkloadRetirement{Sequence: 1, Identity: identity, Action: workspacev1alpha1.WorkloadRetirementSuspend}
-	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementStop {
+	if got := externalRetirementAction(workspace, false, false); got != workspacev1alpha1.WorkloadRetirementStop {
 		t.Fatalf("stale Suspend authorization kept for a tainted workspace: %s", got)
 	}
 	workspace.Spec.Retirement.Sequence = 2
-	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementSuspend {
+	if got := externalRetirementAction(workspace, false, false); got != workspacev1alpha1.WorkloadRetirementSuspend {
 		t.Fatalf("exact in-flight Suspend authorization = %s, want it kept", got)
 	}
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredQuarantined
-	if got := externalRetirementAction(workspace, false); got != workspacev1alpha1.WorkloadRetirementStop {
+	if got := externalRetirementAction(workspace, false, false); got != workspacev1alpha1.WorkloadRetirementStop {
 		t.Fatalf("quarantined tainted retirement = %s, want Stop", got)
+	}
+	// Task-only taint (without workspace annotation) also blocks Suspend and eviction suspendability.
+	taskTainted := &workspacev1alpha1.ExecutionWorkspace{}
+	taskTainted.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
+	taskTainted.Spec.Lifecycle.AllowedOnDetach = []workspacev1alpha1.WorkspaceOnDetach{workspacev1alpha1.WorkspaceOnDetachSuspend}
+	taskTainted.Spec.Workload = &workspacev1alpha1.WorkloadRequest{Sequence: 2}
+	taskTainted.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: 2, Identity: identity}
+	if got := externalRetirementAction(taskTainted, false, true); got != workspacev1alpha1.WorkloadRetirementStop {
+		t.Fatalf("task-tainted retirement = %s, want Stop", got)
+	}
+	if externalWorkspaceSuspendable(taskTainted, true) {
+		t.Fatal("task-tainted workspace announced a data-only eviction suspension")
 	}
 }
 
