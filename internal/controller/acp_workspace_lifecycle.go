@@ -468,12 +468,17 @@ func validateACPClassWorkspaceAttachmentAttempt(
 		(workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID) {
 		return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
 	}
-	if workspace.Spec.Attachment == nil && workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
-		// The class path cold-resumes a Suspended workspace through its
-		// explicit Ready flip, never by attaching it. Rejecting here keeps an
-		// attach retry from reversing a suspension (for example the delayed
-		// Suspend of a warm-detach window) that landed after the first read.
-		return fmt.Errorf("workspace desired state %q is not reusable for direct attachment", workspace.Spec.DesiredState)
+	if workspace.Spec.Attachment == nil {
+		if workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
+			// The class path cold-resumes a Suspended workspace through its
+			// explicit Ready flip, never by attaching it. Rejecting here keeps an
+			// attach retry from reversing a suspension (for example the delayed
+			// Suspend of a warm-detach window) that landed after the first read.
+			return fmt.Errorf("workspace desired state %q is not reusable for direct attachment", workspace.Spec.DesiredState)
+		}
+		if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open && !now.Before(deadline) {
+			return fmt.Errorf("workspace warm-detach window expired at %s; wait for suspension", deadline.UTC().Format(time.RFC3339))
+		}
 	}
 	err := validateWorkspaceAttachmentAttempt(workspace, task, now)
 	if err == nil || binding.Class.ControllerName == "" || workspace.Spec.Attachment != nil {
@@ -1707,6 +1712,9 @@ func (r *TaskReconciler) markACPWorkspaceRevocationStarted(
 	task *corev1alpha1.Task,
 	epoch int64,
 ) error {
+	if workspace.Spec.Attachment == nil && workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredSuspended {
+		return nil
+	}
 	if stampedEpoch, _, ok := parseACPWorkspaceRevocationStamp(workspace.Annotations[acpWorkspaceRevocationStartedAnnotation]); ok && stampedEpoch == epoch {
 		return nil
 	}

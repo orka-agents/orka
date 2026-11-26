@@ -214,9 +214,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	// A warm-detach window (ADR 0055) ends before, and independently of,
 	// idle retention; its window is always shorter than idleTimeout.
-	if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open &&
-		!operatoraccess.Tainted(workspace.Annotations) && now.Before(deadline) {
-		return releaseQuota(ctrl.Result{RequeueAfter: min(deadline.Sub(now)+time.Second, lifetimeRequeue)})
+	if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open {
+		tainted, taintErr := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), workspace)
+		if taintErr != nil {
+			return ctrl.Result{}, taintErr
+		}
+		if !tainted && now.Before(deadline) {
+			return releaseQuota(ctrl.Result{RequeueAfter: min(deadline.Sub(now)+time.Second, lifetimeRequeue)})
+		}
 	}
 	if result, handled, err := r.reconcileWarmDetachWindow(ctx, workspace, now, lifetimeRequeue); err != nil {
 		return ctrl.Result{}, err
@@ -229,6 +234,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, err
 		}
 		if demandOutstanding {
+			if retentionFence != nil {
+				if err := r.deleteACPWorkspaceRetentionFence(ctx, retentionFence); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 	}

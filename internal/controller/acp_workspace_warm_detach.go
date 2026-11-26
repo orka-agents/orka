@@ -300,7 +300,10 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileWarmDetachWindow(
 	if !open {
 		return ctrl.Result{}, false, nil
 	}
-	tainted := operatoraccess.Tainted(workspace.Annotations)
+	tainted, taintErr := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), workspace)
+	if taintErr != nil {
+		return ctrl.Result{}, true, taintErr
+	}
 	if !tainted && now.Before(deadline) {
 		requeue := min(deadline.Sub(now)+time.Second, lifetimeRequeue)
 		return ctrl.Result{RequeueAfter: requeue}, true, nil
