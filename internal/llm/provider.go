@@ -13,54 +13,38 @@ import (
 	"strings"
 )
 
-// Provider is the interface for LLM providers
 type Provider interface {
-	// Complete sends a completion request and returns the response
 	Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error)
 
-	// Stream sends a streaming completion request
 	Stream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error)
 
-	// Name returns the provider name
 	Name() string
 }
 
-// CompletionRequest represents a completion request
 type CompletionRequest struct {
-	Model        string    `json:"model"`
-	Messages     []Message `json:"messages"`
-	SystemPrompt string    `json:"system_prompt,omitempty"`
-	// SystemPromptStable is how many leading bytes of SystemPrompt stay the
-	// same across requests while the rest may change, such as a catalog after
-	// fixed instructions. A provider whose cache needs explicit breakpoints
-	// marks the end of the stable part too. Zero means no split.
+	Model              string          `json:"model"`
+	Messages           []Message       `json:"messages"`
+	SystemPrompt       string          `json:"system_prompt,omitempty"`
 	SystemPromptStable int             `json:"-"`
 	MaxTokens          int             `json:"max_tokens,omitempty"`
 	Temperature        float64         `json:"temperature,omitempty"`
-	TemperatureSet     bool            `json:"-"` // Preserves explicit zero for in-memory callers.
+	TemperatureSet     bool            `json:"-"`
 	Tools              []Tool          `json:"tools,omitempty"`
 	StopSequences      []string        `json:"stop_sequences,omitempty"`
 	ResponseFormat     *ResponseFormat `json:"response_format,omitempty"`
-	// Store preserves explicit stateless requests through provider translation.
-	// Nil retains the provider default for existing callers.
-	Store *bool `json:"store,omitempty"`
-	// ResponsesInput identifies compat Responses requests, preserving native
-	// input/output item order. Turn-based adapters may group adjacent input items.
-	ResponsesInput bool `json:"-"`
+	Store              *bool           `json:"store,omitempty"`
+	ResponsesInput     bool            `json:"-"`
 }
 
-// HasTemperature reports explicit presence or a legacy positive scalar value.
 func (r *CompletionRequest) HasTemperature() bool {
 	return r.TemperatureSet || r.Temperature > 0
 }
 
-// ResponseFormat specifies the output format the model must produce.
 type ResponseFormat struct {
-	Type       string            `json:"type"` // "text", "json_object", "json_schema"
+	Type       string            `json:"type"`
 	JSONSchema *JSONSchemaFormat `json:"json_schema,omitempty"`
 }
 
-// JSONSchemaFormat holds the schema details for json_schema response format.
 type JSONSchemaFormat struct {
 	Name        string         `json:"name"`
 	Schema      map[string]any `json:"schema,omitempty"`
@@ -68,18 +52,13 @@ type JSONSchemaFormat struct {
 	Description string         `json:"description,omitempty"`
 }
 
-// AssistantOutputItem retains a provider's ordered text/function output.
-// Existing consumers continue to use the aggregate Content and ToolCalls fields.
 type AssistantOutputItem struct {
 	Content  string
 	ToolCall *ToolCall
-	// Status retains an optional native message status for Responses output.
-	Status string
+	Status   string
 }
 
-// CompletionResponse represents a completion response
 type CompletionResponse struct {
-	// OutputItems is optional in-memory ordering metadata for Responses requests.
 	OutputItems           []AssistantOutputItem `json:"-"`
 	Content               string                `json:"content"`
 	ToolCalls             []ToolCall            `json:"tool_calls,omitempty"`
@@ -95,7 +74,6 @@ type CompletionResponse struct {
 	ID                    string                `json:"id,omitempty"`
 }
 
-// CompletionOutcome describes the provider-neutral result of a completion.
 type CompletionOutcome string
 
 const (
@@ -107,7 +85,6 @@ const (
 	CompletionOutcomeUnknown    CompletionOutcome = "unknown"
 )
 
-// NormalizeCompletionOutcome maps provider-specific stop reasons to a shared outcome.
 func NormalizeCompletionOutcome(resp *CompletionResponse) CompletionOutcome {
 	if resp == nil {
 		return CompletionOutcomeUnknown
@@ -144,36 +121,29 @@ func completionOutcomeForStopReason(reason string) CompletionOutcome {
 	}
 }
 
-// Message represents a chat message
 type Message struct {
-	// Keep an ordered assistant turn in one message so truncation retains its
-	// tool calls and adjacent results atomically. It is never persisted.
 	OutputItems []AssistantOutputItem `json:"-"`
-	Role        string                `json:"role"` // user, assistant, system, tool
+	Role        string                `json:"role"`
 	Content     string                `json:"content,omitempty"`
 	ToolCalls   []ToolCall            `json:"tool_calls,omitempty"`
 	ToolCallID  string                `json:"tool_call_id,omitempty"`
-	Name        string                `json:"name,omitempty"` // For tool results
+	Name        string                `json:"name,omitempty"`
 }
 
-// Tool represents a tool definition
 type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
-	Strict      *bool           `json:"strict,omitempty"` // JSON Schema
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
-// ToolCall represents a tool call from the model
 type ToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-// StreamChunk represents a chunk of a streaming response
 type StreamChunk struct {
-	// Native Responses item metadata is consumed before exposing compat SSE.
 	OutputIndex           *int64    `json:"-"`
 	OutputItemDone        bool      `json:"-"`
 	OutputItemStatus      string    `json:"-"`
@@ -192,18 +162,14 @@ type StreamChunk struct {
 	Error                 error     `json:"error,omitempty"`
 }
 
-// PromptTokens is the size of the whole prompt, cached or not.
 func (c *StreamChunk) PromptTokens() int {
 	return promptTokens(c.InputTokens, c.CachedInputTokens, c.CacheWriteInputTokens, c.InputExcludesCache)
 }
 
-// PromptTokens is the size of the whole prompt, cached or not.
 func (r *CompletionResponse) PromptTokens() int {
 	return promptTokens(r.InputTokens, r.CachedInputTokens, r.CacheWriteInputTokens, r.InputExcludesCache)
 }
 
-// promptTokens adds the cache reads and writes back to an input count that
-// excludes them, as Anthropic's does; an inclusive count already holds them.
 func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int {
 	if excludesCache {
 		for _, n := range []*int64{cached, cacheWrite} {
@@ -215,27 +181,22 @@ func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int 
 	return input
 }
 
-// ProviderConfig holds configuration for creating a provider
 type ProviderConfig struct {
 	APIKey              string
-	BaseURL             string // Optional override for API URL
-	ProviderType        string // e.g. "openai", "azure-openai"
-	AzureAPIVersion     string // Azure OpenAI API version (e.g. "2024-02-15-preview")
-	AzureDeploymentName string // Azure request model override; logical model selection is unchanged
+	BaseURL             string
+	ProviderType        string
+	AzureAPIVersion     string
+	AzureDeploymentName string
 }
 
-// ProviderFactory is a function that creates a provider
 type ProviderFactory func(config ProviderConfig) (Provider, error)
 
-// providerRegistry holds registered provider factories
 var providerRegistry = map[string]ProviderFactory{}
 
-// RegisterProvider registers a provider factory
 func RegisterProvider(name string, factory ProviderFactory) {
 	providerRegistry[name] = factory
 }
 
-// NewProvider creates a new provider based on the provider name
 func NewProvider(name string, config ProviderConfig) (Provider, error) {
 	factory, ok := providerRegistry[name]
 	if !ok {
@@ -248,7 +209,6 @@ func NewProvider(name string, config ProviderConfig) (Provider, error) {
 	return &usageProvider{Provider: provider}, nil
 }
 
-// Error types
 type ProviderError struct {
 	Provider   string
 	Message    string
@@ -285,7 +245,6 @@ func (e *ProviderError) IsContextTooLong() bool {
 	return strings.Contains(msg, "context") || strings.Contains(msg, "token") || strings.Contains(msg, "too long") || strings.Contains(msg, "maximum")
 }
 
-// ShouldRetry reports whether the operation that produced err should be retried.
 func ShouldRetry(err error) bool {
 	if IsUsagePersistenceError(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
@@ -293,10 +252,9 @@ func ShouldRetry(err error) bool {
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsRetryable()
 	}
-	return true // network errors, unknown errors → retry
+	return true
 }
 
-// ShouldFallback reports whether a different provider should be tried.
 func ShouldFallback(err error) bool {
 	if IsUsagePersistenceError(err) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
@@ -304,10 +262,9 @@ func ShouldFallback(err error) bool {
 	if pe, ok := errors.AsType[*ProviderError](err); ok {
 		return pe.IsProviderDown()
 	}
-	return true // non-ProviderError (network) → try another provider
+	return true
 }
 
-// IsContextTooLongErr reports whether err indicates the context/token limit was exceeded.
 func IsContextTooLongErr(err error) bool {
 	if IsUsagePersistenceError(err) {
 		return false

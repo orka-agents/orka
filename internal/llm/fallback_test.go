@@ -203,7 +203,7 @@ func TestFallbackProvider_Stream_PrimarySucceeds(t *testing.T) {
 func TestFallbackProvider_Stream_PrimaryEmpty_ClosedChannel(t *testing.T) {
 	primary := &retryMockProvider{
 		name:          "primary",
-		streamResults: [][]StreamChunk{{}}, // empty stream
+		streamResults: [][]StreamChunk{{}},
 	}
 	fb := &retryMockProvider{name: "fb"}
 
@@ -371,8 +371,8 @@ func TestFallbackProvider_Stream_AllCooledDown_UsesShortestCooldown(t *testing.T
 
 	tracker := NewCooldownTracker()
 	tracker.MarkCooldown("primary")
-	tracker.MarkCooldown("primary") // longer cooldown
-	tracker.MarkCooldown("fb")      // shorter cooldown
+	tracker.MarkCooldown("primary")
+	tracker.MarkCooldown("fb")
 
 	fp := NewFallbackProvider(primary, []FallbackEntry{
 		{Provider: fb},
@@ -526,23 +526,19 @@ func TestFallbackProvider_AllCooledDown_UsesShortestCooldown(t *testing.T) {
 	}
 
 	tracker := NewCooldownTracker()
-	// Mark both as cooling down, but primary has more marks (longer cooldown)
 	tracker.MarkCooldown("primary")
-	tracker.MarkCooldown("primary") // 5m cooldown
-	tracker.MarkCooldown("fb")      // 1m cooldown
+	tracker.MarkCooldown("primary")
+	tracker.MarkCooldown("fb")
 
 	fp := NewFallbackProvider(primary, []FallbackEntry{
 		{Provider: fb},
 	})
 	fp.SetCooldownTracker(tracker)
 
-	// Should pick fb (shorter cooldown) but fb has no completeResults
-	// Actually, fb will return default "default" from retryMockProvider
 	resp, err := fp.Complete(context.Background(), &CompletionRequest{Model: "test"})
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
-	// fb has shorter cooldown so it should be tried
 	if fb.callCount != 1 {
 		t.Errorf("expected fb to be called (shortest cooldown), fb calls: %d, primary calls: %d", fb.callCount, primary.callCount)
 	}
@@ -550,8 +546,6 @@ func TestFallbackProvider_AllCooledDown_UsesShortestCooldown(t *testing.T) {
 }
 
 func TestFallbackProvider_CooldownExpires_PrimaryTriedAgain(t *testing.T) {
-	// This test verifies the concept but can't easily test time expiry without
-	// a mock clock. Instead, verify that Reset works correctly.
 	primary := &retryMockProvider{
 		name: "primary",
 		completeResults: []completeResult{
@@ -562,7 +556,6 @@ func TestFallbackProvider_CooldownExpires_PrimaryTriedAgain(t *testing.T) {
 
 	tracker := NewCooldownTracker()
 	tracker.MarkCooldown("primary")
-	// Immediately reset (simulating expiry)
 	tracker.Reset("primary")
 
 	fp := NewFallbackProvider(primary, []FallbackEntry{
@@ -610,11 +603,9 @@ func TestFallbackProvider_SuccessfulCallResetsCooldown(t *testing.T) {
 		t.Fatalf("expected success, got %v", err)
 	}
 
-	// fb succeeded → its cooldown should be reset
 	if tracker.IsCoolingDown("fb") {
 		t.Error("successful provider should have cooldown reset")
 	}
-	// primary got 429 → should be in cooldown
 	if !tracker.IsCoolingDown("primary") {
 		t.Error("429'd provider should be in cooldown")
 	}

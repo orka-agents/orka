@@ -207,7 +207,7 @@ func TestGatewayTaskReceiptPruningAdvancesAndRetriesBoundedPages(t *testing.T) {
 			_, err = db.GetGatewayTaskCleanupReceipt(ctx, second.Namespace, second.TaskName, second.TaskUID)
 			require.ErrorIs(t, err, store.ErrNotFound, "a blocked earlier receipt must not starve later receipts")
 			events.deleteError, blocked = nil, false
-			require.NoError(t, service.pruneGatewayTaskCleanupReceipts(ctx)) // End of scan resets the cursor.
+			require.NoError(t, service.pruneGatewayTaskCleanupReceipts(ctx))
 			require.NoError(t, service.pruneGatewayTaskCleanupReceipts(ctx))
 			_, err = db.GetGatewayTaskCleanupReceipt(ctx, first.Namespace, first.TaskName, first.TaskUID)
 			require.ErrorIs(t, err, store.ErrNotFound, "the retained receipt must be retried after the scan wraps")

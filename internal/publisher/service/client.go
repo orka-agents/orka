@@ -47,9 +47,6 @@ func (e *ClientError) Error() string {
 	return fmt.Sprintf("workspace publisher request failed with status %d and code %q", e.StatusCode, e.Response.Code)
 }
 
-// transportError is a request that got no response. It does not unwrap, so
-// errors.Is and errors.As see one opaque failure; TransportCause exposes the
-// underlying error to callers that classify connection failures.
 type transportError struct {
 	cause error
 }
@@ -58,8 +55,6 @@ func (e *transportError) Error() string {
 	return "workspace publisher transport failed"
 }
 
-// TransportCause returns the error behind a Workspace/Publisher request that
-// got no response, or nil when err is not such a failure.
 func TransportCause(err error) error {
 	if transport, ok := errors.AsType[*transportError](err); ok {
 		return transport.cause
@@ -96,13 +91,6 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}
 	client := config.HTTPClient
 	if client == nil {
-		// No client-level timeout: operation deadlines come from the caller's
-		// request context so configured operation timeouts (for example
-		// ORKA_PUBLISHER_PUBLISH_TIMEOUT above the former three-minute client
-		// ceiling) are honored. Requests without a caller deadline fall back to
-		// defaultRequestTimeout in requestContext. Every mutation carries the
-		// publisher bearer and signed operation capability to an in-cluster
-		// Service, so the transport must never resolve environment proxies.
 		client = &http.Client{Transport: harnessv2.NewProxylessTransport()}
 	} else {
 		clone := *client
@@ -179,9 +167,6 @@ func (c *Client) RebaseBranch(ctx context.Context, request BranchRebaseRequest) 
 func (c *Client) ReconcilePullRequest(ctx context.Context, request PullRequestReconcileRequest) (PullRequestReconcileResponse, error) {
 	ctx, cancel := requestContext(ctx)
 	defer cancel()
-	// Discovery and the mutation can land on different pods during a rollout.
-	// A strict legacy JSON rejection happens before any SCM effect or journal
-	// reservation. Retry only that rejection with the same immutable request.
 	retryDeadline := time.NewTimer(2 * time.Minute)
 	defer retryDeadline.Stop()
 	hasPresentation := request.Intent.Title != "" || request.Intent.Body != "" || request.Intent.TaskName != "" || request.Intent.TaskNamespace != ""
@@ -202,15 +187,11 @@ func (c *Client) ReconcilePullRequest(ctx context.Context, request PullRequestRe
 			timer.Stop()
 			return response, err
 		case <-timer.C:
-			// Drop idle connections pinned to a legacy Service backend before retrying.
 			c.httpClient.CloseIdleConnections()
 		}
 	}
 }
 
-// defaultRequestTimeout bounds publisher requests whose caller context carries
-// no deadline. Callers with explicit deadlines (for example settlement contexts
-// sized to the publisher's configured operation timeouts) are never clamped.
 const defaultRequestTimeout = 3 * time.Minute
 
 func requestContext(ctx context.Context) (context.Context, context.CancelFunc) {

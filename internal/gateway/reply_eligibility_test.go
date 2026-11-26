@@ -14,8 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Model a task-index miss immediately before dispatch commits the link. The
-// fallback still reads the real durable event; it must not become a label grant.
 type replyOriginLookupMiss struct{ store.GatewayEventStore }
 
 func (s replyOriginLookupMiss) GetGatewayEventForTask(context.Context, string, string, string) (*store.GatewayEvent, error) {

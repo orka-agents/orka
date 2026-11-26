@@ -61,7 +61,6 @@ func TestResolveGatewayReplyPolicyThroughKubernetesJSON(t *testing.T) {
 			var storedTask corev1alpha1.Task
 			require.NoError(t, runtime.DecodeInto(serializer, agentJSON, &storedAgent))
 			require.NoError(t, runtime.DecodeInto(serializer, taskJSON, &storedTask))
-			// Trusted durable-origin eligibility must not override an explicit empty policy.
 			got := ResolveWithGatewayReply(&storedTask, &storedAgent, true)
 			if tc.wantReply {
 				require.Contains(t, got, GatewayReplyToolName)

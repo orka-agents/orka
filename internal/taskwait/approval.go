@@ -19,23 +19,15 @@ import (
 )
 
 const (
-	// ParkedApprovalAction is the approval action shown to reviewers. A parked
-	// approval is a sign-off checkpoint; it never authorizes a gated tool call.
-	ParkedApprovalAction = "Agent sign-off (parked turn)"
-	// ParkedApprovalToolName attributes the approval to the parking tool.
+	ParkedApprovalAction   = "Agent sign-off (parked turn)"
 	ParkedApprovalToolName = "park_until"
 	parkedApprovalIDKind   = "acp-parked-approval-v1"
 )
 
-// ParkedApprovalID is the stable approval ID for the parked approval one exact
-// brokered tool call requested.
 func ParkedApprovalID(namespace, taskUID string, attempt int32, promptID, operationDigest string) string {
 	return store.CanonicalControlID(parkedApprovalIDKind, namespace, taskUID, fmt.Sprint(attempt), promptID, operationDigest)
 }
 
-// parkedApprovalPayload is the ApprovalRequested content consumed by
-// approvals.Derive. It carries no binding: the decision is delivered to a
-// later turn, which revalidates every policy itself.
 type parkedApprovalPayload struct {
 	ApprovalID  string `json:"approvalID"`
 	Action      string `json:"action"`
@@ -46,8 +38,6 @@ type parkedApprovalPayload struct {
 	Parked      bool   `json:"parked"`
 }
 
-// ParkedApprovalRequestEvent builds the idempotent ApprovalRequested event for
-// a parked approval wait.
 func ParkedApprovalRequestEvent(task *corev1alpha1.Task, wait *corev1alpha1.TaskWaitStatus) (*store.ExecutionEvent, string, error) {
 	if task == nil || wait == nil || wait.Kind != corev1alpha1.TaskWaitKindApproval || len(wait.References) != 1 {
 		return nil, "", fmt.Errorf("parked approval requires one approval reference")
@@ -80,7 +70,6 @@ func ParkedApprovalRequestEvent(task *corev1alpha1.Task, wait *corev1alpha1.Task
 	}, approvalID, nil
 }
 
-// EnsureParkedApprovalRequested appends the parked approval request once.
 func EnsureParkedApprovalRequested(
 	ctx context.Context,
 	eventStore store.DeduplicatingExecutionEventStore,
@@ -98,9 +87,6 @@ func EnsureParkedApprovalRequested(
 	return err
 }
 
-// ParkedApprovalTerminalEvent builds the terminal event that closes a parked
-// approval which was never decided: expired when the wait deadline passed, or
-// cancelled otherwise.
 func ParkedApprovalTerminalEvent(
 	task *corev1alpha1.Task,
 	wait *corev1alpha1.TaskWaitStatus,
@@ -141,11 +127,6 @@ func ParkedApprovalTerminalEvent(
 	}, approvalID + ":terminal", nil
 }
 
-// AcceptsApprovalDecision reports whether task is parked on approvalID, so a
-// human decision is accepted even though the parked turn itself has ended. A
-// requested wait arms only when its turn succeeded; after a failed or
-// cancelled turn it is abandoned with nothing to resume, so it takes no
-// decision either.
 func AcceptsApprovalDecision(task *corev1alpha1.Task, approvalID string) bool {
 	if task == nil || !task.DeletionTimestamp.IsZero() {
 		return false

@@ -25,9 +25,6 @@ func runValidationNetworkSandbox(command []string) error {
 		return fmt.Errorf("%w: validation network sandbox requires a command", errValidationCommandUnavailable)
 	}
 
-	// Seccomp filters apply to the calling thread. Keep this goroutine on the
-	// filtered thread until exec replaces the process; descendants inherit the
-	// filter and can create only local Unix-domain sockets.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := validationProcessLimitInstall(); err != nil {

@@ -10,16 +10,12 @@ import (
 	"github.com/orka-agents/orka/internal/security"
 )
 
-// These character limits match WorkspaceConfig's admission bounds and leave
-// room in the forge body for publication metadata and reconciliation markers.
 const (
 	MaxPullRequestTitleLength = 256
 	MaxPullRequestBodyLength  = 32768
-	// PullRequestMarkerPrefix is reserved for publisher-owned reconciliation metadata.
-	PullRequestMarkerPrefix = "<!-- orka.publisher.pr-"
+	PullRequestMarkerPrefix   = "<!-- orka.publisher.pr-"
 )
 
-// DefaultPullRequestTitle derives a bounded title from trusted Task input.
 func DefaultPullRequestTitle(prompt string, generation int64) string {
 	line, _, _ := strings.Cut(strings.TrimSpace(prompt), "\n")
 	line = strings.TrimSpace(line)
@@ -32,8 +28,6 @@ func DefaultPullRequestTitle(prompt string, generation int64) string {
 	return line
 }
 
-// ValidatePullRequestText enforces admission bounds and rejects secret-like text
-// before publication or forge reconciliation.
 func ValidatePullRequestText(title, body string) error {
 	if utf8.RuneCountInString(title) > MaxPullRequestTitleLength {
 		return invalid("prTitle", "must not exceed 256 characters")
@@ -56,8 +50,6 @@ func ValidatePullRequestText(title, body string) error {
 	return nil
 }
 
-// Description renders the Task-authored body or the default publication body.
-// The forge adapter appends its reconciliation markers after this text.
 func (i PullRequestIntent) Description() string {
 	body := i.Body
 	if body == "" {
@@ -74,7 +66,6 @@ type pullRequestRepositoryIdentity struct {
 	ID       string `json:"id"`
 }
 
-// Key returns the exact immutable tuple identity used for PR reconciliation.
 func (i PullRequestIntent) Key() (string, error) {
 	if err := validatePullRequestIntent(i); err != nil {
 		return "", err
@@ -96,8 +87,6 @@ func (i PullRequestIntent) Key() (string, error) {
 	})
 }
 
-// SessionKey identifies one Session's PR across verified publications. The
-// per-publication Key and receipt still bind the current exact head commit.
 func (i PullRequestIntent) SessionKey() (string, error) {
 	if err := validatePullRequestIntent(i); err != nil {
 		return "", err
@@ -149,9 +138,6 @@ func validatePullRequestIntent(intent PullRequestIntent) error {
 	return validateObjectID("PR expected head", intent.ExpectedHeadOID)
 }
 
-// ReconcilePullRequest validates the exact tuple before and after delegating to
-// the SCM-specific reconciler. The caller must have durably persisted intent
-// before invoking this method.
 func ReconcilePullRequest(ctx context.Context, intent PullRequestIntent, reconciler PullRequestReconciler) (PullRequestReceipt, error) {
 	if reconciler == nil {
 		return PullRequestReceipt{}, invalid("PR reconciler", "must not be nil")

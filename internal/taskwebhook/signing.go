@@ -23,11 +23,8 @@ import (
 )
 
 const (
-	// Issuer is the iss claim of every delivery token.
-	Issuer = "orka.ai/task-webhook"
-	// TokenTTL bounds how long one attempt's token is valid.
-	TokenTTL = 5 * time.Minute
-	// MaxClockSkew is the leeway verifiers should allow on iat/exp.
+	Issuer       = "orka.ai/task-webhook"
+	TokenTTL     = 5 * time.Minute
 	MaxClockSkew = time.Minute
 
 	algorithmEdDSA = "EdDSA"
@@ -36,7 +33,6 @@ const (
 	curveEd25519   = "Ed25519"
 )
 
-// Header names sent with every delivery attempt.
 const (
 	HeaderSignature      = "X-Orka-Signature"
 	HeaderDeliveryID     = "X-Orka-Delivery-ID"
@@ -46,19 +42,15 @@ const (
 )
 
 var (
-	// ErrInvalidSignature reports a token that does not verify.
 	ErrInvalidSignature = errors.New("webhook signature is invalid")
-	// ErrUnknownKey reports a kid that is not in the verifier's key set.
-	ErrUnknownKey = errors.New("webhook signing key is unknown")
+	ErrUnknownKey       = errors.New("webhook signing key is unknown")
 )
 
-// SigningKey is an Ed25519 private key with its RFC 7638 thumbprint key ID.
 type SigningKey struct {
 	KeyID   string
 	private ed25519.PrivateKey
 }
 
-// NewSigningKey wraps an Ed25519 private key.
 func NewSigningKey(private ed25519.PrivateKey) (*SigningKey, error) {
 	if len(private) != ed25519.PrivateKeySize {
 		return nil, errors.New("webhook signing key must be an Ed25519 private key")
@@ -70,14 +62,11 @@ func NewSigningKey(private ed25519.PrivateKey) (*SigningKey, error) {
 	return &SigningKey{KeyID: KeyID(public), private: private}, nil
 }
 
-// PublicKey returns the verification half of the signing key.
 func (k *SigningKey) PublicKey() ed25519.PublicKey {
 	public, _ := k.private.Public().(ed25519.PublicKey)
 	return public
 }
 
-// ParsePrivateKeyPEM decodes a PEM PKCS#8 Ed25519 private key, the format
-// `openssl genpkey -algorithm ed25519` writes.
 func ParsePrivateKeyPEM(data []byte) (*SigningKey, error) {
 	block, rest := pem.Decode(data)
 	if block == nil || block.Type != "PRIVATE KEY" || strings.TrimSpace(string(rest)) != "" {
@@ -94,7 +83,6 @@ func ParsePrivateKeyPEM(data []byte) (*SigningKey, error) {
 	return NewSigningKey(private)
 }
 
-// EncodePrivateKeyPEM encodes an Ed25519 private key as PEM PKCS#8.
 func EncodePrivateKeyPEM(private ed25519.PrivateKey) ([]byte, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(private)
 	if err != nil {
@@ -103,16 +91,13 @@ func EncodePrivateKeyPEM(private ed25519.PrivateKey) ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
 }
 
-// KeyID returns the RFC 7638 JWK thumbprint of an Ed25519 public key.
 func KeyID(public ed25519.PublicKey) string {
-	// RFC 7638 §3.2: required members in lexicographic order, no whitespace.
 	canonical := `{"crv":"` + curveEd25519 + `","kty":"` + keyTypeOKP + `","x":"` +
 		base64.RawURLEncoding.EncodeToString(public) + `"}`
 	sum := sha256.Sum256([]byte(canonical))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// JWK is a public Ed25519 JSON Web Key.
 type JWK struct {
 	KeyType   string `json:"kty"`
 	Curve     string `json:"crv"`
@@ -122,12 +107,10 @@ type JWK struct {
 	Use       string `json:"use"`
 }
 
-// JWKS is a JSON Web Key Set.
 type JWKS struct {
 	Keys []JWK `json:"keys"`
 }
 
-// PublicJWK returns the published form of an Ed25519 public key.
 func PublicJWK(public ed25519.PublicKey) JWK {
 	return JWK{
 		KeyType:   keyTypeOKP,
@@ -139,14 +122,11 @@ func PublicJWK(public ed25519.PublicKey) JWK {
 	}
 }
 
-// KeySet holds the signing key and the previous key kept for verification
-// during rotation. Only Current ever signs.
 type KeySet struct {
 	Current  *SigningKey
 	Previous *SigningKey
 }
 
-// JWKS returns the public keys receivers may use, current first.
 func (s KeySet) JWKS() JWKS {
 	set := JWKS{Keys: []JWK{}}
 	seen := map[string]bool{}
@@ -160,15 +140,12 @@ func (s KeySet) JWKS() JWKS {
 	return set
 }
 
-// TaskClaim identifies the Task a delivery is about.
 type TaskClaim struct {
 	UID       string `json:"uid"`
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 }
 
-// Claims is the payload of a delivery token. It binds one attempt of one
-// delivery to the destination, the Task, the event, and the exact body.
 type Claims struct {
 	Issuer        string    `json:"iss"`
 	Subject       string    `json:"sub"`
@@ -190,13 +167,11 @@ type tokenHeader struct {
 	KeyID     string `json:"kid"`
 }
 
-// PayloadDigest returns the lowercase hex SHA-256 digest of body.
 func PayloadDigest(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
 }
 
-// NewClaims builds the claims for one attempt issued at now.
 func NewClaims(audience string, task TaskClaim, deliveryID, eventType string, attempt int32, body []byte, now time.Time) Claims {
 	issued := now.Unix()
 	return Claims{
@@ -215,7 +190,6 @@ func NewClaims(audience string, task TaskClaim, deliveryID, eventType string, at
 	}
 }
 
-// Sign returns a compact JWS (RFC 7515) over claims with alg EdDSA.
 func Sign(key *SigningKey, claims Claims) (string, error) {
 	if key == nil || len(key.private) != ed25519.PrivateKeySize {
 		return "", errors.New("webhook signing key is unavailable")
@@ -236,18 +210,12 @@ func Sign(key *SigningKey, claims Claims) (string, error) {
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-// VerifyOptions are the receiver-side expectations for a delivery.
 type VerifyOptions struct {
-	// Audience is the exact webhook URL the receiver is registered as.
 	Audience string
-	// Body is the raw request body.
-	Body []byte
-	// Now is the verification time.
-	Now time.Time
+	Body     []byte
+	Now      time.Time
 }
 
-// Verify checks a delivery token against a JWKS and the received body. It is
-// the reference receiver algorithm documented for webhook consumers.
 func Verify(token string, keys JWKS, options VerifyOptions) (*Claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {

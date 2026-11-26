@@ -18,8 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ErrGatewayPrerequisitesUnavailable marks missing or incompatible CRDs that may be
-// intentionally staged during an upgrade. Other errors are transient/operational.
 var ErrGatewayPrerequisitesUnavailable = errors.New("gateway prerequisites unavailable")
 
 const (
@@ -35,7 +33,6 @@ const (
 
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,resourceNames=tasks.core.orka.ai;gatewayclasses.gateway.orka.ai;gateways.gateway.orka.ai;gatewaybindings.gateway.orka.ai,verbs=get
 
-// RequireGatewayPrerequisites verifies every CRD contract needed before gateway controllers start.
 func RequireGatewayPrerequisites(ctx context.Context, reader client.Reader) error {
 	if reader == nil {
 		return fmt.Errorf("kubernetes API reader is required")
@@ -60,7 +57,6 @@ func RequireGatewayPrerequisites(ctx context.Context, reader client.Reader) erro
 	return errors.Join(errs...)
 }
 
-// RequireTaskSessionCutoffSchema verifies the installed Task CRD preserves gateway transcript policy fields.
 func RequireTaskSessionCutoffSchema(ctx context.Context, reader client.Reader) error {
 	if reader == nil {
 		return fmt.Errorf("kubernetes API reader is required")
@@ -118,7 +114,6 @@ func crdEstablished(crd *apiextensionsv1.CustomResourceDefinition) bool {
 	})
 }
 
-// WaitForGatewayPrerequisites retries transient and staging races until ctx expires.
 func WaitForGatewayPrerequisites(
 	ctx context.Context, reader client.Reader, interval time.Duration,
 ) error {
@@ -144,8 +139,6 @@ func WaitForGatewayPrerequisites(
 	}
 }
 
-// GatewayPrerequisiteErrorIsTransient reports whether any leaf error came from
-// the Kubernetes API or local configuration rather than a missing/stale CRD.
 func GatewayPrerequisiteErrorIsTransient(err error) bool {
 	if err == nil {
 		return false

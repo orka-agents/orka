@@ -19,8 +19,6 @@ const (
 	maxCredentialBrokerResponseBytes = int64(64 << 10)
 )
 
-// CredentialMaterialRequest binds one credential read to an authenticated
-// Publisher operation and a non-secret Kubernetes Secret reference.
 type CredentialMaterialRequest struct {
 	ParentOperation Operation           `json:"parentOperation"`
 	Metadata        OperationMetadata   `json:"metadata"`
@@ -78,8 +76,6 @@ func (r CredentialMaterialRequest) Validate() error {
 	return nil
 }
 
-// CredentialMaterialResponse is never logged or persisted by the Publisher.
-// ResourceVersion is non-secret audit metadata for the frozen source Secret.
 type CredentialMaterialResponse struct {
 	Material        string `json:"material"`
 	ResourceVersion string `json:"resourceVersion"`
@@ -123,8 +119,6 @@ func newBrokerCredentialProvider(rawURL string, client *http.Client, bearer []by
 	parsed.Path = CredentialBrokerPath
 	parsed.RawPath = ""
 	if client == nil {
-		// Authenticated in-cluster controller traffic must never traverse an
-		// inherited environment proxy.
 		client = &http.Client{Timeout: timeout, Transport: harnessv2.NewProxylessTransport()}
 	} else {
 		clone := *client

@@ -154,8 +154,6 @@ func TestWorkspacePrepareBatchesGitObjectAccess(t *testing.T) {
 	}
 }
 
-// A tree whose manifest exceeds the 2 MiB / 100k-item v2 wire caps must still
-// prepare when it fits the configured workspace limits.
 func TestWorkspacePrepareDigestsManifestLargerThanV2WireCaps(t *testing.T) {
 	repository := newRepositoryFixture(t, false)
 	const fileCount = 20_500
@@ -175,7 +173,6 @@ func TestWorkspacePrepareDigestsManifestLargerThanV2WireCaps(t *testing.T) {
 
 	fixture := newServiceFixtureWithOptions(t, nil, func(config *Config) {
 		config.WorkspaceLimits.MaxEntries = fileCount + 64
-		// Each PAX tar entry costs about 2 KiB of headers.
 		config.WorkspaceLimits.MaxArtifactBytes = 64 << 20
 	})
 	request := WorkspacePrepareRequest{

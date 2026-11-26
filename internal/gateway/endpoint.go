@@ -32,13 +32,11 @@ const (
 	GatewayAuthEnabledValue       = "true"
 )
 
-// EndpointResolver applies the gateway endpoint SSRF policy.
 type EndpointResolver struct {
 	Client                client.Reader
 	AllowInsecureLoopback bool
 }
 
-// Resolve returns the adapter base URL and an operator-safe scheme/host form.
 func (r EndpointResolver) Resolve(ctx context.Context, object *gatewayv1alpha1.Gateway) (string, string, error) {
 	if object == nil {
 		return "", "", fmt.Errorf("gateway is required")
@@ -98,8 +96,6 @@ func (r EndpointResolver) Resolve(ctx context.Context, object *gatewayv1alpha1.G
 			return "", "", fmt.Errorf("adapter Service %q does not expose port %d", key.Name, port)
 		}
 	}
-	// Service selectors constrain routing, but TLS authentication of the Service DNS name is
-	// what prevents a relabeled backend from receiving the outbound bearer token.
 	host := key.Name + "." + object.Namespace + ".svc"
 	endpoint := "https://" + host + ":" + strconv.Itoa(int(port))
 	return endpoint, endpoint, nil

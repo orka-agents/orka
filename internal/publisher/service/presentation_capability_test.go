@@ -21,7 +21,6 @@ func TestPullRequestPresentationCapabilityIsOptInForLegacyClients(t *testing.T) 
 		return nil, errors.New("not used by capabilities")
 	})
 	fixture := newServiceFixtureWithOptions(t, factory, nil)
-	// A legacy strict decoder cannot accept an additional JSON field.
 	response, err := fixture.httpServer.Client().Get(fixture.httpServer.URL + CapabilitiesPath)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +67,6 @@ func TestPullRequestPresentationSurvivesMixedPublisherRollout(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != PullRequestReconcilePath {
 			t.Error("unexpected operation during PR reconciliation")
 		}
-		// Consume the body so the legacy backend can keep the connection alive.
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			t.Error(err)
 			return
@@ -95,7 +93,6 @@ func TestPullRequestPresentationSurvivesMixedPublisherRollout(t *testing.T) {
 	defer newServer.Close()
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			// Model Service routing per TCP connection, not per request.
 			address := newServer.Listener.Addr().String()
 			if dials.Add(1) == 1 {
 				address = oldServer.Listener.Addr().String()
@@ -145,7 +142,6 @@ func TestUnsupportedPresentationRetryHonorsDeadline(t *testing.T) {
 	if _, err := client.ReconcilePullRequest(ctx, request); !errors.Is(err, context.DeadlineExceeded) || attempts.Load() != 1 {
 		t.Fatalf("retry ignored the caller deadline: %v", err)
 	}
-	// A malformed legacy request is not mistaken for the new-field rollout gap.
 	request.Intent.Title = ""
 	if _, err := client.ReconcilePullRequest(t.Context(), request); err == nil || attempts.Load() != 2 {
 		t.Fatal("legacy malformed request was retried")

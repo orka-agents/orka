@@ -501,7 +501,6 @@ func TestCaptureContentFlaggerMarksBaselinePaths(t *testing.T) {
 		t.Fatal("nil snapshot reported flagged")
 	}
 
-	// Without a flagger nothing is marked.
 	snapshot, err = Capture(root, Options{})
 	if err != nil {
 		t.Fatalf("Capture() error = %v", err)

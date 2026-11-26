@@ -16,9 +16,6 @@ type publishJournal struct {
 	Receipt       *PublishReceipt `json:"receipt,omitempty"`
 }
 
-// Preflight independently checks the current target against the exact durable
-// BranchClaim baseline. Any movement fails closed; a descendant is not accepted
-// as permission to publish.
 func (p *Publisher) Preflight(ctx context.Context, request PreflightRequest) (PreflightResult, error) {
 	if err := validateRepository(request.Target); err != nil {
 		return PreflightResult{}, err
@@ -48,10 +45,6 @@ func (p *Publisher) Preflight(ctx context.Context, request PreflightRequest) (Pr
 	return result, nil
 }
 
-// Publish crosses the cancellation boundary only after the exact preflight,
-// fast-forward proof, and durable Started journal are complete. Once crossed,
-// caller cancellation does not kill an in-flight push; the bounded transport
-// either settles or returns PublicationOutcomeUnknown for Verify to reconcile.
 func (p *Publisher) Publish(ctx context.Context, request PublishRequest) (PublishReceipt, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
