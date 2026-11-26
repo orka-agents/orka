@@ -40,6 +40,7 @@ Available Commands:
   memory        Manage durable memory
   models        List compatible model IDs
   monitor       Manage repository monitors
+  oversight     Inspect oversight decisions and replay recorded ones
   provider      Manage providers
   run           Chat with the Orka AI assistant
   runtime-pool  Manage controller-owned ACP runtime pools
@@ -3410,6 +3411,115 @@ Flags:
   -o, --output string           Output format: table, json, yaml (default "table")
       --status string           Filter by workflow status
       --task-name string        Filter by task name
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka oversight`
+
+```text
+Oversight records what a monitoring pipeline decided about each agent action. These commands are read-only apart from replay, which submits recorded decisions.
+
+Usage:
+  orka oversight [command]
+
+Available Commands:
+  decisions   Search oversight decisions, newest first
+  posture     Answer "is anything untoward happening?" for the namespace
+  replay      Submit recorded oversight decisions from JSON Lines files
+
+Flags:
+  -h, --help   help for oversight
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka oversight [command] --help" for more information about a command.
+```
+
+## `orka oversight decisions`
+
+```text
+The query uses the oversight search grammar: key:value terms such as dest:example.com:443, domain:example.com, bin:curl, concern:K2, agent:name, task:prefix*, disposition:audit_flagged|fail_closed, feedback:unreviewed, plus free-text words or "quoted phrases".
+
+Usage:
+  orka oversight decisions [query] [flags]
+
+Flags:
+  -h, --help            help for decisions
+      --limit int       Maximum decisions to show (up to 200) (default 50)
+  -o, --output string   Output format: json
+  -q, --query string    Search query
+      --window string   How far back to look, such as 24h or 7d (default: all)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka oversight posture`
+
+```text
+Answer "is anything untoward happening?" for the namespace
+
+Usage:
+  orka oversight posture [flags]
+
+Flags:
+  -h, --help            help for posture
+  -o, --output string   Output format: json
+      --run-id string   Only decisions of this run
+      --window string   How far back to look, such as 1h, 24h or 7d (default "24h")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka oversight replay`
+
+```text
+Replay reads newline-delimited OversightDecision records (the pkg/oversight/v1 schema), checks every line first, and submits them in bounded batches to the namespace's ingest endpoint. It submits nothing when any line is invalid. Replaying the same records again is a no-op. The caller needs a ServiceAccount token allowed to create oversightdecisions in the namespace.
+
+Usage:
+  orka oversight replay --file decisions.jsonl [flags]
+
+Flags:
+      --batch-size int     Decisions per request (1-100) (default 50)
+      --dry-run            Check the files and report what would be sent
+      --file stringArray   JSON Lines file of decisions (repeatable; - reads stdin)
+  -h, --help               help for replay
+      --id-suffix string   Append this to every decision ID and Task name (for a repeat take)
+      --into string        Namespace to submit into (default: the selected namespace)
+      --max-gap duration   With --preserve-timing, wait at most this long between decisions (default 10s)
+      --pace duration      Wait this long between batches, to replay as a live stream
+      --preserve-timing    Keep the recorded gaps between decisions, sending those due together, stamped with the time they are sent
+      --run-id string      Set every decision's runID
+      --shift-to-now       Shift every observedAt by the same amount so the newest record is now, keeping their spacing
+      --speed float        With --preserve-timing, play this many times faster (default 1)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
