@@ -2,6 +2,10 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -16,12 +20,35 @@ import (
 // A GitHubApp reference freezes the App Secret as a token reference freezes
 // its Secret: the binding names the private-key entry, and a PEM is accepted.
 func TestPromptCredentialBindingsFreezeGitHubAppSecret(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
-	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-app", UID: "app-secret-uid"},
-		Data:       map[string][]byte{"appId": []byte("1"), "privateKey": []byte("-----BEGIN RSA PRIVATE KEY-----\nMII\n-----END RSA PRIVATE KEY-----\n")},
-	}).Build()
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "publisher-app", UID: "app-secret-uid"},
+			Type:       corev1.SecretType(corev1alpha1.GitHubAppSecretType),
+			Data:       map[string][]byte{"appId": []byte("1"), "privateKey": validPEM},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "untyped-app", UID: "untyped-secret-uid"},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"appId": []byte("1"), "privateKey": validPEM},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "bad-key-app", UID: "bad-key-uid"},
+			Type:       corev1.SecretType(corev1alpha1.GitHubAppSecretType),
+			Data:       map[string][]byte{"appId": []byte("1"), "privateKey": []byte("not-a-pem")},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "missing-id-app", UID: "missing-id-uid"},
+			Type:       corev1.SecretType(corev1alpha1.GitHubAppSecretType),
+			Data:       map[string][]byte{"privateKey": validPEM},
+		},
+	).Build()
 	ref := &corev1alpha1.WorkspaceCredentialReference{Name: "publisher-app", Key: "privateKey", Type: corev1alpha1.WorkspaceCredentialGitHubApp}
 	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Spec: corev1alpha1.TaskSpec{
 		Workspace: &corev1alpha1.WorkspaceConfig{ReadCredentialRef: ref, PublicationCredentialRef: ref},
@@ -45,5 +72,37 @@ func TestPromptCredentialBindingsFreezeGitHubAppSecret(t *testing.T) {
 	if _, err := dispatcher.workspaceCredentialResourceVersion(context.Background(), task,
 		&corev1alpha1.WorkspaceCredentialReference{Name: "publisher-app", Type: corev1alpha1.WorkspaceCredentialGitHubApp}); err == nil {
 		t.Fatal("default key on an App Secret: want error")
+	}
+	// An untyped Secret is refused for a GitHubApp reference before freezing.
+	untypedTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Spec: corev1alpha1.TaskSpec{
+		Workspace: &corev1alpha1.WorkspaceConfig{
+			ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "untyped-app", Key: "privateKey", Type: corev1alpha1.WorkspaceCredentialGitHubApp},
+		},
+	}}
+	if _, _, err := resolvePromptCredentialBindings(context.Background(), reader, untypedTask); err == nil {
+		t.Fatal("untyped Secret for GitHubApp ref: want error")
+	}
+	if _, err := dispatcher.workspaceCredentialResourceVersion(context.Background(), untypedTask, untypedTask.Spec.Workspace.ReadCredentialRef); err == nil {
+		t.Fatal("untyped Secret workspaceCredentialResourceVersion: want error")
+	}
+	// An orka.ai/github-app Secret is refused for a plain Token reference before freezing.
+	rawRefTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Spec: corev1alpha1.TaskSpec{
+		Workspace: &corev1alpha1.WorkspaceConfig{
+			ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "publisher-app", Key: "privateKey"},
+		},
+	}}
+	if _, _, err := resolvePromptCredentialBindings(context.Background(), reader, rawRefTask); err == nil {
+		t.Fatal("GitHubApp Secret for untyped ref: want error")
+	}
+	// A malformed private key or missing appId is rejected before freezing.
+	for _, secretName := range []string{"bad-key-app", "missing-id-app"} {
+		badTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Spec: corev1alpha1.TaskSpec{
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: secretName, Key: "privateKey", Type: corev1alpha1.WorkspaceCredentialGitHubApp},
+			},
+		}}
+		if _, _, err := resolvePromptCredentialBindings(context.Background(), reader, badTask); err == nil {
+			t.Fatalf("%s: want reservation error", secretName)
+		}
 	}
 }

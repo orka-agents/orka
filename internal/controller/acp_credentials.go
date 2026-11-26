@@ -3,6 +3,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"strings"
 
@@ -127,6 +130,9 @@ func (d *ACPDispatcher) workspaceCredentialResourceVersion(
 	if key == "" {
 		key = defaultACPWorkspaceCredentialKey
 	}
+	if err := validateWorkspaceCredentialSecretType(reference, secret, key); err != nil {
+		return "", err
+	}
 	value, ok := secret.Data[key]
 	if !ok || len(bytes.TrimSpace(value)) == 0 || len(value) > maxACPWorkspaceCredentialBytes || bytes.ContainsAny(value, "\x00") {
 		return "", fmt.Errorf("secret key %q is missing or invalid", key)
@@ -181,6 +187,9 @@ func resolvePromptCredentialBindings(
 		if key == "" {
 			key = requested.defaultKey
 		}
+		if err := validateWorkspaceCredentialSecretType(requested.reference, secret, key); err != nil {
+			return nil, acpCredentialVersions{}, err
+		}
 		value, ok := secret.Data[key]
 		if !ok || len(bytes.TrimSpace(value)) == 0 || len(value) > maxACPWorkspaceCredentialBytes || bytes.ContainsAny(value, "\x00") {
 			return nil, acpCredentialVersions{}, fmt.Errorf("secret key %q is missing or invalid", key)
@@ -196,4 +205,63 @@ func resolvePromptCredentialBindings(
 		requested.set(&versions, secret.ResourceVersion)
 	}
 	return bindings, versions, nil
+}
+
+func validateWorkspaceCredentialSecretType(reference *corev1alpha1.WorkspaceCredentialReference, secret *corev1.Secret, key string) error {
+	isAppSecret := secret != nil && secret.Type == corev1.SecretType(corev1alpha1.GitHubAppSecretType)
+	if reference != nil && reference.Type == corev1alpha1.WorkspaceCredentialGitHubApp {
+		if !isAppSecret {
+			return fmt.Errorf("secret %q must have type %q for GitHubApp credentials", secret.Name, corev1alpha1.GitHubAppSecretType)
+		}
+		appID := strings.TrimSpace(string(secret.Data[corev1alpha1.GitHubAppIDSecretKey]))
+		if !isCanonicalGitHubAppID(appID) {
+			return fmt.Errorf("secret %q is missing a valid numeric %q entry", secret.Name, corev1alpha1.GitHubAppIDSecretKey)
+		}
+		if err := validateGitHubAppRSAPrivateKey(secret.Data[key]); err != nil {
+			return fmt.Errorf("secret %q key %q is not a valid GitHub App RSA private key: %w", secret.Name, key, err)
+		}
+		return nil
+	}
+	if isAppSecret {
+		return fmt.Errorf("secret %q of type %q requires credential type GitHubApp", secret.Name, corev1alpha1.GitHubAppSecretType)
+	}
+	return nil
+}
+
+func isCanonicalGitHubAppID(id string) bool {
+	if len(id) == 0 || len(id) > 20 || id[0] == '0' {
+		return false
+	}
+	for i := range len(id) {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validateGitHubAppRSAPrivateKey(data []byte) error {
+	if len(data) == 0 || len(data) > maxACPWorkspaceCredentialBytes {
+		return fmt.Errorf("private key is empty or exceeds maximum size")
+	}
+	block, _ := pem.Decode(bytes.TrimSpace(data))
+	if block == nil {
+		return fmt.Errorf("private key is not PEM")
+	}
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		_, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		return err
+	case "PRIVATE KEY":
+		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return err
+		}
+		if _, ok := key.(*rsa.PrivateKey); !ok {
+			return fmt.Errorf("private key is not RSA")
+		}
+		return nil
+	default:
+		return fmt.Errorf("private key PEM type is unsupported")
+	}
 }

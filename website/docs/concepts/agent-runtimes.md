@@ -490,15 +490,24 @@ Every `spec.workspace` field, with defaults, is in the
 
 ### GitHub App credentials
 
-A stored token has to be created per organization, given an expiry and rotated
-by hand. Rewriting the Secret doesn't help a Task that is already queued: the
+A fine-grained personal access token has to be created per organization and
+rotated by hand before it expires (while a classic token is released with
+whatever scope and lifetime it was created with). Rewriting the Secret doesn't
+help a Task that is already queued: the
 frozen version no longer matches, and the Task ends `CredentialBlocked`.
 Instead, a credential reference can name a Secret holding a GitHub App's ID
 and private key. The credential broker then mints an installation token for
-each operation:
+each operation.
+
+Before creating `orka.ai/github-app` Secrets, finish upgrading all controller
+and API/broker replicas to a version that enforces the `orka.ai/github-app`
+Secret type guard (and remove or revoke any App private-key Secrets before
+rolling back to an older version, which would not block raw release via
+untyped references):
 
 ```bash
 kubectl create secret generic project-publisher-app \
+  --type=orka.ai/github-app \
   --from-literal=appId=123456 \
   --from-file=privateKey=publisher-app.private-key.pem
 ```
@@ -516,7 +525,7 @@ kubectl create secret generic project-publisher-app \
       type: GitHubApp
 ```
 
-`appId` holds the App ID or Client ID. `key` names the entry with the PEM
+`appId` holds the numeric GitHub App ID. `key` names the entry with the PEM
 private key (PKCS#1 or PKCS#8 RSA). For each operation, the broker looks up the
 App's installation on the Task's repository and asks GitHub for a token
 limited to that repository and the role's permission:
@@ -543,9 +552,12 @@ at reservation, so rotating the private key ends queued Tasks as
 before you rotate. If the App isn't installed on the repository or lacks the
 permission, the operation fails with a non-retryable credential error. If
 GitHub is unavailable, the publisher retries. Anyone who may name the Secret in
-a Task can get tokens for every repository the App is installed on, the same
-reach as an organization-wide token. Container and `ai` Tasks can't use
-`type: GitHubApp`.
+a Task can get tokens for every repository across every organization or account
+where the App is installed: each minted token is limited to the Task's
+repository and role, but permission to reference the Secret spans the App's
+entire installation footprint rather than a single organization. Container and
+`ai` Tasks can't use `type: GitHubApp`, and Secrets of type `orka.ai/github-app` are never released
+as raw tokens or SSH signing keys.
 
 ## Pull request text
 

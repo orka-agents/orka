@@ -35,9 +35,14 @@ const (
 	WorkspaceCredentialGitHubApp WorkspaceCredentialType = "GitHubApp"
 )
 
-// GitHubAppIDSecretKey is the Secret data key that holds the GitHub App ID
-// (or Client ID) for a GitHubApp credential reference.
+// GitHubAppIDSecretKey is the Secret data key that holds the numeric GitHub
+// App ID for a GitHubApp credential reference.
 const GitHubAppIDSecretKey = "appId"
+
+// GitHubAppSecretType is the Kubernetes Secret type required for GitHubApp
+// workspace credentials so the credential broker can identify non-exportable
+// App Secrets independently of the Task's reference type.
+const GitHubAppSecretType = "orka.ai/github-app"
 
 // WorkspaceCredentialReference references a Secret in the Task namespace. The
 // controller freezes the Secret resourceVersion when it reserves an attempt;

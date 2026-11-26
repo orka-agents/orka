@@ -14,6 +14,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -174,7 +175,9 @@ type Server struct {
 	memoryConsolidationStore store.MemoryConsolidationStore
 
 	// githubAppMinter mints publisher installation tokens; nil uses GitHub.
-	githubAppMinter githubAppTokenMinter
+	githubAppMinter        githubAppTokenMinter
+	githubAppMinterOnce    sync.Once
+	defaultGitHubAppMinter *githubAppHTTPMinter
 
 	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
 	substrateMCPProxyWriteTimeout time.Duration
@@ -308,7 +311,7 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	// be rejected on headers alone. Bound both the body size and the full
 	// request read so a Pod-local peer cannot hold controller connections
 	// open by dripping chunked bodies.
-	if strings.HasPrefix(path, "/internal/v2/acp/") {
+	if strings.HasPrefix(strings.ToLower(path), "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
 	// The MCP handler reads its body before taking a concurrency permit;
