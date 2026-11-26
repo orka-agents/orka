@@ -690,8 +690,9 @@ func (b *builder) record(name string, wireName protoreflect.FullName) *record {
 	claimed := map[protoreflect.FieldNumber]bool{}
 	for index := 0; index < structType.NumFields(); index++ {
 		goField := structType.Field(index)
-		if !goField.Exported() || goField.Embedded() {
-			b.problemf("field %s.%s cannot cross the wire: only exported, named fields can", name, goField.Name())
+		if !goField.Exported() || (goField.Embedded() && b.contractRecord(goField.Type()) == nil) {
+			b.problemf("field %s.%s cannot cross the wire: only exported fields, and embedded contract records, can",
+				name, goField.Name())
 			continue
 		}
 		field := b.fieldFor(message, goField.Name())

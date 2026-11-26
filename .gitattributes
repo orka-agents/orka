@@ -1,2 +1,6 @@
 # Unified diff context lines intentionally contain a leading space before source indentation.
 hack/agent-substrate/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+
+# Generated orka.storage.v1 wire code (make generate-storage).
+pkg/storage/v1/wire/storagepb/*.pb.go linguist-generated=true
+pkg/storage/v1/wire/**/zz_generated.*.go linguist-generated=true
