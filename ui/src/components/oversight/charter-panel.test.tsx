@@ -24,7 +24,7 @@ describe('CharterPanel', () => {
       http.get('/api/v1/oversight/decisions/groups', ({ request }) => {
         const url = new URL(request.url)
         queries.push(`${url.searchParams.get('q')}@${url.searchParams.get('window')}`)
-        const searched = url.searchParams.get('q') === 'bound:B1' ? 3 : 0
+        const searched = url.searchParams.get('q') === 'charter:charter-r1 bound:B1' ? 3 : 0
         return HttpResponse.json({ namespace: 'default', by: 'agent', groups: [], searched })
       }),
     )
@@ -39,13 +39,13 @@ describe('CharterPanel', () => {
     expect(screen.getByText('Demo charter: preview rule check, audit only')).toBeInTheDocument()
     expect(await screen.findByTestId('bound-count-B1')).toHaveTextContent('3 actions broke it in the last 24h')
     expect(await screen.findByTestId('bound-count-B0')).toHaveTextContent('0 actions broke it')
-    expect(queries).toContain('bound:B1@24h')
+    expect(queries).toContain('charter:charter-r1 bound:B1@24h')
     // Bound ids stay out of the visible list; the count opens the matching actions.
     expect(rules).not.toHaveTextContent(/B0|B1|B2/)
     expect(within(items[0]).getByText('Rule 3')).toHaveAttribute('title', 'Never send workspace data to undeclared hosts.')
     expect(screen.getByText('audit mode · 3 rules')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Show the 3 actions that broke rule 2 in the last 24h' }))
-    expect(onOpenBound).toHaveBeenCalledWith('B1')
+    expect(onOpenBound).toHaveBeenCalledWith('charter:charter-r1 bound:B1')
     expect(onPivot).not.toHaveBeenCalled()
   })
 

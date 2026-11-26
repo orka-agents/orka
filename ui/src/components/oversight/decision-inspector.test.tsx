@@ -252,6 +252,6 @@ describe('DecisionInspector', () => {
     expect(story).not.toHaveTextContent('B1')
     await openDetails()
     const findings = screen.getByRole('region', { name: 'Charter findings' })
-    expect(within(findings).getByRole('button', { name: 'Search all time for bound:B1' })).toHaveTextContent('Rule 2')
+    expect(within(findings).getByRole('button', { name: 'Search all time for charter:charter-r1 bound:B1' })).toHaveTextContent('Rule 2')
   })
 })

@@ -18,7 +18,7 @@ import { useOversightStream, type OversightStreamStatus } from '@/hooks/use-over
 import { useCharterAlertHandler } from '@/hooks/use-charter-alerts'
 import { ApiError, isNotImplementedError } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
-import { charterBreaks, groupIncidents, queryTerm, type Incident } from '@/lib/oversight'
+import { charterBreaks, groupIncidents, type Incident } from '@/lib/oversight'
 import type { DecisionView } from '@/schemas/oversight'
 import { AlertsButton } from './alerts-button'
 import { CharterPanel } from './charter-panel'
@@ -96,7 +96,7 @@ export function OversightDashboard({ search, onSearchChange }: OversightDashboar
   // A pivot is a search across all time, shown with its results.
   const openCharter = () => onSearchChange({ ...search, view: 'charter', decision: undefined })
   // A rule's break count opens the actions that broke it, in the same window.
-  const openBound = (id: string) => onSearchChange({ q: queryTerm('bound', id), window: postureWindow, decision: undefined, view: 'activity' })
+  const openBound = (q: string) => onSearchChange({ q, window: postureWindow, decision: undefined, view: 'activity' })
   const pivot = (query: string) => onSearchChange({ q: query, window: undefined, decision: undefined, view: search.view === 'matrix' ? 'matrix' : 'activity' })
 
   return (
@@ -142,7 +142,7 @@ interface ResultsProps {
   onClose: () => void
   onPivot: (q: string) => void
   onOpenCharter: () => void
-  onOpenBound: (id: string) => void
+  onOpenBound: (q: string) => void
 }
 
 /** The search box, history, and the live table or matrix for one query. */

@@ -137,6 +137,14 @@ export function queryTerm(key: string, value: string): string {
   return /\s/.test(clean) ? `${key}:"${clean}"` : `${key}:${clean}`
 }
 
+/**
+ * The search for one declared rule: its bound ID within its charter revision,
+ * so revisions that reuse an ID are counted apart.
+ */
+export function boundQuery(boundID: string, charterRevision?: string): string {
+  return charterRevision ? `${queryTerm('charter', charterRevision)} ${queryTerm('bound', boundID)}` : queryTerm('bound', boundID)
+}
+
 /** Rebuilds a query from the terms the server echoed. */
 export function termsToQuery(terms: QueryTerm[]): string {
   return terms

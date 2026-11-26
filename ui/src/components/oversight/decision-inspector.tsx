@@ -34,6 +34,7 @@ import {
   isMonitorFailure,
   pathDirectoryGlob,
   producerLabel,
+  boundQuery,
   queryTerm,
 } from '@/lib/oversight'
 import { formatTimestamp, timeAgo } from '@/lib/time'
@@ -285,7 +286,7 @@ function InspectorBody({ decisionId, onPivot, onOpenDecision, initial, related }
                     <li key={`${finding.boundID}-${i}`} className="space-y-1 rounded-md border border-status-failed/40 bg-status-failed-bg p-3 text-sm">
                       <div className="flex flex-wrap items-center gap-1.5 text-xs">
                         <span title={finding.sentence}>
-                          <PivotButton query={queryTerm('bound', finding.boundID)} onPivot={onPivot}>
+                          <PivotButton query={boundQuery(finding.boundID, decision.charterRevision)} onPivot={onPivot}>
                             {ruleName(findCharterRule(config, decision.charterRevision, finding.boundID))}
                           </PivotButton>
                         </span>

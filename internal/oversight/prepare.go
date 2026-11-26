@@ -31,6 +31,7 @@ const (
 	FacetDisposition      = "disposition"
 	FacetSignal           = "signal"
 	FacetBound            = "bound"
+	FacetCharter          = "charter"
 	FacetWorkloadIdentity = "workload_identity"
 	FacetProducer         = "producer"
 )
@@ -153,6 +154,9 @@ func facets(d *oversightv1.OversightDecision, signature []oversightv1.Feature) [
 	add(FacetDisposition, string(d.Disposition))
 	add(FacetSignal, string(oversightv1.SignalOf(d)))
 	add(FacetWorkloadIdentity, d.WorkloadIdentity)
+	if len(d.CharterFindings) > 0 {
+		add(FacetCharter, d.CharterRevision)
+	}
 	for _, finding := range d.CharterFindings {
 		add(FacetBound, finding.BoundID)
 		add(FacetProducer, finding.ProducerRef)

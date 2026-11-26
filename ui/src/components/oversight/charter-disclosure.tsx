@@ -12,7 +12,7 @@ export function CharterDisclosure({ window, broken, onPivot, onOpenBound }: {
   window: string
   broken: number
   onPivot: (q: string) => void
-  onOpenBound?: (id: string) => void
+  onOpenBound?: (q: string) => void
 }) {
   const { data: config } = useOversightConfig()
   const [open, setOpen] = useState(false)

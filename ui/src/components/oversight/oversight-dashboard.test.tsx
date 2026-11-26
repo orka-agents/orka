@@ -373,7 +373,7 @@ describe('OversightDashboard', () => {
       expect(within(rules).getAllByRole('listitem')).toHaveLength(3)
       expect(within(rules).getAllByRole('listitem')[0]).toHaveAttribute('data-highlight', 'true')
       await userEvent.click(await screen.findByRole('button', { name: 'Show the 2 actions that broke rule 1 in the last 24h' }))
-      expect(onSearchChange).toHaveBeenLastCalledWith({ q: 'bound:B0', window: '24h', decision: undefined, view: 'activity' })
+      expect(onSearchChange).toHaveBeenLastCalledWith({ q: 'charter:charter-r1 bound:B0', window: '24h', decision: undefined, view: 'activity' })
     })
 
     it('opens from a charter alert, in the toast and in the alerts list', async () => {

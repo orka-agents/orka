@@ -39,6 +39,7 @@ var queryFacets = map[string]string{
 	"dest_domain":       oversightv1.FeatureDestDomain,
 	"effect":            oversightv1.FeatureEffect,
 	"bound":             FacetBound,
+	"charter":           FacetCharter,
 	"signal":            FacetSignal,
 	"producer":          FacetProducer,
 	"identity":          FacetWorkloadIdentity,
