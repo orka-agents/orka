@@ -101,6 +101,9 @@ type OIDCConfig struct {
 	JWKSURL         string
 	AllowedSubjects []string
 	Namespace       string
+	// Scopes are the OAuth scopes clients request when they sign in. Empty
+	// leaves the choice to each client.
+	Scopes []string
 }
 
 // Enabled reports whether OIDC authentication is configured.

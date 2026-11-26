@@ -112,6 +112,9 @@ type MCPServerConfig struct {
 	// MaxConcurrent bounds concurrent MCP requests. Zero uses
 	// DefaultMCPMaxConcurrent.
 	MaxConcurrent int
+	// ResourceURL is the endpoint's external URL from ParseMCPResourceURL.
+	// With OIDC configured, it enables OAuth protected-resource metadata.
+	ResourceURL string
 }
 
 type mcpServer struct {

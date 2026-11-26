@@ -140,6 +140,7 @@ type Handlers struct {
 	oidcEnabled        bool
 	oidcIssuer         string
 	oidcAudience       string
+	oidcScopes         []string
 	ahp                *ahphost.Host
 	completionLocks    *completionLocks
 	substrateMCPRouter *workerexecutor.SubstrateMCPRouter
@@ -182,6 +183,7 @@ type HandlersConfig struct {
 	OIDCEnabled              bool
 	OIDCIssuer               string
 	OIDCAudience             string
+	OIDCScopes               []string
 	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
 	AHP                *ahphost.Host
 	SubstrateMCPProxy  SubstrateMCPProxyConfig
@@ -229,6 +231,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		oidcEnabled:               cfg.OIDCEnabled,
 		oidcIssuer:                cfg.OIDCIssuer,
 		oidcAudience:              cfg.OIDCAudience,
+		oidcScopes:                cfg.OIDCScopes,
 		ahp:                       cfg.AHP,
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),

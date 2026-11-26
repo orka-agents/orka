@@ -342,6 +342,7 @@ func main() {
 	var dashboardEnabled bool
 	var mcpServerEnabled bool
 	var mcpMaxConcurrent int
+	var mcpResourceURL string
 	var connectorCallbackBaseURL string
 	var connectorsAllowPrivateEndpointsAck string
 	var gatewayPendingPerSession int
@@ -399,6 +400,7 @@ func main() {
 	var oidcJWKSURL string
 	var oidcAllowedSubjects string
 	var oidcNamespace string
+	var oidcScopes string
 	var contextTokenProfile string
 	var contextTokenIssuer string
 	var contextTokenAudience string
@@ -617,6 +619,9 @@ func main() {
 		"Serve the control-plane MCP endpoint at /mcp on the API port. Every tool runs with the caller's own REST API permissions.")
 	flag.IntVar(&mcpMaxConcurrent, "mcp-max-concurrent", api.DefaultMCPMaxConcurrent,
 		"Max concurrent MCP requests per API replica; waiting tools use a separate pool of half as many wait slots.")
+	flag.StringVar(&mcpResourceURL, "mcp-resource-url", os.Getenv("ORKA_MCP_RESOURCE_URL"),
+		"External URL of the MCP endpoint, such as https://orka.example.com/mcp. With --mcp-server-enabled and OIDC, "+
+			"serves OAuth protected-resource metadata naming --oidc-issuer, so MCP clients can sign in there. Requires https, or http only for localhost.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
 			"and let linked-account and Agent identity requests reach them. A person's or an Agent's token would be sent to such an address, so the flag takes only the literal "+
@@ -788,6 +793,9 @@ func main() {
 		"Comma-separated OIDC subject allowlist patterns. Required when OIDC is enabled; supports shell-style wildcards.")
 	flag.StringVar(&oidcNamespace, "oidc-namespace", os.Getenv("ORKA_OIDC_NAMESPACE"),
 		"Namespace assigned to authorized OIDC callers for namespace isolation. Defaults to default.")
+	flag.StringVar(&oidcScopes, "oidc-scopes", os.Getenv("ORKA_OIDC_SCOPES"),
+		"Space- or comma-separated OAuth scopes clients request when they sign in with OIDC, advertised to the CLI and to MCP clients. "+
+			"Empty lets the CLI choose and has MCP clients request openid profile email offline_access.")
 	flag.StringVar(&contextTokenProfile, "context-token-profile", os.Getenv("ORKA_CONTEXT_TOKEN_PROFILE"),
 		"Context-token profile for external API requests (supported: transaction-token).")
 	flag.StringVar(&contextTokenIssuer, "context-token-issuer", os.Getenv("ORKA_CONTEXT_TOKEN_ISSUER"),
@@ -2528,12 +2536,28 @@ func main() {
 		publisherControllerEpochs = api.NewControllerEpochStoreFenceSource(kubeControlStore)
 		connectorToolEffects = kubeControlStore
 	}
+	parsedOIDCScopes, err := api.ParseOIDCScopes(oidcScopes)
+	if err != nil {
+		setupLog.Error(err, "invalid --oidc-scopes")
+		os.Exit(1)
+	}
 	oidcConfig := api.OIDCConfig{
 		Issuer:          oidcIssuer,
 		Audience:        oidcAudience,
 		JWKSURL:         oidcJWKSURL,
 		AllowedSubjects: splitCommaList(oidcAllowedSubjects),
 		Namespace:       oidcNamespace,
+		Scopes:          parsedOIDCScopes,
+	}
+	canonicalMCPResourceURL, err := api.ParseMCPResourceURL(mcpResourceURL)
+	if err != nil {
+		setupLog.Error(err, "invalid --mcp-resource-url")
+		os.Exit(1)
+	}
+	mcpConfig := api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent, ResourceURL: canonicalMCPResourceURL}
+	if err := mcpConfig.ValidateOAuth(oidcConfig); err != nil {
+		setupLog.Error(err, "invalid MCP configuration")
+		os.Exit(1)
 	}
 	var ahpHost *ahphost.Host
 	if ahpAPIEnabled {
@@ -2616,7 +2640,7 @@ func main() {
 		AgentUseAuthorization:    agentUseAuthorizationEnabled,
 		ProviderUseAuthorization: providerUseAuthorizationEnabled,
 		OperatorAccess:           api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
-		MCP:                      api.MCPServerConfig{Enabled: mcpServerEnabled, MaxConcurrent: mcpMaxConcurrent},
+		MCP:                      mcpConfig,
 		TaskWebhookKeys:          taskWebhookKeys,
 		AgentIdentityAudit:       agentIdentityAuditBuffer,
 		Chat: api.ChatConfig{

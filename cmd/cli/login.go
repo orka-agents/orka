@@ -62,8 +62,9 @@ var (
 type authConfigView struct {
 	OIDC       *bool `json:"oidc"`
 	OIDCConfig *struct {
-		Issuer   string `json:"issuer"`
-		Audience string `json:"audience"`
+		Issuer   string   `json:"issuer"`
+		Audience string   `json:"audience"`
+		Scopes   []string `json:"scopes"`
 	} `json:"oidcConfig"`
 	GitHub *struct {
 		ClientID  string `json:"clientID"`

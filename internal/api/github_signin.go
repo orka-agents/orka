@@ -115,8 +115,9 @@ type AuthConfigResponse struct {
 // clients can run device-code / OAuth flows without manual issuer/audience
 // flags.
 type OIDCAuthConfigOption struct {
-	Issuer   string `json:"issuer"`
-	Audience string `json:"audience"`
+	Issuer   string   `json:"issuer"`
+	Audience string   `json:"audience"`
+	Scopes   []string `json:"scopes,omitempty"`
 }
 
 // GitHubAuthConfigOption is the GitHub sign-in a client runs the device flow
@@ -165,6 +166,7 @@ func (h *Handlers) GetAuthConfig(c fiber.Ctx) error {
 		response.OIDCConfig = &OIDCAuthConfigOption{
 			Issuer:   h.oidcIssuer,
 			Audience: h.oidcAudience,
+			Scopes:   h.oidcScopes,
 		}
 	}
 	if cfg := h.githubSignIn; cfg.Enabled {
