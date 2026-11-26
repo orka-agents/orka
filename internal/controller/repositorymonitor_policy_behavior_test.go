@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,9 +126,13 @@ func TestRepositoryMonitorRepairBudgetRefusalIsRecordedOncePerHead(t *testing.T)
 			}
 			pr := repositoryMonitorPullRequest{Number: 31, State: "open", BaseBranch: "main", BaseSHA: "base31", HeadBranch: "feature", HeadRepo: "orka-agents/orka", HeadSHA: "head31", MergeableState: "clean"}
 			item := repositoryMonitorItemFromPullRequest(monitor, pr, nil)
-			poll := &store.MonitorRun{ID: "poll", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, StartedAt: time.Now()}
+			pollSeq := 0
+			nextPoll := func() *store.MonitorRun {
+				pollSeq++
+				return &store.MonitorRun{ID: fmt.Sprintf("poll-%d", pollSeq), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, StartedAt: time.Now()}
+			}
 			for range 3 {
-				if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, poll, "orka-agents", "orka", pr, item); err != nil {
+				if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, nextPoll(), "orka-agents", "orka", pr, item); err != nil {
 					t.Fatalf("tryRepositoryMonitorAutomaticRepair() error = %v", err)
 				}
 			}
@@ -149,7 +154,7 @@ func TestRepositoryMonitorRepairBudgetRefusalIsRecordedOncePerHead(t *testing.T)
 			pr.HeadSHA = "head32"
 			item = repositoryMonitorItemFromPullRequest(monitor, pr, item)
 			for range 2 {
-				if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, poll, "orka-agents", "orka", pr, item); err != nil {
+				if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, nextPoll(), "orka-agents", "orka", pr, item); err != nil {
 					t.Fatalf("tryRepositoryMonitorAutomaticRepair(new head) error = %v", err)
 				}
 			}
@@ -166,6 +171,9 @@ func TestRepositoryMonitorRepairBudgetRefusalIsRecordedOncePerHead(t *testing.T)
 			}
 			heads := map[string]int{}
 			for _, refusal := range refusals {
+				if !strings.Contains(refusal.Summary, tt.wantWhy) || !strings.Contains(refusal.MetadataJSON, `"reason":"`+tt.wantWhy+`"`) {
+					t.Fatalf("refusal = %+v, want reason %s", refusal, tt.wantWhy)
+				}
 				heads[refusal.ItemSHA]++
 			}
 			if len(refusals) != 2 || heads["head31"] != 1 || heads["head32"] != 1 {
@@ -202,8 +210,9 @@ func TestRepositoryMonitorUpdateBranchConsumesRepairBudget(t *testing.T) {
 	}
 	pr.HeadSHA = "head32"
 	item = repositoryMonitorItemFromPullRequest(monitor, pr, nil)
-	for range 3 {
-		if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, poll, "orka-agents", "orka", pr, item); err != nil {
+	for i := range 3 {
+		refusalPoll := &store.MonitorRun{ID: fmt.Sprintf("poll-refusal-%d", i+1), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, StartedAt: time.Now()}
+		if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, refusalPoll, "orka-agents", "orka", pr, item); err != nil {
 			t.Fatalf("tryRepositoryMonitorAutomaticRepair() error = %v", err)
 		}
 	}
@@ -217,6 +226,27 @@ func TestRepositoryMonitorUpdateBranchConsumesRepairBudget(t *testing.T) {
 	if len(refusals) != 1 || refusals[0].ItemSHA != "head32" || !strings.Contains(refusals[0].Summary, repositoryMonitorRepairPRBudgetReason) {
 		t.Fatalf("refusals = %+v, want one for head32", refusals)
 	}
+
+	// Isolate the mutation's contribution to the budget: a fresh monitor with
+	// only the succeeded update-branch mutation (and no prior CommandEvent)
+	// still exhausts the PR repair budget.
+	isoMonitor, isoReconciler, isoStore := newRepositoryMonitorPolicyReconciler(t, "update-branch-budget-mutation-only", nil, func(m *corev1alpha1.RepositoryMonitor) {
+		m.Spec.Repair.MaxRepairsPerPR = new(int32(1))
+	})
+	if err := isoStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: repositoryMonitorUpdateBranchMutationID("cmd-prior"), MonitorNamespace: isoMonitor.Namespace, MonitorName: isoMonitor.Name, CommandEventID: "cmd-prior", Operation: repositoryMonitorUpdateBranchOperation, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, TargetSHA: "head31", Status: repositoryMonitorRunPhaseSucceeded, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	isoPoll := &store.MonitorRun{ID: "poll-iso", MonitorNamespace: isoMonitor.Namespace, MonitorName: isoMonitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, StartedAt: time.Now()}
+	isoItem := repositoryMonitorItemFromPullRequest(isoMonitor, pr, nil)
+	if _, err := isoReconciler.tryRepositoryMonitorAutomaticRepair(ctx, isoMonitor, isoPoll, "orka-agents", "orka", pr, isoItem); err != nil {
+		t.Fatalf("mutation-only tryRepositoryMonitorAutomaticRepair() error = %v", err)
+	}
+	if isoItem.SkipReason != repositoryMonitorRepairPRBudgetReason {
+		t.Fatalf("mutation-only item skip = %q, want %s", isoItem.SkipReason, repositoryMonitorRepairPRBudgetReason)
+	}
+	if cmds := repositoryMonitorTestCommands(t, isoStore, isoMonitor); len(cmds) != 0 {
+		t.Fatalf("mutation-only commands = %+v, want none", cmds)
+	}
 }
 
 // The controller validates an implementation patch against the same path
@@ -226,7 +256,7 @@ func TestRepositoryMonitorIssuePatchValidationAppliesAllowedPaths(t *testing.T) 
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
 	monitor := repositoryMonitorReviewIngestTestMonitor("patch-allowed-paths")
-	monitor.Spec.IssueWorkflow.Implementation.AllowedPaths = []string{"docs/**"}
+	monitor.Spec.IssueWorkflow.Implementation.AllowedPaths = []string{"docs/**", ".github/workflows/**"}
 	reconciler := &RepositoryMonitorReconciler{Store: monitorStore, ArtifactStore: monitorStore}
 	item := &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: 56, SnapshotDigest: "sha256:allowed-paths"}
 	tests := []struct {

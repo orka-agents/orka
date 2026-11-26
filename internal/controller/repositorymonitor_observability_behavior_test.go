@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -54,36 +55,56 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 	const held = repositoryMonitorStatusFailure + ": The pull request is a draft."
 	const claimed = repositoryMonitorStatusPending + ": Waiting for verified workflow completion."
 
-	for range 5 {
+	wantContext := repositoryMonitorReadinessContext(monitor)
+	poll()
+	if got := forge.descriptions("head-1", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
+		t.Fatalf("head-1 statuses after first poll = %q, want the claim then one draft hold", got)
+	}
+	for range 4 {
 		poll()
 	}
-	if got := forge.descriptions("head-1"); len(got) != 2 || got[0] != claimed || got[1] != held {
-		t.Fatalf("head-1 statuses after 5 polls = %q, want the claim then one draft hold", got)
+	if got := forge.descriptions("head-1", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
+		t.Fatalf("head-1 statuses after 5 polls = %q, want no extra writes after the first poll", got)
 	}
 	mutation, err := db.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, "head-1"))
 	if err != nil || mutation.Status != repositoryMonitorRunPhaseSucceeded || mutation.Reason != "The pull request is a draft." || mutation.ExternalID != "101" {
 		t.Fatalf("head-1 readiness mutation = %+v err=%v, want the draft hold recorded", mutation, err)
 	}
 
-	// A new head is still a draft: it gets its own status, written once.
+	// A new head is still a draft: it gets its own status on the first poll, written once.
 	forge.set("head-2", true)
 	pr.HeadSHA = "head-2"
 	item = repositoryMonitorItemFromPullRequest(monitor, pr, item)
-	for range 3 {
+	poll()
+	if got := forge.descriptions("head-2", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
+		t.Fatalf("head-2 statuses after first poll = %q, want the claim then one draft hold", got)
+	}
+	for range 2 {
 		poll()
 	}
-	if got := forge.descriptions("head-2"); len(got) != 2 || got[0] != claimed || got[1] != held {
-		t.Fatalf("head-2 statuses = %q, want the claim then one draft hold", got)
+	if got := forge.descriptions("head-2", wantContext); len(got) != 2 || got[0] != claimed || got[1] != held {
+		t.Fatalf("head-2 statuses = %q, want no extra writes after the first poll", got)
+	}
+	head2Mutation, err := db.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, "head-2"))
+	wantHead2ID := strconv.FormatInt(forge.latestID("head-2"), 10)
+	if err != nil || head2Mutation.Status != repositoryMonitorRunPhaseSucceeded || head2Mutation.Reason != "The pull request is a draft." || head2Mutation.ExternalID != wantHead2ID || head2Mutation.ExternalID == mutation.ExternalID {
+		t.Fatalf("head-2 readiness mutation = %+v err=%v, want distinct draft hold ID %s", head2Mutation, err, wantHead2ID)
 	}
 
-	// Marking it ready replaces the hold once with the next blocker.
+	// Marking it ready replaces the hold on the first poll with the next blocker.
 	forge.set("head-2", false)
-	for range 3 {
+	pr.Draft = false
+	item = repositoryMonitorItemFromPullRequest(monitor, pr, item)
+	poll()
+	got := forge.descriptions("head-2", wantContext)
+	if len(got) != 3 || got[2] == held || !strings.HasPrefix(got[2], repositoryMonitorStatusPending+": ") {
+		t.Fatalf("head-2 statuses after first ready poll = %q, want one pending status replacing the draft hold", got)
+	}
+	for range 2 {
 		poll()
 	}
-	got := forge.descriptions("head-2")
-	if len(got) != 3 || got[2] == held || !strings.HasPrefix(got[2], repositoryMonitorStatusPending+": ") {
-		t.Fatalf("head-2 statuses after ready = %q, want one pending status replacing the draft hold", got)
+	if got = forge.descriptions("head-2", wantContext); len(got) != 3 {
+		t.Fatalf("head-2 statuses after repeated ready polls = %q, want no extra writes", got)
 	}
 }
 
@@ -95,10 +116,17 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 	ctx := context.Background()
 	monitor, first, monitorStore := newRepositoryMonitorPolicyReconciler(t, "repair-restart", nil, nil)
-	command := &store.CommandEvent{ID: "cmd-repair-restart", Intent: repositoryMonitorCommandIntentFix, Source: "api"}
+	newCommand := func() *store.CommandEvent {
+		return &store.CommandEvent{ID: "cmd-repair-restart", Intent: repositoryMonitorCommandIntentFix, Source: "api"}
+	}
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
-	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA}
-	run := &store.MonitorRun{ID: "run-repair-restart"}
+	newItem := func() *store.MonitorItem {
+		return &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA}
+	}
+	newRun := func() *store.MonitorRun {
+		return &store.MonitorRun{ID: "run-repair-restart"}
+	}
+	commandID := newCommand().ID
 	cluster, ok := first.Client.(crclient.WithWatch)
 	if !ok {
 		t.Fatalf("test client %T does not support interception", first.Client)
@@ -109,7 +137,7 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 	}
 	handoff := func(r *RepositoryMonitorReconciler, wantCreated int) {
 		t.Helper()
-		if created, _, err := r.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, run, command, "orka-agents", "orka", pr, item, 1, 1); err != nil || created != wantCreated {
+		if created, _, err := r.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1); err != nil || created != wantCreated {
 			t.Fatalf("repair Task handoff = (%d, %v), want created=%d", created, err, wantCreated)
 		}
 	}
@@ -137,46 +165,117 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 		if got := jobs(); len(got) != 1 {
 			t.Fatalf("%s: repair jobs = %+v, want one", stage, got)
 		}
-		if got := pushes(); len(got) != 1 || got[0].Status != wantPush || got[0].CommandEventID != command.ID {
+		if got := pushes(); len(got) != 1 || got[0].Status != wantPush || got[0].CommandEventID != commandID {
 			t.Fatalf("%s: push records = %+v, want one %s record for the command", stage, got, wantPush)
 		}
 	}
 
-	// The controller stops at the Task create of its first handoff. By then the
-	// repair job and the started push record must already be durable.
-	stopped := false
+	// The controller crashes at the Task create of its first handoff, before
+	// error handling can update the job. By then the repair job and the started
+	// push record must already be durable.
+	type crashBeforeTaskCreate struct{}
+	crashed := false
 	first.Client = interceptor.NewClient(cluster, interceptor.Funcs{
 		Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
-			if _, isTask := obj.(*corev1alpha1.Task); !isTask || stopped {
+			if _, isTask := obj.(*corev1alpha1.Task); !isTask || crashed {
 				return c.Create(ctx, obj, opts...)
 			}
-			stopped = true
-			if got := jobs(); len(got) != 1 {
-				t.Errorf("repair jobs at Task create = %+v, want the job recorded first", got)
+			crashed = true
+			if got := jobs(); len(got) != 1 || got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
+				t.Errorf("repair jobs at Task create = %+v, want one queued job with no error recorded first", got)
 			}
-			if got := pushes(); len(got) != 1 || got[0].Status != repositoryMonitorAutomergeStateStarted || got[0].CommandEventID != command.ID {
+			if got := pushes(); len(got) != 1 || got[0].Status != repositoryMonitorAutomergeStateStarted || got[0].CommandEventID != commandID {
 				t.Errorf("push records at Task create = %+v, want one started record for the command first", got)
 			}
-			return errors.New("controller stopped before creating the Task")
+			panic(crashBeforeTaskCreate{})
 		},
 	})
-	if created, _, err := first.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, run, command, "orka-agents", "orka", pr, item, 1, 1); err == nil || created != 0 || !stopped {
-		t.Fatalf("interrupted handoff = (%d, %v) stopped=%t, want it stopped at Task creation", created, err, stopped)
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected simulated crash at Task creation")
+			}
+			if _, ok := r.(crashBeforeTaskCreate); !ok {
+				panic(r)
+			}
+		}()
+		_, _, _ = first.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1)
+	}()
+	if !crashed {
+		t.Fatal("interrupted handoff did not reach Task creation")
 	}
 	if tasks := repositoryMonitorTestTaskCount(t, restart()); tasks != 0 {
-		t.Fatalf("tasks after the interrupted handoff = %d, want none", tasks)
+		t.Fatalf("tasks after the crashed handoff = %d, want none", tasks)
+	}
+	if got := jobs(); len(got) != 1 || got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
+		t.Fatalf("repair job after crash = %+v, want queued without create error", got)
 	}
 
-	// The restarted controller creates the Task against the same records.
-	handoff(restart(), 1)
-	assertOne("restart before Task creation", repositoryMonitorAutomergeStateStarted)
-	if got := jobs(); got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
-		t.Fatalf("repair job after recovery = %+v, want queued without the create error", got[0])
+	// Next, an ordinary Create error records LastError without creating a Task;
+	// a subsequent restart still recovers against the same records and clears it.
+	failedCreate := false
+	retrying := restart()
+	retrying.Client = interceptor.NewClient(cluster, interceptor.Funcs{
+		Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
+			if _, isTask := obj.(*corev1alpha1.Task); !isTask || failedCreate {
+				return c.Create(ctx, obj, opts...)
+			}
+			failedCreate = true
+			return errors.New("transient apiserver create error")
+		},
+	})
+	if created, _, err := retrying.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1); err == nil || created != 0 || !failedCreate {
+		t.Fatalf("failed create handoff = (%d, %v) failedCreate=%t, want error at Task creation", created, err, failedCreate)
+	}
+	if tasks := repositoryMonitorTestTaskCount(t, restart()); tasks != 0 {
+		t.Fatalf("tasks after failed Task creation = %d, want none", tasks)
+	}
+	if got := jobs(); len(got) != 1 || got[0].LastError == "" {
+		t.Fatalf("repair job after create error = %+v, want LastError recorded", got)
 	}
 
-	// The controller stopped after creating the Task: the restart adopts it.
+	// The restarted controller creates the Task in the API server, then crashes
+	// before it can observe the Create response or run post-Create bookkeeping.
+	type crashAfterTaskCreate struct{}
+	crashedAfterCreate := false
+	creating := restart()
+	creating.Client = interceptor.NewClient(cluster, interceptor.Funcs{
+		Create: func(ctx context.Context, c crclient.WithWatch, obj crclient.Object, opts ...crclient.CreateOption) error {
+			if _, isTask := obj.(*corev1alpha1.Task); !isTask || crashedAfterCreate {
+				return c.Create(ctx, obj, opts...)
+			}
+			if err := c.Create(ctx, obj, opts...); err != nil {
+				return err
+			}
+			crashedAfterCreate = true
+			panic(crashAfterTaskCreate{})
+		},
+	})
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected simulated crash after Task creation")
+			}
+			if _, ok := r.(crashAfterTaskCreate); !ok {
+				panic(r)
+			}
+		}()
+		_, _, _ = creating.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, newRun(), newCommand(), "orka-agents", "orka", pr, newItem(), 1, 1)
+	}()
+	if !crashedAfterCreate {
+		t.Fatal("handoff did not reach post-Create crash")
+	}
+	assertOne("crash after API server stored Task", repositoryMonitorAutomergeStateStarted)
+
+	// The next restart adopts the already-created Task against the same records
+	// and clears the earlier create error.
 	handoff(restart(), 0)
 	assertOne("restart after Task creation", repositoryMonitorAutomergeStateStarted)
+	if got := jobs(); got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
+		t.Fatalf("repair job after adopting Task = %+v, want queued without the create error", got[0])
+	}
 
 	markRepositoryMonitorTestTaskDelivered(t, ctx, cluster, jobs()[0].TaskName, pr.HeadBranch, "pushed31")
 	if ingested, err := restart().ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil || !ingested {
@@ -213,9 +312,14 @@ func TestRepositoryMonitorGitHubTimeoutFailsRunWithBoundedRetries(t *testing.T) 
 	}
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		watchdog := time.NewTimer(5 * time.Second)
+		defer watchdog.Stop()
 		select {
 		case <-req.Context().Done():
 		case <-release:
+		case <-watchdog.C:
+			t.Errorf("GitHub request %s %s did not time out within watchdog window", req.Method, req.URL.Path)
+			http.Error(w, "watchdog timeout", http.StatusGatewayTimeout)
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -260,6 +364,18 @@ func TestRepositoryMonitorGitHubTimeoutFailsRunWithBoundedRetries(t *testing.T) 
 		if run.Phase != repositoryMonitorRunPhaseFailed || !strings.HasPrefix(run.Error, "["+repositoryMonitorRunFailurePermanent+"] retry_attempts_exhausted:") || !strings.Contains(run.Error, "Client.Timeout exceeded") {
 			t.Fatalf("final run = %+v, want failed after exhausting retries on the timeout", run)
 		}
+		terminalEvents := 0
+		for _, failure := range failures {
+			if failure.RunID != run.ID || !strings.Contains(failure.Summary, "pull request inventory request failed") || !strings.Contains(failure.Summary, "Client.Timeout exceeded") {
+				t.Fatalf("final failure event = %+v, want inventory timeout for this run", failure)
+			}
+			if !strings.Contains(failure.MetadataJSON, `"state":"`+repositoryMonitorRunRetryScheduled+`"`) {
+				terminalEvents++
+			}
+		}
+		if terminalEvents != 1 {
+			t.Fatalf("terminal run_failed events = %d (all=%+v), want 1 non-retry terminal event", terminalEvents, failures)
+		}
 	}
 	var tasks corev1alpha1.TaskList
 	if err := cl.List(ctx, &tasks); err != nil || len(tasks.Items) != 0 {
@@ -274,6 +390,7 @@ type repositoryMonitorDraftReadinessForge struct {
 	mu     sync.Mutex
 	sha    string
 	draft  bool
+	nextID int64
 	writes map[string][]repositoryMonitorCommitStatus
 }
 
@@ -283,11 +400,25 @@ func (f *repositoryMonitorDraftReadinessForge) set(sha string, draft bool) {
 	f.sha, f.draft = sha, draft
 }
 
-func (f *repositoryMonitorDraftReadinessForge) descriptions(head string) []string {
+func (f *repositoryMonitorDraftReadinessForge) latestID(head string) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	statuses := f.writes[head]
+	if len(statuses) == 0 {
+		return 0
+	}
+	return statuses[len(statuses)-1].ID
+}
+
+func (f *repositoryMonitorDraftReadinessForge) descriptions(head, wantContext string) []string {
+	f.t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]string, 0, len(f.writes[head]))
 	for _, status := range f.writes[head] {
+		if status.Context != wantContext {
+			f.t.Errorf("head %s status context = %q, want %q", head, status.Context, wantContext)
+		}
 		out = append(out, status.State+": "+status.Description)
 	}
 	return out
@@ -305,15 +436,44 @@ func (f *repositoryMonitorDraftReadinessForge) ServeHTTP(w http.ResponseWriter, 
 	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/check-runs"):
 		_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
 	case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/status"):
-		_, _ = w.Write([]byte(`{"state":"pending","total_count":0,"statuses":[]}`))
+		prefix := strings.TrimSuffix(req.URL.Path, "/status")
+		target := prefix[strings.LastIndex(prefix, "/")+1:]
+		latestByContext := map[string]repositoryMonitorCommitStatus{}
+		order := []string{}
+		for _, s := range f.writes[target] {
+			if _, seen := latestByContext[s.Context]; !seen {
+				order = append(order, s.Context)
+			}
+			latestByContext[s.Context] = s
+		}
+		statuses := make([]repositoryMonitorCommitStatus, 0, len(order))
+		combined := repositoryMonitorStatusPending
+		if len(order) > 0 {
+			combined = repositoryMonitorStatusSuccess
+		}
+		for _, ctxName := range order {
+			s := latestByContext[ctxName]
+			statuses = append(statuses, s)
+			switch s.State {
+			case repositoryMonitorStatusFailure, "error":
+				combined = repositoryMonitorStatusFailure
+			case repositoryMonitorStatusPending:
+				if combined != repositoryMonitorStatusFailure {
+					combined = repositoryMonitorStatusPending
+				}
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"state": combined, "total_count": len(statuses), "statuses": statuses})
 	case req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/statuses/"):
 		var status repositoryMonitorCommitStatus
 		if err := json.NewDecoder(req.Body).Decode(&status); err != nil {
 			f.t.Error(err)
 		}
 		target := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
-		status.ID = int64(100 + len(f.writes[target]))
+		status.ID = 100 + f.nextID
+		f.nextID++
 		f.writes[target] = append(f.writes[target], status)
+		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(status)
 	default:
 		f.t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
