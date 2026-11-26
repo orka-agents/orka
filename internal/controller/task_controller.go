@@ -160,7 +160,10 @@ type TaskReconciler struct {
 	// ProviderUseAuthorization mirrors --provider-use-authorization-enabled.
 	// The controller then refuses an ai Task that takes a Provider from an
 	// Agent in another namespace; see ProvidersFromAgentInAnotherNamespace.
-	ProviderUseAuthorization    bool
+	ProviderUseAuthorization bool
+	// ACPProviderProxyEntra describes the provider auth proxy's Entra mode;
+	// see checkAgentTaskKeylessProvider. Zero when the proxy runs without it.
+	ACPProviderProxyEntra       ACPProviderProxyEntra
 	MaxTasksPerNamespace        int32
 	WorkspaceProviderAPIEnabled bool
 	// WorkspaceSettlementProtected reports that Task provenance admission
@@ -1116,6 +1119,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		case agentExecutionPathRejected:
 			return r.rejectPlannedAgentExecution(ctx, task, plan)
 		case agentExecutionPathACP, agentExecutionPathExternal:
+			if err := r.checkAgentTaskKeylessProvider(ctx, task, agent, plan.path); err != nil {
+				return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
+			}
 			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
 				return result, err
 			}

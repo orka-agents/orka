@@ -135,6 +135,10 @@ spec:
             - --acp-provider-proxy-namespace={{ .Release.Namespace }}
             - --acp-provider-proxy-pod-labels=orka.ai/network-role=provider-auth-proxy
             - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
+            {{- with dig "entra" "identity" "" .Values.providerProxy }}
+            - {{ printf "--acp-provider-proxy-entra-identity=%s" . | quote }}
+            - {{ printf "--acp-provider-proxy-entra-endpoint=%s" $.Values.providerProxy.upstreamBaseURL | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.controller.acpRuntime.codexImage }}
             - {{ printf "--acp-codex-runtime-image=%s" .Values.controller.acpRuntime.codexImage | quote }}

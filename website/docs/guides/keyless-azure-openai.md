@@ -179,6 +179,42 @@ the controller, and other Task types run code that the controller cannot
 restrict to model calls. Both fail with a message that names `spec.auth`; use a
 key-based Provider for them.
 
+## Agent Tasks through the provider auth proxy
+
+Built-in ACP runtimes (Codex, Claude, Copilot, OpenCode) never use a Task's
+Provider: every model call goes through the deployment's
+`orka-provider-auth-proxy`, which forwards it to one `upstreamBaseURL`. The
+proxy can authenticate that upstream keylessly. It exchanges a projected token
+of its own ServiceAccount for an Entra token of one identity, and sends that
+token only to the upstream's origin. Runtime and supervisor Pods never hold it.
+
+```yaml
+providerProxy:
+  enabled: true
+  # Azure OpenAI or Foundry's OpenAI-compatible v1 base URL.
+  upstreamBaseURL: https://<resource>.openai.azure.com/openai/v1
+  entra:
+    identity: models
+    identities:
+      - name: models
+        tenantID: <tenant-id>
+        clientID: <client-id>
+        allowedEndpoints: [https://<resource>.openai.azure.com]
+```
+
+Federate the identity with the proxy's ServiceAccount
+(`system:serviceaccount:<namespace>:<release>-provider-auth-proxy`), give it a
+data-plane role on the resource, and allow the proxy egress to the Entra
+authority and the upstream. If the identity issuer cannot issue a token, the
+proxy answers `503` and forwards nothing.
+
+The model each runtime sends reaches the upstream unchanged, so Agents can use
+different deployments behind the same origin. With the proxy in Entra mode, the
+chart also tells the controller which identity and origin the proxy serves. An
+agent Task whose Agent names a keyless Provider runs only on the built-in ACP
+path, and only when that Provider uses the same identity for the same origin.
+Any other keyless Provider fails the Task with a message that names `spec.auth`.
+
 ## Limits
 
 - Only `azure-openai` Providers can be keyless.

@@ -33,6 +33,13 @@ func main() {
 	maxResponseBytes := flag.Int64("max-response-bytes", envutil.MustInt64("ORKA_PROVIDER_AUTH_PROXY_MAX_RESPONSE_BYTES", defaultMaxResponseBytes), "Maximum streamed response body size")
 	responseHeaderTimeout := flag.Duration("response-header-timeout", envutil.MustDuration("ORKA_PROVIDER_AUTH_PROXY_RESPONSE_HEADER_TIMEOUT", defaultResponseHeaderTimeout), "Upstream response header timeout")
 	maxConcurrentRequests := flag.Int("max-concurrent-requests", envutil.MustInt("ORKA_PROVIDER_AUTH_PROXY_MAX_CONCURRENT_REQUESTS", defaultMaxConcurrentRequests), "Maximum concurrent upstream requests")
+	upstreamEntraIdentities := flag.String("upstream-entra-identities", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_ENTRA_IDENTITIES"),
+		"Entra workload identities as JSON, in the controller's --provider-identities format; enables keyless upstream authentication")
+	upstreamEntraIdentity := flag.String("upstream-entra-identity", os.Getenv("ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_ENTRA_IDENTITY"),
+		"Name of the identity whose tokens authenticate the upstream")
+	upstreamEntraTokenFile := flag.String("upstream-entra-token-file",
+		envutil.String("ORKA_PROVIDER_AUTH_PROXY_UPSTREAM_ENTRA_TOKEN_FILE", "/var/run/secrets/orka.ai/upstream-identity/token"),
+		"Projected ServiceAccount token the proxy presents as the identity's federated credential")
 	flag.Parse()
 
 	tokens := newBearerTokenStore(time.Now)
@@ -57,6 +64,9 @@ func main() {
 		MaxResponseBytes:      *maxResponseBytes,
 		ResponseHeaderTimeout: *responseHeaderTimeout,
 		MaxConcurrentRequests: *maxConcurrentRequests,
+		UpstreamEntra: upstreamEntraConfig{
+			Identities: *upstreamEntraIdentities, Identity: *upstreamEntraIdentity, TokenFile: *upstreamEntraTokenFile,
+		},
 	}, tokens)
 	if err != nil {
 		log.Fatalf("invalid provider auth proxy configuration: %v", err)

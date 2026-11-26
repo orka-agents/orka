@@ -636,6 +636,19 @@ providerProxy:
   # Optional operator-controlled restart input for binary/flag changes or
   # recovery. Change it to force only the provider-auth-proxy Pod to roll.
   rolloutNonce: ""
+  # Keyless upstream authentication for an Azure OpenAI or Foundry upstream.
+  # Set identity to enable it: the proxy exchanges a projected token of its
+  # own ServiceAccount for an Entra token of that identity and sends it only
+  # to upstreamBaseURL's origin, which must be https and listed in the
+  # identity's allowedEndpoints. identities uses the format of
+  # controller.providerIdentities. Federate the identity with the proxy's
+  # ServiceAccount, never an agent's, and allow egress to the Entra authority
+  # as well as the upstream. Each runtime's model name reaches the upstream
+  # unchanged, so Agents may use different deployments behind one origin.
+  entra:
+    identity: ""
+    tokenAudience: ""
+    identities: []
   auth:
     existingSecret: ""
     tokenKey: token
