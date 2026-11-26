@@ -229,7 +229,7 @@ func repositoryMonitorEventPolicy(monitor *corev1alpha1.RepositoryMonitor, itemK
 		}
 	case repositoryMonitorPatchPathDenied:
 		return repositoryMonitorRepositoryControlPathsPolicy
-	case repositoryMonitorPatchPathNotAllowed:
+	case repositoryMonitorPatchPathNotAllowed, repositoryMonitorNoEditableTargetReason:
 		return "spec.issueWorkflow.implementation.allowedPaths"
 	case repositoryMonitorPublishSkipDisabled:
 		return "spec.review.publish.enabled=false"

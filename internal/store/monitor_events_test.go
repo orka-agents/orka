@@ -13,6 +13,7 @@ func TestRepositoryMonitorEventDecisionCoversDecisionTypesOnly(t *testing.T) {
 	tests := map[string]string{
 		"repair_task_created":    RepositoryMonitorDecisionAccepted,
 		"command_rejected":       RepositoryMonitorDecisionRefused,
+		"issue_action_refused":   RepositoryMonitorDecisionRefused,
 		"item_skipped":           RepositoryMonitorDecisionHeld,
 		"issue_action_blocked":   RepositoryMonitorDecisionBlocked,
 		"repair_succeeded":       RepositoryMonitorDecisionActed,

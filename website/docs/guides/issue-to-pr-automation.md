@@ -186,6 +186,12 @@ revoke them.
 | `maxChangedFiles` | `12` | Files in one `orka.patch.v1` patch |
 | `allowedPaths` | none | Path globs or prefixes, such as `api/**` or `docs/**`, that a patch may touch. Pull request repairs use the same list |
 
+### Editable and read-only files
+
+Plan, implement, and repair Tasks see the edit policy in their input as `editPolicy`. A plan gets `allowedPaths`, so its `allowedFiles` can stay inside them. An implement Task also gets the files its issue names (a path with a directory and a file extension, such as `docs/install.md`, a directory written as inline code with a trailing slash, such as `docs/guides/`, or a root file such as `README.md`) together with the latest plan's `allowedFiles` and research's `affectedFiles`, split into `editableFiles` and `readOnlyFiles`. A repair Task gets the files its open review findings, external review threads, and CI annotations name, split the same way. A file is editable when it matches `allowedPaths` (or no `allowedPaths` are set) and is not a repository control path. Read-only files are context: the Task may read them but not change them.
+
+When `allowedPaths` is set and the issue and its plan name files but none is editable, the monitor refuses the implementation before any model run. The issue moves to `blocked` with reason `no_editable_target`, an `issue_action_refused` event names the read-only files, and the issue's status comment shows the reason. An issue or plan that names no files still starts, and the Task works within `allowedPaths`. A findings repair (`fix`) whose open findings name only read-only files is refused the same way with a `repair_refused` event. CI and branch-update repairs are never refused this way, because CI annotations show where a failure surfaces rather than where the fix belongs.
+
 ## Watch and debug
 
 ```bash

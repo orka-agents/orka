@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	pathpkg "path"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -375,6 +374,16 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorIssueImplementation(
 		}
 		return 0, r.saveBlockedRepositoryMonitorIssueImplementation(ctx, monitor, run, command, item)
 	}
+	// Refuse before the model run when the issue and its plan name files but
+	// the monitor may change none of them; the run could only fail the path
+	// limits after spending its budget.
+	priorActions, _, err := r.Store.ListActionRecords(ctx, store.ActionRecordFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Limit: 10})
+	if err != nil {
+		return 0, err
+	}
+	if policy := repositoryMonitorIssueImplementationEditPolicy(monitor, item, priorActions); policy.noEditableTarget() {
+		return 0, r.refuseRepositoryMonitorIssueImplementation(ctx, monitor, run, command, item, policy)
+	}
 	taskName, created, err := r.createRepositoryMonitorIssueActionTask(ctx, monitor, run, command, item, owner, repository, repositoryMonitorIssueActionImplementation, repositoryMonitorIssuePhaseImplementationQueued, monitor.Spec.Agents.Implementer)
 	if err != nil {
 		return 0, err
@@ -661,6 +670,12 @@ func buildRepositoryMonitorIssueActionPrompt(monitor *corev1alpha1.RepositoryMon
 		"phase":                             phase,
 		"priorActions":                      repositoryMonitorIssuePromptPriorActions(priorActions),
 	}
+	switch actionKind {
+	case repositoryMonitorIssueActionPlan:
+		payload[repositoryMonitorEditPolicyField] = newRepositoryMonitorEditPolicy(monitor, nil)
+	case repositoryMonitorIssueActionImplementation:
+		payload[repositoryMonitorEditPolicyField] = repositoryMonitorIssueImplementationEditPolicy(monitor, item, priorActions)
+	}
 	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
 	instruction := ""
 	schema := ""
@@ -672,10 +687,10 @@ func buildRepositoryMonitorIssueActionPrompt(monitor *corev1alpha1.RepositoryMon
 		instruction = "Research the codebase for this issue. Do not edit files, post comments, push, or mutate GitHub."
 		schema = `{"schemaVersion":"orka.issueResearch.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","confidence":"low|medium|high","problemStatement":"...","evidence":[],"affectedFiles":[],"recommendedTests":[],"needsHuman":false}`
 	case repositoryMonitorIssueActionPlan:
-		instruction = "Create an implementation plan from the issue text and existing prior action context. Do not edit files, post comments, push, or mutate GitHub. Avoid tool use unless absolutely necessary; do not perform an exhaustive repository review. Keep the plan concise and actionable so implementation can inspect the actual code later. Current Orka patch artifacts are text-only: do not plan binary artifacts (for example .ico, screenshots, archives, compiled outputs, or vendored blobs). If a binary asset would be useful, leave it out of allowedFiles and document a follow-up/manual asset step instead."
+		instruction = "Create an implementation plan from the issue text and existing prior action context. Do not edit files, post comments, push, or mutate GitHub. Avoid tool use unless absolutely necessary; do not perform an exhaustive repository review. Keep the plan concise and actionable so implementation can inspect the actual code later. Current Orka patch artifacts are text-only: do not plan binary artifacts (for example .ico, screenshots, archives, compiled outputs, or vendored blobs). If a binary asset would be useful, leave it out of allowedFiles and document a follow-up/manual asset step instead." + repositoryMonitorPlanEditPolicyInstruction
 		schema = `{"schemaVersion":"orka.issuePlan.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","status":"ready|blocked|needs_human","summary":"...","acceptanceCriteria":[],"steps":[],"validationCommands":[],"allowedFiles":["text source/docs and generated text files; no binary artifacts"],"risk":"low|medium|high","categories":["security|database-migration|other"]}`
 	case repositoryMonitorIssueActionImplementation:
-		instruction = "Implement the ready plan for this issue as a tracer-bullet vertical slice. Keep scope tight and prefer the smallest reviewable source/docs patch that proves the intended route. Make the planned code/documentation changes first; do not run tests before making changes. If the ready plan is too broad for one bounded agent turn, do not keep iterating indefinitely: return a blocked or needs_human JSON result that says the issue should be decomposed using the monitor decompose API/CLI operation. Run repository generators for required generated text; never hand-edit generated files. Current Orka patch artifacts are text-only: do not create or modify binary artifacts (for example .ico, screenshots, archives, compiled outputs, or vendored blobs), even if they appear in the plan; use text/source/docs changes and mention any omitted binary asset as a follow-up. After edits, run focused validation only for the files/packages you changed; avoid long full-repository test suites inside this task because CI/Orka repair will run broad validation after the PR is opened. Set proposedPullRequestTitle to a concise title describing the implemented change without an issue number. Leave final changes for Orka to commit and push through the configured push branch. Do not open a pull request yourself. Never write realistic secret values (API keys, tokens, passwords) into any file, including docs, examples, and tests; use placeholders such as ${env:VAR} or <your-api-key>, because a workspace delta containing secret-like content is rejected before publication."
+		instruction = "Implement the ready plan for this issue as a tracer-bullet vertical slice. Keep scope tight and prefer the smallest reviewable source/docs patch that proves the intended route. Make the planned code/documentation changes first; do not run tests before making changes. If the ready plan is too broad for one bounded agent turn, do not keep iterating indefinitely: return a blocked or needs_human JSON result that says the issue should be decomposed using the monitor decompose API/CLI operation. Run repository generators for required generated text; never hand-edit generated files. Current Orka patch artifacts are text-only: do not create or modify binary artifacts (for example .ico, screenshots, archives, compiled outputs, or vendored blobs), even if they appear in the plan; use text/source/docs changes and mention any omitted binary asset as a follow-up. After edits, run focused validation only for the files/packages you changed; avoid long full-repository test suites inside this task because CI/Orka repair will run broad validation after the PR is opened. Set proposedPullRequestTitle to a concise title describing the implemented change without an issue number. Leave final changes for Orka to commit and push through the configured push branch. Do not open a pull request yourself. Never write realistic secret values (API keys, tokens, passwords) into any file, including docs, examples, and tests; use placeholders such as ${env:VAR} or <your-api-key>, because a workspace delta containing secret-like content is rejected before publication." + repositoryMonitorEditPolicyInstruction
 		schema = `{"schemaVersion":"orka.issueImplementation.v1","repo":"owner/repo","issueNumber":123,"snapshotDigest":"sha256:...","status":"patch_ready|blocked|needs_human","summary":"...","proposedPullRequestTitle":"feat(scope): describe the implemented change","validation":[]}`
 	case repositoryMonitorIssueActionDecompose:
 		instruction = "Decompose this issue into small, independently implementable child issue drafts. Do not create issues or mutate GitHub; return drafts only."
@@ -1570,30 +1585,10 @@ func repositoryMonitorWorkspacePathRejectionReason(task *corev1alpha1.Task) stri
 }
 
 func repositoryMonitorImplementationPathAllowed(monitor *corev1alpha1.RepositoryMonitor, path string) bool {
-	if monitor == nil || len(monitor.Spec.IssueWorkflow.Implementation.AllowedPaths) == 0 {
+	if monitor == nil {
 		return true
 	}
-	for _, pattern := range monitor.Spec.IssueWorkflow.Implementation.AllowedPaths {
-		if repositoryMonitorPathPatternMatches(strings.TrimSpace(pattern), path) {
-			return true
-		}
-	}
-	return false
-}
-
-func repositoryMonitorPathPatternMatches(pattern, path string) bool {
-	if pattern == "" {
-		return false
-	}
-	pattern = strings.TrimPrefix(strings.ReplaceAll(pattern, "\\", "/"), "./")
-	path = strings.TrimPrefix(strings.ReplaceAll(path, "\\", "/"), "./")
-	if strings.HasSuffix(pattern, "/**") {
-		return strings.HasPrefix(path, strings.TrimSuffix(pattern, "**"))
-	}
-	if matched, err := filepath.Match(pattern, path); err == nil && matched {
-		return true
-	}
-	return strings.TrimSuffix(pattern, "/") == strings.TrimSuffix(path, "/")
+	return harnessv2.WorkspaceDeltaPathAllowed(path, monitor.Spec.IssueWorkflow.Implementation.AllowedPaths)
 }
 
 func repositoryMonitorACPDeliveryReceipt(task *corev1alpha1.Task) (branch, headSHA string, ok bool) {
@@ -2208,8 +2203,7 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		return "patch_changed_file_limit_exceeded", nil
 	}
 	for _, path := range paths {
-		lower := strings.ToLower(path)
-		if strings.HasPrefix(lower, ".github/workflows/") || strings.HasPrefix(lower, "config/rbac/") || (strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret")) {
+		if harnessv2.WorkspaceDeltaRepositoryControlPath(path) {
 			return repositoryMonitorPatchPathDenied, nil
 		}
 		if !repositoryMonitorImplementationPathAllowed(monitor, path) {
