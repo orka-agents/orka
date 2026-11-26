@@ -61,6 +61,7 @@ var _ = Describe("Container Task Secret use", Ordered, Serial,
 		var tokenBase64 string
 		var tokenDigest string
 		var runID string
+		var secretLeaked bool
 		var dynamicClient dynamic.Interface
 		taskGVR := schema.GroupVersionResource{Group: "core.orka.ai", Version: "v1alpha1", Resource: "tasks"}
 
@@ -325,37 +326,51 @@ var _ = Describe("Container Task Secret use", Ordered, Serial,
 		})
 
 		AfterEach(func() {
+			if secretLeaked {
+				return
+			}
 			dumpDebugInfo(taskName(secretUseE2ETask), taskName(secretUseE2EScheduled))
 		})
 
 		assertNoSecretLeak := func(deliveredTask string, taskNames ...string) {
 			By("keeping the Secret value out of Task status, events, and controller logs")
+			checkClean := func(source, content string) {
+				if strings.Contains(content, token) || strings.Contains(content, tokenBase64) {
+					secretLeaked = true
+					Fail("fixture Secret value leaked into " + source)
+				}
+			}
 			args := append([]string{"get", "task"}, taskNames...)
 			args = append(args, "-n", namespace, "-o", "json")
 			output, err := utils.Run(exec.Command("kubectl", args...))
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			ExpectWithOffset(1, output).NotTo(ContainSubstring(token))
-			ExpectWithOffset(1, output).NotTo(ContainSubstring(tokenBase64))
+			if err != nil {
+				Fail("failed to read Task JSON for leak check")
+			}
+			checkClean("Task status/spec", output)
 			output, err = utils.Run(exec.Command("kubectl", "get", "events", "-n", namespace, "-o", "json"))
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			ExpectWithOffset(1, output).NotTo(ContainSubstring(token))
-			ExpectWithOffset(1, output).NotTo(ContainSubstring(tokenBase64))
+			if err != nil {
+				Fail("failed to read namespace events for leak check")
+			}
+			checkClean("namespace events", output)
 			name, err := controllerManagerDeploymentName()
 			ExpectWithOffset(1, err).NotTo(HaveOccurred())
 			output, err = utils.Run(exec.Command("kubectl", "logs", "deployment/"+name, "-n", namespace,
 				"-c", "manager", "--all-pods", "--tail=-1"))
-			ExpectWithOffset(1, err).NotTo(HaveOccurred())
-			ExpectWithOffset(1, output).NotTo(ContainSubstring(token))
-			ExpectWithOffset(1, output).NotTo(ContainSubstring(tokenBase64))
+			if err != nil {
+				Fail("failed to read controller logs for leak check")
+			}
+			checkClean("controller logs", output)
 			matchedDelivery := false
 			for line := range strings.SplitSeq(output, "\n") {
 				if strings.Contains(line, "delivering Secrets to container Task under the Secret use policy") &&
-					strings.Contains(line, deliveredTask) {
+					strings.Contains(line, deliveredTask) &&
+					strings.Contains(line, secretUseE2ESecret) {
 					matchedDelivery = true
 					break
 				}
 			}
-			ExpectWithOffset(1, matchedDelivery).To(BeTrue(), "expected policy delivery log for Task %s", deliveredTask)
+			ExpectWithOffset(1, matchedDelivery).To(BeTrue(),
+				"expected policy delivery log for Task %s naming Secret %s", deliveredTask, secretUseE2ESecret)
 		}
 
 		It("delivers the Secret as a file and an env value to a Task its author may use", func() {
