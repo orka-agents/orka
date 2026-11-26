@@ -1843,6 +1843,10 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			log.Error(err, "failed to resolve connector-backed tools; retrying dispatch")
 			return ctrl.Result{}, err
 		}
+		if errors.Is(err, ErrContainerTaskSecretUseUnavailable) {
+			log.Error(err, "failed to confirm the container Task Secret use policy; retrying dispatch")
+			return ctrl.Result{}, err
+		}
 		log.Error(err, "failed to build Job")
 		return r.failTask(ctx, task, fmt.Sprintf("failed to build job: %v", err))
 	}

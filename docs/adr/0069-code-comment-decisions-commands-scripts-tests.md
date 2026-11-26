@@ -11,7 +11,7 @@ non-obvious decision in `cmd/`, `api/`, `scripts/`, `hack/`, `test/`, `examples/
 ## Context
 
 Round 2 of the comment cleanup classified every comment left after
-[ADR 0063](0063-code-comment-decisions-round-1.md). In `cmd/`, `api/`, `scripts/`, `hack/`, `test/`, `examples/`, and the skill scripts it found 864 distinct decisions
+[ADR 0063](0063-code-comment-decisions-round-1.md). In `cmd/`, `api/`, `scripts/`, `hack/`, `test/`, `examples/`, and the skill scripts it found 866 distinct decisions
 that a reader of the code alone could get wrong. Comments that stated the same rule in several
 places are merged into one entry. Where an earlier ADR already records a decision, the entry
 links it.
@@ -947,6 +947,8 @@ grouped by package and ordered by source position as of round 2.
 - **Custom Tool receiver is probed through Service DNS** (`e2e.Describe(Tools)`): The custom Tool e2e probes the echo receiver with kubectl exec from inside the Pod so it exercises Service DNS and routing, not the API-server proxy or a port-forward.
 - **web_fetch e2e checks the SSRF guard on IPs and names** (`e2e.Describe(Tools)`): The web_fetch e2e fixture fetches the link-local metadata address and the in-cluster aimock Service instead of the internet, so it checks the SSRF guard on both an IP literal and a resolved name and needs no internet access.
 - **Child serialization e2e checks recorded intervals** (`e2e serialized children spec`): The serialized-children e2e both samples running children and checks that their recorded startTime/completionTime intervals do not overlap, so concurrent execution is caught even when children finish between polls; requiring all three to succeed proves waiting children are admitted.
+- **Secret use e2e runs alone and outlasts propagation** (`e2e.Container Task Secret use`): The container Task Secret use e2e restarts the controller, so it is Ordered and Serial, and waits secretUseE2EPropagation (35s), longer than the controller's propagation window, before expecting a write to be trusted.
+- **Secret use e2e never overwrites an installation** (`e2e.Container Task Secret use`): The Secret use e2e creates each cluster-wide resource and Task without overwriting existing ones, registers UID-preconditioned cleanup only for objects it created, and keeps the policy installed once the controller mode is enabled unless rolling the controller back succeeds.
 
 ### `test/fixtures/aimockauthority`
 

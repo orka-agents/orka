@@ -350,6 +350,14 @@ rules:
     resourceNames: [{{ include "orka.controllerWebhookName" . | quote }}]
     verbs: ["update", "patch"]
   {{- end }}
+  {{- if dig "containerTaskSecretUse" "enabled" false .Values.controller }}
+  # The controller confirms the container Task Secret use policy is installed
+  # and bound before it delivers a Secret to a container Task.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    resourceNames: [{{ printf "%s-container-task-secret-use" (include "orka.fullname" .) | quote }}]
+    verbs: ["get"]
+  {{- end }}
   # Startup preflight checks retained allocations even when dispatch is disabled.
   - apiGroups: ["core.orka.ai"]
     resources: ["runtimepools"]
