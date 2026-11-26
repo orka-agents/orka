@@ -1490,9 +1490,10 @@ func (r *TaskReconciler) checkCoordinationConstraints(ctx context.Context, task 
 	}
 	// A child pinned to an earlier Task of the same name is never admitted
 	// under its replacement: that parent's children scope does not count it.
-	// The cache may still hold the earlier parent, so a mismatch is confirmed
-	// against the API server before the child fails.
-	if pinned, ok := taskParentUIDPin(task, parentName); ok && pinned != parentTask.UID {
+	// The cache may still hold the earlier parent even when the API server has
+	// already replaced it, so every pinned child refreshes the parent uncached
+	// before checking its UID.
+	if pinned, ok := taskParentUIDPin(task, parentName); ok {
 		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Name: parentName, Namespace: task.Namespace}, parentTask); err != nil {
 			if apierrors.IsNotFound(err) {
 				result, err := r.failTask(ctx, task, fmt.Sprintf("failed to get parent task: %v", err))

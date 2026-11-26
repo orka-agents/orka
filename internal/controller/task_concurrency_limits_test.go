@@ -284,15 +284,27 @@ func TestCoordinationChildOfAReplacedParentIsNeverAdmitted(t *testing.T) {
 
 	// The cache still holds the earlier parent; the API server has the new
 	// one. The new parent's child is confirmed against the API server and
-	// admitted, not failed as a child of a replaced parent.
+	// admitted, while a child pinned to the stale cached parent is also
+	// refreshed against the API server and failed as replaced.
 	cachedParent := parent.DeepCopy()
 	cachedParent.UID = "parent-old"
 	fresh := child("new-b", parent.UID)
+	staleMatch := child("old-d", "parent-old")
 	scheme := newTestScheme()
-	r = newUnitReconciler(scheme, parentAgent.DeepCopy(), cachedParent, fresh.DeepCopy())
-	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(parentAgent.DeepCopy(), parent.DeepCopy(), fresh.DeepCopy()).Build()
+	r = newUnitReconciler(scheme, parentAgent.DeepCopy(), cachedParent, fresh.DeepCopy(), staleMatch.DeepCopy())
+	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(parentAgent.DeepCopy(), parent.DeepCopy(), fresh.DeepCopy(), staleMatch.DeepCopy()).Build()
 	if _, err, handled := r.validateCoordinationConstraints(ctx, fresh.DeepCopy()); err != nil || handled {
 		t.Fatalf("the new parent's child seen with a stale cached parent: handled=%t err=%v, want it admitted", handled, err)
+	}
+	if _, err, handled := r.validateCoordinationConstraints(ctx, staleMatch.DeepCopy()); err != nil || !handled {
+		t.Fatalf("stale child matching stale cached parent: handled=%t err=%v, want a terminal failure", handled, err)
+	}
+	stored := &corev1alpha1.Task{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(staleMatch), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(stored.Status.Message, "was replaced") {
+		t.Fatalf("stale child matching stale cached parent: phase=%s message=%q, want it failed as replaced", stored.Status.Phase, stored.Status.Message)
 	}
 }
 
