@@ -508,9 +508,12 @@ func TestContainerTaskSecretUseScheduledRunWithCRDDefaults(t *testing.T) {
 	parent := secretUseContainerTask()
 	parent.Spec.Schedule = "0 3 * * *"
 	parent.Spec.ConcurrencyPolicy = corev1alpha1.ForbidConcurrent
+	parent.Spec.Args = []string{}
 	run := scheduledRunOf(parent)
-	// The API server defaults these on the run after the controller clears them.
+	// The API server defaults these on the run after the controller clears them,
+	// and omitempty drops explicitly empty slices on the persisted child.
 	run.Spec.ConcurrencyPolicy = corev1alpha1.ForbidConcurrent
+	run.Spec.Args = nil
 	deadline := int64(100)
 	run.Spec.StartingDeadlineSeconds = &deadline
 	requireSecretDelivered(t, secretUseBuilder(t, append(secretUsePolicyObjects(), parent.DeepCopy())...), run)
