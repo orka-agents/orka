@@ -64,7 +64,7 @@ function ProducerRow({ producer }: { producer: ProducerInfo }) {
       )}
       {small && <p className="text-xs font-medium text-status-pending">Small sample: n={producer.sampleSize}</p>}
       <p className={cn('text-xs tabular-nums', producer.failures > 0 ? 'text-status-failed' : 'text-muted-foreground')}>
-        This window: {producer.evaluations} evaluations, {producer.failures} failures
+        Last 24 hours: {producer.evaluations} evaluations, {producer.failures} failures
         {producer.failures > 0 && ` (${Math.round(failureRate * 100)}%)`}
       </p>
       {producer.note && <p className="text-xs whitespace-pre-wrap break-words text-muted-foreground">{producer.note}</p>}

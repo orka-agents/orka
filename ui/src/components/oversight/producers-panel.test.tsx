@@ -25,7 +25,7 @@ describe('ProducersPanel', () => {
     expect(within(rows[0]).getByText('0.92 AUROC · run r1 · n=26')).toBeInTheDocument()
     expect(within(rows[0]).getByText('Small sample: n=26')).toBeInTheDocument()
     expect(within(rows[1]).getByText('scorer-b')).toBeInTheDocument()
-    expect(within(rows[1]).getByText(/10 evaluations, 2 failures/)).toBeInTheDocument()
+    expect(within(rows[1]).getByText(/Last 24 hours: 10 evaluations, 2 failures/)).toBeInTheDocument()
   })
 
   it.each([404, 501])('reads a %s as no producer declarations', async (status) => {
