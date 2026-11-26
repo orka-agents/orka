@@ -23,9 +23,11 @@
 !*.go
 **/*_test.go
 
-# Re-include Go module files
+# Re-include Go module files, including the nested storage contract module
 !go.mod
 !go.sum
+!pkg/storage/go.mod
+!pkg/storage/go.sum
 !LICENSE
 !NOTICE.md
 

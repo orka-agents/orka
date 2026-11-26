@@ -1905,6 +1905,246 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 	}
 }
 
+func coordinationConcurrencyFixture(maxChildren int32) (*corev1alpha1.Task, *corev1alpha1.Agent) {
+	parentTask := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAI,
+			AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
+		},
+	}
+	parentAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-agent", Namespace: "default"},
+		Spec: corev1alpha1.AgentSpec{
+			Coordination: &corev1alpha1.CoordinationConfig{
+				Enabled:               true,
+				MaxConcurrentChildren: maxChildren,
+			},
+		},
+	}
+	return parentTask, parentAgent
+}
+
+func coordinationChildTask(name string, status corev1alpha1.TaskStatus) *corev1alpha1.Task {
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   "default",
+			Annotations: map[string]string{labels.AnnotationCoordinationDepth: "1"},
+			Labels:      map[string]string{labels.LabelParentTask: "parent"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: status,
+	}
+}
+
+// A burst of children reaches admission while the informer cache still shows
+// the sibling admitted by the previous reconcile without its phase. The check
+// must read live sibling state so the limit holds.
+func TestValidateCoordinationConstraints_ConcurrencyLimitIgnoresStaleCache(t *testing.T) {
+	scheme := newTestScheme()
+	parentTask, parentAgent := coordinationConcurrencyFixture(1)
+	staleSibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{})
+	liveSibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{
+		Phase:   corev1alpha1.TaskPhaseRunning,
+		JobName: "sibling-job",
+	})
+	childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+
+	r := newUnitReconciler(scheme, parentTask, parentAgent, staleSibling, childTask)
+	r.APIReader = fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(parentTask.DeepCopy(), parentAgent.DeepCopy(), liveSibling, childTask.DeepCopy()).
+		Build()
+
+	result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+	if err != nil {
+		t.Fatalf("validateCoordinationConstraints() error = %v", err)
+	}
+	if !done || result.RequeueAfter != 10*time.Second {
+		t.Fatalf("expected the child to wait for the live running sibling, got done=%t result=%+v", done, result)
+	}
+}
+
+// Children that are all Pending and waiting for admission must not block each
+// other; otherwise a burst of children never starts.
+// createTaskJob creates the Job before it records JobName and Running. If that
+// status write fails, the sibling runs while still looking Pending and
+// unadmitted; its owned Job must still hold the slot.
+func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *testing.T) {
+	tests := []struct {
+		name     string
+		jobLabel string
+		ownerUID types.UID
+		wantWait bool
+	}{
+		{name: "owned job", jobLabel: "sibling", ownerUID: "sibling-uid", wantWait: true},
+		{name: "job of a deleted task with the same name", jobLabel: "sibling", ownerUID: "previous-sibling-uid", wantWait: false},
+		{name: "job labeled for another sibling", jobLabel: "other", ownerUID: "sibling-uid", wantWait: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			parentTask, parentAgent := coordinationConcurrencyFixture(1)
+			sibling := coordinationChildTask("sibling", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+			sibling.UID = "sibling-uid"
+			other := coordinationChildTask("other", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+			other.UID = "other-uid"
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sibling-job",
+					Namespace: "default",
+					Labels:    map[string]string{labels.LabelTask: tt.jobLabel},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: corev1alpha1.GroupVersion.String(),
+						Kind:       "Task",
+						Name:       "sibling",
+						UID:        tt.ownerUID,
+					}},
+				},
+			}
+			childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
+
+			r := newUnitReconciler(scheme, parentTask, parentAgent, sibling, other, job, childTask)
+			result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+			if err != nil {
+				t.Fatalf("validateCoordinationConstraints() error = %v", err)
+			}
+			if done != tt.wantWait {
+				t.Fatalf("done = %t, want %t (result %+v)", done, tt.wantWait, result)
+			}
+			if tt.wantWait && result.RequeueAfter != 10*time.Second {
+				t.Fatalf("RequeueAfter = %s, want 10s (result %+v)", result.RequeueAfter, result)
+			}
+		})
+	}
+}
+
+// Marked siblings are counted first; once they fill the limit no Job list is
+// needed. Otherwise one batched list finds every unmarked sibling's Job.
+func TestCountChildSiblingSlots(t *testing.T) {
+	scheme := newTestScheme()
+	ownedJob := func(owner *corev1alpha1.Task) *batchv1.Job {
+		return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+			Name:      owner.Name + "-job",
+			Namespace: owner.Namespace,
+			Labels:    map[string]string{labels.LabelTask: owner.Name},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: owner.Name, UID: owner.UID,
+			}},
+		}}
+	}
+	pending := corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
+	running := coordinationChildTask("running", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, JobName: "running-job"})
+	unmarked1 := coordinationChildTask("unmarked-1", pending)
+	unmarked1.UID = "unmarked-1-uid"
+	unmarked2 := coordinationChildTask("unmarked-2", pending)
+	unmarked2.UID = "unmarked-2-uid"
+	waiting := coordinationChildTask("waiting", pending)
+	waiting.UID = "waiting-uid"
+	child := coordinationChildTask("child", pending)
+	siblings := []corev1alpha1.Task{*running, *unmarked1, *unmarked2, *waiting, *child}
+
+	t.Run("limit filled by marked siblings skips the Job list", func(t *testing.T) {
+		r := newUnitReconciler(scheme)
+		r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					return errors.New("unexpected live list")
+				},
+			}).Build()
+		active, err := r.countChildSiblingSlots(context.Background(), child, siblings, 1)
+		if err != nil || active != 1 {
+			t.Fatalf("countChildSiblingSlots() = %d, %v; want 1, nil", active, err)
+		}
+	})
+
+	t.Run("one list counts every unmarked sibling with a Job", func(t *testing.T) {
+		jobLists := 0
+		r := newUnitReconciler(scheme)
+		r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(ownedJob(unmarked1), ownedJob(unmarked2)).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					jobLists++
+					return c.List(ctx, list, opts...)
+				},
+			}).Build()
+		active, err := r.countChildSiblingSlots(context.Background(), child, siblings, 5)
+		if err != nil || active != 3 {
+			t.Fatalf("countChildSiblingSlots() = %d, %v; want 3, nil", active, err)
+		}
+		if jobLists != 1 {
+			t.Fatalf("live Job lists = %d, want 1", jobLists)
+		}
+	})
+}
+
+func TestValidateCoordinationConstraints_WaitingSiblingsDoNotBlockAdmission(t *testing.T) {
+	scheme := newTestScheme()
+	parentTask, parentAgent := coordinationConcurrencyFixture(1)
+	pending := corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
+	sibling1 := coordinationChildTask("sibling-1", pending)
+	sibling2 := coordinationChildTask("sibling-2", pending)
+	childTask := coordinationChildTask("child", pending)
+
+	r := newUnitReconciler(scheme, parentTask, parentAgent, sibling1, sibling2, childTask)
+	result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
+	if err != nil {
+		t.Fatalf("validateCoordinationConstraints() error = %v", err)
+	}
+	if done {
+		t.Fatalf("expected admission while siblings are only waiting, got requeue %+v", result)
+	}
+}
+
+// The maxConcurrentChildren admission check relies on Task reconciles being
+// serialized: it reads live sibling state and records the admission in the same
+// reconcile. Raising Task reconcile concurrency needs a different admission
+// mechanism first (for example an optimistic-concurrency slot on the parent).
+func TestTaskControllerReconcilesSerially(t *testing.T) {
+	if taskControllerMaxConcurrentReconciles != 1 {
+		t.Fatalf("taskControllerMaxConcurrentReconciles = %d; maxConcurrentChildren admission is only race-free with 1",
+			taskControllerMaxConcurrentReconciles)
+	}
+}
+
+func TestChildTaskHoldsConcurrencySlot(t *testing.T) {
+	const slotTestJobName = "child-job"
+	tests := []struct {
+		name   string
+		status corev1alpha1.TaskStatus
+		want   bool
+	}{
+		{name: "slot when new", status: corev1alpha1.TaskStatus{}, want: false},
+		{name: "slot when pending waiting", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}, want: false},
+		{name: "slot when pending with job", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, JobName: slotTestJobName}, want: true},
+		{name: "slot when pending with binding", status: corev1alpha1.TaskStatus{
+			Phase:                 corev1alpha1.TaskPhasePending,
+			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{},
+		}, want: true},
+		{name: "slot when pending with execution", status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhasePending,
+			Execution: &corev1alpha1.TaskExecutionStatus{},
+		}, want: true},
+		{name: "slot when scheduled", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled}, want: false},
+		{name: "slot when running", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}, want: true},
+		{name: "slot when finalizing", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing}, want: true},
+		{name: "slot when succeeded", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, JobName: slotTestJobName}, want: false},
+		{name: "slot when failed", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed, JobName: slotTestJobName}, want: false},
+		{name: "slot when cancelled", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{Status: tt.status}
+			if got := childTaskHoldsConcurrencySlot(task); got != tt.want {
+				t.Fatalf("childTaskHoldsConcurrencySlot() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ensureWorkerRBAC
 // ---------------------------------------------------------------------------

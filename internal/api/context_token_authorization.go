@@ -1805,6 +1805,7 @@ func contextTokenWorkspaceCredentialFailures(token *ContextToken, cfg ContextTok
 		{role: "target-read", ref: workspace.PublicationReadCredentialRef},
 		{role: "target-write", ref: workspace.PublicationCredentialRef},
 		{role: "forge", ref: workspace.ForgeCredentialRef},
+		{role: "commit-sign", ref: workspace.CommitSigningCredentialRef},
 	}
 	hasCredential := false
 	for _, credential := range credentials {
@@ -1995,7 +1996,10 @@ func contextTokenNativeRuntimeToolName(authzCtx contextTokenTaskCreateAuthorizat
 		return true
 	}
 	if runtime != nil && runtime.Type != "" {
-		return contextTokenBuiltInRuntimeNativeToolName(runtime.Type, base)
+		// The broker serves its built-ins ahead of any Tool of the same
+		// name, so they have no Tool credential policy to resolve.
+		return slices.Contains(toolspkg.BrokeredBuiltInToolNames(), base) ||
+			contextTokenBuiltInRuntimeNativeToolName(runtime.Type, base)
 	}
 	if slices.Contains(toolspkg.CoordinationToolNames(), base) {
 		return true

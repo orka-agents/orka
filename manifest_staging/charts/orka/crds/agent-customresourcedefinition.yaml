@@ -89,6 +89,17 @@ spec:
                       Autonomous enables autonomous loop mode for coordinator agents using this config.
                       When enabled, the controller re-creates Jobs in a loop instead of marking the task as Succeeded.
                     type: boolean
+                  delegatedGatewayTools:
+                    description: |-
+                      DelegatedGatewayTools names gateway task-pass Tools (http.gatewayTaskPass)
+                      that this agent may pass on to the children it delegates to, without
+                      calling them itself. They join this agent's frozen gateway grant only,
+                      never its tool policy; a child still gets a tool only when its own
+                      policy lists it too.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
                   enabled:
                     default: false
                     description: Enabled indicates if coordination is enabled
@@ -117,6 +128,10 @@ spec:
                 required:
                 - enabled
                 type: object
+                x-kubernetes-validations:
+                - message: delegatedGatewayTools requires coordination to be enabled
+                  rule: '!has(self.delegatedGatewayTools) || size(self.delegatedGatewayTools)
+                    == 0 || self.enabled'
               execution:
                 description: Execution defines default worker pod runtime and placement
                   settings.
@@ -1391,7 +1406,7 @@ spec:
                   defaultReasoningEffort:
                     description: |-
                       DefaultReasoningEffort configures the CLI runtime reasoning effort for tasks using this Agent.
-                      Runtime adapters reject values they do not support (none is Codex-only; max is Claude-only).
+                      Only Codex accepts none. Codex and Claude accept max when the model and provider support it.
                     enum:
                     - none
                     - low

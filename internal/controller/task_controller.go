@@ -32,7 +32,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -40,6 +42,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -207,10 +210,10 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=sessions,verbs=get;list;delete
 // The controller creates the scheduled runs of a memory consolidation Task,
 // which the memory consolidation admission policy checks for list on memories
-// and, in Propose mode, create on memoryproposals, as it checked the parent's
-// creator.
+// and memoryproposals and, in Propose mode, create on memoryproposals, as it
+// checked the parent's creator.
 // +kubebuilder:rbac:groups=core.orka.ai,resources=memories,verbs=list
-// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=create
+// +kubebuilder:rbac:groups=core.orka.ai,resources=memoryproposals,verbs=list;create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -274,6 +277,7 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
 		previousJobName := task.Status.JobName
 		hadACPExecution := task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0
+		reported := taskSuccessOf(task)
 		mutate(task)
 		write := func(writeCtx context.Context) error {
 			if taskJobAuthorityChanged(previousJob, previousJobName, task) {
@@ -281,7 +285,9 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 					return err
 				}
 			}
-			return r.Status().Update(writeCtx, task)
+			return admitTaskStatus(writeCtx, r.ControllerEpochManager, reported, task, func(ctx context.Context) error {
+				return r.Status().Update(ctx, task)
+			})
 		}
 		if hadACPExecution && taskDataAuthorityEnded(task) {
 			return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
@@ -332,6 +338,88 @@ func taskPhaseCountsTowardConcurrency(phase corev1alpha1.TaskPhase) bool {
 	default:
 		return false
 	}
+}
+
+// childTaskHoldsConcurrencySlot reports whether a child Task has been admitted
+// past its parent's maxConcurrentChildren check and has not finished. A Pending
+// sibling that is still waiting for admission does not hold a slot; counting it
+// would let waiting siblings block each other indefinitely.
+func childTaskHoldsConcurrencySlot(task *corev1alpha1.Task) bool {
+	switch task.Status.Phase {
+	case corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing:
+		return true
+	case corev1alpha1.TaskPhasePending:
+		return task.Status.JobName != "" ||
+			task.Status.AgentExecutionBinding != nil ||
+			task.Status.Execution != nil
+	default:
+		return false
+	}
+}
+
+// maxUnmarkedSiblingJobSelectorBatch caps the number of task label values in
+// one live Job list selector so large Pending child queues never exceed the
+// API server's HTTP request size limit.
+const maxUnmarkedSiblingJobSelectorBatch = 200
+
+// countChildSiblingSlots counts the siblings of task that hold a
+// maxConcurrentChildren slot, stopping once limit is reached. createTaskJob
+// creates a Job before the Task records JobName, so a failed status write or a
+// restart can leave a running child Pending without markers; those siblings are
+// counted when a live Job list finds a Job they own.
+func (r *TaskReconciler) countChildSiblingSlots(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	siblings []corev1alpha1.Task,
+	limit int32,
+) (int32, error) {
+	active := int32(0)
+	// unmarked maps each Pending sibling without markers to its orka.ai/task
+	// label value; a Job counts only when it is labeled for and owned by it.
+	unmarked := map[types.UID]string{}
+	var unmarkedNames []string
+	for i := range siblings {
+		s := &siblings[i]
+		switch {
+		case s.Name == task.Name:
+			continue
+		case childTaskHoldsConcurrencySlot(s):
+			if active++; active >= limit {
+				return active, nil
+			}
+		case s.Status.Phase == corev1alpha1.TaskPhasePending:
+			unmarked[s.UID] = labels.SelectorValue(s.Name)
+			unmarkedNames = append(unmarkedNames, unmarked[s.UID])
+		}
+	}
+	if len(unmarked) == 0 {
+		return active, nil
+	}
+
+	for start := 0; start < len(unmarkedNames); start += maxUnmarkedSiblingJobSelectorBatch {
+		end := min(start+maxUnmarkedSiblingJobSelectorBatch, len(unmarkedNames))
+		byTask, err := k8slabels.NewRequirement(labels.LabelTask, selection.In, unmarkedNames[start:end])
+		if err != nil {
+			return 0, err
+		}
+		var jobs batchv1.JobList
+		if err := r.taskMetadataReader().List(ctx, &jobs, client.InNamespace(task.Namespace),
+			client.MatchingLabelsSelector{Selector: k8slabels.NewSelector().Add(*byTask)}); err != nil {
+			return 0, err
+		}
+		for i := range jobs.Items {
+			for _, ref := range jobs.Items[i].OwnerReferences {
+				if label, ok := unmarked[ref.UID]; !ok || jobs.Items[i].Labels[labels.LabelTask] != label {
+					continue
+				}
+				delete(unmarked, ref.UID)
+				if active++; active >= limit {
+					return active, nil
+				}
+			}
+		}
+	}
+	return active, nil
 }
 
 // Reconcile handles the reconciliation loop for Task resources
@@ -1335,26 +1423,56 @@ func (r *TaskReconciler) validateCoordinationConstraints(ctx context.Context, ta
 		}
 	}
 
-	// Enforce maxConcurrentChildren (requeue if at limit)
+	// Enforce maxConcurrentChildren (requeue if at limit).
 	if coord.MaxConcurrentChildren > 0 {
-		var siblings corev1alpha1.TaskList
-		if err := r.List(ctx, &siblings, client.InNamespace(task.Namespace),
-			client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
-			log.Error(err, "failed to list sibling tasks")
-			return ctrl.Result{}, err, true
-		}
-		active := int32(0)
-		for _, s := range siblings.Items {
-			if s.Name != task.Name && taskPhaseCountsTowardConcurrency(s.Status.Phase) {
-				active++
+		return r.enforceMaxConcurrentChildren(ctx, task, parentName, coord.MaxConcurrentChildren)
+	}
+
+	return ctrl.Result{}, nil, false
+}
+
+// enforceMaxConcurrentChildren checks whether parentName already has at least
+// limit active children. It short-circuits via the informer cache when active
+// marked siblings already fill the limit, and always performs a live API read
+// before admitting a child (relying on serialized Task reconciliation).
+func (r *TaskReconciler) enforceMaxConcurrentChildren(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	parentName string,
+	limit int32,
+) (ctrl.Result, error, bool) {
+	log := logf.FromContext(ctx)
+	var cachedSiblings corev1alpha1.TaskList
+	if err := r.List(ctx, &cachedSiblings, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err == nil {
+		cachedActive := int32(0)
+		for i := range cachedSiblings.Items {
+			s := &cachedSiblings.Items[i]
+			if s.Name == task.Name || !childTaskHoldsConcurrencySlot(s) {
+				continue
 			}
-		}
-		if active >= coord.MaxConcurrentChildren {
-			log.Info("coordination concurrency limit reached", "active", active, "max", coord.MaxConcurrentChildren)
-			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+			if cachedActive++; cachedActive >= limit {
+				log.Info("coordination concurrency limit reached (cached)", "active", cachedActive, "max", limit)
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+			}
 		}
 	}
 
+	var siblings corev1alpha1.TaskList
+	if err := r.taskMetadataReader().List(ctx, &siblings, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parentName)}); err != nil {
+		log.Error(err, "failed to list sibling tasks")
+		return ctrl.Result{}, err, true
+	}
+	active, err := r.countChildSiblingSlots(ctx, task, siblings.Items, limit)
+	if err != nil {
+		log.Error(err, "failed to count sibling task jobs")
+		return ctrl.Result{}, err, true
+	}
+	if active >= limit {
+		log.Info("coordination concurrency limit reached", "active", active, "max", limit)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil, true
+	}
 	return ctrl.Result{}, nil, false
 }
 
@@ -1672,6 +1790,14 @@ func (r *TaskReconciler) boundMissingToolPolicy(ctx context.Context, task *corev
 func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// While storage is held for recovery, Orka starts no work. No storage
+	// write or control-store change guards a Job's creation, so the hold is
+	// checked before anything is prepared for it.
+	if holdErr := r.ControllerEpochManager.StorageHold(); holdErr != nil {
+		log.Info("not creating the Task Job while storage is held for recovery", "reason", holdErr.Error())
+		return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+	}
+
 	latest := &corev1alpha1.Task{}
 	reader := uncachedReader(r.APIReader, r.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, latest); err != nil {
@@ -1880,7 +2006,16 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 	// deletion between the reads must not turn a skipped freshness check into
 	// a new execution from stale inputs.
 	if !existingGatewayJob {
-		err = r.Create(ctx, job)
+		// The hold is checked again at the creation itself: a hold raised
+		// while the Job was prepared either waits for this creation or
+		// refuses it.
+		err = r.ControllerEpochManager.AdmitWork(ctx, func(ctx context.Context) error {
+			return r.Create(ctx, job)
+		})
+		if errors.Is(err, store.ErrStorageRecoveryRequired) || errors.Is(err, store.ErrNotReady) {
+			log.Info("not creating the Task Job while storage is held for recovery", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: storageHoldRequeue}, nil
+		}
 	}
 	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
 		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
@@ -4545,8 +4680,16 @@ func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return fmt.Errorf("register ACP workspace Task wakeups: %w", err)
 	}
-	return builder.Named("task").Complete(r)
+	return builder.Named("task").
+		WithOptions(crcontroller.Options{MaxConcurrentReconciles: taskControllerMaxConcurrentReconciles}).
+		Complete(r)
 }
+
+// taskControllerMaxConcurrentReconciles must stay 1. Admission checks such as
+// maxConcurrentChildren read live sibling state and then record the admission
+// (Job creation or execution binding) in the same reconcile; they are only
+// race-free while no two Task reconciles run at once.
+const taskControllerMaxConcurrentReconciles = 1
 
 const (
 	DefaultAIWorkerClusterRoleName        = "orka-ai-worker-role"

@@ -29,6 +29,7 @@ const (
 	PublicationVerifyPath        = "/v1/publications/verify"
 	PublicationReclaimPath       = "/v1/publications/reclaim"
 	PullRequestReconcilePath     = "/v1/pull-requests/reconcile"
+	BranchRebasePath             = "/v1/branches/rebase"
 	OperationCapabilityHeader    = "X-Orka-Publisher-Operation-Capability"
 	OperationRequestDigestHeader = "X-Orka-Publisher-Request-Digest"
 )
@@ -44,6 +45,7 @@ const (
 	OperationPublicationVerify    Operation = "publication.verify"
 	OperationPublicationReclaim   Operation = "publication.reclaim"
 	OperationPullRequestReconcile Operation = "pull-request.reconcile"
+	OperationBranchRebase         Operation = "branch.rebase"
 )
 
 func (o Operation) Path() string {
@@ -64,6 +66,8 @@ func (o Operation) Path() string {
 		return PublicationReclaimPath
 	case OperationPullRequestReconcile:
 		return PullRequestReconcilePath
+	case OperationBranchRebase:
+		return BranchRebasePath
 	default:
 		return ""
 	}
@@ -86,11 +90,13 @@ type CredentialRole string
 const (
 	CredentialHTTPExtraHeader CredentialKind = "http-extra-header"
 	CredentialForgeToken      CredentialKind = "forge-token"
+	CredentialSSHSigningKey   CredentialKind = "ssh-signing-key"
 
 	CredentialRoleSourceRead  CredentialRole = "SourceRead"
 	CredentialRoleTargetRead  CredentialRole = "TargetRead"
 	CredentialRoleTargetWrite CredentialRole = "TargetWrite"
 	CredentialRoleForge       CredentialRole = "Forge"
+	CredentialRoleCommitSign  CredentialRole = "CommitSign"
 )
 
 // CredentialReference names a mounted file below the configured credential
@@ -160,10 +166,11 @@ type PublicationPreflightResponse struct {
 }
 
 type PublicationPrepareRequest struct {
-	Metadata            OperationMetadata           `json:"metadata"`
-	SourceCredentialRef *CredentialReference        `json:"sourceCredentialRef,omitempty"`
-	DeltaArtifact       harnessv2.ArtifactReference `json:"deltaArtifact"`
-	Request             publisher.PrepareRequest    `json:"request"`
+	Metadata             OperationMetadata           `json:"metadata"`
+	SourceCredentialRef  *CredentialReference        `json:"sourceCredentialRef,omitempty"`
+	SigningCredentialRef *CredentialReference        `json:"signingCredentialRef,omitempty"`
+	DeltaArtifact        harnessv2.ArtifactReference `json:"deltaArtifact"`
+	Request              publisher.PrepareRequest    `json:"request"`
 }
 
 // PreparedPublication deliberately omits the publisher's local BundlePath.
@@ -245,6 +252,19 @@ type PullRequestReconcileResponse struct {
 	OperationID   string                       `json:"operationId"`
 	RequestDigest string                       `json:"requestDigest"`
 	Receipt       publisher.PullRequestReceipt `json:"receipt"`
+}
+
+type BranchRebaseRequest struct {
+	Metadata             OperationMetadata             `json:"metadata"`
+	CredentialRef        *CredentialReference          `json:"credentialRef,omitempty"`
+	SigningCredentialRef *CredentialReference          `json:"signingCredentialRef,omitempty"`
+	Request              publisher.RebaseBranchRequest `json:"request"`
+}
+
+type BranchRebaseResponse struct {
+	OperationID   string                       `json:"operationId"`
+	RequestDigest string                       `json:"requestDigest"`
+	Result        publisher.RebaseBranchResult `json:"result"`
 }
 
 type ErrorResponse struct {

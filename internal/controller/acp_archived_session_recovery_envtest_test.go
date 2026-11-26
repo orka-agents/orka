@@ -2,10 +2,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +26,10 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	// Obtain real Kubernetes Task UIDs before exercising the existing runtime
 	// fixture. Its public dispatch/finalization/deletion paths produce receipts
 	// for those exact UIDs; only the runtime and control API transport is fake.
-	fixture := newExternalACPDispatchFixture(t)
+	// The fixture's deadline also covers every real API server call below, so
+	// give it the headroom other API-heavy external dispatch tests use.
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
+		externalACPDispatchFixtureOptions{contextTimeout: time.Minute})
 	tasks := make([]*corev1alpha1.Task, 0, 2)
 	for i := range 2 {
 		name := fmt.Sprintf("archive-restart-turn-%d", i+1)
@@ -102,7 +107,9 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restoredAuthority := installationEpochStore{ControllerEpochStore: control, installationID: bound.InstallationID}
+	restoredAuthority := installationEpochStore{
+		ControllerEpochStore: control, memoryStorageRecords: newMemoryStorageRecords(), installationID: bound.InstallationID,
+	}
 	blockedID, err := promptAttemptIDFromTask(tasks[0])
 	if err != nil {
 		t.Fatal(err)
@@ -119,9 +126,7 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 		}
 		dispatcher := archivedSessionRecoveryDispatcher(restarted, recovering, epoch)
 		dispatcher.Epochs = epochs
-		runCtx, cancel := context.WithTimeout(fixture.ctx, 400*time.Millisecond)
-		err := dispatcher.Start(runCtx)
-		cancel()
+		err := runArchivedRecoveryRestart(fixture.ctx, dispatcher)
 		stop()
 		if err != nil {
 			t.Fatalf("real API dispatcher restart at epoch %d: %v", epoch, err)
@@ -146,6 +151,46 @@ func TestACPDispatcherArchivedSessionRestartWithAPIServer(t *testing.T) {
 	if fixture.createCalls.Load() != 1 || fixture.deleteCalls.Load() != 1 {
 		t.Fatal("real API restart replayed runtime work")
 	}
+}
+
+// runArchivedRecoveryRestart runs the dispatcher until stale-attempt recovery
+// has returned, then stops it. Start recovers stale attempts before its first
+// dispatch scan, and both begin with an unfiltered Task list on the dispatcher
+// client, so the second such list marks the end of recovery. A fixed run
+// deadline would also bound recovery itself and fail on a slow API server.
+func runArchivedRecoveryRestart(ctx context.Context, dispatcher *ACPDispatcher) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	scanning := make(chan struct{})
+	dispatcher.Client = &taskListSignalClient{Client: dispatcher.Client, signalAt: 2, signal: scanning}
+	done := make(chan error, 1)
+	go func() { done <- dispatcher.Start(runCtx) }()
+	select {
+	case <-scanning:
+		cancel()
+		return <-done
+	case err := <-done:
+		if err == nil {
+			err = errors.New("dispatcher stopped before its first dispatch scan")
+		}
+		return err
+	}
+}
+
+// taskListSignalClient closes signal when the signalAt-th unfiltered Task list
+// starts.
+type taskListSignalClient struct {
+	client.Client
+	signalAt int32
+	signal   chan struct{}
+	lists    atomic.Int32
+}
+
+func (c *taskListSignalClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if _, ok := list.(*corev1alpha1.TaskList); ok && len(opts) == 0 && c.lists.Add(1) == c.signalAt {
+		close(c.signal)
+	}
+	return c.Client.List(ctx, list, opts...)
 }
 
 func newArchivedSessionAPIClient(t *testing.T) client.Client {

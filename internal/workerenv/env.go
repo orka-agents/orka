@@ -19,17 +19,13 @@ import (
 
 const (
 	// Base worker env vars used by all worker types.
-	TaskName      = "ORKA_TASK_NAME"
-	TaskNamespace = "ORKA_TASK_NAMESPACE"
-	// ServiceAccountName is the worker Pod's own ServiceAccount, from the
-	// Downward API. Outbound access lets the AI worker exchange a token for
-	// itself even though its account is a platform account.
-	ServiceAccountName = "ORKA_SERVICE_ACCOUNT_NAME"
-	ResultEndpoint     = "ORKA_RESULT_ENDPOINT"
-	ResultStdout       = "ORKA_RESULT_STDOUT"
-	ControllerURL      = "ORKA_CONTROLLER_URL"
-	Command            = "ORKA_COMMAND"
-	AgentName          = "ORKA_AGENT_NAME"
+	TaskName       = "ORKA_TASK_NAME"
+	TaskNamespace  = "ORKA_TASK_NAMESPACE"
+	ResultEndpoint = "ORKA_RESULT_ENDPOINT"
+	ResultStdout   = "ORKA_RESULT_STDOUT"
+	ControllerURL  = "ORKA_CONTROLLER_URL"
+	Command        = "ORKA_COMMAND"
+	AgentName      = "ORKA_AGENT_NAME"
 
 	// Task relationship env vars.
 	PriorTask           = "ORKA_PRIOR_TASK"
@@ -78,7 +74,10 @@ const (
 	AIDeprecatedMemoryTools = "ORKA_AI_DEPRECATED_MEMORY_TOOLS"
 	GatewayReplyEnabled     = "ORKA_GATEWAY_REPLY_ENABLED"
 	AIFallbackCount         = "ORKA_AI_FALLBACK_COUNT"
-	ControllerMode          = "ORKA_CONTROLLER_MODE"
+	// AIFallbackEnvPrefix starts every fallback provider env var, including
+	// AIFallbackCount.
+	AIFallbackEnvPrefix = "ORKA_AI_FALLBACK_"
+	ControllerMode      = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -126,7 +125,9 @@ const (
 	PodNamespace = "POD_NAMESPACE"
 	Namespace    = "NAMESPACE"
 
-	// Code execution tool env vars.
+	// Code execution tool env vars. Every name starts with CodeExecEnvPrefix,
+	// which the controller reserves from AI Task spec.env.
+	CodeExecEnvPrefix               = "ORKA_CODE_EXEC_"
 	CodeExecBackend                 = "ORKA_CODE_EXEC_BACKEND"
 	CodeExecLocalCPUSeconds         = "ORKA_CODE_EXEC_LOCAL_CPU_SECONDS"
 	CodeExecLocalMemoryKB           = "ORKA_CODE_EXEC_LOCAL_MEMORY_KB"
@@ -345,7 +346,7 @@ type FallbackProviderEnv struct {
 
 // FallbackPrefix returns the prefix for fallback provider i.
 func FallbackPrefix(i int) string {
-	return fmt.Sprintf("ORKA_AI_FALLBACK_%d", i)
+	return fmt.Sprintf("%s%d", AIFallbackEnvPrefix, i)
 }
 
 func FallbackProviderKey(i int) string        { return FallbackPrefix(i) + "_PROVIDER" }

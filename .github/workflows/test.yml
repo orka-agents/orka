@@ -69,6 +69,10 @@ jobs:
       - name: Check Go coverage reporting
         run: bash scripts/tests/go-coverage-summary-test.sh
 
+      # Before make test, whose generate step rewrites the generated files.
+      - name: Verify generated storage wire code
+        run: scripts/generate-storage-proto.sh verify
+
       - name: Running Tests
         id: go_tests
         run: |
@@ -83,7 +87,7 @@ jobs:
 
       - name: Upload Go coverage evidence
         if: ${{ always() && hashFiles('cover.out') != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-coverage-evidence
           path: |

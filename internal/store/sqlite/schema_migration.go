@@ -29,6 +29,9 @@ const (
 	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e" // schema version 5: result and artifact write stamps
 	schema173 = "44db6c191e5b2d8c2570a251762e50e89231b2e61ad7a5f40a42d6d5784ed75b" // schema version 6: memory generations and consolidation proposal targets
 	schema174 = "ce3aacb60e5f3f40f03cbe071637ac1218ff4255fb7fff314642e6b7b416317d" // schema version 7: memory consolidation runs
+	schema175 = "54d6dcddb755001aa9ba36a92056d29c9a6a044d60f863e9d5de64cd96ea4d6e" // schema version 8: Agent Host Protocol store
+	schema176 = "4af6f8b91484395ea51813a429338640f875baf8e919f972e3324d29de5afc13" // schema version 9: GitHub sign-in sessions
+	schema177 = "5d98d75e3cc537c5735264ac6a46a4c521c3000c3115e483e68be6fe19c6faa6" // schema version 10: write watermark
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -68,6 +71,15 @@ var migration172To173 string
 //go:embed migrations/173-to-174.sql
 var migration173To174 string
 
+//go:embed migrations/174-to-175.sql
+var migration174To175 string
+
+//go:embed migrations/175-to-176.sql
+var migration175To176 string
+
+//go:embed migrations/176-to-177.sql
+var migration176To177 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
@@ -88,6 +100,9 @@ func schemaMigrations() []schemaMigration {
 		{schema171, schema172, migration171To172, nil},
 		{schema172, schema173, migration172To173, nil},
 		{schema173, schema174, migration173To174, nil},
+		{schema174, schema175, migration174To175, nil},
+		{schema175, schema176, migration175To176, nil},
+		{schema176, schema177, migration176To177, nil},
 	}
 }
 
@@ -110,6 +125,9 @@ func versionUpgrades() []versionUpgrade {
 		{from: 4, to: 5, fromLayout: schema171, sql: migration171To172, toLayout: schema172},
 		{from: 5, to: 6, fromLayout: schema172, sql: migration172To173, toLayout: schema173},
 		{from: 6, to: 7, fromLayout: schema173, sql: migration173To174, toLayout: schema174},
+		{from: 7, to: 8, fromLayout: schema174, sql: migration174To175, toLayout: schema175},
+		{from: 8, to: 9, fromLayout: schema175, sql: migration175To176, toLayout: schema176},
+		{from: 9, to: 10, fromLayout: schema176, sql: migration176To177, toLayout: schema177},
 	}
 }
 

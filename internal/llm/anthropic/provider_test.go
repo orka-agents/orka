@@ -18,6 +18,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/orka-agents/orka/internal/llm"
+	"github.com/orka-agents/orka/internal/llm/anthropic/anthropictest"
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
@@ -365,8 +366,7 @@ func TestComplete_ServerError(t *testing.T) {
 
 func TestComplete_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{
+		_ = anthropictest.WriteMessage(w, `{
 			"id": "msg_123",
 			"type": "message",
 			"role": "assistant",
@@ -374,7 +374,7 @@ func TestComplete_Success(t *testing.T) {
 			"content": [{"type": "text", "text": "Hello there!"}],
 			"stop_reason": "end_turn",
 			"usage": {"input_tokens": 10, "output_tokens": 5}
-		}`) //nolint:errcheck
+		}`)
 	}))
 	defer server.Close()
 
@@ -406,8 +406,7 @@ func TestComplete_Success(t *testing.T) {
 
 func TestComplete_WithToolUse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{
+		_ = anthropictest.WriteMessage(w, `{
 			"id": "msg_456",
 			"type": "message",
 			"role": "assistant",
@@ -418,7 +417,7 @@ func TestComplete_WithToolUse(t *testing.T) {
 			],
 			"stop_reason": "tool_use",
 			"usage": {"input_tokens": 20, "output_tokens": 15}
-		}`) //nolint:errcheck
+		}`)
 	}))
 	defer server.Close()
 
@@ -1056,8 +1055,7 @@ func TestComplete_SendsPromptCacheControl(t *testing.T) {
 	var body []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`) //nolint:errcheck
+		_ = anthropictest.WriteMessage(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
 	}))
 	defer server.Close()
 

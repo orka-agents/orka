@@ -76,6 +76,30 @@ func (p *stateProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1
 	return r0, err
 }
 
+func (p *stateProvider) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "AdvanceWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.AdvanceWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) AppendAHPJournal(ctx context.Context, a1 string, a2 int64, a3 []storagev1.AHPJournalEntry, a4 []storagev1.AHPChannelState, a5 storagev1.AHPJournalLimits) error {
+	_, err := p.injector.call(ctx, p.contract, "AppendAHPJournal", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a3 = cloneArgument(a3)
+			a4 = cloneArgument(a4)
+		}
+		return p.inner.AppendAHPJournal(ctx, a1, a2, a3, a4, a5)
+	})
+	return err
+}
+
 func (p *stateProvider) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEvent", func(ctx context.Context) (err error) {
@@ -496,12 +520,32 @@ func (p *stateProvider) CountUnsettledOutboxProjections(ctx context.Context) (in
 	return r0, err
 }
 
+func (p *stateProvider) CreateAHPToken(ctx context.Context, a1 storagev1.AHPToken) error {
+	_, err := p.injector.call(ctx, p.contract, "CreateAHPToken", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.CreateAHPToken(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) CreateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateActionRecord", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {
 			a1 = cloneArgument(a1)
 		}
 		return p.inner.CreateActionRecord(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) CreateAuthSession(ctx context.Context, a1 storagev1.AuthSession) error {
+	_, err := p.injector.call(ctx, p.contract, "CreateAuthSession", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.CreateAuthSession(ctx, a1)
 	})
 	return err
 }
@@ -727,6 +771,37 @@ func (p *stateProvider) DeferGatewayEventProjection(ctx context.Context, a1 stri
 	return err
 }
 
+func (p *stateProvider) DeleteAHPChannelStates(ctx context.Context, a1 string, a2 []string) error {
+	_, err := p.injector.call(ctx, p.contract, "DeleteAHPChannelStates", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
+		return p.inner.DeleteAHPChannelStates(ctx, a1, a2)
+	})
+	return err
+}
+
+func (p *stateProvider) DeleteAHPRecord(ctx context.Context, a1 string, a2 string, a3 string) error {
+	_, err := p.injector.call(ctx, p.contract, "DeleteAHPRecord", func(ctx context.Context) error {
+		return p.inner.DeleteAHPRecord(ctx, a1, a2, a3)
+	})
+	return err
+}
+
+func (p *stateProvider) DeleteAHPRecords(ctx context.Context, a1 string, a2 string, a3 string) error {
+	_, err := p.injector.call(ctx, p.contract, "DeleteAHPRecords", func(ctx context.Context) error {
+		return p.inner.DeleteAHPRecords(ctx, a1, a2, a3)
+	})
+	return err
+}
+
+func (p *stateProvider) DeleteAHPSession(ctx context.Context, a1 string, a2 string) error {
+	_, err := p.injector.call(ctx, p.contract, "DeleteAHPSession", func(ctx context.Context) error {
+		return p.inner.DeleteAHPSession(ctx, a1, a2)
+	})
+	return err
+}
+
 func (p *stateProvider) DeleteAgentExecutionSnapshot(ctx context.Context, a1 storagev1.AgentExecutionSnapshotKey) error {
 	_, err := p.injector.call(ctx, p.contract, "DeleteAgentExecutionSnapshot", func(ctx context.Context) error {
 		return p.inner.DeleteAgentExecutionSnapshot(ctx, a1)
@@ -924,6 +999,84 @@ func (p *stateProvider) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Co
 	return r0, err
 }
 
+func (p *stateProvider) GetAHPChannelState(ctx context.Context, a1 string, a2 string) (storagev1.AHPChannelState, error) {
+	var r0 storagev1.AHPChannelState
+	injected, err := p.injector.call(ctx, p.contract, "GetAHPChannelState", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAHPChannelState(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 storagev1.AHPChannelState
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetAHPClient(ctx context.Context, a1 string) (storagev1.AHPClient, error) {
+	var r0 storagev1.AHPClient
+	injected, err := p.injector.call(ctx, p.contract, "GetAHPClient", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAHPClient(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.AHPClient
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetAHPRecord(ctx context.Context, a1 string, a2 string, a3 string) (storagev1.AHPRecord, error) {
+	var r0 storagev1.AHPRecord
+	injected, err := p.injector.call(ctx, p.contract, "GetAHPRecord", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAHPRecord(ctx, a1, a2, a3)
+		return err
+	})
+	if injected {
+		var z0 storagev1.AHPRecord
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetAHPServerSeq(ctx context.Context, a1 string) (int64, error) {
+	var r0 int64
+	injected, err := p.injector.call(ctx, p.contract, "GetAHPServerSeq", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAHPServerSeq(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 int64
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetAHPSession(ctx context.Context, a1 string, a2 string) (storagev1.AHPSession, error) {
+	var r0 storagev1.AHPSession
+	injected, err := p.injector.call(ctx, p.contract, "GetAHPSession", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAHPSession(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 storagev1.AHPSession
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetAHPTokenByHash(ctx context.Context, a1 string) (storagev1.AHPToken, error) {
+	var r0 storagev1.AHPToken
+	injected, err := p.injector.call(ctx, p.contract, "GetAHPTokenByHash", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAHPTokenByHash(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.AHPToken
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) GetActionRecord(ctx context.Context, a1 string, a2 string) (*storagev1.ActionRecord, error) {
 	var r0 *storagev1.ActionRecord
 	injected, err := p.injector.call(ctx, p.contract, "GetActionRecord", func(ctx context.Context) (err error) {
@@ -932,6 +1085,19 @@ func (p *stateProvider) GetActionRecord(ctx context.Context, a1 string, a2 strin
 	})
 	if injected {
 		var z0 *storagev1.ActionRecord
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetAuthSessionByHash(ctx context.Context, a1 string) (storagev1.AuthSession, error) {
+	var r0 storagev1.AuthSession
+	injected, err := p.injector.call(ctx, p.contract, "GetAuthSessionByHash", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetAuthSessionByHash(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.AuthSession
 		return z0, err
 	}
 	return r0, err
@@ -1567,6 +1733,19 @@ func (p *stateProvider) GetWorkAction(ctx context.Context, a1 string, a2 string)
 	return r0, err
 }
 
+func (p *stateProvider) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "GetWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) HasGatewayTaskTombstone(ctx context.Context, a1 string, a2 string, a3 string) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "HasGatewayTaskTombstone", func(ctx context.Context) (err error) {
@@ -1631,6 +1810,58 @@ func (p *stateProvider) LinkUsagePullRequest(ctx context.Context, a1 storagev1.U
 		return p.inner.LinkUsagePullRequest(ctx, a1)
 	})
 	return err
+}
+
+func (p *stateProvider) ListAHPChannels(ctx context.Context, a1 string, a2 string) ([]string, error) {
+	var r0 []string
+	injected, err := p.injector.call(ctx, p.contract, "ListAHPChannels", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListAHPChannels(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 []string
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) ListAHPRecords(ctx context.Context, a1 string, a2 string) ([]storagev1.AHPRecord, error) {
+	var r0 []storagev1.AHPRecord
+	injected, err := p.injector.call(ctx, p.contract, "ListAHPRecords", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListAHPRecords(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.AHPRecord
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) ListAHPSessions(ctx context.Context, a1 string) ([]storagev1.AHPSession, error) {
+	var r0 []storagev1.AHPSession
+	injected, err := p.injector.call(ctx, p.contract, "ListAHPSessions", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListAHPSessions(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.AHPSession
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) ListAHPTokens(ctx context.Context, a1 string) ([]storagev1.AHPToken, error) {
+	var r0 []storagev1.AHPToken
+	injected, err := p.injector.call(ctx, p.contract, "ListAHPTokens", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListAHPTokens(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.AHPToken
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) ListActionRecords(ctx context.Context, a1 storagev1.ActionRecordFilter) ([]storagev1.ActionRecord, string, error) {
@@ -2211,6 +2442,22 @@ func (p *stateProvider) ListUsagePullRequestLinks(ctx context.Context, a1 string
 	return r0, err
 }
 
+func (p *stateProvider) ListUsageTasksInSessions(ctx context.Context, a1 string, a2 string, a3 []string, a4 time.Time, a5 int) ([]storagev1.UsageTask, error) {
+	var r0 []storagev1.UsageTask
+	injected, err := p.injector.call(ctx, p.contract, "ListUsageTasksInSessions", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a3 = cloneArgument(a3)
+		}
+		r0, err = p.inner.ListUsageTasksInSessions(ctx, a1, a2, a3, a4, a5)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.UsageTask
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) ListWorkActions(ctx context.Context, a1 storagev1.WorkActionFilter) ([]storagev1.WorkAction, string, error) {
 	var r0 []storagev1.WorkAction
 	var r1 string
@@ -2412,6 +2659,33 @@ func (p *stateProvider) PruneUsage(ctx context.Context, a1 time.Time) error {
 	return err
 }
 
+func (p *stateProvider) PutAHPClient(ctx context.Context, a1 storagev1.AHPClient) error {
+	_, err := p.injector.call(ctx, p.contract, "PutAHPClient", func(ctx context.Context) error {
+		return p.inner.PutAHPClient(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) PutAHPRecord(ctx context.Context, a1 storagev1.AHPRecord) error {
+	_, err := p.injector.call(ctx, p.contract, "PutAHPRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.PutAHPRecord(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) PutAHPSession(ctx context.Context, a1 storagev1.AHPSession) error {
+	_, err := p.injector.call(ctx, p.contract, "PutAHPSession", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.PutAHPSession(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) PutSealedConnectorCredential(ctx context.Context, a1 storagev1.PutSealedConnectorCredentialRequest) (*storagev1.SealedConnectorCredential, error) {
 	var r0 *storagev1.SealedConnectorCredential
 	injected, err := p.injector.call(ctx, p.contract, "PutSealedConnectorCredential", func(ctx context.Context) (err error) {
@@ -2426,6 +2700,21 @@ func (p *stateProvider) PutSealedConnectorCredential(ctx context.Context, a1 sto
 		return z0, err
 	}
 	return r0, err
+}
+
+func (p *stateProvider) ReadAHPJournal(ctx context.Context, a1 string, a2 int64) ([]storagev1.AHPJournalEntry, bool, error) {
+	var r0 []storagev1.AHPJournalEntry
+	var r1 bool
+	injected, err := p.injector.call(ctx, p.contract, "ReadAHPJournal", func(ctx context.Context) (err error) {
+		r0, r1, err = p.inner.ReadAHPJournal(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.AHPJournalEntry
+		var z1 bool
+		return z0, z1, err
+	}
+	return r0, r1, err
 }
 
 func (p *stateProvider) ReadConnectorCustody(ctx context.Context, a1 string) (*storagev1.ConnectorCustody, error) {
@@ -2567,6 +2856,16 @@ func (p *stateProvider) ReleaseTaskDataFence(ctx context.Context, a1 storagev1.T
 	return err
 }
 
+func (p *stateProvider) RenewAuthSession(ctx context.Context, a1 string, a2 storagev1.AuthSession, a3 time.Time) error {
+	_, err := p.injector.call(ctx, p.contract, "RenewAuthSession", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
+		return p.inner.RenewAuthSession(ctx, a1, a2, a3)
+	})
+	return err
+}
+
 func (p *stateProvider) RenewGatewayEventClaim(ctx context.Context, a1 string, a2 string, a3 string, a4 time.Time, a5 time.Duration) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	injected, err := p.injector.call(ctx, p.contract, "RenewGatewayEventClaim", func(ctx context.Context) (err error) {
@@ -2693,6 +2992,20 @@ func (p *stateProvider) RetryGatewayEvent(ctx context.Context, a1 string, a2 str
 func (p *stateProvider) ReviewMemoryProposal(ctx context.Context, a1 storagev1.MemoryProposalReview) error {
 	_, err := p.injector.call(ctx, p.contract, "ReviewMemoryProposal", func(ctx context.Context) error {
 		return p.inner.ReviewMemoryProposal(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) RevokeAHPToken(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
+	_, err := p.injector.call(ctx, p.contract, "RevokeAHPToken", func(ctx context.Context) error {
+		return p.inner.RevokeAHPToken(ctx, a1, a2, a3)
+	})
+	return err
+}
+
+func (p *stateProvider) RevokeAuthSession(ctx context.Context, a1 string, a2 time.Time) error {
+	_, err := p.injector.call(ctx, p.contract, "RevokeAuthSession", func(ctx context.Context) error {
+		return p.inner.RevokeAuthSession(ctx, a1, a2)
 	})
 	return err
 }
@@ -3055,6 +3368,19 @@ func (p *artifactProvider) AdvanceControllerEpoch(ctx context.Context, a1 storag
 	return r0, err
 }
 
+func (p *artifactProvider) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "AdvanceWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.AdvanceWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *artifactProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
 	var r0 storagev1.DatasetBinding
 	injected, err := p.injector.call(ctx, p.contract, "BindDataset", func(ctx context.Context) (err error) {
@@ -3131,6 +3457,19 @@ func (p *artifactProvider) GetDatasetBinding(ctx context.Context, a1 string) (st
 	})
 	if injected {
 		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *artifactProvider) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "GetWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
 		return z0, err
 	}
 	return r0, err
