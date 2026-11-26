@@ -337,6 +337,9 @@ orka monitor issues list orka-main --namespace orka-system
 
 Label commands — `orka:implement` to start the workflow and `orka:pause` to hold an item —
 are covered in [Issue-to-PR automation](issue-to-pr-automation.md#start-from-a-github-label).
+Maintainers can start the same issue intents with a comment such as `/orka plan`, or ask a
+read-only question about an issue or pull request with `/orka ask`; see
+[Start from a comment](issue-to-pr-automation.md#start-from-a-comment).
 Guard labels from `spec.policy.protectedLabels` and `spec.policy.pauseLabels` record blocked
 commands and do not queue work.
 

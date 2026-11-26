@@ -116,6 +116,81 @@ label-to-Task trigger, and ordinary progress needs no label for each step. Plann
 research, decomposition, review, and repair can still be requested through the monitor API
 or CLI for ad hoc work.
 
+## Start from a comment
+
+A maintainer can also start issue work with a comment. Enable
+`spec.triggers.github.comments`, choose a prefix, and subscribe the repository webhook to
+`Issue comments` events:
+
+```yaml
+spec:
+  forgeCredentialRef:
+    name: orka-forge
+  triggers:
+    github:
+      comments:
+        enabled: true
+        prefix: /orka
+        requireActorPermission: maintain
+```
+
+A comment is a command only when its first line is `<prefix> <command>`:
+
+```text
+/orka plan keep the public API unchanged
+The parser change should stay behind the existing flag.
+```
+
+By default the commands are `ask`, `triage`, `research`, `plan`, `implement`, `decompose`,
+`stop`, and `resume`. Each issue command starts the issue workflow intent of the same name;
+`ask` is described below and is available only when `spec.agents.researcher` is set. List
+`spec.triggers.github.comments.commands` to choose other words; only the listed words are
+then accepted. No model decides whether a comment is a command.
+
+Intake follows the label path. The controller verifies `X-Hub-Signature-256`, checks that the
+issue belongs to the monitor's repository and target scope, checks the comment author's
+current repository permission, and records a durable command before starting any work. Every
+comment command, including the read-only ones, needs the
+`triggers.github.comments.requireActorPermission` minimum (default `maintain`), and
+`spec.policy.allowedRepositoryPermissions` also applies. A command from an author below the
+minimum is recorded as rejected and starts nothing.
+
+- Only newly created comments count. Edited and deleted comments are ignored, so an edit can
+  never turn a comment into a command or change one.
+- Comments from bots, GitHub Apps, and the account behind `forgeCredentialRef` are ignored.
+- The command ID is derived from the comment ID, so a redelivered webhook is a no-op. A second
+  comment asking for the same work while it is active is coalesced into it.
+- On pull requests, only `ask` is accepted, and only when the monitor watches pull requests.
+
+Everything after the command word, including the following lines, is stored as command
+context. Before it is stored, hidden HTML comments, images, links, and URLs are removed,
+control characters are stripped, credentials are redacted, and the text is bounded to 80
+lines and 4 KiB. The context is frozen with a digest in the command's workflow action and
+passed to the action's agent as a separate, untrusted `commandContext` input. It can guide
+what the agent looks at, but it never selects the intent, the agent, the tools, the
+repository, the branch, or the output schema. The context is sent to the model provider
+with the rest of the prompt.
+
+### Ask a question
+
+`/orka ask <question>` answers a question about an issue or pull request, such as
+"what does this change?" or "summarize this PR", and changes nothing else:
+
+- The controller reads the issue or pull request and checks that it is open and in the
+  monitor's scope (for a pull request: base branch, draft setting, and include labels).
+- It starts one read-only Task with `spec.agents.researcher`: a read workspace at the
+  default branch for an issue or at the head commit for a pull request, read-only tools,
+  and no publication or forge credential. The question is its untrusted `commandContext`.
+  An ask with no text asks for a summary.
+- When the Task succeeds, the controller posts its answer once as a reply comment, using
+  `forgeCredentialRef`. The answer is sanitized like the context (links, images, URLs, and
+  credentials removed; at most 200 lines and 8 KiB) and shown inside a code block, so
+  mentions, references, and Markdown in it never render. The reply is recorded as a GitHub
+  mutation and is attempted at most once; a failed or interrupted reply is not retried.
+
+At most two asks run at a time per monitor. A rejected or failed ask posts nothing. Asks
+with different text run separately; an identical ask while one is active is coalesced.
+
 ## Pause and stop
 
 - **`orka:pause`** (configurable with `spec.policy.pauseLabels`) is a persistent guard on one

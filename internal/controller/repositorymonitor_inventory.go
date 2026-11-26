@@ -70,6 +70,7 @@ const (
 type repositoryMonitorPullRequest struct {
 	Number         int64
 	Title          string
+	Body           string
 	Author         string
 	State          string
 	Labels         []string
@@ -1524,6 +1525,7 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorBranchHead(ctx conte
 type repositoryMonitorPullRequestResponse struct {
 	Number         int64  `json:"number"`
 	Title          string `json:"title"`
+	Body           string `json:"body"`
 	State          string `json:"state"`
 	Draft          bool   `json:"draft"`
 	MergeableState string `json:"mergeable_state"`
@@ -1572,6 +1574,7 @@ func repositoryMonitorPullRequestFromGitHub(pr repositoryMonitorPullRequestRespo
 	return repositoryMonitorPullRequest{
 		Number:              pr.Number,
 		Title:               pr.Title,
+		Body:                pr.Body,
 		Author:              pr.User.Login,
 		State:               pr.State,
 		Labels:              labelNames,

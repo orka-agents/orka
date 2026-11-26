@@ -23,6 +23,10 @@ const (
 	repositoryMonitorCommandMaxRetries             = 3
 	repositoryMonitorCommandProcessed              = "processed"
 	repositoryMonitorCommandCompleted              = "completed"
+	repositoryMonitorCommandRecording              = "recording"
+	repositoryMonitorCommandRejected               = "rejected"
+	repositoryMonitorCommandRecordingGrace         = 2 * time.Minute
+	repositoryMonitorCommandRecordingInterrupted   = "command intake was interrupted before its context was stored"
 	repositoryMonitorRetiredAutomergeIntent        = "automerge"
 	repositoryMonitorRetiredApprovePlanIntent      = "approve_plan"
 	repositoryMonitorAutomergeCommandRetiredReason = "automerge_command_retired"
@@ -39,7 +43,7 @@ func (r *RepositoryMonitorReconciler) enqueueAcceptedRepositoryMonitorCommands(c
 		}
 		for i := range commands {
 			command := commands[i]
-			if strings.TrimSpace(command.Kind) == "" || command.Number == 0 {
+			if strings.TrimSpace(command.Kind) == "" || command.Number == 0 || command.Intent == repositoryMonitorCommandIntentAsk {
 				continue
 			}
 			if reason := repositoryMonitorRetiredCommandReason(command.Intent); reason != "" {
@@ -340,4 +344,107 @@ func repositoryMonitorFailedCommandRunRetryable(runError string) bool {
 func repositoryMonitorCommandRunIDFromCommand(commandID string) string {
 	sum := sha256.Sum256([]byte(commandID + "|run"))
 	return "monrun-" + hex.EncodeToString(sum[:])[:12]
+}
+
+// recoverInterruptedRepositoryMonitorCommandRecordings settles comment commands
+// whose intake stopped between recording the command and accepting it. GitHub
+// does not redeliver a webhook on its own, so without this a recording command
+// would leave its queued work action holding the action's dedupe key.
+//
+// Once the grace period has passed, a command whose work action holds
+// verifiable context is accepted. One whose action was coalesced completes.
+// One whose action cannot run is rejected, and a queued action it owns is
+// failed so its dedupe key is released. A recording with no work action
+// holds nothing and is left for a redelivery to finish. Every transition is
+// one a concurrent redelivery would also make, or leaves the command unable to
+// run, so recovery cannot race intake into running work twice.
+//
+// It reports whether recordings still inside their grace period remain, so the
+// reconcile can requeue for them.
+func (r *RepositoryMonitorReconciler) recoverInterruptedRepositoryMonitorCommandRecordings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor) (bool, error) {
+	// The store's cursor is an offset, and settling a recording removes it
+	// from the filter, so read every page before changing any status.
+	var recordings []store.CommandEvent
+	cursor := ""
+	for {
+		commands, next, err := r.Store.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Status: repositoryMonitorCommandRecording, Limit: 100, Cursor: cursor})
+		if err != nil {
+			return false, err
+		}
+		recordings = append(recordings, commands...)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	pending := false
+	for i := range recordings {
+		settled, err := r.recoverRepositoryMonitorCommandRecording(ctx, monitor, &recordings[i])
+		if err != nil {
+			return pending, err
+		}
+		pending = pending || !settled
+	}
+	return pending, nil
+}
+
+// recoverRepositoryMonitorCommandRecording settles one recording command. It
+// reports false while the command is still inside its grace period.
+func (r *RepositoryMonitorReconciler) recoverRepositoryMonitorCommandRecording(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent) (bool, error) {
+	if time.Since(command.CreatedAt) < repositoryMonitorCommandRecordingGrace {
+		return false, nil
+	}
+	// The listed recording may be stale: a redelivery can accept the command
+	// after the list was read. Settle only a command that is still recording.
+	current, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, command.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.Status != repositoryMonitorCommandRecording {
+		return true, nil
+	}
+	command = current
+	action, err := r.Store.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, store.RepositoryMonitorDesiredActionForIntent(command.Intent)))
+	if errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case action.CommandEventID != command.ID:
+		return true, nil
+	case action.Status == store.RepositoryMonitorWorkActionStatusRetryPending:
+		// Only intake parks an action for retry, after it accepted the command
+		// and then failed to signal its run. A redelivery can do that between
+		// the read above and this one, and rejecting the command would strand
+		// the retry and its dedupe key.
+		return true, nil
+	case action.Status == store.RepositoryMonitorWorkActionStatusCompleted && action.Phase == "coalesced":
+		command.Status = repositoryMonitorCommandCompleted
+		command.Error = store.RepositoryMonitorCoalescedCommandError(action.DependsOnActionID)
+	case action.Status != store.RepositoryMonitorWorkActionStatusQueued:
+		command.Status = repositoryMonitorCommandRejected
+		command.Error = repositoryMonitorCommandRecordingInterrupted
+	default:
+		if _, contextErr := repositoryMonitorCommandContextFromMetadata(action.MetadataJSON); contextErr != nil {
+			now := time.Now()
+			action.Status = store.RepositoryMonitorWorkActionStatusFailed
+			action.Phase = repositoryMonitorCommandRejected
+			action.BlockedReason = repositoryMonitorCommandRecordingInterrupted
+			action.CompletedAt = &now
+			if err := r.Store.UpdateWorkAction(ctx, action); err != nil {
+				return false, err
+			}
+			command.Status = repositoryMonitorCommandRejected
+			command.Error = repositoryMonitorCommandRecordingInterrupted
+		} else {
+			command.Status = repositoryMonitorCommandAccepted
+			command.Error = ""
+		}
+	}
+	return true, r.Store.UpdateCommandEvent(ctx, command)
 }
