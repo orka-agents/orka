@@ -65,7 +65,13 @@ func (h *Handlers) handleRepositoryMonitorLabelCommand(c fiber.Ctx, body []byte,
 	for i := range monitors.Items {
 		monitor := &monitors.Items[i]
 		intent, ok := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name)
-		if !ok || !repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, intent) {
+		if !ok {
+			continue
+		}
+		if !repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, intent) {
+			if err := h.recordRepositoryMonitorOutOfScopeLabelCommand(c, monitor, payload, target, intent, delivery); err != nil {
+				return result, true, err
+			}
 			continue
 		}
 		result.Matched++
@@ -181,7 +187,7 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 	dedupe := repositoryMonitorCommandDedupeKey(monitor, target, payload.Label.Name, delivery)
 	commandID := repositoryMonitorCommandID(dedupe)
 	if existing, err := h.repositoryMonitorStore.GetCommandEvent(c.Context(), monitor.Namespace, commandID); err == nil {
-		return existing, true, nil
+		return existing, true, h.recordRepositoryMonitorCommandIntakeDecision(c, monitor, existing, target)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to inspect repository monitor command: %v", err))
 	}
@@ -229,12 +235,22 @@ func (h *Handlers) recordRepositoryMonitorCommandEvent(c fiber.Ctx, monitor *cor
 	}
 	if err := h.repositoryMonitorStore.CreateCommandEvent(c.Context(), command); err != nil {
 		if existing, getErr := h.repositoryMonitorStore.GetCommandEvent(c.Context(), monitor.Namespace, command.ID); getErr == nil {
-			return existing, true, nil
+			return existing, true, h.recordRepositoryMonitorCommandIntakeDecision(c, monitor, existing, target)
 		}
 		return nil, false, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command: %v", err))
 	}
 	metrics.RecordRepositoryMonitorCommand(command.Intent, command.Status)
-	return command, false, nil
+	return command, false, h.recordRepositoryMonitorCommandIntakeDecision(c, monitor, command, target)
+}
+
+// recordRepositoryMonitorCommandIntakeDecision records a webhook command's
+// intake decision. It runs for redeliveries too, so a decision whose event
+// write failed earlier is recorded by the next delivery.
+func (h *Handlers) recordRepositoryMonitorCommandIntakeDecision(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, target githubLabelTarget) error {
+	if err := h.recordRepositoryMonitorCommandDecision(c.Context(), monitor, command, target.Labels); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor command decision: %v", err))
+	}
+	return nil
 }
 
 func (h *Handlers) ensureRepositoryMonitorCommandLabelConsumed(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, payload githubLabelWebhookPayload, target githubLabelTarget) error {

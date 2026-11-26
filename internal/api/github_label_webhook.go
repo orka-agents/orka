@@ -553,16 +553,7 @@ func githubRepositoryMonitorExactRunID(monitor *corev1alpha1.RepositoryMonitor, 
 
 func (h *Handlers) createRepositoryMonitorEventRunAudit(c fiber.Ctx, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, payload githubLabelWebhookPayload, target githubLabelTarget, delivery, eventType string) error {
 	eventKey := githubWebhookReplayKey([]byte(eventType + "-" + delivery))
-	metadataJSON, err := json.Marshal(map[string]any{
-		apiFieldAction: payload.Action,
-		"delivery":     delivery,
-		"repository":   payload.Repository.FullName,
-		"sender":       payload.Sender.Login,
-	})
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode monitor event metadata: %v", err))
-	}
-	if err := h.repositoryMonitorStore.CreateMonitorEvent(c.Context(), &store.MonitorEvent{
+	event, err := store.NewRepositoryMonitorEvent(store.RepositoryMonitorEventInput{
 		ID:               fmt.Sprintf("mevt-%s-%s", run.ID, githubReplayKeySuffix(eventKey)),
 		MonitorNamespace: monitor.Namespace,
 		MonitorName:      monitor.Name,
@@ -571,10 +562,19 @@ func (h *Handlers) createRepositoryMonitorEventRunAudit(c fiber.Ctx, monitor *co
 		ItemNumber:       int64(target.Number),
 		ItemSHA:          target.HeadSHA,
 		EventType:        eventType,
-		Actor:            "github-webhook",
+		Actor:            repositoryMonitorWebhookEventActor,
 		Summary:          fmt.Sprintf("GitHub %s event queued repository monitor run for %s #%d", payload.Action, strings.ReplaceAll(target.Kind, "_", " "), target.Number),
-		MetadataJSON:     string(metadataJSON),
-	}); err != nil {
+		Metadata: map[string]any{
+			apiFieldAction:                      payload.Action,
+			repositoryMonitorEventDeliveryField: delivery,
+			"repository":                        payload.Repository.FullName,
+			repositoryMonitorEventSenderField:   payload.Sender.Login,
+		},
+	})
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode monitor event metadata: %v", err))
+	}
+	if err := h.repositoryMonitorStore.CreateMonitorEvent(c.Context(), event); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record repository monitor event run audit: %v", err))
 	}
 	return nil

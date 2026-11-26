@@ -1229,6 +1229,13 @@ func (h *Handlers) CreateRepositoryMonitorCommandEvent(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor command: %v", err))
 	}
 	metrics.RecordRepositoryMonitorCommand(event.Intent, event.Status)
+	var targetLabels []string
+	if item != nil {
+		targetLabels = repositoryMonitorLabelsFromItem(item)
+	}
+	if err := h.recordRepositoryMonitorCommandDecision(c.Context(), monitor, event, targetLabels); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to record monitor command decision: %v", err))
+	}
 	if event.Status != githubCommandStatusAccepted {
 		if err := h.upsertRepositoryMonitorCommandWorkAction(c.Context(), monitor, event, ""); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create monitor workflow action: %v", err))

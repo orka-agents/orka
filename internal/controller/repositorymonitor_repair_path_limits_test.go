@@ -30,10 +30,12 @@ func TestRepositoryMonitorRepairAppliesImplementationPathLimits(t *testing.T) {
 		wantPhase     string
 		wantError     string
 		wantPushedSHA string
+		wantEvent     string
+		wantPolicy    string
 	}{
-		{name: "repository control path", rejection: controlPathRejection, wantPhase: repositoryMonitorRepairPhaseFailed, wantError: repositoryMonitorPatchPathDenied},
-		{name: "outside allowed paths", rejection: disallowedPathRejection, wantPhase: repositoryMonitorRepairPhaseFailed, wantError: repositoryMonitorPatchPathNotAllowed},
-		{name: "inside allowed paths", wantPhase: repositoryMonitorRepairPhaseSucceeded, wantPushedSHA: "pushed31"},
+		{name: "repository control path", rejection: controlPathRejection, wantPhase: repositoryMonitorRepairPhaseFailed, wantError: repositoryMonitorPatchPathDenied, wantEvent: repositoryMonitorEventRepairFailed, wantPolicy: repositoryMonitorRepositoryControlPathsPolicy},
+		{name: "outside allowed paths", rejection: disallowedPathRejection, wantPhase: repositoryMonitorRepairPhaseFailed, wantError: repositoryMonitorPatchPathNotAllowed, wantEvent: repositoryMonitorEventRepairFailed, wantPolicy: "spec.issueWorkflow.implementation.allowedPaths"},
+		{name: "inside allowed paths", wantPhase: repositoryMonitorRepairPhaseSucceeded, wantPushedSHA: "pushed31", wantEvent: repositoryMonitorEventRepairSucceeded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -114,6 +116,21 @@ func TestRepositoryMonitorRepairAppliesImplementationPathLimits(t *testing.T) {
 			if pushMutation.Status != wantStatus || pushMutation.ExternalID != tt.wantPushedSHA || pushMutation.Error != tt.wantError {
 				t.Fatalf("push mutation = %#v, want status %q with pushed SHA %q and error %q", pushMutation, wantStatus, tt.wantPushedSHA, tt.wantError)
 			}
+
+			// The outcome is one decision event that names the push record.
+			// An ingestion retried before the job settled records it once.
+			job.Phase = repositoryMonitorRepairPhaseQueued
+			if err := monitorStore.UpdateRepairJob(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reconciler.ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil {
+				t.Fatalf("ingestCompletedRepositoryMonitorRepairTasks(retry) error = %v", err)
+			}
+			wantDecision := store.RepositoryMonitorDecisionActed
+			if tt.rejection != "" {
+				wantDecision = store.RepositoryMonitorDecisionFailed
+			}
+			assertRepositoryMonitorRepairOutcomeEvent(t, monitorStore, monitor, tt.wantEvent, wantDecision, tt.wantError, tt.wantPolicy, pr.HeadSHA, pushMutation.ID, task.Name)
 		})
 	}
 }
@@ -137,5 +154,22 @@ func TestRepositoryMonitorWorkspacePathRejectionReasonIgnoresOtherFailures(t *te
 		if reason := repositoryMonitorWorkspacePathRejectionReason(task); reason != "" {
 			t.Fatalf("repositoryMonitorWorkspacePathRejectionReason(%#v) = %q, want none", delivery, reason)
 		}
+	}
+}
+
+// assertRepositoryMonitorRepairOutcomeEvent checks that a repair's outcome is
+// one decision event linked to its run, head, push record and Task.
+func assertRepositoryMonitorRepairOutcomeEvent(t *testing.T, monitorStore store.RepositoryMonitorStore, monitor *corev1alpha1.RepositoryMonitor, eventType, wantDecision, wantReason, wantPolicy, headSHA, mutationID, taskName string) {
+	t.Helper()
+	events := repositoryMonitorTestEventsOfType(t, monitorStore, monitor, eventType)
+	if len(events) != 1 {
+		t.Fatalf("%s events = %#v, want one", eventType, events)
+	}
+	metadata := repositoryMonitorTestEventMetadata(t, events[0])
+	if events[0].RunID != "run-repair-path-limits" || events[0].ItemSHA != headSHA || metadata[repositoryMonitorEventMutationIDField] != mutationID || metadata[eventTaskNameField] != taskName {
+		t.Fatalf("outcome event = %#v metadata %v, want it linked to the run, head, push record and Task", events[0], metadata)
+	}
+	if metadata[store.RepositoryMonitorEventDecisionField] != wantDecision || metadata[eventReasonField] != repositoryMonitorTestOptionalString(wantReason) || metadata[store.RepositoryMonitorEventPolicyField] != repositoryMonitorTestOptionalString(wantPolicy) {
+		t.Fatalf("outcome metadata = %v, want decision %s reason %q policy %q", metadata, wantDecision, wantReason, wantPolicy)
 	}
 }
