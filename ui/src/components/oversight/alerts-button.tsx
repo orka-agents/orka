@@ -79,7 +79,7 @@ export function AlertsButton({ onOpenDecision, onOpenCharter }: { onOpenDecision
             </ul>
           )}
           <div className="flex justify-end">
-            <Button size="sm" variant="ghost" onClick={markAllRead} disabled={unread === 0}>Mark all read</Button>
+            <Button size="sm" variant="ghost" onClick={() => markAllRead(namespace)} disabled={unread === 0}>Mark all read</Button>
           </div>
         </DialogContent>
       </Dialog>

@@ -18,7 +18,8 @@ interface OversightAlertsState {
   alerts: CharterAlert[]
   /** Adds an alert unless one exists for the decision; returns whether it was new. */
   add: (alert: Omit<CharterAlert, 'read'>) => boolean
-  markAllRead: () => void
+  /** Marks the namespace's alerts read; other namespaces keep their marks. */
+  markAllRead: (namespace: string) => void
   reset: () => void
 }
 
@@ -33,7 +34,7 @@ export const useOversightAlerts = create<OversightAlertsState>()((set, get) => (
     set((state) => ({ alerts: [{ ...alert, read: false }, ...state.alerts].slice(0, MAX_ALERTS) }))
     return true
   },
-  markAllRead: () => set((state) => ({ alerts: state.alerts.map((a) => (a.read ? a : { ...a, read: true })) })),
+  markAllRead: (namespace) => set((state) => ({ alerts: state.alerts.map((a) => (a.read || a.namespace !== namespace ? a : { ...a, read: true })) })),
   reset: () => set({ alerts: [] }),
 }))
 

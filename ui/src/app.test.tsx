@@ -19,7 +19,9 @@ vi.mock('./routeTree.gen', () => ({
 }))
 
 import { App } from './app'
+import { useAuthStore } from './stores/auth'
 import { useChatStore } from './stores/chat'
+import { useOversightAlerts } from './stores/oversight-alerts'
 import { useUIStore } from './stores/ui'
 
 describe('App', () => {
@@ -47,5 +49,14 @@ describe('App', () => {
       isStreaming: false,
       turnEpoch: 5,
     })
+  })
+
+  it('drops oversight alerts when the identity changes', () => {
+    act(() => useAuthStore.setState({ token: 'first-user' }))
+    useOversightAlerts.getState().add({
+      decisionID: 't@1', namespace: 'team', taskName: 't', observedAt: '2026-08-31T00:00:00Z', rule: 'Rule 1', sentence: 'kept to the first user',
+    })
+    act(() => useAuthStore.setState({ token: 'second-user' }))
+    expect(useOversightAlerts.getState().alerts).toEqual([])
   })
 })
