@@ -2152,6 +2152,7 @@ func main() {
 		Identity:        agentIdentityConfig,
 		SubstrateRouter: runtimePoolSubstrateRouter,
 		Client:          mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		Informers:  mgr.GetCache(),
 		EventStore: appStorage, Snapshots: agentExecutionSnapshotStore,
 		Epochs: controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,

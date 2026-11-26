@@ -93,6 +93,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err != nil {
 		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "external workspace binding is unavailable")
 	}
+	ctx = withExternalRuntimeTimingWorkspace(ctx, w)
 	// An eviction or upgrade drain of a detached warm runtime ends its
 	// window now (ADR 0055), so retention suspends it inside the drain's
 	// deadline; the runtime keeps serving no one in the meantime.
@@ -107,6 +108,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	stopping := deleting || pool.Spec.DesiredReplicas == 0 || w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady ||
 		pool.Annotations["orka.ai/external-runtime-retirement-requested"] == "true" || w.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed ||
 		externalProviderSuspendDeadlineExceeded(w)
+	// Timing only: remember when this process first saw the sequence retire.
+	if w.Spec.Workload != nil {
+		r.externalTimings.observeRetirement(pool.UID, w.Spec.Workload.Sequence, stopping, r.now())
+	} else {
+		r.externalTimings.observeRetirement(pool.UID, 0, false, r.now())
+	}
 	if stopping {
 		return r.reconcileExternalWorkspaceRetirement(ctx, pool, w, deleting)
 	}
@@ -166,6 +173,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 				return ctrl.Result{}, err
 			}
+			r.externalTimings.observeRetirement(pool.UID, w.Spec.Workload.Sequence, true, r.now())
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "retiring the old runtime fence before credential rotation")
 		}
 	}
@@ -188,6 +196,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 				return r.externalPoolRequestProgress(ctx, pool, w.Spec.Workload, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 			}
+			r.noteExternalRuntimeStopProven(pool, w)
 		}
 		if externalEvictionSettlementPending(pool, w) {
 			// An eviction whose outcome was never recorded settles against
@@ -445,6 +454,7 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 	}
 	before := w.DeepCopy()
 	w.Spec.Workload, w.Spec.Retirement = &request, nil
+	setExternalRuntimeMilestone(w, externalWorkloadPublishedAnnotation, request.Sequence, r.now())
 	if err := r.Patch(ctx, w, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -939,6 +949,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 		if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 			return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 		}
+		r.noteExternalRuntimeStopProven(pool, w)
 		return r.externalPoolStopped(ctx, pool, w)
 	}
 	if w.Spec.Retirement == nil {
@@ -1039,6 +1050,11 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	if !reflect.DeepEqual(w.Spec.Retirement, retirement) {
 		before := w.DeepCopy()
 		w.Spec.Retirement = retirement
+		authorized := r.now()
+		if before.Spec.Retirement == nil || before.Spec.Retirement.Sequence != retirement.Sequence || before.Spec.Retirement.Action != retirement.Action {
+			setExternalRuntimeMilestone(w, externalRetirementAuthorizedAnnotation, retirement.Sequence, authorized)
+		}
+		r.stampExternalRuntimeStopRequested(w, before.Spec.Retirement, pool, authorized)
 		if deleting {
 			w.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
 			w.Spec.Attachment = nil
@@ -1114,6 +1130,12 @@ func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Contex
 	if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
+	// A deleted pool never records Stopped: its released finalizer is the
+	// persisted proof that the runtime stopped.
+	if before.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleStopped {
+		r.observeExternalRuntimeStop(ctx, pool)
+	}
+	r.externalTimings.forget(pool.UID)
 	return ctrl.Result{}, nil
 }
 
@@ -1127,6 +1149,7 @@ func (r *RuntimePoolReconciler) deleteExternalRuntimePoolCoreResources(ctx conte
 	if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 		return true, err
 	}
+	r.noteExternalRuntimeStopProven(pool, w)
 	if w.Spec.Workload != nil {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.PoolBinding.UID != pool.UID {
 			return false, workspaceprovider.ErrStaleIdentity

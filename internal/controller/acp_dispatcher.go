@@ -26,6 +26,7 @@ import (
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -129,9 +130,16 @@ type ACPDispatcher struct {
 	AdmissionGate            *ACPAdmissionGate
 	ACPRuntimeImages         ACPRuntimeImages
 	// LiveEvents receives each running Task's events as they arrive. It may be nil.
-	LiveEvents            *liveevents.Broker
-	SubstrateRouter       *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
+	LiveEvents      *liveevents.Broker
+	SubstrateRouter *RuntimePoolSubstrateRouter // reaches routed native runtimes; see RuntimePoolReconciler
+	// Informers, when set, wake the dispatcher as soon as a Task is queued
+	// or a RuntimePool starts serving or accepting, or frees capacity,
+	// instead of only on the next Interval tick.
+	Informers             cache.Informers
 	runtimeContextFactory func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
+
+	wake     chan struct{}
+	wakeOnce sync.Once
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -227,13 +235,14 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+	removeWakeHandlers := d.registerDispatchWakeHandlers(ctx)
+	defer removeWakeHandlers()
 	heldBy := ""
 	for {
+		lastScan := time.Now()
 		logACPScanError(ctx, d.dispatchOnce(ctx), &heldBy)
-		select {
-		case <-ctx.Done():
+		if !waitForNextDispatchScan(ctx, ticker.C, d.wakeChannel(), lastScan) {
 			return nil
-		case <-ticker.C:
 		}
 	}
 }
@@ -1070,6 +1079,8 @@ func validateFrozenACPDispatchPlan(
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
 	var promptTrace *acpSpan
 	defer func() { promptTrace.End(retErr) }()
+	turnTimings := newACPTurnTimings(task, time.Now)
+	defer func() { turnTimings.log(ctx, task, retErr) }()
 
 	reservationLease := newACPRuntimePoolReservationLease(d, target.reservation)
 	if reservationLease != nil {
@@ -1133,6 +1144,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if _, err := d.pullRequestPresentationCapability(runtimeCtx, task); err != nil {
 		return d.requeueReservedTask(ctx, task, acpReservedRetryCapabilities, err)
 	}
+	turnTimings.mark(acpTurnStepDispatchPreflight)
 	runtimeClient, runtimeFence, profile, maxResultBytes, authErr := d.runtimeClient(
 		runtimeCtx, target, bound.mcpConfiguration, true,
 	)
@@ -1155,6 +1167,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionConfiguration, fmt.Errorf("RuntimePool supervisor is waiting for Agent session configuration support"))
 		}
 	}
+	turnTimings.mark(acpTurnStepRuntimeClient)
 	if bound.mcpConfiguration.NativePermissions == harnessv2.NativePermissionsAsk && !nativePermissionAskSupported {
 		// Never run a Requester Task on a runtime that would pre-approve its tools.
 		return d.rejectPermissionDecisionsRuntime(ctx, task, attemptID, fence)
@@ -1342,6 +1355,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	requeued, reconcileErr := d.reconcilePlannedRuntimeSession(
 		ctx, runtimeClient, task, attemptID, fence, sessionExecution, &runtimeFence,
 	)
+	turnTimings.mark(acpTurnStepSessionPlan)
 	if runtimeContextError(runtimeCtx) != nil && sessionExecution != nil {
 		// Cancellation supersedes an admission requeue. Let the deferred Session
 		// reconciler finalize the open turn and release its mutation lease.
@@ -1391,6 +1405,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "WorkspaceUnsupported", err.Error())
 	}
+	turnTimings.mark(acpTurnStepWorkspacePrepare)
 	baseline := preparedWorkspace.baseline
 	workspace := preparedWorkspace.spec
 	createIssuedAt := preparedWorkspace.createIssuedAt
@@ -1781,6 +1796,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if !created {
 			return fmt.Errorf("RuntimeSession creation was not reconciled")
 		}
+		turnTimings.mark(acpTurnStepSessionCreate)
 		if runtimeSessionRetirementRequired {
 			runtimeSessionCleanupPending = true
 		}
@@ -2030,6 +2046,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			case harnessv2.EventAccepted:
 				admitOnce.Do(func() { close(admitted) })
 				runtimeSessionSettlementRequired = true
+				turnTimings.markPromptAccepted()
 				if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, event); err != nil {
 					return acpUpdatePersistenceError(err)
 				}
@@ -2215,6 +2232,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 			continue
 		}
+		turnTimings.markFailedPromptStream(accepted || summary.Accepted)
 		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpInterruptedOutputFlushTimeout)
 		if persistErr := flushInterruptedOutput(flushCtx); persistErr != nil {
 			streamErr = acpUpdatePersistenceError(persistErr)
@@ -2238,6 +2256,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		return settlementErr
 	}
+	turnTimings.mark(acpTurnStepPromptStream)
 	if terminal == nil {
 		if err := flushInterruptedOutput(ctx); err != nil {
 			logf.FromContext(ctx).Error(err, "persist unterminated ACP buffered streams", "namespace", task.Namespace, "task", task.Name)
@@ -2300,6 +2319,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				),
 			)
 		}
+		turnTimings.mark(acpTurnStepTerminalPersistence)
 		outcome := acpPromptOutcomeFailed
 		switch terminal.Type {
 		case harnessv2.EventCancelled:
@@ -2354,6 +2374,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			ctx, task, attemptID, fence, "terminal prompt lifecycle persistence failed",
 		)
 	}
+	turnTimings.mark(acpTurnStepTerminalPersistence)
 	if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryNotRequested, store.PromptDeliveryValidating, "validate-workspace", ""); err != nil {
 		return err
 	}
@@ -2375,6 +2396,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		validationCtx, runtimeClient, createRequest.RuntimeSessionID, deltaRequest,
 	)
 	cancelValidation()
+	turnTimings.mark(acpTurnStepWorkspaceDelta)
 	if err != nil {
 		httpStatus, code, kind := 0, harnessv2.ErrorCode(""), harnessv2.ClientErrorKind("")
 		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok {
@@ -2402,6 +2424,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 		promptTrace.End(nil)
+		turnTimings.mark(acpTurnStepExecutionSettled)
 		validationMessage := acpWorkspaceValidationFailureMessage(err)
 		if transitionErr := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict, "workspace-validation-failed", validationMessage); transitionErr != nil {
 			return transitionErr
@@ -2439,6 +2462,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	recordACPPromptOutcome(ctx, acpPromptOutcomeSucceeded)
 	promptTrace.End(nil)
+	turnTimings.mark(acpTurnStepExecutionSettled)
 
 	var deliveryStatus corev1alpha1.TaskDeliveryStatus
 	publicationID := ""
@@ -2481,6 +2505,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return d.failTaskForDelivery(ctx, task, deliveryStatus, deliveryStatus.Message)
 	case harnessv2.WorkspaceDeltaPrepared:
 		publicationResult, publicationErr := d.publishWorkspaceDelta(runtimeCtx, task, attemptID, fence, baseline, delta.Delta, sessionExecution)
+		turnTimings.mark(acpTurnStepPublication)
 		publicationID = publicationResult.PublicationID
 		deliveryStatus = publicationResult.Status
 		if deliveryStatus.State != "" {
@@ -2561,12 +2586,14 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		runtimePublicationFinalization = &finalization
 	}
+	turnTimings.mark(acpTurnStepPublicationFinalize)
 	if err := finalizePreparedRuntimeSession(); err != nil {
 		return err
 	}
 	if err := captureSuccessfulRuntimeSession(); err != nil {
 		return err
 	}
+	turnTimings.mark(acpTurnStepRuntimeFinalize)
 	// A read-only Session normally keeps its RuntimeSession resident for the
 	// next turn. When this turn parked, release that capacity: mark the
 	// binding for recreation while the Session lease is still held, so no
@@ -2582,6 +2609,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	); err != nil {
 		return err
 	}
+	turnTimings.mark(acpTurnStepSessionResult)
 	if runtimeSessionRetirementRequired {
 		if cleanupErr := cleanupRuntimeSession("task_finalized"); cleanupErr != nil {
 			return cleanupErr
@@ -2592,7 +2620,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	} else if releaseParkedRuntime {
 		d.releaseParkedRuntimeSession(ctx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, sessionExecution.Binding.SessionUID)
 	}
-	return d.completeSuccessWithDelivery(ctx, task, deliveryStatus, "ACP task completed")
+	turnTimings.mark(acpTurnStepRuntimeRetirement)
+	completionErr := d.completeSuccessWithDelivery(ctx, task, deliveryStatus, "ACP task completed")
+	turnTimings.mark(acpTurnStepTaskCompletion)
+	return completionErr
 }
 
 // acpExecutionUpdatePersistenceError marks a failure to persist an execution

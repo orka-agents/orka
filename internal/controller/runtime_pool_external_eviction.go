@@ -352,6 +352,9 @@ func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 		if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 			return nil, err
 		}
+		if requestRetirement {
+			r.externalTimings.observeRetirement(pool.UID, w.Spec.Workload.Sequence, true, r.now())
+		}
 	}
 	return &record, nil
 }
