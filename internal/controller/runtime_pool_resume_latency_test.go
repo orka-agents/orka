@@ -272,20 +272,33 @@ func TestExternalRuntimePoolPublishedResumeWaitsForProviderWithoutDegrading(t *t
 		t.Fatalf("cold boot did not publish the successor request: %#v", request)
 	}
 
-	// Core re-admits the published generation (the fake client keeps the
-	// generation, so that is the admitted one); the provider has not yet
-	// reported the new allocation.
-	if workspace.Spec.CoreAdmission.AdmittedGeneration != workspace.Generation {
-		workspace.Spec.CoreAdmission.AdmittedGeneration = workspace.Generation
-		if err := f.r.Update(context.Background(), workspace); err != nil {
-			t.Fatal(err)
-		}
-		workspace = f.currentWorkspace(t)
+	// Advance the workspace generation explicitly (the fake client does not bump
+	// Generation on spec updates) and re-admit it in Core while the provider has
+	// not yet reported the new allocation.
+	prevObserved := workspace.Status.ObservedGeneration
+	workspace.Generation++
+	workspace.Spec.CoreAdmission.AdmittedGeneration = workspace.Generation
+	if err := f.r.Update(context.Background(), workspace); err != nil {
+		t.Fatal(err)
 	}
+	workspace = f.currentWorkspace(t)
+	meta.SetStatusCondition(&workspace.Status.Conditions, metav1.Condition{
+		Type:               string(workspacev1alpha1.ConditionWorkspaceAdmitted),
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: workspace.Generation,
+		Reason:             string(workspacev1alpha1.ReasonReady),
+	})
+	if err := f.r.Status().Update(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	workspace = f.currentWorkspace(t)
 	if !workspaceCurrentlyAdmittedByCore(workspace) {
 		t.Fatalf("fixture did not re-admit generation %d: %#v", workspace.Generation, workspace.Spec.CoreAdmission)
 	}
-	for _, observed := range []int64{workspace.Status.ObservedGeneration, workspace.Generation} {
+	if prevObserved == workspace.Generation {
+		t.Fatalf("expected predecessor observed generation (%d) to differ from successor generation (%d)", prevObserved, workspace.Generation)
+	}
+	for _, observed := range []int64{prevObserved, workspace.Generation} {
 		workspace.Status.ObservedGeneration = observed
 		if err := f.r.Status().Update(context.Background(), workspace); err != nil {
 			t.Fatal(err)
