@@ -10,7 +10,7 @@ import (
 
 // ProtocolRevision is this library's orka.storage.v1 protocol revision. A
 // release raises it whenever it adds RPCs or request fields.
-const ProtocolRevision = 2
+const ProtocolRevision = 3
 
 // Call metadata keys. The contract and revision headers travel on every
 // request and response. The dataset header names the dataset a request

@@ -1624,11 +1624,16 @@ class, an upload a write and a download or list stream a read. Generation fails 
 part differs from the catalog, when any parameter, result or record field,
 including a `json:"-"` field, has no wire field or the reverse, when two Go
 fields claim one wire field, or when a pair of types is outside the mapping
-table. A family whose service does not exist yet is not checked.
+table. The table pairs `encoding/json.RawMessage`, `any` and `map[string]any`
+with `JSONValue`, a map from string to a scalar with a wire map of the same
+scalar, and a contract record embedded in another, such as the
+`ExecutionEvent` in `SessionExecutionEvent`, with a message field named after
+it. A family whose service does not exist yet is not checked.
 CI regenerates the code and fails on a difference.
 
 The wire currently serves `Describe` and `HealthCheck`, inter-agent messages,
-plan state, Task results, prompt result receipts and the `artifacts.v1`
+plan state, Task results, prompt result receipts, execution events (with their
+deduplicated, grouped and plan-carrying appends) and the `artifacts.v1`
 artifact store. The other families stay in process until their RPCs land.
 `wiretest.State` serves a provider over an in-memory loopback with TLS 1.3 and
 bearer authentication, sending each family that has RPCs through the server
@@ -1723,8 +1728,9 @@ artifact-fence cases run only in process.
 - **Unknown fields.** The server refuses a request with a field it does not
   know anywhere in its message tree, including any message of a stream
   (`UNSUPPORTED_FIELD`), so an older server
-  never ignores a newer precondition. The protocol revision starts at 1 and is 2
-  since the result, receipt and artifact RPCs; a release raises it when it adds RPCs or request fields, and the client calls
+  never ignores a newer precondition. The protocol revision starts at 1, is 2
+  since the result, receipt and artifact RPCs and 3 since the execution event
+  RPCs; a release raises it when it adds RPCs or request fields, and the client calls
   an RPC only on a server of at least the revision that introduced it. A
   newer field of a read or an administrative call is sent only to such a
   server; on an older one the client refuses a call that sets it
