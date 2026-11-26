@@ -291,7 +291,8 @@ func newTaskAdmissionView(task *corev1alpha1.Task, granted []types.UID, tasks []
 	if listed, ok := eligible[task.UID]; ok {
 		self = listed
 		_, view.granted = grants[task.UID]
-		view.claimant = view.granted || taskAdmissionRetryPending(listed)
+		_, ownsJob := jobOwners[task.UID]
+		view.claimant = view.granted || taskAdmissionRetryPending(listed) || taskAdmittedByWork(listed) || ownsJob
 	}
 	for uid, candidate := range eligible {
 		if uid == task.UID {
@@ -432,7 +433,7 @@ func (r *TaskReconciler) taskAdmissionSlot(ctx context.Context, task *corev1alph
 // leader created.
 func (r *TaskReconciler) taskAdmissionJobOwners(ctx context.Context, namespace string) (map[types.UID]struct{}, error) {
 	jobs := &batchv1.JobList{}
-	if err := r.List(ctx, jobs, client.InNamespace(namespace)); err != nil {
+	if err := uncachedReader(r.APIReader, r.Client).List(ctx, jobs, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
 	owners := map[types.UID]struct{}{}
