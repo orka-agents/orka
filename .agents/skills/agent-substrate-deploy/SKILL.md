@@ -1,6 +1,6 @@
 ---
 name: agent-substrate-deploy
-description: Stand up official Agent Substrate on a dedicated gVisor kind cluster and validate Orka direct, MCP, ACP, and data-only checkpoint paths.
+description: Stand up official Agent Substrate on a dedicated gVisor kind cluster and validate Orka direct exec, data-only checkpoint restore, MCP Tools, egress credential injection, and trace propagation; ACP runs in orka-workspace's provider proofs.
 ---
 
 # Agent Substrate deployment
@@ -14,8 +14,13 @@ This workflow is local evaluation, not a production provider installer.
 
 Drive `hack/demos/cluster/install-substrate.sh` in place. It retains the cluster
 and calls the same `scripts/agent-substrate-e2e.sh` used by CI. The suite builds
-the provider from its official pin and runs direct, MCP, and real ACP runtime
-execution against a local Responses fixture. It needs no model or Git account.
+the provider from its official pin and runs direct workspace execution with a
+data-only checkpoint restore, pooled MCP Tools, egress-gateway credential
+injection, and trace propagation through the MCP proxy. It needs no model or Git
+account. It installs no ACP workspace provider: ACP on Substrate (Task
+execution, Session suspend and cold resume, worker eviction) is proven by the
+standalone provider's Data and Core proofs in `orka-workspace`, which CI runs in
+`.github/workflows/agent-substrate-acp-e2e.yml`.
 
 1. Check Docker, kind, ko, Go 1.27, git, jq, kubectl, openssl, Python, curl, and
    ripgrep. Install missing local CLI dependencies as needed. Do not restart

@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Substrate Deploy"
   short_description: "Validate official Substrate execution and cold checkpoints"
-  default_prompt: "Use $agent-substrate-deploy to install the official Substrate pin on a dedicated gVisor kind cluster and validate Orka direct, MCP, ACP, and DataOnly checkpoint paths."
+  default_prompt: "Use $agent-substrate-deploy to install the official Substrate pin on a dedicated gVisor kind cluster and validate Orka direct exec, DataOnly checkpoint restore, MCP Tools, egress credential injection, and trace propagation."
