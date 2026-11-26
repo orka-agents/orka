@@ -252,6 +252,58 @@ func (s *crashRecoveryEpochStore) CompareAndSwapControllerEpoch(ctx context.Cont
 	return s.ControllerEpochStore.CompareAndSwapControllerEpoch(ctx, change)
 }
 
+func (s *crashRecoveryEpochStore) records() (store.StorageRecordStore, error) {
+	records, ok := s.ControllerEpochStore.(store.StorageRecordStore)
+	if !ok {
+		return nil, errors.New("wrapped controller epoch store keeps no storage record")
+	}
+	return records, nil
+}
+
+func (s *crashRecoveryEpochStore) GetStorageRecord(ctx context.Context, name string) (store.StorageRecord, error) {
+	records, err := s.records()
+	if err != nil {
+		return store.StorageRecord{}, err
+	}
+	return records.GetStorageRecord(ctx, name)
+}
+
+func (s *crashRecoveryEpochStore) RecordStorageAcknowledgement(ctx context.Context, fence store.ControllerEpochFence, ack store.StorageAcknowledgement) error {
+	records, err := s.records()
+	if err != nil {
+		return err
+	}
+	return records.RecordStorageAcknowledgement(ctx, fence, ack)
+}
+
+func (s *crashRecoveryEpochStore) RecordStorageWatermark(
+	ctx context.Context, fence store.ControllerEpochFence, datasetID string, watermark int64, at time.Time,
+) error {
+	records, err := s.records()
+	if err != nil {
+		return err
+	}
+	return records.RecordStorageWatermark(ctx, fence, datasetID, watermark, at)
+}
+
+func (s *crashRecoveryEpochStore) HoldStorage(ctx context.Context, fence store.ControllerEpochFence, hold store.StorageRecoveryHold) (store.StorageRecoveryHold, error) {
+	records, err := s.records()
+	if err != nil {
+		return store.StorageRecoveryHold{}, err
+	}
+	return records.HoldStorage(ctx, fence, hold)
+}
+
+func (s *crashRecoveryEpochStore) ReleaseStorageHold(
+	ctx context.Context, fence store.ControllerEpochFence, id string, acks []store.StorageAcknowledgement,
+) error {
+	records, err := s.records()
+	if err != nil {
+		return err
+	}
+	return records.ReleaseStorageHold(ctx, fence, id, acks)
+}
+
 func (s *crashRecoveryEpochStore) ControllerEpochInstallationID(ctx context.Context, name string) (string, error) {
 	installations, ok := s.ControllerEpochStore.(store.ControllerEpochInstallationReader)
 	if !ok {

@@ -304,10 +304,11 @@ func validateAgentRuntimeReasoningEffort(runtimeCfg *corev1alpha1.AgentCLIRuntim
 	switch runtimeCfg.Type {
 	case corev1alpha1.AgentRuntimeCodex:
 		switch effort {
-		case agentReasoningEffortNone, agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh, agentReasoningEffortXHigh:
+		case agentReasoningEffortNone, agentReasoningEffortLow, agentReasoningEffortMedium, agentReasoningEffortHigh,
+			agentReasoningEffortXHigh, agentReasoningEffortMax:
 			return nil
 		default:
-			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be none, low, medium, high, or xhigh", effort)
+			return fmt.Errorf("codex runtime defaultReasoningEffort %q must be none, low, medium, high, xhigh, or max", effort)
 		}
 	case corev1alpha1.AgentRuntimeClaude:
 		switch effort {
@@ -517,6 +518,18 @@ func (r *AgentReconciler) validateCoordination(ctx context.Context, agent *corev
 				return fmt.Errorf("coordination target agent %q not found", allowed.Name)
 			}
 			return fmt.Errorf("failed to check coordination target agent %q: %w", allowed.Name, err)
+		}
+	}
+	for _, name := range agent.Spec.Coordination.DelegatedGatewayTools {
+		tool := &corev1alpha1.Tool{}
+		if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: agent.Namespace}, tool); err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("delegated gateway tool %q not found", name)
+			}
+			return fmt.Errorf("failed to check delegated gateway tool %q: %w", name, err)
+		}
+		if tool.Spec.HTTP == nil || !tool.Spec.HTTP.GatewayTaskPass {
+			return fmt.Errorf("delegated gateway tool %q is not a gateway task pass tool", name)
 		}
 	}
 	return nil

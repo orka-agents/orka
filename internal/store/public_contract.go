@@ -176,6 +176,7 @@ type (
 	UsageWorkRequest                          = storagev1.UsageWorkRequest
 	UsageTask                                 = storagev1.UsageTask
 	UsageGatewayOwner                         = storagev1.UsageGatewayOwner
+	UsageRequester                            = storagev1.UsageRequester
 	UsageTaskPhase                            = storagev1.UsageTaskPhase
 	UsageObservation                          = storagev1.UsageObservation
 	UsagePRLink                               = storagev1.UsagePRLink
@@ -185,11 +186,17 @@ type (
 	UsageStore                                = storagev1.UsageStore
 	Memory                                    = storagev1.Memory
 	MemoryFilter                              = storagev1.MemoryFilter
+	MemoryRecall                              = storagev1.MemoryRecall
 	MemoryProposal                            = storagev1.MemoryProposal
 	MemoryProposalFilter                      = storagev1.MemoryProposalFilter
 	MemoryProposalReview                      = storagev1.MemoryProposalReview
 	MemoryProposalApplyTarget                 = storagev1.MemoryProposalApplyTarget
 	MemoryProposalApplication                 = storagev1.MemoryProposalApplication
+	MemoryProposalTarget                      = storagev1.MemoryProposalTarget
+	MemoryConsolidationRun                    = storagev1.MemoryConsolidationRun
+	MemoryConsolidationCompletion             = storagev1.MemoryConsolidationCompletion
+	MemoryConsolidationStore                  = storagev1.MemoryConsolidationStore
+	MemoryProposalSource                      = storagev1.MemoryProposalSource
 	MemoryStore                               = storagev1.MemoryStore
 	TaskUsageObservationReader                = storagev1.TaskUsageObservationReader
 )
@@ -260,6 +267,21 @@ const (
 	MemorySourceProposal              = storagev1.MemorySourceProposal
 	MemoryProposalTypeSkill           = storagev1.MemoryProposalTypeSkill
 	MemoryProposalTypeMemory          = storagev1.MemoryProposalTypeMemory
+	MemoryProposalTypeMerge           = storagev1.MemoryProposalTypeMerge
+	MemoryProposalTypeSupersede       = storagev1.MemoryProposalTypeSupersede
+	MemoryProposalTypeRetire          = storagev1.MemoryProposalTypeRetire
+	MaxMemoryProposalTargets          = storagev1.MaxMemoryProposalTargets
+	MaxMemoryProposalSources          = storagev1.MaxMemoryProposalSources
+	MemoryConsolidationRunning        = storagev1.MemoryConsolidationRunning
+	MemoryConsolidationModePropose    = storagev1.MemoryConsolidationModePropose
+	MemoryConsolidationCompleted      = storagev1.MemoryConsolidationCompleted
+	MemoryConsolidationSkipped        = storagev1.MemoryConsolidationSkipped
+	MaxMemoryConsolidationReportBytes = storagev1.MaxMemoryConsolidationReportBytes
+	MaxMemoryConsolidationProposals   = storagev1.MaxMemoryConsolidationProposals
+	MemoryConsolidationRunLease       = storagev1.MemoryConsolidationRunLease
+	MemoryConsolidationAbandoned      = storagev1.MemoryConsolidationAbandoned
+	MaxMemoryConsolidationInputBytes  = storagev1.MaxMemoryConsolidationInputBytes
+	MaxMemoryConsolidationSessions    = storagev1.MaxMemoryConsolidationSessions
 	MemoryProposalStatusPending       = storagev1.MemoryProposalStatusPending
 	MemoryProposalStatusAccepted      = storagev1.MemoryProposalStatusAccepted
 	MemoryProposalStatusRejected      = storagev1.MemoryProposalStatusRejected
@@ -267,7 +289,11 @@ const (
 	MemoryProposalStatusApplied       = storagev1.MemoryProposalStatusApplied
 	MaxArtifactBytes                  = storagev1.MaxArtifactBytes
 	MaxMessageBatch                   = storagev1.MaxMessageBatch
+	MaxMemoryRecallIDs                = storagev1.MaxMemoryRecallIDs
 	MaxResultBytes                    = storagev1.MaxResultBytes
+	MaxMessageContentBytes            = storagev1.MaxMessageContentBytes
+	MaxMessageBatchBytes              = storagev1.MaxMessageBatchBytes
+	MaxControlIdentifierBytes         = storagev1.MaxControlIdentifierBytes
 )
 
 var (
@@ -403,4 +429,10 @@ func ValidateUsageObservation(observation UsageObservation) error {
 
 func UsageWorkID(namespace, monitorUID, repository, kind string, number int64) string {
 	return storagev1.UsageWorkID(namespace, monitorUID, repository, kind, number)
+}
+
+// IsMemoryConsolidationProposalType reports whether proposalType is one of
+// the consolidation proposal types, which change existing memories.
+func IsMemoryConsolidationProposalType(proposalType string) bool {
+	return storagev1.IsMemoryConsolidationProposalType(proposalType)
 }

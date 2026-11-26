@@ -22,7 +22,7 @@ func TestPromptCancellationRetriesUnsentPreflight(t *testing.T) {
 	for _, persistenceFailure := range []bool{false, true} {
 		name := "task timeout"
 		if persistenceFailure {
-			name = "plan persistence failure"
+			name = "execution update persistence failure"
 		}
 		t.Run(name, func(t *testing.T) {
 			fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{})
@@ -49,7 +49,7 @@ func TestPromptCancellationRetriesUnsentPreflight(t *testing.T) {
 			runtimeContextErr, streamErr := context.DeadlineExceeded, context.DeadlineExceeded
 			if persistenceFailure {
 				runtimeContextErr = nil
-				streamErr = acpUpdatePersistenceError(nil, errors.New("synthetic plan persistence failure"))
+				streamErr = acpUpdatePersistenceError(errors.New("synthetic execution update persistence failure"))
 			}
 			if err := fixture.dispatcher.handlePromptStreamError(
 				fixture.ctx, nil, runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
@@ -71,7 +71,10 @@ func TestPromptCancellationRetriesUnsentPreflight(t *testing.T) {
 			if completed.Status.Execution == nil || completed.Status.Execution.State != wantState || completed.Status.Execution.Reason != wantReason {
 				t.Fatalf("settled original prompt status = %#v", completed.Status.Execution)
 			}
-			fixture.assertTerminalLifecycle(t, harnessv2.EventCancelled, true)
+			if !persistenceFailure {
+				// A failed journal records no further lifecycle.
+				fixture.assertTerminalLifecycle(t, harnessv2.EventCancelled, true)
+			}
 		})
 	}
 }

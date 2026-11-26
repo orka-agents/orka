@@ -25,13 +25,44 @@ const externalMode = `${modeAnchor}    static readonly OrkaExternal = new AgentM
         {"type": "externalSandbox", networkAccess: "restricted"},
         "read-only",
     );
+    static readonly OrkaExternalAsk = new AgentMode(
+        "orka-external-ask",
+        "Orka external sandbox, ask",
+        "Execution is confined by the Orka RuntimeSession boundary; commands and file changes ask first.",
+        "standard",
+        "untrusted",
+        "user",
+        {"type": "externalSandbox", networkAccess: "restricted"},
+        "read-only",
+    );
 `;
 if (!source.includes(modeAnchor)) throw new Error("AgentFullAccess anchor not found");
 source = source.replace(modeAnchor, externalMode);
 
 const allAnchor = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess];`;
-const allReplacement = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess, AgentMode.OrkaExternal];`;
+const allReplacement = `        return [AgentMode.ReadOnly, AgentMode.WorkspaceWrite, AgentMode.Agent, AgentMode.AgentFullAccess, AgentMode.OrkaExternal, AgentMode.OrkaExternalAsk];`;
 if (!source.includes(allAnchor)) throw new Error("AgentMode.all anchor not found");
 source = source.replace(allAnchor, allReplacement);
 
 writeFileSync(path, source);
+
+// The adapter marks every session root as a trusted Codex project, which makes
+// Codex load the cloned repository's .codex/config.toml. Its mcp_servers and
+// shell_environment_policy entries then run repository commands outside the
+// Orka tool policy. Grant no trust instead, so Codex treats the root like any
+// unknown directory: project config stays disabled while AGENTS.md and the
+// default approval behavior remain. An explicit "untrusted" level would also
+// drop AGENTS.md. The supervisor rewrites CODEX_HOME/config.toml for every
+// session, so no trust entry can carry over from an earlier session.
+const clientPath = process.argv[3];
+if (!clientPath) throw new Error("CodexAcpClient.ts path is required");
+let client = readFileSync(clientPath, "utf8");
+const trustAnchor = `            projects: Object.fromEntries(sessionRoots.map(root => [root, {
+                trust_level: "trusted",
+            }])),
+`;
+const trustReplacement = `            projects: {},
+`;
+if (client.split(trustAnchor).length !== 2) throw new Error("session root trust anchor not found exactly once");
+client = client.replace(trustAnchor, trustReplacement);
+writeFileSync(clientPath, client);

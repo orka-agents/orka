@@ -22,6 +22,9 @@ func validateTaskPullRequestText(task *corev1alpha1.Task) error {
 		return nil
 	}
 	workspace := task.Spec.Workspace
+	if _, _, err := publisher.ValidateCommitIdentity(workspace.CommitAuthorName, workspace.CommitAuthorEmail); err != nil {
+		return fmt.Errorf("commit identity is invalid: %w", err)
+	}
 	if message := workspace.CommitMessage; message != "" {
 		if !utf8.ValidString(message) || strings.ContainsAny(message, "\x00\r") || len(taskPublicationCommitMessage(task)) > maxTaskPublicationCommitMessageBytes {
 			return fmt.Errorf("commitMessage must be UTF-8 without NUL or carriage returns and at most %d bytes", maxTaskPublicationCommitMessageBytes)

@@ -15,14 +15,16 @@ import (
 // target again after the provider reports that it changed.
 const maxMemoryProposalApplyAttempts = 5
 
-// ApplyMemoryProposal applies an accepted memory proposal in three steps, so
-// no provider transaction is open while Orka authorizes:
+// ApplyMemoryProposal applies an accepted memory or consolidation proposal in
+// three steps, so no provider transaction is open while Orka authorizes:
 //
 //  1. The provider resolves the memory the application would return, by ID
 //     only.
 //  2. Orka authorizes that exact memory through apply.AuthorizeExistingMemory
 //     (when set). A new memory is covered by the caller's own create
-//     permission; Orka builds it from the stored proposal and redacts it.
+//     permission; Orka builds it from the stored proposal and redacts it. A
+//     consolidation proposal also needs apply.AuthorizeMemoryChange (when
+//     set) for every memory it targets.
 //  3. The provider commits only while the proposal still resolves to the same
 //     target. When it changed, for example because a concurrent application
 //     created the memory, the loop resolves and authorizes again.
@@ -42,7 +44,20 @@ func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProp
 		if err != nil {
 			return nil, err
 		}
+		// A proposal's type and targets never change, so the proposal read
+		// after the resolve names the memories this application changes.
+		proposal, err := c.GetMemoryProposal(ctx, namespace, id)
+		if err != nil {
+			return nil, err
+		}
 		application := store.MemoryProposalApplication{Target: target, AppliedBy: appliedBy, AppliedAt: time.Now().UTC()}
+		if target.AppliedMemoryID == "" && store.IsMemoryConsolidationProposalType(proposal.Type) && apply.AuthorizeMemoryChange != nil {
+			for _, changed := range proposal.Targets {
+				if err := apply.AuthorizeMemoryChange(ctx, target.Namespace, changed.MemoryID); err != nil {
+					return nil, err
+				}
+			}
+		}
 		if target.MemoryID != "" {
 			if apply.AuthorizeExistingMemory != nil {
 				if err := apply.AuthorizeExistingMemory(ctx, target.Namespace, target.MemoryID); err != nil {
@@ -50,10 +65,6 @@ func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProp
 				}
 			}
 		} else {
-			proposal, err := c.GetMemoryProposal(ctx, namespace, id)
-			if err != nil {
-				return nil, err
-			}
 			application.Memory = memoryFromProposal(proposal, application.AppliedAt)
 		}
 		memory, err := c.CommitMemoryProposalApplication(ctx, application)

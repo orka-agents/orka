@@ -1269,6 +1269,141 @@ func TestJournalReturnsPersistentAppendFailureAfterOneRetry(t *testing.T) {
 	}
 }
 
+// stallingAppendEventStore commits an append and then, like a store whose
+// reply is stuck behind a stalled connection pool, returns only when the
+// caller's context ends. Its lists fail on an ended context, as
+// database/sql does before it waits for a connection.
+type stallingAppendEventStore struct {
+	store.ExecutionEventStore
+	listStarted chan struct{}
+	blockList   bool
+	// failAppends makes an append fail at once, without committing.
+	failAppends bool
+	// skipCommit makes an append wait out its context without committing.
+	skipCommit  bool
+	appendCalls int
+	listCalls   int
+}
+
+func (s *stallingAppendEventStore) AppendExecutionEventIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
+	s.appendCalls++
+	if s.failAppends {
+		return nil, false, errors.New("append failed")
+	}
+	if s.skipCommit {
+		<-ctx.Done()
+		return nil, false, ctx.Err()
+	}
+	deduplicatingStore := s.ExecutionEventStore.(store.DeduplicatingExecutionEventStore)
+	if _, _, err := deduplicatingStore.AppendExecutionEventIfAbsent(context.WithoutCancel(ctx), event, dedupeKey); err != nil {
+		return nil, false, err
+	}
+	<-ctx.Done()
+	return nil, false, ctx.Err()
+}
+
+func (s *stallingAppendEventStore) ListExecutionEvents(
+	ctx context.Context,
+	filter store.ExecutionEventFilter,
+) ([]store.ExecutionEvent, error) {
+	s.listCalls++
+	if s.listStarted != nil {
+		select {
+		case s.listStarted <- struct{}{}:
+		default:
+		}
+	}
+	if s.blockList {
+		<-ctx.Done()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.ExecutionEventStore.ListExecutionEvents(ctx, filter)
+}
+
+func TestJournalReconcilesAnAppendThatOutlivedItsDeadline(t *testing.T) {
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &stallingAppendEventStore{ExecutionEventStore: base}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	appended, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if err != nil || isNew || appended != nil {
+		t.Fatalf("append that committed before its deadline = %#v new=%t err=%v, want reconciled", appended, isNew, err)
+	}
+	if !state.HasUpdate(event) {
+		t.Fatal("journal did not remember the reconciled update")
+	}
+}
+
+// An append that waited out its caller's deadline and did not commit is
+// reconciled once, and not retried under the ended context.
+func TestJournalDoesNotRetryAnAppendAfterItsDeadline(t *testing.T) {
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &stallingAppendEventStore{ExecutionEventStore: base, skipCommit: true}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listsBefore := eventStore.listCalls
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	_, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if !errors.Is(err, context.DeadlineExceeded) || isNew {
+		t.Fatalf("append that never committed: new=%t err=%v, want its deadline", isNew, err)
+	}
+	if eventStore.appendCalls != 1 || eventStore.listCalls-listsBefore != 1 {
+		t.Fatalf("appends = %d and reconcile lists = %d, want one of each", eventStore.appendCalls, eventStore.listCalls-listsBefore)
+	}
+	if state.HasUpdate(event) {
+		t.Fatal("journal remembered an update that was never persisted")
+	}
+}
+
+func TestJournalReconcileStopsWhenTheCallerCancels(t *testing.T) {
+	base := storetest.NewFakeExecutionEventStore()
+	eventStore := &stallingAppendEventStore{ExecutionEventStore: base, failAppends: true}
+	state, err := (Journal{EventStore: eventStore, MapContext: testMapContext()}).Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the reconcile lists from here on; it blocks until its context ends.
+	eventStore.listStarted, eventStore.blockList = make(chan struct{}, 1), true
+	event := testUpdateEvent(2, time.Now().UTC(), harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateUsage, Usage: &harnessv2.UsageUpdate{InputTokens: 10},
+	})
+	// The deadline is shorter than the reconcile budget, so the reconcile is
+	// detached from it, and still ends when the caller cancels.
+	ctx, cancel := context.WithTimeout(t.Context(), mappedAppendReconcileTimeout/2)
+	defer cancel()
+	go func() {
+		<-eventStore.listStarted
+		cancel()
+	}()
+	started := time.Now()
+	_, isNew, err := state.AppendUpdateIfNew(ctx, event)
+	if !errors.Is(err, context.Canceled) || isNew {
+		t.Fatalf("append whose caller cancelled during the reconcile: new=%t err=%v, want context.Canceled", isNew, err)
+	}
+	if elapsed := time.Since(started); elapsed >= mappedAppendReconcileTimeout/2 {
+		t.Fatalf("reconcile ran for %v after its caller cancelled", elapsed)
+	}
+}
+
 func TestJournalDoesNotRetryWhenAppendAbsenceCannotBeConfirmed(t *testing.T) {
 	ctx := context.Background()
 	base := storetest.NewFakeExecutionEventStore()

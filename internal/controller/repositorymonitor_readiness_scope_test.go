@@ -127,7 +127,7 @@ func TestRepositoryMonitorReadinessRevokesOutOfScopeHead(t *testing.T) {
 				wantState, wantWrites = repositoryMonitorStatusSuccess, 2
 			}
 			if peerDirty {
-				wantState = repositoryMonitorStatusPending
+				wantState = repositoryMonitorStatusFailure
 			}
 			if latest.State != wantState || writes != wantWrites {
 				t.Fatalf("readiness=%+v writes=%d, want %s and %d", latest, writes, wantState, wantWrites)

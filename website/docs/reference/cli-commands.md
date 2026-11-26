@@ -24,6 +24,7 @@ Usage:
 Available Commands:
   agent         Manage agents
   agent-runtime Manage external orka.harness.v2 AgentRuntime registrations
+  ahp           Connect desktop Agent Host Protocol clients to Orka
   audit         Inspect audit and transaction traces
   auth          Inspect authentication
   completion    Generate the autocompletion script for the specified shell
@@ -34,6 +35,8 @@ Available Commands:
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
   host          See and manage your agent host for the Copilot app
+  login         Sign in to Orka with GitHub
+  logout        End your Orka session from orka login
   memory        Manage durable memory
   models        List compatible model IDs
   monitor       Manage repository monitors
@@ -347,6 +350,132 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
+## `orka ahp`
+
+```text
+Desktop Agent Host Protocol (AHP) clients connect to Orka as a remote agent host by a WebSocket URL that carries a connection token. 'orka ahp connect' mints one for the signed-in person and prints the URL; 'orka ahp tokens' lists and revokes them.
+
+Usage:
+  orka ahp [command]
+
+Available Commands:
+  connect     Mint an AHP connection token and print the URL to paste into a desktop AHP client
+  tokens      List and revoke your AHP connection tokens
+
+Flags:
+  -h, --help   help for ahp
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka ahp [command] --help" for more information about a command.
+```
+
+## `orka ahp connect`
+
+```text
+Mint an AHP connection token for the signed-in person and print the WebSocket URL a desktop AHP client connects to. The token you use must be your own OIDC sign-in; context tokens and ServiceAccount tokens cannot mint AHP tokens. The URL is shown once and carries the token: anyone holding it acts as you on Orka until it expires or you revoke it.
+
+The URL is built from --url, or else from the server the CLI talks to. Use --url with the public https address people reach the Orka API on when the CLI reaches it another way, such as a port-forward.
+
+Usage:
+  orka ahp connect [flags]
+
+Flags:
+  -h, --help            help for connect
+      --insecure        Allow a plaintext ws:// URL to a host other than this machine; the token then crosses the network unencrypted
+      --name string     Name for this token, such as the device it is for (default: this machine's host name)
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --ttl string      Token lifetime as a Go duration such as 720h (default: the server's, 720h unless configured)
+      --url string      Public address of the Orka API to build the URL from, such as https://orka.example.com (default: --server)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka ahp tokens`
+
+```text
+List and revoke your AHP connection tokens
+
+Usage:
+  orka ahp tokens [command]
+
+Available Commands:
+  list        List your AHP connection tokens
+  revoke      Revoke AHP connection tokens and close their connections
+
+Flags:
+  -h, --help   help for tokens
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka ahp tokens [command] --help" for more information about a command.
+```
+
+## `orka ahp tokens list`
+
+```text
+List your AHP connection tokens without their secrets. Expired and revoked tokens are shown with --all.
+
+Usage:
+  orka ahp tokens list [flags]
+
+Flags:
+      --all             Include expired and revoked tokens
+  -h, --help            help for list
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka ahp tokens revoke`
+
+```text
+Revoke one or more of your AHP connection tokens. Clients connected with a revoked token are disconnected, and its URL stops working.
+
+Usage:
+  orka ahp tokens revoke <id>... [flags]
+
+Flags:
+  -h, --help   help for revoke
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka audit`
 
 ```text
@@ -356,6 +485,7 @@ Usage:
   orka audit [command]
 
 Available Commands:
+  identity    Query redacted agent-identity-audit records
   trace       Show tasks correlated by transaction ID
 
 Flags:
@@ -371,6 +501,33 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka audit [command] --help" for more information about a command.
+```
+
+## `orka audit identity`
+
+```text
+Query redacted agent-identity-audit records
+
+Usage:
+  orka audit identity [flags]
+
+Flags:
+      --agent string      Filter by Agent name
+  -h, --help              help for identity
+      --limit int         Maximum number of audit records to return (default 100)
+      --outcome string    Filter by outcome: issued or refused
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --task string       Filter by Task name in the active namespace
+      --task-uid string   Filter by Task UID
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka audit trace`
@@ -404,6 +561,7 @@ Usage:
   orka auth [command]
 
 Available Commands:
+  login       Sign in to Orka with OIDC (device-code flow)
   validate    Validate current credentials
   whoami      Show sanitized authenticated identity
 
@@ -420,6 +578,32 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka auth [command] --help" for more information about a command.
+```
+
+## `orka auth login`
+
+```text
+Sign in to Orka using OpenID Connect device-code flow. By default, discovers the OIDC issuer and audience from the Orka server (/api/v1/auth/config), requests a device code, saves an Orka-compatible JWT (and refresh token when issued) in your Orka config, and refreshes it on demand when a later command runs near or after expiry (otherwise run 'orka auth login' again).
+
+Usage:
+  orka auth login [flags]
+
+Flags:
+      --client-id string   OIDC public client ID (defaults to the server's advertised audience)
+  -h, --help               help for login
+      --issuer string      OIDC issuer URL (defaults to the server's advertised issuer)
+      --no-open            Print the verification URL without opening a browser
+      --scope string       Space-separated OAuth scopes to request
+      --timeout duration   Maximum time to wait for device-code approval (default 15m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka auth validate`
@@ -674,7 +858,7 @@ Usage:
   orka connection complete <name> [flags]
 
 Flags:
-      --completion string   The value after '#completion=' in the dashboard URL the provider callback opened
+      --completion string   The value after '#completion=' (or the full redirect URL) from the browser address bar
   -h, --help                help for complete
 
 Global Flags:
@@ -1216,6 +1400,7 @@ Usage:
 
 Available Commands:
   delete      Delete your agent host and its volume
+  invite      Invite someone who cannot reach Orka to a Copilot environment
   status      Show your agent host
   wake        Start your agent host after it idled out
 
@@ -1245,6 +1430,28 @@ Usage:
 Flags:
   -h, --help   help for delete
       --yes    Confirm deleting the host and its volume
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host invite`
+
+```text
+Start GitHub's device flow for a GitHub login. Pass the code on; once that person approves it with that GitHub account, and is in an allowed org or team, Orka links their account and starts their Copilot environment. They need only a browser and the Copilot app. Needs Kubernetes credentials allowed to create agenthosts.
+
+Usage:
+  orka host invite <github-login> [flags]
+
+Flags:
+  -h, --help               help for invite
+      --timeout duration   How long to wait for the invited person (default 16m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1288,6 +1495,51 @@ Usage:
 
 Flags:
   -h, --help   help for wake
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka login`
+
+```text
+Sign in to Orka with your GitHub account. You approve a code on github.com, Orka checks you are in an allowed org or team, links your GitHub account, and starts your Copilot environment unless you pass --no-host. The session replaces the token and namespace saved in your Orka config, and renews itself.
+
+Usage:
+  orka login [flags]
+
+Flags:
+  -h, --help               help for login
+      --no-host            Link GitHub without starting a Copilot environment on Orka
+      --no-open            Print the GitHub URL without opening a browser
+      --timeout duration   How long to wait for the code to be approved and the host to start (default 15m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka logout`
+
+```text
+End your Orka session from orka login
+
+Usage:
+  orka logout [flags]
+
+Flags:
+  -h, --help   help for logout
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

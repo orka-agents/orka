@@ -344,6 +344,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 				return err
 			}
 		}
+		// Another person's AHP conversation cannot be continued, and so read.
+		if err := ch.ahpSessionVisible(ctx, userInfo, namespace, sessionID); err != nil {
+			return err
+		}
 	}
 	reservation, err := ch.reserveActiveChat(namespace, sessionID)
 	if err != nil {
@@ -370,7 +374,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 			return authorizeContextTokenProviderReference(c, ch.contextTokenAuthorization, "chatProviderReference", namespace, provider)
 		},
 		AuthorizeProviderUse: func(provider ProviderResolutionInfo, model string) error {
-			return authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, provider, model)
+			if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chat", namespace, provider, model); err != nil {
+				return err
+			}
+			return authorizeChatProviderUse(c, ch.kubeClient, "chat", provider)
 		},
 		// Enforced scoped context tokens get no implicit Provider selection;
 		// callers must name one directly or use an Agent bound to one.
@@ -498,10 +505,16 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 		return authorizeContextTokenTaskDeleteObject(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolDeleteTask", task)
 	})
 	executor.SetAgentCreateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
-		return authorizeContextTokenToolAgentCreate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent)
+		if err := authorizeContextTokenToolAgentCreate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolCreateAgent", agent); err != nil {
+			return err
+		}
+		return authorizeToolAgentCreateProviderUse(ctx, ch.kubeClient, userInfo, agent)
 	})
 	executor.SetAgentUpdateAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
-		return authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolUpdateAgent", agent)
+		if err := authorizeContextTokenToolAgentUpdate(ctx, authorizationReader, contextToken, ch.contextTokenAuthorization, "chatToolUpdateAgent", agent); err != nil {
+			return err
+		}
+		return authorizeToolAgentUpdateProviderUse(ctx, authorizationReader, ch.kubeClient, userInfo, agent)
 	})
 	executor.SetAgentDeleteAuthorizer(func(ctx context.Context, agent *corev1alpha1.Agent) error {
 		return authorizeContextTokenToolAgentDelete(contextToken, ch.contextTokenAuthorization, "chatToolDeleteAgent", agent)
@@ -1445,6 +1458,21 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 }
 
 // HandleCancelChat handles DELETE /api/v1/chat/{sessionId}.
+// ahpSessionVisible refuses, as not found, another person's AHP session.
+func (ch *ChatHandler) ahpSessionVisible(ctx context.Context, ui *UserInfo, namespace, sessionID string) error {
+	if ch.client == nil {
+		return nil
+	}
+	hidden, err := ahpSessionHiddenIn(ctx, ch.client, ui, namespace, sessionID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to look up the session's owner: %v", err))
+	}
+	if hidden {
+		return fiber.NewError(fiber.StatusNotFound, "chat session not found")
+	}
+	return nil
+}
+
 func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	if sessionID == "" {
@@ -1460,6 +1488,10 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
+	// Another person's AHP session cannot be cancelled or removed.
+	if err := ch.ahpSessionVisible(ctx, GetUserInfo(c), namespace, sessionID); err != nil {
+		return err
+	}
 	activeCancelled, err := ch.cancelAndWaitForActiveChat(ctx, namespace, sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotReady) {
@@ -1657,6 +1689,9 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 			fbModel = fbProviderCRD.Spec.DefaultModel
 		}
 		if err := authorizeContextTokenProviderUse(c, ch.contextTokenAuthorization, "chatFallback", namespace, fbProviderInfo, fbModel); err != nil {
+			return resultProvider, err
+		}
+		if err := authorizeChatProviderUse(c, ch.kubeClient, "chat", fbProviderInfo); err != nil {
 			return resultProvider, err
 		}
 

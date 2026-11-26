@@ -7,11 +7,19 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -184,4 +192,59 @@ func TestCheckMessagesTool_Parameters(t *testing.T) {
 	if _, ok := props["mark_read"]; !ok {
 		t.Error("schema missing mark_read property")
 	}
+}
+
+// worstCaseMessageBatch builds the largest JSON a controller returns for one
+// contract-conforming batch: MaxMessageBatch messages whose identifiers are at
+// MaxControlIdentifierBytes and whose content totals MaxMessageBatchBytes, all
+// of control bytes that JSON escapes to six bytes each.
+func worstCaseMessageBatch(t *testing.T) []byte {
+	t.Helper()
+	identifier := strings.Repeat("\x01", store.MaxControlIdentifierBytes)
+	content := strings.Repeat("\x01", store.MaxMessageBatchBytes/store.MaxMessageBatch)
+	messages := make([]store.Message, store.MaxMessageBatch)
+	for i := range messages {
+		messages[i] = store.Message{
+			ID: math.MaxInt64 - int64(i), Namespace: identifier, FromTask: identifier,
+			ToTask: identifier, ParentTask: identifier, Content: content, Read: true,
+			CreatedAt: time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("", -(23*3600+59*60))),
+		}
+	}
+	body, err := json.Marshal(messages)
+	require.NoError(t, err)
+	return body
+}
+
+func serveCheckMessages(t *testing.T, body []byte) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body) //nolint:errcheck
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(envOrkaControllerURL, server.URL)
+	t.Setenv(envOrkaTaskName, testWorkerAName)
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaParentTask, testCoordinatorTaskName)
+}
+
+func TestCheckMessagesToolReturnsAWholeBatchAtEveryLimit(t *testing.T) {
+	body := worstCaseMessageBatch(t)
+	require.Greater(t, len(body), 1<<20, "the batch is larger than the old 1 MiB read limit")
+	require.LessOrEqual(t, len(body), maxCheckMessagesResponseBytes)
+	serveCheckMessages(t, body)
+
+	result, err := NewCheckMessagesTool().Execute(context.Background(), nil)
+	require.NoError(t, err)
+	require.Equal(t, len(body), len(result), "the consumed batch comes back whole")
+	require.Equal(t, string(body), result)
+}
+
+func TestCheckMessagesToolRefusesAResponseOverTheLimit(t *testing.T) {
+	serveCheckMessages(t, bytes.Repeat([]byte(" "), maxCheckMessagesResponseBytes+1))
+
+	result, err := NewCheckMessagesTool().Execute(context.Background(), nil)
+	require.Error(t, err, "an oversized response is an error, not a truncated success")
+	require.Contains(t, err.Error(), "exceeds")
+	require.Empty(t, result)
 }

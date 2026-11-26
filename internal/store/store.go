@@ -46,11 +46,13 @@ type SecurityStore interface {
 // maps it onto the provider contract's ListUnreadMessages and ConsumeMessages.
 type MessageStore interface {
 	// SendMessage stores a new message. Use toTask="*" for broadcast.
+	// Content over MaxMessageContentBytes returns ErrTooLarge.
 	SendMessage(ctx context.Context, msg *Message) error
 	// GetMessages returns up to MaxMessageBatch of the oldest unread messages
-	// in a Task's inbox, including broadcasts to its siblings, and marks
-	// exactly those read when markRead is set. A longer backlog is read over
-	// several calls.
+	// in a Task's inbox, including broadcasts to its siblings, stopping
+	// before the message that would take their content past
+	// MaxMessageBatchBytes, and marks exactly those read when markRead is
+	// set. A longer backlog is read over several calls.
 	GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]Message, error)
 	// DeleteTaskMessages deletes all messages involving a task (sent or received).
 	DeleteTaskMessages(ctx context.Context, namespace, taskName string) error

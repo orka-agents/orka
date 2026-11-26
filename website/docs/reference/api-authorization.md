@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 159 authenticated external route registrations, including 64
+The table covers all 168 authenticated external route registrations, including 69
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -68,11 +68,12 @@ resource and subresource fields and to the same slash-separated string in RBAC.
 
 The HTTP method does not define the permission. `PUT /api/v1/agents/:name` patches
 the Kubernetes Agent, so it requires `patch` on `agents`. Approval decisions require
-`update` on `tasks/approvals` and `patch` on the parent Task. Cancelling a Task
-requires `update` on `tasks/cancel`, not `patch` or `delete` on `tasks`, so an
-on-call role can stop Tasks without editing or deleting them; cancelling keeps
-everything the Task produced. Stopping a Session's turn requires `get` on the
-Session and `update` on `tasks/cancel`. A monitor run or
+`update` on `tasks/approvals` and `patch` on the parent Task; a permission request a
+built-in runtime holds for the Task's requester can be decided only by that requester.
+Cancelling a Task requires `update` on `tasks/cancel`, not `patch` or `delete` on
+`tasks`, so an on-call role can stop Tasks without editing or deleting them;
+cancelling keeps everything the Task produced. Stopping a Session's turn requires
+`get` on the Session and `update` on `tasks/cancel`. A monitor run or
 command also needs `patch` on its RepositoryMonitor. Commands also require named
 `create` on `repositorymonitors/runs` before the command or its derived run is
 stored. A scan, validation, or patch request that creates a Task also needs
@@ -127,6 +128,33 @@ with each OIDC group prefixed the same way, so bind Roles to, for example,
 `https://token.actions.githubusercontent.com#repo:my-org/my-repo:ref:refs/heads/main`.
 Display claims such as `preferred_username`, `email`, and `name` are not used.
 Permission to read, create, or edit an Agent does not grant `use`.
+
+Provider `use` is a separate opt-in check, enabled with
+`--provider-use-authorization-enabled` (Helm:
+`controller.providerUseAuthorization.enabled`). When it is on, the same
+identities need `use` on `providers` in `core.orka.ai`, with the Provider name
+and the Provider's namespace, to:
+
+- create a Task whose `spec.ai.providerRef` names the Provider;
+- create or edit an Agent so that its `spec.providerRef` or a
+  `spec.model.fallbacks[].providerRef` names the Provider. Fallbacks are checked
+  in the Agent's namespace, and Providers the Agent already named are not
+  checked again;
+- send a request through `POST /api/v1/chat`, `/openai/v1/chat/completions`,
+  `/openai/v1/responses`, or `/anthropic/v1/messages`. Every Provider the request
+  resolves is checked before its credential is read: one it names, its Agent's,
+  a fallback, or the configured default.
+
+A Task that runs its Agent's own Provider needs only Agent `use`. An Agent from
+another namespace is the exception: it may be in a namespace no policy checked,
+its fallbacks and a `providerRef` without a namespace resolve in the Task's
+namespace, and it can change after the Task is created. So while the check is
+on, an `ai` Task that would take a Provider from an Agent in another namespace,
+its `providerRef` when the Task sets none or any of its fallbacks, is refused: by
+the API when it is created, and by the controller each time it runs, which also
+covers direct Kubernetes writes. Set the Task's own `spec.ai.providerRef` and use
+an Agent without fallbacks, or use an Agent from the Task's namespace. Permission to read, create, or edit a Provider, or `create`
+on `chats`, does not grant `use`.
 
 Setting or changing `Agent.spec.identity` requires `bind` on the virtual resource
 `agentidentities` in `core.orka.ai`, with the issuer as the subresource (for example
@@ -195,7 +223,7 @@ otherwise. In the additional-checks column:
 
 | Method | Path | API group | Resource/subresource | Verb | Name | Namespace | Additional checks |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use |
+| `POST` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `create` | empty | `C` | Class use; Checkpoint use; for `ai.memoryConsolidation`, `list` and `get` on `sessions`, `list` on `memories` and `memoryproposals`, and in `Propose` mode `create` on `memoryproposals` |
 | `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
 | `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
 | `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; same team namespaces, Gateway read, and retained-Task access checks as the summary |
@@ -210,9 +238,11 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/attention` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history; monitor items need `list` on `repositorymonitors` and `monitorworkactions` |
 | `GET` | `/api/v1/approvals` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read; context-token Task read scopes before approval history |
+| `GET` | `/api/v1/audit/identity` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read, context-token Task binding, and hidden-Task visibility checks per record |
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/memory-consolidation-report` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` and `get` on `sessions`; `list` on `memories` and `memoryproposals`; a transaction token also needs the session-read and memory-read scopes |
 | `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
@@ -250,7 +280,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/memory-proposals` | `core.orka.ai` | `memoryproposals` | `create` | empty | `B` | none |
 | `GET` | `/api/v1/memory-proposals/:id` | `core.orka.ai` | `memoryproposals` | `get` | `:id` | `Q` | none |
 | `POST` | `/api/v1/memory-proposals/:id/review` | `core.orka.ai` | `memoryproposals` | `review` | `:id`, trimmed | `BQ` | none |
-| `POST` | `/api/v1/memory-proposals/:id/apply` | `core.orka.ai` | `memoryproposals` | `apply` | `:id`, trimmed | `BQ` | `create` on `core.orka.ai/memories`, empty name; If already applied, `get core.orka.ai/memories` with final referenced memory ID |
+| `POST` | `/api/v1/memory-proposals/:id/apply` | `core.orka.ai` | `memoryproposals` | `apply` | `:id`, trimmed | `BQ` | `create` on `core.orka.ai/memories`, empty name; If already applied, `get core.orka.ai/memories` with final referenced memory ID; for a `memory_merge`, `memory_supersede` or `memory_retire` proposal not yet applied, also `update core.orka.ai/memories` on every target memory ID, and for a retire `get` on its first target |
 | `POST` | `/api/v1/memory-proposals/:id/archive` | `core.orka.ai` | `memoryproposals` | `update` | `:id`, trimmed | `Q` | none |
 | `GET` | `/api/v1/providers` | `core.orka.ai` | `providers` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/providers` | `core.orka.ai` | `providers` | `create` | empty | `C` | none |
@@ -333,6 +363,8 @@ otherwise. In the additional-checks column:
 | `DELETE` | `/api/v1/substrate-actor-pools/:name` | `core.orka.ai` | `substrateactorpools` | `delete` | `:name` | `Q` | none |
 | `GET` | `/api/v1/auth/validate` | none | none | identity only | empty | not applicable | Authenticated identity only |
 | `GET` | `/api/v1/auth/whoami` | none | none | identity only | empty | not applicable | Authenticated identity only |
+| `POST` | `/api/v1/auth/session/renew` | none | none | identity only | empty | not applicable | A GitHub sign-in session renews only itself |
+| `DELETE` | `/api/v1/auth/session` | none | none | identity only | empty | not applicable | A GitHub sign-in session ends only itself |
 | `GET` | `/api/v1/connectors` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `GET` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
@@ -341,9 +373,14 @@ otherwise. In the additional-checks column:
 | `DELETE` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/authorize` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/complete` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject; additionally requires the one-time completion token handed to the browser that finished consent |
+| `POST` | `/api/v1/ahp-tokens` | none | none | identity only | empty | not applicable | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
+| `GET` | `/api/v1/ahp-tokens` | none | none | identity only | empty | not applicable | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
+| `DELETE` | `/api/v1/ahp-tokens/:id` | none | none | identity only | empty | not applicable | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
 | `GET` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; returns only the caller's own agent host, found through their own Connections; context-token callers need a connector read scope |
 | `POST` | `/api/v1/agent-hosts/me/wake` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope; an operator-suspended host is not woken |
 | `DELETE` | `/api/v1/agent-hosts/me` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; acts only on the caller's own agent host; context-token callers need a connector manage scope |
+| `POST` | `/api/v1/agent-hosts/invites` | `core.orka.ai` | `agenthosts` | `create` | empty | `Q` | none |
+| `GET` | `/api/v1/agent-hosts/invites/:id` | `core.orka.ai` | `agenthosts` | `create` | empty | `Q` | none |
 | `GET` | `/api/v1/secrets` | `""` | `secrets` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/chat` | `core.orka.ai` | `chats` | `create` | empty | `B` | Supplied JSON `sessionId`: `get` and `update` on `core.orka.ai/sessions` with that name; supplied JSON `agentRef`: `get core.orka.ai/agents` with that name; each nested tool requires its own resource permissions |
 | `GET` | `/api/v1/chat/config` | `core.orka.ai` | `chats/config` | `get` | empty | `Q` | none |

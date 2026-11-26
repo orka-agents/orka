@@ -19,7 +19,7 @@
     {"match": {"userMessage": "[e2e:art-concurrent]"}, "latency": 10000, "response": {"content": "Concurrent read summary: the repository is Orka."}},
     {"match": {"userMessage": "[e2e:art-timeout]"}, "latency": 120000, "response": {"content": "The sleep finished."}},
     {"match": {"userMessage": "[e2e:art-cancel]"}, "latency": 120000, "response": {"content": "The sleep finished."}},
-    {"match": {"userMessage": "[e2e:art-restart]"}, "latency": 150000, "response": {"content": "The sleep finished."}},
+    {"match": {"userMessage": "[e2e:art-restart]"}, "streamingProfile": {"ttft": 60000}, "response": {"content": "The sleep finished."}},
     {"match": {"userMessage": "[e2e:art-opencode-read]", "toolResultContains": "MIT License"}, "response": {"content": "Session nonce nonce-art-opencode. First LICENSE line: MIT License"}},
     {"match": {"userMessage": "[e2e:art-opencode-read]", "hasToolResult": false}, "response": {"toolCalls": [{"name": "read", "arguments": {"filePath": "LICENSE"}}]}},
     {"match": {"userMessage": "[e2e:art-opencode-policy]", "toolResultContains": "MIT License"}, "response": {"content": "First LICENSE line: MIT License"}},
