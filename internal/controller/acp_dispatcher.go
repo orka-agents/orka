@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -140,6 +141,9 @@ type ACPDispatcher struct {
 
 	wake     chan struct{}
 	wakeOnce sync.Once
+	// wokenAt is when the first wakeup since the last scan arrived, in Unix
+	// nanoseconds; zero when none is pending. Timing only.
+	wokenAt atomic.Int64
 
 	mu              sync.Mutex
 	active          map[types.UID]struct{}
@@ -150,7 +154,11 @@ type ACPDispatcher struct {
 	// Session retries them.
 	parkedRuntimeReleases map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease
 	finalizedTurns        map[types.UID]string
-	staleRecoveryMu       sync.Mutex
+	// settledDeliveryRecoveries caches, per Task, the exact Task version and
+	// controller epoch at which delivery recovery found nothing left to
+	// recover from settled durable state; see deliveryRecoverySettled.
+	settledDeliveryRecoveries acpSettledDeliveryRecoveryCache
+	staleRecoveryMu           sync.Mutex
 
 	approvalRecoveryMu sync.Mutex
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
@@ -238,9 +246,14 @@ func (d *ACPDispatcher) Start(ctx context.Context) error {
 	removeWakeHandlers := d.registerDispatchWakeHandlers(ctx)
 	defer removeWakeHandlers()
 	heldBy := ""
+	var lastPoolRetirement time.Time
 	for {
 		lastScan := time.Now()
-		logACPScanError(ctx, d.dispatchOnce(ctx), &heldBy)
+		retirePools := acpDispatchPoolRetirementDue(lastPoolRetirement, lastScan, d.Interval)
+		if retirePools {
+			lastPoolRetirement = lastScan
+		}
+		logACPScanError(ctx, d.dispatchScan(ctx, retirePools), &heldBy)
 		if !waitForNextDispatchScan(ctx, ticker.C, d.wakeChannel(), lastScan) {
 			return nil
 		}
@@ -281,18 +294,44 @@ func (d *ACPDispatcher) recoverAtStart(ctx context.Context) error {
 	return nil
 }
 
+// acpDispatchPoolRetirementDue reports whether a scan should also run idle
+// and stopped RuntimePool retirement. Wakeups can start a scan every
+// acpDispatchWakeMinInterval; retirement decisions wait minutes-long idle
+// TTLs and read each linked workspace uncached, so they run at most about
+// once per dispatch interval and never delay a wakeup's reservation. The
+// quarter-interval slack keeps the periodic tick retiring even when a wakeup
+// scan ran just before it.
+func acpDispatchPoolRetirementDue(last, now time.Time, interval time.Duration) bool {
+	return last.IsZero() || now.Sub(last) >= interval-interval/4
+}
+
 func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
+	return d.dispatchScan(ctx, true)
+}
+
+// dispatchScan admits queued Tasks and runs recovery and RuntimePool
+// accounting. retirePools additionally scales idle pools to zero and deletes
+// stopped ones; capacity accounting runs on every scan either way.
+func (d *ACPDispatcher) dispatchScan(ctx context.Context, retirePools bool) error {
+	timer := newACPDispatchScanTimer(time.Now, retirePools)
+	if woken := d.wokenAt.Swap(0); woken > 0 {
+		timer.values = append(timer.values, "sinceWakeMs", acpPreDispatchMillis(timer.started.Sub(time.Unix(0, woken))))
+	}
+	defer timer.log(ctx)
 	var tasks corev1alpha1.TaskList
 	if err := d.Client.List(ctx, &tasks); err != nil {
 		return err
 	}
+	timer.mark("list")
 	if err := d.reconcileExpiredExternalEffects(ctx, tasks.Items); err != nil {
 		return err
 	}
+	timer.mark("externalEffects")
 	d.pruneFinalizedSessionTurns(tasks.Items)
 	if err := d.scheduleACPDeliveryRecoveries(ctx, tasks.Items); err != nil {
 		return err
 	}
+	timer.mark("deliveryRecoveries")
 	queued := make([]*corev1alpha1.Task, 0)
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
@@ -306,8 +345,10 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 		queued = append(queued, task.DeepCopy())
 	}
 	sortACPTasksByQueuePriority(queued, time.Now().UTC())
+	timer.queued = len(queued)
 	admissible := queued[:0]
 	for _, queuedTask := range queued {
+		acpPreDispatch.mark(queuedTask, acpPreDispatchScanned)
 		keep, err := d.settleQueuedTaskBeforeAdmission(ctx, queuedTask)
 		if err != nil {
 			return fmt.Errorf("settle ACP task before admission %s/%s: %w", queuedTask.Namespace, queuedTask.Name, err)
@@ -317,6 +358,7 @@ func (d *ACPDispatcher) dispatchOnce(ctx context.Context) error {
 		}
 	}
 	queued = admissible
+	timer.mark("admissionSettle")
 	if err := d.AdmissionGate.Check(); err != nil {
 		return nil
 	}
@@ -337,6 +379,7 @@ dispatchLoop:
 				}
 				continue
 			}
+			timer.reserved++
 			go func(task *corev1alpha1.Task, target acpDispatchTarget) {
 				defer func() {
 					<-d.sem
@@ -350,7 +393,10 @@ dispatchLoop:
 			break dispatchLoop
 		}
 	}
-	return d.reapIdlePools(ctx, tasks.Items)
+	timer.mark("reservation")
+	err := d.reapIdlePoolsWithRetirement(ctx, tasks.Items, retirePools)
+	timer.mark("poolAccounting")
+	return err
 }
 
 //nolint:gocyclo // Terminal projection and cleanup recovery branches are audited together.
@@ -359,6 +405,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 	if err != nil {
 		return err
 	}
+	d.pruneSettledDeliveryRecoveries(tasks)
 	d.scheduleStaleAttemptRecoveries(ctx, tasks, fence)
 	for i := range tasks {
 		task := &tasks[i]
@@ -373,6 +420,9 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 			continue
 		}
 		if task.Status.Execution.Attempt < 1 || strings.TrimSpace(task.Status.Execution.PromptID) == "" {
+			continue
+		}
+		if d.deliveryRecoverySettled(task, fence.Epoch) {
 			continue
 		}
 		attemptID, idErr := promptAttemptIDFromTask(task)
@@ -415,6 +465,9 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 			}
 		}
 		if recoveryKind == "" {
+			if acpDeliveryRecoveryVerdictSettled(task, attempt, cleanupPending) {
+				d.rememberDeliveryRecoverySettled(task, fence.Epoch)
+			}
 			continue
 		}
 		select {
@@ -451,8 +504,17 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 	return nil
 }
 
-//nolint:gocyclo // Demand-state accounting and all fail-closed pool capacity gates are intentionally audited together.
 func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.Task) error {
+	return d.reapIdlePoolsWithRetirement(ctx, tasks, true)
+}
+
+// reapIdlePoolsWithRetirement refreshes every RuntimePool's coordinator
+// capacity and last-demand record. With retire, it also scales idle pools to
+// zero and deletes stopped ones; without it those decisions wait for a later
+// scan, which only keeps capacity longer.
+//
+//nolint:gocyclo // Demand-state accounting and all fail-closed pool capacity gates are intentionally audited together.
+func (d *ACPDispatcher) reapIdlePoolsWithRetirement(ctx context.Context, tasks []corev1alpha1.Task, retire bool) error {
 	fence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
 		return err
@@ -506,6 +568,9 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 		}
 		pool = latest
 		if pool.Spec.DesiredReplicas == 0 {
+			if !retire {
+				continue
+			}
 			if err := d.reapStoppedSupersededPlainPool(ctx, pool, activeByPool[key], now); err != nil {
 				return err
 			}
@@ -525,6 +590,9 @@ func (d *ACPDispatcher) reapIdlePools(ctx context.Context, tasks []corev1alpha1.
 			if runtimePoolHasActiveDemand(pool, activeByPool[key]) {
 				continue
 			}
+		}
+		if !retire {
+			continue
 		}
 		lastDemand, err := time.Parse(time.RFC3339Nano, pool.Annotations[acpRuntimeLastDemandAnnotation])
 		if err != nil {
@@ -1077,6 +1145,7 @@ func validateFrozenACPDispatchPlan(
 
 //nolint:gocyclo // The explicit state-machine branches are easier to audit together.
 func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alpha1.Task, target acpDispatchTarget) (retErr error) {
+	acpPreDispatch.markStarted(task)
 	var promptTrace *acpSpan
 	defer func() { promptTrace.End(retErr) }()
 	turnTimings := newACPTurnTimings(task, time.Now)
@@ -1215,6 +1284,10 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		}
 		lineage.NamespaceUID = string(taskNamespace.UID)
 	}
+	// Every early requeue of the reservation is behind this point; the turn
+	// proceeds to its Session lease and runtime session, so the pre-dispatch
+	// milestones, with started at this attempt's entry, are reported once.
+	acpPreDispatch.report(ctx, task)
 	var sessionExecution *acpTaskSession
 	sessionCompleted := false
 	sessionCtx, sessionTrace := startACPSessionSpan(runtimeCtx, task)
@@ -4104,6 +4177,7 @@ func (d *ACPDispatcher) finalizeRecoveredTaskSessionAfterTerminal(
 
 //nolint:gocyclo // Reservation and its rollback paths form one fenced state transition.
 func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Task) (*corev1alpha1.Task, acpDispatchTarget, error) {
+	steps := newACPDispatchScanTimer(time.Now, false)
 	task := &corev1alpha1.Task{}
 	reader := uncachedReader(d.APIReader, d.Client)
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: queued.Namespace, Name: queued.Name}, task); err != nil {
@@ -4195,6 +4269,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		target.pool = pool
 		target.reservation = reservation
 	}
+	steps.mark("capacityClaim")
 	releaseClaim := func() {
 		if target.reservation == nil {
 			return
@@ -4213,6 +4288,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		}
 		return nil, acpDispatchTarget{}, err
 	}
+	steps.mark("credentialFreeze")
 	bound, err := refreshTarget()
 	if err != nil {
 		releaseClaim()
@@ -4222,6 +4298,7 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
+	steps.mark("targetRefresh")
 	if hasExternal {
 		if err := d.AdmissionGate.Check(); err != nil {
 			return nil, acpDispatchTarget{}, err
@@ -4236,25 +4313,34 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
-	bound, err = refreshTarget()
-	if err != nil {
-		releaseClaim()
-		return nil, acpDispatchTarget{}, err
-	}
-	if !bound {
-		releaseClaim()
-		return nil, acpDispatchTarget{}, nil
-	}
-	if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+	steps.mark("attemptReserved")
+	markReserved := func(status *corev1alpha1.TaskExecutionStatus) {
 		status.State = corev1alpha1.TaskExecutionStateReserved
 		status.ControllerEpoch = fence.Epoch
 		status.Reason = ""
 		status.Message = ""
 		status.LastTransitionTime = nowMeta()
-	}); err != nil {
+	}
+	if target.pool != nil {
+		// The Reserved write re-reads the Task uncached and checks the pool
+		// binding on that read before its optimistic patch, so a separate
+		// refresh just before it would read the same state twice.
+		bound, err = d.patchReservedExecutionForPool(ctx, task, target.pool, markReserved)
+	} else {
+		bound, err = refreshTarget()
+		if err == nil && bound {
+			err = d.patchExecution(ctx, task, markReserved)
+		}
+	}
+	if err != nil {
 		releaseClaim()
 		return nil, acpDispatchTarget{}, err
 	}
+	if !bound {
+		releaseClaim()
+		return nil, acpDispatchTarget{}, nil
+	}
+	steps.mark("taskReserved")
 	bound, err = refreshTarget()
 	if err != nil {
 		releaseClaim()
@@ -4264,6 +4350,10 @@ func (d *ACPDispatcher) reserveTask(ctx context.Context, queued *corev1alpha1.Ta
 		releaseClaim()
 		return nil, acpDispatchTarget{}, nil
 	}
+	steps.mark("finalRefresh")
+	acpPreDispatch.mark(task, acpPreDispatchReserved)
+	logf.FromContext(ctx).V(1).Info(acpReservationTimingsLogMessage,
+		append([]any{acpCancelLogKeyNamespace, task.Namespace, acpCancelLogKeyTask, task.Name}, steps.values...)...)
 	return task, target, nil
 }
 
@@ -4399,19 +4489,59 @@ func (d *ACPDispatcher) refreshTaskRuntimePoolBinding(
 		}
 		return false, err
 	}
-	if current.UID != task.UID || current.Status.Execution == nil ||
-		(current.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued &&
-			current.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved) ||
-		current.Status.Execution.Attempt != task.Status.Execution.Attempt ||
-		current.Status.Execution.PromptID != task.Status.Execution.PromptID ||
-		current.Status.Execution.RequestDigest != task.Status.Execution.RequestDigest ||
-		!acpRuntimePoolBindingMatches(current.Status.Execution, pool) {
+	if !acpTaskStillTargetsRuntimePool(task, current, pool) {
 		return false, nil
 	}
 	task.Status = current.Status
 	task.Labels = current.Labels
 	task.Annotations = current.Annotations
 	return true, nil
+}
+
+// acpTaskStillTargetsRuntimePool reports whether current is the same queued
+// or reserved attempt as task, still bound to pool.
+func acpTaskStillTargetsRuntimePool(task, current *corev1alpha1.Task, pool *corev1alpha1.RuntimePool) bool {
+	return current.UID == task.UID && current.Status.Execution != nil && task.Status.Execution != nil &&
+		(current.Status.Execution.State == corev1alpha1.TaskExecutionStateQueued ||
+			current.Status.Execution.State == corev1alpha1.TaskExecutionStateReserved) &&
+		current.Status.Execution.Attempt == task.Status.Execution.Attempt &&
+		current.Status.Execution.PromptID == task.Status.Execution.PromptID &&
+		current.Status.Execution.RequestDigest == task.Status.Execution.RequestDigest &&
+		acpRuntimePoolBindingMatches(current.Status.Execution, pool)
+}
+
+// patchReservedExecutionForPool writes the Reserved execution state when the
+// uncached read the optimistic patch is based on still shows this attempt
+// bound to pool. It reports false, writing nothing, when it does not.
+func (d *ACPDispatcher) patchReservedExecutionForPool(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	pool *corev1alpha1.RuntimePool,
+	mutate func(*corev1alpha1.TaskExecutionStatus),
+) (bool, error) {
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	bound := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		bound = false
+		latest := &corev1alpha1.Task{}
+		if err := uncachedReader(d.APIReader, d.Client).Get(ctx, key, latest); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if !acpTaskStillTargetsRuntimePool(task, latest, pool) {
+			return nil
+		}
+		base := latest.DeepCopy()
+		mutate(latest.Status.Execution)
+		if err := d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		task.Status = latest.Status
+		task.Labels = latest.Labels
+		task.Annotations = latest.Annotations
+		bound = true
+		return nil
+	})
+	return bound, err
 }
 
 func (d *ACPDispatcher) refreshTaskExternalRuntimeBinding(

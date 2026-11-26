@@ -409,6 +409,7 @@ func (r *TaskReconciler) ensureACPClassWorkspace(
 		}
 		return "", false, err
 	}
+	acpPreDispatch.mark(task, acpPreDispatchWorkspaceAttachRequested)
 	// The epoch this Task now holds is recorded IMMEDIATELY: a Task
 	// cancelled between Attach and the later attached-ready pass would
 	// otherwise settle with a zero recorded epoch, and the displaced-receipt
