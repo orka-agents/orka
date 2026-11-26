@@ -18,6 +18,11 @@ type stateOverlay struct {
 // overlayMethods names the contract methods stateOverlay sends through the
 // client.
 var overlayMethods = []string{
+	"CheckTaskJobAuthority",
+	"DeleteTaskJobRevocations",
+	"GetSessionTurnCleanupReceipt",
+	"RevokeTaskJob",
+	"SyncControllerEpochMirror",
 	"Describe",
 	"HealthCheck",
 	"AppendExecutionEvent",
@@ -53,6 +58,26 @@ var overlayMethods = []string{
 	"SavePlan",
 	"SavePromptResultReceipt",
 	"SaveResult",
+}
+
+func (overlay stateOverlay) CheckTaskJobAuthority(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	return overlay.client.CheckTaskJobAuthority(ctx, identity)
+}
+
+func (overlay stateOverlay) DeleteTaskJobRevocations(ctx context.Context, namespace string, taskName string, taskUID string) error {
+	return overlay.client.DeleteTaskJobRevocations(ctx, namespace, taskName, taskUID)
+}
+
+func (overlay stateOverlay) GetSessionTurnCleanupReceipt(ctx context.Context, namespace string, sessionName string, promptAttemptID string) (*storagev1.SessionTurnCleanupReceipt, error) {
+	return overlay.client.GetSessionTurnCleanupReceipt(ctx, namespace, sessionName, promptAttemptID)
+}
+
+func (overlay stateOverlay) RevokeTaskJob(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	return overlay.client.RevokeTaskJob(ctx, identity)
+}
+
+func (overlay stateOverlay) SyncControllerEpochMirror(ctx context.Context, epoch storagev1.ControllerEpoch) error {
+	return overlay.client.SyncControllerEpochMirror(ctx, epoch)
 }
 
 func (overlay stateOverlay) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {

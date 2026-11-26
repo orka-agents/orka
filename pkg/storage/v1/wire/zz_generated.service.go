@@ -14,6 +14,11 @@ var (
 	methodGetArtifact                          = method{name: "GetArtifact", fullName: "/orka.storage.v1.Artifacts/GetArtifact", kind: storagev1.MethodRead, class: storagev1.CallBulk, since: 2, stream: streamDownload, contract: storagev1.ArtifactsContract}
 	methodListArtifacts                        = method{name: "ListArtifacts", fullName: "/orka.storage.v1.Artifacts/ListArtifacts", kind: storagev1.MethodRead, class: storagev1.CallInteractive, since: 2, stream: streamList, contract: storagev1.ArtifactsContract}
 	methodSaveArtifact                         = method{name: "SaveArtifact", fullName: "/orka.storage.v1.Artifacts/SaveArtifact", kind: storagev1.MethodWrite, class: storagev1.CallBulk, since: 2, stream: streamUpload, contract: storagev1.ArtifactsContract}
+	methodCheckTaskJobAuthority                = method{name: "CheckTaskJobAuthority", fullName: "/orka.storage.v1.Control/CheckTaskJobAuthority", kind: storagev1.MethodRead, class: storagev1.CallInteractive, since: 5, stream: streamNone, contract: storagev1.StateContract}
+	methodDeleteTaskJobRevocations             = method{name: "DeleteTaskJobRevocations", fullName: "/orka.storage.v1.Control/DeleteTaskJobRevocations", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 5, stream: streamNone, contract: storagev1.StateContract}
+	methodGetSessionTurnCleanupReceipt         = method{name: "GetSessionTurnCleanupReceipt", fullName: "/orka.storage.v1.Control/GetSessionTurnCleanupReceipt", kind: storagev1.MethodRead, class: storagev1.CallInteractive, since: 5, stream: streamNone, contract: storagev1.StateContract}
+	methodRevokeTaskJob                        = method{name: "RevokeTaskJob", fullName: "/orka.storage.v1.Control/RevokeTaskJob", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 5, stream: streamNone, contract: storagev1.StateContract}
+	methodSyncControllerEpochMirror            = method{name: "SyncControllerEpochMirror", fullName: "/orka.storage.v1.Control/SyncControllerEpochMirror", kind: storagev1.MethodAdmin, class: storagev1.CallControl, since: 5, stream: streamNone, contract: storagev1.StateContract}
 	methodDescribe                             = method{name: "Describe", fullName: "/orka.storage.v1.Dataset/Describe", kind: storagev1.MethodRead, class: storagev1.CallControl, since: 1, stream: streamNone, contract: ""}
 	methodHealthCheck                          = method{name: "HealthCheck", fullName: "/orka.storage.v1.Dataset/HealthCheck", kind: storagev1.MethodRead, class: storagev1.CallControl, since: 1, stream: streamNone, contract: ""}
 	methodAppendExecutionEvent                 = method{name: "AppendExecutionEvent", fullName: "/orka.storage.v1.Events/AppendExecutionEvent", kind: storagev1.MethodWrite, class: storagev1.CallInteractive, since: 3, stream: streamNone, contract: storagev1.StateContract}
@@ -56,6 +61,11 @@ var methodsByFullName = map[string]*method{
 	methodGetArtifact.fullName:                          &methodGetArtifact,
 	methodListArtifacts.fullName:                        &methodListArtifacts,
 	methodSaveArtifact.fullName:                         &methodSaveArtifact,
+	methodCheckTaskJobAuthority.fullName:                &methodCheckTaskJobAuthority,
+	methodDeleteTaskJobRevocations.fullName:             &methodDeleteTaskJobRevocations,
+	methodGetSessionTurnCleanupReceipt.fullName:         &methodGetSessionTurnCleanupReceipt,
+	methodRevokeTaskJob.fullName:                        &methodRevokeTaskJob,
+	methodSyncControllerEpochMirror.fullName:            &methodSyncControllerEpochMirror,
 	methodDescribe.fullName:                             &methodDescribe,
 	methodHealthCheck.fullName:                          &methodHealthCheck,
 	methodAppendExecutionEvent.fullName:                 &methodAppendExecutionEvent,
@@ -96,6 +106,7 @@ var methodsByFullName = map[string]*method{
 // clientStubs holds one generated stub per service.
 type clientStubs struct {
 	artifacts storagepb.ArtifactsClient
+	control   storagepb.ControlClient
 	dataset   storagepb.DatasetClient
 	events    storagepb.EventsClient
 	messages  storagepb.MessagesClient
@@ -106,6 +117,7 @@ type clientStubs struct {
 func newClientStubs(conn grpc.ClientConnInterface) clientStubs {
 	return clientStubs{
 		artifacts: storagepb.NewArtifactsClient(conn),
+		control:   storagepb.NewControlClient(conn),
 		dataset:   storagepb.NewDatasetClient(conn),
 		events:    storagepb.NewEventsClient(conn),
 		messages:  storagepb.NewMessagesClient(conn),
@@ -117,6 +129,9 @@ func newClientStubs(conn grpc.ClientConnInterface) clientStubs {
 // The Client implements every contract interface that has a wire service.
 var (
 	_ storagev1.ArtifactStore                    = (*Client)(nil)
+	_ storagev1.SessionTurnCleanupReceiptStore   = (*Client)(nil)
+	_ storagev1.ControllerEpochMirror            = (*Client)(nil)
+	_ storagev1.TaskJobAuthorityStore            = (*Client)(nil)
 	_ storagev1.HealthChecker                    = (*Client)(nil)
 	_ storagev1.ProviderDescriber                = (*Client)(nil)
 	_ storagev1.ExecutionEventStore              = (*Client)(nil)
@@ -218,6 +233,101 @@ func (client *Client) SaveArtifact(ctx context.Context, request storagev1.SaveAr
 	return nil
 }
 
+// CheckTaskJobAuthority calls orka.storage.v1.Control.CheckTaskJobAuthority.
+func (client *Client) CheckTaskJobAuthority(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	wireRequest := &storagepb.CheckTaskJobAuthorityRequest{}
+	var err error
+	if wireRequest.Identity, err = toWireTaskJobIdentity(identity); err != nil {
+		return err
+	}
+	_ = err
+	if err := client.invoke(ctx, &methodCheckTaskJobAuthority, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		_, callErr := client.stubs.control.CheckTaskJobAuthority(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteTaskJobRevocations calls orka.storage.v1.Control.DeleteTaskJobRevocations.
+func (client *Client) DeleteTaskJobRevocations(ctx context.Context, namespace string, taskName string, taskUID string) error {
+	wireRequest := &storagepb.DeleteTaskJobRevocationsRequest{}
+	var err error
+	wireRequest.Namespace = namespace
+	wireRequest.TaskName = taskName
+	wireRequest.TaskUid = taskUID
+	_ = err
+	if err := client.invoke(ctx, &methodDeleteTaskJobRevocations, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		_, callErr := client.stubs.control.DeleteTaskJobRevocations(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// GetSessionTurnCleanupReceipt calls orka.storage.v1.Control.GetSessionTurnCleanupReceipt.
+func (client *Client) GetSessionTurnCleanupReceipt(ctx context.Context, namespace string, sessionName string, promptAttemptID string) (*storagev1.SessionTurnCleanupReceipt, error) {
+	wireRequest := &storagepb.GetSessionTurnCleanupReceiptRequest{}
+	var err error
+	wireRequest.Namespace = namespace
+	wireRequest.SessionName = sessionName
+	wireRequest.PromptAttemptId = promptAttemptID
+	_ = err
+	var wireResponse *storagepb.GetSessionTurnCleanupReceiptResponse
+	if err := client.invoke(ctx, &methodGetSessionTurnCleanupReceipt, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		var callErr error
+		wireResponse, callErr = client.stubs.control.GetSessionTurnCleanupReceipt(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return nil, err
+	}
+	var r0 *storagev1.SessionTurnCleanupReceipt
+	if wireResponse.Receipt != nil {
+		var v3 storagev1.SessionTurnCleanupReceipt
+		if v3, err = fromWireSessionTurnCleanupReceipt(wireResponse.Receipt, false); err != nil {
+			return nil, client.responseError(&methodGetSessionTurnCleanupReceipt, err)
+		}
+		r0 = &v3
+	}
+	return r0, nil
+}
+
+// RevokeTaskJob calls orka.storage.v1.Control.RevokeTaskJob.
+func (client *Client) RevokeTaskJob(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	wireRequest := &storagepb.RevokeTaskJobRequest{}
+	var err error
+	if wireRequest.Identity, err = toWireTaskJobIdentity(identity); err != nil {
+		return err
+	}
+	_ = err
+	if err := client.invoke(ctx, &methodRevokeTaskJob, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		_, callErr := client.stubs.control.RevokeTaskJob(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SyncControllerEpochMirror calls orka.storage.v1.Control.SyncControllerEpochMirror.
+func (client *Client) SyncControllerEpochMirror(ctx context.Context, epoch storagev1.ControllerEpoch) error {
+	wireRequest := &storagepb.SyncControllerEpochMirrorRequest{}
+	var err error
+	if wireRequest.Epoch, err = toWireControllerEpoch(epoch); err != nil {
+		return err
+	}
+	_ = err
+	if err := client.invoke(ctx, &methodSyncControllerEpochMirror, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
+		_, callErr := client.stubs.control.SyncControllerEpochMirror(ctx, wireRequest, opts...)
+		return callErr
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Describe calls orka.storage.v1.Dataset.Describe.
 func (client *Client) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 	wireRequest := &storagepb.DescribeRequest{}
@@ -272,11 +382,11 @@ func (client *Client) AppendExecutionEvent(ctx context.Context, event *storagev1
 	}
 	var r0 *storagev1.ExecutionEvent
 	if wireResponse.Event != nil {
-		var v3 storagev1.ExecutionEvent
-		if v3, err = fromWireExecutionEvent(wireResponse.Event, false); err != nil {
+		var v4 storagev1.ExecutionEvent
+		if v4, err = fromWireExecutionEvent(wireResponse.Event, false); err != nil {
 			return nil, client.responseError(&methodAppendExecutionEvent, err)
 		}
-		r0 = &v3
+		r0 = &v4
 	}
 	return r0, nil
 }
@@ -302,11 +412,11 @@ func (client *Client) AppendExecutionEventIfAbsent(ctx context.Context, event *s
 	}
 	var r0 *storagev1.ExecutionEvent
 	if wireResponse.Persisted != nil {
-		var v4 storagev1.ExecutionEvent
-		if v4, err = fromWireExecutionEvent(wireResponse.Persisted, false); err != nil {
+		var v5 storagev1.ExecutionEvent
+		if v5, err = fromWireExecutionEvent(wireResponse.Persisted, false); err != nil {
 			return nil, false, client.responseError(&methodAppendExecutionEventIfAbsent, err)
 		}
-		r0 = &v4
+		r0 = &v5
 	}
 	var r1 bool
 	r1 = wireResponse.Appended
@@ -339,11 +449,11 @@ func (client *Client) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, 
 	}
 	var r0 *storagev1.ExecutionEvent
 	if wireResponse.Persisted != nil {
-		var v5 storagev1.ExecutionEvent
-		if v5, err = fromWireExecutionEvent(wireResponse.Persisted, false); err != nil {
+		var v6 storagev1.ExecutionEvent
+		if v6, err = fromWireExecutionEvent(wireResponse.Persisted, false); err != nil {
 			return nil, false, client.responseError(&methodAppendExecutionEventWithPlanIfAbsent, err)
 		}
-		r0 = &v5
+		r0 = &v6
 	}
 	var r1 bool
 	r1 = wireResponse.Appended
@@ -354,12 +464,12 @@ func (client *Client) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, 
 func (client *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends []storagev1.ExecutionEventAppend) ([]storagev1.ExecutionEventAppendResult, error) {
 	wireRequest := &storagepb.AppendExecutionEventsIfAbsentRequest{}
 	var err error
-	for _, e6 := range appends {
-		w7, err := toWireExecutionEventAppend(e6)
+	for _, e7 := range appends {
+		w8, err := toWireExecutionEventAppend(e7)
 		if err != nil {
 			return nil, err
 		}
-		wireRequest.Appends = append(wireRequest.Appends, w7)
+		wireRequest.Appends = append(wireRequest.Appends, w8)
 	}
 	_ = err
 	var wireResponse *storagepb.AppendExecutionEventsIfAbsentResponse
@@ -374,12 +484,12 @@ func (client *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends
 	if len(wireResponse.Results) > 0 {
 		r0 = make([]storagev1.ExecutionEventAppendResult, 0, len(wireResponse.Results))
 	}
-	for _, e8 := range wireResponse.Results {
-		g9, err := fromWireExecutionEventAppendResult(e8, false)
+	for _, e9 := range wireResponse.Results {
+		g10, err := fromWireExecutionEventAppendResult(e9, false)
 		if err != nil {
 			return nil, client.responseError(&methodAppendExecutionEventsIfAbsent, err)
 		}
-		r0 = append(r0, g9)
+		r0 = append(r0, g10)
 	}
 	return r0, nil
 }
@@ -428,8 +538,8 @@ func (client *Client) GetLatestExecutionEventSeqs(ctx context.Context, namespace
 	var err error
 	wireRequest.Namespace = namespace
 	wireRequest.StreamType = streamType
-	for _, e10 := range streamIDs {
-		wireRequest.StreamIds = append(wireRequest.StreamIds, string(e10))
+	for _, e11 := range streamIDs {
+		wireRequest.StreamIds = append(wireRequest.StreamIds, string(e11))
 	}
 	_ = err
 	var wireResponse *storagepb.GetLatestExecutionEventSeqsResponse
@@ -463,12 +573,12 @@ func (client *Client) ListExecutionEvents(ctx context.Context, filter storagev1.
 	if len(wireResponse.Events) > 0 {
 		r0 = make([]storagev1.ExecutionEvent, 0, len(wireResponse.Events))
 	}
-	for _, e11 := range wireResponse.Events {
-		g12, err := fromWireExecutionEvent(e11, false)
+	for _, e12 := range wireResponse.Events {
+		g13, err := fromWireExecutionEvent(e12, false)
 		if err != nil {
 			return nil, client.responseError(&methodListExecutionEvents, err)
 		}
-		r0 = append(r0, g12)
+		r0 = append(r0, g13)
 	}
 	return r0, nil
 }
@@ -491,12 +601,12 @@ func (client *Client) ListSessionExecutionEvents(ctx context.Context, filter sto
 	if len(wireResponse.Events) > 0 {
 		r0 = make([]storagev1.SessionExecutionEvent, 0, len(wireResponse.Events))
 	}
-	for _, e13 := range wireResponse.Events {
-		g14, err := fromWireSessionExecutionEvent(e13, false)
+	for _, e14 := range wireResponse.Events {
+		g15, err := fromWireSessionExecutionEvent(e14, false)
 		if err != nil {
 			return nil, 0, client.responseError(&methodListSessionExecutionEvents, err)
 		}
-		r0 = append(r0, g14)
+		r0 = append(r0, g15)
 	}
 	var r1 int64
 	r1 = wireResponse.LatestSeq
@@ -522,12 +632,12 @@ func (client *Client) ConsumeMessages(ctx context.Context, request storagev1.Con
 	if len(wireResponse.Messages) > 0 {
 		r0 = make([]storagev1.Message, 0, len(wireResponse.Messages))
 	}
-	for _, e15 := range wireResponse.Messages {
-		g16, err := fromWireMessage(e15, false)
+	for _, e16 := range wireResponse.Messages {
+		g17, err := fromWireMessage(e16, false)
 		if err != nil {
 			return nil, client.responseError(&methodConsumeMessages, err)
 		}
-		r0 = append(r0, g16)
+		r0 = append(r0, g17)
 	}
 	return r0, nil
 }
@@ -585,12 +695,12 @@ func (client *Client) ListUnreadMessages(ctx context.Context, namespace string, 
 	if len(wireResponse.Messages) > 0 {
 		r0 = make([]storagev1.Message, 0, len(wireResponse.Messages))
 	}
-	for _, e17 := range wireResponse.Messages {
-		g18, err := fromWireMessage(e17, false)
+	for _, e18 := range wireResponse.Messages {
+		g19, err := fromWireMessage(e18, false)
 		if err != nil {
 			return nil, client.responseError(&methodListUnreadMessages, err)
 		}
-		r0 = append(r0, g18)
+		r0 = append(r0, g19)
 	}
 	return r0, nil
 }
@@ -618,11 +728,11 @@ func (client *Client) SendMessage(ctx context.Context, msg *storagev1.Message) e
 			err = missingWriteBack("msg")
 			return client.responseError(&methodSendMessage, err)
 		}
-		written19, err := fromWireMessage(wireResponse.Msg, false)
+		written20, err := fromWireMessage(wireResponse.Msg, false)
 		if err != nil {
 			return client.responseError(&methodSendMessage, err)
 		}
-		*msg = written19
+		*msg = written20
 	}
 	return nil
 }
@@ -906,11 +1016,11 @@ func (client *Client) GetPlan(ctx context.Context, namespace string, taskName st
 	}
 	var r0 *storagev1.PlanState
 	if wireResponse.Plan != nil {
-		var v20 storagev1.PlanState
-		if v20, err = fromWirePlanState(wireResponse.Plan, false); err != nil {
+		var v21 storagev1.PlanState
+		if v21, err = fromWirePlanState(wireResponse.Plan, false); err != nil {
 			return nil, client.responseError(&methodGetPlan, err)
 		}
-		r0 = &v20
+		r0 = &v21
 	}
 	return r0, nil
 }
@@ -929,11 +1039,11 @@ func (client *Client) GetPromptResultReceipt(ctx context.Context, attemptID stri
 	}
 	var r0 *storagev1.PromptResultReceipt
 	if wireResponse.Receipt != nil {
-		var v21 storagev1.PromptResultReceipt
-		if v21, err = fromWirePromptResultReceipt(wireResponse.Receipt, false); err != nil {
+		var v22 storagev1.PromptResultReceipt
+		if v22, err = fromWirePromptResultReceipt(wireResponse.Receipt, false); err != nil {
 			return nil, client.responseError(&methodGetPromptResultReceipt, err)
 		}
-		r0 = &v21
+		r0 = &v22
 	}
 	return r0, nil
 }
@@ -1018,6 +1128,7 @@ func (s *Server) registerServices(registrar grpc.ServiceRegistrar) {
 	storagepb.RegisterDatasetServer(registrar, &datasetService{server: s, provider: s.dataset})
 	storagepb.RegisterOwnershipServer(registrar, &ownershipService{server: s, provider: s.dataset})
 	if s.state != nil {
+		storagepb.RegisterControlServer(registrar, &controlService{server: s, provider: s.state})
 		storagepb.RegisterEventsServer(registrar, &eventsService{server: s, provider: s.state})
 		storagepb.RegisterMessagesServer(registrar, &messagesService{server: s, provider: s.state})
 		storagepb.RegisterResultsServer(registrar, &resultsService{server: s, provider: s.state})
@@ -1094,12 +1205,12 @@ func (service *artifactsService) ListArtifacts(wireRequest *storagepb.ListArtifa
 		return service.server.providerError(ctx, &methodListArtifacts, err)
 	}
 	wireResponse := &storagepb.ListArtifactsResponse{}
-	for _, e22 := range r0 {
-		w23, err := toWireArtifactMetadata(e22)
+	for _, e23 := range r0 {
+		w24, err := toWireArtifactMetadata(e23)
 		if err != nil {
 			return service.server.encodeError(ctx, &methodListArtifacts, err)
 		}
-		wireResponse.Artifacts = append(wireResponse.Artifacts, w23)
+		wireResponse.Artifacts = append(wireResponse.Artifacts, w24)
 	}
 	return service.server.sendList(stream, &methodListArtifacts, wireResponse)
 }
@@ -1127,6 +1238,118 @@ func (service *artifactsService) SaveArtifact(stream grpc.ClientStreamingServer[
 	}
 	wireResponse := &storagepb.SaveArtifactResponse{}
 	return stream.SendAndClose(wireResponse)
+}
+
+// controlService serves orka.storage.v1.Control from a provider.
+type controlService struct {
+	storagepb.UnimplementedControlServer
+	server   *Server
+	provider interface {
+		storagev1.SessionTurnCleanupReceiptStore
+		storagev1.ControllerEpochMirror
+		storagev1.TaskJobAuthorityStore
+	}
+}
+
+func (service *controlService) CheckTaskJobAuthority(ctx context.Context, wireRequest *storagepb.CheckTaskJobAuthorityRequest) (*storagepb.CheckTaskJobAuthorityResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.TaskJobIdentity
+	if a0, err = fromWireTaskJobIdentity(wireRequest.Identity, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	err = service.provider.CheckTaskJobAuthority(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodCheckTaskJobAuthority, err)
+	}
+	wireResponse := &storagepb.CheckTaskJobAuthorityResponse{}
+	return wireResponse, nil
+}
+
+func (service *controlService) DeleteTaskJobRevocations(ctx context.Context, wireRequest *storagepb.DeleteTaskJobRevocationsRequest) (*storagepb.DeleteTaskJobRevocationsResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 string
+	a0 = wireRequest.Namespace
+	var a1 string
+	a1 = wireRequest.TaskName
+	var a2 string
+	a2 = wireRequest.TaskUid
+	if err := service.server.checkDigest(ctx, &methodDeleteTaskJobRevocations, a0, a1, a2); err != nil {
+		return nil, err
+	}
+	err = service.provider.DeleteTaskJobRevocations(ctx, a0, a1, a2)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodDeleteTaskJobRevocations, err)
+	}
+	wireResponse := &storagepb.DeleteTaskJobRevocationsResponse{}
+	return wireResponse, nil
+}
+
+func (service *controlService) GetSessionTurnCleanupReceipt(ctx context.Context, wireRequest *storagepb.GetSessionTurnCleanupReceiptRequest) (*storagepb.GetSessionTurnCleanupReceiptResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 string
+	a0 = wireRequest.Namespace
+	var a1 string
+	a1 = wireRequest.SessionName
+	var a2 string
+	a2 = wireRequest.PromptAttemptId
+	var r0 *storagev1.SessionTurnCleanupReceipt
+	r0, err = service.provider.GetSessionTurnCleanupReceipt(ctx, a0, a1, a2)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodGetSessionTurnCleanupReceipt, err)
+	}
+	wireResponse := &storagepb.GetSessionTurnCleanupReceiptResponse{}
+	if r0 != nil {
+		if wireResponse.Receipt, err = toWireSessionTurnCleanupReceipt(*r0); err != nil {
+			return nil, service.server.encodeError(ctx, &methodGetSessionTurnCleanupReceipt, err)
+		}
+	}
+	return wireResponse, nil
+}
+
+func (service *controlService) RevokeTaskJob(ctx context.Context, wireRequest *storagepb.RevokeTaskJobRequest) (*storagepb.RevokeTaskJobResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.TaskJobIdentity
+	if a0, err = fromWireTaskJobIdentity(wireRequest.Identity, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	if err := service.server.checkDigest(ctx, &methodRevokeTaskJob, a0); err != nil {
+		return nil, err
+	}
+	err = service.provider.RevokeTaskJob(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodRevokeTaskJob, err)
+	}
+	wireResponse := &storagepb.RevokeTaskJobResponse{}
+	return wireResponse, nil
+}
+
+func (service *controlService) SyncControllerEpochMirror(ctx context.Context, wireRequest *storagepb.SyncControllerEpochMirrorRequest) (*storagepb.SyncControllerEpochMirrorResponse, error) {
+	if err := service.server.requireIntercepted(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	var a0 storagev1.ControllerEpoch
+	if a0, err = fromWireControllerEpoch(wireRequest.Epoch, true); err != nil {
+		return nil, requestStatus(err)
+	}
+	err = service.provider.SyncControllerEpochMirror(ctx, a0)
+	if err != nil {
+		return nil, service.server.providerError(ctx, &methodSyncControllerEpochMirror, err)
+	}
+	wireResponse := &storagepb.SyncControllerEpochMirrorResponse{}
+	return wireResponse, nil
 }
 
 // datasetService serves orka.storage.v1.Dataset from a provider.
@@ -1189,11 +1412,11 @@ func (service *eventsService) AppendExecutionEvent(ctx context.Context, wireRequ
 	var err error
 	var a0 *storagev1.ExecutionEvent
 	if wireRequest.Event != nil {
-		var v24 storagev1.ExecutionEvent
-		if v24, err = fromWireExecutionEvent(wireRequest.Event, true); err != nil {
+		var v25 storagev1.ExecutionEvent
+		if v25, err = fromWireExecutionEvent(wireRequest.Event, true); err != nil {
 			return nil, requestStatus(err)
 		}
-		a0 = &v24
+		a0 = &v25
 	}
 	if err := service.server.checkDigest(ctx, &methodAppendExecutionEvent, a0); err != nil {
 		return nil, err
@@ -1219,11 +1442,11 @@ func (service *eventsService) AppendExecutionEventIfAbsent(ctx context.Context, 
 	var err error
 	var a0 *storagev1.ExecutionEvent
 	if wireRequest.Event != nil {
-		var v25 storagev1.ExecutionEvent
-		if v25, err = fromWireExecutionEvent(wireRequest.Event, true); err != nil {
+		var v26 storagev1.ExecutionEvent
+		if v26, err = fromWireExecutionEvent(wireRequest.Event, true); err != nil {
 			return nil, requestStatus(err)
 		}
-		a0 = &v25
+		a0 = &v26
 	}
 	var a1 string
 	a1 = wireRequest.DedupeKey
@@ -1253,21 +1476,21 @@ func (service *eventsService) AppendExecutionEventWithPlanIfAbsent(ctx context.C
 	var err error
 	var a0 *storagev1.ExecutionEvent
 	if wireRequest.Event != nil {
-		var v26 storagev1.ExecutionEvent
-		if v26, err = fromWireExecutionEvent(wireRequest.Event, true); err != nil {
+		var v27 storagev1.ExecutionEvent
+		if v27, err = fromWireExecutionEvent(wireRequest.Event, true); err != nil {
 			return nil, requestStatus(err)
 		}
-		a0 = &v26
+		a0 = &v27
 	}
 	var a1 string
 	a1 = wireRequest.DedupeKey
 	var a2 *storagev1.PlanState
 	if wireRequest.Plan != nil {
-		var v27 storagev1.PlanState
-		if v27, err = fromWirePlanState(wireRequest.Plan, true); err != nil {
+		var v28 storagev1.PlanState
+		if v28, err = fromWirePlanState(wireRequest.Plan, true); err != nil {
 			return nil, requestStatus(err)
 		}
-		a2 = &v27
+		a2 = &v28
 	}
 	if err := service.server.checkDigest(ctx, &methodAppendExecutionEventWithPlanIfAbsent, a0, a1, a2); err != nil {
 		return nil, err
@@ -1297,12 +1520,12 @@ func (service *eventsService) AppendExecutionEventsIfAbsent(ctx context.Context,
 	if len(wireRequest.Appends) > 0 {
 		a0 = make([]storagev1.ExecutionEventAppend, 0, len(wireRequest.Appends))
 	}
-	for _, e28 := range wireRequest.Appends {
-		g29, err := fromWireExecutionEventAppend(e28, true)
+	for _, e29 := range wireRequest.Appends {
+		g30, err := fromWireExecutionEventAppend(e29, true)
 		if err != nil {
 			return nil, requestStatus(err)
 		}
-		a0 = append(a0, g29)
+		a0 = append(a0, g30)
 	}
 	if err := service.server.checkDigest(ctx, &methodAppendExecutionEventsIfAbsent, a0); err != nil {
 		return nil, err
@@ -1313,12 +1536,12 @@ func (service *eventsService) AppendExecutionEventsIfAbsent(ctx context.Context,
 		return nil, service.server.providerError(ctx, &methodAppendExecutionEventsIfAbsent, err)
 	}
 	wireResponse := &storagepb.AppendExecutionEventsIfAbsentResponse{}
-	for _, e30 := range r0 {
-		w31, err := toWireExecutionEventAppendResult(e30)
+	for _, e31 := range r0 {
+		w32, err := toWireExecutionEventAppendResult(e31)
 		if err != nil {
 			return nil, service.server.encodeError(ctx, &methodAppendExecutionEventsIfAbsent, err)
 		}
-		wireResponse.Results = append(wireResponse.Results, w31)
+		wireResponse.Results = append(wireResponse.Results, w32)
 	}
 	return wireResponse, nil
 }
@@ -1379,8 +1602,8 @@ func (service *eventsService) GetLatestExecutionEventSeqs(ctx context.Context, w
 	if len(wireRequest.StreamIds) > 0 {
 		a2 = make([]string, 0, len(wireRequest.StreamIds))
 	}
-	for _, e32 := range wireRequest.StreamIds {
-		a2 = append(a2, string(e32))
+	for _, e33 := range wireRequest.StreamIds {
+		a2 = append(a2, string(e33))
 	}
 	var r0 map[string]int64
 	r0, err = service.provider.GetLatestExecutionEventSeqs(ctx, a0, a1, a2)
@@ -1408,12 +1631,12 @@ func (service *eventsService) ListExecutionEvents(wireRequest *storagepb.ListExe
 		return service.server.providerError(ctx, &methodListExecutionEvents, err)
 	}
 	wireResponse := &storagepb.ListExecutionEventsResponse{}
-	for _, e33 := range r0 {
-		w34, err := toWireExecutionEvent(e33)
+	for _, e34 := range r0 {
+		w35, err := toWireExecutionEvent(e34)
 		if err != nil {
 			return service.server.encodeError(ctx, &methodListExecutionEvents, err)
 		}
-		wireResponse.Events = append(wireResponse.Events, w34)
+		wireResponse.Events = append(wireResponse.Events, w35)
 	}
 	return service.server.sendList(stream, &methodListExecutionEvents, wireResponse)
 }
@@ -1435,12 +1658,12 @@ func (service *eventsService) ListSessionExecutionEvents(wireRequest *storagepb.
 		return service.server.providerError(ctx, &methodListSessionExecutionEvents, err)
 	}
 	wireResponse := &storagepb.ListSessionExecutionEventsResponse{}
-	for _, e35 := range r0 {
-		w36, err := toWireSessionExecutionEvent(e35)
+	for _, e36 := range r0 {
+		w37, err := toWireSessionExecutionEvent(e36)
 		if err != nil {
 			return service.server.encodeError(ctx, &methodListSessionExecutionEvents, err)
 		}
-		wireResponse.Events = append(wireResponse.Events, w36)
+		wireResponse.Events = append(wireResponse.Events, w37)
 	}
 	wireResponse.LatestSeq = r1
 	return service.server.sendList(stream, &methodListSessionExecutionEvents, wireResponse)
@@ -1473,12 +1696,12 @@ func (service *messagesService) ConsumeMessages(ctx context.Context, wireRequest
 		return nil, service.server.providerError(ctx, &methodConsumeMessages, err)
 	}
 	wireResponse := &storagepb.ConsumeMessagesResponse{}
-	for _, e37 := range r0 {
-		w38, err := toWireMessage(e37)
+	for _, e38 := range r0 {
+		w39, err := toWireMessage(e38)
 		if err != nil {
 			return nil, service.server.encodeError(ctx, &methodConsumeMessages, err)
 		}
-		wireResponse.Messages = append(wireResponse.Messages, w38)
+		wireResponse.Messages = append(wireResponse.Messages, w39)
 	}
 	return wireResponse, nil
 }
@@ -1544,12 +1767,12 @@ func (service *messagesService) ListUnreadMessages(ctx context.Context, wireRequ
 		return nil, service.server.providerError(ctx, &methodListUnreadMessages, err)
 	}
 	wireResponse := &storagepb.ListUnreadMessagesResponse{}
-	for _, e39 := range r0 {
-		w40, err := toWireMessage(e39)
+	for _, e40 := range r0 {
+		w41, err := toWireMessage(e40)
 		if err != nil {
 			return nil, service.server.encodeError(ctx, &methodListUnreadMessages, err)
 		}
-		wireResponse.Messages = append(wireResponse.Messages, w40)
+		wireResponse.Messages = append(wireResponse.Messages, w41)
 	}
 	return wireResponse, nil
 }
@@ -1561,11 +1784,11 @@ func (service *messagesService) SendMessage(ctx context.Context, wireRequest *st
 	var err error
 	var a0 *storagev1.Message
 	if wireRequest.Msg != nil {
-		var v41 storagev1.Message
-		if v41, err = fromWireMessage(wireRequest.Msg, true); err != nil {
+		var v42 storagev1.Message
+		if v42, err = fromWireMessage(wireRequest.Msg, true); err != nil {
 			return nil, requestStatus(err)
 		}
-		a0 = &v41
+		a0 = &v42
 	}
 	if err := service.server.checkDigest(ctx, &methodSendMessage, a0); err != nil {
 		return nil, err
@@ -1936,11 +2159,11 @@ func (service *resultsService) SavePlan(ctx context.Context, wireRequest *storag
 	a1 = wireRequest.TaskName
 	var a2 *storagev1.PlanState
 	if wireRequest.Plan != nil {
-		var v42 storagev1.PlanState
-		if v42, err = fromWirePlanState(wireRequest.Plan, true); err != nil {
+		var v43 storagev1.PlanState
+		if v43, err = fromWirePlanState(wireRequest.Plan, true); err != nil {
 			return nil, requestStatus(err)
 		}
-		a2 = &v42
+		a2 = &v43
 	}
 	if err := service.server.checkDigest(ctx, &methodSavePlan, a0, a1, a2); err != nil {
 		return nil, err

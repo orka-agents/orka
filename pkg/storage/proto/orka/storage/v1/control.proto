@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/common.proto";
+import "orka/storage/v1/options.proto";
+import "orka/storage/v1/ownership.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Control serves the store halves of the Kubernetes control protocols: the
+// Session turn cleanup receipts, the controller epoch mirror and Task Job
+// authority.
+service Control {
+  option (go_interface) = "SessionTurnCleanupReceiptStore";
+  option (go_interface) = "ControllerEpochMirror";
+  option (go_interface) = "TaskJobAuthorityStore";
+
+  rpc GetSessionTurnCleanupReceipt(GetSessionTurnCleanupReceiptRequest) returns (GetSessionTurnCleanupReceiptResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 5;
+  }
+  rpc SyncControllerEpochMirror(SyncControllerEpochMirrorRequest) returns (SyncControllerEpochMirrorResponse) {
+    option (kind) = METHOD_KIND_ADMIN;
+    option (rpc_since) = 5;
+  }
+  rpc RevokeTaskJob(RevokeTaskJobRequest) returns (RevokeTaskJobResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 5;
+  }
+  rpc CheckTaskJobAuthority(CheckTaskJobAuthorityRequest) returns (CheckTaskJobAuthorityResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 5;
+  }
+  rpc DeleteTaskJobRevocations(DeleteTaskJobRevocationsRequest) returns (DeleteTaskJobRevocationsResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 5;
+  }
+}
+
+message GetSessionTurnCleanupReceiptRequest {
+  string namespace = 1;
+  string session_name = 2;
+  string prompt_attempt_id = 3;
+}
+
+message SessionTurnKey {
+  string session_uid = 1;
+  int64 lease_generation = 2;
+  string task_uid = 3;
+  int64 attempt = 4;
+  string prompt_id = 5;
+}
+
+message PreparedPublicationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string tree_sha = 3;
+  string commit_sha = 4;
+  string manifest_digest = 5;
+  string relative_root = 6;
+  string bundle_artifact_id = 7;
+  string bundle_digest = 8;
+  int64 bundle_size_bytes = 9;
+  string bundle_media_type = 10;
+  string bundle_ref = 11;
+  google.protobuf.Timestamp prepared_at = 12;
+}
+
+message RemoteRefState {
+  bool absent = 1;
+  string sha = 2;
+}
+
+message PublishOperationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string target_repository_id = 3;
+  string target_ref = 4;
+  RemoteRefState remote_before = 5;
+  string expected_commit_sha = 6;
+  bool acknowledgement_unknown = 7;
+  google.protobuf.Timestamp published_at = 8;
+}
+
+message PublicationVerificationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string outcome = 3;
+  string expected_commit_sha = 4;
+  RemoteRefState observed_remote = 5;
+  string descendant_proof_digest = 6;
+  google.protobuf.Timestamp verified_at = 7;
+}
+
+message PullRequestOperationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string intent_key = 3;
+  string forge_id = 4;
+  string url = 5;
+  string state = 6;
+  string head_sha = 7;
+  google.protobuf.Timestamp reconciled_at = 8;
+}
+
+message PublicationReceipt {
+  string publication_id = 1;
+  int64 generation = 2;
+  string state = 3;
+  PreparedPublicationReceipt prepared = 4;
+  PublishOperationReceipt publish = 5;
+  PublicationVerificationReceipt verification = 6;
+  PullRequestOperationReceipt pull_request = 7;
+}
+
+message SessionTurnCleanupReceipt {
+  string namespace = 1;
+  string session_name = 2;
+  string operation_id = 3;
+  string operation_digest = 4;
+  string turn_id = 5;
+  SessionTurnKey key = 6;
+  string prompt_attempt_id = 7;
+  string terminal_kind = 8;
+  google.protobuf.Timestamp finalized_at = 9;
+  string publication_id = 10;
+  PublicationReceipt publication_receipt = 11;
+  string projection_id = 12;
+  string projection_kind = 13;
+  string projection_digest = 14;
+  string aggregate_kind = 15;
+  string aggregate_id = 16;
+  bytes payload = 17;
+  string payload_digest = 18;
+  string projection_state = 19;
+  string delivery_digest = 20;
+  NullableTime delivered_at = 21;
+}
+
+message GetSessionTurnCleanupReceiptResponse {
+  SessionTurnCleanupReceipt receipt = 1;
+}
+
+message SyncControllerEpochMirrorRequest {
+  ControllerEpoch epoch = 1;
+}
+
+message SyncControllerEpochMirrorResponse {}
+
+message RevokeTaskJobRequest {
+  TaskJobIdentity identity = 1;
+}
+
+message RevokeTaskJobResponse {}
+
+message CheckTaskJobAuthorityRequest {
+  TaskJobIdentity identity = 1;
+}
+
+message CheckTaskJobAuthorityResponse {}
+
+message DeleteTaskJobRevocationsRequest {
+  string namespace = 1;
+  string task_name = 2;
+  string task_uid = 3;
+}
+
+message DeleteTaskJobRevocationsResponse {}

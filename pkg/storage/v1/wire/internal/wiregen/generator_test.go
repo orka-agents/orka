@@ -445,7 +445,9 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 		"GetLatestExecutionEventSeq", "GetLatestExecutionEventSeqs", "DeleteExecutionEvents", "AppendExecutionEventIfAbsent",
 		"AppendExecutionEventWithPlanIfAbsent", "AppendExecutionEventsIfAbsent", "ResolveOperation", "PruneOperationReceipts",
 		"AdvanceControllerEpoch", "GetControllerEpochMirror", "BindDataset", "GetDatasetBinding", "DetachDatasetBinding",
-		"UpdateBindingKeyFingerprint", "CompleteDatasetBootstrap", "AdvanceWriteWatermark", "GetWriteWatermark"} {
+		"UpdateBindingKeyFingerprint", "CompleteDatasetBootstrap", "AdvanceWriteWatermark", "GetWriteWatermark",
+		"GetSessionTurnCleanupReceipt", "SyncControllerEpochMirror", "RevokeTaskJob", "CheckTaskJobAuthority",
+		"DeleteTaskJobRevocations"} {
 		if !methods[name] {
 			t.Errorf("method %s has no RPC", name)
 		}
@@ -459,7 +461,8 @@ func TestModelCoversTheMappedFamilies(t *testing.T) {
 		"ControllerEpochFence", "TaskDataFence", "TaskJobIdentity", "PromptResultReceipt", "ArtifactOwner",
 		"ArtifactKey", "ArtifactMetadata", "SaveArtifactRequest", "ExecutionEvent", "SessionExecutionEvent",
 		"ExecutionEventUsage", "UsageObservation", "ExecutionEventAppend", "ExecutionEventAppendResult", "OperationOutcome",
-		"ControllerEpoch", "ControllerEpochMirrorState", "DetachDatasetRequest", "UpdateBindingKeyRequest", "WriteWatermark"} {
+		"ControllerEpoch", "ControllerEpochMirrorState", "DetachDatasetRequest", "UpdateBindingKeyRequest", "WriteWatermark",
+		"SessionTurnCleanupReceipt", "SessionTurnKey", "PublicationReceipt"} {
 		if !records[name] {
 			t.Errorf("record %s is not mapped", name)
 		}

@@ -270,6 +270,17 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "PreparedPublicationReceipt",
+		goType:  reflect.TypeFor[storagev1.PreparedPublicationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PreparedPublicationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePreparedPublicationReceipt(value.(storagev1.PreparedPublicationReceipt))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWirePreparedPublicationReceipt(message.(*storagepb.PreparedPublicationReceipt), exact)
+		},
+	},
+	{
 		name:    "PromptResultReceipt",
 		goType:  reflect.TypeFor[storagev1.PromptResultReceipt](),
 		newWire: func() proto.Message { return &storagepb.PromptResultReceipt{} },
@@ -296,6 +307,59 @@ var recordCodecs = []recordCodec{
 		toWire:  func(value any) (proto.Message, error) { return toWireProviderLimits(value.(storagev1.ProviderLimits)) },
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireProviderLimits(message.(*storagepb.ProviderLimits), exact)
+		},
+	},
+	{
+		name:    "PublicationReceipt",
+		goType:  reflect.TypeFor[storagev1.PublicationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PublicationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePublicationReceipt(value.(storagev1.PublicationReceipt))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWirePublicationReceipt(message.(*storagepb.PublicationReceipt), exact)
+		},
+	},
+	{
+		name:    "PublicationVerificationReceipt",
+		goType:  reflect.TypeFor[storagev1.PublicationVerificationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PublicationVerificationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePublicationVerificationReceipt(value.(storagev1.PublicationVerificationReceipt))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWirePublicationVerificationReceipt(message.(*storagepb.PublicationVerificationReceipt), exact)
+		},
+	},
+	{
+		name:    "PublishOperationReceipt",
+		goType:  reflect.TypeFor[storagev1.PublishOperationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PublishOperationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePublishOperationReceipt(value.(storagev1.PublishOperationReceipt))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWirePublishOperationReceipt(message.(*storagepb.PublishOperationReceipt), exact)
+		},
+	},
+	{
+		name:    "PullRequestOperationReceipt",
+		goType:  reflect.TypeFor[storagev1.PullRequestOperationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PullRequestOperationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePullRequestOperationReceipt(value.(storagev1.PullRequestOperationReceipt))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWirePullRequestOperationReceipt(message.(*storagepb.PullRequestOperationReceipt), exact)
+		},
+	},
+	{
+		name:    "RemoteRefState",
+		goType:  reflect.TypeFor[storagev1.RemoteRefState](),
+		newWire: func() proto.Message { return &storagepb.RemoteRefState{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireRemoteRefState(value.(storagev1.RemoteRefState)) },
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireRemoteRefState(message.(*storagepb.RemoteRefState), exact)
 		},
 	},
 	{
@@ -340,6 +404,26 @@ var recordCodecs = []recordCodec{
 		},
 		fromWire: func(message proto.Message, exact bool) (any, error) {
 			return fromWireSessionExecutionEventFilter(message.(*storagepb.SessionExecutionEventFilter), exact)
+		},
+	},
+	{
+		name:    "SessionTurnCleanupReceipt",
+		goType:  reflect.TypeFor[storagev1.SessionTurnCleanupReceipt](),
+		newWire: func() proto.Message { return &storagepb.SessionTurnCleanupReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionTurnCleanupReceipt(value.(storagev1.SessionTurnCleanupReceipt))
+		},
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireSessionTurnCleanupReceipt(message.(*storagepb.SessionTurnCleanupReceipt), exact)
+		},
+	},
+	{
+		name:    "SessionTurnKey",
+		goType:  reflect.TypeFor[storagev1.SessionTurnKey](),
+		newWire: func() proto.Message { return &storagepb.SessionTurnKey{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireSessionTurnKey(value.(storagev1.SessionTurnKey)) },
+		fromWire: func(message proto.Message, exact bool) (any, error) {
+			return fromWireSessionTurnKey(message.(*storagepb.SessionTurnKey), exact)
 		},
 	},
 	{
