@@ -108,8 +108,14 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 		t.Fatalf("patched verification readCredentialRef = %#v, want %q", patchedTask.Spec.Workspace.ReadCredentialRef, fixture.scan.Spec.PublicationReadCredentialRef.Name)
 	}
 	patchedTask.Spec = taskSpecWithServerDefaults(patchedTask.Spec)
-	if !patchVerifyTaskMatchesDesired(fixture.scan, patchedTask, buildDesiredPatchVerifyTask(fixture.scan, task, fixture.finding, patchVerifyPhasePatched, strings.Repeat("b", 40), true)) {
+	desiredPatched := buildDesiredPatchVerifyTask(fixture.scan, task, fixture.finding, patchVerifyPhasePatched, strings.Repeat("b", 40), true)
+	if !patchVerifyTaskMatchesDesired(fixture.scan, patchedTask, desiredPatched) {
 		t.Fatal("expected patchVerifyTaskMatchesDesired to accept server-defaulted task spec")
+	}
+	tampered := patchedTask.DeepCopy()
+	tampered.Spec.Env = []corev1.EnvVar{{Name: "GOFLAGS", Value: "-run=^$"}}
+	if patchVerifyTaskMatchesDesired(fixture.scan, tampered, desiredPatched) {
+		t.Fatal("expected patchVerifyTaskMatchesDesired to reject unexpected Spec.Env")
 	}
 
 	patchedTask.Status.Phase = corev1alpha1.TaskPhaseSucceeded

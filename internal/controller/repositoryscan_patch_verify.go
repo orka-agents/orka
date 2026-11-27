@@ -296,13 +296,7 @@ func patchVerifyTaskMatchesDesired(scan *corev1alpha1.RepositoryScan, existing, 
 	}
 	have := taskSpecWithServerDefaults(existing.Spec)
 	want := taskSpecWithServerDefaults(desired.Spec)
-	if have.Type != want.Type ||
-		strings.TrimSpace(have.Image) != strings.TrimSpace(want.Image) ||
-		!reflect.DeepEqual(have.Command, want.Command) ||
-		!reflect.DeepEqual(have.Args, want.Args) {
-		return false
-	}
-	return reflect.DeepEqual(have.Workspace, want.Workspace)
+	return reflect.DeepEqual(have, want)
 }
 
 func (r *RepositoryScanReconciler) ensurePatchVerifyTask(
