@@ -38,6 +38,7 @@ import (
 	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/githubauth"
+	"github.com/orka-agents/orka/internal/k8scaps"
 )
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agenthosts,verbs=get;list;watch;update;patch
@@ -115,17 +116,18 @@ var errAgentHostObjectGone = errors.New("agent host object is gone")
 
 type AgentHostReconciler struct {
 	client.Client
-	APIReader       client.Reader
-	Scheme          *runtime.Scheme
-	HostNamespace   string
-	AgentImage      string
-	Controller      agenthost.ControllerPeer
-	IdleStatus      agenthost.StatusReader
-	HostCredentials AgentHostCredentials
-	GitHubAccounts  GitHubAccountReader
-	Membership      GitHubMembershipChecker
-	Now             func() time.Time
-	Random          func([]byte) (int, error)
+	APIReader           client.Reader
+	Scheme              *runtime.Scheme
+	HostNamespace       string
+	AgentImage          string
+	ClusterCapabilities k8scaps.Capabilities
+	Controller          agenthost.ControllerPeer
+	IdleStatus          agenthost.StatusReader
+	HostCredentials     AgentHostCredentials
+	GitHubAccounts      GitHubAccountReader
+	Membership          GitHubMembershipChecker
+	Now                 func() time.Time
+	Random              func([]byte) (int, error)
 }
 
 type AgentHostCredentials interface {
@@ -839,7 +841,7 @@ func (r *AgentHostReconciler) reconcilePod(
 	pod := &corev1.Pod{}
 	err := r.ensureObject(ctx, host, agentHostKindPod, "", names.Pod, pod, func(nonce string) client.Object {
 		return agenthost.HostPod(host, names, nonce, template, agenthost.PodOptions{
-			AgentImage: r.AgentImage, GitHubTokenSource: tokenSource,
+			AgentImage: r.AgentImage, GitHubTokenSource: tokenSource, ClusterCapabilities: r.ClusterCapabilities,
 		})
 	})
 	if errors.Is(err, errAgentHostObjectGone) {
@@ -867,7 +869,7 @@ func (r *AgentHostReconciler) reconcilePod(
 			agentHostReasonRestarting, "the host's Pod stopped; replacing it", "")
 		return ctrl.Result{RequeueAfter: agentHostCleanupRequeue}, nil
 	}
-	if message := staleAgentHostPod(pod, template, tokenSource); message != "" {
+	if message := staleAgentHostPod(pod, template, tokenSource, r.ClusterCapabilities); message != "" {
 		if err := r.deletePod(ctx, host, names); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1066,12 +1068,18 @@ func newAgentHostObject(kind string) client.Object {
 	}
 }
 
-func staleAgentHostPod(pod *corev1.Pod, template *corev1alpha1.AgentHostTemplate, tokenSource string) string {
+func staleAgentHostPod(pod *corev1.Pod, template *corev1alpha1.AgentHostTemplate, tokenSource string, caps k8scaps.Capabilities) string {
 	switch {
 	case pod.Annotations[agenthost.AnnotationGitHubToken] != tokenSource:
 		return "replacing the host's Pod to change its credentials"
 	case pod.Annotations[agenthost.AnnotationTemplateUID] != string(template.UID):
 		return "replacing the host's Pod to run its recreated template"
+	case caps.PodUserNamespaces && (pod.Spec.HostUsers == nil || *pod.Spec.HostUsers):
+		return "replacing the host's Pod to enable user namespaces"
+	case caps.SupplementalGroupsStrict && (pod.Spec.SecurityContext == nil ||
+		pod.Spec.SecurityContext.SupplementalGroupsPolicy == nil ||
+		*pod.Spec.SecurityContext.SupplementalGroupsPolicy != corev1.SupplementalGroupsPolicyStrict):
+		return "replacing the host's Pod to enable strict supplemental groups"
 	}
 	return ""
 }

@@ -77,6 +77,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/githubauth"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
@@ -435,6 +436,8 @@ func main() {
 	var agentHostNamespace string
 	var agentHostAgentImage string
 	var agentHostControllerPodLabels string
+	var podUserNamespacesEnabled bool
+	var podSupplementalGroupsStrictEnabled bool
 	var tlsOpts []func(*tls.Config)
 
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
@@ -506,6 +509,12 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.BoolVar(&podUserNamespacesEnabled, "pod-user-namespaces-enabled",
+		envBool("ORKA_POD_USER_NAMESPACES_ENABLED"),
+		"Set spec.hostUsers=false on controller-managed RuntimePool, Task, AgentHost, and AHP workspace Pods. Requires Kubernetes 1.33+ and Linux kernel 6.3+ with idmap-capable container runtime on worker nodes.")
+	flag.BoolVar(&podSupplementalGroupsStrictEnabled, "pod-supplemental-groups-strict-enabled",
+		envBool("ORKA_POD_SUPPLEMENTAL_GROUPS_STRICT_ENABLED"),
+		"Set spec.securityContext.supplementalGroupsPolicy=Strict on controller-managed Pods. Requires Kubernetes 1.33+ and container runtime support (containerd 2.0+ or CRI-O 1.31+) on worker nodes.")
 	flag.StringVar(&agentIdentityEntraTenantID, "agent-identity-entra-tenant-id",
 		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID"),
 		"Entra tenant ID of the agent identity blueprint that Agent.spec.identity.entra identities belong to.")
@@ -1377,6 +1386,7 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	clusterCaps := detectClusterCapabilities(restConfig, podUserNamespacesEnabled, podSupplementalGroupsStrictEnabled)
 	acpToolboxPolicy = checkACPToolboxImageVolumeSupport(restConfig, acpToolboxPolicy)
 	leaderLease, err := agentUseLeaderLease(enableLeaderElection, watchNamespace)
 	if err != nil {
@@ -1954,6 +1964,7 @@ func main() {
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
+	jobBuilder.ClusterCapabilities = clusterCaps
 	jobBuilder.EnforceTransactionCredentialAuth =
 		contextTokenAuthzConfig.Mode == api.ContextTokenAuthorizationModeEnforce
 	jobBuilder.TransactionCredentialReadScopes = append(
@@ -2016,6 +2027,7 @@ func main() {
 	runtimePoolReconciler.TelemetryCollectorEgress = runtimeTelemetryCollectorEgress
 	runtimePoolReconciler.E2EPromptWriteAmbiguityMarker = acpE2EPromptWriteAmbiguityMarker
 	runtimePoolReconciler.ToolboxPolicy = acpToolboxPolicy
+	runtimePoolReconciler.ClusterCapabilities = clusterCaps
 
 	runtimePoolReconciler.AllowedImages = controller.ACPRuntimeImages{
 		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
@@ -2314,11 +2326,12 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.AgentHostReconciler{
-			Client:        mgr.GetClient(),
-			APIReader:     mgr.GetAPIReader(),
-			Scheme:        mgr.GetScheme(),
-			HostNamespace: strings.TrimSpace(agentHostNamespace),
-			AgentImage:    strings.TrimSpace(agentHostAgentImage),
+			Client:              mgr.GetClient(),
+			APIReader:           mgr.GetAPIReader(),
+			Scheme:              mgr.GetScheme(),
+			HostNamespace:       strings.TrimSpace(agentHostNamespace),
+			AgentImage:          strings.TrimSpace(agentHostAgentImage),
+			ClusterCapabilities: clusterCaps,
 			Controller: agenthost.ControllerPeer{
 				Namespace: currentPodNamespace(),
 				PodLabels: controllerLabels,
@@ -2575,6 +2588,7 @@ func main() {
 		MCP:                      mcpConfig,
 		TaskWebhookKeys:          taskWebhookKeys,
 		AgentIdentityAudit:       agentIdentityAuditBuffer,
+		ClusterCapabilities:      clusterCaps,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2815,6 +2829,45 @@ func resolveACPToolboxPolicy(
 		policy.NodeSelector = selector
 	}
 	return policy, nil
+}
+
+func detectClusterCapabilities(restConfig *rest.Config, podUserNamespacesEnabled, podSupplementalGroupsStrictEnabled bool) k8scaps.Capabilities {
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "failed to create discovery client for Kubernetes capability detection; defaulting to minimum-compatible feature set")
+		return k8scaps.Capabilities{}
+	}
+	caps, err := k8scaps.Detect(discoveryClient)
+	if err != nil {
+		setupLog.Error(err, "failed to detect Kubernetes cluster capabilities; defaulting to minimum-compatible feature set")
+		return k8scaps.Capabilities{}
+	}
+	if podUserNamespacesEnabled {
+		if caps.MeetsVersion(k8scaps.MinSupportedServerVersion) {
+			caps = caps.WithPodUserNamespaces(true)
+		} else {
+			setupLog.Info("ignoring --pod-user-namespaces-enabled on Kubernetes version older than minimum supported",
+				"serverVersion", caps.ServerVersion, "minimumVersion", k8scaps.MinSupportedServerVersion)
+		}
+	}
+	if podSupplementalGroupsStrictEnabled {
+		if caps.MeetsVersion(k8scaps.MinSupportedServerVersion) {
+			caps = caps.WithSupplementalGroupsStrict(true)
+		} else {
+			setupLog.Info("ignoring --pod-supplemental-groups-strict-enabled on Kubernetes version older than minimum supported",
+				"serverVersion", caps.ServerVersion, "minimumVersion", k8scaps.MinSupportedServerVersion)
+		}
+	}
+	setupLog.Info("detected Kubernetes cluster capabilities",
+		"serverVersion", caps.ServerVersion,
+		"supplementalGroupsStrict", caps.SupplementalGroupsStrict,
+		"podLevelResources", caps.PodLevelResources,
+		"podLogsSplitStreams", caps.PodLogsSplitStreams,
+		"inPlacePodResize", caps.InPlacePodResize,
+		"imageVolumes", caps.ImageVolumes,
+		"podUserNamespaces", caps.PodUserNamespaces,
+	)
+	return caps
 }
 
 func checkACPToolboxImageVolumeSupport(

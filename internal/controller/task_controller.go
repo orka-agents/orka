@@ -56,6 +56,7 @@ import (
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -3626,7 +3627,7 @@ func (r *TaskReconciler) readPodLogsWithOptions(ctx context.Context, task *corev
 		return "", fmt.Errorf("no pods found for job %s", task.Status.JobName)
 	}
 
-	pod := podList.Items[len(podList.Items)-1]
+	pod, _ := k8scaps.SelectJobPod(podList.Items)
 	req := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &opts)
 	stream, err := req.Stream(ctx)
 	if err != nil {

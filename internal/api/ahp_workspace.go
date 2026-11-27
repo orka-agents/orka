@@ -126,7 +126,19 @@ func (w *ahpWorkspaces) podSpec(principal ahphost.Principal) *corev1.Pod {
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: &yes, RunAsUser: &uid, RunAsGroup: &uid, FSGroup: &uid,
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+				SupplementalGroupsPolicy: func() *corev1.SupplementalGroupsPolicy {
+					if w.b != nil && w.b.h != nil && w.b.h.clusterCapabilities.SupplementalGroupsStrict {
+						return new(corev1.SupplementalGroupsPolicyStrict)
+					}
+					return nil
+				}(),
 			},
+			HostUsers: func() *bool {
+				if w.b != nil && w.b.h != nil && w.b.h.clusterCapabilities.PodUserNamespaces {
+					return new(false)
+				}
+				return nil
+			}(),
 			Containers: []corev1.Container{{
 				Name: ahpWorkspaceContainer, Image: w.image,
 				Command:    []string{ahpShell, "-c", ahpWorkspaceKeepAlive},

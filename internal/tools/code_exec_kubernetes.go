@@ -16,12 +16,12 @@ import (
 	"io"
 	"maps"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/workerenv"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -68,6 +68,8 @@ const (
 	codeExecKubernetesNetworkPolicyEnv    = workerenv.CodeExecKubernetesNetworkPolicy
 	codeExecKubernetesRuntimeClassNameEnv = workerenv.CodeExecKubernetesRuntimeClass
 	codeExecKubernetesAppArmorProfileEnv  = workerenv.CodeExecKubernetesAppArmor
+	codeExecKubernetesHostUsersEnv        = workerenv.CodeExecKubernetesHostUsers
+	codeExecKubernetesSuppStrictEnv       = workerenv.CodeExecKubernetesSuppStrict
 
 	codeExecKubernetesFinishedTTLSeconds = int32(60)
 )
@@ -350,7 +352,8 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 			Labels:      cloneKubernetesCodeExecStringMap(labels),
 			Annotations: cloneKubernetesCodeExecStringMap(annotations),
 		},
-		Type: corev1.SecretTypeOpaque,
+		Immutable: new(true),
+		Type:      corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			codeExecKubernetesCodeVolumeName: []byte(req.Code),
 		},
@@ -377,6 +380,26 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 			BackoffLimit:            &backoffLimit,
 			ActiveDeadlineSeconds:   &deadlineSeconds,
 			TTLSecondsAfterFinished: &ttlSeconds,
+			PodFailurePolicy: &batchv1.PodFailurePolicy{
+				Rules: []batchv1.PodFailurePolicyRule{
+					{
+						Action: batchv1.PodFailurePolicyActionIgnore,
+						OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{
+							{
+								Type:   corev1.DisruptionTarget,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+					{
+						Action: batchv1.PodFailurePolicyActionFailJob,
+						OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+							Operator: batchv1.PodFailurePolicyOnExitCodesOpNotIn,
+							Values:   []int32{0},
+						},
+					},
+				},
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      cloneKubernetesCodeExecStringMap(labels),
@@ -456,6 +479,12 @@ func (e *KubernetesJobCodeExecutor) buildResourcesWithJobName(namespace string, 
 
 	if runtimeClassName := codeExecKubernetesRuntimeClassNameForRequest(req); runtimeClassName != "" {
 		job.Spec.Template.Spec.RuntimeClassName = &runtimeClassName
+	}
+	if codeExecKubernetesEnvBool(codeExecKubernetesSuppStrictEnv) {
+		job.Spec.Template.Spec.SecurityContext.SupplementalGroupsPolicy = new(corev1.SupplementalGroupsPolicyStrict)
+	}
+	if hostUsers, ok := codeExecKubernetesHostUsersSetting(); ok {
+		job.Spec.Template.Spec.HostUsers = &hostUsers
 	}
 
 	resourcesToCreate := &kubernetesCodeExecResources{
@@ -1260,19 +1289,31 @@ func codeExecKubernetesNetworkPolicyEnabledForRequest(req CodeExecutionRequest) 
 	return codeExecKubernetesNetworkPolicyEnabledForScope(codeExecRequestProviderScope(req), req.Tenant)
 }
 
-func codeExecKubernetesNetworkPolicyEnabledForScope(provider, tenant string) bool {
-	value := strings.TrimSpace(strings.ToLower(codeExecScopedEnv(codeExecKubernetesNetworkPolicyEnv, provider, tenant, "")))
-	if value == "" {
-		return true
-	}
-	switch value {
+func parseCodeExecKubernetesBool(raw string) (bool, bool) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "0", falseStr, "no", "off", "disabled":
-		return false
+		return false, true
 	case "1", trueStr, "yes", "on", enabledString:
-		return true
+		return true, true
 	default:
-		return true
+		return false, false
 	}
+}
+
+func codeExecKubernetesEnvBool(envName string) bool {
+	enabled, ok := parseCodeExecKubernetesBool(os.Getenv(envName))
+	return ok && enabled
+}
+
+func codeExecKubernetesHostUsersSetting() (bool, bool) {
+	return parseCodeExecKubernetesBool(os.Getenv(codeExecKubernetesHostUsersEnv))
+}
+
+func codeExecKubernetesNetworkPolicyEnabledForScope(provider, tenant string) bool {
+	if enabled, ok := parseCodeExecKubernetesBool(codeExecScopedEnv(codeExecKubernetesNetworkPolicyEnv, provider, tenant, "")); ok {
+		return enabled
+	}
+	return true
 }
 
 func codeExecQuantityForScope(envName, provider, tenant, fallback string) (resource.Quantity, error) {
@@ -1467,18 +1508,8 @@ func (e *KubernetesJobCodeExecutor) firstJobPod(ctx context.Context, clients kub
 	if err := clients.client.List(ctx, pods, crclient.InNamespace(clients.namespace), crclient.MatchingLabels{codeExecKubernetesLabelJob: jobName}); err != nil {
 		return corev1.Pod{}, false, err
 	}
-	if len(pods.Items) == 0 {
-		return corev1.Pod{}, false, nil
-	}
-	sort.Slice(pods.Items, func(i, j int) bool {
-		left := pods.Items[i]
-		right := pods.Items[j]
-		if !left.CreationTimestamp.Equal(&right.CreationTimestamp) {
-			return left.CreationTimestamp.Before(&right.CreationTimestamp)
-		}
-		return left.Name < right.Name
-	})
-	return pods.Items[0], true, nil
+	pod, ok := k8scaps.SelectJobPod(pods.Items)
+	return pod, ok, nil
 }
 
 func hasJobCondition(job *batchv1.Job, conditionType batchv1.JobConditionType) bool {

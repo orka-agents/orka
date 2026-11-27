@@ -36,26 +36,27 @@ const (
 )
 
 type runtimePoolBootWitness struct {
-	SchemaVersion  int             `json:"schemaVersion"`
-	PoolNamespace  string          `json:"poolNamespace"`
-	PoolName       string          `json:"poolName"`
-	PoolUID        types.UID       `json:"poolUID"`
-	Provider       string          `json:"provider"`
-	Fence          harnessv2.Fence `json:"fence"`
-	PodNamespace   string          `json:"podNamespace"`
-	PodName        string          `json:"podName"`
-	PodUID         types.UID       `json:"podUID"`
-	PodAddress     string          `json:"podAddress"`
-	PodSpecDigest  string          `json:"podSpecDigest"`
-	DeploymentName string          `json:"deploymentName"`
-	DeploymentUID  types.UID       `json:"deploymentUID"`
-	ReplicaSetName string          `json:"replicaSetName"`
-	ReplicaSetUID  types.UID       `json:"replicaSetUID"`
-	TemplateDigest string          `json:"templateDigest"`
-	ContainerID    string          `json:"containerID"`
-	ImageID        string          `json:"imageID"`
-	RestartCount   int32           `json:"restartCount"`
-	StartedAt      metav1.Time     `json:"startedAt"`
+	SchemaVersion  int               `json:"schemaVersion"`
+	PoolNamespace  string            `json:"poolNamespace"`
+	PoolName       string            `json:"poolName"`
+	PoolUID        types.UID         `json:"poolUID"`
+	Provider       string            `json:"provider"`
+	Fence          harnessv2.Fence   `json:"fence"`
+	PodNamespace   string            `json:"podNamespace"`
+	PodName        string            `json:"podName"`
+	PodUID         types.UID         `json:"podUID"`
+	PodAddress     string            `json:"podAddress"`
+	PodSpecDigest  string            `json:"podSpecDigest"`
+	DeploymentName string            `json:"deploymentName"`
+	DeploymentUID  types.UID         `json:"deploymentUID"`
+	ReplicaSetName string            `json:"replicaSetName"`
+	ReplicaSetUID  types.UID         `json:"replicaSetUID"`
+	TemplateDigest string            `json:"templateDigest"`
+	ContainerID    string            `json:"containerID"`
+	ImageID        string            `json:"imageID"`
+	ImageVolumes   map[string]string `json:"imageVolumes,omitempty"`
+	RestartCount   int32             `json:"restartCount"`
+	StartedAt      metav1.Time       `json:"startedAt"`
 }
 
 func (w runtimePoolBootWitness) identity(kind string) store.ExternalEffectIdentity {
@@ -216,8 +217,37 @@ func (r *RuntimePoolReconciler) observeNativeRuntimePoolBoot(ctx context.Context
 		PodNamespace: pod.Namespace, PodName: pod.Name, PodUID: pod.UID, PodAddress: pod.Status.PodIP, PodSpecDigest: podDigest,
 		DeploymentName: deployment.Name, DeploymentUID: deployment.UID, ReplicaSetName: rs.Name, ReplicaSetUID: rs.UID,
 		TemplateDigest: runtimePoolPodTemplateRevision(deployment.Spec.Template), ContainerID: container.ContainerID,
-		ImageID: container.ImageID, RestartCount: container.RestartCount, StartedAt: container.State.Running.StartedAt,
+		ImageID: container.ImageID, ImageVolumes: observedImageVolumeDigests(container),
+		RestartCount: container.RestartCount, StartedAt: container.State.Running.StartedAt,
 	}, nil
+}
+
+func runtimePoolBootWitnessEqual(existing, observed runtimePoolBootWitness) bool {
+	if len(existing.ImageVolumes) == 0 && len(observed.ImageVolumes) > 0 {
+		observed.ImageVolumes = nil
+	}
+	return reflect.DeepEqual(existing, observed)
+}
+
+func observedImageVolumeDigests(container corev1.ContainerStatus) map[string]string {
+	if len(container.VolumeMounts) == 0 {
+		return nil
+	}
+	var digests map[string]string
+	for i := range container.VolumeMounts {
+		vm := &container.VolumeMounts[i]
+		if vm.VolumeStatus == nil || vm.VolumeStatus.Image == nil || strings.TrimSpace(vm.VolumeStatus.Image.ImageRef) == "" {
+			continue
+		}
+		if !strings.HasPrefix(vm.Name, runtimePoolToolboxVolumePrefix) && !strings.HasPrefix(vm.Name, runtimePoolSkillVolumePrefix) {
+			continue
+		}
+		if digests == nil {
+			digests = map[string]string{}
+		}
+		digests[vm.Name] = strings.TrimSpace(vm.VolumeStatus.Image.ImageRef)
+	}
+	return digests
 }
 
 func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, pod *corev1.Pod) (*appsv1.Deployment, *appsv1.ReplicaSet, error) {
@@ -375,10 +405,10 @@ func (r *RuntimePoolReconciler) enrollRuntimePoolBoot(ctx context.Context, pool 
 	}
 	existing, loadErr := loadRuntimePoolBootWitness(ctx, r.ControlStore, w.identity(runtimePoolBootWitnessKind))
 	if loadErr == nil {
-		if !reflect.DeepEqual(existing, w) {
+		if !runtimePoolBootWitnessEqual(existing, w) {
 			return fmt.Errorf("%w: enrolled RuntimePool boot changed", store.ErrConflict)
 		}
-		retired, err := loadRuntimePoolBootRetirement(ctx, r.ControlStore, w)
+		retired, err := loadRuntimePoolBootRetirement(ctx, r.ControlStore, existing)
 		if err != nil {
 			return err
 		}
@@ -388,7 +418,7 @@ func (r *RuntimePoolReconciler) enrollRuntimePoolBoot(ctx context.Context, pool 
 			}
 			return nil
 		}
-		return r.requireRuntimePoolBootRetention(ctx, w)
+		return r.requireRuntimePoolBootRetention(ctx, existing)
 	}
 	if !errors.Is(loadErr, store.ErrNotFound) && !errors.Is(loadErr, store.ErrNotReady) {
 		return loadErr

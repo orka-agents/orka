@@ -35,6 +35,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -141,6 +142,7 @@ type Handlers struct {
 	chatTurns                 chatTurnStopper
 	attentionBounds           attentionBounds
 	agentIdentityAudit        outboundaccess.AgentIdentityAuditReader
+	clusterCapabilities       k8scaps.Capabilities
 }
 
 type HandlersConfig struct {
@@ -177,6 +179,7 @@ type HandlersConfig struct {
 	AHP                       *ahphost.Host
 	SubstrateMCPProxy         SubstrateMCPProxyConfig
 	AgentIdentityAudit        outboundaccess.AgentIdentityAuditReader
+	ClusterCapabilities       k8scaps.Capabilities
 }
 
 func NewHandlers(cfg HandlersConfig) *Handlers {
@@ -224,6 +227,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
 		agentIdentityAudit:        cfg.AgentIdentityAudit,
+		clusterCapabilities:       cfg.ClusterCapabilities,
 	}
 }
 
@@ -885,12 +889,17 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "no pods found for task job")
 	}
 
-	podName := pods.Items[0].Name
+	selectedPod, _ := k8scaps.SelectJobPod(pods.Items)
+	podName := selectedPod.Name
 	follow := c.Query("follow") == queryTrue
+	logStreamSelector, err := parseTaskLogStream(c.Query("stream"))
+	if err != nil {
+		return err
+	}
 
 	if follow {
 		streamCtx, streamCancel := context.WithCancel(context.Background())
-		stream, err := StreamPodLogs(streamCtx, h.clientset, namespace, podName, "worker")
+		stream, err := streamPodLogsWithStream(streamCtx, h.clientset, namespace, podName, "worker", logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
 		if err != nil {
 			streamCancel()
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to stream logs: %v", err))
@@ -921,21 +930,214 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		Container: "worker",
 		TailLines: &tailLines,
 	}
-	req := h.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts)
-	logStream, err := req.Stream(ctx)
+	logStream, err := openPodLogsWithStreamFallback(ctx, h.clientset, namespace, podName, opts, logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get logs: %v", err))
 	}
 	defer func() { _ = logStream.Close() }()
 
-	logBytes, err := io.ReadAll(logStream)
+	logs, err := readBoundedTailLogLines(logStream, tailLines, maxTaskLogReadBytes)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", err))
 	}
-
 	return c.JSON(fiber.Map{
-		"logs": string(logBytes),
+		"logs": logs,
 	})
+}
+
+const maxTaskLogReadBytes int64 = 4 << 20
+
+func parseTaskLogStream(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return "", nil
+	case "all":
+		return corev1.LogStreamAll, nil
+	case "stdout":
+		return corev1.LogStreamStdout, nil
+	case "stderr":
+		return corev1.LogStreamStderr, nil
+	default:
+		return "", fiber.NewError(fiber.StatusBadRequest, "stream must be one of all, stdout, or stderr")
+	}
+}
+
+func openPodLogsWithStreamFallback(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName string,
+	baseOpts *corev1.PodLogOptions,
+	streamSelector string,
+	splitStreamsSupported bool,
+) (io.ReadCloser, error) {
+	opts := baseOpts.DeepCopy()
+	if streamSelector != "" && splitStreamsSupported {
+		splitOpts := opts.DeepCopy()
+		splitOpts.Stream = new(streamSelector)
+		if streamSelector == corev1.LogStreamStdout || streamSelector == corev1.LogStreamStderr {
+			splitOpts.TailLines = nil
+		}
+		stream, err := clientset.CoreV1().Pods(namespace).GetLogs(podName, splitOpts).Stream(ctx)
+		if err == nil {
+			return stream, nil
+		}
+		if !apierrors.IsBadRequest(err) && !apierrors.IsInvalid(err) {
+			return nil, err
+		}
+	}
+	return clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+}
+
+func streamPodLogsWithStream(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName, containerName, streamSelector string,
+	splitStreamsSupported bool,
+) (io.ReadCloser, error) {
+	opts := &corev1.PodLogOptions{
+		Container: containerName,
+		Follow:    true,
+	}
+	return openPodLogsWithStreamFallback(ctx, clientset, namespace, podName, opts, streamSelector, splitStreamsSupported)
+}
+
+func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxTaskLogReadBytes
+	}
+	if tailLines <= 0 {
+		tailLines = defaultTaskLogTailLines
+	}
+	if tailLines > maxTaskLogTailLines {
+		tailLines = maxTaskLogTailLines
+	}
+	br := bufio.NewReaderSize(r, 32*1024)
+	ring := make([]string, tailLines)
+	var head int64
+	var count int64
+	var retainedBytes int64
+
+	pushLine := func(line string) {
+		if int64(len(line)) > maxBytes {
+			line = line[int64(len(line))-maxBytes:]
+		}
+		if count < tailLines {
+			ring[(head+count)%tailLines] = line
+			count++
+			retainedBytes += int64(len(line))
+		} else {
+			retainedBytes -= int64(len(ring[head]))
+			ring[head] = line
+			retainedBytes += int64(len(line))
+			head = (head + 1) % tailLines
+		}
+		for retainedBytes > maxBytes && count > 1 {
+			retainedBytes -= int64(len(ring[head]))
+			ring[head] = ""
+			head = (head + 1) % tailLines
+			count--
+		}
+	}
+
+	cur := tailLineBuffer{maxBytes: maxBytes}
+	for {
+		frag, err := br.ReadSlice('\n')
+		if len(frag) > 0 {
+			cur.write(frag)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if cur.len() > 0 {
+			pushLine(cur.takeString())
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	if count == 0 {
+		return "", nil
+	}
+	var out strings.Builder
+	out.Grow(int(retainedBytes))
+	for i := range count {
+		out.WriteString(ring[(head+i)%tailLines])
+	}
+	return out.String(), nil
+}
+
+type tailLineBuffer struct {
+	buf      []byte
+	maxBytes int64
+	writePos int64
+	full     bool
+}
+
+func (b *tailLineBuffer) len() int64 {
+	if b.full {
+		return int64(len(b.buf))
+	}
+	return b.writePos
+}
+
+func (b *tailLineBuffer) write(src []byte) {
+	if len(src) == 0 || b.maxBytes <= 0 {
+		return
+	}
+	if int64(len(src)) >= b.maxBytes {
+		tail := src[int64(len(src))-b.maxBytes:]
+		if int64(len(b.buf)) < b.maxBytes {
+			b.buf = make([]byte, b.maxBytes)
+		}
+		copy(b.buf, tail)
+		b.writePos = 0
+		b.full = true
+		return
+	}
+	if !b.full && b.writePos+int64(len(src)) <= b.maxBytes {
+		b.buf = append(b.buf[:b.writePos], src...)
+		b.writePos += int64(len(src))
+		if b.writePos == b.maxBytes {
+			b.writePos = 0
+			b.full = true
+		}
+		return
+	}
+	if int64(len(b.buf)) < b.maxBytes {
+		grown := make([]byte, b.maxBytes)
+		copy(grown, b.buf[:b.writePos])
+		b.buf = grown
+	}
+	remaining := src
+	for len(remaining) > 0 {
+		space := b.maxBytes - b.writePos
+		n := copy(b.buf[b.writePos:b.writePos+space], remaining)
+		b.writePos += int64(n)
+		if b.writePos == b.maxBytes {
+			b.writePos = 0
+			b.full = true
+		}
+		remaining = remaining[n:]
+	}
+}
+
+func (b *tailLineBuffer) takeString() string {
+	defer func() {
+		b.writePos = 0
+		b.full = false
+		b.buf = b.buf[:0]
+	}()
+	if !b.full {
+		return string(b.buf[:b.writePos])
+	}
+	var sb strings.Builder
+	sb.Grow(len(b.buf))
+	sb.Write(b.buf[b.writePos:])
+	sb.Write(b.buf[:b.writePos])
+	return sb.String()
 }
 
 const (
