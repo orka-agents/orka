@@ -39,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/executionmode"
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/taskmeta"
@@ -123,6 +124,7 @@ type JobBuilder struct {
 	OutboundAccessTrustedGatewayServices       string
 	OutboundAccessTrustedTokenEndpointServices string
 	EnableTelemetry                            bool
+	ClusterCapabilities                        k8scaps.Capabilities
 	ContainerTaskSecretUse                     ContainerTaskSecretUsePolicy
 	directSecrets                              directRuntimeSecretPolicy
 }
@@ -499,7 +501,8 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: new(int32(0)),
+			BackoffLimit:     new(int32(0)),
+			PodFailurePolicy: defaultDisruptionIgnoringPodFailurePolicy(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -511,6 +514,7 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 					RestartPolicy:                corev1.RestartPolicyNever,
 					ServiceAccountName:           b.workerServiceAccountForTask(task),
 					AutomountServiceAccountToken: workerAutomountServiceAccountToken(task),
+					HostUsers:                    b.podHostUsers(validationTask),
 					SecurityContext:              b.buildPodSecurityContext(),
 					Containers: []corev1.Container{
 						container,
@@ -591,8 +595,38 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	return job, nil
 }
 
+func defaultDisruptionIgnoringPodFailurePolicy() *batchv1.PodFailurePolicy {
+	return &batchv1.PodFailurePolicy{
+		Rules: []batchv1.PodFailurePolicyRule{
+			{
+				Action: batchv1.PodFailurePolicyActionIgnore,
+				OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{
+					{
+						Type:   corev1.DisruptionTarget,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+			{
+				Action: batchv1.PodFailurePolicyActionFailJob,
+				OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+					Operator: batchv1.PodFailurePolicyOnExitCodesOpNotIn,
+					Values:   []int32{0},
+				},
+			},
+		},
+	}
+}
+
+func (b *JobBuilder) podHostUsers(validationTask bool) *bool {
+	if validationTask || !b.ClusterCapabilities.PodUserNamespaces {
+		return nil
+	}
+	return new(false)
+}
+
 func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
-	return &corev1.PodSecurityContext{
+	sc := &corev1.PodSecurityContext{
 		RunAsNonRoot: new(true),
 		RunAsUser:    new(int64(1000)),
 		RunAsGroup:   new(int64(1000)),
@@ -601,6 +635,10 @@ func (b *JobBuilder) buildPodSecurityContext() *corev1.PodSecurityContext {
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
 	}
+	if b.ClusterCapabilities.SupplementalGroupsStrict {
+		sc.SupplementalGroupsPolicy = new(corev1.SupplementalGroupsPolicyStrict)
+	}
+	return sc
 }
 
 func (b *JobBuilder) buildContainerSecurityContext() *corev1.SecurityContext {
@@ -846,6 +884,12 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		if opts.AISoul != nil {
 			envVars = setControllerEnvValue(envVars, workerenv.AISystemPrompt, literalKubernetesPrompt(opts.AISoul.Prompt))
 			envVars = setControllerEnvValue(envVars, workerenv.AIPrompt, literalKubernetesPrompt(opts.AISoul.UserPrompt))
+		}
+		if b.ClusterCapabilities.SupplementalGroupsStrict {
+			envVars = setControllerEnv(envVars, workerenv.CodeExecKubernetesSuppStrict, scheduledRunLabelValue)
+		}
+		if b.ClusterCapabilities.PodUserNamespaces {
+			envVars = setControllerEnv(envVars, workerenv.CodeExecKubernetesHostUsers, "false")
 		}
 	}
 

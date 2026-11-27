@@ -35,6 +35,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -140,6 +141,7 @@ type Handlers struct {
 	chatTurns                 chatTurnStopper
 	attentionBounds           attentionBounds
 	agentIdentityAudit        outboundaccess.AgentIdentityAuditReader
+	clusterCapabilities       k8scaps.Capabilities
 }
 
 type HandlersConfig struct {
@@ -175,6 +177,7 @@ type HandlersConfig struct {
 	AHP                       *ahphost.Host
 	SubstrateMCPProxy         SubstrateMCPProxyConfig
 	AgentIdentityAudit        outboundaccess.AgentIdentityAuditReader
+	ClusterCapabilities       k8scaps.Capabilities
 }
 
 func NewHandlers(cfg HandlersConfig) *Handlers {
@@ -221,6 +224,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		substrateMCPRouter:        cfg.SubstrateMCPProxy.Router,
 		completionLocks:           newCompletionLocks(),
 		agentIdentityAudit:        cfg.AgentIdentityAudit,
+		clusterCapabilities:       cfg.ClusterCapabilities,
 	}
 }
 
@@ -884,10 +888,14 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 
 	podName := pods.Items[0].Name
 	follow := c.Query("follow") == queryTrue
+	logStreamSelector, err := parseTaskLogStream(c.Query("stream"))
+	if err != nil {
+		return err
+	}
 
 	if follow {
 		streamCtx, streamCancel := context.WithCancel(context.Background())
-		stream, err := StreamPodLogs(streamCtx, h.clientset, namespace, podName, "worker")
+		stream, err := streamPodLogsWithStream(streamCtx, h.clientset, namespace, podName, "worker", logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
 		if err != nil {
 			streamCancel()
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to stream logs: %v", err))
@@ -918,8 +926,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		Container: "worker",
 		TailLines: &tailLines,
 	}
-	req := h.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts)
-	logStream, err := req.Stream(ctx)
+	logStream, err := openPodLogsWithStreamFallback(ctx, h.clientset, namespace, podName, opts, logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get logs: %v", err))
 	}
@@ -933,6 +940,57 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"logs": string(logBytes),
 	})
+}
+
+func parseTaskLogStream(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return "", nil
+	case "all":
+		return corev1.LogStreamAll, nil
+	case "stdout":
+		return corev1.LogStreamStdout, nil
+	case "stderr":
+		return corev1.LogStreamStderr, nil
+	default:
+		return "", fiber.NewError(fiber.StatusBadRequest, "stream must be one of all, stdout, or stderr")
+	}
+}
+
+func openPodLogsWithStreamFallback(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName string,
+	baseOpts *corev1.PodLogOptions,
+	streamSelector string,
+	splitStreamsSupported bool,
+) (io.ReadCloser, error) {
+	opts := baseOpts.DeepCopy()
+	if streamSelector != "" && splitStreamsSupported {
+		opts.Stream = new(streamSelector)
+		stream, err := clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+		if err == nil {
+			return stream, nil
+		}
+		if !apierrors.IsBadRequest(err) && !apierrors.IsInvalid(err) {
+			return nil, err
+		}
+		opts.Stream = nil
+	}
+	return clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+}
+
+func streamPodLogsWithStream(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName, containerName, streamSelector string,
+	splitStreamsSupported bool,
+) (io.ReadCloser, error) {
+	opts := &corev1.PodLogOptions{
+		Container: containerName,
+		Follow:    true,
+	}
+	return openPodLogsWithStreamFallback(ctx, clientset, namespace, podName, opts, streamSelector, splitStreamsSupported)
 }
 
 const (

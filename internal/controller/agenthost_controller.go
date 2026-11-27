@@ -38,6 +38,7 @@ import (
 	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/githubauth"
+	"github.com/orka-agents/orka/internal/k8scaps"
 )
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agenthosts,verbs=get;list;watch;update;patch
@@ -117,9 +118,10 @@ type AgentHostReconciler struct {
 	client.Client
 	APIReader       client.Reader
 	Scheme          *runtime.Scheme
-	HostNamespace   string
-	AgentImage      string
-	Controller      agenthost.ControllerPeer
+	HostNamespace       string
+	AgentImage          string
+	ClusterCapabilities k8scaps.Capabilities
+	Controller          agenthost.ControllerPeer
 	IdleStatus      agenthost.StatusReader
 	HostCredentials AgentHostCredentials
 	GitHubAccounts  GitHubAccountReader
@@ -839,7 +841,7 @@ func (r *AgentHostReconciler) reconcilePod(
 	pod := &corev1.Pod{}
 	err := r.ensureObject(ctx, host, agentHostKindPod, "", names.Pod, pod, func(nonce string) client.Object {
 		return agenthost.HostPod(host, names, nonce, template, agenthost.PodOptions{
-			AgentImage: r.AgentImage, GitHubTokenSource: tokenSource,
+			AgentImage: r.AgentImage, GitHubTokenSource: tokenSource, ClusterCapabilities: r.ClusterCapabilities,
 		})
 	})
 	if errors.Is(err, errAgentHostObjectGone) {

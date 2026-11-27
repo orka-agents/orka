@@ -124,6 +124,8 @@ const (
 	CodeExecKubernetesNetworkPolicy = "ORKA_CODE_EXEC_K8S_NETWORK_POLICY"
 	CodeExecKubernetesRuntimeClass  = "ORKA_CODE_EXEC_K8S_RUNTIME_CLASS_NAME"
 	CodeExecKubernetesAppArmor      = "ORKA_CODE_EXEC_K8S_APPARMOR_PROFILE"
+	CodeExecKubernetesHostUsers     = "ORKA_CODE_EXEC_K8S_HOST_USERS"
+	CodeExecKubernetesSuppStrict    = "ORKA_CODE_EXEC_K8S_SUPPLEMENTAL_GROUPS_STRICT"
 	OrkaNamespace                   = "ORKA_NAMESPACE"
 
 	GitRepo              = "ORKA_GIT_REPO"

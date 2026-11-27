@@ -54,6 +54,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/k8scaps"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
@@ -337,6 +338,7 @@ type RuntimePoolReconciler struct {
 	WorkspaceCleanupOnly          bool
 	E2EPromptWriteAmbiguityMarker string
 	ToolboxPolicy                 ACPToolboxPolicy
+	ClusterCapabilities           k8scaps.Capabilities
 
 	WorkspaceCredentialSeeder func(ctx context.Context, endpoint, nonce string, capabilitySecret []byte, request harnessv2.CredentialBootstrapRequest) (alreadyComplete bool, err error)
 
@@ -2433,7 +2435,8 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 					},
 					SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 				},
-				Resources: runtimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass),
+				Resources:    runtimePoolResourceRequirements(pool.Spec.Runtime.Profile.ResourceClass),
+				ResizePolicy: runtimePoolResizePolicy(r.ClusterCapabilities),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: runtimePoolAuthVolume, MountPath: "/var/run/secrets/orka/auth", ReadOnly: true},
 					{Name: runtimePoolProviderCapabilityVolume, MountPath: "/var/run/secrets/orka/provider", ReadOnly: true},
@@ -2458,6 +2461,12 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 			},
 		},
 	}
+	if r.ClusterCapabilities.SupplementalGroupsStrict {
+		template.Spec.SecurityContext.SupplementalGroupsPolicy = new(corev1.SupplementalGroupsPolicyStrict)
+	}
+	if r.ClusterCapabilities.PodUserNamespaces {
+		template.Spec.HostUsers = new(false)
+	}
 	template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, runtimePoolTelemetryEnv(r.EnableTelemetry, os.Getenv)...)
 	if marker := strings.TrimSpace(r.E2EPromptWriteAmbiguityMarker); marker != "" {
 		template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{
@@ -2471,6 +2480,16 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 	_ = applyRuntimePoolSkillTemplate(&template, cfg.profile.Skills, cfg.maxResidentSessions, len(cfg.profile.Toolboxes) > 0, r.ToolboxPolicy)
 	template.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(template)
 	return template
+}
+
+func runtimePoolResizePolicy(caps k8scaps.Capabilities) []corev1.ContainerResizePolicy {
+	if !caps.InPlacePodResize {
+		return nil
+	}
+	return []corev1.ContainerResizePolicy{
+		{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},
+		{ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.NotRequired},
+	}
 }
 
 func (r *RuntimePoolReconciler) runtimePoolToolboxAdmission(pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig) error {

@@ -52,10 +52,11 @@ type runtimePoolBootWitness struct {
 	ReplicaSetName string          `json:"replicaSetName"`
 	ReplicaSetUID  types.UID       `json:"replicaSetUID"`
 	TemplateDigest string          `json:"templateDigest"`
-	ContainerID    string          `json:"containerID"`
-	ImageID        string          `json:"imageID"`
-	RestartCount   int32           `json:"restartCount"`
-	StartedAt      metav1.Time     `json:"startedAt"`
+	ContainerID    string            `json:"containerID"`
+	ImageID        string            `json:"imageID"`
+	ImageVolumes   map[string]string `json:"imageVolumes,omitempty"`
+	RestartCount   int32             `json:"restartCount"`
+	StartedAt      metav1.Time       `json:"startedAt"`
 }
 
 func (w runtimePoolBootWitness) identity(kind string) store.ExternalEffectIdentity {
@@ -216,8 +217,30 @@ func (r *RuntimePoolReconciler) observeNativeRuntimePoolBoot(ctx context.Context
 		PodNamespace: pod.Namespace, PodName: pod.Name, PodUID: pod.UID, PodAddress: pod.Status.PodIP, PodSpecDigest: podDigest,
 		DeploymentName: deployment.Name, DeploymentUID: deployment.UID, ReplicaSetName: rs.Name, ReplicaSetUID: rs.UID,
 		TemplateDigest: runtimePoolPodTemplateRevision(deployment.Spec.Template), ContainerID: container.ContainerID,
-		ImageID: container.ImageID, RestartCount: container.RestartCount, StartedAt: container.State.Running.StartedAt,
+		ImageID: container.ImageID, ImageVolumes: observedImageVolumeDigests(container),
+		RestartCount: container.RestartCount, StartedAt: container.State.Running.StartedAt,
 	}, nil
+}
+
+func observedImageVolumeDigests(container corev1.ContainerStatus) map[string]string {
+	if len(container.VolumeMounts) == 0 {
+		return nil
+	}
+	var digests map[string]string
+	for i := range container.VolumeMounts {
+		vm := &container.VolumeMounts[i]
+		if vm.VolumeStatus == nil || vm.VolumeStatus.Image == nil || strings.TrimSpace(vm.VolumeStatus.Image.ImageRef) == "" {
+			continue
+		}
+		if !strings.HasPrefix(vm.Name, runtimePoolToolboxVolumePrefix) && !strings.HasPrefix(vm.Name, runtimePoolSkillVolumePrefix) {
+			continue
+		}
+		if digests == nil {
+			digests = map[string]string{}
+		}
+		digests[vm.Name] = strings.TrimSpace(vm.VolumeStatus.Image.ImageRef)
+	}
+	return digests
 }
 
 func (r *RuntimePoolReconciler) nativeRuntimePoolBootOwners(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, pod *corev1.Pod) (*appsv1.Deployment, *appsv1.ReplicaSet, error) {

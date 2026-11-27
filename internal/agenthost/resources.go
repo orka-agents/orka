@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/k8scaps"
 )
 
 const (
@@ -127,8 +128,9 @@ type ControllerPeer struct {
 }
 
 type PodOptions struct {
-	AgentImage        string
-	GitHubTokenSource string
+	AgentImage          string
+	GitHubTokenSource   string
+	ClusterCapabilities k8scaps.Capabilities
 }
 
 func meta(host *corev1alpha1.AgentHost, n Names, name, nonce string) metav1.ObjectMeta {
@@ -300,25 +302,125 @@ func HostPod(
 	podMeta := meta(host, n, n.Pod, nonce)
 	podMeta.Annotations[AnnotationTemplateUID] = string(template.UID)
 	podMeta.Annotations[AnnotationGitHubToken] = opts.GitHubTokenSource
+	podSecurity := &corev1.PodSecurityContext{
+		RunAsNonRoot:   new(true),
+		RunAsUser:      new(spec.SecurityContext.RunAsUser),
+		RunAsGroup:     new(spec.SecurityContext.RunAsGroup),
+		FSGroup:        new(spec.SecurityContext.RunAsGroup),
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+	if opts.ClusterCapabilities.SupplementalGroupsStrict {
+		podSecurity.SupplementalGroupsPolicy = new(corev1.SupplementalGroupsPolicyStrict)
+	}
+	podSpec := corev1.PodSpec{
+		RestartPolicy:                corev1.RestartPolicyNever,
+		AutomountServiceAccountToken: new(false),
+		EnableServiceLinks:           new(false),
+		RuntimeClassName:             spec.RuntimeClassName,
+		SecurityContext:              podSecurity,
+		InitContainers:               initContainers,
+		Containers:                   containers,
+		Volumes:                      volumes,
+	}
+	if opts.ClusterCapabilities.PodUserNamespaces {
+		podSpec.HostUsers = new(false)
+	}
+	if opts.ClusterCapabilities.InPlacePodResize {
+		for i := range podSpec.Containers {
+			podSpec.Containers[i].ResizePolicy = []corev1.ContainerResizePolicy{
+				{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},
+				{ResourceName: corev1.ResourceMemory, RestartPolicy: corev1.NotRequired},
+			}
+		}
+	}
+	if opts.ClusterCapabilities.PodLevelResources {
+		podSpec.Resources = aggregatePodLevelResources(podSpec.InitContainers, podSpec.Containers)
+	}
 	return &corev1.Pod{
 		ObjectMeta: podMeta,
-		Spec: corev1.PodSpec{
-			RestartPolicy:                corev1.RestartPolicyNever,
-			AutomountServiceAccountToken: new(false),
-			EnableServiceLinks:           new(false),
-			RuntimeClassName:             spec.RuntimeClassName,
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot:   new(true),
-				RunAsUser:      new(spec.SecurityContext.RunAsUser),
-				RunAsGroup:     new(spec.SecurityContext.RunAsGroup),
-				FSGroup:        new(spec.SecurityContext.RunAsGroup),
-				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-			},
-			InitContainers: initContainers,
-			Containers:     containers,
-			Volumes:        volumes,
-		},
+		Spec:       podSpec,
 	}
+}
+
+func aggregatePodLevelResources(initContainers, containers []corev1.Container) *corev1.ResourceRequirements {
+	requests := corev1.ResourceList{}
+	limits := corev1.ResourceList{}
+	limitBounded := map[corev1.ResourceName]bool{
+		corev1.ResourceCPU:    len(containers) > 0,
+		corev1.ResourceMemory: len(containers) > 0,
+	}
+	addRequest := func(src corev1.ResourceList) {
+		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			q, ok := src[name]
+			if !ok || q.IsZero() {
+				continue
+			}
+			cur := requests[name]
+			cur.Add(q)
+			requests[name] = cur
+		}
+	}
+	addLimit := func(src corev1.ResourceList) {
+		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			q, ok := src[name]
+			if !ok || q.IsZero() {
+				limitBounded[name] = false
+				continue
+			}
+			cur := limits[name]
+			cur.Add(q)
+			limits[name] = cur
+		}
+	}
+	for i := range containers {
+		addRequest(containers[i].Resources.Requests)
+		addLimit(containers[i].Resources.Limits)
+	}
+	for i := range initContainers {
+		if initContainers[i].RestartPolicy != nil && *initContainers[i].RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			addRequest(initContainers[i].Resources.Requests)
+			addLimit(initContainers[i].Resources.Limits)
+		}
+	}
+	for i := range initContainers {
+		if initContainers[i].RestartPolicy != nil && *initContainers[i].RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			continue
+		}
+		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			if q, ok := initContainers[i].Resources.Requests[name]; ok && q.Cmp(requests[name]) > 0 {
+				requests[name] = q.DeepCopy()
+			}
+			q, ok := initContainers[i].Resources.Limits[name]
+			if !ok || q.IsZero() {
+				limitBounded[name] = false
+				continue
+			}
+			if q.Cmp(limits[name]) > 0 {
+				limits[name] = q.DeepCopy()
+			}
+		}
+	}
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		if !limitBounded[name] {
+			delete(limits, name)
+			continue
+		}
+		lim := limits[name]
+		if req, hasReq := requests[name]; hasReq && lim.Cmp(req) < 0 {
+			delete(limits, name)
+		}
+	}
+	if len(requests) == 0 && len(limits) == 0 {
+		return nil
+	}
+	out := &corev1.ResourceRequirements{}
+	if len(requests) > 0 {
+		out.Requests = requests
+	}
+	if len(limits) > 0 {
+		out.Limits = limits
+	}
+	return out
 }
 
 func ConnectionSecret(

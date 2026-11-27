@@ -34,6 +34,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -107,6 +108,7 @@ type ServerConfig struct {
 	LiveEvents                *liveevents.Broker
 	RESTConfig                *rest.Config
 	OperatorAccess            OperatorAccessConfig
+	ClusterCapabilities       k8scaps.Capabilities
 	SubstrateMCPProxy         SubstrateMCPProxyConfig
 	DashboardEnabled          bool
 	MCP                       MCPServerConfig
@@ -207,6 +209,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		AHP:                       config.AHP,
 		SubstrateMCPProxy:         config.SubstrateMCPProxy,
 		AgentIdentityAudit:        config.AgentIdentityAudit,
+		ClusterCapabilities:       config.ClusterCapabilities,
 	})
 	if config.AHP != nil && config.AHPBackend != nil {
 		backend := newAHPBackend(server.handlers, config.AHP.Store(), config.LiveEvents, *config.AHPBackend)
