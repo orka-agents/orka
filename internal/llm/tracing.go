@@ -432,8 +432,6 @@ func requestAttributes(req *CompletionRequest, providerName string, stream bool)
 		attribute.String(genai.AttrProviderName, providerName),
 		attribute.String(genai.AttrRequestModel, requestModel(req)),
 		attribute.Bool(genai.AttrRequestStream, stream),
-		attribute.String("llm.provider", providerName),
-		attribute.String("llm.model", requestModel(req)),
 	}
 	if req == nil {
 		return attrs
@@ -459,13 +457,10 @@ func setResponseAttributes(span trace.Span, resp *CompletionResponse, providerNa
 	}
 	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrProviderName, providerName),
-		attribute.Int("llm.tool_calls", len(resp.ToolCalls)),
+		attribute.Int(tracing.AttrLLMToolCalls, len(resp.ToolCalls)),
 	}
 	if input := resp.PromptTokens(); input > 0 {
-		attrs = append(attrs,
-			attribute.Int(genai.AttrUsageInputTokens, input),
-			attribute.Int("llm.input_tokens", input),
-		)
+		attrs = append(attrs, attribute.Int(genai.AttrUsageInputTokens, input))
 	}
 	if resp.CachedInputTokens != nil {
 		attrs = append(attrs, attribute.Int64(genai.AttrUsageCacheReadInputTokens, *resp.CachedInputTokens))
@@ -474,10 +469,7 @@ func setResponseAttributes(span trace.Span, resp *CompletionResponse, providerNa
 		attrs = append(attrs, attribute.Int64(genai.AttrUsageCacheCreateInputTokens, *resp.CacheWriteInputTokens))
 	}
 	if resp.OutputTokens > 0 {
-		attrs = append(attrs,
-			attribute.Int(genai.AttrUsageOutputTokens, resp.OutputTokens),
-			attribute.Int("llm.output_tokens", resp.OutputTokens),
-		)
+		attrs = append(attrs, attribute.Int(genai.AttrUsageOutputTokens, resp.OutputTokens))
 	}
 	if resp.Model != "" {
 		attrs = append(attrs, attribute.String(genai.AttrResponseModel, resp.Model))
