@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -46,6 +47,9 @@ type proxyConfig struct {
 	MaxResponseBytes      int64
 	ResponseHeaderTimeout time.Duration
 	MaxConcurrentRequests int
+	// UpstreamEntra, when enabled, authenticates every upstream request with
+	// an Entra token of the proxy's own workload identity.
+	UpstreamEntra upstreamEntraConfig
 }
 
 type providerAuthProxy struct {
@@ -58,6 +62,7 @@ type providerAuthProxy struct {
 	maxResponseBytes int64
 	client           *http.Client
 	requestSlots     chan struct{}
+	upstreamEntra    *upstreamEntra
 }
 
 func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStore) (*providerAuthProxy, error) {
@@ -67,6 +72,12 @@ func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStor
 	}
 	if tokens == nil {
 		return nil, fmt.Errorf("provider auth token store is required")
+	}
+	var entra *upstreamEntra
+	if cfg.UpstreamEntra.enabled() {
+		if entra, err = newUpstreamEntra(cfg.UpstreamEntra, upstream); err != nil {
+			return nil, err
+		}
 	}
 	routeID, err := providerproxy.Codex429EgressID(upstream, normalized.Codex429RetryBaseURL, normalized.Codex429RetryModel)
 	if err != nil {
@@ -100,7 +111,8 @@ func newProviderAuthProxyWithTokenStore(cfg proxyConfig, tokens *bearerTokenStor
 				return http.ErrUseLastResponse
 			},
 		},
-		requestSlots: make(chan struct{}, normalized.MaxConcurrentRequests),
+		requestSlots:  make(chan struct{}, normalized.MaxConcurrentRequests),
+		upstreamEntra: entra,
 	}, nil
 }
 
@@ -216,6 +228,14 @@ func (p *providerAuthProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamRequest.ContentLength = r.ContentLength
 	providerproxy.CopyRequestHeaders(upstreamRequest.Header, r.Header)
 	upstreamRequest.Header.Set("Accept-Encoding", "identity")
+	if p.upstreamEntra != nil {
+		if err := p.upstreamEntra.authenticate(ctx, upstreamRequest); err != nil {
+			_ = body.Close()
+			log.Printf("provider upstream authentication failed: %v", err)
+			providerproxy.WriteError(w, http.StatusServiceUnavailable, "provider upstream authentication is unavailable")
+			return
+		}
+	}
 
 	response, err := p.client.Do(upstreamRequest)
 	if err != nil {

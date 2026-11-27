@@ -53,6 +53,11 @@ spec:
             - --previous-token-valid-until-file=/var/run/secrets/orka/provider-auth/previous-token-valid-until
             - {{ printf "--token-reload-interval=%s" (.Values.providerProxy.tokenReloadInterval | default "5s") | quote }}
             - {{ printf "--previous-token-overlap=%s" (.Values.providerProxy.previousTokenOverlap | default "10m") | quote }}
+            {{- with dig "entra" "identity" "" .Values.providerProxy }}
+            - {{ printf "--upstream-entra-identities=%s" (dict "tokenAudience" (dig "entra" "tokenAudience" "" $.Values.providerProxy | toString | trim | default "api://AzureADTokenExchange") "identities" (dig "entra" "identities" (list) $.Values.providerProxy) | toJson) | quote }}
+            - {{ printf "--upstream-entra-identity=%s" . | quote }}
+            - --upstream-entra-token-file=/var/run/secrets/orka.ai/upstream-identity/token
+            {{- end }}
           ports: [{name: http, containerPort: 8080}]
           securityContext:
             allowPrivilegeEscalation: false
@@ -64,7 +69,19 @@ spec:
           livenessProbe: {httpGet: {path: /healthz, port: http}}
           volumeMounts:
             - {name: provider-auth, mountPath: /var/run/secrets/orka/provider-auth, readOnly: true}
+            {{- if dig "entra" "identity" "" .Values.providerProxy }}
+            - {name: upstream-identity-token, mountPath: /var/run/secrets/orka.ai/upstream-identity, readOnly: true}
+            {{- end }}
       volumes:
+        {{- if dig "entra" "identity" "" .Values.providerProxy }}
+        - name: upstream-identity-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ dig "entra" "tokenAudience" "" .Values.providerProxy | toString | trim | default "api://AzureADTokenExchange" | quote }}
+                  expirationSeconds: 3600
+        {{- end }}
         - name: provider-auth
           projected:
             defaultMode: 0440

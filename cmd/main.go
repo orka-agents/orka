@@ -390,6 +390,7 @@ func main() {
 	var acpWorkspaceDefaultSuspendAfterDetach time.Duration
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
+	var acpProviderProxyEntraIdentity, acpProviderProxyEntraEndpoint string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
@@ -743,6 +744,10 @@ func main() {
 		"Comma-separated exact Pod labels selected by RuntimePool provider-proxy egress policy.")
 	flag.StringVar(&acpProviderProxyTokenFile, "acp-provider-proxy-token-file", os.Getenv("ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE"),
 		"Mounted file containing the authenticated provider proxy bearer token.")
+	flag.StringVar(&acpProviderProxyEntraIdentity, "acp-provider-proxy-entra-identity", os.Getenv("ORKA_ACP_PROVIDER_PROXY_ENTRA_IDENTITY"),
+		"Entra identity the provider auth proxy authenticates its upstream with. Agent Tasks may name a keyless Provider only with this identity.")
+	flag.StringVar(&acpProviderProxyEntraEndpoint, "acp-provider-proxy-entra-endpoint", os.Getenv("ORKA_ACP_PROVIDER_PROXY_ENTRA_ENDPOINT"),
+		"https origin of the provider auth proxy's Entra-authenticated upstream. Agent Tasks may name a keyless Provider only for this origin.")
 	flag.StringVar(&acpE2EPromptWriteAmbiguityMarker, "acp-e2e-prompt-write-ambiguity-marker", os.Getenv("ORKA_ACP_E2E_PROMPT_WRITE_AMBIGUITY_MARKER"),
 		"Test-only exact prompt marker that aborts a fully validated ACP prompt request before acceptance is recorded.")
 	flag.BoolVar(&acpToolboxesEnabled, "acp-toolboxes-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_TOOLBOXES_ENABLED"), "true"),
@@ -2213,8 +2218,11 @@ func main() {
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
-		EnforceNamespaceIsolation:    enforceNamespaceIsolation,
-		ProviderUseAuthorization:     providerUseAuthorizationEnabled,
+		EnforceNamespaceIsolation: enforceNamespaceIsolation,
+		ProviderUseAuthorization:  providerUseAuthorizationEnabled,
+		ACPProviderProxyEntra: controller.ACPProviderProxyEntra{
+			Identity: strings.TrimSpace(acpProviderProxyEntraIdentity), Endpoint: strings.TrimSpace(acpProviderProxyEntraEndpoint),
+		},
 		MaxTasksPerNamespace:         maxTasksPerNamespaceValue,
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
