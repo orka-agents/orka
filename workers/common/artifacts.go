@@ -21,18 +21,14 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// artifactMaxRetries and the shared maxBackoff cap size artifact uploads to
-// the same ~4 minute window as result submission (2s, 4s, 8s, 16s, 32s, then
-// 60s steps), so a worker that reaches its uploads during a routine
-// single-replica controller restart still persists its output.
 const artifactMaxRetries = 9
 
 const (
 	artifactsDirEnv           = "ORKA_ARTIFACTS_DIR"
 	defaultArtifactsDir       = "/tmp/artifacts"
 	workspaceArtifactsDirName = ".orka-artifacts"
-	MaxArtifactTotalBytes     = 50 << 20 // 50 MB
-	MaxArtifactFileBytes      = 10 << 20 // 10 MB
+	MaxArtifactTotalBytes     = 50 << 20
+	MaxArtifactFileBytes      = 10 << 20
 	artifactPath              = "internal/v1/artifacts"
 )
 
@@ -49,8 +45,6 @@ func artifactsDir() string {
 	return defaultArtifactsDir
 }
 
-// EnsureWorkspaceArtifactsLink exposes /tmp/artifacts inside the repo root so
-// runtime agents can write artifacts using a workspace-relative path.
 func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	if workspaceDir == "" {
 		return nil
@@ -92,7 +86,6 @@ func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
 	return nil
 }
 
-// WriteArtifactFile writes an artifact file into the shared upload directory.
 func WriteArtifactFile(filename string, data []byte) error {
 	rawFilename := filename
 	filename, err := artifactFilename(filename)
@@ -129,15 +122,10 @@ func artifactFilename(filename string) (string, error) {
 	return localName, nil
 }
 
-// UploadArtifactsContext scans the artifacts directory and uploads each file
-// using the worker lifecycle context. It returns nil when the directory does
-// not exist or is empty.
 func UploadArtifactsContext(ctx context.Context) error {
 	return UploadArtifactsWithRequestAuthorizationContext(ctx, nil)
 }
 
-// UploadArtifactsWithRequestAuthorizationContext signs each request, including retries,
-// and stops uploads when the worker lifecycle ends. The callback stays in the wrapper.
 func UploadArtifactsWithRequestAuthorizationContext(
 	ctx context.Context,
 	authorize func(*http.Request, []byte) error,
@@ -200,7 +188,6 @@ func UploadArtifactsWithRequestAuthorizationContext(
 		}
 
 		filename := filepath.Base(e.Name())
-		// Reject filenames with path traversal or special characters
 		if filename == "." || filename == ".." || strings.ContainsAny(filename, "/\\") {
 			fmt.Fprintf(os.Stderr, "artifact: skipping invalid filename %q\n", filename)
 			continue
@@ -219,8 +206,6 @@ func UploadArtifactsWithRequestAuthorizationContext(
 			fmt.Fprintf(os.Stderr, "artifact: skipping non-regular file %s\n", filename)
 			continue
 		}
-		// Reject symlinks and open relative to the already-open artifact directory
-		// so the artifact root path is not re-resolved after the no-follow check.
 		file, err := openAtNoFollow(dirFile, filename)
 		if err != nil {
 			if isNoFollowSkippable(err) {
@@ -306,7 +291,6 @@ func uploadPendingArtifacts(
 	if len(uploadErrors) > 0 {
 		return fmt.Errorf("some artifacts failed to upload: %s", strings.Join(uploadErrors, "; "))
 	}
-	// Every upload succeeded; later cancellation cannot undo the completed batch.
 	return nil
 }
 
@@ -363,7 +347,6 @@ func detectContentType(filename string, data []byte) string {
 		return "text/plain"
 	}
 
-	// Check for .tar.gz
 	if strings.HasSuffix(strings.ToLower(filename), ".tar.gz") {
 		return "application/gzip"
 	}

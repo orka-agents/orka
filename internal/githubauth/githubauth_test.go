@@ -109,9 +109,6 @@ func TestRequireMemberChecksOrgsAndTeamsAndFailsClosed(t *testing.T) {
 			t.Fatalf("%s: err = %v, want ErrNotMember", name, err)
 		}
 	}
-	// GitHub failing, rate-limiting, refusing with a bare 403 (which may be
-	// a secondary rate limit), or answering without a known state is no
-	// membership too, but not a verdict to act on.
 	for _, org := range []string{"broken", "throttled", "slow-down", "forbidden", "empty", "no-state", "null-state", "odd-state"} {
 		if err := member("ghu_alice", Allowed{Orgs: []string{org}}); err == nil || errors.Is(err, ErrNotMember) {
 			t.Fatalf("%s: err = %v, want a retryable error", org, err)
@@ -169,8 +166,6 @@ func TestDeviceFlowWaitsForApproval(t *testing.T) {
 	}
 }
 
-// A server error or a dropped connection while the code is pending is no
-// verdict: polling goes on, and the approval that follows is taken.
 func TestDeviceFlowOutlastsTransientFailures(t *testing.T) {
 	polls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -206,7 +201,6 @@ func TestDeviceFlowOutlastsTransientFailures(t *testing.T) {
 		t.Fatalf("tokens = %q, err = %v, polls = %d", tokens.AccessToken, err, polls)
 	}
 
-	// An answer GitHub gives about the request itself still ends it.
 	refused := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "incorrect_client_credentials"})
@@ -231,8 +225,6 @@ func TestDeviceFlowStopsWhenRefused(t *testing.T) {
 	}
 }
 
-// No call follows a redirect: a 307 or 308 would replay its body, which
-// carries a token or device code, to another origin.
 func TestCallsNeverFollowARedirect(t *testing.T) {
 	var leaked []string
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

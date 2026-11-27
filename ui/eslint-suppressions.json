@@ -1,0 +1,1437 @@
+{
+  "src/app-routing.test.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/app.tsx": {
+    "orka/no-comments": {
+      "count": 13
+    }
+  },
+  "src/components/agents/agent-create-form.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/agents/agent-create-form.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/agents/agent-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/agents/agent-detail.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/agents/agent-list.test.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/components/agents/agent-list.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/approvals/approvals-inbox.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/approvals/approvals-inbox.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/attention/attention-item-card.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/chat/chat-input.test.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/chat/chat-input.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/chat/chat-message-list.test.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/chat/chat-message-list.tsx": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/components/chat/chat-message.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/chat/chat-message.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/chat/chat-page.test.tsx": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/components/chat/chat-page.tsx": {
+    "orka/no-comments": {
+      "count": 33
+    }
+  },
+  "src/components/chat/chat-tool-call.test.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/chat/chat-tool-call.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/common/not-found-page.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/common/not-found-page.tsx": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/components/common/status-problem-alert.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/common/status-problem.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/connectors/connectors-page.test.tsx": {
+    "orka/no-comments": {
+      "count": 22
+    }
+  },
+  "src/components/connectors/connectors-page.tsx": {
+    "orka/no-comments": {
+      "count": 59
+    }
+  },
+  "src/components/dashboard/needs-you-card.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/dashboard/needs-you-card.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/dashboard/overview.test.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/dashboard/overview.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/dashboard/recent-tasks.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/dashboard/stats-cards.test.tsx": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/components/dashboard/stats-cards.tsx": {
+    "orka/no-comments": {
+      "count": 14
+    }
+  },
+  "src/components/events/event-row.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/events/event-timeline.test.tsx": {
+    "orka/no-comments": {
+      "count": 11
+    }
+  },
+  "src/components/events/event-timeline.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/events/eventing-smoke.test.tsx": {
+    "orka/no-comments": {
+      "count": 12
+    }
+  },
+  "src/components/events/severity-icon.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/events/severity-icon.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/events/task-trace-view.test.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/events/task-trace-view.tsx": {
+    "orka/no-comments": {
+      "count": 23
+    }
+  },
+  "src/components/events/trace-status-pill.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/gateways/gateway-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/gateways/gateway-detail.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/gateways/gateway-page.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/gateways/gateway-page.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/gateways/gateway-tables.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/layout/page-header.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/components/layout/root-layout.test.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/layout/root-layout.tsx": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/components/layout/sidebar.test.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/layout/sidebar.tsx": {
+    "orka/no-comments": {
+      "count": 19
+    }
+  },
+  "src/components/monitors/repository-monitor-create-form.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/monitors/repository-monitor-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/monitors/repository-monitor-detail.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/components/runtime/activity-spotlight.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/runtime/activity-spotlight.tsx": {
+    "orka/no-comments": {
+      "count": 16
+    }
+  },
+  "src/components/runtime/runtime-control-bar.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/runtime/runtime-control-bar.tsx": {
+    "orka/no-comments": {
+      "count": 12
+    }
+  },
+  "src/components/runtime/runtime-registry.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/runtime/validation-summary.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/security/finding-count-badges.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/security/finding-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/security/finding-detail.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/components/security/recommended-findings.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/security/repository-create-form.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/security/repository-create-form.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/security/repository-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/security/repository-detail.tsx": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/components/security/threat-model-editor.test.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/security/threat-model-editor.tsx": {
+    "orka/no-comments": {
+      "count": 12
+    }
+  },
+  "src/components/sessions/session-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/sessions/session-detail.tsx": {
+    "orka/no-comments": {
+      "count": 11
+    }
+  },
+  "src/components/sessions/session-event-timeline.test.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/components/sessions/session-event-timeline.tsx": {
+    "orka/no-comments": {
+      "count": 20
+    }
+  },
+  "src/components/sessions/session-list.test.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/sessions/session-list.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/sessions/transcript-viewer.test.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/sessions/transcript-viewer.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/tasks/action-error.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/tasks/diff-viewer.test.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/tasks/diff-viewer.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/tasks/execution-graph.test.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/tasks/execution-graph.tsx": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/components/tasks/fork-dialog.test.tsx": {
+    "orka/no-comments": {
+      "count": 42
+    }
+  },
+  "src/components/tasks/fork-dialog.tsx": {
+    "orka/no-comments": {
+      "count": 41
+    }
+  },
+  "src/components/tasks/fork-provenance.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/tasks/kanban-board.test.tsx": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/components/tasks/kanban-board.tsx": {
+    "orka/no-comments": {
+      "count": 19
+    }
+  },
+  "src/components/tasks/kanban-card.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tasks/pr-status-badge.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/tasks/run-timeline.test.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/tasks/run-timeline.tsx": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/components/tasks/structured-log-viewer.test.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/tasks/structured-log-viewer.tsx": {
+    "orka/no-comments": {
+      "count": 12
+    }
+  },
+  "src/components/tasks/task-activity.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tasks/task-approval-panel.test.tsx": {
+    "orka/no-comments": {
+      "count": 13
+    }
+  },
+  "src/components/tasks/task-approval-panel.tsx": {
+    "orka/no-comments": {
+      "count": 24
+    }
+  },
+  "src/components/tasks/task-artifacts-panel.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tasks/task-artifacts-panel.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/tasks/task-cancel-dialog.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/tasks/task-cancel-dialog.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/tasks/task-create-form.test.tsx": {
+    "orka/no-comments": {
+      "count": 21
+    }
+  },
+  "src/components/tasks/task-create-form.tsx": {
+    "orka/no-comments": {
+      "count": 47
+    }
+  },
+  "src/components/tasks/task-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 32
+    }
+  },
+  "src/components/tasks/task-detail.tsx": {
+    "orka/no-comments": {
+      "count": 61
+    }
+  },
+  "src/components/tasks/task-event-timeline.test.tsx": {
+    "orka/no-comments": {
+      "count": 60
+    }
+  },
+  "src/components/tasks/task-event-timeline.tsx": {
+    "orka/no-comments": {
+      "count": 83
+    }
+  },
+  "src/components/tasks/task-execution-panel.test.tsx": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/components/tasks/task-execution-panel.tsx": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/components/tasks/task-list.test.tsx": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/components/tasks/task-list.tsx": {
+    "orka/no-comments": {
+      "count": 21
+    }
+  },
+  "src/components/tasks/task-name.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/tasks/task-overview.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/tasks/task-result-viewer.test.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/tasks/task-result-viewer.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/tasks/task-schedule-panel.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tasks/task-schedule-panel.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/tasks/task-state-badges.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tasks/task-state.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tasks/task-state.ts": {
+    "orka/no-comments": {
+      "count": 14
+    }
+  },
+  "src/components/tasks/task-status-badge.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/tasks/task-status-badge.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/tasks/task-status-details.tsx": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/components/tasks/task-yaml.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tasks/task-yaml.tsx": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/components/tasks/view-switch.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/tools/tool-detail.test.tsx": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/components/tools/tool-detail.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/components/tools/tool-list.test.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/tools/tool-list.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/ui/button.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/ui/button.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/ui/dialog.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/ui/dialog.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/ui/distribution.test.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/ui/distribution.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/ui/empty-state.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/ui/list-access-error.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/components/ui/orca-mark.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/components/ui/scroll-area.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/ui/secret-name-field.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/components/ui/sonar-ping.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/ui/sonar-ping.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/ui/sparkline.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/ui/sparkline.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/ui/status-dot.test.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/components/ui/status-dot.tsx": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/components/ui/table.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/components/usage/usage-page.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/components/usage/usage-page.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/demo/api-groups.test.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/demo/data/agents.test.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/demo/data/agents.ts": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/demo/data/chat.ts": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/demo/data/connectors.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/demo/data/gateways.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/demo/data/monitors.ts": {
+    "orka/no-comments": {
+      "count": 14
+    }
+  },
+  "src/demo/data/runtimes.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/demo/data/security.ts": {
+    "orka/no-comments": {
+      "count": 20
+    }
+  },
+  "src/demo/data/sessions.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/demo/data/tasks.ts": {
+    "orka/no-comments": {
+      "count": 29
+    }
+  },
+  "src/demo/data/tools.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/demo/data/usage-report.ts": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/demo/data/usage.ts": {
+    "orka/no-comments": {
+      "count": 29
+    }
+  },
+  "src/demo/handlers/chat.test.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/demo/handlers/chat.ts": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/demo/handlers/connectors.ts": {
+    "orka/no-comments": {
+      "count": 18
+    }
+  },
+  "src/demo/handlers/core.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/demo/handlers/gateways.test.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/demo/handlers/gateways.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/demo/handlers/monitors.ts": {
+    "orka/no-comments": {
+      "count": 14
+    }
+  },
+  "src/demo/handlers/security.test.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/demo/handlers/security.ts": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/demo/handlers/tasks.test.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/demo/handlers/tasks.ts": {
+    "orka/no-comments": {
+      "count": 43
+    }
+  },
+  "src/demo/handlers/usage.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/demo/index.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/demo/server.ts": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/demo/shared.ts": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/demo/token.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/demo/tour/manifests.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/demo/tour/steps.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/demo/tour/steps.ts": {
+    "orka/no-comments": {
+      "count": 16
+    }
+  },
+  "src/demo/tour/store.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/demo/tour/tour.test.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/demo/tour/tour.tsx": {
+    "orka/no-comments": {
+      "count": 14
+    }
+  },
+  "src/demo/world.ts": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/hooks/use-agents.ts": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/hooks/use-attention.ts": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/hooks/use-chat.test.tsx": {
+    "orka/no-comments": {
+      "count": 18
+    }
+  },
+  "src/hooks/use-chat.ts": {
+    "orka/no-comments": {
+      "count": 74
+    }
+  },
+  "src/hooks/use-document-title.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/hooks/use-execution-event-stream.test.tsx": {
+    "orka/no-comments": {
+      "count": 18
+    }
+  },
+  "src/hooks/use-execution-event-stream.ts": {
+    "orka/no-comments": {
+      "count": 41
+    }
+  },
+  "src/hooks/use-execution-events.test.tsx": {
+    "orka/no-comments": {
+      "count": 42
+    }
+  },
+  "src/hooks/use-execution-events.ts": {
+    "orka/no-comments": {
+      "count": 41
+    }
+  },
+  "src/hooks/use-freshness.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/hooks/use-freshness.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/hooks/use-gateways.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/hooks/use-media-query.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/hooks/use-monitors.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/hooks/use-monitors.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/hooks/use-providers.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/hooks/use-resolved-theme.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/hooks/use-resolved-theme.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/hooks/use-secrets.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/hooks/use-security.test.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/hooks/use-security.ts": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/hooks/use-sessions.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/hooks/use-sessions.ts": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/hooks/use-sticky-query-error.test.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/hooks/use-sticky-query-error.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/hooks/use-task-artifacts.ts": {
+    "orka/no-comments": {
+      "count": 12
+    }
+  },
+  "src/hooks/use-task-logs.ts": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/hooks/use-tasks.test.tsx": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/hooks/use-tasks.ts": {
+    "orka/no-comments": {
+      "count": 32
+    }
+  },
+  "src/index-html.test.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/index.css.test.ts": {
+    "orka/no-comments": {
+      "count": 10
+    }
+  },
+  "src/lib/agent-runtime.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/lib/api-client.test.ts": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/lib/api-client.ts": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/lib/attention-lanes.test.ts": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/lib/attention-lanes.ts": {
+    "orka/no-comments": {
+      "count": 26
+    }
+  },
+  "src/lib/connectors.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/lib/connectors.ts": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/lib/event-severity.ts": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/lib/execution-events.test.ts": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/lib/execution-events.ts": {
+    "orka/no-comments": {
+      "count": 34
+    }
+  },
+  "src/lib/list-api.ts": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/lib/load-problem.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/lib/login-return.ts": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/lib/parked-approval.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/lib/repository-form-validation.test.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/lib/repository-form-validation.ts": {
+    "orka/no-comments": {
+      "count": 14
+    }
+  },
+  "src/lib/repository-name.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/lib/runtime-activity.ts": {
+    "orka/no-comments": {
+      "count": 6
+    }
+  },
+  "src/lib/runtime-validation.test.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/lib/runtime-validation.ts": {
+    "orka/no-comments": {
+      "count": 14
+    }
+  },
+  "src/lib/secret-like.ts": {
+    "orka/no-comments": {
+      "count": 26
+    }
+  },
+  "src/lib/shell-words.test.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/lib/shell-words.ts": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/lib/task-command.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/lib/task-filter.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/lib/task-filter.ts": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/lib/task-phase.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/lib/task-resource.test.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/lib/task-resource.ts": {
+    "orka/no-comments": {
+      "count": 11
+    }
+  },
+  "src/lib/task-status.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/lib/task-status.ts": {
+    "orka/no-comments": {
+      "count": 18
+    }
+  },
+  "src/lib/time.ts": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/lib/utils.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/lib/workspace-repository.ts": {
+    "orka/no-comments": {
+      "count": 26
+    }
+  },
+  "src/lib/workspace-source-ref.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/main.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/routes/__root.test.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/routes/__root.tsx": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/routes/agents/index.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/routes/chat.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/routes/login.test.tsx": {
+    "orka/no-comments": {
+      "count": 5
+    }
+  },
+  "src/routes/login.tsx": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "src/routes/security/findings/index.tsx": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/routes/sessions/$sessionId.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/routes/sessions/index.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/routes/settings/connectors.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/routes/tasks/index.test.tsx": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/routes/tools/index.test.tsx": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/schemas/agent.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/schemas/artifact.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/schemas/attention.ts": {
+    "orka/no-comments": {
+      "count": 4
+    }
+  },
+  "src/schemas/chat.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/schemas/chat.ts": {
+    "orka/no-comments": {
+      "count": 12
+    }
+  },
+  "src/schemas/execution-event.ts": {
+    "orka/no-comments": {
+      "count": 15
+    }
+  },
+  "src/schemas/provider.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/schemas/runtime.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/schemas/task.ts": {
+    "orka/no-comments": {
+      "count": 8
+    }
+  },
+  "src/schemas/tool.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/stores/auth.test.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/stores/chat.test.ts": {
+    "orka/no-comments": {
+      "count": 3
+    }
+  },
+  "src/stores/chat.ts": {
+    "orka/no-comments": {
+      "count": 27
+    }
+  },
+  "src/stores/ui-persist.test.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/stores/ui.ts": {
+    "orka/no-comments": {
+      "count": 7
+    }
+  },
+  "src/test/fixtures/events.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  },
+  "src/test/fixtures/trace.ts": {
+    "orka/no-comments": {
+      "count": 1
+    }
+  },
+  "src/test/mocks/handlers.ts": {
+    "orka/no-comments": {
+      "count": 9
+    }
+  },
+  "vite.config.ts": {
+    "orka/no-comments": {
+      "count": 2
+    }
+  }
+}

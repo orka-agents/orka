@@ -41,8 +41,6 @@ func TestCollectorRetiresOnlyAfterGraceAndPreservesLateLiveReferences(t *testing
 		t.Fatal(err)
 	}
 
-	// Retirement blocks stale capabilities immediately but keeps bytes and replay
-	// records through the capability grace window.
 	assertArtifactPresence(t, root, DigestBytes(unique), true)
 	assertArtifactPresence(t, root, DigestBytes(shared), true)
 	assertOperationPresence(t, root, "task-a-unique", true)
@@ -51,9 +49,6 @@ func TestCollectorRetiresOnlyAfterGraceAndPreservesLateLiveReferences(t *testing
 		t.Fatalf("retired identity download error = %v, want ErrUnauthorized", err)
 	}
 
-	// A different live identity can receive a capability late in the retirement
-	// grace window. Its persisted reservation keeps the shared digest live even
-	// though the transfer has not started yet.
 	now = retiredAt.Add(4 * time.Minute)
 	lateLiveAuthorization, err := Issue(secret, lateLiveDownload, now, MaxCapabilityTTL)
 	if err != nil {
@@ -73,8 +68,6 @@ func TestCollectorRetiresOnlyAfterGraceAndPreservesLateLiveReferences(t *testing
 	assertOperationPresence(t, root, "task-a-shared", true)
 	assertOperationPresence(t, root, "task-b-download", false)
 
-	// Starting the reserved transfer creates the live replay reference that takes
-	// over once the capability reservation expires.
 	download, err := service.OpenDownload(context.Background(), lateLiveAuthorization.Capability, present(lateLiveDownload, lateLiveAuthorization))
 	if err != nil {
 		t.Fatal(err)

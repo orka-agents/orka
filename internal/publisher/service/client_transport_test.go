@@ -60,7 +60,6 @@ func TestTransportCauseKeepsTimeoutsOpaque(t *testing.T) {
 	if err == nil {
 		t.Fatal("Capabilities succeeded against a server that never answers")
 	}
-	// Callers that branch on context errors keep seeing an opaque failure.
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("the transport failure must not match context.DeadlineExceeded")
 	}

@@ -54,7 +54,6 @@ func TestBrokerDropsALaggingSubscriberInsteadOfSkippingEvents(t *testing.T) {
 	if !errors.Is(sub.Err(), ErrLagged) {
 		t.Fatalf("Err() = %v, want ErrLagged", sub.Err())
 	}
-	// The dropped subscriber is forgotten; publishing again must not panic.
 	b.Publish(Event{Namespace: "ns", Task: "task"})
 	sub.Close()
 }

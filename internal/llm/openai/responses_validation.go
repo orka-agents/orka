@@ -32,8 +32,6 @@ func responsesEventHasRefusal(evt responses.ResponseStreamEventUnion) bool {
 		evt.Part.Type == stopReasonRefusal || responsesHaveRefusal([]responses.ResponseOutputItemUnion{evt.Item}) || responsesHaveRefusal(evt.Response.Output)
 }
 
-// This validation belongs only to callers of Orka's Responses endpoint.
-// Other provider consumers retain their existing normalization policy.
 func validateResponsesItemType(item responses.ResponseOutputItemUnion) error {
 	switch item.Type {
 	case eventTypeFunctionCall:
@@ -56,9 +54,6 @@ func validateResponsesItemType(item responses.ResponseOutputItemUnion) error {
 	}
 }
 
-// SDK field validity permits coercion of numbers and booleans into strings.
-// Validate the wire type while preserving explicitly empty text and synthetic
-// in-process events that have no decoded JSON metadata.
 func invalidResponseStringField(rawObject string, field respjson.Field) bool {
 	return rawObject != "" && (!field.Valid() || !strings.HasPrefix(strings.TrimSpace(field.Raw()), "\""))
 }
@@ -91,8 +86,6 @@ func validateResponsesOutput(output []responses.ResponseOutputItemUnion) error {
 	return nil
 }
 
-// Compatible snapshots may omit required identities for recovery.
-// Explicitly cleared or mistyped values cannot restore an earlier identity.
 func invalidResponseMetadataString(value string, field respjson.Field) bool {
 	return field.Raw() != "" && (!field.Valid() || value == "")
 }
@@ -107,9 +100,6 @@ func validateResponseFunctionMetadata(item responses.ResponseOutputItemUnion) er
 	return nil
 }
 
-// openai-go no longer decodes the optional function name on function-call
-// argument events, but servers may still send it. Read it from the raw event
-// so a changed, cleared, or mistyped name is still rejected.
 func responseEventFunctionName(evt responses.ResponseStreamEventUnion) (name string, invalid bool) {
 	raw := evt.RawJSON()
 	if raw == "" {
@@ -164,8 +154,6 @@ func (t *responseFuncCallTracker) getChecked(itemID string, index int64, hasInde
 		if hasIndex {
 			states = append(states, t.byOutputIndex[index])
 		}
-		// Validate every partial state before get merges or mutates any of
-		// them. The incoming event may bridge previously separate records.
 		for i, state := range states {
 			for _, other := range states[:i] {
 				if err := validateResponseFunctionMerge(state, other); err != nil {
@@ -235,8 +223,6 @@ func (t *responseFuncCallTracker) prepareEvent(evt *responses.ResponseStreamEven
 				return err
 			}
 		}
-		// Reject an unfinished item before exposing an executable call, even
-		// if the terminal snapshot later omits that status.
 		if evt.Type == eventTypeResponseOutputItemDone && evt.Item.Type == eventTypeFunctionCall &&
 			evt.Item.Status != "" && evt.Item.Status != stopReasonCompleted {
 			return fmt.Errorf("provider returned an unfinished Responses function call")
@@ -251,8 +237,6 @@ func (t *responseFuncCallTracker) prepareEvent(evt *responses.ResponseStreamEven
 			(evt.Type == eventTypeResponseIncomplete && evt.Response.Status != stopReasonIncomplete) {
 			return fmt.Errorf("response terminal status does not match its event type")
 		}
-		// A terminal may omit fields already supplied by the same call.
-		// Recover only absent fields, then validate the complete output.
 		for i, item := range evt.Response.Output {
 			if item.Type != eventTypeFunctionCall {
 				continue

@@ -15,24 +15,17 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 )
 
-// orderedResponseSender streams the current output item immediately, retaining
-// later items until their predecessors finish. Function arguments can finish
-// out of order; their readiness must not change the assistant's output order.
-// This is used only for requests entering through the Responses endpoint.
 type orderedResponseSender struct {
-	send    streamSender
-	order   *responseOutputOrder
-	pending map[int64][]llm.StreamChunk
-	next    int64
-	open    bool
-	// Freeze statuses at queue entry, including items awaiting predecessors.
+	send          streamSender
+	order         *responseOutputOrder
+	pending       map[int64][]llm.StreamChunk
+	next          int64
+	open          bool
 	statuses      map[int64]string
 	hasIncomplete bool
 	hasToolCall   bool
 }
 
-// A terminal snapshot can close an earlier message and drain queued calls.
-// Hold that output until every snapshot and ordering check has succeeded.
 func (s *orderedResponseSender) terminal(handle func(streamSender)) {
 	downstream := s.send
 	var chunks []llm.StreamChunk
@@ -56,8 +49,6 @@ func (s *orderedResponseSender) terminal(handle func(streamSender)) {
 }
 
 func (s *orderedResponseSender) chunk(chunk llm.StreamChunk) bool {
-	// A failed/refused outcome must not recover queued output or be replaced
-	// by a secondary ordering error while flushing it.
 	if chunk.Error != nil || (chunk.Done && !responsesTerminalAllowsOutput(chunk.StopReason)) {
 		return s.send(chunk)
 	}
@@ -127,8 +118,6 @@ func (s *orderedResponseSender) unindexedChunk(chunk llm.StreamChunk) bool {
 	return s.send(chunk)
 }
 
-// Only successful completions and supported token-budget truncation may
-// recover buffered output. Missing, failed and refused terminals abort it.
 func responsesTerminalAllowsOutput(stopReason string) bool {
 	if stopReason == stopReasonToolCalls || stopReason == stopReasonLength {
 		return true
@@ -161,16 +150,11 @@ func (s *orderedResponseSender) drain() bool {
 	}
 }
 
-// Some compatible upstreams supply the complete item only in the terminal
-// response. Flush those items in index order, leaving the last text item open
-// so the terminal outcome can mark a token-budget-truncated item incomplete.
 func (s *orderedResponseSender) flush() bool {
 	indices := make([]int64, 0, len(s.pending))
 	for index := range s.pending {
 		indices = append(indices, index)
 	}
-	// Empty messages still establish boundaries, including after the last
-	// text chunk. Keep their observed slots in terminal recovery order.
 	if s.order != nil {
 		for index, itemType := range s.order.typesByIndex {
 			if index < s.next || itemType != responseOutputTypeMessage {
@@ -187,8 +171,6 @@ func (s *orderedResponseSender) flush() bool {
 			continue
 		}
 		for index > s.next {
-			// Empty added messages have an observed slot but emit no chunk.
-			// Complete each such predecessor before releasing later output.
 			observedMessage := s.order != nil && s.order.typesByIndex[s.next] == responseOutputTypeMessage
 			if !s.open && !observedMessage {
 				s.send(llm.StreamChunk{Error: fmt.Errorf("response output has a missing predecessor"), Done: true})
@@ -210,8 +192,6 @@ func (s *orderedResponseSender) flush() bool {
 			return false
 		}
 	}
-	// Preserve an observed final status when a terminal omits its snapshots.
-	// Unknown last-message statuses remain open for outcome-based inference.
 	if s.open {
 		index := s.next
 		outputIndex := &index
@@ -231,9 +211,6 @@ func (s *orderedResponseSender) flush() bool {
 	return true
 }
 
-// responseOutputOrder validates the index/identity/type relationship before output
-// reaches the queue. Compatible text-only streams may omit indices entirely,
-// but mixing that mode with indexed items must never yield reordered success.
 type responseOutputOrder struct {
 	byID            map[string]int64
 	byIndex         map[int64]string
@@ -276,8 +253,6 @@ func (o *responseOutputOrder) bind(id string, index int64, itemType, status stri
 	return nil
 }
 
-// Record inferred types even before an event supplies an index. Later metadata
-// may connect an ID-only event to an index-only event, and both must agree.
 func (o *responseOutputOrder) bindType(id string, index *int64, itemType string) error {
 	knownTypes := []string{o.typesByID[id]}
 	if index != nil {
@@ -307,8 +282,6 @@ func (o *responseOutputOrder) bindType(id string, index *int64, itemType string)
 	return nil
 }
 
-// Final statuses can arrive with an added snapshot, before parts finish or an
-// index is known. Keep those observations tied to the same identity bindings.
 func (o *responseOutputOrder) observeStatus(id string, index *int64, status string) error {
 	if status == "in_progress" {
 		status = ""
@@ -364,8 +337,6 @@ func (o *responseOutputOrder) messageStatus(index *int64) string {
 }
 
 func (o *responseOutputOrder) validateTerminalMembership(output []responses.ResponseOutputItemUnion) error {
-	// Compatible terminals may omit snapshots entirely. A nonempty snapshot
-	// is authoritative and must account for every observed output item.
 	if len(output) == 0 {
 		return nil
 	}
@@ -379,8 +350,6 @@ func (o *responseOutputOrder) validateTerminalMembership(output []responses.Resp
 		ids[item.ID] = true
 	}
 	for id, itemType := range o.typesByID {
-		// The function tracker reconciles ID-only calls through call_id.
-		// ID-only messages have no alternate identity for that association.
 		if itemType != responseOutputTypeMessage {
 			continue
 		}
@@ -434,8 +403,6 @@ func (o *responseOutputOrder) eventIndex(evt responses.ResponseStreamEventUnion)
 			}
 			return &index, nil
 		}
-		// Index zero can identify the existing single unindexed message.
-		// Keep its text/status state and apply the identity checks below.
 		if evt.OutputIndex != 0 || itemType != responseOutputTypeMessage {
 			return nil, fmt.Errorf("ambiguous response output index")
 		}
@@ -459,8 +426,6 @@ func (o *responseOutputOrder) observeUnindexedEvent(evt responses.ResponseStream
 		if o.indexed || (o.unindexedText && o.unindexedID != "" && id != "" && o.unindexedID != id) {
 			return fmt.Errorf("response text has no unambiguous output index")
 		}
-		// Anonymous text can follow an ID-only empty added snapshot. Use
-		// that message's metadata only when the association is unique.
 		for knownID, knownType := range o.typesByID {
 			if knownType != responseOutputTypeMessage {
 				continue

@@ -385,11 +385,6 @@ func waitArtifactLockRetry(ctx context.Context) error {
 	}
 }
 
-// secureManagedArtifactFile repairs group permission bits that a Kubernetes
-// fsGroup volume mount can add to an existing controller-owned regular file.
-// Other-accessible files remain fail-closed. The file is already opened with
-// O_NOFOLLOW, and chmod operates on that descriptor, so symlinks and
-// non-regular replacements remain fail-closed.
 func secureManagedArtifactFile(file *os.File, description string) (os.FileInfo, error) {
 	info, err := file.Stat()
 	if err != nil {

@@ -19,7 +19,6 @@ import (
 	orkalabels "github.com/orka-agents/orka/internal/labels"
 )
 
-// AuthDirection identifies one side of the gateway trust boundary.
 type AuthDirection string
 
 const (
@@ -27,13 +26,11 @@ const (
 	AuthDirectionOutbound AuthDirection = "outbound"
 )
 
-// BearerSecretResult contains a token for immediate use plus non-secret version metadata.
 type BearerSecretResult struct {
 	Token           string
 	ResourceVersion string
 }
 
-// ReadBearerSecret resolves and validates one Gateway-bound bearer Secret.
 func ReadBearerSecret(
 	ctx context.Context,
 	kubeClient client.Reader,

@@ -147,6 +147,16 @@ How monitors review and repair pull requests.
 | --- | --- | --- |
 | [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Accepted, not implemented |
 
+### Code comments
+
+Why the code carries no comments, and the decisions recovered from the comments it used to
+carry. Each cleanup round adds one catalog record.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0062](0062-code-carries-no-comments.md) | Code carries no comments; decisions live in ADRs | Accepted |
+| [0063](0063-code-comment-decisions-round-1.md) | Decisions recovered from code comments, round 1 | Accepted |
+
 ## Writing a new one
 
 Copy the shape of a recent record — [0028](0028-agent-sandbox-pvc-cold-resume.md) is a

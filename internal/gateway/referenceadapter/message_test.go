@@ -167,7 +167,7 @@ func TestDelayedMessageRechecksTerminalBeforeSend(t *testing.T) {
 				delivery.Metadata = map[string]string{"fixture": "delay"}
 				response := make(chan protocol.DeliveryResponse, 1)
 				go func() { response <- postDelivery(t, adapter, delivery) }()
-				synctest.Wait() // The message has passed the early gate and is sleeping.
+				synctest.Wait()
 				if got := adapter.Attempts(delivery.DeliveryID); got != 1 {
 					t.Fatalf("delayed message attempts = %d, want 1", got)
 				}

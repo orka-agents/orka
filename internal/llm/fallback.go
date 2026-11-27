@@ -9,21 +9,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// FallbackEntry represents a fallback provider with an optional model override.
 type FallbackEntry struct {
 	Provider Provider
 	Model    string
 }
 
-// FallbackProvider tries a primary provider and falls back to alternatives on failure.
 type FallbackProvider struct {
 	primary   Provider
 	fallbacks []FallbackEntry
 	tracker   *CooldownTracker
 }
 
-// NewFallbackProvider creates a FallbackProvider. If fallbacks is empty, it behaves
-// like the primary provider.
 func NewFallbackProvider(primary Provider, fallbacks []FallbackEntry) *FallbackProvider {
 	return &FallbackProvider{
 		primary:   primary,
@@ -31,24 +27,18 @@ func NewFallbackProvider(primary Provider, fallbacks []FallbackEntry) *FallbackP
 	}
 }
 
-// SetCooldownTracker sets a cooldown tracker for rate-limit awareness.
 func (f *FallbackProvider) SetCooldownTracker(tracker *CooldownTracker) {
 	f.tracker = tracker
 }
 
-// Name returns the provider name.
 func (f *FallbackProvider) Name() string {
 	return fmt.Sprintf("fallback(%s)", f.primary.Name())
 }
 
-// TelemetryProviderName delegates to the primary provider so error telemetry
-// emitted before a concrete fallback response is available uses the configured
-// serving provider identity instead of the wrapper name.
 func (f *FallbackProvider) TelemetryProviderName() string {
 	return ProviderTelemetryName(f.primary)
 }
 
-// Complete tries the primary provider, then falls back on failure.
 func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	logger := log.FromContext(ctx)
 
@@ -58,19 +48,16 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 	}
 	candidates := make([]candidate, 0, 1+len(f.fallbacks))
 
-	// Add primary if not cooling down
 	if f.tracker == nil || !f.tracker.IsCoolingDown(f.primary.Name()) {
 		candidates = append(candidates, candidate{provider: f.primary})
 	}
 
-	// Add fallbacks that aren't cooling down
 	for _, fb := range f.fallbacks {
 		if f.tracker == nil || !f.tracker.IsCoolingDown(fb.Provider.Name()) {
 			candidates = append(candidates, candidate{provider: fb.Provider, model: fb.Model})
 		}
 	}
 
-	// If all are cooling down, try the one with shortest remaining cooldown
 	if len(candidates) == 0 {
 		shortest := f.shortestCooldown()
 		candidates = append(candidates, candidate{provider: shortest})
@@ -100,7 +87,6 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 		logger.Info("provider failed, trying fallback",
 			"provider", c.provider.Name(), "error", err)
 
-		// Mark cooldown on rate limit
 		if f.tracker != nil {
 			var pe *ProviderError
 			if errors.As(err, &pe) && pe.StatusCode == 429 {
@@ -116,7 +102,6 @@ func (f *FallbackProvider) Complete(ctx context.Context, req *CompletionRequest)
 	return nil, fmt.Errorf("all providers failed: %w", lastErr)
 }
 
-// Stream tries the primary provider's Stream, falling back on initial failure.
 func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
 	logger := log.FromContext(ctx)
 
@@ -159,8 +144,6 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			continue
 		}
 
-		// Usage can arrive before output or an initial stream error. The
-		// provider's recorder retains it independently of fallback selection.
 		firstChunk, ok := firstStreamResult(innerCh)
 		if !ok {
 			ch := make(chan StreamChunk)
@@ -170,7 +153,6 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 
 		if firstChunk.Error != nil {
 			lastErr = firstChunk.Error
-			// Drain remaining
 			for range innerCh {
 			}
 			if IsUsagePersistenceError(firstChunk.Error) {
@@ -192,7 +174,6 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			continue
 		}
 
-		// Success — proxy first chunk and rest
 		if f.tracker != nil {
 			f.tracker.Reset(c.provider.Name())
 		}
@@ -209,7 +190,6 @@ func (f *FallbackProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		return outCh, nil
 	}
 
-	// All failed
 	ch := make(chan StreamChunk, 1)
 	if lastErr != nil {
 		ch <- StreamChunk{Error: fmt.Errorf("all providers failed: %w", lastErr), Done: true}
@@ -237,7 +217,6 @@ func withStreamTelemetry(chunk StreamChunk, providerName, modelName string) Stre
 	return chunk
 }
 
-// shortestCooldown returns the provider with the shortest remaining cooldown.
 func (f *FallbackProvider) shortestCooldown() Provider {
 	if f.tracker == nil {
 		return f.primary
@@ -256,6 +235,5 @@ func (f *FallbackProvider) shortestCooldown() Provider {
 	return shortest
 }
 
-// Ensure FallbackProvider implements Provider and TelemetryIdentity.
 var _ Provider = (*FallbackProvider)(nil)
 var _ TelemetryIdentity = (*FallbackProvider)(nil)

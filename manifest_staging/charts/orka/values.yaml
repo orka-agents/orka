@@ -271,6 +271,19 @@ controller:
   providerUseAuthorization:
     enabled: false
 
+  # Let operator-authorized container Tasks receive the Secrets they name,
+  # without ORKA_AGENT_DIRECT_SECRET_MOUNTS (which it cannot be combined
+  # with). A write that creates or changes a container Task naming a Secret
+  # in spec.secretRef or spec.env[].valueFrom.secretKeyRef is admitted only if
+  # the writer holds the `use` verb on that Secret. Orka grants that verb
+  # to none of its own identities, so Tasks created by agents, tools, chat, or
+  # the API never qualify. Enabling it sets
+  # --container-task-secret-use-authorization-enabled and installs the
+  # ValidatingAdmissionPolicy. Grant it with a Role rule such as
+  # {apiGroups: [""], resources: [secrets], verbs: [use], resourceNames: [<secret>]}.
+  containerTaskSecretUse:
+    enabled: false
+
   # External Agent identities (ADR 0039). Set both Entra values to accept
   # Agent.spec.identity.entra; an identity-bound Agent also needs
   # agentUseAuthorization.enabled and a runtime.ceiling.allowedTools.

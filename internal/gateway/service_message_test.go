@@ -402,7 +402,6 @@ func TestGatewayTaskMessagePermanentAbandonmentImmediatelyBeforePOST(t *testing.
 			s, db, adapter, _, task := newGatewayMessageFixture(t)
 			receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update")
 			require.NoError(t, err)
-			// Change after the initial Gateway read, while the outbound Secret is resolved.
 			s.APIReader = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				err := c.Get(ctx, key, obj, opts...)
 				if _, ok := obj.(*corev1.Secret); ok && key.Name == "outbound" {
@@ -446,7 +445,6 @@ func TestGatewayTaskMessageTimingAfterRevalidation(t *testing.T) {
 				if _, ok := obj.(*gatewayv1alpha1.Gateway); ok {
 					gatewayReads++
 					if gatewayReads == 2 {
-						// The successful final eligibility read outlasts the adapter timeout.
 						time.Sleep(2 * requestTimeout)
 					}
 				}
@@ -476,8 +474,6 @@ func TestGatewayTaskMessageRetriesReadinessLossImmediatelyBeforePOST(t *testing.
 				s, db, adapter, event, task := newGatewayMessageFixture(t)
 				receipt, err := s.EnqueueTaskMessage(t.Context(), task.Namespace, task.Name, string(task.UID), "request", "update")
 				require.NoError(t, err)
-				// The first Gateway read is ready; only the last pre-POST check
-				// sees readiness lost while resolving the outbound Secret.
 				s.APIReader = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 					err := c.Get(ctx, key, obj, opts...)
 					if _, ok := obj.(*corev1.Secret); ok && key.Name == "outbound" {
@@ -607,8 +603,6 @@ func TestGatewayTaskMessagePreparedAdmissionSerializesTerminalCutoff(t *testing.
 	task.Status.Phase = corev1alpha1.TaskPhaseFailed
 	require.NoError(t, s.Client.Status().Update(t.Context(), task))
 	require.NoError(t, s.ProjectTerminals(t.Context()))
-	// The enqueue's own store transaction serializes admission with the
-	// terminal projection that already committed.
 	_, err = s.EnqueuePreparedTaskMessage(t.Context(), prepared)
 	var httpErr *HTTPError
 	require.ErrorAs(t, err, &httpErr)

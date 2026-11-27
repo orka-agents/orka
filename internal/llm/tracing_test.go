@@ -63,7 +63,6 @@ func TestTracingProviderComplete(t *testing.T) {
 	}
 }
 
-// errorProvider always returns an error from Complete.
 type errorProvider struct{ mockProvider }
 
 func (e *errorProvider) Complete(_ context.Context, _ *CompletionRequest) (*CompletionResponse, error) {
@@ -670,8 +669,6 @@ func TestTracingProviderStreamRecordsTokenUsage(t *testing.T) {
 	}
 }
 
-// Anthropic's input count leaves out its cache reads and writes; telemetry
-// reports the whole prompt and the cache breakdown beside it.
 func TestTracingProviderReportsCachedPromptTokens(t *testing.T) {
 	read, write := int64(100), int64(20)
 	for _, mode := range []string{"complete", "stream"} {
@@ -997,7 +994,7 @@ func TestTracingProviderStreamStopsOnContextCancelWithoutConsumer(t *testing.T) 
 		t.Fatalf("Stream() error = %v", err)
 	}
 	cancel()
-	_ = ch // intentionally do not read: cancellation must unblock the forwarding goroutine.
+	_ = ch
 	deadline := time.After(time.Second)
 	for {
 		if len(h.Recorder.Ended()) == 1 {

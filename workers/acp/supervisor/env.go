@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -903,6 +905,9 @@ func providerProfile(
 				}, nil
 			},
 			PrepareSession: prepareCodexHome,
+			BindProviderProxy: func(paths acp.SessionPaths, proxy ProviderProxyBinding) error {
+				return writeCodexHomeConfig(paths, proxy.BaseURL)
+			},
 		}, nil
 	case providerKindClaude:
 		return ProviderProfile{
@@ -915,6 +920,8 @@ func providerProfile(
 				return map[string]string{
 					"CLAUDE_CONFIG_DIR": filepath.Join(paths.Home, ".claude"), "CLAUDE_CODE_EXECUTABLE": "/opt/claude/bin/claude",
 					noBrowserEnv: "1", "DISABLE_UPDATES": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_INSTALLATION_CHECKS": "1",
+					"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
+					"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 					"ANTHROPIC_BASE_URL": proxy.BaseURL, "ANTHROPIC_API_KEY": proxy.Credential, "ANTHROPIC_MODEL": model,
 				}, nil
 			},
@@ -1466,17 +1473,63 @@ func openCodeAdapterDigest() string {
 }
 
 func prepareCodexHome(paths acp.SessionPaths) error {
+	return writeCodexHomeConfig(paths, "")
+}
+
+// writeCodexHomeConfig writes CODEX_HOME/config.toml. With a provider base URL
+// it also makes the session's provider proxy the default provider, so a Codex
+// thread started without the per-session CODEX_CONFIG override still uses the
+// proxy rather than Codex's built-in OpenAI provider.
+func writeCodexHomeConfig(paths acp.SessionPaths, baseURL string) error {
+	if strings.TrimSpace(paths.Home) == "" {
+		return fmt.Errorf("codex session home is required")
+	}
 	dir := filepath.Join(paths.Home, ".codex")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "config.toml"), []byte(codexHomeConfigTOML), 0o600)
+	config := codexHomeConfigTOML
+	if baseURL != "" {
+		provider, err := codexDefaultProviderTOML(baseURL)
+		if err != nil {
+			return err
+		}
+		config += provider
+	}
+	return os.WriteFile(filepath.Join(dir, "config.toml"), []byte(config), 0o600)
+}
+
+func codexDefaultProviderTOML(baseURL string) (string, error) {
+	var builder strings.Builder
+	builder.WriteString("model_provider = \"" + codexProviderID + "\"\n")
+	definition := codexProviderDefinition(baseURL)
+	keys := slices.Sorted(maps.Keys(definition))
+	for _, key := range keys {
+		encoded, err := json.Marshal(definition[key])
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&builder, "model_providers.%s.%s = %s\n", codexProviderID, key, encoded)
+	}
+	return builder.String(), nil
 }
 
 // codexHomeConfigTOML is the static CODEX_HOME/config.toml; the per-session
 // provider definition travels in CODEX_CONFIG (see codexBaseConfig).
 // Codex 0.160.0's connection retry loop is independent of stream_max_retries.
-const codexHomeConfigTOML = "check_for_update_on_startup = false\nfeatures.unbounded_connection_retries = false\n"
+// The app server reads this file before any session override arrives, so the
+// vendor traffic it would otherwise start on its own is turned off here:
+// analytics, the OTEL metrics exporter (on by default), and the plugin and app
+// catalog syncs.
+const codexHomeConfigTOML = `check_for_update_on_startup = false
+analytics.enabled = false
+features.unbounded_connection_retries = false
+features.plugins = false
+features.apps = false
+otel.exporter = "none"
+otel.trace_exporter = "none"
+otel.metrics_exporter = "none"
+`
 
 func openAIProxyURL(base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")

@@ -83,7 +83,6 @@ var (
 	errGatewayResultNotReady  = errors.New("gateway task result is not ready")
 )
 
-// Config controls bounded gateway processing behavior.
 type Config struct {
 	Enabled                      bool
 	Namespace                    string
@@ -102,7 +101,6 @@ type Config struct {
 	AllowInsecureLoopback        bool
 }
 
-// DefaultConfig returns the locked V1 queue, expiry, retry, and retention defaults.
 func DefaultConfig() Config {
 	return Config{
 		Enabled: true, PendingPerSession: 100, MaxRecordsPerGateway: 1_000, MaxRejectedRecordsPerGateway: 250, EventExpiry: 24 * time.Hour,
@@ -112,7 +110,6 @@ func DefaultConfig() Config {
 	}
 }
 
-// HTTPError is a client-safe ingress error with an HTTP status code.
 type HTTPError struct {
 	Code    int
 	Message string
@@ -120,10 +117,7 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string { return e.Message }
 
-// Service owns durable admission, dispatch, terminal projection, and delivery.
 type Service struct {
-	// TaskPassCredentials are controller-mounted, per-Gateway UID credentials,
-	// never delivery bearers or Task/Tool namespace Secrets.
 	TaskPassCredentials      map[string]TaskPassCredential
 	Client                   client.Client
 	APIReader                client.Reader
@@ -151,7 +145,6 @@ func (s *Service) freshReader() client.Reader {
 	return s.Client
 }
 
-// NewService creates a gateway processing service.
 func NewService(
 	kubeClient client.Client,
 	events store.GatewayEventStore,
@@ -166,11 +159,8 @@ func NewService(
 	}
 }
 
-// NeedLeaderElection serializes dispatch, delivery, and maintenance across controller replicas.
-// Durable claims still provide crash recovery, while leader election makes namespace capacity checks replica-safe.
 func (s *Service) NeedLeaderElection() bool { return true }
 
-// Start runs independent dispatch/projection, delivery, and maintenance loops until cancellation.
 func (s *Service) Start(ctx context.Context) error {
 	if s == nil || !s.Config.Enabled {
 		<-ctx.Done()
@@ -231,9 +221,6 @@ func (s *Service) runMaintenanceLoop(ctx context.Context, logger logr.Logger) {
 	}
 }
 
-// Receipt authority is needed until the exact Task disappears, even when it
-// has been deleting for longer than retention. Never infer absence from the
-// cache: a lagging informer must not strand a Task by losing its receipt.
 func (s *Service) pruneGatewayTaskCleanupReceipts(ctx context.Context) error {
 	if s == nil || s.APIReader == nil {
 		return nil
@@ -255,8 +242,6 @@ func (s *Service) pruneGatewayTaskCleanupReceipts(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(errs, err)...)
 		}
-		// Advance even on a retained receipt or failed read/delete. Retry those
-		// entries after the scan wraps without starving independent receipts.
 		s.taskCleanupAfterNamespace, s.taskCleanupAfterUID = receipt.Namespace, receipt.TaskUID
 		var task corev1alpha1.Task
 		err := s.APIReader.Get(ctx, client.ObjectKey{Namespace: receipt.Namespace, Name: receipt.TaskName}, &task)
@@ -308,9 +293,6 @@ func (s *Service) cleanupRetainedGatewaySessions(ctx context.Context, now, termi
 			errs = append(errs, fmt.Errorf("reclaim Gateway Session %s/%s: %w", candidate.Namespace, candidate.SessionName, err))
 		}
 	}
-	// Use raw query progress, including rows excluded for invalid ownership.
-	// Blocked candidates are retried when the scan wraps, without preventing
-	// later Sessions or Task receipt maintenance from making progress.
 	s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = page.NextNamespace, page.NextSessionName
 	if page.Complete {
 		s.sessionCleanupAfterNamespace, s.sessionCleanupAfterName = "", ""
@@ -393,10 +375,6 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 	return errors.Join(errs...)
 }
 
-// Compaction receipts preserve the exact Task deletion authority after event
-// deduplication expires, including Tasks that never acquired a SessionTurn.
-// Requesting ordinary deletion still leaves runtime and archive finalizers in
-// charge of deciding when the Task itself can be removed.
 func (s *Service) gatewayTaskCompactionArchived(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	reader, ok := s.EventStore.(store.GatewayTaskCleanupReceiptStore)
 	if !ok {
@@ -422,8 +400,6 @@ func (s *Service) gatewayTaskCompactionArchived(ctx context.Context, task *corev
 	return true, nil
 }
 
-// Archive evidence outlives the bounded event tombstones. A controller that was
-// offline for that whole window must still be able to request Task deletion.
 func (s *Service) gatewayTaskCleanupArchived(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	reader, ok := s.ResultStore.(store.SessionTurnCleanupReceiptStore)
 	if !ok || task.Spec.SessionRef == nil || task.Status.Execution == nil {
@@ -434,7 +410,7 @@ func (s *Service) gatewayTaskCleanupArchived(ctx context.Context, task *corev1al
 		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: int64(execution.Attempt), PromptID: execution.PromptID,
 	}).CanonicalID()
 	if err != nil {
-		return false, nil // No admitted prompt can have a matching archive.
+		return false, nil
 	}
 	receipt, err := reader.GetSessionTurnCleanupReceipt(ctx, task.Namespace, task.Spec.SessionRef.Name, attemptID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -516,8 +492,6 @@ func (s *Service) processCoreOnce(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// RepairExpiredEvents creates missing outbox rows for records expired by older
-// versions or interrupted migrations before maintenance can compact them.
 func (s *Service) RepairExpiredEvents(ctx context.Context) error {
 	now := time.Now().UTC()
 	events, err := s.EventStore.ListGatewayEvents(ctx, store.GatewayEventFilter{
@@ -553,7 +527,6 @@ func (s *Service) RepairExpiredEvents(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// ExpireQueuedEvents appends visible expiry errors for admitted work that never reached Task creation.
 func (s *Service) ExpireQueuedEvents(ctx context.Context) error {
 	now := time.Now().UTC()
 	events, err := s.EventStore.ListGatewayEvents(ctx, store.GatewayEventFilter{
@@ -589,8 +562,6 @@ func (s *Service) updateQueueMetrics(ctx context.Context) error {
 	return nil
 }
 
-// AdmitEvent authenticates, validates, routes, and durably acknowledges one inbound event.
-//
 //nolint:gocyclo // ingress intentionally sequences independent fail-closed trust and durability checks
 func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, authorization string, body []byte) (*protocol.IngressResponse, error) {
 	ctx, span := gatewayTracer.Start(ctx, "gateway.ingress")
@@ -616,8 +587,6 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		}
 		return nil, fmt.Errorf("read Gateway namespace: %w", err)
 	}
-	// Authentication intentionally precedes mutable readiness checks so an exact retry of an
-	// already-committed event can still receive its durable duplicate acknowledgement.
 	inbound, err := ReadBearerSecret(ctx, reader, object, AuthDirectionInbound, "")
 	if err != nil {
 		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway authentication is not ready"}
@@ -716,8 +685,6 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		if errors.Is(err, store.ErrDuplicateMismatch) {
 			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
 		}
-		// A replaced controller's write is fenced, which also matches
-		// ErrConflict; it says nothing about Session ownership.
 		if errors.Is(err, store.ErrFenced) {
 			return nil, fmt.Errorf("persist accepted gateway event: %w", err)
 		}
@@ -829,7 +796,6 @@ func matchingOptionalTime(left, right *time.Time) bool {
 	return left.Equal(*right)
 }
 
-// DispatchOnce claims one FIFO event and creates/links its deterministic Task.
 func (s *Service) DispatchOnce(ctx context.Context) error {
 	now := time.Now().UTC()
 	event, err := s.EventStore.ClaimNextGatewayEvent(ctx, s.Config.Namespace, s.Owner, now, s.Config.ClaimLease)
@@ -908,13 +874,10 @@ func (s *Service) namespaceTaskCapacityAvailable(ctx context.Context, namespace,
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if task.Name == taskName {
-			// A deterministic Task that already exists can be linked without creating more work.
 			return true, nil
 		}
 		switch task.Status.Phase {
 		case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing:
-			// The controller initializes an empty phase to Pending. Count that brief window so
-			// one dispatch batch cannot create more non-terminal Tasks than the limiter can admit.
 			active++
 		}
 	}
@@ -965,7 +928,6 @@ func (s *Service) reconcileExistingDispatchTask(
 		return true, s.expireDispatchEvent(ctx, event, "The admitted Agent identity changed.")
 	}
 
-	// Task kind is immutable. Agent edits after creation must not reroute recovery.
 	expected, err := s.materializedTaskForGatewayEvent(ctx, event, binding, agent, existing.Spec.Type, now)
 	if err != nil {
 		return true, err
@@ -1212,8 +1174,6 @@ func (s *Service) createOrFindGatewayTask(
 			gatewayDispatchTotal.WithLabelValues("name_collision").Inc()
 			return nil, false, nil
 		}
-		// The Create response may be ambiguous even though the API server committed
-		// the deterministic Task. Treat the fresh read as authoritative and link it.
 		return s.refreshGatewayTaskUID(ctx, event, existing)
 	}
 	if !apierrors.IsNotFound(lookupErr) {
@@ -1229,8 +1189,6 @@ func (s *Service) createOrFindGatewayTask(
 		gatewayDispatchTotal.WithLabelValues("create_rejected").Inc()
 		return nil, false, expireErr
 	}
-	// Unknown transport/server errors may be returned after the API server commits.
-	// Keep the Dispatching claim intact so lease recovery reconciles before requeue.
 	gatewayDispatchTotal.WithLabelValues("create_ambiguous").Inc()
 	return nil, false, fmt.Errorf("gateway Task create outcome is ambiguous: %w", createErr)
 }
@@ -1282,13 +1240,9 @@ func (s *Service) linkGatewayTask(
 	if getErr == nil && current.State == store.GatewayEventTaskCreated && current.TaskUID == string(linkedTask.UID) {
 		return nil
 	}
-	// A reclaimed owner may already be linking this deterministic Task. Leave it
-	// in place so lease recovery can reconcile the exact UID instead of deleting
-	// work another owner has adopted.
 	return fmt.Errorf("link gateway event %s to Task: %w", event.ID, err)
 }
 
-// ProjectTerminals fairly rotates TaskCreated events while projecting terminal work.
 func (s *Service) ProjectTerminals(ctx context.Context) error {
 	now := time.Now().UTC()
 	events, err := s.EventStore.ListGatewayEvents(ctx, store.GatewayEventFilter{
@@ -1430,11 +1384,6 @@ func (s *Service) projectTerminal(
 		task.UID != "" && task.Status.SoulBinding == nil && task.Status.Attempts == 0 && task.Status.StartTime == nil &&
 		task.Status.JobName == "" && task.Status.JobUID == "" && task.Status.Iteration == 0 &&
 		task.Status.Execution == nil && task.Status.ExecutionOutcome == nil && task.Status.ResultRef == nil {
-		// Any failure before binding and execution, including soul, Provider and
-		// compatibility errors, ran no model turn, so it must not pin absence.
-		// The status alone cannot rule out an earlier no-soul Job whose
-		// start-status write was lost, so an owned Job also counts as execution.
-		// Read failures retry projection rather than pin the wrong identity.
 		var jobs batchv1.JobList
 		if err := s.freshReader().List(ctx, &jobs, client.InNamespace(task.Namespace)); err != nil {
 			return false, err
@@ -1484,8 +1433,6 @@ func (s *Service) projectTerminal(
 	return true, nil
 }
 
-// DeliverOnce claims one due delivery and records the synchronous terminal adapter result.
-//
 //nolint:gocyclo // Delivery keeps claim, send, and settlement branches together under one lease.
 func (s *Service) DeliverOnce(ctx context.Context) error {
 	claimAt := time.Now().UTC()
@@ -1565,7 +1512,6 @@ func (s *Service) DeliverOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Eligibility reads must finish before starting the adapter request timeout.
 	if delivery.Kind == protocol.DeliveryKindMessage {
 		if err := s.validateMessageDelivery(ctx, delivery); err != nil {
 			var httpErr *HTTPError
@@ -1647,9 +1593,6 @@ func (s *Service) completeGatewayDelivery(
 	outcomeAt time.Time,
 ) error {
 	providerMessageID = protocol.SanitizeMessage(providerMessageID, protocol.MaxIdentityBytes)
-	// Correlate the Task before committing the delivery as terminal. If the patch fails,
-	// the Sending lease expires and the same idempotent delivery is replayed, allowing
-	// correlation to converge without creating a second provider-side send.
 	if delivery.Kind != protocol.DeliveryKindMessage {
 		if err := s.markTaskDeliveryCorrelation(ctx, delivery, providerMessageID); err != nil {
 			return err
@@ -1676,7 +1619,6 @@ func retryableAdapterHTTPStatus(statusCode int) bool {
 	}
 }
 
-// RetryDelivery manually requeues one dead-lettered delivery with a fresh bounded expiry.
 func (s *Service) RetryDelivery(ctx context.Context, namespace, id string) (*store.GatewayDelivery, error) {
 	if s == nil || !s.Config.Enabled || s.DeliveryStore == nil {
 		return nil, &HTTPError{Code: http.StatusServiceUnavailable, Message: "gateway delivery processing is disabled"}
@@ -1864,7 +1806,6 @@ func gatewayTaskMatchesExpected(
 	existingSpec := existing.Spec.DeepCopy()
 	expectedSpec := expected.Spec.DeepCopy()
 	existingSpec.Timeout = expectedSpec.Timeout
-	// Control fields such as suspend can change after creation.
 	if !apiequality.Semantic.DeepEqual(existingSpec.ExecutionInputs(), expectedSpec.ExecutionInputs()) {
 		return false
 	}
@@ -2116,7 +2057,6 @@ func (s *Service) markBindingOutbound(ctx context.Context, namespace, name strin
 	_ = s.Client.Status().Update(ctx, binding)
 }
 
-// NewAdapterHTTPClient returns an adapter client whose transport matches the endpoint trust model.
 func NewAdapterHTTPClient(
 	base *http.Client, timeout time.Duration, serviceRef bool, allowInsecureLoopback bool,
 ) (*http.Client, error) {
@@ -2219,9 +2159,6 @@ func gatewayDeliveryID(event *store.GatewayEvent, kind string) string {
 }
 
 func gatewayTaskName(gatewayUID, externalEventID string, admittedAt time.Time) string {
-	// The admission instant is the durable incarnation key. It keeps retries deterministic while
-	// the event/tombstone exists, but avoids colliding with a deliberately re-admitted event after
-	// the configured deduplication retention window has elapsed.
 	return stableID("gw", gatewayUID, externalEventID, admittedAt.UTC().Format(time.RFC3339Nano))
 }
 

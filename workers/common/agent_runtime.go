@@ -19,8 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// WorkspaceConfig holds the repository checkout configuration a worker reads
-// from its environment.
 type WorkspaceConfig struct {
 	GitRepo       string
 	GitBranch     string
@@ -32,8 +30,6 @@ type WorkspaceConfig struct {
 	SubPath       string
 }
 
-// LoadWorkspaceConfig reads and validates the repository checkout
-// configuration from environment variables.
 func LoadWorkspaceConfig() (*WorkspaceConfig, error) {
 	cfg := &WorkspaceConfig{
 		GitRepo:       os.Getenv(workerenv.GitRepo),
@@ -46,7 +42,6 @@ func LoadWorkspaceConfig() (*WorkspaceConfig, error) {
 		SubPath:       os.Getenv(workerenv.WorkspaceSubpath),
 	}
 
-	// Sanitize SubPath to prevent directory traversal
 	if cfg.SubPath != "" {
 		cleaned := filepath.Clean(cfg.SubPath)
 		if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
@@ -58,8 +53,6 @@ func LoadWorkspaceConfig() (*WorkspaceConfig, error) {
 	return cfg, nil
 }
 
-// SetupGitCredentials sets git credential env vars globally so both clone and
-// agent-initiated git operations (push, fetch) can authenticate.
 func SetupGitCredentials() {
 	tokenPaths := []string{
 		"/secrets/git/token",
@@ -85,23 +78,7 @@ func SetupGitCredentials() {
 	}
 }
 
-// CloneRepo clones the configured git repository into the workspace directory.
-//
-// When the workspace already contains a git repository (e.g. a sandbox
-// workspace reused across turns of the same session), CloneRepo skips the
-// clone and refreshes in place. Branch workspaces are fast-forwarded only
-// when the configured branch is still checked out; a session-created branch
-// is preserved as part of the reused workspace state.
-//
-// When ORKA_PUSH_BRANCH is set and no ORKA_GIT_REF pinned a specific commit,
-// CloneRepo also creates and checks out a local branch with that name. This
-// way any agent-initiated `git push origin HEAD` lands on the intended remote
-// branch instead of the upstream default (often "main"). The post-run worker
-// finalize step still owns the canonical commit + push.
 func CloneRepo(ctx context.Context, cfg *WorkspaceConfig, workspaceDir string) error {
-	// Detect a reused workspace: if <workspaceDir>/.git exists we already
-	// have a clone (sandbox session reuse). Re-running `git clone` would
-	// fail with "destination path already exists". Refresh in place instead.
 	if info, err := os.Stat(filepath.Join(workspaceDir, ".git")); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
 		fmt.Printf("Reusing existing git repo at %s (sandbox workspace reuse)\n", workspaceDir)
 		if err := validateReusedGitRemote(ctx, workspaceDir, cfg.GitRepo); err != nil {
@@ -151,10 +128,6 @@ func CloneRepo(ctx context.Context, cfg *WorkspaceConfig, workspaceDir string) e
 		return fmt.Errorf("git clone failed: %w", err)
 	}
 
-	// Checkout specific ref if provided (overrides branch). Validation tasks often
-	// pin workspace.ref to a pushed branch head SHA without also providing the
-	// branch name, so fall back to fetching all remote heads when the server does
-	// not allow fetching the object by SHA directly.
 	if cfg.GitRef != "" {
 		var fetchMode gitRefFetchMode
 		var err error
@@ -171,11 +144,6 @@ func CloneRepo(ctx context.Context, cfg *WorkspaceConfig, workspaceDir string) e
 		}
 	}
 
-	// If ORKA_PUSH_BRANCH is set and we're not pinned to a specific ref, create
-	// and check out a local branch with that name. This way any agent-initiated
-	// `git push origin HEAD` lands on the intended remote branch rather than
-	// overwriting "main" (or whatever the upstream default branch was). Skipped
-	// for ref-pinned validation tasks because those aren't expected to push.
 	if cfg.GitRef == "" {
 		if err := checkoutPushBranchForAgentRun(ctx, workspaceDir, cfg.GitBranch); err != nil {
 			return err
@@ -420,7 +388,6 @@ func gitSafeDirectoryArgs(dir string, args ...string) []string {
 	return append([]string{"-c", "safe.directory=" + safeDir, "-c", "core.hooksPath=/dev/null"}, args...)
 }
 
-// execGitOutputContext runs git with stderr passed through and returns trimmed stdout.
 func execGitOutputContext(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd, err := newGitCommand(ctx, dir, args...)
 	if err != nil {
@@ -431,7 +398,6 @@ func execGitOutputContext(ctx context.Context, dir string, args ...string) (stri
 	return strings.TrimSpace(string(out)), err
 }
 
-// execGitContext runs git with stdout and stderr passed through.
 func execGitContext(ctx context.Context, dir string, args ...string) error {
 	cmd, err := newGitCommand(ctx, dir, args...)
 	if err != nil {

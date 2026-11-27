@@ -322,8 +322,6 @@ func startFiberAppForWorkerTest(t *testing.T, app *fiber.App) string {
 	return "http://" + ln.Addr().String()
 }
 
-// newWorkerSQLiteExecutionEventStore returns SQLite behind the storage client,
-// which provides the fenced task data access the internal API uses.
 func newWorkerSQLiteExecutionEventStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
