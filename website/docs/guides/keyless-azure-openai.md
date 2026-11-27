@@ -54,10 +54,12 @@ Keyless Providers serve chat, the compatibility APIs, and
   them in `spec.nodeName`. A taint alone keeps no one off
   ([Security](../concepts/security.md#agent-identities)).
 - No Pod running as the controller ServiceAccount except the controller
-  Deployment's own, and no ServiceAccount token Secret for it. Delete any
-  before you configure the identity, since they could obtain a token the
-  federated credential trusts. The chart's admission policy keeps new ones
-  from being created.
+  Deployment's own, no other Deployment or ReplicaSet (including scaled-to-zero
+  ones) configured to run as it, and no ServiceAccount token Secret for it.
+  Delete any, or move non-controller Deployments and ReplicaSets to another
+  ServiceAccount, before you configure the identity, since pre-existing
+  workloads or secrets could still obtain a token the federated credential
+  trusts. The chart's admission policy keeps new ones from being created.
 
 ## Create the identity
 
