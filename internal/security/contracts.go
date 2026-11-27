@@ -321,6 +321,24 @@ type PatchTestRun struct {
 	ExitCode int    `json:"exitCode"`
 }
 
+func (r *PatchTestRun) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Command  string `json:"command"`
+		ExitCode *int   `json:"exitCode"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	if raw.ExitCode == nil {
+		return fmt.Errorf("patch testsRun exitCode is required")
+	}
+	r.Command = raw.Command
+	r.ExitCode = *raw.ExitCode
+	return nil
+}
+
 func ReviewContextArtifactName(sliceID string) string {
 	return fmt.Sprintf("security-review-context-%s.json", sanitizeName(sliceID))
 }
