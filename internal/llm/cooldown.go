@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-// CooldownTracker tracks rate-limit cooldowns for providers.
 type CooldownTracker struct {
 	mu        sync.RWMutex
 	cooldowns map[string]*cooldownEntry
@@ -16,14 +15,12 @@ type cooldownEntry struct {
 	errorCount int
 }
 
-// NewCooldownTracker creates a new CooldownTracker.
 func NewCooldownTracker() *CooldownTracker {
 	return &CooldownTracker{
 		cooldowns: make(map[string]*cooldownEntry),
 	}
 }
 
-// MarkCooldown marks a provider as cooling down with exponential backoff.
 func (t *CooldownTracker) MarkCooldown(provider string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -35,7 +32,6 @@ func (t *CooldownTracker) MarkCooldown(provider string) {
 	}
 	entry.errorCount++
 
-	// Exponential: 1m * 5^(errorCount-1), capped at 1h
 	duration := time.Minute
 	for i := 1; i < entry.errorCount; i++ {
 		duration *= 5
@@ -47,7 +43,6 @@ func (t *CooldownTracker) MarkCooldown(provider string) {
 	entry.until = time.Now().Add(duration)
 }
 
-// IsCoolingDown returns true if the provider is currently in cooldown.
 func (t *CooldownTracker) IsCoolingDown(provider string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -59,7 +54,6 @@ func (t *CooldownTracker) IsCoolingDown(provider string) bool {
 	return time.Now().Before(entry.until)
 }
 
-// CooldownRemaining returns the remaining cooldown duration for a provider.
 func (t *CooldownTracker) CooldownRemaining(provider string) time.Duration {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -75,7 +69,6 @@ func (t *CooldownTracker) CooldownRemaining(provider string) time.Duration {
 	return remaining
 }
 
-// Reset clears the cooldown for a provider.
 func (t *CooldownTracker) Reset(provider string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

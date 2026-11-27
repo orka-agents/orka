@@ -11,9 +11,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// lostReceiptDeletionStore deletes a Gateway Task cleanup receipt and then
-// reports the outcome unknown, as the storage client does when it cannot
-// settle the write.
 type lostReceiptDeletionStore struct {
 	*sqlite.Store
 	lose    int
@@ -32,8 +29,6 @@ func (s *lostReceiptDeletionStore) DeleteGatewayTaskCleanupReceipt(ctx context.C
 	return nil
 }
 
-// P7: a lost receipt deletion is reported, never treated as done, and the
-// next pass converges: the receipt is gone and is not deleted again.
 func TestGatewayTaskReceiptPruningConvergesAfterLostDeletion(t *testing.T) {
 	ctx := t.Context()
 	service, db, _ := newGatewayServiceFixture(t)

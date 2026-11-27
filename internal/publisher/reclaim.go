@@ -11,11 +11,6 @@ import (
 	"strconv"
 )
 
-// Reclaim durably removes one exact Publication incarnation from the local
-// Publisher cache. The caller must already have settled all publication and
-// session effects. Once the directory is renamed out of its live name, cleanup
-// is completed even if the request context is canceled so a successful return
-// is a durable reclamation boundary.
 func (p *Publisher) Reclaim(ctx context.Context, request ReclaimRequest) (ReclaimResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

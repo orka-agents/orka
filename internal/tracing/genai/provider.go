@@ -8,7 +8,6 @@ package genai
 
 import "strings"
 
-// NormalizeProviderName maps Orka/provider-CRD names to the GenAI provider enum.
 func NormalizeProviderName(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "anthropic":
@@ -48,11 +47,6 @@ func NormalizeProviderName(name string) string {
 	}
 }
 
-// AgentRuntimeProvider maps an Orka ACP agent runtime and its pinned profile
-// model to the GenAI provider the runtime's model API speaks, and the model
-// name requested from that provider. OpenCode pins "provider/model" but always
-// speaks OpenAI chat completions through the proxy, which sends only the model
-// part upstream: the prefix selects the gateway's upstream, not the wire API.
 func AgentRuntimeProvider(runtime, model string) (provider, requestModel string) {
 	model = strings.TrimSpace(model)
 	switch strings.ToLower(strings.TrimSpace(runtime)) {

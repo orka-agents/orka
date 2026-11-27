@@ -1,4 +1,3 @@
-// Package agentcontext resolves explicit, non-secret Agent persona configuration.
 package agentcontext
 
 import (
@@ -48,8 +47,6 @@ func IsInvalidSource(err error) bool {
 	return errors.As(err, &invalidSource)
 }
 
-// ResolvedSoul contains exactly the bytes selected by an explicit Agent source.
-// Text is sensitive configuration and must not be logged or exposed in Task status.
 type ResolvedSoul struct {
 	Text   string
 	Digest string
@@ -68,7 +65,6 @@ func validDigest(value string) bool {
 	return err == nil && strings.ToLower(value) == value
 }
 
-// ValidateSource validates only the new soul field, preserving legacy PromptSource semantics.
 func ValidateSource(source *corev1alpha1.SoulSource) error {
 	if source == nil {
 		return nil
@@ -107,7 +103,6 @@ func validateText(text, expected string) error {
 	return nil
 }
 
-// ResolveSoul reads a single ConfigMap object version, without repository discovery.
 func ResolveSoul(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent) (*ResolvedSoul, error) {
 	if agent == nil || agent.Spec.Soul == nil {
 		return nil, nil
@@ -140,8 +135,6 @@ func ResolveSoul(ctx context.Context, reader client.Reader, agent *corev1alpha1.
 	return &ResolvedSoul{Text: text, Digest: Digest(text)}, nil
 }
 
-// Compose preserves existing prompt bytes when no soul is configured.
-// The hierarchy is prompt guidance, not output validation or an authorization boundary.
 func Compose(role string, soul *ResolvedSoul) string {
 	if soul == nil {
 		return role
@@ -153,24 +146,16 @@ func Compose(role string, soul *ResolvedSoul) string {
 	return role + "\n\n" + persona
 }
 
-// SessionDigest excludes the per-Task generation and inputs so different Tasks
-// can continue the same Agent revision, while a changed role, persona, or Agent
-// requires a new Session.
 func SessionDigest(binding *corev1alpha1.TaskSoulBinding) string {
 	if binding == nil {
 		return ""
 	}
 	identity := *binding
 	identity.TaskGeneration, identity.InputsDigest = 0, ""
-	encoded, _ := json.Marshal(identity) // A fixed struct containing strings and integers.
+	encoded, _ := json.Marshal(identity)
 	return Digest(string(encoded))
 }
 
-// TaskInputsDigest identifies a Task's execution inputs: its spec without the
-// control fields a soul binding leaves mutable. JSON omits empty collections,
-// so the digest also lists the path of every present but empty collection: an
-// explicitly empty node selector or toleration list behaves differently from an
-// omitted one.
 func TaskInputsDigest(spec *corev1alpha1.TaskSpec) (string, error) {
 	inputs := spec.ExecutionInputs()
 	encoded, err := json.Marshal(&inputs)
@@ -182,8 +167,6 @@ func TaskInputsDigest(spec *corev1alpha1.TaskSpec) (string, error) {
 	return Digest(string(encoded) + "\n" + strings.Join(empty, "\n")), nil
 }
 
-// appendEmptyCollections records, by JSON path, each non-nil empty slice or
-// map reachable from value. Map keys are visited in sorted order.
 func appendEmptyCollections(value reflect.Value, path string, empty *[]string) {
 	switch value.Kind() {
 	case reflect.Pointer, reflect.Interface:
@@ -227,11 +210,6 @@ func appendEmptyCollections(value reflect.Value, path string, empty *[]string) {
 	}
 }
 
-// SoulBindingMatches reports whether a recorded binding still describes the
-// current one. TaskGeneration identifies only the first binding: afterwards
-// the inputs digest proves the execution inputs are unchanged, so control-field
-// edits that advance the generation keep the binding. A binding recorded
-// without an inputs digest keeps the exact generation check.
 func SoulBindingMatches(recorded, current corev1alpha1.TaskSoulBinding) bool {
 	if recorded.InputsDigest == "" {
 		current.InputsDigest = ""

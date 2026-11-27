@@ -6,9 +6,6 @@ import (
 	"unicode/utf8"
 )
 
-// ValidJSONUnicode rejects invalid UTF-8 and unpaired UTF-16 escapes before
-// encoding/json can silently replace them with U+FFFD. JSON syntax is checked
-// first so scanning escapes never interprets malformed input as valid text.
 func ValidJSONUnicode(data []byte) bool {
 	if !utf8.Valid(data) || !json.Valid(data) {
 		return false

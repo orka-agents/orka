@@ -18,9 +18,6 @@ const (
 	defaultMaxPathBytes           = 4 << 10
 	defaultMaxSymlinkBytes        = 4 << 10
 
-	// Repository tool conventions commonly expose the same checked-in skill
-	// tree to multiple agents. This exact alias is read-only: both the link and
-	// its protected target are fingerprinted and excluded from publication.
 	readOnlySkillsAliasPath     = ".agents/skills"
 	readOnlySkillsAliasTarget   = "../.claude/skills"
 	readOnlySkillsAliasResolved = ".claude/skills"
@@ -53,8 +50,6 @@ var mandatoryReservedNames = []string{
 	".orka-workspace-delta",
 }
 
-// Limits bounds both snapshots and generated artifacts. Zero fields use the
-// secure defaults; negative fields are invalid.
 type Limits struct {
 	MaxEntries       int
 	MaxFileBytes     int64
@@ -64,26 +59,12 @@ type Limits struct {
 	MaxSymlinkBytes  int
 }
 
-// Options adds deployment-specific protected and reserved path-component
-// names. Built-in security names cannot be disabled.
 type Options struct {
 	Limits                  Limits
 	AdditionalExcludedNames []string
 	AdditionalReservedNames []string
-	// ContentFlagger, when set, is evaluated against each regular file's
-	// content during Capture. Flagged paths are queryable through
-	// Snapshot.BaselineContentFlagged, letting callers distinguish content
-	// that was already present in the trusted pre-prompt baseline from
-	// content introduced afterwards. It never alters the manifest or the
-	// options digest. Capture calls it from several goroutines at once, so
-	// it must be safe for concurrent use.
-	ContentFlagger func(content []byte) bool
-	// ContentFingerprinter, when set, records opaque fingerprints of the
-	// flagged fragments of each regular file (for example digests of its
-	// secret-like lines) so a later delta can tell pre-existing flagged
-	// content from content the agent introduced. Only fingerprints are kept.
-	// Like ContentFlagger it must be safe for concurrent use.
-	ContentFingerprinter func(content []byte) []string
+	ContentFlagger          func(content []byte) bool
+	ContentFingerprinter    func(content []byte) []string
 }
 
 type normalizedOptions struct {
@@ -96,15 +77,12 @@ type normalizedOptions struct {
 	contentFingerprinter func(content []byte) []string
 }
 
-// withoutContentPolicy returns a copy of the options with the baseline-only
-// content heuristics cleared.
 func (o normalizedOptions) withoutContentPolicy() normalizedOptions {
 	o.contentFlagger = nil
 	o.contentFingerprinter = nil
 	return o
 }
 
-// DefaultLimits returns the package's bounded first-release defaults.
 func DefaultLimits() Limits {
 	return Limits{
 		MaxEntries:       defaultMaxEntries,

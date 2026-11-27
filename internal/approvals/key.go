@@ -25,9 +25,6 @@ const (
 	maxApprovalNumberCanonicalChars   = 8 * 1024
 )
 
-// ApprovalTarget is the stable, sanitized contract for a human approval request.
-// It deliberately stores only a digest of target arguments, not raw side-effect
-// payloads, so approval events can be persisted without leaking secrets.
 type ApprovalTarget struct {
 	ApprovalID        string          `json:"approvalID"`
 	TaskUID           string          `json:"taskUID,omitempty"`
@@ -40,8 +37,6 @@ type ApprovalTarget struct {
 	Severity          string          `json:"severity,omitempty"`
 }
 
-// ResolvedApproval is the compact controller-to-worker approval decision
-// payload injected into resumed worker Pods.
 type ResolvedApproval struct {
 	ID                string          `json:"id"`
 	TaskUID           string          `json:"taskUID,omitempty"`
@@ -58,8 +53,6 @@ type ResolvedApproval struct {
 	Severity          string          `json:"severity,omitempty"`
 }
 
-// TargetArgsDigest returns a sha256 digest of canonical JSON arguments. Empty
-// arguments canonicalize to an empty object, matching LLM tool-call semantics.
 func TargetArgsDigest(args json.RawMessage) (string, error) {
 	canonical, err := canonicalJSON(args)
 	if err != nil {
@@ -69,8 +62,6 @@ func TargetArgsDigest(args json.RawMessage) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// ApprovalID returns a deterministic approval/idempotency key for a concrete
-// side-effect target within a task.
 func ApprovalID(namespace, taskName, taskUID, targetTool, targetArgsDigest string, targetSpecDigests ...string) string {
 	parts := []string{
 		strings.TrimSpace(namespace),
@@ -88,7 +79,6 @@ func ApprovalID(namespace, taskName, taskUID, targetTool, targetArgsDigest strin
 	return hex.EncodeToString(sum[:])
 }
 
-// NewApprovalTarget builds a sanitized approval target for the given tool call.
 func NewApprovalTarget(
 	namespace string,
 	taskName string,
@@ -139,7 +129,6 @@ func NewApprovalTarget(
 	}, nil
 }
 
-// TargetSpecDigest returns a sha256 digest of a sanitized tool specification.
 func TargetSpecDigest(spec any) (string, error) {
 	if spec == nil {
 		return "", nil

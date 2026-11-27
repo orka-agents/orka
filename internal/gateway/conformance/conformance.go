@@ -4,7 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package conformance probes and validates the orka.gateway.v1 adapter contract.
 package conformance
 
 import (
@@ -27,7 +26,6 @@ const (
 	redactedValue           = "[REDACTED]"
 )
 
-// Target describes one adapter endpoint.
 type Target struct {
 	BaseURL            string
 	AuthorizationValue string
@@ -38,21 +36,18 @@ type Target struct {
 	DeliveryFixture    *DeliveryFixture
 }
 
-// ProbeResult is the non-mutating health and capability result used by reconciliation.
 type ProbeResult struct {
 	Passed       bool
 	Message      string
 	Capabilities *protocol.CapabilitiesResponse
 }
 
-// CheckResult is the full adapter conformance result.
 type CheckResult struct {
 	Passed       bool
 	Message      string
 	Capabilities *protocol.CapabilitiesResponse
 }
 
-// Probe performs authenticated health and capability checks without sending a delivery.
 func Probe(ctx context.Context, target Target) (result ProbeResult) {
 	defer func() {
 		if target.DeliveryFixture != nil {
@@ -115,9 +110,6 @@ func verifyProbeAuthentication(ctx context.Context, client *http.Client, baseURL
 	return nil
 }
 
-// Check performs the reusable full contract check, including auth, size bounds,
-// redaction safety, and idempotent delivery.
-//
 //nolint:gocyclo // The conformance probe keeps its ordered protocol checks and cleanup together.
 func Check(ctx context.Context, target Target) (result CheckResult) {
 	defer func() {
@@ -187,8 +179,6 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 	var interim protocol.DeliveryRequest
 	var interimReceipt protocol.DeliveryResponse
 	if probe.Capabilities.Capabilities.InterimDelivery {
-		// Send before the final for this event, preserving private fixture routing.
-		// Never send even a negative message probe to a non-capable adapter.
 		interim, interimReceipt, err = checkInterimDeliveries(ctx, client, baseURL, target, delivery)
 		if err != nil {
 			return CheckResult{Message: target.safeError("interim delivery check failed", err), Capabilities: probe.Capabilities}
@@ -198,7 +188,6 @@ func Check(ctx context.Context, target Target) (result CheckResult) {
 		return CheckResult{Message: err.Error(), Capabilities: probe.Capabilities}
 	}
 	if probe.Capabilities.Capabilities.InterimDelivery {
-		// A replay after terminal must retain the original receipt, not send again.
 		replayed, err := sendInterimProbe(ctx, client, baseURL, target, interim)
 		if err != nil || replayed.ProviderMessageID != interimReceipt.ProviderMessageID {
 			return CheckResult{Message: target.safeError("interim replay after terminal failed", err), Capabilities: probe.Capabilities}
@@ -466,9 +455,6 @@ func request(ctx context.Context, client *http.Client, method, targetURL, token 
 	return responseBody, resp.StatusCode, nil
 }
 
-// SanitizeCheckResult returns an output-safe copy of a conformance result. It
-// provides a final defense before CLI or test harness serialization, even when
-// a caller constructs a CheckResult directly.
 func SanitizeCheckResult(result CheckResult, authorizationValue string) CheckResult {
 	result.Message = sanitizeOutputText(result.Message, authorizationValue, conformanceMessageLimit)
 	result.Capabilities = sanitizeCapabilities(result.Capabilities, authorizationValue)
@@ -527,7 +513,6 @@ func (target Target) safeError(prefix string, err error) string {
 	}
 	message := prefix + ": " + err.Error()
 	if target.DeliveryFixture != nil {
-		// Mask the original diagnostic before truncation can leave an unmatched identity prefix.
 		message, _ = target.DeliveryFixture.maskResultFields(message, nil)
 		return sanitizeOutputText(message, target.AuthorizationValue, conformanceMessageLimit)
 	}

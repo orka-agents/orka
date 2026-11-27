@@ -403,9 +403,6 @@ func TestRecordEventStrictCapturesFakeEvent(t *testing.T) {
 	}
 }
 
-// restartingControllerClient fails the first failures connections the way a
-// restarting controller's Service does, refusing them or, with hang, never
-// answering, then dials the requested address.
 func restartingControllerClient(t *testing.T, failures int32, hang bool) (*http.Client, *atomic.Int32) {
 	t.Helper()
 	closed, err := net.Listen("tcp", "127.0.0.1:0")
@@ -593,7 +590,6 @@ func (f eventRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, err
 func TestRecordEventStrictDoesNotRetryThroughCustomTransport(t *testing.T) {
 	slept := stubRetryWait(t)
 	var calls atomic.Int32
-	// A custom RoundTripper may send the request without reporting GotConn.
 	client := &http.Client{Transport: eventRoundTripperFunc(func(*http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return nil, errors.New("connection reset after sending")

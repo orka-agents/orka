@@ -112,11 +112,9 @@ func TestGroupMessageBlocks(t *testing.T) {
 		if len(blocks) != 2 {
 			t.Fatalf("expected 2 blocks, got %d", len(blocks))
 		}
-		// First block: assistant + 2 tool results
 		if len(blocks[0].messages) != 3 {
 			t.Errorf("first block: expected 3 messages, got %d", len(blocks[0].messages))
 		}
-		// Second block: user message
 		if len(blocks[1].messages) != 1 {
 			t.Errorf("second block: expected 1 message, got %d", len(blocks[1].messages))
 		}
@@ -158,7 +156,6 @@ func TestTruncateMessages(t *testing.T) {
 			{Role: "user", Content: "hi"},
 			{Role: "assistant", Content: "hello there how are you doing today"},
 		}
-		// First message "hi" ≈ 1 token. Set budget to 1.
 		result := TruncateMessages(msgs, 1)
 		if len(result) != 1 {
 			t.Fatalf("expected 1 message, got %d", len(result))
@@ -169,15 +166,13 @@ func TestTruncateMessages(t *testing.T) {
 	})
 
 	t.Run("truncation adds system note", func(t *testing.T) {
-		// Create messages where total exceeds budget
 		msgs := []Message{
 			{Role: "user", Content: "system prompt"},
-			{Role: "assistant", Content: strings.Repeat("a", 100)}, // ~25 tokens
-			{Role: "user", Content: strings.Repeat("b", 100)},      // ~25 tokens
-			{Role: "assistant", Content: strings.Repeat("c", 100)}, // ~25 tokens
-			{Role: "user", Content: "last"},                        // ~1 token
+			{Role: "assistant", Content: strings.Repeat("a", 100)},
+			{Role: "user", Content: strings.Repeat("b", 100)},
+			{Role: "assistant", Content: strings.Repeat("c", 100)},
+			{Role: "user", Content: "last"},
 		}
-		// Budget large enough for first + enriched note + last message, but not all
 		result := TruncateMessages(msgs, 40)
 		if len(result) < 2 {
 			t.Fatalf("expected at least 2 messages, got %d", len(result))
@@ -185,7 +180,6 @@ func TestTruncateMessages(t *testing.T) {
 		if result[0].Content != "system prompt" {
 			t.Error("first message should be preserved")
 		}
-		// Should have a truncation note
 		if result[1].Role != "system" {
 			t.Error("expected truncation note to have system role")
 		}
@@ -201,7 +195,6 @@ func TestTruncateMessages(t *testing.T) {
 			{Role: "tool", Content: "result", ToolCallID: "1"},
 			{Role: "user", Content: "ok"},
 		}
-		// Budget large enough for everything
 		result := TruncateMessages(msgs, 10000)
 		if len(result) != 4 {
 			t.Errorf("expected 4 messages, got %d", len(result))
@@ -213,10 +206,9 @@ func TestTruncateMessages(t *testing.T) {
 			{Role: "user", Content: "system prompt"},
 			{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "file_read", Arguments: json.RawMessage(`{"path":"main.go"}`)}}},
 			{Role: "tool", Content: "package main", ToolCallID: "1"},
-			{Role: "user", Content: strings.Repeat("x", 400)}, // ~100 tokens
+			{Role: "user", Content: strings.Repeat("x", 400)},
 			{Role: "user", Content: "last"},
 		}
-		// Budget large enough for first + enriched note + last, but not the big middle block
 		result := TruncateMessages(msgs, 60)
 		if len(result) < 2 {
 			t.Fatalf("expected at least 2 messages, got %d", len(result))
@@ -391,7 +383,6 @@ func TestExtractDroppedSummary(t *testing.T) {
 				tokens: 10,
 			},
 		}
-		// Should not panic
 		result := extractDroppedSummary(blocks)
 		if !strings.Contains(result, "broken_tool") {
 			t.Errorf("expected 'broken_tool' in result, got %q", result)
@@ -464,7 +455,6 @@ func TestExtractDroppedSummary(t *testing.T) {
 	})
 
 	t.Run("context items capped per tool", func(t *testing.T) {
-		// Create a tool with more files than maxContextPerTool (5)
 		args := make([]ToolCall, 8)
 		blockMsgs := make([]Message, 0, len(args)*2)
 		for i := range 8 {
@@ -509,15 +499,12 @@ func TestExtractDroppedSummary(t *testing.T) {
 	})
 }
 
-// TestTruncateMessagesKeepsCutWhileGrowing checks that a growing conversation
-// sends the same prefix step after step, so a provider's prompt cache matches,
-// and moves its cut only once per quarter budget of growth.
 func TestTruncateMessagesKeepsCutWhileGrowing(t *testing.T) {
 	const budget = 400
 	conversation := make([]Message, 0, 201)
 	conversation = append(conversation, Message{Role: "user", Content: "first"})
 	for i := range 200 {
-		conversation = append(conversation, Message{Role: "user", Content: fmt.Sprintf("message %03d %s", i, strings.Repeat("x", 28))}) // ~10 tokens
+		conversation = append(conversation, Message{Role: "user", Content: fmt.Sprintf("message %03d %s", i, strings.Repeat("x", 28))})
 	}
 
 	var previous []Message
@@ -539,7 +526,6 @@ func TestTruncateMessagesKeepsCutWhileGrowing(t *testing.T) {
 		}
 		previous = got
 	}
-	// 140 steps of ~10 tokens is ~1400 tokens of growth: about 14 quarter-budget moves.
 	if moves == 0 || moves > steps/5 {
 		t.Fatalf("cut moved %d times in %d steps", moves, steps)
 	}

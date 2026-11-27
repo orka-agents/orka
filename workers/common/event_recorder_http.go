@@ -25,15 +25,10 @@ const (
 	DefaultServiceAccountBearerPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultEventRecorderTimeout     = 2 * time.Second
 
-	// Strict events retry only attempts that never connected, so the controller
-	// cannot have appended them. About a minute of backoff covers a routine
-	// controller restart, whose Recreate rollout leaves the API Service without
-	// a serving endpoint until the new Pod is up.
 	strictEventConnectAttempts = 10
 	strictEventMaxBackoff      = 8 * time.Second
 )
 
-// HTTPEventRecorderConfig configures the worker HTTP event recorder.
 type HTTPEventRecorderConfig struct {
 	ControllerURL string
 	Namespace     string
@@ -45,7 +40,6 @@ type HTTPEventRecorderConfig struct {
 	Now           func() time.Time
 }
 
-// HTTPEventRecorder posts worker execution events to the controller internal API.
 type HTTPEventRecorder struct {
 	endpoint    string
 	namespace   string
@@ -59,9 +53,6 @@ type HTTPEventRecorder struct {
 
 var _ EventRecorder = (*HTTPEventRecorder)(nil)
 
-// NewHTTPEventRecorderFromEnv builds a controller-backed event recorder from worker env.
-// If required env is missing or invalid, it returns a no-op recorder so event recording
-// never blocks task execution.
 func NewHTTPEventRecorderFromEnv() EventRecorder {
 	return NewHTTPEventRecorder(HTTPEventRecorderConfig{
 		ControllerURL: os.Getenv(workerenv.ControllerURL),
@@ -72,8 +63,6 @@ func NewHTTPEventRecorderFromEnv() EventRecorder {
 	})
 }
 
-// NewHTTPEventRecorder creates a controller-backed event recorder.
-// Missing required controller/task configuration returns NoopEventRecorder.
 func NewHTTPEventRecorder(cfg HTTPEventRecorderConfig) EventRecorder {
 	controllerURL := strings.TrimSpace(cfg.ControllerURL)
 	namespace := strings.TrimSpace(cfg.Namespace)
@@ -114,7 +103,6 @@ func NewHTTPEventRecorder(cfg HTTPEventRecorderConfig) EventRecorder {
 	}
 }
 
-// Record implements EventRecorder. Failures are warning-only and never returned to callers.
 func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...EventOption) {
 	if err := r.record(ctx, typ, 1, opts...); err != nil {
 		if ctx == nil {
@@ -124,9 +112,6 @@ func (r *HTTPEventRecorder) Record(ctx context.Context, typ string, opts ...Even
 	}
 }
 
-// RecordStrict implements StrictEventRecorder by posting the event and returning
-// transport or non-2xx response errors. Attempts that cannot connect are retried
-// for about a minute, so a controller restart does not fail the caller.
 func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts ...EventOption) error {
 	attempts := 1
 	if r != nil && tracesConnections(r.client) {
@@ -135,9 +120,6 @@ func (r *HTTPEventRecorder) RecordStrict(ctx context.Context, typ string, opts .
 	return r.record(ctx, typ, attempts, opts...)
 }
 
-// tracesConnections reports whether client uses net/http's own Transport, which
-// reports GotConn before writing a request. Another RoundTripper could send a
-// request without it, so RecordStrict does not retry through one.
 func tracesConnections(client *http.Client) bool {
 	if client == nil {
 		return false
@@ -216,9 +198,6 @@ func (r *HTTPEventRecorder) record(ctx context.Context, typ string, connectAttem
 	}
 }
 
-// post sends one attempt. unsent reports a failure before any connection to
-// the controller, such as a refused or timed-out dial, so a retry cannot
-// append a duplicate event.
 func (r *HTTPEventRecorder) post(ctx context.Context, body []byte) (unsent bool, err error) {
 	reqCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
@@ -291,9 +270,6 @@ func readServiceAccountToken(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// FirstNonBlank returns the first value that is not blank, unmodified, so
-// callers that must preserve provider-supplied strings exactly (model IDs,
-// paths) still treat whitespace-only values as empty.
 func FirstNonBlank(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {

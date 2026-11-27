@@ -71,7 +71,6 @@ func TestPrepareSignedCommitAndCustomIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare signed commit: %v", err)
 	}
-	// Deterministic idempotent retry with same Ed25519 key produces identical CommitOID.
 	reqRetry := req
 	reqRetry.OperationID = "op-prepare-signed-2"
 	two, err := pub.Prepare(ctx, reqRetry)
@@ -82,7 +81,6 @@ func TestPrepareSignedCommitAndCustomIdentity(t *testing.T) {
 		t.Fatalf("non-deterministic signed prepare: one=%+v two=%+v", one, two)
 	}
 
-	// Independent publisher instance with same Ed25519 key produces identical CommitOID.
 	pub2 := newTestPublisher(t)
 	three, err := pub2.Prepare(ctx, req)
 	if err != nil {
@@ -92,7 +90,6 @@ func TestPrepareSignedCommitAndCustomIdentity(t *testing.T) {
 		t.Fatalf("Ed25519 signed CommitOID not deterministic across publishers: %s vs %s", three.CommitOID, one.CommitOID)
 	}
 
-	// Rotating the signing key under the same PublicationID must fail with ErrIdempotencyConflict.
 	otherKeyPEM, _ := generateTestEd25519KeyPEM(t)
 	rotated := req
 	rotated.SigningKey = otherKeyPEM
@@ -100,7 +97,6 @@ func TestPrepareSignedCommitAndCustomIdentity(t *testing.T) {
 		t.Fatalf("expected ErrIdempotencyConflict on rotated signing key, got %v", err)
 	}
 
-	// Restore bundle into a bare repo and verify commit author, gpgsig, and git verify-commit (if ssh-keygen is available).
 	verifyDir := t.TempDir()
 	verifyRepo := filepath.Join(verifyDir, "verify.git")
 	runTestGit(t, verifyDir, nil, "init", "--bare", verifyRepo)

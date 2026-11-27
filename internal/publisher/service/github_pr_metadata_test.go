@@ -57,7 +57,6 @@ func TestGitHubPRReconcilerTaskPresentation(t *testing.T) {
 			if body != want {
 				t.Fatal("publisher changed the body or omitted its Task metadata or reconciliation markers")
 			}
-			// A retry must adopt the same PR without rewriting its presentation.
 			scenario.list = []githubPullRequest{scenario.create}
 			intent.Title, intent.Body = "A later Task title", "A later Task body"
 			if _, err := publisher.ReconcilePullRequest(context.Background(), intent, reconciler); err != nil {
@@ -126,7 +125,6 @@ func TestGitHubPRReconcilerRejectsInvalidPullRequestText(t *testing.T) {
 						t.Error("invalid pull request text reached the forge")
 					}
 					if !errors.Is(err, publisher.ErrInvalidRequest) || err.Error() != test.wantError {
-						// Do not print the error: a regression could include the fake value.
 						t.Fatal("invalid text did not return the expected non-sensitive validation error")
 					}
 				})

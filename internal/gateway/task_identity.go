@@ -14,7 +14,6 @@ import (
 
 const gatewayRequestedByIssuerPrefix = "gateway.orka.ai/"
 
-// TaskOwnerIdentity is the immutable Gateway ownership recorded on a Task.
 type TaskOwnerIdentity struct {
 	GatewayNamespace string
 	NamespaceUID     string
@@ -22,8 +21,6 @@ type TaskOwnerIdentity struct {
 	GatewayUID       string
 }
 
-// TaskOwner reports immutable Gateway ownership. RequestedBy is immutable and
-// therefore authoritative; metadata markers preserve compatibility for older Tasks.
 func TaskOwner(task *corev1alpha1.Task) (TaskOwnerIdentity, bool) {
 	if task == nil {
 		return TaskOwnerIdentity{}, false
@@ -40,8 +37,6 @@ func TaskOwner(task *corev1alpha1.Task) (TaskOwnerIdentity, bool) {
 				identity.GatewayName = strings.TrimSpace(parts[3])
 				identity.GatewayUID = strings.TrimSpace(parts[4])
 			case len(parts) == 4 && parts[0] == "gateway.orka.ai" && strings.TrimSpace(parts[1]) != "":
-				// Compatibility with pre-identity Tasks. The missing Namespace UID keeps
-				// public authorization fail-closed unless the retained event supplies it.
 				identity.GatewayNamespace = strings.TrimSpace(parts[1])
 				identity.GatewayName = strings.TrimSpace(parts[2])
 				identity.GatewayUID = strings.TrimSpace(parts[3])
@@ -59,7 +54,6 @@ func TaskOwner(task *corev1alpha1.Task) (TaskOwnerIdentity, bool) {
 	return identity, identity.GatewayName != "" || eventID != ""
 }
 
-// TaskIdentity reports only the Gateway name for callers that need classification.
 func TaskIdentity(task *corev1alpha1.Task) (string, bool) {
 	identity, owned := TaskOwner(task)
 	return identity.GatewayName, owned

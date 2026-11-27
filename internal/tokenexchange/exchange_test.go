@@ -586,7 +586,6 @@ func TestClientFlightContinuesWhenInitiatingCallerCancels(t *testing.T) {
 		_, err := client.Exchange(context.Background(), req)
 		secondDone <- err
 	}()
-	// Give the second caller time to join the existing flight before canceling the initiator.
 	time.Sleep(10 * time.Millisecond)
 	cancelFirst()
 	if err := <-firstDone; !errors.Is(err, context.Canceled) {
