@@ -37,3 +37,15 @@ func TestParseTaskLogStream(t *testing.T) {
 		}
 	}
 }
+
+func TestTailLogLines(t *testing.T) {
+	if got := tailLogLines("a\nb\nc\nd\n", 2); got != "c\nd\n" {
+		t.Fatalf("tailLogLines = %q, want %q", got, "c\nd\n")
+	}
+	if got := tailLogLines("a\nb", 5); got != "a\nb" {
+		t.Fatalf("tailLogLines = %q, want %q", got, "a\nb")
+	}
+	if got := tailLogLines("a\nb\nc", 1); got != "c" {
+		t.Fatalf("tailLogLines = %q, want %q", got, "c")
+	}
+}

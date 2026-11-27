@@ -8,8 +8,10 @@ package k8scaps
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/client-go/discovery"
 )
@@ -120,4 +122,61 @@ func (c Capabilities) MeetsVersion(minVersion string) bool {
 		return false
 	}
 	return !parsed.LessThan(version.MustParseGeneric(minVersion))
+}
+
+func IsDisruptedPod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for i := range pod.Status.Conditions {
+		cond := &pod.Status.Conditions[i]
+		if cond.Type == corev1.DisruptionTarget && cond.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func SelectJobPod(pods []corev1.Pod) (corev1.Pod, bool) {
+	if len(pods) == 0 {
+		return corev1.Pod{}, false
+	}
+	ordered := make([]corev1.Pod, len(pods))
+	copy(ordered, pods)
+	sort.Slice(ordered, func(i, j int) bool {
+		left, right := ordered[i], ordered[j]
+		if !left.CreationTimestamp.Equal(&right.CreationTimestamp) {
+			return left.CreationTimestamp.Before(&right.CreationTimestamp)
+		}
+		return left.Name < right.Name
+	})
+	bestIdx := -1
+	bestScore := -1
+	for i := range ordered {
+		score := jobPodAttemptScore(&ordered[i])
+		if score >= bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+	if bestIdx < 0 {
+		return ordered[len(ordered)-1], true
+	}
+	return ordered[bestIdx], true
+}
+
+func jobPodAttemptScore(pod *corev1.Pod) int {
+	if IsDisruptedPod(pod) {
+		return 0
+	}
+	switch pod.Status.Phase {
+	case corev1.PodSucceeded:
+		return 4
+	case corev1.PodRunning:
+		return 3
+	case corev1.PodFailed:
+		return 2
+	default:
+		return 1
+	}
 }

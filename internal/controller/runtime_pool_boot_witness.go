@@ -36,22 +36,22 @@ const (
 )
 
 type runtimePoolBootWitness struct {
-	SchemaVersion  int             `json:"schemaVersion"`
-	PoolNamespace  string          `json:"poolNamespace"`
-	PoolName       string          `json:"poolName"`
-	PoolUID        types.UID       `json:"poolUID"`
-	Provider       string          `json:"provider"`
-	Fence          harnessv2.Fence `json:"fence"`
-	PodNamespace   string          `json:"podNamespace"`
-	PodName        string          `json:"podName"`
-	PodUID         types.UID       `json:"podUID"`
-	PodAddress     string          `json:"podAddress"`
-	PodSpecDigest  string          `json:"podSpecDigest"`
-	DeploymentName string          `json:"deploymentName"`
-	DeploymentUID  types.UID       `json:"deploymentUID"`
-	ReplicaSetName string          `json:"replicaSetName"`
-	ReplicaSetUID  types.UID       `json:"replicaSetUID"`
-	TemplateDigest string          `json:"templateDigest"`
+	SchemaVersion  int               `json:"schemaVersion"`
+	PoolNamespace  string            `json:"poolNamespace"`
+	PoolName       string            `json:"poolName"`
+	PoolUID        types.UID         `json:"poolUID"`
+	Provider       string            `json:"provider"`
+	Fence          harnessv2.Fence   `json:"fence"`
+	PodNamespace   string            `json:"podNamespace"`
+	PodName        string            `json:"podName"`
+	PodUID         types.UID         `json:"podUID"`
+	PodAddress     string            `json:"podAddress"`
+	PodSpecDigest  string            `json:"podSpecDigest"`
+	DeploymentName string            `json:"deploymentName"`
+	DeploymentUID  types.UID         `json:"deploymentUID"`
+	ReplicaSetName string            `json:"replicaSetName"`
+	ReplicaSetUID  types.UID         `json:"replicaSetUID"`
+	TemplateDigest string            `json:"templateDigest"`
 	ContainerID    string            `json:"containerID"`
 	ImageID        string            `json:"imageID"`
 	ImageVolumes   map[string]string `json:"imageVolumes,omitempty"`

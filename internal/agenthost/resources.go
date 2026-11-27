@@ -349,9 +349,12 @@ func aggregatePodLevelResources(initContainers, containers []corev1.Container) *
 		corev1.ResourceCPU:    len(containers) > 0,
 		corev1.ResourceMemory: len(containers) > 0,
 	}
-	addRequest := func(src corev1.ResourceList) {
+	addRequest := func(reqSrc, limSrc corev1.ResourceList) {
 		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
-			q, ok := src[name]
+			q, ok := reqSrc[name]
+			if !ok {
+				q, ok = limSrc[name]
+			}
 			if !ok || q.IsZero() {
 				continue
 			}
@@ -373,12 +376,12 @@ func aggregatePodLevelResources(initContainers, containers []corev1.Container) *
 		}
 	}
 	for i := range containers {
-		addRequest(containers[i].Resources.Requests)
+		addRequest(containers[i].Resources.Requests, containers[i].Resources.Limits)
 		addLimit(containers[i].Resources.Limits)
 	}
 	for i := range initContainers {
 		if initContainers[i].RestartPolicy != nil && *initContainers[i].RestartPolicy == corev1.ContainerRestartPolicyAlways {
-			addRequest(initContainers[i].Resources.Requests)
+			addRequest(initContainers[i].Resources.Requests, initContainers[i].Resources.Limits)
 			addLimit(initContainers[i].Resources.Limits)
 		}
 	}
@@ -387,8 +390,12 @@ func aggregatePodLevelResources(initContainers, containers []corev1.Container) *
 			continue
 		}
 		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
-			if q, ok := initContainers[i].Resources.Requests[name]; ok && q.Cmp(requests[name]) > 0 {
-				requests[name] = q.DeepCopy()
+			reqQ, reqOK := initContainers[i].Resources.Requests[name]
+			if !reqOK {
+				reqQ, reqOK = initContainers[i].Resources.Limits[name]
+			}
+			if reqOK && reqQ.Cmp(requests[name]) > 0 {
+				requests[name] = reqQ.DeepCopy()
 			}
 			q, ok := initContainers[i].Resources.Limits[name]
 			if !ok || q.IsZero() {

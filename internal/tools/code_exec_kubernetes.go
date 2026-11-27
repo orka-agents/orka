@@ -16,12 +16,12 @@ import (
 	"io"
 	"maps"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/orka-agents/orka/internal/k8scaps"
 	"github.com/orka-agents/orka/internal/workerenv"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -1508,18 +1508,8 @@ func (e *KubernetesJobCodeExecutor) firstJobPod(ctx context.Context, clients kub
 	if err := clients.client.List(ctx, pods, crclient.InNamespace(clients.namespace), crclient.MatchingLabels{codeExecKubernetesLabelJob: jobName}); err != nil {
 		return corev1.Pod{}, false, err
 	}
-	if len(pods.Items) == 0 {
-		return corev1.Pod{}, false, nil
-	}
-	sort.Slice(pods.Items, func(i, j int) bool {
-		left := pods.Items[i]
-		right := pods.Items[j]
-		if !left.CreationTimestamp.Equal(&right.CreationTimestamp) {
-			return left.CreationTimestamp.Before(&right.CreationTimestamp)
-		}
-		return left.Name < right.Name
-	})
-	return pods.Items[0], true, nil
+	pod, ok := k8scaps.SelectJobPod(pods.Items)
+	return pod, ok, nil
 }
 
 func hasJobCondition(job *batchv1.Job, conditionType batchv1.JobConditionType) bool {

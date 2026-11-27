@@ -886,7 +886,8 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "no pods found for task job")
 	}
 
-	podName := pods.Items[0].Name
+	selectedPod, _ := k8scaps.SelectJobPod(pods.Items)
+	podName := selectedPod.Name
 	follow := c.Query("follow") == queryTrue
 	logStreamSelector, err := parseTaskLogStream(c.Query("stream"))
 	if err != nil {
@@ -926,7 +927,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		Container: "worker",
 		TailLines: &tailLines,
 	}
-	logStream, err := openPodLogsWithStreamFallback(ctx, h.clientset, namespace, podName, opts, logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
+	logStream, usedSplitStream, err := openPodLogsWithStreamFallback(ctx, h.clientset, namespace, podName, opts, logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get logs: %v", err))
 	}
@@ -937,8 +938,12 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", err))
 	}
 
+	logs := string(logBytes)
+	if usedSplitStream {
+		logs = tailLogLines(logs, tailLines)
+	}
 	return c.JSON(fiber.Map{
-		"logs": string(logBytes),
+		"logs": logs,
 	})
 }
 
@@ -964,20 +969,24 @@ func openPodLogsWithStreamFallback(
 	baseOpts *corev1.PodLogOptions,
 	streamSelector string,
 	splitStreamsSupported bool,
-) (io.ReadCloser, error) {
+) (io.ReadCloser, bool, error) {
 	opts := baseOpts.DeepCopy()
 	if streamSelector != "" && splitStreamsSupported {
-		opts.Stream = new(streamSelector)
-		stream, err := clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+		splitOpts := opts.DeepCopy()
+		splitOpts.Stream = new(streamSelector)
+		if streamSelector == corev1.LogStreamStdout || streamSelector == corev1.LogStreamStderr {
+			splitOpts.TailLines = nil
+		}
+		stream, err := clientset.CoreV1().Pods(namespace).GetLogs(podName, splitOpts).Stream(ctx)
 		if err == nil {
-			return stream, nil
+			return stream, splitOpts.TailLines == nil && baseOpts.TailLines != nil, nil
 		}
 		if !apierrors.IsBadRequest(err) && !apierrors.IsInvalid(err) {
-			return nil, err
+			return nil, false, err
 		}
-		opts.Stream = nil
 	}
-	return clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+	stream, err := clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+	return stream, false, err
 }
 
 func streamPodLogsWithStream(
@@ -990,7 +999,25 @@ func streamPodLogsWithStream(
 		Container: containerName,
 		Follow:    true,
 	}
-	return openPodLogsWithStreamFallback(ctx, clientset, namespace, podName, opts, streamSelector, splitStreamsSupported)
+	stream, _, err := openPodLogsWithStreamFallback(ctx, clientset, namespace, podName, opts, streamSelector, splitStreamsSupported)
+	return stream, err
+}
+
+func tailLogLines(logs string, tailLines int64) string {
+	if tailLines <= 0 || logs == "" {
+		return logs
+	}
+	hasTrailingNewline := strings.HasSuffix(logs, "\n")
+	trimmed := strings.TrimSuffix(logs, "\n")
+	lines := strings.Split(trimmed, "\n")
+	if int64(len(lines)) <= tailLines {
+		return logs
+	}
+	sliced := strings.Join(lines[int64(len(lines))-tailLines:], "\n")
+	if hasTrailingNewline {
+		return sliced + "\n"
+	}
+	return sliced
 }
 
 const (

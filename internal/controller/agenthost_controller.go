@@ -116,18 +116,18 @@ var errAgentHostObjectGone = errors.New("agent host object is gone")
 
 type AgentHostReconciler struct {
 	client.Client
-	APIReader       client.Reader
-	Scheme          *runtime.Scheme
+	APIReader           client.Reader
+	Scheme              *runtime.Scheme
 	HostNamespace       string
 	AgentImage          string
 	ClusterCapabilities k8scaps.Capabilities
 	Controller          agenthost.ControllerPeer
-	IdleStatus      agenthost.StatusReader
-	HostCredentials AgentHostCredentials
-	GitHubAccounts  GitHubAccountReader
-	Membership      GitHubMembershipChecker
-	Now             func() time.Time
-	Random          func([]byte) (int, error)
+	IdleStatus          agenthost.StatusReader
+	HostCredentials     AgentHostCredentials
+	GitHubAccounts      GitHubAccountReader
+	Membership          GitHubMembershipChecker
+	Now                 func() time.Time
+	Random              func([]byte) (int, error)
 }
 
 type AgentHostCredentials interface {

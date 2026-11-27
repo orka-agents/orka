@@ -9,7 +9,10 @@ package k8scaps
 import (
 	"errors"
 	"testing"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/version"
 )
 
@@ -136,5 +139,39 @@ func TestCapabilitiesWithPodUserNamespacesAndMeetsVersion(t *testing.T) {
 	}
 	if (Capabilities{}).MeetsVersion("1.33") {
 		t.Fatal("empty ServerVersion must not satisfy MeetsVersion")
+	}
+}
+
+func TestSelectJobPodSkipsDisruptedAttempt(t *testing.T) {
+	t0 := time.Date(2026, 11, 27, 1, 0, 0, 0, time.UTC)
+	disrupted := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "job-attempt-1",
+			CreationTimestamp: metav1.NewTime(t0),
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	succeeded := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "job-attempt-2",
+			CreationTimestamp: metav1.NewTime(t0.Add(time.Minute)),
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodSucceeded,
+		},
+	}
+
+	got, ok := SelectJobPod([]corev1.Pod{succeeded, disrupted})
+	if !ok || got.Name != "job-attempt-2" {
+		t.Fatalf("SelectJobPod() = (%q, %v), want job-attempt-2", got.Name, ok)
+	}
+	got, ok = SelectJobPod([]corev1.Pod{disrupted, succeeded})
+	if !ok || got.Name != "job-attempt-2" {
+		t.Fatalf("SelectJobPod(reversed) = (%q, %v), want job-attempt-2", got.Name, ok)
 	}
 }

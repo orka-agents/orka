@@ -2287,9 +2287,9 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.AgentHostReconciler{
-			Client:        mgr.GetClient(),
-			APIReader:     mgr.GetAPIReader(),
-			Scheme:        mgr.GetScheme(),
+			Client:              mgr.GetClient(),
+			APIReader:           mgr.GetAPIReader(),
+			Scheme:              mgr.GetScheme(),
 			HostNamespace:       strings.TrimSpace(agentHostNamespace),
 			AgentImage:          strings.TrimSpace(agentHostAgentImage),
 			ClusterCapabilities: clusterCaps,

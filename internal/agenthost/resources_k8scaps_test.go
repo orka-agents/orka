@@ -147,3 +147,28 @@ func TestHostPodLevelResourcesOmitsUnboundedLimits(t *testing.T) {
 		t.Fatalf("Pod CPU request = %s, want %s", got.String(), wantCPUReq.String())
 	}
 }
+
+func TestHostPodLevelResourcesDefaultsMissingRequestsFromLimits(t *testing.T) {
+	host, template := testAgentHostFixtures()
+	template.Spec.Containers[0].Resources.Requests = nil
+	names := ObjectNames(host, "orka-agent-hosts")
+
+	pod := HostPod(host, names, "nonce-4", template, PodOptions{
+		AgentImage: "example.com/host-agent:v1",
+		ClusterCapabilities: k8scaps.Capabilities{
+			ServerVersion:     "v1.35.0",
+			PodLevelResources: true,
+		},
+	})
+	if pod.Spec.Resources == nil {
+		t.Fatal("expected Pod-level Resources to be set")
+	}
+	wantCPUReq := resource.MustParse("2010m")
+	if got := pod.Spec.Resources.Requests[corev1.ResourceCPU]; got.Cmp(wantCPUReq) != 0 {
+		t.Fatalf("Pod CPU request = %s, want %s", got.String(), wantCPUReq.String())
+	}
+	wantMemReq := resource.MustParse("2064Mi")
+	if got := pod.Spec.Resources.Requests[corev1.ResourceMemory]; got.Cmp(wantMemReq) != 0 {
+		t.Fatalf("Pod memory request = %s, want %s", got.String(), wantMemReq.String())
+	}
+}
