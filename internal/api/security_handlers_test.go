@@ -510,6 +510,64 @@ func TestCreateManualSecurityScan_ContextTokenDeniesValidatorModelMismatch(t *te
 	require.Empty(t, tasks.Items)
 }
 
+func TestCreateAndUpdateRepositoryScan_ContextTokenDeniesValidatorModelMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := securityTestRepoURL
+
+	existing := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-existing",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:          repoURL,
+			Branch:           "main",
+			AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+		},
+	}
+	analysisAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "analysis", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:   &corev1alpha1.ModelConfig{Name: "gpt-4o-mini"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	validatorAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Model:   &corev1alpha1.ModelConfig{Name: "gpt-5-restricted"},
+			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
+		},
+	}
+	app, _ := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, existing, analysisAgent, validatorAgent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecurityWrite,
+		"tctx": map[string]any{
+			"namespace": "demo",
+			"repo":      repoURL,
+			"branch":    "main",
+			"model":     "gpt-4o-mini",
+		},
+	})
+
+	createBody := fmt.Sprintf(`{"name":"scan-new","namespace":"demo","spec":{"repoURL":%q,"branch":"main","analysisAgentRef":{"name":"analysis"},"validationAgentRef":{"name":"validator"}}}`, repoURL)
+	createReq := httptest.NewRequest(http.MethodPost, "/security/repositories", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set(TransactionTokenHeaderName, token)
+	createResp, err := app.Test(createReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, createResp.StatusCode)
+
+	updateBody := fmt.Sprintf(`{"spec":{"repoURL":%q,"branch":"main","analysisAgentRef":{"name":"analysis"},"validationAgentRef":{"name":"validator"}}}`, repoURL)
+	updateReq := httptest.NewRequest(http.MethodPut, "/security/repositories/scan-existing?namespace=demo", strings.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set(TransactionTokenHeaderName, token)
+	updateResp, err := app.Test(updateReq)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, updateResp.StatusCode)
+}
+
 func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAndRef(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
