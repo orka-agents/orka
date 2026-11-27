@@ -1866,7 +1866,7 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 	if existingGatewayJob || apierrors.IsAlreadyExists(err) {
-		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, validationTask)
+		existing, recoveryErr := r.recoverTaskJob(ctx, latest, job, isConfinedVerificationTask(latest, validationTask))
 		if recoveryErr != nil {
 			if errors.Is(recoveryErr, errTaskJobIdentity) || errors.Is(recoveryErr, errRepositoryMonitorValidationConfinement) {
 				return r.failTask(ctx, task, recoveryErr.Error())
