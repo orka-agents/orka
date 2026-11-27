@@ -460,6 +460,56 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 	}
 }
 
+func TestCreateManualSecurityScan_ContextTokenDeniesValidatorModelMismatch(t *testing.T) {
+	provider := newTestOIDCProvider(t)
+	ctxTokenConfig := testContextTokenConfig(t, provider, "")
+	repoURL := securityTestRepoURL
+
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:            repoURL,
+			Branch:             "main",
+			AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "analysis"},
+			ValidationAgentRef: &corev1alpha1.AgentReference{Name: "validator"},
+		},
+	}
+	analysisAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "analysis", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Name: "gpt-4o-mini"},
+		},
+	}
+	validatorAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "validator", Namespace: "demo"},
+		Spec: corev1alpha1.AgentSpec{
+			Model: &corev1alpha1.ModelConfig{Name: "gpt-5-restricted"},
+		},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan, analysisAgent, validatorAgent)
+	token := issueTestContextToken(t, provider, nil, map[string]any{
+		"scope": ContextTokenScopeSecurityWrite,
+		"tctx": map[string]any{
+			"namespace": "demo",
+			"repo":      repoURL,
+			"branch":    "main",
+			"model":     "gpt-4o-mini",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+	req.Header.Set(TransactionTokenHeaderName, token)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	var tasks corev1alpha1.TaskList
+	require.NoError(t, handlers.client.List(context.Background(), &tasks, client.InNamespace("demo")))
+	require.Empty(t, tasks.Items)
+}
+
 func TestCreateManualSecurityScan_ContextTokenAllowsRefOnlyWorkspaceWithBranchAndRef(t *testing.T) {
 	provider := newTestOIDCProvider(t)
 	ctxTokenConfig := testContextTokenConfig(t, provider, "")
