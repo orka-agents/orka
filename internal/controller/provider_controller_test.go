@@ -43,7 +43,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret"},
 				},
 			},
 			secrets: []*corev1.Secret{{
@@ -57,7 +57,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p2", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret", Key: "custom-key"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret", Key: "custom-key"},
 				},
 			},
 			secrets: []*corev1.Secret{{
@@ -71,7 +71,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p3", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "missing-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "missing-secret"},
 				},
 			},
 			wantErr:   true,
@@ -83,7 +83,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p4", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret"},
 				},
 			},
 			secrets: []*corev1.Secret{{
@@ -99,7 +99,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p5", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret", Key: "token"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret", Key: "token"},
 				},
 			},
 			secrets: []*corev1.Secret{{
@@ -115,7 +115,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p6", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeAzureOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret"},
 					BaseURL:   "https://my.azure.com",
 				},
 			},
@@ -132,7 +132,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p7", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeAzureOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret"},
 					Azure:     &corev1alpha1.AzureConfig{DeploymentName: "gpt4"},
 				},
 			},
@@ -149,7 +149,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p8", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeAzureOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret"},
 					BaseURL:   "https://my.azure.com",
 				},
 			},
@@ -166,7 +166,7 @@ func TestValidateProvider(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "p9", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeAzureOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret"},
 					BaseURL:   "https://my.azure.com",
 					Azure:     &corev1alpha1.AzureConfig{DeploymentName: "gpt4"},
 				},
@@ -216,7 +216,7 @@ func TestProviderReconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "prov-ok", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "sec-ok"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "sec-ok"},
 				},
 			},
 			secrets: []*corev1.Secret{{
@@ -232,7 +232,7 @@ func TestProviderReconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "prov-miss", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "no-secret"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "no-secret"},
 				},
 			},
 			wantReady:  false,
@@ -310,7 +310,7 @@ func TestProviderUpdateStatus(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "s-prov", Namespace: "default"},
 				Spec: corev1alpha1.ProviderSpec{
 					Type:      corev1alpha1.ProviderTypeOpenAI,
-					SecretRef: corev1alpha1.ProviderSecretRef{Name: "s"},
+					SecretRef: &corev1alpha1.ProviderSecretRef{Name: "s"},
 				},
 			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).

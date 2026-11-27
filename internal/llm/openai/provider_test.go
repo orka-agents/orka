@@ -438,6 +438,24 @@ func TestNewProvider_AzureOpenAI(t *testing.T) {
 	}
 }
 
+func TestNewProvider_BearerTokenIsAzureOnlyAndExclusiveWithAKey(t *testing.T) {
+	token := func(context.Context) (string, error) { return "entra-token", nil }
+	if _, err := NewProvider(llm.ProviderConfig{
+		BearerToken: token, BaseURL: "https://myresource.openai.azure.com", ProviderType: "azure-openai",
+	}); err != nil {
+		t.Fatalf("NewProvider(azure bearer) error = %v", err)
+	}
+	for name, config := range map[string]llm.ProviderConfig{
+		"openai type":   {BearerToken: token, BaseURL: "https://api.example.com", ProviderType: testProviderOpenAI},
+		"key and token": {APIKey: "k", BearerToken: token, BaseURL: "https://myresource.openai.azure.com", ProviderType: "azure-openai"},
+		"plain http":    {BearerToken: token, BaseURL: "http://myresource.openai.azure.com", ProviderType: "azure-openai"},
+	} {
+		if _, err := NewProvider(config); err == nil {
+			t.Fatalf("NewProvider(%s) was accepted", name)
+		}
+	}
+}
+
 func TestNewProvider_AzureOpenAI_CustomAPIVersion(t *testing.T) {
 	provider, err := NewProvider(llm.ProviderConfig{
 		APIKey:          "test-key",

@@ -81,6 +81,11 @@ type ChatConfig struct {
 	RuntimeAvailability    ACPRuntimeAvailability
 	ExecutionMode          executionmode.Mode
 	LinkedAccounts         LinkedAccountsFactory
+	ProviderIdentities     ProviderIdentityTokenSource
+}
+
+type ProviderIdentityTokenSource interface {
+	Token(ctx context.Context, identity, baseURL string) (string, error)
 }
 
 type LinkedAccountsFactory func(namespace string, requester *corev1alpha1.RequestedBy) chattools.LinkedAccountCredentials
@@ -1580,19 +1585,9 @@ func (ch *ChatHandler) wrapWithRetryAndFallback(ctx context.Context, c fiber.Ctx
 			return resultProvider, err
 		}
 
-		fbAPIKey, err := ch.resolver.ResolveAPIKey(ctx, fbProviderCRD)
+		fbConfig, err := ch.resolver.ProviderConfig(ctx, fbProviderCRD)
 		if err != nil {
 			continue
-		}
-
-		fbConfig := llm.ProviderConfig{
-			APIKey:       fbAPIKey,
-			BaseURL:      fbProviderCRD.Spec.BaseURL,
-			ProviderType: string(fbProviderCRD.Spec.Type),
-		}
-		if fbProviderCRD.Spec.Azure != nil {
-			fbConfig.AzureAPIVersion = fbProviderCRD.Spec.Azure.APIVersion
-			fbConfig.AzureDeploymentName = fbProviderCRD.Spec.Azure.DeploymentName
 		}
 
 		fbProvider, err := llm.NewProvider(string(fbProviderCRD.Spec.Type), fbConfig)

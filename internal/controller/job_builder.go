@@ -1401,7 +1401,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 	allowDirectSecretMounts := b.directSecretMountsAllowed(task)
 	allowTaskSecretMount := b.taskSecretMountsAllowed(task, secretUseGranted)
 
-	if allowDirectProviderSecrets && provider != nil {
+	if allowDirectProviderSecrets && provider != nil && provider.Spec.SecretRef != nil {
 		secretName := provider.Spec.SecretRef.Name
 		secretKey := provider.Spec.SecretRef.Key
 		if secretKey == "" {
@@ -1446,7 +1446,7 @@ func (b *JobBuilder) addSecretVolumes(ctx context.Context, job *batchv1.Job, tas
 			if err := b.Get(ctx, client.ObjectKey{
 				Namespace: task.Namespace,
 				Name:      fb.ProviderRef,
-			}, fbProvider); err != nil {
+			}, fbProvider); err != nil || fbProvider.Spec.SecretRef == nil {
 				continue
 			}
 			secretName := fbProvider.Spec.SecretRef.Name

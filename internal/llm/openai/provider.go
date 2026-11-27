@@ -89,13 +89,27 @@ type Provider struct {
 }
 
 func NewProvider(config llm.ProviderConfig) (*Provider, error) {
-	if config.APIKey == "" {
+	if config.BearerToken != nil {
+		if config.ProviderType != providerTypeAzureOpenAI || config.APIKey != "" {
+			return nil, llm.ErrBearerTokenUnsupported
+		}
+	} else if config.APIKey == "" {
 		return nil, llm.ErrAPIKeyRequired
 	}
 
+	httpClient := llm.SharedHTTPClient()
+	if config.BearerToken != nil {
+		bearerClient, err := llm.NewBearerHTTPClientWithTransport(config.BaseURL, config.BearerToken, config.HTTPTransport)
+		if err != nil {
+			return nil, err
+		}
+		httpClient = bearerClient
+	} else if config.HTTPTransport != nil {
+		httpClient = &http.Client{Transport: config.HTTPTransport}
+	}
 	opts := []option.RequestOption{
 		option.WithMiddleware(llm.UsageHTTPMiddleware),
-		option.WithHTTPClient(llm.SharedHTTPClient()),
+		option.WithHTTPClient(httpClient),
 	}
 	if config.ProviderType == providerTypeAzureOpenAI {
 		apiVersion := config.AzureAPIVersion
@@ -103,7 +117,12 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 			apiVersion = "2025-03-01-preview"
 		}
 		endpoint := strings.TrimRight(config.BaseURL, "/")
-		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion), azure.WithAPIKey(config.APIKey))
+		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion))
+		if config.BearerToken == nil {
+			opts = append(opts, azure.WithAPIKey(config.APIKey))
+		} else {
+			opts = append(opts, azure.WithTokenCredential(transportAuthenticated{}))
+		}
 		if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
 			opts = append(opts, azure.WithUnsafeAllowHTTP())
 		}
@@ -1548,6 +1567,13 @@ func isUnsupportedStreamOptionsError(err error) bool {
 }
 
 func toProviderError(err error) *llm.ProviderError {
+	if providerErr, ok := errors.AsType[*llm.ProviderError](err); ok {
+		classified := *providerErr
+		if classified.Provider == "" {
+			classified.Provider = providerTypeOpenAI
+		}
+		return &classified
+	}
 	pe := &llm.ProviderError{Provider: "openai", Message: err.Error()}
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		pe.StatusCode = apiErr.StatusCode

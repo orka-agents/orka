@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 )
 
@@ -183,10 +184,12 @@ func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int 
 
 type ProviderConfig struct {
 	APIKey              string
+	BearerToken         BearerTokenSource
 	BaseURL             string
 	ProviderType        string
 	AzureAPIVersion     string
 	AzureDeploymentName string
+	HTTPTransport       http.RoundTripper
 }
 
 type ProviderFactory func(config ProviderConfig) (Provider, error)

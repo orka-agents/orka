@@ -218,7 +218,7 @@ func TestValidateChildTaskAgainstParentTransactionDerivesOpenCodeProviderFromMod
 		ObjectMeta: metav1.ObjectMeta{Name: "override-provider", Namespace: defaultNamespace},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "override-secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "override-secret"},
 			DefaultModel: "claude-sonnet-4",
 		},
 	}

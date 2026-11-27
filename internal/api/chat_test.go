@@ -238,7 +238,7 @@ func providerCRD(name, namespace, providerType, model string) []runtime.Object {
 			Spec: corev1alpha1.ProviderSpec{
 				Type:         corev1alpha1.ProviderType(providerType),
 				DefaultModel: model,
-				SecretRef:    corev1alpha1.ProviderSecretRef{Name: name + "-secret", Key: "api-key"},
+				SecretRef:    &corev1alpha1.ProviderSecretRef{Name: name + "-secret", Key: "api-key"},
 			},
 		},
 		&corev1.Secret{
@@ -953,7 +953,7 @@ func TestResolveAPIKey(t *testing.T) {
 		providerObj := &corev1alpha1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: "default"},
 			Spec: corev1alpha1.ProviderSpec{
-				SecretRef: corev1alpha1.ProviderSecretRef{Name: "my-secret", Key: "api-key"},
+				SecretRef: &corev1alpha1.ProviderSecretRef{Name: "my-secret", Key: "api-key"},
 			},
 		}
 
@@ -975,7 +975,7 @@ func TestResolveAPIKey(t *testing.T) {
 		providerObj := &corev1alpha1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: "p2", Namespace: "default"},
 			Spec: corev1alpha1.ProviderSpec{
-				SecretRef: corev1alpha1.ProviderSecretRef{Name: "default-key-secret"},
+				SecretRef: &corev1alpha1.ProviderSecretRef{Name: "default-key-secret"},
 			},
 		}
 
@@ -993,7 +993,7 @@ func TestResolveAPIKey(t *testing.T) {
 		providerObj := &corev1alpha1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: "p3", Namespace: "default"},
 			Spec: corev1alpha1.ProviderSpec{
-				SecretRef: corev1alpha1.ProviderSecretRef{Name: "nonexistent"},
+				SecretRef: &corev1alpha1.ProviderSecretRef{Name: "nonexistent"},
 			},
 		}
 
@@ -1015,7 +1015,7 @@ func TestResolveAPIKey(t *testing.T) {
 		providerObj := &corev1alpha1.Provider{
 			ObjectMeta: metav1.ObjectMeta{Name: "p4", Namespace: "default"},
 			Spec: corev1alpha1.ProviderSpec{
-				SecretRef: corev1alpha1.ProviderSecretRef{Name: "bad-key-secret", Key: "api-key"},
+				SecretRef: &corev1alpha1.ProviderSecretRef{Name: "bad-key-secret", Key: "api-key"},
 			},
 		}
 

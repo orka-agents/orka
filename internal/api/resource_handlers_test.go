@@ -683,7 +683,7 @@ func TestHandlers_ProviderListExistingObject(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:      corev1alpha1.ProviderTypeAnthropic,
-			SecretRef: corev1alpha1.ProviderSecretRef{Name: "anthropic-secret"},
+			SecretRef: &corev1alpha1.ProviderSecretRef{Name: "anthropic-secret"},
 		},
 	}
 	handlers, app := setupTestHandlersWithObjects(provider)
@@ -737,7 +737,7 @@ func TestHandlers_ProviderReadFiltersContextTokenRestrictions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "allowed", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeOpenAI,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "allowed-secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "allowed-secret"},
 			DefaultModel: "gpt-4o-mini",
 		},
 	}
@@ -745,7 +745,7 @@ func TestHandlers_ProviderReadFiltersContextTokenRestrictions(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "denied", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeOpenAI,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "denied-secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "denied-secret"},
 			DefaultModel: "gpt-4o-mini",
 		},
 	}
@@ -811,6 +811,52 @@ func TestHandlers_ProviderRESTMutationRejectsBaseURL(t *testing.T) {
 		},
 	})
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestHandlers_ProviderRESTMutationRejectsAndKeepsAuth(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/providers", handlers.CreateProvider)
+	app.Put("/providers/:name", handlers.UpdateProvider)
+	resp := testJSONRequest(t, app, http.MethodPost, "/providers", map[string]any{
+		"name": "keyless",
+		"spec": map[string]any{
+			"type": "azure-openai",
+			"auth": map[string]any{"entra": map[string]any{"identity": "models"}},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	existing := &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "keyless", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:    corev1alpha1.ProviderTypeAzureOpenAI,
+			BaseURL: "https://example.openai.azure.com",
+			Auth:    &corev1alpha1.ProviderAuth{Entra: &corev1alpha1.ProviderEntraAuth{Identity: "models"}},
+			Azure:   &corev1alpha1.AzureConfig{DeploymentName: "gpt-example"},
+		},
+	}
+	require.NoError(t, handlers.client.Create(t.Context(), existing))
+	resp = testJSONRequest(t, app, http.MethodPut, "/providers/keyless", map[string]any{
+		"spec": map[string]any{
+			"type":  "azure-openai",
+			"auth":  map[string]any{"entra": map[string]any{"identity": "other"}},
+			"azure": map[string]any{"deploymentName": "gpt-example"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	resp = testJSONRequest(t, app, http.MethodPut, "/providers/keyless", map[string]any{
+		"spec": map[string]any{
+			"type":         "azure-openai",
+			"defaultModel": "gpt-new",
+			"azure":        map[string]any{"deploymentName": "gpt-example"},
+		},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	stored := &corev1alpha1.Provider{}
+	require.NoError(t, handlers.client.Get(t.Context(), client.ObjectKeyFromObject(existing), stored))
+	require.Equal(t, "models", stored.EntraIdentity())
+	require.Equal(t, "gpt-new", stored.Spec.DefaultModel)
 }
 
 func TestHandlers_ToolRESTMutationRejectsMalformedURL(t *testing.T) {

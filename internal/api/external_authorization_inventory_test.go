@@ -293,7 +293,7 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 		&corev1alpha1.SubstrateActorPool{ObjectMeta: meta},
 		&corev1alpha1.RepositoryScan{ObjectMeta: meta, Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/orka-agents/orka"}},
 		&corev1alpha1.RepositoryMonitor{ObjectMeta: meta},
-		&corev1alpha1.Provider{ObjectMeta: meta, Spec: corev1alpha1.ProviderSpec{Type: "openai", BaseURL: provider.URL, DefaultModel: "fixture", SecretRef: corev1alpha1.ProviderSecretRef{Name: "provider-key", Key: "key"}}},
+		&corev1alpha1.Provider{ObjectMeta: meta, Spec: corev1alpha1.ProviderSpec{Type: "openai", BaseURL: provider.URL, DefaultModel: "fixture", SecretRef: &corev1alpha1.ProviderSecretRef{Name: "provider-key", Key: "key"}}},
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "provider-key"}, Data: map[string][]byte{"key": []byte("fixture-only")}},
 	).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {

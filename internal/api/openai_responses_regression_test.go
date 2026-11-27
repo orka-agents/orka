@@ -124,7 +124,7 @@ func TestResponsesHTTPAnthropicPreservesSystemRole(t *testing.T) {
 			defer upstream.Close()
 			provider := &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "fixture", Namespace: "default"}, Spec: corev1alpha1.ProviderSpec{
 				Type: corev1alpha1.ProviderTypeAnthropic, DefaultModel: "fixture-model", BaseURL: upstream.URL,
-				SecretRef: corev1alpha1.ProviderSecretRef{Name: "fixture", Key: "key"},
+				SecretRef: &corev1alpha1.ProviderSecretRef{Name: "fixture", Key: "key"},
 			}}
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "fixture", Namespace: "default"}, Data: map[string][]byte{"key": []byte("local-fixture-only")}}
 			h, app := setupTestOpenAIHandler(provider, secret)

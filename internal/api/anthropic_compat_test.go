@@ -832,7 +832,7 @@ func TestHandleMessages_ProviderSlashModel(t *testing.T) {
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
 			BaseURL:      mockAPI.URL,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
 		},
 	}
 	secret := &corev1.Secret{
@@ -886,7 +886,7 @@ func TestAnthropicHandleListModels_WithProviders(t *testing.T) {
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "secret"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "secret"},
 		},
 	}
 
@@ -1914,7 +1914,7 @@ func TestAnthropicCompat_ContextTokenAuthorizationRejectsDisallowedProvider(t *t
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
 		},
 	}
 	secret := &corev1.Secret{

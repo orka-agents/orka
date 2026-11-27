@@ -223,6 +223,9 @@ spec:
             - {{ printf "--agent-identity-entra-authority=%s" . | quote }}
             {{- end }}
             {{- end }}
+            {{- with dig "providerIdentities" "identities" (list) .Values.controller }}
+            - {{ printf "--provider-identities=%s" (dict "tokenAudience" (dig "providerIdentities" "tokenAudience" "" $.Values.controller | toString | trim | default "api://AzureADTokenExchange") "identities" . | toJson) | quote }}
+            {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
             {{- end }}
@@ -652,6 +655,12 @@ spec:
               mountPath: /var/run/secrets/orka.ai/agent-identity
               readOnly: true
             {{- end }}
+            {{- if dig "providerIdentities" "identities" (list) .Values.controller }}
+            # Keyless Providers' identities trust this token's subject.
+            - name: provider-identity-token
+              mountPath: /var/run/secrets/orka.ai/provider-identity
+              readOnly: true
+            {{- end }}
             - name: webhook-tls
               mountPath: /var/run/orka/webhook/tls
               readOnly: {{ if include "orka.webhookTLSGenerated" . }}false{{ else }}true{{ end }}
@@ -749,6 +758,15 @@ spec:
             sources:
               - serviceAccountToken:
                   audience: api://AzureADTokenExchange
+                  expirationSeconds: 3600
+                  path: token
+        {{- end }}
+        {{- if dig "providerIdentities" "identities" (list) .Values.controller }}
+        - name: provider-identity-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ dig "providerIdentities" "tokenAudience" "" .Values.controller | toString | trim | default "api://AzureADTokenExchange" | quote }}
                   expirationSeconds: 3600
                   path: token
         {{- end }}

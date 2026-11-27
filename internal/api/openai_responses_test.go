@@ -50,7 +50,7 @@ func setupResponsesHTTP(t *testing.T, upstream http.HandlerFunc, handleProbe ...
 	}))
 	t.Cleanup(fixture.Close)
 	provider := &corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "fixture", Namespace: "default"}, Spec: corev1alpha1.ProviderSpec{
-		Type: corev1alpha1.ProviderTypeOpenAI, DefaultModel: "test-model", BaseURL: fixture.URL + "/v1", SecretRef: corev1alpha1.ProviderSecretRef{Name: "fixture", Key: "key"},
+		Type: corev1alpha1.ProviderTypeOpenAI, DefaultModel: "test-model", BaseURL: fixture.URL + "/v1", SecretRef: &corev1alpha1.ProviderSecretRef{Name: "fixture", Key: "key"},
 	}}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "fixture", Namespace: "default"}, Data: map[string][]byte{"key": []byte("local-fixture-only")}}
 	h, app := setupTestOpenAIHandler(provider, secret)

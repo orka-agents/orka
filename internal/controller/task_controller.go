@@ -1392,6 +1392,9 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 				strings.Join(names, ", "), agent.Namespace, agent.Name, task.Namespace)
 		}
 	}
+	if err := r.refuseKeylessFallbackProviders(ctx, task, agent); err != nil {
+		return nil, err
+	}
 	providerRef := r.resolveProviderRef(task, agent)
 	if providerRef == nil {
 		return nil, nil
@@ -1415,7 +1418,33 @@ func (r *TaskReconciler) resolveProvider(ctx context.Context, task *corev1alpha1
 	if !provider.Status.Ready {
 		return nil, fmt.Errorf("provider %s is not ready: %s", providerRef.Name, provider.Status.Message)
 	}
+	if provider.UsesKeylessAuth() {
+		return nil, keylessProviderTaskError(provider.Name)
+	}
 	return provider, nil
+}
+
+func keylessProviderTaskError(name string) error {
+	return fmt.Errorf("provider %s uses spec.auth, which Tasks do not support yet; use it through the chat or compatibility APIs, or use a Provider with a secretRef", name)
+}
+
+func (r *TaskReconciler) refuseKeylessFallbackProviders(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	if task.Spec.Type == corev1alpha1.TaskTypeAgent || !agentHasFallbackProviders(agent) {
+		return nil
+	}
+	for _, fallback := range agent.Spec.Model.Fallbacks {
+		provider := &corev1alpha1.Provider{}
+		if err := r.Get(ctx, types.NamespacedName{Name: fallback.ProviderRef, Namespace: task.Namespace}, provider); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("failed to get fallback provider: %v", err)
+		}
+		if provider.UsesKeylessAuth() {
+			return keylessProviderTaskError(provider.Name)
+		}
+	}
+	return nil
 }
 
 func isMemoryConsolidationTask(task *corev1alpha1.Task) bool {

@@ -54,7 +54,7 @@ func makeProvider(name, ns string, ptype corev1alpha1.ProviderType, secretName, 
 		Spec: corev1alpha1.ProviderSpec{
 			Type:         ptype,
 			DefaultModel: defaultModel,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: secretName},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: secretName},
 		},
 	}
 }
@@ -117,7 +117,7 @@ func TestProviderResolver_ResolveAPIKey(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "p2", Namespace: "default"},
 			Spec: corev1alpha1.ProviderSpec{
 				Type:      corev1alpha1.ProviderTypeOpenAI,
-				SecretRef: corev1alpha1.ProviderSecretRef{Name: "custom-secret", Key: "token"},
+				SecretRef: &corev1alpha1.ProviderSecretRef{Name: "custom-secret", Key: "token"},
 			},
 		}
 		secret := makeSecret("custom-secret", "default", "token", "sk-custom")
@@ -485,7 +485,7 @@ func TestProviderResolver_Resolve(t *testing.T) {
 					Spec: corev1alpha1.ProviderSpec{
 						Type:      corev1alpha1.ProviderTypeAzureOpenAI,
 						BaseURL:   "https://my.openai.azure.com",
-						SecretRef: corev1alpha1.ProviderSecretRef{Name: "azure-secret"},
+						SecretRef: &corev1alpha1.ProviderSecretRef{Name: "azure-secret"},
 						Azure: &corev1alpha1.AzureConfig{
 							DeploymentName: "gpt4-deploy",
 							APIVersion:     "2024-02-15-preview",
@@ -700,4 +700,64 @@ func TestRequestRequiresExplicitProviderHonorsAuthorizationMode(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+type fakeProviderIdentityTokens struct {
+	identity, baseURL string
+	err               error
+}
+
+func (f *fakeProviderIdentityTokens) Token(_ context.Context, identity, baseURL string) (string, error) {
+	f.identity, f.baseURL = identity, baseURL
+	return "entra-token", f.err
+}
+
+func keylessProvider() *corev1alpha1.Provider {
+	return &corev1alpha1.Provider{
+		ObjectMeta: metav1.ObjectMeta{Name: "azure", Namespace: "default"},
+		Spec: corev1alpha1.ProviderSpec{
+			Type:    corev1alpha1.ProviderTypeAzureOpenAI,
+			BaseURL: "https://example.openai.azure.com",
+			Auth:    &corev1alpha1.ProviderAuth{Entra: &corev1alpha1.ProviderEntraAuth{Identity: "models"}},
+			Azure:   &corev1alpha1.AzureConfig{DeploymentName: "gpt-example", APIVersion: "2024-10-21"},
+		},
+	}
+}
+
+func TestProviderResolverKeylessProviderUsesTheIdentityAndNoSecret(t *testing.T) {
+	tracked := &providerReadTrackingClient{Client: fake.NewClientBuilder().WithScheme(newScheme()).Build()}
+	tokens := &fakeProviderIdentityTokens{}
+	config := DefaultChatConfig()
+	config.ProviderIdentities = tokens
+	resolver := NewProviderResolver(tracked, config)
+
+	providerConfig, err := resolver.ProviderConfig(context.Background(), keylessProvider())
+	require.NoError(t, err)
+	assert.Empty(t, providerConfig.APIKey)
+	require.NotNil(t, providerConfig.BearerToken)
+	assert.Equal(t, "gpt-example", providerConfig.AzureDeploymentName)
+	token, err := providerConfig.BearerToken(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "entra-token", token)
+	assert.Equal(t, "models", tokens.identity)
+	assert.Equal(t, "https://example.openai.azure.com", tokens.baseURL)
+	assert.Zero(t, tracked.secretReads, "a keyless Provider must not read a Secret")
+
+	tokens.err = errors.New("issuer down")
+	provider, _, err := resolver.buildProvider(keylessProvider(), providerConfig, "gpt-example")
+	require.NoError(t, err)
+	assert.NotNil(t, provider)
+}
+
+func TestProviderResolverKeylessProviderFailsWithoutIdentities(t *testing.T) {
+	resolver := NewProviderResolver(fake.NewClientBuilder().WithScheme(newScheme()).Build(), DefaultChatConfig())
+	_, err := resolver.ProviderConfig(context.Background(), keylessProvider())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no Provider identities are configured")
+
+	withoutSecret := keylessProvider()
+	withoutSecret.Spec.Auth = nil
+	_, err = resolver.ResolveAPIKey(context.Background(), withoutSecret)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no secretRef")
 }

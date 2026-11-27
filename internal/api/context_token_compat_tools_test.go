@@ -103,7 +103,7 @@ func TestOpenAICompat_ContextTokenAllowedToolsFiltersInjectedProxyTools(t *testi
 			Type:         corev1alpha1.ProviderTypeOpenAI,
 			DefaultModel: "gpt-4o-mini",
 			BaseURL:      mockAPI.URL,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "openai-secret", Key: "api-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "openai-secret", Key: "api-key"},
 		},
 	}
 	secret := &corev1.Secret{
@@ -179,7 +179,7 @@ func TestAnthropicCompat_ContextTokenAllowedToolsFiltersInjectedProxyTools(t *te
 			Type:         corev1alpha1.ProviderTypeAnthropic,
 			DefaultModel: "claude-sonnet-4-20250514",
 			BaseURL:      mockAPI.URL,
-			SecretRef:    corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
+			SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
 		},
 	}
 	secret := &corev1.Secret{

@@ -13,7 +13,7 @@ values are in [Configuration](configuration.md), and HTTP endpoints are in the
 | --- | --- | --- |
 | [Task](#task) | `core.orka.ai` | One unit of work: a container command, a native AI prompt, or a coding-agent session. |
 | [Agent](#agent) | `core.orka.ai` | Reusable configuration: model, prompt, tools, skills, coordination, and optionally a [runtime](#agent-with-runtime). |
-| [Provider](#provider) | `core.orka.ai` | A model backend and the Secret that holds its API key. |
+| [Provider](#provider) | `core.orka.ai` | A model backend and how Orka authenticates to it: an API key Secret or an Entra identity. |
 | [Skill](#skill) | `core.orka.ai` | Reusable instructions injected into an Agent's system prompt. |
 | [Tool](#tool) | `core.orka.ai` | A custom tool backed by an HTTP endpoint or an MCP server. |
 | [OutboundAccessPolicy](#outboundaccesspolicy) | `core.orka.ai` | How Tools reach an external API without handing agents the credential. |
@@ -421,7 +421,7 @@ requester to decide; see
 
 ## Provider
 
-A model backend and the Secret that holds its API key. Native AI Agents, chat, and the
+A model backend and how Orka authenticates to it. Native AI Agents, chat, and the
 compatibility APIs use Providers. Coding-agent runtimes do not; they reach models through the
 [provider proxy](../operations/provider-proxy.md).
 
@@ -446,7 +446,8 @@ spec:
 | Field | Default | Description |
 | --- | --- | --- |
 | `type` | required | `anthropic`, `openai`, or `azure-openai`. Use `anthropic` or `openai` with a `baseURL` for any compatible endpoint. |
-| `secretRef.name` / `secretRef.key` | key `api-key` | The Secret and key holding the API key. Required, even for an endpoint that ignores it. |
+| `secretRef.name` / `secretRef.key` | key `api-key` | The Secret and key holding the API key. Required unless `auth` is set, even for an endpoint that ignores the key. |
+| `auth.entra.identity` | empty | Keyless authentication with a Microsoft Entra ID workload identity configured on the controller; see [Keyless Azure OpenAI Providers](#keyless-azure-openai-providers). Set exactly one of `secretRef` and `auth`. |
 | `baseURL` | provider default | A custom endpoint, such as a gateway or an in-cluster model server. |
 | `defaultModel` | empty | Model used when the Agent or Task does not name one. |
 | `azure.deploymentName` | required for Azure | The Azure OpenAI deployment. |
@@ -454,6 +455,47 @@ spec:
 
 For `type: openai`, Orka tries the Responses API first and switches to Chat Completions when
 the endpoint does not support it.
+
+### Keyless Azure OpenAI Providers
+
+Where key-based authentication is turned off, or not wanted, an `azure-openai` Provider can name
+an Entra identity instead of a Secret:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: Provider
+metadata:
+  name: azure
+spec:
+  type: azure-openai
+  baseURL: https://example-resource.openai.azure.com
+  auth:
+    entra:
+      identity: models  # configured on the controller
+  azure:
+    deploymentName: gpt-example
+```
+
+A keyless Provider's `baseURL` must be the resource's origin, without a path or query.
+
+The operator configures each identity on the controller with the Helm value
+`controller.providerIdentities` (the `--provider-identities` flag): its tenant and client ID,
+its cloud, the data-plane token scope (`https://ai.azure.com/.default` in the public cloud;
+Azure Government and Azure China need it set), and `allowedEndpoints`, the exact `https`
+origins its tokens may reach. The identity's federated identity credential trusts the
+controller's ServiceAccount; give it a data-plane role, such as Cognitive Services OpenAI User,
+on the model resource.
+
+The controller obtains short-lived tokens with its own projected ServiceAccount token, caches
+them for at most five minutes, and attaches them only to requests it sends to an allowed
+origin, never following a redirect. No key or token is stored in a Secret or mounted into a
+Pod. The `CredentialReady` condition reports whether the identity can obtain a token; it is
+checked when the Provider changes and hourly after that.
+
+Keyless Providers serve chat and the compatibility APIs. Tasks that would run a keyless
+Provider, as their Provider or a fallback, fail with a clear message until worker Pods can
+reach it through the controller. The REST API cannot set or change `auth`; manage keyless
+Providers with Kubernetes RBAC.
 
 ## Skill
 

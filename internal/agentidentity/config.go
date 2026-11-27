@@ -4,12 +4,12 @@ package agentidentity
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/entraclient"
 )
 
 var guidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -21,16 +21,7 @@ type EntraConfig struct {
 }
 
 func (c EntraConfig) authority() string {
-	authority := strings.TrimSuffix(strings.TrimSpace(c.Authority), "/")
-	if authority == "" {
-		return DefaultEntraAuthority
-	}
-	parsed, err := url.Parse(authority)
-	if err != nil || parsed.Host == "" {
-		return authority
-	}
-	parsed.Scheme, parsed.Host = strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)
-	return parsed.String()
+	return entraclient.CanonicalAuthority(c.Authority)
 }
 
 type Config struct {
@@ -58,12 +49,7 @@ func (c Config) Validate() error {
 	if !guidPattern.MatchString(tenant) || !guidPattern.MatchString(blueprint) {
 		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs without surrounding space")
 	}
-	authority, err := url.Parse(c.Entra.authority())
-	if err != nil || authority.Scheme != "https" || authority.Hostname() == "" || authority.User != nil ||
-		authority.RawQuery != "" || authority.ForceQuery || authority.Fragment != "" || strings.ContainsAny(c.Entra.Authority, "?#") {
-		return fmt.Errorf("the Entra authority must be an https URL with a host and without credentials, query, or fragment")
-	}
-	return nil
+	return entraclient.ValidateAuthority(c.Entra.Authority)
 }
 
 func (c Config) Instance(issuer string) (string, bool) {

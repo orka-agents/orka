@@ -191,7 +191,7 @@ func setupCompatCustomToolsApp(t *testing.T, api, modelURL, toolURL string) (*fi
 			ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},
 			Spec: corev1alpha1.ProviderSpec{
 				Type: corev1alpha1.ProviderTypeAnthropic, DefaultModel: "test-model", BaseURL: modelURL,
-				SecretRef: corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
+				SecretRef: &corev1alpha1.ProviderSecretRef{Name: "anthropic-secret", Key: "api-key"},
 			},
 		},
 		&corev1.Secret{

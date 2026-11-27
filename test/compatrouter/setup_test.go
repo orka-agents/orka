@@ -109,7 +109,7 @@ func newLiveEnvironment(t *testing.T) *liveEnvironment {
 				Type:         corev1alpha1.ProviderTypeOpenAI,
 				BaseURL:      "http://model." + routerNamespace + ".svc:8080/v1",
 				DefaultModel: namespace + "-catalog",
-				SecretRef:    corev1alpha1.ProviderSecretRef{Name: "same-secret", Key: "api-key"},
+				SecretRef:    &corev1alpha1.ProviderSecretRef{Name: "same-secret", Key: "api-key"},
 			},
 		})
 		f.create(t, &corev1alpha1.Agent{
