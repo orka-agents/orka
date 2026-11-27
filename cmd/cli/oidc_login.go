@@ -503,8 +503,6 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 	return token
 }
 
-// configuredOIDCTokenWithExpiry is configuredOIDCToken that also returns the
-// saved expiry of the token it returns, without rereading the config.
 func configuredOIDCTokenWithExpiry(cmd *cobra.Command, server string, cfg orkaConfig) (string, *time.Time) {
 	if server == "" {
 		server = cfg.Server
