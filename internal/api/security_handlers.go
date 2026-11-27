@@ -493,6 +493,12 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 			pinnedCommit = strings.TrimSpace(run.HeadCommit)
 		}
 	}
+	if pinnedCommit != "" && strings.TrimSpace(finding.TargetKey) != "" {
+		currentTargetKey := security.FindingV2TargetKey(scan.Spec.RepoURL, security.EffectiveBranch(scan), scan.Spec.SubPath)
+		if strings.TrimSpace(finding.TargetKey) != currentTargetKey {
+			return fiber.NewError(fiber.StatusConflict, "finding belongs to a different scan target than the current RepositoryScan")
+		}
+	}
 	timeout := metav1.Duration{Duration: 90 * time.Minute}
 	priority := int32(725)
 	taskScope := finding.ID
