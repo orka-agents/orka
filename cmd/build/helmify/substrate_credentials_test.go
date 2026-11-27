@@ -19,8 +19,6 @@ func TestStaticChartMountsRotatableSubstrateCredentials(t *testing.T) {
 	}{
 		{"mtls", true},
 		{"mtls", false},
-		// Bearer control credentials remain valid for cleanup while MCP Tools
-		// are disabled; enabled Tools also need the router's client certificate.
 		{"bearer", false},
 	} {
 		t.Run(tc.auth+"/enabled="+strconv.FormatBool(tc.enabled), func(t *testing.T) {
@@ -128,7 +126,7 @@ func TestStaticChartRequiresSubstrateServerTrust(t *testing.T) {
 	} {
 		for _, enabled := range []bool{true, false} {
 			if enabled && strings.Contains(tc.name, "bearer") {
-				continue // covered by TestStaticChartMCPToolsRequireRouterClientCertificate
+				continue
 			}
 			t.Run(tc.name+" enabled="+strconv.FormatBool(enabled), func(t *testing.T) {
 				args := []string{"--set", "controller.substrate.mcpToolsEnabled=" + strconv.FormatBool(enabled),

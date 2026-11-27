@@ -20,18 +20,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// classifyChatK8sErr returns a ChatToolResult for common K8s API errors.
-// chatTaskCreateTimeout bounds a chat Task's Create, which stopping the chat
-// turn does not cut short. It stays under the time a Session cancel waits
-// for the turn to stop.
 const chatTaskCreateTimeout = 5 * time.Second
 
-// createChatTask creates a Task for a chat turn. A turn already stopped
-// starts no Create. One the turn's stop interrupts runs on to its outcome:
-// a Session cancel stops the turn and then lists its Tasks, and were the
-// Create abandoned mid-flight, the API server could commit the Task after
-// that list, where it would run uncancelled. The turn instead waits for the
-// Create's outcome, so the list sees it.
 func createChatTask(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -54,7 +44,6 @@ func classifyChatK8sErr(err error) (string, error) {
 	return ChatToolErrorResult(internalErrorType, err.Error(), "")
 }
 
-// checkChatNamespaceScope validates namespace access using ToolContext.
 func checkChatNamespaceScope(tc *ToolContext, namespace string) (string, bool) {
 	if tc.WatchNamespace != "" && namespace != tc.WatchNamespace {
 		r, _ := ChatToolErrorResult("permission_denied",
@@ -71,9 +60,6 @@ func checkChatNamespaceScope(tc *ToolContext, namespace string) (string, bool) {
 	return "", true
 }
 
-// requireChatObjectArg rejects a present, non-null argument that is not an
-// object. Registry.Execute already decodes JSON-encoded objects, so anything
-// left here is a value the tool would otherwise ignore.
 func requireChatObjectArg(a map[string]any, key string) (string, bool) {
 	value, ok := a[key]
 	if !ok || value == nil {
@@ -86,7 +72,6 @@ func requireChatObjectArg(a map[string]any, key string) (string, bool) {
 	return result, false
 }
 
-// chatGetStringArg extracts a string argument from a map.
 func chatGetStringArg(args map[string]any, key string) string {
 	v, ok := args[key]
 	if !ok {
@@ -99,7 +84,6 @@ func chatGetStringArg(args map[string]any, key string) string {
 	return s
 }
 
-// chatGetStringArgDefault extracts a string argument with a default.
 func chatGetStringArgDefault(args map[string]any, key, defaultVal string) string {
 	v := chatGetStringArg(args, key)
 	if v == "" {
@@ -108,7 +92,6 @@ func chatGetStringArgDefault(args map[string]any, key, defaultVal string) string
 	return v
 }
 
-// chatGetIntArg extracts an integer argument with a default.
 func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	v, ok := args[key]
 	if !ok {
@@ -116,9 +99,6 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	}
 	switch n := v.(type) {
 	case float64:
-		// Saturate rather than convert out of range, which wraps, so a huge
-		// value still meets the caller's clamp: wait_for_task turned a huge
-		// timeout into a negative one that had already expired.
 		switch {
 		case math.IsNaN(n):
 			return defaultVal
@@ -137,9 +117,6 @@ func chatGetIntArg(args map[string]any, key string, defaultVal int) int {
 	}
 }
 
-// chatPriorityArg reads the optional priority argument. It returns an error
-// result and false for a value that is not a whole number from 0 to 1000; a
-// larger value would wrap when narrowed to int32, possibly into that range.
 func chatPriorityArg(a map[string]any) (*int32, string, bool) {
 	value := a[priorityField]
 	if value == nil {
@@ -154,8 +131,6 @@ func chatPriorityArg(a map[string]any) (*int32, string, bool) {
 	return &p, "", true
 }
 
-// chatParseBoolArg parses a bool tool argument that may arrive as a JSON
-// boolean or a string boolean.
 func chatParseBoolArg(value any) (bool, error) {
 	switch v := value.(type) {
 	case bool:
@@ -167,8 +142,6 @@ func chatParseBoolArg(value any) (bool, error) {
 	}
 }
 
-// chatParseIntArg parses an integer tool argument that may arrive as a JSON
-// number or a numeric string.
 func chatParseIntArg(value any) (int, error) {
 	switch v := value.(type) {
 	case float64:
@@ -187,7 +160,6 @@ func chatParseIntArg(value any) (int, error) {
 	}
 }
 
-// chatGetStringSliceArg extracts a string slice argument.
 func chatGetStringSliceArg(args map[string]any, key string) []string {
 	v, ok := args[key]
 	if !ok {
@@ -208,7 +180,6 @@ func chatGetStringSliceArg(args map[string]any, key string) []string {
 	return result
 }
 
-// parseTimeoutArg parses a timeout duration string from args and returns an error result if invalid.
 func parseTimeoutArg(args map[string]any) (time.Duration, string, bool) {
 	const key = "timeout"
 	s := chatGetStringArg(args, key)
@@ -225,15 +196,11 @@ func parseTimeoutArg(args map[string]any) (time.Duration, string, bool) {
 	return d, "", true
 }
 
-// maxTurns bounds mirror the Task CRD validation on spec.agentRuntime.maxTurns
-// (+kubebuilder:validation:Minimum=1, +kubebuilder:validation:Maximum=1000).
 const (
 	minMaxTurns = 1
 	maxMaxTurns = 1000
 )
 
-// parseMaxTurnsArg parses the optional maxTurns argument and returns an error
-// result if invalid.
 func parseMaxTurnsArg(args map[string]any) (*int32, string, bool) {
 	raw, ok := args["maxTurns"]
 	if !ok {
@@ -256,14 +223,10 @@ func parseMaxTurnsArg(args map[string]any) (*int32, string, bool) {
 	return &value, "", true
 }
 
-// workspaceRequestsPublication reports whether any publication field upgrades
-// the workspace to write intent.
 func workspaceRequestsPublication(wsCfg *corev1alpha1.WorkspaceConfig) bool {
 	return wsCfg.PublicationGitRepo != "" || wsCfg.PushBranch != "" || wsCfg.PRBaseBranch != "" || wsCfg.CreatePR
 }
 
-// parseCreatePRArg parses the optional workspace.createPR argument and returns
-// an error result if invalid.
 func parseCreatePRArg(wsMap map[string]any) (bool, string, bool) {
 	raw, ok := wsMap["createPR"]
 	if !ok {
@@ -279,7 +242,6 @@ func parseCreatePRArg(wsMap map[string]any) (bool, string, bool) {
 	return createPR, "", true
 }
 
-// taskCreatedMsg returns the appropriate message for a created task.
 func taskCreatedMsg(schedule string) string {
 	if schedule != "" {
 		return fmt.Sprintf("Recurring task scheduled (schedule: %s)", schedule)
@@ -287,7 +249,6 @@ func taskCreatedMsg(schedule string) string {
 	return "Task created"
 }
 
-// splitModelString splits a "provider/model" string.
 func splitModelString(s string) (provider, name string) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) == 2 {

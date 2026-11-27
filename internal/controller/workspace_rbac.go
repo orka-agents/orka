@@ -1,8 +1,5 @@
 package controller
 
-// The generic workspace coordinator owns generic API objects only. Provider-native
-// resources remain adapter-owned and intentionally do not appear in Orka core RBAC.
-//
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceproviders,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceproviders/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceproviders/finalizers,verbs=update
@@ -17,8 +14,6 @@ package controller
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaceproviders;executionworkspaceclasses;executionworkspacepools;executionworkspaces;executionworkspacecheckpoints,verbs=admit
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=workspace.orka.ai,resources=executionworkspaces/finalizers,verbs=update
-// Separately installed providers grant Core access to their own parameter kinds.
-//
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete

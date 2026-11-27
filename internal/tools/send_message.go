@@ -24,28 +24,23 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// SendMessageTool implements inter-agent messaging
 type SendMessageTool struct{}
 
-// SendMessageArgs are the arguments for the send_message tool
 type SendMessageArgs struct {
 	ToTask  string `json:"to_task"`
 	Content string `json:"content"`
 }
 
-// NewSendMessageTool creates a new send message tool
 func NewSendMessageTool() *SendMessageTool {
 	return &SendMessageTool{}
 }
 
 const sendMessageToolName = "send_message"
 
-// Name returns the tool name
 func (t *SendMessageTool) Name() string {
 	return sendMessageToolName
 }
 
-// Description returns the tool description
 func (t *SendMessageTool) Description() string {
 	return "Send a message to a sibling task (another child of the same parent coordinator). " +
 		"Use this to share findings, coordinate work, challenge hypotheses, or avoid duplicated effort. " +
@@ -53,7 +48,6 @@ func (t *SendMessageTool) Description() string {
 		"the recipient will see them next time they call check_messages."
 }
 
-// Parameters returns the JSON Schema for the tool parameters
 func (t *SendMessageTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -71,7 +65,6 @@ func (t *SendMessageTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute sends a message to a sibling task via the controller's internal API
 func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a SendMessageArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -128,8 +121,6 @@ func (t *SendMessageTool) Execute(ctx context.Context, args json.RawMessage) (st
 	return sendMessageViaController(ctx, targetTask, a.Content)
 }
 
-// sendMessageViaController sends a message through the controller's internal
-// API, for a worker without an in-process message store.
 func sendMessageViaController(ctx context.Context, targetTask, content string) (string, error) {
 	taskName := os.Getenv(envOrkaTaskName)
 	namespace := os.Getenv(envOrkaTaskNamespace)
@@ -181,8 +172,6 @@ func sendMessageViaController(ctx context.Context, targetTask, content string) (
 	return "", fmt.Errorf("failed to send message: HTTP %d: %s", resp.StatusCode, string(respBody))
 }
 
-// errMessageContentTooLarge tells the agent to shorten a message over the
-// storage contract's per-message limit.
 func errMessageContentTooLarge(size int) error {
 	return fmt.Errorf("message content is %d bytes and exceeds the %d byte limit; send a shorter message",
 		size, store.MaxMessageContentBytes)

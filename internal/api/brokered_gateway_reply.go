@@ -17,10 +17,6 @@ type brokeredGatewayReplySender struct {
 	service *gatewayruntime.Service
 }
 
-// NewBrokeredGatewayReplySender binds an ACP prompt guard and exact Task identity.
-// It grants no tool availability; the sealed descriptor policy does that. Each
-// method independently reauthorizes, prepares live data outside the SQLite writer,
-// and consumes the preparation under the existing authorized data transaction.
 func NewBrokeredGatewayReplySender(reader client.Reader, service *gatewayruntime.Service, key client.ObjectKey, uid string, guard func(context.Context, func(context.Context) error) error) tools.GatewayReplySender {
 	return &brokeredGatewayReplySender{access: brokeredTaskDataAccess{authorizer: internalCallerAuthorizer{k8sReader: reader}, taskKey: key, taskUID: uid, guard: guard}, service: service}
 }
@@ -107,5 +103,5 @@ func brokeredGatewayReplyError(err error) error {
 	if rejection := tools.NewGatewayReplyRejection(code, err); rejection != nil {
 		return rejection
 	}
-	return err // Guard/store/transport failures retain consequential uncertainty.
+	return err
 }

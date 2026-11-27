@@ -73,11 +73,9 @@ func TestSubstrateMCPPoolRequiresPinnedTemplateIdentity(t *testing.T) {
 			require.Equal(t, scenario.pinnedUID, pool.Status.TemplateUID)
 
 			if scenario.name == "unbound" {
-				// Admission resumes once the pool controller persists its binding.
 				pool.Status.TemplateUID = "current-template-uid"
 				require.NoError(t, r.Status().Update(t.Context(), pool))
 			} else {
-				// A replacement template requires a new pool with its own binding.
 				replacement := pool.DeepCopy()
 				replacement.Name, replacement.UID, replacement.ResourceVersion = "replacement-pool", "replacement-pool-uid", ""
 				replacement.Status = corev1alpha1.SubstrateActorPoolStatus{}

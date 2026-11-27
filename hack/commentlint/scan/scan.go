@@ -8,6 +8,7 @@ package scan
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,8 +65,8 @@ type Target struct {
 	Category string `json:"category,omitempty"`
 }
 
-var goDirective = regexp.MustCompile(`^(?://(?:go:|nolint|lint:|export |line |extern |\+|\s*\+[a-z]|revive:` +
-	`|\s*#nosec)|/\*line )`)
+var goDirective = regexp.MustCompile(`^(?://(?:go:|\s*nolint(?:$|[:\s])|lint:|export |line |extern |` +
+	`\+|\s*\+[a-z]|revive:|\s*#nosec)|/\*line )`)
 
 var deprecation = regexp.MustCompile(`(?m)^Deprecated: `)
 
@@ -76,6 +77,23 @@ var exampleOutput = regexp.MustCompile(`(?i)^[[:space:]]*(unordered )?output:`)
 var pythonDirective = regexp.MustCompile(`^#\s*(nosec|noqa|type:|pylint:|pyright:|mypy:|-\*-|fmt:|isort:)`)
 
 var shellAliases = regexp.MustCompile(`\balias\b|expand_aliases`)
+
+//go:embed notices.json
+var noticesJSON []byte
+
+var noticeParagraphs = func() []*regexp.Regexp {
+	var spec struct {
+		Paragraphs []string `json:"paragraphs"`
+	}
+	if err := json.Unmarshal(noticesJSON, &spec); err != nil {
+		panic(err)
+	}
+	out := make([]*regexp.Regexp, 0, len(spec.Paragraphs))
+	for _, pattern := range spec.Paragraphs {
+		out = append(out, regexp.MustCompile(pattern))
+	}
+	return out
+}()
 
 var pythonInterpreter = regexp.MustCompile(`^python(3(\.\d+)?)?$`)
 
@@ -263,7 +281,7 @@ func scanGo(path string, src []byte) ([]Comment, error) {
 			continue
 		}
 		startLine := fset.PositionFor(group.Pos(), false).Line
-		if startLine < packageLine && strings.Contains(group.Text(), "Copyright") {
+		if startLine < packageLine && onlyNotices(group.Text()) {
 			continue
 		}
 		if deprecation.MatchString(group.Text()) || exampleOutputGroup(group, examples) {
@@ -352,7 +370,11 @@ func scanHash(path string, src []byte, directive *regexp.Regexp) ([]Comment, err
 }
 
 func licenseHeader(src []byte, c Comment) bool {
-	if !strings.Contains(c.Text, "Copyright") {
+	var plain strings.Builder
+	for line := range strings.SplitSeq(c.Text, "\n") {
+		plain.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "#")) + "\n")
+	}
+	if !onlyNotices(plain.String()) {
 		return false
 	}
 	for i, line := range strings.Split(string(src), "\n")[:c.Line-1] {
@@ -362,6 +384,25 @@ func licenseHeader(src []byte, c Comment) bool {
 		}
 	}
 	return true
+}
+
+func onlyNotices(text string) bool {
+	var plain strings.Builder
+	for line := range strings.SplitSeq(text, "\n") {
+		plain.WriteString(strings.TrimPrefix(strings.TrimSpace(line), "*") + "\n")
+	}
+	found := false
+	for paragraph := range strings.SplitSeq(plain.String(), "\n\n") {
+		normalized := strings.Join(strings.Fields(paragraph), " ")
+		if normalized == "" {
+			continue
+		}
+		if !slices.ContainsFunc(noticeParagraphs, func(re *regexp.Regexp) bool { return re.MatchString(normalized) }) {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func exampleOutputGroup(group *ast.CommentGroup, examples []*ast.BlockStmt) bool {

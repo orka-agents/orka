@@ -51,9 +51,6 @@ func newClient(t *testing.T) (*storageclient.Client, *storagefault.Injector) {
 	t.Helper()
 	client, faults, err := storagefault.NewEmbeddedClient(openSQLite(t))
 	require.NoError(t, err)
-	// Activate the snapshot key, as controller startup does, so sealed calls
-	// reach the provider and see its injected faults. Activation reads the
-	// sealed families, so the counts start after it.
 	require.NoError(t, client.ActivateSnapshotKey(t.Context(), storageclienttest.Key))
 	faults.ResetCounts()
 	return client, faults
@@ -68,8 +65,6 @@ func saveArtifact(ctx context.Context, provider storagev1.ArtifactStore) error {
 	return provider.SaveArtifact(ctx, storagev1.SaveArtifactRequest{Owner: owner, Filename: key.Filename, ContentType: "text/plain", Data: []byte("file")})
 }
 
-// shortCall bounds a write that a test expects to fail through an outage:
-// the client retries an unavailable write until its deadline.
 func shortCall(t *testing.T) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -84,16 +79,11 @@ func requireInjected(t *testing.T, err error, target error) {
 	require.ErrorAs(t, err, &injected, "the outcome came from a fault, not the provider")
 }
 
-// artifactsWithMirror serves the artifact wrapper together with the state
-// mirror of the store behind it.
 type artifactsWithMirror struct {
 	storagev1.ArtifactProvider
 	storagev1.ControllerEpochMirror
 }
 
-// Without faults the wrappers are transparent: the shared provider suite
-// passes through the embedded wrapper inside a storage client and through the
-// artifact wrapper, and every call reaches the provider.
 func TestWrappersPassCallsThrough(t *testing.T) {
 	var mu sync.Mutex
 	var injectors []*storagefault.Injector
@@ -115,9 +105,6 @@ func TestWrappersPassCallsThrough(t *testing.T) {
 			track(faults)
 			backend := openSQLite(t)
 			backend.RequireWriteEnvelopes()
-			// The suite gives the dataset its first epoch through the state
-			// mirror when the provider offers one, which binds no
-			// installation; it reaches SQLite directly.
 			return artifactsWithMirror{ArtifactProvider: faults.WrapArtifacts(backend), ControllerEpochMirror: backend}
 		})
 	})
@@ -130,9 +117,6 @@ func TestWrappersPassCallsThrough(t *testing.T) {
 	require.Positive(t, calls)
 }
 
-// Every generated method passes through the injector under the contract its
-// wrapper assigns. With both contracts down, no call reaches the provider, so
-// each method can be called with zero arguments.
 func TestEveryMethodPassesThroughTheInjector(t *testing.T) {
 	artifactStore := reflect.TypeFor[storagev1.ArtifactStore]()
 	for name, tc := range map[string]struct {
@@ -243,7 +227,6 @@ func TestFaultsMatchMethodsAndKinds(t *testing.T) {
 	require.NoError(t, err, "reads continue while writes fail")
 	require.Equal(t, []byte("kept"), data)
 
-	// The fault added last applies.
 	method := faults.Inject(storagefault.Fault{
 		Match:  storagefault.Match{Methods: []string{"SaveResult"}},
 		Action: storagefault.Fail(storagev1.ErrUnauthenticated),
@@ -262,8 +245,6 @@ func TestFaultsMatchMethodsAndKinds(t *testing.T) {
 	require.NoError(t, err, "a fault with Times removes itself")
 	require.Equal(t, 1, once.Hits())
 
-	// The client retries an unavailable write with the same envelope, so a
-	// fault that fails a write once does not reach the caller.
 	once = faults.Inject(storagefault.Fault{Action: storagefault.Fail(storagev1.ErrUnavailable), Times: 1})
 	require.NoError(t, client.SaveResult(ctx, "tenant", "task", []byte("changed")))
 	require.Equal(t, 1, once.Hits())
@@ -272,10 +253,6 @@ func TestFaultsMatchMethodsAndKinds(t *testing.T) {
 	require.Equal(t, storagefault.Counts{}, faults.Counts(storagefault.Match{}))
 }
 
-// A write whose response is lost after it committed is retried with the same
-// envelope, and the provider answers the retry from the operation's receipt,
-// so the write commits once and the caller sees it succeed. A lost read
-// response reaches the caller.
 func TestLostResponseAfterCommit(t *testing.T) {
 	client, faults := newClient(t)
 	ctx := t.Context()
@@ -347,7 +324,6 @@ func TestDelay(t *testing.T) {
 	require.GreaterOrEqual(t, time.Since(started), 50*time.Millisecond)
 	require.Equal(t, 1, short.Hits())
 
-	// A delay far longer than the deadline, so the deadline always ends it.
 	faults.Inject(storagefault.Fault{Match: storagefault.Match{Methods: []string{"HealthCheck"}}, Action: storagefault.Delay(time.Hour)})
 	deadline, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer cancel()
@@ -357,10 +333,6 @@ func TestDelay(t *testing.T) {
 	require.Equal(t, storagefault.Counts{Calls: 2, Delivered: 1}, faults.Counts(storagefault.Match{}))
 }
 
-// A call whose context has ended by the time its delay or hold ends is
-// abandoned. Delay(0) makes the delay and the context's end ready together;
-// the hold case is usually decided by the context alone here, and
-// TestHangAbandonsAnEndedCallReleasedAtTheSameMoment covers the tie.
 func TestEndedContextWinsOverDelayAndRelease(t *testing.T) {
 	client, faults := newClient(t)
 	ctx := t.Context()
@@ -406,15 +378,10 @@ func TestMatchByCallClass(t *testing.T) {
 	require.NoError(t, client.HealthCheck(ctx), "control calls are not matched")
 	_, err := client.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	requireInjected(t, err, storagev1.ErrUnavailable)
-	// The client retried each bulk write until its deadline.
 	writes := faults.Counts(storagefault.Match{Methods: []string{"SaveResult", "SaveArtifact"}}).Calls
 	require.Equal(t, writes+1, bulk.Hits(), "a sealed snapshot read moves a whole sealed body, so it is a bulk call")
 }
 
-// The embedded client probes its store through the state binding. A binding
-// check for artifacts wraps the same store with WrapArtifacts, which shares
-// the injector, so the artifact store's outage and Describe changes reach it
-// while the state binding stays healthy.
 func TestArtifactsBindingProbesOfTheEmbeddedStore(t *testing.T) {
 	faults := storagefault.New()
 	backend := openSQLite(t)
@@ -439,10 +406,6 @@ func TestArtifactsBindingProbesOfTheEmbeddedStore(t *testing.T) {
 	require.NotEqual(t, "another-dataset", stateInfo.DatasetID)
 }
 
-// notWrappedYet lists catalog methods of optional provider interfaces that the
-// wrappers do not serve until those interfaces join StateProvider or
-// ArtifactProvider. The export, import and marker methods of export.v1 stay
-// here until the embedded store implements them.
 var notWrappedYet = []string{
 	"AbortImport",
 	"BeginImport",
@@ -456,10 +419,6 @@ var notWrappedYet = []string{
 	"MarkDatasetMigrated",
 }
 
-// Every catalog method reaches the provider through the wrappers, except the
-// listed optional ones, and those stay listed only while the embedded store
-// does not serve them either, so the wrappers never hide a method from a
-// caller that type-asserts for it.
 func TestWrappersServeEveryCatalogMethod(t *testing.T) {
 	backend := openSQLite(t)
 	wrapped := reflect.TypeOf(storagefault.New().WrapEmbedded(backend))
@@ -534,17 +493,12 @@ func TestErrorUnwrapsToTheInjectedOutcome(t *testing.T) {
 	require.Equal(t, "storagefault: state.v1 GetResult: storage unavailable", err.Error())
 }
 
-// Provider-populated pointer fields are part of the response too. Losing it
-// cannot reveal a generated ID/timestamp to the caller, even after commit.
 func TestLostCreateMemoryResponseDoesNotPopulateCaller(t *testing.T) {
 	client, faults := newClient(t)
 	memory := &storagev1.Memory{Namespace: "tenant", Content: "synthetic memory", Tags: []string{"original"}}
 	fault := faults.Inject(storagefault.Fault{Match: storagefault.Match{Methods: []string{"CreateMemory"}}, Action: storagefault.LoseResponse()})
 	err := client.CreateMemory(t.Context(), memory)
 	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
-	// The client assigns the memory's ID and times before the write, so the
-	// caller holds them whatever the outcome. What the provider fills in, such
-	// as the default source, stays unpublished.
 	require.Regexp(t, "^mem-", memory.ID, "the client assigns the ID before the write")
 	require.False(t, memory.CreatedAt.IsZero(), "the client assigns the creation time before the write")
 	require.True(t, memory.UpdatedAt.Equal(memory.CreatedAt))
@@ -603,7 +557,6 @@ func TestLostResponseIsolatesNestedMutableArguments(t *testing.T) {
 	require.Equal(t, time.Date(2026, 1, 1, 2, 2, 3, 0, time.UTC), at)
 	require.Equal(t, "provider-updated", tags[0], "healthy calls preserve retained slice aliases")
 
-	// A value request can carry mutable output surfaces as well.
 	artifacts := faults.WrapArtifacts(&mutatingArtifactProvider{})
 	request := storagev1.SaveArtifactRequest{Data: []byte("abc")}
 	fault = faults.Inject(storagefault.Fault{Action: storagefault.LoseResponse()})

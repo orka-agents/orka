@@ -19,8 +19,6 @@ func repositoryMonitorNormalizeLegacyIssuePhase(item *store.MonitorItem) {
 	case "approved":
 		item.WorkflowPhase = repositoryMonitorIssuePhasePlanned
 	case "approval_required":
-		// This state also covered plans that needed human input. Preserve
-		// that hold until a fresh command requests a plan under current policy.
 		item.WorkflowPhase = repositoryMonitorIssuePhaseBlocked
 		item.SkipReason = repositoryMonitorLegacyPlanRequiresReplanning
 	}

@@ -15,8 +15,6 @@ export const Route = createFileRoute('/settings/connectors')({
 export function ConnectorsSettingsRoute() {
   const search = Route.useSearch()
   const navigate = useNavigate()
-  // The spent callback leaves the router's search state too, not only the
-  // address bar, so a remount (a namespace switch) never replays it.
   const clearCallback = () => { void navigate({ to: '/settings/connectors', search: {}, replace: true }) }
   return <ConnectorsPage search={search} clearCallback={clearCallback} />
 }

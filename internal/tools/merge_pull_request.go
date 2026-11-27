@@ -24,27 +24,19 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// MergePullRequestTool merges a GitHub pull request after verifying CI checks pass.
 type MergePullRequestTool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// MergePullRequestArgs are the arguments for the merge_pull_request tool.
 type MergePullRequestArgs struct {
-	// TaskName is the name of the child task to read workspace config from.
-	TaskName string `json:"task_name"`
-	// PRNumber is the GitHub PR number to merge.
-	PRNumber int `json:"pr_number"`
-	// MergeMethod is the merge method: "merge", "squash", "rebase". Defaults to "squash".
-	MergeMethod string `json:"merge_method,omitempty"`
-	// CommitTitle is the custom merge commit title.
-	CommitTitle string `json:"commit_title,omitempty"`
-	// CommitMessage is the custom merge commit message.
+	TaskName      string `json:"task_name"`
+	PRNumber      int    `json:"pr_number"`
+	MergeMethod   string `json:"merge_method,omitempty"`
+	CommitTitle   string `json:"commit_title,omitempty"`
 	CommitMessage string `json:"commit_message,omitempty"`
 }
 
-// MergePullRequestResult is the result of merging a pull request.
 type MergePullRequestResult struct {
 	SHA          string `json:"sha"`
 	Merged       bool   `json:"merged"`
@@ -52,25 +44,21 @@ type MergePullRequestResult struct {
 	ChecksPassed bool   `json:"checks_passed"`
 }
 
-// NewMergePullRequestTool creates a new merge_pull_request tool.
 func NewMergePullRequestTool(k8sClient client.Client) *MergePullRequestTool {
 	return &MergePullRequestTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *MergePullRequestTool) Name() string {
 	return mergePullRequestToolName
 }
 
-// Description returns the tool description.
 func (t *MergePullRequestTool) Description() string {
 	return "Merge a GitHub pull request after verifying all CI checks have passed. " +
 		"Takes a PR number and task name to read git credentials from the task's workspace configuration."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *MergePullRequestTool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: childWorkspaceTaskDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to merge"}, mergeMethodField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Merge method: 'merge', 'squash', or 'rebase'. Defaults to 'squash'",
 		jsonSchemaEnumField: []string{mergeMethodMerge, defaultMergeMethod, mergeMethodRebase},
@@ -82,7 +70,6 @@ func (t *MergePullRequestTool) Parameters() json.RawMessage {
 	return data
 }
 
-// Execute merges a pull request on GitHub after verifying CI checks.
 func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args MergePullRequestArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
@@ -100,19 +87,16 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 		return "", err
 	}
 
-	// Determine namespace from environment
 	ns := os.Getenv(envOrkaTaskNamespace)
 	if ns == "" {
 		ns = defaultNamespace
 	}
 
-	// Look up the child task to get workspace config
 	var task corev1alpha1.Task
 	if err := t.k8sClient.Get(ctx, types.NamespacedName{Name: args.TaskName, Namespace: ns}, &task); err != nil {
 		return "", fmt.Errorf("failed to get task %s: %w", args.TaskName, err)
 	}
 
-	// Extract repo URL and git secret from the task's workspace config
 	ws := taskWorkspace(&task)
 	if ws == nil {
 		return "", fmt.Errorf("task %s does not have workspace configuration", args.TaskName)
@@ -123,14 +107,11 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 		return "", fmt.Errorf("task %s workspace has no gitRepo configured", args.TaskName)
 	}
 
-	// Parse owner/repo from the git URL
 	owner, repo, err := parseGitHubRepo(repoURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse GitHub repo from %s: %w", repoURL, err)
 	}
 
-	// Forge API operations must use the forge credential, not the repository
-	// publication credential used for Git pushes.
 	if ws.ForgeCredentialRef == nil {
 		return "", fmt.Errorf("task %s workspace has no forgeCredentialRef configured", args.TaskName)
 	}
@@ -145,13 +126,11 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 		baseURL = t.apiBaseURL
 	}
 
-	// Get PR details to find the head SHA
 	headSHA, err := getGitHubPRHeadSHA(ctx, token, owner, repo, args.PRNumber, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to get PR head SHA: %w", err)
 	}
 
-	// Check CI status
 	passed, checkDetails, err := checkGitHubCIStatus(ctx, token, owner, repo, headSHA, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to check CI status: %w", err)
@@ -167,7 +146,6 @@ func (t *MergePullRequestTool) Execute(ctx context.Context, argsJSON json.RawMes
 		return string(resultJSON), nil
 	}
 
-	// Merge the PR
 	sha, err := mergeGitHubPR(ctx, token, owner, repo, args.PRNumber, args.MergeMethod, args.CommitTitle, args.CommitMessage, baseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to merge pull request: %w", err)
@@ -223,7 +201,6 @@ func resolveForgeCredentialToken(
 	return token, nil
 }
 
-// getGitHubPRHeadSHA retrieves the head SHA for a pull request.
 func getGitHubPRHeadSHA(ctx context.Context, token, owner, repo string, prNumber int, baseURL string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", baseURL, owner, repo, prNumber)
 
@@ -260,7 +237,6 @@ func getGitHubPRHeadSHA(ctx context.Context, token, owner, repo string, prNumber
 	return prResp.Head.SHA, nil
 }
 
-// checkGitHubCIStatus checks whether all CI checks have passed for a commit.
 func checkGitHubCIStatus(ctx context.Context, token, owner, repo, sha, baseURL string) (bool, string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", baseURL, owner, repo, sha)
 
@@ -315,8 +291,6 @@ func checkGitHubCIStatus(ctx context.Context, token, owner, repo, sha, baseURL s
 	return true, "", nil
 }
 
-// validateMergeMethod rejects a merge method GitHub does not support before
-// any GitHub call is made.
 func validateMergeMethod(method string) error {
 	switch method {
 	case mergeMethodMerge, defaultMergeMethod, mergeMethodRebase:
@@ -325,7 +299,6 @@ func validateMergeMethod(method string) error {
 	return fmt.Errorf("invalid merge_method %q: must be %s, %s, or %s", method, mergeMethodMerge, defaultMergeMethod, mergeMethodRebase)
 }
 
-// mergeGitHubPR merges a pull request via the GitHub REST API.
 func mergeGitHubPR(ctx context.Context, token, owner, repo string, prNumber int, mergeMethod, commitTitle, commitMessage, baseURL string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", baseURL, owner, repo, prNumber)
 

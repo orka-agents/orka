@@ -46,8 +46,6 @@ func TestOperatorExecRequestSealDecodeAndVerify(t *testing.T) {
 		t.Fatal("a capability signed with another pool's secret must be rejected")
 	}
 
-	// Changing argv after signing breaks the content digest even when the
-	// attacker re-encodes canonical JSON.
 	tampered := decoded
 	tampered.Exec.Argv = []string{"rm", "-rf", "/"}
 	raw, err := CanonicalValue(tampered)
@@ -66,8 +64,6 @@ func TestOperatorRequestHeaderRejectsMalformedInput(t *testing.T) {
 			t.Fatalf("header %q must be rejected", header)
 		}
 	}
-	// Unknown fields are refused, so a newer client cannot smuggle options
-	// an older supervisor would ignore.
 	request := map[string]any{"protocol": ProtocolVersion, "metadata": map[string]any{"requestDigest": ""}, "unexpected": true}
 	digest, err := CanonicalRequestDigest(request)
 	if err != nil {

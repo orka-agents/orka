@@ -32,38 +32,20 @@ import (
 )
 
 const (
-	// AuthTypeGitHubSession identifies an Orka session issued after a
-	// GitHub sign-in (ADR 0037).
 	AuthTypeGitHubSession = "githubSession"
 
-	// sessionTokenPrefix marks Orka session tokens, so the API never tries
-	// them as OIDC or ServiceAccount tokens.
-	sessionTokenPrefix = "orka_s_"
-	// SessionTTL is how long a sign-in session lasts before it renews.
-	SessionTTL = 12 * time.Hour
-	// sessionRenewHorizon is how fresh the GitHub token behind a renewal is.
-	sessionRenewHorizon = 5 * time.Minute
-	// maxGitHubAccessTokenLife bounds the expiry a sign-in claims for its
-	// GitHub token, and is the expiry of one that claims none: GitHub App
-	// user tokens last eight hours. A link that cannot refresh then ends, and
-	// every refresh checks membership again.
+	sessionTokenPrefix       = "orka_s_"
+	SessionTTL               = 12 * time.Hour
+	sessionRenewHorizon      = 5 * time.Minute
 	maxGitHubAccessTokenLife = 8 * time.Hour
 )
 
-// GitHubSignInConfig signs people in with GitHub (ADR 0037). The GitHub App
-// is the agent-host ConnectorProvider's: its OAuth client checks tokens, and
-// a sign-in links the person's account through it.
 type GitHubSignInConfig struct {
-	Enabled bool
-	// Provider names the ConnectorProvider, in the watch namespace, whose
-	// GitHub App signs people in.
-	Provider string
-	// Allowed lists the orgs and teams whose active members may sign in.
-	Allowed githubauth.Allowed
-	// CreateHosts false records every sign-in as declining an agent host.
+	Enabled     bool
+	Provider    string
+	Allowed     githubauth.Allowed
 	CreateHosts bool
 	Sessions    store.AuthSessionStore
-	// Credentials renews a person's GitHub token from custody.
 	Credentials interface {
 		HostCredential(ctx context.Context, namespace, name string, horizon time.Duration) (credential.HostCredential, error)
 	}
@@ -78,9 +60,6 @@ func (c GitHubSignInConfig) now() time.Time {
 	return time.Now()
 }
 
-// authenticateSession resolves an Orka session token to its person. Session
-// identities are verified people, but GitHub sessions reach only the routes
-// that act on the caller's own links, host and AHP tokens.
 func (c GitHubSignInConfig) authenticateSession(ctx context.Context, token string) (*UserInfo, error) {
 	if !c.Enabled || c.Sessions == nil {
 		return nil, errors.New("GitHub sign-in sessions are not enabled")
@@ -90,8 +69,6 @@ func (c GitHubSignInConfig) authenticateSession(ctx context.Context, token strin
 		return nil, errors.New("unknown session")
 	}
 	if err != nil {
-		// Not a verdict on the token: a client that took 401 for it would
-		// drop a session that is still live.
 		return nil, fmt.Errorf("%w: %v", errSessionStoreUnavailable, err)
 	}
 	if session.RevokedAt != nil || !c.now().Before(session.ExpiresAt) {
@@ -103,34 +80,22 @@ func (c GitHubSignInConfig) authenticateSession(ctx context.Context, token strin
 	}, nil
 }
 
-// AuthConfigResponse tells a client how it may sign in. It holds nothing
-// secret.
 type AuthConfigResponse struct {
 	OIDC       bool                    `json:"oidc"`
 	OIDCConfig *OIDCAuthConfigOption   `json:"oidcConfig,omitempty"`
 	GitHub     *GitHubAuthConfigOption `json:"github,omitempty"`
 }
 
-// OIDCAuthConfigOption advertises non-secret OIDC login metadata so CLI
-// clients can run device-code / OAuth flows without manual issuer/audience
-// flags.
 type OIDCAuthConfigOption struct {
 	Issuer   string `json:"issuer"`
 	Audience string `json:"audience"`
 }
 
-// GitHubAuthConfigOption is the GitHub sign-in a client runs the device flow
-// for.
 type GitHubAuthConfigOption struct {
-	ClientID string `json:"clientID"`
-	// AgentHost says that signing in gives the person an agent host whose
-	// code can read the GitHub token.
-	AgentHost bool `json:"agentHost"`
+	ClientID  string `json:"clientID"`
+	AgentHost bool   `json:"agentHost"`
 }
 
-// signInProvider is the ready provider sign-in links people through. It
-// must serve agent hosts: sessions renew from the host link, and sign-in
-// starts hosts unless the person declines one.
 func (h *Handlers) signInProvider(ctx context.Context) (*corev1alpha1.ConnectorProvider, error) {
 	provider, err := h.loadReadyConnectorProvider(ctx, h.watchNamespace, h.githubSignIn.Provider)
 	if err != nil {
@@ -139,8 +104,6 @@ func (h *Handlers) signInProvider(ctx context.Context) (*corev1alpha1.ConnectorP
 	if provider.Spec.AgentHost == nil {
 		return nil, fiber.NewError(fiber.StatusServiceUnavailable, "the GitHub sign-in provider does not serve agent hosts")
 	}
-	// The controller provisions no host while two providers in a namespace
-	// serve agent hosts, so sign-in would promise one that never comes.
 	providers := &corev1alpha1.ConnectorProviderList{}
 	if err := h.providerReader().List(ctx, providers, client.InNamespace(provider.Namespace)); err != nil {
 		return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to read connector providers")
@@ -158,7 +121,6 @@ func (h *Handlers) signInProvider(ctx context.Context) (*corev1alpha1.ConnectorP
 	return provider, nil
 }
 
-// GetAuthConfig serves GET /api/v1/auth/config, unauthenticated.
 func (h *Handlers) GetAuthConfig(c fiber.Ctx) error {
 	response := AuthConfigResponse{OIDC: h.oidcEnabled}
 	if h.oidcEnabled && h.oidcIssuer != "" && h.oidcAudience != "" {
@@ -183,39 +145,25 @@ func (h *Handlers) GetAuthConfig(c fiber.Ctx) error {
 type githubSignInRequest struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
-	// ExpiresIn is the access token's lifetime in seconds, as GitHub gave it.
-	ExpiresIn int  `json:"expiresIn"`
-	NoHost    bool `json:"noHost"`
+	ExpiresIn    int    `json:"expiresIn"`
+	NoHost       bool   `json:"noHost"`
 }
 
-// SessionResponse is a new session token, shown once.
 type SessionResponse struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expiresAt"`
-	Login     string    `json:"login"`
-	// Subject is the person's numeric GitHub user ID. Unlike the login,
-	// which can be renamed and reused, it tells one person from another.
-	Subject    string `json:"subject"`
-	Namespace  string `json:"namespace"`
-	Connection string `json:"connection,omitempty"`
-	// AgentHost says Orka provisions an agent host for this link.
-	AgentHost bool `json:"agentHost"`
+	Token      string    `json:"token"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	Login      string    `json:"login"`
+	Subject    string    `json:"subject"`
+	Namespace  string    `json:"namespace"`
+	Connection string    `json:"connection,omitempty"`
+	AgentHost  bool      `json:"agentHost"`
 }
 
-// SignInWithGitHub serves POST /api/v1/auth/github. It is unauthenticated:
-// the GitHub token is the credential. Orka checks the token was issued to its
-// own app and that its person is in an allowed org or team, links their
-// account, and issues a session.
 func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	cfg := h.githubSignIn
 	if !cfg.Enabled || cfg.Sessions == nil || !h.connectors.Enabled {
 		return fiber.NewError(fiber.StatusNotImplemented, "GitHub sign-in is not enabled on this controller")
 	}
-	// Each attempt checks its token with GitHub as the App, before anything
-	// authenticates the caller: without a limit, anyone who reaches the API
-	// could spend the App's GitHub rate limit, which renewal and invites
-	// share, and lock everyone out of signing in. It runs before the body is
-	// read.
 	if h.signInLimiter != nil && !h.signInLimiter.AllowClientFirst(c.IP(), time.Now()) {
 		c.Set(fiber.HeaderRetryAfter, "10")
 		return fiber.NewError(fiber.StatusTooManyRequests, "too many sign-in attempts; try again shortly")
@@ -244,13 +192,7 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadGateway, "could not check the GitHub token")
 	}
 	tokens := githubauth.Tokens{AccessToken: req.AccessToken, ExpiresIn: req.ExpiresIn}
-	// A token this sign-in minted is held by nothing else, so one it does not
-	// store is revoked. A submitted one is not: the client keeps it, and it
-	// may be the very token custody holds for the person's working link.
 	minted := false
-	// A host takes only a token that expires. Only a token this sign-in
-	// minted carries an expiry GitHub confirmed, by the refresh token GitHub
-	// issues only beside one; a submitted expiresIn is the client's word.
 	expiryConfirmed := false
 	revokeUnused := func(token string) {
 		if minted {
@@ -258,9 +200,6 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 		}
 	}
 	if strings.TrimSpace(req.RefreshToken) != "" {
-		// The refresh token arrives unchecked beside the access token. Using
-		// it once proves it is the same person's, and custody then holds only
-		// what GitHub issued from it.
 		refreshed, err := h.connectors.OAuth.Refresh(ctx, oauth, req.RefreshToken)
 		if err != nil {
 			return fiber.NewError(fiber.StatusUnauthorized, "GitHub did not accept the refresh token")
@@ -281,8 +220,6 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 			tokens.ExpiresIn = int(max(time.Until(refreshed.ExpiresAt), 0) / time.Second)
 		}
 	}
-	// Only GitHub's verdict refuses the person; an answer it could not give
-	// is retried. Either way the token this sign-in obtained goes unused.
 	if err := cfg.GitHub.RequireMember(ctx, tokens.AccessToken, user.Login, cfg.Allowed); err != nil {
 		revokeUnused(tokens.AccessToken)
 		if errors.Is(err, githubauth.ErrNotMember) {
@@ -302,8 +239,6 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	// A link that cannot refresh ends with its token, and the session with
-	// it: it could not renew past that.
 	response, err := h.issueSession(ctx, ui, deadline)
 	if err != nil {
 		return err
@@ -313,9 +248,6 @@ func (h *Handlers) SignInWithGitHub(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(response)
 }
 
-// RenewSession serves POST /api/v1/auth/session/renew. It refreshes the
-// person's GitHub token from custody, checks their membership again, and
-// replaces the session, which then ends.
 func (h *Handlers) RenewSession(c fiber.Ctx) error {
 	ui, err := h.sessionIdentity(c)
 	if err != nil {
@@ -327,9 +259,6 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 	if cfg.Credentials == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "session renewal is not available")
 	}
-	// Renewal spends the App's GitHub rate limit too, and returns a session
-	// that can renew again, so a person's renewals, concurrent or chained,
-	// share the sign-in limit: one person's limit, and the overall one.
 	if h.signInLimiter != nil && !h.signInLimiter.AllowClientFirst("renew\x00"+ui.Issuer+"\x00"+ui.Subject, time.Now()) {
 		c.Set(fiber.HeaderRetryAfter, "10")
 		return fiber.NewError(fiber.StatusTooManyRequests, "too many session renewals; try again shortly")
@@ -341,15 +270,9 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "could not refresh your GitHub token; retry")
 	}
-	// A token GitHub does not expire is held only until the deadline Orka
-	// chose, which a session from it already ends at: renewing could not
-	// outlast it. The person signs in again, and their membership is
-	// checked then.
 	if !held.Refreshable {
 		return fiber.NewError(fiber.StatusUnauthorized, "your GitHub link cannot be refreshed and ends with this session; sign in again")
 	}
-	// The link must still hold this person's own grant: the session's
-	// subject, not whoever the refreshed token belongs to, renews.
 	provider, err := h.signInProvider(ctx)
 	if err != nil {
 		return err
@@ -387,7 +310,6 @@ func (h *Handlers) RenewSession(c fiber.Ctx) error {
 	})
 }
 
-// SignOut serves DELETE /api/v1/auth/session: it ends the caller's session.
 func (h *Handlers) SignOut(c fiber.Ctx) error {
 	ui, err := h.sessionIdentity(c)
 	if err != nil {
@@ -411,8 +333,6 @@ func (h *Handlers) sessionIdentity(c fiber.Ctx) (*UserInfo, error) {
 	return ui, nil
 }
 
-// issueSession stores a new session for ui and returns its token, once. A
-// non-zero deadline ends the session no later.
 func (h *Handlers) issueSession(ctx context.Context, ui *UserInfo, deadline time.Time) (SessionResponse, error) {
 	token, session, err := h.newSession(ui, deadline)
 	if err != nil {
@@ -443,11 +363,6 @@ func (h *Handlers) newSession(ui *UserInfo, deadline time.Time) (string, store.A
 	}, nil
 }
 
-// gitHubTokenExpiry is when a GitHub token obtained at now ends: as GitHub
-// reported, at most maxGitHubAccessTokenLife, which is also the deadline of
-// one reported without an expiry. The lifetime is capped in seconds, before
-// it becomes a Duration: a large submitted expiresIn would overflow and land
-// in the past.
 func gitHubTokenExpiry(now time.Time, expiresIn int) time.Time {
 	if expiresIn > 0 && expiresIn < int(maxGitHubAccessTokenLife/time.Second) {
 		return now.Add(time.Duration(expiresIn) * time.Second)
@@ -455,49 +370,27 @@ func gitHubTokenExpiry(now time.Time, expiresIn int) time.Time {
 	return now.Add(maxGitHubAccessTokenLife)
 }
 
-// errSignInLinkUnrecorded is a sign-in whose custody was committed but whose
-// Connection status was not written: the Connection reconciler records it
-// from the committed completion.
 var errSignInLinkUnrecorded = fiber.NewError(fiber.StatusInternalServerError, "failed to record your GitHub link; sign in again")
 
-// linkGitHubSignIn records the sign-in's GitHub tokens as the person's
-// Connection to the provider. It takes the steps a browser consent takes, a
-// consent, a completion and its commit, so custody's fences hold as they do
-// for any link. held reports whether Orka may hold the tokens: when it is
-// false nothing stored them, after a failure or when an existing link was
-// kept, and the caller revokes them if it minted them.
 func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
 	oauth connectors.OAuthProviderConfig, tokens githubauth.Tokens, declined bool) (connection *corev1alpha1.Connection, held bool, deadline time.Time, err error) {
 	connection, err = h.ensureSignInConnection(ctx, ui, provider, declined)
 	if err != nil {
 		return nil, false, time.Time{}, err
 	}
-	// Sign-ins for one Connection take turns, and each judges the link as
-	// the one before it left it: a sign-in that waited reuses what that one
-	// linked rather than commit a second grant.
 	unlock := h.completionLocks.lock(string(connection.UID))
 	defer unlock()
 	if connection, err = h.reloadSignInConnection(ctx, connection, ui); err != nil {
 		return nil, false, time.Time{}, err
 	}
-	// A decline is recorded and lifted only under the lock, so overlapping
-	// sign-ins never undo each other's. It is recorded before the link
-	// changes, so no host takes what is linked next, and lifted only once
-	// custody holds a grant a host may take.
 	if declined {
 		if err := h.recordAgentHostDecline(ctx, connection, ui, true); err != nil {
 			return nil, false, time.Time{}, err
 		}
 	}
-	// Signing in again keeps a link that still holds the person's account:
-	// each commit retains the grant it replaces until disconnect, so linking
-	// every sign-in would soon refuse new ones. The caller revokes the
-	// unused token, unless custody holds that very token.
 	kept, holds, err := h.signInLinkHolds(ctx, connection, oauth, ui, !declined)
 	custody := kept.AccessToken
 	if err != nil {
-		// Replacing a link that may still work would spend one of the grants
-		// custody retains; the person retries instead.
 		return nil, custody != "" && tokens.AccessToken == custody, time.Time{},
 			fiber.NewError(fiber.StatusServiceUnavailable, "could not check your GitHub link; retry")
 	}
@@ -507,8 +400,6 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 				return nil, tokens.AccessToken == custody, time.Time{}, err
 			}
 		}
-		// The kept link's token, not the one just submitted, bounds the
-		// session when it cannot refresh.
 		if !kept.Refreshable {
 			deadline = kept.ExpiresAt
 		}
@@ -544,7 +435,6 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 		return nil, false, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to record consent")
 	}
 	expires := gitHubTokenExpiry(now, tokens.ExpiresIn)
-	// The token linked now bounds the session when it cannot refresh.
 	var linked time.Time
 	if tokens.RefreshToken == "" {
 		linked = expires
@@ -571,7 +461,6 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 		if errors.Is(err, store.ErrConnectorConsentSuperseded) {
 			return nil, false, time.Time{}, fiber.NewError(fiber.StatusConflict, "another sign-in is linking GitHub at the same time; retry")
 		}
-		// Whether the completion was stored is unknown.
 		return nil, true, time.Time{}, fiber.NewError(fiber.StatusInternalServerError, "failed to link GitHub")
 	}
 	ref, err := connectors.CredentialRef(connection)
@@ -582,10 +471,6 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	if err != nil {
 		return nil, true, time.Time{}, h.completionCommitError(ctx, err, completion, completionNonce, connection.Name)
 	}
-	// Custody now holds this sign-in's grant, so a host may take it. The
-	// decline is lifted before the status write, which the Connection
-	// reconciler repairs from the completion if it fails; nothing repairs
-	// a decline.
 	if !declined {
 		if err := h.recordAgentHostDecline(ctx, connection, ui, false); err != nil {
 			return nil, true, time.Time{}, err
@@ -600,12 +485,6 @@ func (h *Handlers) linkGitHubSignIn(ctx context.Context, ui *UserInfo, provider 
 	return connection, true, linked, nil
 }
 
-// recordAgentHostDecline records whether connection's person declined an
-// agent host. It runs under the sign-in's completion lock: a decline before
-// the link changes, a lift only once custody holds a grant a host may take.
-// The lock is keyed by UID, so the write is fenced to the Connection read
-// under it: a change by another writer is read again and the write retried,
-// and a Connection replaced under the same name is never written.
 func (h *Handlers) recordAgentHostDecline(ctx context.Context, connection *corev1alpha1.Connection, ui *UserInfo, declined bool) error {
 	for attempt := 1; ; attempt++ {
 		if (connection.Annotations[corev1alpha1.ConnectionAnnotationAgentHost] == corev1alpha1.ConnectionAgentHostDeclined) == declined {
@@ -628,23 +507,12 @@ func (h *Handlers) recordAgentHostDecline(ctx context.Context, connection *corev
 	}
 }
 
-// revokeSignInToken revokes a token a sign-in obtained and did not store.
 func (h *Handlers) revokeSignInToken(ctx context.Context, oauth connectors.OAuthProviderConfig, token string) {
 	if err := h.githubSignIn.GitHub.DeleteToken(ctx, oauth.ClientID, oauth.ClientSecret, token); err != nil {
 		log.Error(err, "could not revoke a sign-in's unused GitHub token")
 	}
 }
 
-// signInLinkHolds reports whether connection's link still holds ui's GitHub
-// account, and the token custody holds for it. A token that never expires is
-// not kept: membership is checked again only at refreshes, so the sign-in
-// replaces it with one that ends. Nor, for a sign-in that starts a host, is
-// one custody cannot refresh: its expiry is a deadline Orka chose, which a
-// host does not take. It returns an error when it cannot tell,
-// such as when custody or GitHub cannot answer: only a link shown not to
-// work is replaced. It returns the credential custody holds for a kept link.
-// With an error, the token is custody's when custody gave
-// one, or empty when custody could not be read.
 func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1.Connection,
 	oauth connectors.OAuthProviderConfig, ui *UserInfo, startsHost bool) (credential.HostCredential, bool, error) {
 	cfg := h.githubSignIn
@@ -667,7 +535,6 @@ func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1
 		return none, false, nil
 	}
 	if err != nil {
-		// Custody's token is still named, so the caller never revokes it.
 		return credential.HostCredential{AccessToken: held.AccessToken}, false, err
 	}
 	if strconv.FormatInt(account.ID, 10) != ui.Subject {
@@ -676,8 +543,6 @@ func (h *Handlers) signInLinkHolds(ctx context.Context, connection *corev1alpha1
 	return held, true, nil
 }
 
-// reloadSignInConnection reads connection again, uncached, and requires it
-// to be the same live, protected link of ui's.
 func (h *Handlers) reloadSignInConnection(ctx context.Context, connection *corev1alpha1.Connection, ui *UserInfo) (*corev1alpha1.Connection, error) {
 	fresh := &corev1alpha1.Connection{}
 	if err := h.providerReader().Get(ctx, client.ObjectKeyFromObject(connection), fresh); err != nil {
@@ -695,9 +560,6 @@ func (h *Handlers) reloadSignInConnection(ctx context.Context, connection *corev
 	return fresh, nil
 }
 
-// ensureSignInConnection returns the person's canonical Connection to
-// provider, creating it as CreateConnection does, and records a decline of
-// an agent host on a link it creates.
 func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, provider *corev1alpha1.ConnectorProvider,
 	declined bool) (*corev1alpha1.Connection, error) {
 	name := connectors.ConnectionName(provider.Name, ui.Issuer, ui.Subject)
@@ -727,8 +589,6 @@ func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, pro
 		if !apierrors.IsAlreadyExists(err) {
 			return nil, fiber.NewError(fiber.StatusInternalServerError, "failed to create your GitHub link")
 		}
-		// A concurrent sign-in created it first; this one goes on under the
-		// same checks. Read uncached: the informer may not have seen it yet.
 		connection = &corev1alpha1.Connection{}
 		err = h.providerReader().Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: name}, connection)
 	}
@@ -741,20 +601,12 @@ func (h *Handlers) ensureSignInConnection(ctx context.Context, ui *UserInfo, pro
 	if !connectionOwnedBy(connection, ui) {
 		return nil, fiber.NewError(fiber.StatusConflict, "a link with your name belongs to someone else")
 	}
-	// The provider reference is immutable, as CreateConnection holds: a
-	// Connection made outside the API under this name for another provider
-	// must never take this provider's grant.
 	if connection.Spec.ProviderRef.Name != provider.Name {
 		return nil, fiber.NewError(fiber.StatusConflict, "a link with your name is bound to another provider")
 	}
-	// Custody is written only under the finalizer that tombstones and
-	// revokes it on delete; a Connection made elsewhere gets it when first
-	// reconciled.
 	if !connectionCustodyProtected(connection) {
 		return nil, fiber.NewError(fiber.StatusConflict, "your GitHub link is still being set up; sign in again in a moment")
 	}
-	// An existing link's decline is recorded under the sign-in's completion
-	// lock; see recordAgentHostDecline.
 	return connection, nil
 }
 

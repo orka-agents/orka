@@ -59,8 +59,6 @@ func loadRoutes(path string) (map[string]string, error) {
 		Namespaces map[string]string `json:"namespaces"`
 	}
 	if err := yaml.UnmarshalStrict(data, &config); err != nil {
-		// Parser diagnostics may reproduce configuration values. Keep them out
-		// of logs, including accidentally supplied credentials.
 		return nil, fmt.Errorf("routes-file must contain a YAML namespaces mapping")
 	}
 	return config.Namespaces, nil
@@ -108,8 +106,6 @@ func newHTTPServer(address string, handler http.Handler, readTimeout time.Durati
 		ReadHeaderTimeout: min(10*time.Second, readTimeout),
 		ReadTimeout:       readTimeout,
 		IdleTimeout:       time.Minute,
-		// Bound uploads without imposing a response deadline: installations own
-		// long JSON/SSE chat durations after the request body has been received.
 	}
 }
 

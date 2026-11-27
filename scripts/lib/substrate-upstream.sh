@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Shared upstream-only local setup. Call from the bundled installer/E2E.
 
 substrate_prepare_upstream() {
   local orka_root="$1" run_dir="$2" cluster="$3"
@@ -58,12 +57,6 @@ PY
   substrate_require_clean_upstream "${SUBSTRATE_DIR}"
 }
 
-# Install the pinned control plane with ate-setup. Authorization is always
-# enforced in v1: only the shared ate-client test identity is a bootstrap
-# owner, and Orka receives least-privilege access policies afterwards. Only
-# Orka's controller identity may reach Actors through the router. Egress
-# credential injection is off; Actors get no egress unless an EgressPolicy
-# allows it (v1 has no direct egress).
 substrate_install_ate_system() {
   local orka_spiffe_id="spiffe://cluster.local/ns/${ORKA_NAMESPACE:-orka-system}/sa/${ORKA_CONTROLLER_SERVICE_ACCOUNT:-orka-controller-manager}"
   (cd "${SUBSTRATE_DIR}" && go run ./cmd/ate-setup --kind --kind-cluster-name="${KIND_CLUSTER_NAME}" \

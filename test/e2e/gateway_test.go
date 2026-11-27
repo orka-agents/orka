@@ -364,9 +364,6 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 			name = "rejects the native reply tool on unsupported interim delivery and still delivers final"
 		}
 		It(name, func() {
-			// The native image was selected before the external runtime was
-			// admitted. Retained Sessions must keep that controller/runtime epoch
-			// until the supported Gateway retention cleanup has finished.
 			agentName := "gateway-e2e-native"
 			if !capable {
 				agentName += "-legacy"

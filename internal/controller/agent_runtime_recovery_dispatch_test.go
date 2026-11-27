@@ -20,9 +20,6 @@ import (
 
 func newManagedExternalACPDispatchFixture(t *testing.T) (*externalACPDispatchFixture, *AgentRuntimeReconciler, agentRuntimeBootWitness) {
 	t.Helper()
-	// These tests span enrollment, multiple full event streams and takeover.
-	// Race instrumentation makes the existing event redaction work exceed the
-	// ordinary single-dispatch fixture's deadline.
 	f := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
 		externalACPDispatchFixtureOptions{contextTimeout: time.Minute})
 	runtime := f.runtime.DeepCopy()
@@ -72,8 +69,6 @@ func newManagedExternalACPDispatchFixture(t *testing.T) (*externalACPDispatchFix
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fixture publishes Ready directly, so seed the matching physical
-	// conformance record through the same resolver and persistence as reconcile.
 	serviceBackend, err := r.agentRuntimeServiceBackendState(f.ctx, runtime)
 	if err != nil || serviceBackend.conformanceDigest == "" {
 		t.Fatalf("managed fixture Service identity is incomplete: %v", err)
@@ -206,7 +201,6 @@ func TestAgentRuntimeRecoveryExposureRejectsTaskAndProofDrift(t *testing.T) {
 			}
 		})
 	}
-	// Mutable controller epoch is deliberately not original prompt authority.
 	current := task.DeepCopy()
 	current.Status.Execution.ControllerEpoch += 5
 	if retired, err := verifiedKubernetesRuntimeRetirement(f.ctx, f.controlStore, current, current.UID); err != nil || !retired {
@@ -247,8 +241,6 @@ func TestAgentRuntimeRecoveryFirstEnrollmentAtOldEpoch(t *testing.T) {
 	if err != nil || epoch != 2 {
 		t.Fatalf("initial old boot was not replaced at the current epoch: %d, %v", epoch, err)
 	}
-	// The witnessed idle observation belongs only to this boot and cannot
-	// satisfy cleanup for the historical boot lost before enrollment existed.
 	if _, err := loadAgentRuntimeBootWitness(t.Context(), f.control, defaultNS, f.runtime.UID, harnessv2.SupervisorBootID("historical-killsup04")); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("historical unwitnessed boot gained proof: %v", err)
 	}

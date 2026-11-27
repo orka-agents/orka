@@ -1,6 +1,5 @@
 package sqlite
 
-// controlSchemaStatements defines the ACP control and payload tables.
 func controlSchemaStatements() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS controller_epochs (

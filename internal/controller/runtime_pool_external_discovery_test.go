@@ -118,7 +118,6 @@ func (c *externalDiscoveryWriteFailureClient) Patch(ctx context.Context, object 
 		}
 	}
 	if fail && c.unrelatedWrite {
-		// Another writer bumps the pool, so the optimistic lock really conflicts.
 		c.fired = true
 		current := &corev1alpha1.RuntimePool{}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
@@ -157,8 +156,6 @@ func TestExternalDiscoveryReceiptLossNeverAdoptsUnknownUID(t *testing.T) {
 						t.Fatal("write failure not exercised")
 					}
 					currentPool := runtimePoolTestGetPool(t, f.r, f.pool)
-					// Receipt writes are re-read and retried in place; only a lost
-					// create response leaves the UID unknown.
 					if stage != "create" {
 						if err != nil {
 							t.Fatalf("receipt write failure was not retried: %v", err)

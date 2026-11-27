@@ -499,8 +499,6 @@ func TestValidateACPProviderNativePolicyCodexReadOnlySurface(t *testing.T) {
 	); err != nil {
 		t.Fatalf("read-intent read-only surface rejected: %v", err)
 	}
-	// The same surface must stay rejected for write intent, and any other
-	// restricted shape must stay rejected for every intent.
 	if err := validateACPProviderNativePolicy(
 		string(corev1alpha1.AgentRuntimeCodex), corev1alpha1.WorkspaceIntentWrite, surface, nil, true,
 	); err == nil {
@@ -518,8 +516,6 @@ func TestValidateACPProviderNativePolicyCodexReadOnlySurface(t *testing.T) {
 			t.Fatalf("restricted codex policy %v was accepted", allowed)
 		}
 	}
-	// Brokered tool names are enforced by the MCP broker and must not break
-	// the codex read-only surface (delegated children add coordination tools).
 	withBrokered := append([]string{"check_messages"}, surface...)
 	withBrokered = append(withBrokered, "send_message")
 	if err := validateACPProviderNativePolicy(

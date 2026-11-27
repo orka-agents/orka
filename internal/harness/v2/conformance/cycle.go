@@ -49,8 +49,6 @@ func probeLifecycle(
 	if err != nil {
 		return fmt.Errorf("allocate conformance identity: %w", err)
 	}
-	// Cancellation retires a session. Prove workspace validation and
-	// publication on a separate, successfully completed prompt first.
 	if target.WorkspaceGovernance.Strict() {
 		workspaceProbeID := "workspace-" + probeID
 		workspaceState := newLifecycleProbeState(httpClient, client, target, status.Fence, workspaceProbeID)
@@ -71,8 +69,6 @@ func probeLifecycle(
 			return err
 		}
 	}
-	// Check the generation while the session is still idle. Cancellation may
-	// retire it before the controller can issue an explicit deletion.
 	deleteRequest, err := state.deleteSessionRequest("delete-session-" + probeID)
 	if err != nil {
 		return err
@@ -85,8 +81,6 @@ func probeLifecycle(
 		return err
 	}
 	completed := settlement.TerminalEvent == harnessv2.EventCompleted
-	// A prompt that finishes before cancellation still owes workspace
-	// validation and publication finalization before its session can retire.
 	if completed && target.WorkspaceGovernance.Strict() {
 		if err := state.probeCompletedPromptWorkspace(ctx, probeID, promptRequest.Metadata, settlement); err != nil {
 			return err
@@ -212,8 +206,6 @@ func (s *lifecycleProbeState) probeCompletedPromptLifecycle(
 	}
 	streamDone := make(chan promptStreamResult, 1)
 	streamDone <- result
-	// Replaying cancellation and settlement is safe while the completed
-	// session awaits validation. A canceled session may already be retired.
 	return s.probeCancellationSettlement(ctx, probeID, request, streamDone, true)
 }
 
@@ -341,8 +333,6 @@ func (s *lifecycleProbeState) probeSessionDeletion(ctx context.Context, probeID 
 			return fmt.Errorf("delete conformance runtime session: %w", err)
 		}
 		if clientErr.StatusCode == http.StatusNotFound {
-			// A canceled session may already have been retired. Verify absence
-			// on the same runtime boot, rather than accepting a bare 404.
 			status, statusErr := s.client.Status(ctx)
 			if statusErr != nil {
 				return fmt.Errorf("verify canceled runtime session retirement: %w", statusErr)
@@ -689,9 +679,6 @@ func (s *lifecycleProbeState) cleanup(ctx context.Context) {
 	if !s.sessionCreated {
 		return
 	}
-	// Cancel and delete each get a full control-timeout budget rather than
-	// sharing one fixed 5s window, so a slow cancellation cannot starve the
-	// deletion and leak a resident probe session until capacity is exhausted.
 	budget := s.target.ControlTimeout
 	if budget <= 0 {
 		budget = defaultControlTimeout
@@ -706,9 +693,6 @@ func (s *lifecycleProbeState) cleanup(ctx context.Context) {
 		cancel()
 	}
 	if !s.deleteAttempted {
-		// Verify deletion succeeded and retry once on a transient failure, so a
-		// runtime that needs more than one attempt to release the session does
-		// not leave it resident.
 		for attempt := range 2 {
 			deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 			request, err := s.deleteSessionRequest(fmt.Sprintf("cleanup-delete-%s-%d", s.sessionID, attempt))

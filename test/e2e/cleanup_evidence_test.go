@@ -35,9 +35,6 @@ import (
 
 const e2eCleanupFinalizer = "e2e.orka.ai/cleanup-observer"
 
-// These records deliberately exclude Task specs, transcripts, credentials,
-// response bodies and unrestricted command errors. A failed run keeps the
-// last completed boundary instead of relying on Ginkgo's primary assertion.
 type e2eTaskCleanupEvidence struct {
 	Name                        string    `json:"name"`
 	Namespace                   string    `json:"namespace"`
@@ -240,7 +237,6 @@ func cleanupE2EToken(ctx context.Context) (string, error) {
 	cmd := exec.CommandContext(ctx, "kubectl", "create", "token", serviceAccountName,
 		"-n", namespace, "--duration=10m", "--request-timeout=10s")
 	cmd.WaitDelay = time.Second
-	// Capture the token only in memory, without the logging command runner.
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -260,10 +256,6 @@ func (c *e2eCleanup) checkpoint(stage string) error {
 	return c.save(c.report)
 }
 
-// tasks requests normal deletion under exact UID preconditions. Its finalizer
-// only observes the controller's existing cleanup barriers; it never supplies
-// a receipt or removes a product finalizer. allSessions is used only by the
-// final sweep of this suite's isolated test namespace.
 func (c *e2eCleanup) tasks(ctx context.Context, taskNames []string, allSessions bool) (resultErr error) {
 	defer func() {
 		c.report.FinishedAt = time.Now().UTC()
@@ -284,8 +276,6 @@ func (c *e2eCleanup) tasks(ctx context.Context, taskNames []string, allSessions 
 		}
 		record := &e2eTaskCleanupEvidence{Name: name, Namespace: namespace, UID: task.UID}
 		if task.Status.Execution != nil && task.Status.Execution.RuntimeSessionUID != "" {
-			// An admitted Task must prove runtime cleanup even if it later
-			// loses its execution status; never downgrade it to non-ACP.
 			record.ReceiptRequired = true
 		}
 		c.report.Tasks = append(c.report.Tasks, record)
@@ -435,8 +425,6 @@ func captureTaskCleanupReceipt(task *corev1alpha1.Task, record *e2eTaskCleanupEv
 		if record.ReceiptRequired {
 			return false, errors.New("Task lost a required runtime cleanup identity")
 		}
-		// A never-admitted or non-ACP Task can finalize without a terminal
-		// status update. Its product finalizers remain the cleanup barrier.
 		return true, nil
 	}
 	terminal := []corev1alpha1.TaskPhase{
@@ -462,8 +450,6 @@ func captureTaskCleanupReceipt(task *corev1alpha1.Task, record *e2eTaskCleanupEv
 		idHash := sha256.Sum256([]byte(e.RuntimeInstanceID))
 		record.RuntimeInstanceDigest = "sha256:" + hex.EncodeToString(idHash[:])
 	}
-	// An authenticated registration drain can prove cleanup even when Task
-	// admission did not retain the complete task-scoped runtime identity.
 	drainDigest, drainErr := e2eRuntimeDrainCleanupDigest(task)
 	if drainErr == nil && drainDigest != "" && e.RuntimeSessionCleanupDigest == drainDigest {
 		record.RuntimeCleanupDigest, record.ReceiptVerified = drainDigest, true
@@ -684,7 +670,6 @@ func (c *e2eCleanup) archiveSession(ctx context.Context, record *e2eSessionClean
 			return false, err
 		}
 		attempted = true
-		// Bound evidence size for a slow but healthy 409 retry loop.
 		if len(record.DeleteStatuses) == 0 || record.DeleteStatuses[len(record.DeleteStatuses)-1] != status {
 			record.DeleteStatuses = append(record.DeleteStatuses, status)
 		}

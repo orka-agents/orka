@@ -6,7 +6,6 @@ import { INCIDENT_APPROVAL, INCIDENT_TASK, RELEASE_TASK, TOUR_AGENT, TOUR_FINDIN
 
 const get = (path: string) => handleDemoRequest(new Request(`http://localhost/api/v1${path}`))
 
-// Generated from `orka --help` by `make docs-cli`: one section per command.
 const cliReference = new Map(
   readFileSync(path.resolve(__dirname, '../../../../website/docs/reference/cli-commands.md'), 'utf8')
     .split(/^## /m)

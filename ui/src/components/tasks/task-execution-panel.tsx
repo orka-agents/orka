@@ -7,20 +7,12 @@ import { latestModelContextEvent, latestModelUsageEvents } from '@/lib/execution
 
 const steps = ['Pending', 'Running', 'Completed'] as const
 
-// Map a task phase onto the coarse Pending → Running → Completed stepper.
-// Scheduled hasn't started yet, so it sits at the start (step 0). Running and
-// Finalizing are both in progress. Only terminal phases
-// (Succeeded/Failed/Cancelled) land on the final step.
-
 function stepIndex(phase?: string): number {
   if (!phase || phase === 'Pending' || phase === 'Scheduled') return 0
   if (phase === 'Running' || phase === 'Finalizing') return 1
   return 2
 }
 
-// A step is done once the task has moved past it; the final step is done
-// when the task is terminal, marked by its outcome rather than shown as the
-// "current" step forever.
 function stepMarker(index: number, current: number, phase?: string): { mark: string; className: string } {
   const finished = current === steps.length - 1
   if (index < current) return { mark: '✓', className: 'bg-status-succeeded-bg text-status-succeeded' }
@@ -180,8 +172,6 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
   const totalIn = modelEvents.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0)
   const totalOut = modelEvents.reduce((sum, event) => sum + (event.outputTokens ?? 0), 0)
   const totalCachedIn = modelEvents.reduce((sum, event) => sum + (event.cachedInputTokens ?? 0), 0)
-  // Some runtimes (OpenCode) report model requests without token counts;
-  // a sum of zeros would read as a real "0 tokens" measurement.
   const usageRecorded = modelEvents.some((event) =>
     event.inputTokens !== undefined || event.outputTokens !== undefined || event.cachedInputTokens !== undefined)
   const current = stepIndex(phase)
@@ -192,7 +182,6 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
         <CardTitle>Execution</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Steps wrap on narrow cards instead of running past the edge. */}
         <div className="flex flex-wrap items-center gap-2" data-testid="progress-steps">
           {steps.map((step, index) => {
             const marker = stepMarker(index, current, phase)

@@ -250,9 +250,6 @@ func newSkillImportCmd() *cobra.Command {
 	return cmd
 }
 
-// deriveSkillImportName picks a Kubernetes-safe skill name for an imported
-// SKILL.md: the H1 heading when present, otherwise the parent directory when
-// the file itself is the conventional SKILL.md, otherwise the file name.
 func deriveSkillImportName(filePath string, data []byte) string {
 	frontmatter, body := splitSkillFrontmatter(data)
 	if name := sanitizeSkillName(frontmatter[cliNameKey]); name != "" {
@@ -276,9 +273,6 @@ func deriveSkillImportName(filePath string, data []byte) string {
 	return sanitizeSkillName(stem)
 }
 
-// deriveSkillImportDescription returns the first paragraph under a
-// "## Description" heading, or the first non-heading paragraph when the file
-// has no description section.
 func deriveSkillImportDescription(data []byte) string {
 	frontmatter, body := splitSkillFrontmatter(data)
 	if description := truncateSkillDescription(frontmatter["description"]); description != "" {
@@ -321,8 +315,6 @@ func skillMarkdownHeading(data []byte) string {
 	return ""
 }
 
-// sanitizeSkillName lowercases and collapses a free-form label into a
-// DNS-1123 label (a-z, 0-9, and interior dashes).
 func sanitizeSkillName(value string) string {
 	var b strings.Builder
 	lastDash := true
@@ -351,8 +343,6 @@ func truncateSkillDescription(value string) string {
 	if len(value) <= maxLen {
 		return value
 	}
-	// Cut on a rune boundary so a multibyte character crossing the limit
-	// cannot become invalid UTF-8 in the stored description.
 	cut := maxLen
 	for cut > 0 && !utf8.RuneStart(value[cut]) {
 		cut--
@@ -360,9 +350,6 @@ func truncateSkillDescription(value string) string {
 	return strings.TrimSpace(value[:cut])
 }
 
-// splitSkillFrontmatter separates a leading YAML frontmatter block
-// (---\nkey: value\n---) from the Markdown body. Only simple scalar
-// `key: value` lines are read; quoted values are unquoted.
 func splitSkillFrontmatter(data []byte) (map[string]string, []byte) {
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	fields := map[string]string{}
@@ -374,10 +361,6 @@ func splitSkillFrontmatter(data []byte) (map[string]string, []byte) {
 	if !ok {
 		return fields, data
 	}
-	// Parse the block as YAML so folded (`>-`) and literal (`|`) block
-	// scalars, multi-line flow scalars, and quoting are all honoured;
-	// only top-level scalar values are kept. A block that is not valid
-	// YAML falls back to the simple `key: value` line reader.
 	var parsed map[string]any
 	if err := sigsyaml.Unmarshal([]byte(before), &parsed); err == nil {
 		for key, value := range parsed {
@@ -406,8 +389,6 @@ func splitSkillFrontmatter(data []byte) (map[string]string, []byte) {
 	return fields, []byte(body)
 }
 
-// skillFrontmatterScalar renders a parsed frontmatter value as trimmed text
-// when it is a scalar; lists and maps are not usable as name/description.
 func skillFrontmatterScalar(value any) (string, bool) {
 	switch v := value.(type) {
 	case string:

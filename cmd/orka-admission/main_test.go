@@ -205,8 +205,6 @@ func newServingCertificateFixture(
 	}
 }
 
-// A renamed worker that the provenance trust list leaves out still gets the
-// worker rules once --worker-service-accounts names it.
 func TestTaskProvenanceConfigCoversConfiguredWorkers(t *testing.T) {
 	opts := options{taskProvenanceTrustedSAs: "trusted-sa", workerServiceAccounts: "team-ai-worker, team-vendor-worker"}
 	cfg := opts.taskProvenanceConfig([]string{"system:serviceaccount:orka-system:orka-controller-manager"})

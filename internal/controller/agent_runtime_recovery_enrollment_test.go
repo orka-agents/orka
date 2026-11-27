@@ -331,9 +331,6 @@ func TestRecoveryEnrollmentLatePodRetentionCannotOutliveRuntime(t *testing.T) {
 			break
 		}
 	}
-	// Model only the already-sent PATCH completing after the timed-out call.
-	// Its exact optimistic resourceVersion must not be able to install an
-	// unowned Pod finalizer after runtime finalization.
 	lateErr := base.Patch(t.Context(), delayedPod, client.RawPatch(types.MergePatchType, delayedPatch))
 	if lateErr != nil && !apierrors.IsConflict(lateErr) {
 		t.Fatalf("delayed original patch = %v", lateErr)
@@ -384,8 +381,6 @@ func TestRecoveryEnrollmentPreparationDuringFinalizationRetainsOwner(t *testing.
 				return err
 			}
 			if _, ok := list.(*corev1alpha1.ExternalEffectList); ok && effectScans.Add(1) == 1 {
-				// The first scan has already observed the reservation. Publish
-				// the original preparation before the final removal guard runs.
 				preparation := identity
 				preparation.Kind = agentRuntimeBootPreparationKind
 				return persistAgentRuntimeRecoveryEffect(ctx, f.control, f.fence, preparation, digest, witness)
@@ -458,8 +453,6 @@ func TestRecoveryEnrollmentFencesDelayedOwnerRemoval(t *testing.T) {
 	if _, err := f.r.finalizeKubernetesAgentRuntime(t.Context(), f.runtime); !errors.Is(err, context.DeadlineExceeded) || delayedOwner == nil {
 		t.Fatalf("owner removal was not left in flight: %v", err)
 	}
-	// The original preparation publication, whose caller timed out, commits
-	// after the owner-removal request was sent. Neither write is replayed.
 	if err := persistAgentRuntimeRecoveryEffect(t.Context(), f.control, f.fence, preparation, digest, witness); err != nil {
 		t.Fatal(err)
 	}
@@ -500,8 +493,6 @@ func legacyRetainedRecoveryFixture(t *testing.T) (*runtimeRecoveryFixture, agent
 		agentRuntimeRecoveryIdentity(agentRuntimeBootWitnessKind, witness.RuntimeUID, witness.Namespace, string(witness.Fence.SupervisorBootID)), digest, witness); err != nil {
 		t.Fatal(err)
 	}
-	// This is the exact witness-first format emitted before preparations:
-	// the Pod is retained, but neither new annotation exists.
 	controllerutil.AddFinalizer(f.pod, agentRuntimeRecoveryPodFinalizer)
 	if err := f.r.Update(t.Context(), f.pod); err != nil {
 		t.Fatal(err)
@@ -670,8 +661,6 @@ func TestRecoveryEnrollmentOwnerRemovalBeforeLatePreparation(t *testing.T) {
 	if _, err := f.r.finalizeKubernetesAgentRuntime(t.Context(), f.runtime); !errors.Is(err, context.DeadlineExceeded) || delayedOwner == nil {
 		t.Fatalf("owner removal was not left in flight: %v", err)
 	}
-	// Both original writes complete after their callers timed out. Owner
-	// removal wins before any Pod retention request has been sent.
 	if err := persistAgentRuntimeRecoveryEffect(t.Context(), f.control, f.fence, preparation, digest, witness); err != nil {
 		t.Fatal(err)
 	}

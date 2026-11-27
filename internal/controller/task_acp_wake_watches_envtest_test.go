@@ -30,10 +30,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// A provider status write on a linked ExecutionWorkspace reconciles the
-// waiting Task through the watch, with no Task event and no RequeueAfter
-// poll, and status churn the gates ignore does not. A Task reaching Queued
-// wakes the ACP dispatcher the same way.
 func TestACPWorkspaceStatusChangeWakesLinkedTaskWithoutPolling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -59,7 +55,6 @@ func TestACPWorkspaceStatusChangeWakesLinkedTaskWithoutPolling(t *testing.T) {
 	}
 	requests := make(chan reconcile.Request, 64)
 	probe := ctrl.NewControllerManagedBy(mgr).Named("acp-task-wake-probe").
-		// Task events never reach the probe: only the wake watches can.
 		For(&corev1alpha1.Task{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(client.Object) bool { return false })))
 	probe, err = registerACPTaskWakeWatches(ctx, mgr, probe)
 	if err != nil {
@@ -142,8 +137,6 @@ func TestACPWorkspaceStatusChangeWakesLinkedTaskWithoutPolling(t *testing.T) {
 	expectWake("workspace created", 10*time.Second)
 	expectQuiet("after create", 300*time.Millisecond)
 
-	// The provider acknowledges the current generation: well inside one 2s
-	// gate poll, the watch alone reconciles the Task.
 	updateStatus := func(mutate func(*workspacev1alpha1.ExecutionWorkspace)) {
 		t.Helper()
 		current := &workspacev1alpha1.ExecutionWorkspace{}
@@ -165,13 +158,11 @@ func TestACPWorkspaceStatusChangeWakesLinkedTaskWithoutPolling(t *testing.T) {
 	})
 	expectWake("provider acknowledged", 1500*time.Millisecond)
 
-	// Rewording a condition message changes nothing a gate reads.
 	updateStatus(func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Status.Conditions[0].Message = "provisioned and healthy"
 	})
 	expectQuiet("condition message", 750*time.Millisecond)
 
-	// A Task reaching Queued wakes the dispatcher before its next tick.
 	select {
 	case <-dispatcher.wakeChannel():
 	default:

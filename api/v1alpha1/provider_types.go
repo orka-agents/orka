@@ -15,11 +15,8 @@ import (
 type ProviderType string
 
 const (
-	// ProviderTypeAnthropic is the Anthropic Claude provider
-	ProviderTypeAnthropic ProviderType = "anthropic"
-	// ProviderTypeOpenAI is the OpenAI provider
-	ProviderTypeOpenAI ProviderType = "openai"
-	// ProviderTypeAzureOpenAI is the Azure OpenAI provider
+	ProviderTypeAnthropic   ProviderType = "anthropic"
+	ProviderTypeOpenAI      ProviderType = "openai"
 	ProviderTypeAzureOpenAI ProviderType = "azure-openai"
 )
 

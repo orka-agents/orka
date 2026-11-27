@@ -13,8 +13,6 @@ import (
 	"strings"
 )
 
-// UnmarshalJSON rejects unsupported contracts before a client or admission
-// decoder can interpret an explicitly requested protocol as current work.
 func (in *AgentRuntimeContractVersion) UnmarshalJSON(data []byte) error {
 	var value string
 	if err := json.Unmarshal(data, &value); err != nil {
@@ -119,10 +117,6 @@ func (in *AgentRuntimeObservedCapabilities) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// The corresponding CRD objects preserve unknown fields until admission.
-// Reject removed inputs before typed decoding can discard them. Only exact
-// schema field names may pass: Go's case-insensitive decoding must not turn an
-// unvalidated unknown key into a known field after schema validation.
 func decodeRuntimeJSON(data []byte, target any, path string, removed ...string) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {

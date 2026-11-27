@@ -23,65 +23,38 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 )
 
-// ProviderResolver resolves LLM providers from Kubernetes CRDs and secrets.
-// It consolidates provider lookup, API key resolution, and provider construction
-// logic shared by the chat, OpenAI-compat, and Anthropic-compat handlers.
 type ProviderResolver struct {
 	client client.Client
 	config ChatConfig
 }
 
-// ResolveOpts configures how a provider is resolved.
 type ResolveOpts struct {
-	ProviderName string // explicit provider name (chat handler)
-	ModelStr     string // "provider/model" format or plain model (compat handlers)
-	Model        string // explicit model override (chat handler)
-	AgentRef     string // agent reference for agent-based resolution (chat handler)
-	Namespace    string
-	RequireModel bool // return error if model is empty after resolution
-	// RequireExplicitProvider disables every implicit Provider selection,
-	// including configured, default-named, and sole-ready Providers. Handlers
-	// set it for context-token requests so every request without an explicit
-	// Provider or Agent-bound Provider has the same outcome.
-	RequireExplicitProvider bool
-	// AuthorizeProviderReference runs on an explicitly named Provider before
-	// its credential is read or any implicit selection happens. It receives
-	// the loaded Provider's metadata (name, namespace, type) so type-based
-	// grants apply; when the Provider does not exist it receives the name
-	// only, and its rejection is returned in place of the not-found error so
-	// missing and unauthorized names stay indistinguishable to scoped
-	// callers.
+	ProviderName               string
+	ModelStr                   string
+	Model                      string
+	AgentRef                   string
+	Namespace                  string
+	RequireModel               bool
+	RequireExplicitProvider    bool
 	AuthorizeProviderReference func(ProviderResolutionInfo) error
-	// AuthorizeProviderUse runs after the effective model is known but before
-	// the Provider credential is read.
-	AuthorizeProviderUse func(ProviderResolutionInfo, string) error
+	AuthorizeProviderUse       func(ProviderResolutionInfo, string) error
 }
 
-// ProviderResolutionInfo contains the Provider CRD metadata selected for a request.
 type ProviderResolutionInfo struct {
 	Name      string
 	Namespace string
 	Type      string
 }
 
-// NewProviderResolver creates a new ProviderResolver.
 func NewProviderResolver(c client.Client, config ChatConfig) *ProviderResolver {
 	return &ProviderResolver{client: c, config: config}
 }
 
-// Resolve finds the appropriate LLM provider and model for a request.
-// It handles provider/model string parsing, Kubernetes secret resolution,
-// and provider construction.
-//
-// When AgentRef or ProviderName is set, provider lookups are fatal (errors are returned).
-// Otherwise, intermediate lookups are non-fatal and fall through to defaults.
 func (r *ProviderResolver) Resolve(ctx context.Context, opts ResolveOpts) (llm.Provider, string, error) {
 	provider, model, _, err := r.ResolveWithInfo(ctx, opts)
 	return provider, model, err
 }
 
-// ResolveWithInfo finds the appropriate LLM provider and model for a request,
-// and also returns the selected Provider CRD metadata.
 func (r *ProviderResolver) ResolveWithInfo(ctx context.Context, opts ResolveOpts) (llm.Provider, string, ProviderResolutionInfo, error) {
 	if opts.AgentRef != "" || opts.ProviderName != "" {
 		return r.resolveFromExplicit(ctx, opts)
@@ -89,8 +62,6 @@ func (r *ProviderResolver) ResolveWithInfo(ctx context.Context, opts ResolveOpts
 	return r.resolveFromModelStr(ctx, opts)
 }
 
-// resolveFromExplicit handles the chat handler path with explicit provider names
-// and agent refs. Provider lookups by name are fatal.
 func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts ResolveOpts) (llm.Provider, string, ProviderResolutionInfo, error) {
 	var model string
 	var providerCRD *corev1alpha1.Provider
@@ -111,10 +82,6 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 
 	if opts.ProviderName != "" {
 		if providerName != "" && providerName != opts.ProviderName {
-			// The bound Provider's name is withheld: this error can reach a
-			// context token before provider-use authorization runs, and it
-			// must not become an enumeration path around the
-			// authorization-aware Providers API.
 			return nil, "", ProviderResolutionInfo{}, fmt.Errorf("agent %q is bound to a different provider; omit the provider or choose an agent without a providerRef", opts.AgentRef)
 		}
 		providerName = opts.ProviderName
@@ -124,20 +91,12 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 		p, err := r.LookupProvider(ctx, providerName, opts.Namespace)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				// Masking: a name the caller may not reference gets the same
-				// answer whether or not the Provider exists. Only the name is
-				// known here, so a type-based grant cannot apply; a caller
-				// holding one sees a missing Provider and a wrong-type
-				// Provider identically.
 				if authErr := authorizeProviderReference(opts, ProviderResolutionInfo{Name: providerName, Namespace: opts.Namespace}); authErr != nil {
 					return nil, "", ProviderResolutionInfo{}, authErr
 				}
 			}
 			return nil, "", ProviderResolutionInfo{}, err
 		}
-		// The loaded Provider carries its type, so type-based grants
-		// (allowedProviders naming a provider type) authorize here exactly as
-		// they do for the Providers list.
 		if err := authorizeProviderReference(opts, providerResolutionInfo(p)); err != nil {
 			return nil, "", ProviderResolutionInfo{}, err
 		}
@@ -158,9 +117,6 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 	if providerCRD == nil {
 		p, err := r.LookupProvider(ctx, "default", opts.Namespace)
 		if err != nil {
-			// Runtime Agents carry no providerRef; the coordinator still needs
-			// a chat Provider, so apply the same sole-ready fallback as the
-			// model-string path instead of demanding one named "default".
 			fallback, fallbackErr := r.soleReadyProvider(ctx, opts.Namespace, "", opts.RequireExplicitProvider)
 			if fallbackErr != nil {
 				return nil, "", ProviderResolutionInfo{}, fallbackErr
@@ -170,7 +126,6 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 		providerCRD = p
 	}
 
-	// Model resolution priority: opts.Model > agent model > provider default > config model
 	if opts.Model != "" {
 		model = opts.Model
 	}
@@ -198,9 +153,6 @@ func (r *ProviderResolver) resolveFromExplicit(ctx context.Context, opts Resolve
 	return provider, resolvedModel, providerInfo, nil
 }
 
-// resolveFromModelStr handles the compat handler path with "provider/model"
-// format strings. An explicit provider prefix is authoritative and fails
-// closed; fallback applies only when the model string names no provider.
 func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts ResolveOpts) (llm.Provider, string, ProviderResolutionInfo, error) {
 	var providerName, model string
 
@@ -217,20 +169,12 @@ func (r *ProviderResolver) resolveFromModelStr(ctx context.Context, opts Resolve
 		p, err := r.LookupProvider(ctx, providerName, opts.Namespace)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				// Masking: a name the caller may not reference gets the same
-				// answer whether or not the Provider exists. Only the name is
-				// known here, so a type-based grant cannot apply; a caller
-				// holding one sees a missing Provider and a wrong-type
-				// Provider identically.
 				if authErr := authorizeProviderReference(opts, ProviderResolutionInfo{Name: providerName, Namespace: opts.Namespace}); authErr != nil {
 					return nil, "", ProviderResolutionInfo{}, authErr
 				}
 			}
 			return nil, "", ProviderResolutionInfo{}, err
 		}
-		// The loaded Provider carries its type, so type-based grants
-		// (allowedProviders naming a provider type) authorize here exactly as
-		// they do for the Providers list.
 		if err := authorizeProviderReference(opts, providerResolutionInfo(p)); err != nil {
 			return nil, "", ProviderResolutionInfo{}, err
 		}
@@ -306,7 +250,6 @@ func explicitProviderRequiredError() error {
 	return fmt.Errorf("no provider selected and no default Provider is configured; pass an explicit provider")
 }
 
-// providerResolutionInfo extracts stable metadata from a Provider CRD.
 func providerResolutionInfo(providerCRD *corev1alpha1.Provider) ProviderResolutionInfo {
 	if providerCRD == nil {
 		return ProviderResolutionInfo{}
@@ -318,7 +261,6 @@ func providerResolutionInfo(providerCRD *corev1alpha1.Provider) ProviderResoluti
 	}
 }
 
-// buildProvider constructs an LLM provider from a Provider CRD, API key, and model.
 func (r *ProviderResolver) buildProvider(providerCRD *corev1alpha1.Provider, apiKey, model string) (llm.Provider, string, error) {
 	providerConfig := llm.ProviderConfig{
 		APIKey:       apiKey,
@@ -338,7 +280,6 @@ func (r *ProviderResolver) buildProvider(providerCRD *corev1alpha1.Provider, api
 	return provider, model, nil
 }
 
-// LookupProvider fetches a Provider CRD by name and namespace.
 func (r *ProviderResolver) LookupProvider(ctx context.Context, name, namespace string) (*corev1alpha1.Provider, error) {
 	p := &corev1alpha1.Provider{}
 	if err := r.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, p); err != nil {
@@ -347,7 +288,6 @@ func (r *ProviderResolver) LookupProvider(ctx context.Context, name, namespace s
 	return p, nil
 }
 
-// ResolveAPIKey extracts the API key from a Provider CRD's secret reference.
 func (r *ProviderResolver) ResolveAPIKey(ctx context.Context, providerCRD *corev1alpha1.Provider) (string, error) {
 	secretName := providerCRD.Spec.SecretRef.Name
 	secretKey := providerCRD.Spec.SecretRef.Key
@@ -365,11 +305,6 @@ func (r *ProviderResolver) ResolveAPIKey(ctx context.Context, providerCRD *corev
 	return string(apiKeyBytes), nil
 }
 
-// soleReadyProvider selects the namespace's only ready Provider when no
-// provider was named and no default is configured: an unambiguous choice is
-// friendlier than an error, and the caller's provider-use authorization still
-// applies to the selected Provider. With zero or several candidates the error
-// names what exists so the caller can choose.
 func (r *ProviderResolver) soleReadyProvider(ctx context.Context, namespace, requestedName string, requireExplicitProvider bool) (*corev1alpha1.Provider, error) {
 	list := &corev1alpha1.ProviderList{}
 	if err := r.client.List(ctx, list, client.InNamespace(namespace)); err != nil {
@@ -386,8 +321,6 @@ func (r *ProviderResolver) soleReadyProvider(ctx context.Context, namespace, req
 		return ready[0], nil
 	}
 	if requireExplicitProvider {
-		// One uniform outcome for scoped callers, independent of how many
-		// Providers exist or are ready.
 		return nil, explicitProviderRequiredError()
 	}
 	prefix := "no provider selected"
@@ -397,16 +330,9 @@ func (r *ProviderResolver) soleReadyProvider(ctx context.Context, namespace, req
 	if len(list.Items) == 0 {
 		return nil, fmt.Errorf("%s and namespace %q has no Providers; create a Provider (or one named \"default\") or configure the chat default provider", prefix, namespace)
 	}
-	// The error deliberately names and counts no Providers: resolution runs
-	// with controller credentials before the caller's provider-use
-	// authorization, and a scoped context token must not learn anything
-	// about Providers outside its scopes from this message. The
-	// authorization-aware list endpoints are the enumeration surface.
 	return nil, fmt.Errorf("%s and no default Provider is configured; list the Providers you can use with the providers API and pass one, create a Provider named \"default\", or configure the chat default provider", prefix)
 }
 
-// requestUsesContextToken reports whether the request authenticated with a
-// transaction context token, whose Provider visibility is scope-limited.
 func requestUsesContextToken(c fiber.Ctx) bool {
 	ui := GetUserInfo(c)
 	return ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil

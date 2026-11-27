@@ -11,9 +11,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// The digest-checking store also records the protected writes the tests below
-// send, before the provider handles them.
-
 func (s *digestCheckingStore) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	s.check(ctx, "UpdateMemory", memory)
 	return s.Store.UpdateMemory(ctx, memory)
@@ -109,7 +106,6 @@ func (s *digestCheckingStore) MarkGatewayDeliveryTerminal(
 	return s.Store.MarkGatewayDeliveryTerminal(ctx, namespace, id, owner, state, reason, now)
 }
 
-// secretText is redacted by Orka's credential redaction.
 const secretText = "dial failed: password=correct-horse-battery-staple rejected"
 
 func protectedEvent() *store.ExecutionEvent {
@@ -119,10 +115,6 @@ func protectedEvent() *store.ExecutionEvent {
 	}
 }
 
-// A caller that supplies its own write envelope sends a request the client
-// would redact, bound or otherwise prepare: the client does not change it,
-// and refuses it with ErrValidation before the provider is called. A record
-// the caller passed by pointer is left as it was.
 func TestCallerEnvelopeRefusesARequestTheClientWouldProtect(t *testing.T) {
 	long := strings.Repeat("r", gatewayReasonBytes+1)
 	cases := map[string]struct {
@@ -289,10 +281,6 @@ func TestCallerEnvelopeRefusesARequestTheClientWouldProtect(t *testing.T) {
 	}
 }
 
-// A caller-owned request the client would not change reaches the provider as
-// the caller sent it: the digest recomputed from what the provider receives
-// matches the caller's envelope. The provider may refuse it for its own
-// reasons; the client does not.
 func TestCallerEnvelopeSendsAProtectedRequestUnchanged(t *testing.T) {
 	cases := map[string]func(*testing.T, *lossyFixture) error{
 		"UpdateMemory": func(t *testing.T, f *lossyFixture) error {

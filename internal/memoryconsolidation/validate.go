@@ -20,31 +20,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Validate decides which submitted operations a run keeps. The model's output
-// is untrusted: every operation is checked against what the run read, and
-// one that fails is dropped with its reason while the others still count.
-//
-// An operation is kept only when:
-//   - its type is known and its targets fit it: none for add, two or more for
-//     merge, one for supersede, one or more for retire;
-//   - every target is a memory the run read, at the generation it read, and
-//     no earlier kept operation targets it; when current is set, it is also
-//     still an active memory at that generation, so an operation on a memory
-//     that changed since the run read it is dropped rather than proposed
-//     stale;
-//   - every source is a Session the run read, and a cited message is one of
-//     that Session's messages the run read; an add cites at least one.
-//     Repeated citations are dropped, and only the first
-//     MaxMemoryProposalSources are kept;
-//   - it does not repeat an open proposal the run read: it is not the same
-//     change as one, even when it covers it, and it targets a memory or
-//     proposes content that an open proposal already does only when it covers
-//     that proposal. Covers keeps only open proposals the run read;
-//   - add, merge and supersede carry content of at most MaxContentChars;
-//   - the run keeps no more than maxOperations operations, and removes no
-//     more than a quarter of the memories it read, at least one. A merge of
-//     k memories removes k-1, a supersede none and a retire k: a merge keeps
-//     what it combines, so it costs only the duplicates it removes.
 func Validate(submission Submission, input Input, current map[string]uint64, maxOperations int) ([]Operation, []Rejection, []Conflict) {
 	generations := make(map[string]uint64, len(input.Memories))
 	for _, memory := range input.Memories {
@@ -147,14 +122,11 @@ func Validate(submission Submission, input Input, current map[string]uint64, max
 	return kept, rejected, validConflicts(submission.Conflicts, generations)
 }
 
-// openProposals indexes the open proposals a run read.
 type openProposals struct {
-	ids     map[string]bool
-	targets map[string][]string // memory ID -> proposals that change it
-	// contents maps normalized proposed content to the proposals proposing it.
+	ids      map[string]bool
+	targets  map[string][]string
 	contents map[string][]string
-	// changes holds each proposal's change: its type, targets and content.
-	changes map[string]bool
+	changes  map[string]bool
 }
 
 func newOpenProposals(read, later []InputProposal) openProposals {
@@ -166,8 +138,6 @@ func newOpenProposals(read, later []InputProposal) openProposals {
 		for _, target := range proposal.Targets {
 			open.targets[target.MemoryID] = append(open.targets[target.MemoryID], proposal.ID)
 		}
-		// A retire creates no memory, so whatever content it carries is not
-		// proposed content.
 		if key := contentKey(proposal.Content); key != "" && proposal.Type != store.MemoryProposalTypeRetire {
 			open.contents[key] = append(open.contents[key], proposal.ID)
 		}
@@ -176,15 +146,11 @@ func newOpenProposals(read, later []InputProposal) openProposals {
 	return open
 }
 
-// known keeps the distinct covered IDs that name open proposals the run read,
-// at most MaxProposalTargets of them; any other ID is the model's invention.
 func (o openProposals) known(covers []string) []string {
 	var kept []string
 	seen := map[string]bool{}
 	for _, id := range covers {
 		id = strings.TrimSpace(id)
-		// IDs are named in the proposal's description, so one that could
-		// break a line, or spell a tag line, is never kept.
 		if len([]rune(id)) > MaxCoveredIDChars ||
 			strings.ContainsFunc(id, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 			continue
@@ -197,12 +163,6 @@ func (o openProposals) known(covers []string) []string {
 	return kept
 }
 
-// check returns why op repeats an open proposal, or "" when it does not. A
-// change identical to an open proposal is always a repeat, even one that
-// names it in covers. Otherwise an operation may target a memory, or propose
-// content, that an open proposal already does only when it covers that
-// proposal: it replaces it with a different change, such as a supersede in
-// place of an add beside the outdated memory.
 func (o openProposals) check(op Operation) string {
 	if o.changes[changeKey(proposalTypes[op.Type], op.Targets, op.Content)] {
 		return "an open proposal already proposes this change"
@@ -228,10 +188,6 @@ func (o openProposals) check(op Operation) string {
 	return ""
 }
 
-// changeKey identifies a change by its proposal type, its targets at their
-// generations in any order, and its normalized content. A retire's content is
-// ignored: it creates no memory, and validation clears a submitted retire's
-// content.
 func changeKey(proposalType string, targets []store.MemoryProposalTarget, content string) string {
 	if proposalType == store.MemoryProposalTypeRetire {
 		content = ""
@@ -244,19 +200,14 @@ func changeKey(proposalType string, targets []store.MemoryProposalTarget, conten
 	return proposalType + "|" + strings.Join(keys, ",") + "|" + contentKey(content)
 }
 
-// contentKey normalizes memory content for an exact duplicate check: case,
-// spacing and a final period do not make two memories different.
 func contentKey(content string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.Join(strings.Fields(content), " ")), ".")
 }
 
-// RemovalBudget is how many of memories active memories a run may remove:
-// a quarter, and at least one.
 func RemovalBudget(memories int) int {
 	return max(1, memories/4)
 }
 
-// removes is how many active memories an operation removes.
 func removes(op Operation) int {
 	switch op.Type {
 	case OperationMerge:
@@ -268,7 +219,6 @@ func removes(op Operation) int {
 	}
 }
 
-// targetRule returns the check of an operation type's target count.
 func targetRule(operationType string) (func(int) string, bool) {
 	switch operationType {
 	case OperationAdd:
@@ -328,9 +278,6 @@ func checkTargets(targets []store.MemoryProposalTarget, generations, current map
 	return ""
 }
 
-// distinctSources drops repeated citations and keeps the first
-// MaxMemoryProposalSources, so a model that cites one Session many times does
-// not lose an otherwise valid operation.
 func distinctSources(sources []store.MemoryProposalSource) []store.MemoryProposalSource {
 	var kept []store.MemoryProposalSource
 	seen := map[store.MemoryProposalSource]bool{}
@@ -405,7 +352,6 @@ func normalizeTags(tags []string) []string {
 	return out
 }
 
-// proposalTypes maps operations to the proposal types that apply them.
 var proposalTypes = map[string]string{
 	OperationAdd:       store.MemoryProposalTypeMemory,
 	OperationMerge:     store.MemoryProposalTypeMerge,
@@ -413,30 +359,19 @@ var proposalTypes = map[string]string{
 	OperationRetire:    store.MemoryProposalTypeRetire,
 }
 
-// ProposalID is the deterministic ID of a run's index-th proposal, so a
-// retried completion cannot create a second copy.
 func ProposalID(taskUID string, index int) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "memory-consolidation/%s/%d", taskUID, index))
 	return "mprop-" + hex.EncodeToString(sum[:16])
 }
 
-// Proposals returns one pending proposal for each kept operation, attributed
-// to the run's Task. A proposal's tags ride on a Tags: line in its
-// description, as every memory proposal's do.
 func Proposals(kept []Operation, namespace, taskName, taskUID, agentName string) []store.MemoryProposal {
 	proposals := make([]store.MemoryProposal, 0, len(kept))
 	for index, op := range kept {
-		// Applying a proposal takes its tags from the first "Tags:" line of
-		// its description. The validated tags come first, and a line in the
-		// model's reason that reads as a tag line is quoted, so only the
-		// validated tags are ever applied.
 		description := op.Reason
 		if len(op.Covers) > 0 {
 			description = "The run judged these open proposals redundant with this one: " + strings.Join(op.Covers, ", ") +
 				". Check them; if they are, reject or archive them when you apply this one.\n\n" + description
 		}
-		// Proposal IDs, like the model's reason, are quoted wherever a line
-		// reads as a tag line.
 		description = strings.TrimSpace(quoteTagLines(description))
 		if len(op.Tags) > 0 {
 			tagLine := "Tags: " + strings.Join(op.Tags, ", ")
@@ -452,8 +387,6 @@ func Proposals(kept []Operation, namespace, taskName, taskUID, agentName string)
 	return proposals
 }
 
-// NewReport returns the report of a run over input with the kept and
-// rejected operations. In Propose mode it names the proposals created.
 func NewReport(settings Settings, status string, input Input, kept []Operation, rejected []Rejection, conflicts []Conflict,
 	summary string, proposals []store.MemoryProposal) Report {
 	report := Report{
@@ -473,8 +406,6 @@ func NewReport(settings Settings, status string, input Input, kept []Operation, 
 	return report
 }
 
-// Redact applies Orka's sensitive-text redaction to every free-text field of
-// the report, which keeps model output and becomes the Task result.
 func (r *Report) Redact() {
 	for i := range r.Operations {
 		op := &r.Operations[i]
@@ -495,13 +426,6 @@ func (r *Report) Redact() {
 	r.Summary = redact.SensitiveText(r.Summary)
 }
 
-// Encode redacts the report and encodes it in at most limit bytes. Every
-// field is bounded, but text that is mostly multibyte or escaped can still
-// encode larger than a run's report may be. Encode then drops, in order, the
-// rejected operations, the conflicts, the summary, the kept operations' text
-// and their covered proposal IDs, and marks the report Abridged: the kept
-// operations' proposals keep their full text and name what they cover, so the
-// report loses nothing that a review needs.
 func (r *Report) Encode(limit int) ([]byte, error) {
 	r.Redact()
 	steps := []func(){
@@ -537,13 +461,6 @@ func (r *Report) Encode(limit int) ([]byte, error) {
 	return encoded, nil
 }
 
-// Structure returns the report without any text a model wrote or a run
-// read: titles, content, reasons, tags, conflict notes and the summary. It
-// keeps each operation's type, targets, sources and covered proposal IDs, each rejection's index,
-// known type and reason, which Orka writes and which name only memories the
-// run read, and the counts. A run's Task result is its structure, since
-// anyone who can read the Task can read the result; the full report needs
-// the permissions the run's inputs need.
 func (r Report) Structure() Report {
 	structure := r
 	structure.Summary = ""
@@ -576,8 +493,6 @@ func (r Report) Structure() Report {
 	return structure
 }
 
-// quoteTagLines quotes every line of text that a proposal's apply would read
-// as its tag line, so model text never names a memory's tags.
 func quoteTagLines(text string) string {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {

@@ -40,9 +40,6 @@ const (
 	liveProxyProbeAPIKey = "live-proxy-e2e-probe"
 )
 
-// Keep this to models that work through the OpenAI provider path; the live
-// catalog can include runtime-only GPT models rejected by the worker route.
-// Prefer the smaller model for routine live checks.
 var liveProxyOpenAIModelPreferences = []string{
 	"gpt-5-mini",
 	"gpt-5.5",
@@ -131,8 +128,6 @@ var (
 		"gpt-4.1",
 		"gpt-4.1-2025-04-14",
 	}
-	// Prefer Haiku for routine live checks. Keep the larger-model fallbacks
-	// aligned with the pinned Vekil CLI smoke preferences to avoid retired aliases.
 	liveCopilotProxyClaudeModelPreferences = []string{
 		"claude-haiku-4.5",
 		"claude-sonnet-5",
@@ -166,8 +161,6 @@ type apiMemoryProposalListResponse struct {
 	Items []store.MemoryProposal `json:"items"`
 }
 
-// skipIfNoKey skips the current test when the credential named by envVar is
-// unavailable. Model keys resolve to aimock unless E2E_DISABLE_MOCK_LLM is set.
 func skipIfNoKey(envVar string) {
 	value := os.Getenv(envVar)
 	switch envVar {
@@ -181,7 +174,6 @@ func skipIfNoKey(envVar string) {
 	}
 }
 
-// waitForTaskPhase polls until the task reaches the given phase or times out.
 func waitForTaskPhase(name, phase string, timeout time.Duration) {
 	Eventually(func(g Gomega) {
 		cmd := exec.Command("kubectl", "get", "task", name,
@@ -194,7 +186,6 @@ func waitForTaskPhase(name, phase string, timeout time.Duration) {
 	}, timeout, time.Second).Should(Succeed())
 }
 
-// waitForTaskCompletion waits for a task to reach a terminal phase (Succeeded or Failed).
 func waitForTaskCompletion(name string, timeout time.Duration) string {
 	var finalPhase string
 	Eventually(func(g Gomega) {
@@ -211,7 +202,6 @@ func waitForTaskCompletion(name string, timeout time.Duration) string {
 	return finalPhase
 }
 
-// verifyResultAvailable checks that a task's resultRef.available is "true".
 func verifyResultAvailable(taskName string) {
 	Eventually(func(g Gomega) {
 		cmd := exec.Command("kubectl", "get", "task", taskName,
@@ -271,9 +261,6 @@ func acpDeliveryOutcome(value corev1alpha1.TaskDeliveryOutcome) *corev1alpha1.Ta
 	return &value
 }
 
-// verifyACPTaskRuntimeForTask waits until an agent Task has been durably queued
-// for an Orka harness v2 RuntimePool and verifies the non-secret execution and delivery
-// projections. ACP Tasks never create one Kubernetes Job per prompt.
 func verifyACPTaskRuntimeForTask(taskName string, expected acpTaskExpectation, timeout time.Duration) {
 	Eventually(func(g Gomega) {
 		task := fetchTaskForACPAssertion(g, taskName)
@@ -464,7 +451,6 @@ func verifyNoJobForTask(taskName string, timeout time.Duration) {
 	}, timeout, time.Second).Should(Succeed())
 }
 
-// verifyJobCreatedForTask waits for a Job labeled with the task name to appear.
 func verifyJobCreatedForTask(taskName string, timeout time.Duration) {
 	Eventually(func(g Gomega) {
 		cmd := exec.Command("kubectl", "get", "jobs",
@@ -478,7 +464,6 @@ func verifyJobCreatedForTask(taskName string, timeout time.Duration) {
 	}, timeout, time.Second).Should(Succeed())
 }
 
-// getJobContainerImage returns the container image used by the Job for a task.
 func getJobContainerImage(taskName string) string {
 	var image string
 	Eventually(func(g Gomega) {
@@ -495,7 +480,6 @@ func getJobContainerImage(taskName string) string {
 	return image
 }
 
-// createProviderCRD creates a Provider CRD with the given configuration and waits for it to be ready.
 func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model string) {
 	By(fmt.Sprintf("creating Provider CRD: %s (type: %s)", name, providerType))
 
@@ -529,7 +513,6 @@ func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to create Provider %s", name)
 
-	// Wait for provider to become ready before returning
 	Eventually(func(g Gomega) {
 		cmd := exec.Command("kubectl", "get", "provider", name,
 			"-n", namespace, "-o", "jsonpath={.status.ready}")
@@ -539,7 +522,6 @@ func createProviderCRD(name, providerType, secretName, secretKey, baseURL, model
 	}, 30*time.Second, time.Second).Should(Succeed())
 }
 
-// discoverProxyModel queries an OpenAI-compatible /v1/models endpoint and returns the first model ID.
 func discoverProxyModel(baseURL string) string {
 	var modelID string
 	Eventually(func(g Gomega) {
@@ -1263,8 +1245,6 @@ func isProxyOpenAIProviderCandidate(modelID string) bool {
 	if modelID == "" {
 		return false
 	}
-	// These aliases can be visible in the live catalog while still being
-	// rejected by the worker's copilot-language-server OpenAI provider route.
 	return !strings.Contains(modelID, "codex") &&
 		!strings.Contains(modelID, "copilot") &&
 		!strings.HasPrefix(modelID, "gpt-5.4")
@@ -1432,9 +1412,6 @@ func liveACPProviderProxyServicePort() int {
 	return value
 }
 
-// expectProviderValidated checks that a Provider echoes its spec and that the
-// controller validated it: ready, with the validation message, time, and a
-// Ready condition.
 func expectProviderValidated(name, providerType, baseURL, model string) {
 	provider := fetchProviderSnapshot(name)
 	ExpectWithOffset(1, provider.Spec.Type).To(Equal(providerType))
@@ -1449,8 +1426,6 @@ func expectProviderValidated(name, providerType, baseURL, model string) {
 	ExpectWithOffset(1, readyCondition.Reason).To(Equal("ValidationSucceeded"))
 }
 
-// expectNativeAITaskSucceeded checks the status a native AI Task records when
-// its first attempt succeeds.
 func expectNativeAITaskSucceeded(taskName string) {
 	task := fetchTaskSnapshot(taskName)
 	ExpectWithOffset(1, task.Status.Phase).To(Equal("Succeeded"))
@@ -1791,7 +1766,6 @@ func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.Memor
 	if strings.TrimSpace(review.Namespace) == "" {
 		review.Namespace = namespace
 	}
-	// The server records the caller's identity as the reviewer.
 	payload, err := json.Marshal(struct {
 		Namespace  string `json:"namespace"`
 		Status     string `json:"status"`
@@ -1885,7 +1859,6 @@ func doAuthorizedJSONRequest(method, url, token, body, accept string) (string, i
 	return string(responseBody), resp.StatusCode, nil
 }
 
-// dumpDebugInfo collects and prints debug information on test failure.
 func dumpDebugInfo(taskNames ...string) {
 	if !CurrentSpecReport().Failed() {
 		return
@@ -1893,7 +1866,6 @@ func dumpDebugInfo(taskNames ...string) {
 
 	By("collecting debug information for failed test")
 
-	// Controller logs
 	cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
 		"-o", "jsonpath={.items[0].metadata.name}", "-n", namespace)
 	podName, err := utils.Run(cmd)
@@ -1905,7 +1877,6 @@ func dumpDebugInfo(taskNames ...string) {
 		}
 	}
 
-	// Task details
 	for _, name := range taskNames {
 		cmd = exec.Command("kubectl", "get", "task", name, "-n", namespace, "-o", "yaml")
 		output, err := utils.Run(cmd)
@@ -1913,9 +1884,6 @@ func dumpDebugInfo(taskNames ...string) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Task %s ===\n%s\n", name, output)
 		}
 
-		// Tool execution failures are persisted as task timeline events rather
-		// than Kubernetes Events. Read them through the in-cluster API service so
-		// delegation failures retain their exact, already-sanitized cause in CI.
 		eventPath := fmt.Sprintf(
 			"/api/v1/namespaces/%s/services/http:%s:8080/proxy/api/v1/tasks/%s/events?namespace=%s&type=ToolCallFailed",
 			url.PathEscape(namespace),
@@ -1929,7 +1897,6 @@ func dumpDebugInfo(taskNames ...string) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== ToolCallFailed Events for task %s ===\n%s\n", name, output)
 		}
 
-		// ACP runtime-pool details (agent Tasks do not have per-Task Pods).
 		cmd = exec.Command("kubectl", "get", "task", name, "-n", namespace,
 			"-o", "jsonpath={.status.execution.runtimePoolName}")
 		poolName, poolErr := utils.Run(cmd)
@@ -1949,7 +1916,6 @@ func dumpDebugInfo(taskNames ...string) {
 			}
 		}
 
-		// Pod descriptions and logs for non-ACP tasks.
 		cmd = exec.Command("kubectl", "get", "pods", "-l", fmt.Sprintf("orka.ai/task=%s", name),
 			"-n", namespace, "-o", "wide")
 		output, err = utils.Run(cmd)
@@ -1957,7 +1923,6 @@ func dumpDebugInfo(taskNames ...string) {
 			_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Pods for task %s ===\n%s\n", name, output)
 		}
 
-		// Worker pod logs
 		cmd = exec.Command("kubectl", "logs", "-l", fmt.Sprintf("orka.ai/task=%s", name),
 			"-n", namespace, "--tail=50")
 		output, err = utils.Run(cmd)
@@ -1966,7 +1931,6 @@ func dumpDebugInfo(taskNames ...string) {
 		}
 	}
 
-	// Namespace events
 	cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
 	events, err := utils.Run(cmd)
 	if err == nil {

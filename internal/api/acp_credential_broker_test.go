@@ -179,7 +179,6 @@ func TestPublisherCredentialBrokerAuthorizesCommitSigningOnlyOnPrepare(t *testin
 		t.Fatalf("unexpected signing broker response: decoded=%q err=%v rv=%q", string(decoded), err, response.ResourceVersion)
 	}
 
-	// Non-prepare operations must be rejected even with the same Secret.
 	badReq := request
 	badReq.ParentOperation = publisherservice.OperationPublicationPublish
 	if err := badReq.Validate(); err == nil {

@@ -84,8 +84,6 @@ func TestGatewayRetentionPreservesSoulWithoutRetainingMessageContent(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Some expiry paths already create the canonical error message. Attach the
-			// controller metadata to that message, or create its missing fixture row.
 			result, err := s.db.ExecContext(ctx, `UPDATE session_messages SET metadata_json = ?, content = 'expired private response'
    WHERE namespace = ? AND session_name = ? AND message_id = ?`, string(metadata), event.Namespace, event.SessionName, store.GatewayErrorMessageID(event.ID))
 			if err != nil {

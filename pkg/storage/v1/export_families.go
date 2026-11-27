@@ -2,70 +2,6 @@ package v1
 
 import "slices"
 
-// The export families: every family of state.v1 and artifacts.v1, in the
-// order Orka imports them. Sessions come before the records that belong to a
-// Session; references between other families can be circular, so the order
-// does not place every referenced record first (see
-// [DatasetImporter.ImportRecords]).
-//
-// A family holds what the contract requires a provider to keep for one kind
-// of record, field for field, including provider-assigned values (IDs,
-// sequences, versions and generations), domain tombstones, natural-key
-// receipts, cleanup intents and completions, usage watermarks and sealed
-// records as opaque bytes. Field names are the embedded SQLite provider's
-// column names, which also serve as the canonical names; other providers map
-// their own layout to them.
-//
-// Agent Host Protocol connection tokens (ahp_tokens) and sign-in sessions
-// (auth_sessions) are copied with their token hashes, so a token or session
-// issued before a migration stays valid after it; no family holds a raw
-// token. An AHP user's server sequence is ahp_users.server_seq, so a copy
-// continues it past every imported journal entry.
-//
-// sequence_heads holds the last value each provider-assigned sequence issued
-// ("family" and "field" name the sequence, such as messages and id), which can
-// be higher than the largest value still stored after records were deleted.
-// An import continues each sequence past both its head and the largest
-// imported value, so a value a client may have seen is never issued again.
-//
-// Three fields carry an order a provider may keep implicitly, so a copy keeps
-// it even when record keys sort differently:
-//
-//   - security_scan_runs.admission_seq is the order in which runs were
-//     admitted: positive and unique within a repository scan, higher for a
-//     later run. ListScanRuns lists newest first by it and UpdateScanRun
-//     refuses an active update to a run once a newer one was admitted. The embedded SQLite
-//     provider keeps it as the row's rowid rather than a column. An import
-//     keeps the relative order, and a run admitted after the import is newer
-//     than every imported run.
-//   - auth_sessions.issued_seq is the order in which sign-in sessions were
-//     issued: positive and unique, higher for a later session.
-//     CreateAuthSession keeps a person's most recently issued sessions by it
-//     when their creation times are equal. The embedded SQLite provider
-//     keeps it as the row's rowid. An import keeps the relative order, and a
-//     session issued after the import is newer than every imported session.
-//   - execution_events.session_seq is the event's effective session
-//     sequence. An event in a Session always exports a positive one; a
-//     provider that stored an event before it kept session sequences exports
-//     the sequence it lists that event under.
-//
-// These are not exported:
-//
-//   - Operation receipts. Writes are stopped before an export, so no
-//     operation is unresolved, and the imported dataset has a new dataset ID,
-//     so a late request naming the old dataset is refused with
-//     ErrDatasetMismatch.
-//   - The controller epoch mirror and the write watermark. The imported
-//     dataset starts with neither, and the next takeover advances it.
-//   - The write stamps of results and artifacts (write_epoch and write_seq).
-//     They are relative to the source's controller epochs, so an import
-//     stores (0, 0), which every enveloped write exceeds.
-//   - The dataset identity and installation binding. An import mints a new
-//     dataset ID, and an explicit storage switch binds it.
-//   - The embedded store's duplicate SQL control records (prompt attempts and
-//     their reclamations, Session controls, branch claims, publications and
-//     external effects), which Kubernetes holds in production and which are
-//     not part of the contract.
 var exportSchemas = []ExportFamilySchema{
 	stateFamily("results",
 		key(stringField("namespace")), key(stringField("task_name")), bytesField("data"), optTime("created_at"),
@@ -490,7 +426,6 @@ func artifactFamily(name string, fields ...ExportField) ExportFamilySchema {
 	return ExportFamilySchema{Name: name, Contract: ArtifactsContract, Version: 1, Fields: fields}
 }
 
-// key marks field as one of the fields that identify a record.
 func key(field ExportField) ExportField {
 	field.Key = true
 	return field
@@ -512,7 +447,6 @@ func optBytes(name string) ExportField {
 	return ExportField{Name: name, Kind: ExportBytes, Nullable: true}
 }
 
-// ExportSchemas returns every export family, in import order.
 func ExportSchemas() []ExportFamilySchema {
 	schemas := make([]ExportFamilySchema, len(exportSchemas))
 	for i, schema := range exportSchemas {
@@ -521,7 +455,6 @@ func ExportSchemas() []ExportFamilySchema {
 	return schemas
 }
 
-// LookupExportSchema returns the schema of an export family.
 func LookupExportSchema(family string) (ExportFamilySchema, bool) {
 	for _, schema := range exportSchemas {
 		if schema.Name == family {

@@ -9,9 +9,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ACPIndependentBranchReceipt is the controller boundary for a fresh remote
-// observation performed outside the runtime Pod. Digest covers the exact
-// repository, ref, SHA, operation, and observation time.
 type ACPIndependentBranchReceipt struct {
 	OperationID  string
 	RepositoryID string
@@ -21,8 +18,6 @@ type ACPIndependentBranchReceipt struct {
 	Digest       string
 }
 
-// NewACPIndependentBranchReceipt creates a canonical recovery receipt after an
-// independent clean-room remote observation has established the actual branch.
 func NewACPIndependentBranchReceipt(operationID, repositoryID, ref, sha string, verifiedAt time.Time) (ACPIndependentBranchReceipt, error) {
 	receipt := ACPIndependentBranchReceipt{
 		OperationID: strings.TrimSpace(operationID), RepositoryID: strings.TrimSpace(repositoryID),
@@ -75,9 +70,6 @@ func (r ACPIndependentBranchReceipt) validateIdentity() error {
 	return store.ValidateGitObjectID("verified branch SHA", strings.TrimSpace(r.SHA))
 }
 
-// ACPRecoverBlockedSessionRequest supplies the immutable Session identity and a
-// fresh independent branch receipt. Store versions and generations are loaded
-// immediately before the cross-aggregate CAS reconciliation.
 type ACPRecoverBlockedSessionRequest struct {
 	Namespace   string
 	SessionName string
@@ -86,9 +78,6 @@ type ACPRecoverBlockedSessionRequest struct {
 	Receipt     ACPIndependentBranchReceipt
 }
 
-// RecoverBlockedSession establishes the actual remote baseline and atomically
-// returns a PublicationOutcomeUnknown/DeliveryConflict Session and BranchClaim
-// to Available. It cannot be used to bypass a missing independent receipt.
 func (c *ACPSessionContinuity) RecoverBlockedSession(ctx context.Context, request ACPRecoverBlockedSessionRequest) (*store.SessionControl, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.SessionName = strings.TrimSpace(request.SessionName)

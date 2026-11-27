@@ -38,7 +38,6 @@ describe('GatewayDetail', () => {
     render(<GatewayDetail name="chat" />)
 
     const bindingsTab = await screen.findByRole('tab', { name: 'Bindings' })
-    // The tab strip scrolls horizontally instead of pushing tabs past the viewport.
     expect(screen.getByRole('tablist').parentElement).toHaveClass('overflow-x-auto')
     expect(bindingsTab).toBeInTheDocument()
   })

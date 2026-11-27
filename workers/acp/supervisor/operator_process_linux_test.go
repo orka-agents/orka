@@ -22,9 +22,6 @@ func startRealOperatorTestProcess(t *testing.T) *realOperatorProcess {
 	return &realOperatorProcess{cmd: cmd, uid: 20001, tag: 61020}
 }
 
-// After Wait reaps the leader, its PID and therefore the process group ID can
-// be reused by an unrelated group, so a late control frame must never signal
-// the group.
 func TestOperatorGroupSignalsStopOnceTheLeaderIsReaped(t *testing.T) {
 	process := startRealOperatorTestProcess(t)
 	previous := signalOperatorGroup
@@ -43,9 +40,6 @@ func TestOperatorGroupSignalsStopOnceTheLeaderIsReaped(t *testing.T) {
 	}
 }
 
-// Once cleanup retires an operation its tag group can be reused by a later
-// operation, so a late Kill (for example from the input relay) must not scan
-// for or kill that tag again.
 func TestOperatorKillIsFencedAfterRetire(t *testing.T) {
 	process := startRealOperatorTestProcess(t)
 	previous := killOperatorTagProcesses
@@ -76,9 +70,6 @@ func TestOperatorKillIsFencedAfterRetire(t *testing.T) {
 	}
 }
 
-// Orphaned descendants of a contained operation are reparented to the
-// subreaping supervisor; retiring the operation reaps them while the tag still
-// names only that operation, and never after an unproven kill.
 func TestOperatorRetireReapsTheTagOnlyAfterProvenContainment(t *testing.T) {
 	for _, proven := range []bool{true, false} {
 		process := startRealOperatorTestProcess(t)
@@ -103,11 +94,6 @@ func TestOperatorRetireReapsTheTagOnlyAfterProvenContainment(t *testing.T) {
 	}
 }
 
-// The session-wide reaper must not take an operator leader: its owner would
-// lose the exit status, and the leader's PID, which is its process group ID,
-// could be reused while group signals are still allowed. The owner therefore
-// withholds the leader from that reaper, reaps it itself, and lets go of it
-// only afterwards.
 func TestOperatorWaitReleasesTheLeaderOnlyAfterReapingIt(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 7")
 	release, err := startOperatorCommand(cmd)

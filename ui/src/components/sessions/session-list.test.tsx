@@ -35,7 +35,6 @@ describe('SessionList', () => {
   })
 
   it('shows skeleton rows while loading', () => {
-    // Default handler returns empty list; check skeletons appear before data loads
     const { container } = render(<SessionList />)
     const skeletons = container.querySelectorAll('[class*="animate-pulse"], [data-slot="skeleton"]')
     expect(skeletons.length).toBeGreaterThan(0)
@@ -131,7 +130,6 @@ describe('SessionList', () => {
     expect(screen.getByText('Name')).toBeInTheDocument()
     expect(screen.getByText('Namespace')).toBeInTheDocument()
     expect(screen.getByText('Messages')).toBeInTheDocument()
-    // The delete column's header is named for screen readers, not left empty.
     expect(screen.getByRole('columnheader', { name: 'Actions' })).toBeInTheDocument()
   })
 
@@ -206,7 +204,6 @@ describe('SessionList', () => {
     render(<SessionList />)
     await user.click(await screen.findByRole('button', { name: 'Delete session sess-a' }))
     await user.click(screen.getByRole('button', { name: 'Delete session sess-b' }))
-    // sess-b's delete must not re-enable sess-a's pending one.
     await user.click(screen.getByRole('button', { name: 'Delete session sess-a' }))
     await waitFor(() => expect(deletes).toEqual(['sess-a', 'sess-b']))
     releases.forEach((release) => release())
@@ -251,7 +248,6 @@ describe('SessionList', () => {
     trash.focus()
     await user.keyboard('{Enter}')
 
-    // Pending: marked unavailable but never disabled, so focus stays put.
     await waitFor(() => expect(trash).toHaveAttribute('aria-disabled', 'true'))
     expect(trash).not.toBeDisabled()
     expect(trash).toHaveFocus()

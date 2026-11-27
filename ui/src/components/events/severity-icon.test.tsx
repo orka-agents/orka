@@ -5,7 +5,6 @@ import { SeverityIcon } from './severity-icon'
 describe('SeverityIcon', () => {
   it('emits an accessible label so severity is not conveyed by color alone', () => {
     render(<SeverityIcon severity="error" />)
-    // The visible glyph is aria-hidden; an sr-only text label carries the meaning.
     expect(screen.getByText('Error')).toBeInTheDocument()
   })
 

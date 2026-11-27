@@ -12,9 +12,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// authorizeAgentIdentityBind requires the `bind` verb on
-// agentidentities/<issuer> when a write sets an Agent identity that the
-// previous version did not hold. Removing an identity needs no grant.
 func authorizeAgentIdentityBind(
 	ctx context.Context,
 	clientset kubernetes.Interface,
@@ -29,8 +26,6 @@ func authorizeAgentIdentityBind(
 	if previousIssuer, previousID, had := previous.IdentityRef(); had && previousIssuer == issuer && previousID == id {
 		return nil
 	}
-	// Review the same principal an Agent use check does, so `bind` and `use`
-	// grants name one subject.
 	spec, reviewable := agentUseReviewSubject(userInfo)
 	logValues := []any{"user", spec.User, "agentNamespace", agent.Namespace, "agentName", agent.Name, "identityIssuer", issuer, "identityID", id}
 	forbidden := fiber.NewError(fiber.StatusForbidden, "not authorized to bind agent identity "+issuer+"/"+id)
@@ -57,12 +52,6 @@ func authorizeAgentIdentityBind(
 	return nil
 }
 
-// requireRequesterApprovesDelegatedWrite lets only the Task's requester
-// approve a call on a Task whose binding froze a Delegated agentIdentity
-// policy, because such a call can act as that person. The decision rests on
-// the write-once binding, never on the live Tool or policy, which an editor
-// could change and restore around an approval. Anyone authorized to decide
-// approvals may still decline.
 func requireRequesterApprovesDelegatedWrite(task *corev1alpha1.Task, userInfo *UserInfo) error {
 	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.AgentExecutionBinding.Agent == nil {
 		return nil

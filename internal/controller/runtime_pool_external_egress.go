@@ -14,20 +14,10 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// externalProviderRequiresEgressAllowlist reports whether a provider accepts
-// only the host-name egress allowlist (RuntimeWorkload.Egress) and rejects a
-// Kubernetes NetworkPolicy, as gateway-enforced backends such as Agent
-// Substrate v1 do. Providers declare it with the shared
-// runtime.egress-allowlist feature.
 func externalProviderRequiresEgressAllowlist(provider *workspacev1alpha1.ExecutionWorkspaceProvider) bool {
 	return provider != nil && slices.Contains(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressAllowlist)
 }
 
-// externalRuntimeUsesEgressAllowlist selects the admitted network shape for a
-// new workload request. Only native processes on a gateway-enforcing backend
-// receive the egress allowlist; Pod-backed runtimes keep their NetworkPolicy.
-// The shape is frozen for a workspace: a successor whose shape differs from
-// its admitted predecessor is refused rather than silently dropping policy.
 func externalRuntimeUsesEgressAllowlist(provider *workspacev1alpha1.ExecutionWorkspaceProvider, nativeProcess bool, previous *workspacev1alpha1.WorkloadRequest) (bool, error) {
 	egress := nativeProcess && externalProviderRequiresEgressAllowlist(provider)
 	if previous == nil {
@@ -42,42 +32,18 @@ func externalRuntimeUsesEgressAllowlist(provider *workspacev1alpha1.ExecutionWor
 	return egress, nil
 }
 
-// externalProviderSupportsEgressCredentialInjection reports whether the
-// provider's backend gateway enforces RuntimeEgressRule.ReplaceHeaders.
 func externalProviderSupportsEgressCredentialInjection(provider *workspacev1alpha1.ExecutionWorkspaceProvider) bool {
 	return provider != nil && slices.Contains(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
 }
 
-// externalProviderTokenInjection names the Secret key the egress gateway
-// injects as the provider-proxy bearer. A nil value means Core delivers the
-// token through the runtime's sealed bootstrap instead.
 type externalProviderTokenInjection struct {
 	namespace, name string
 }
 
-// externalProviderTokenEgressPlaceholder is the public value a runtime whose
-// provider-proxy bearer is gateway-injected sends in Authorization. The
-// gateway discards it and the proxy never accepts it.
 const externalProviderTokenEgressPlaceholder = harnessv2.ProviderTokenEgressInjectionPlaceholder
 
-// bearerAuthorizationPrefix is the scheme prefix of a bearer Authorization value.
 const bearerAuthorizationPrefix = "Bearer "
 
-// externalRuntimeEgress compiles Core's runtime egress intent into the
-// host-name allowlist: the in-cluster provider authentication proxy and the
-// controller artifact/MCP broker API, the destinations Core's NetworkPolicy
-// shape admits besides DNS (the egress gateway resolves allowlisted names).
-// With --runtime-telemetry-collector-egress and telemetry enabled, the OTLP
-// collector endpoints projected into the supervisor are admitted too.
-// Cleartext origins become HTTP rules; TLS origins become TLSPassthrough so the
-// runtime still verifies the in-cluster origin's own certificate. Any origin
-// the allowlist cannot express fails admission.
-//
-// With injection, the provider-proxy origin gets its own HTTP rule that
-// replaces Authorization with "Bearer " plus the token from Core's private
-// provider Secret, so the token never enters the runtime. Injection needs a
-// cleartext proxy origin (the gateway re-originates TLS trusting only public
-// roots) that no other admitted origin shares.
 func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig, injection *externalProviderTokenInjection) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
 	return r.externalRuntimeEgressWithEnv(cfg, injection, os.Getenv)
 }
@@ -86,9 +52,6 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConf
 	return r.externalRuntimeEgressForCollectors(cfg, injection, runtimePoolTelemetryCollectorEndpoints(true, getenv))
 }
 
-// externalRuntimeEgressForCollectors admits exactly the collector endpoints
-// the runtime's own environment exports to, so a signal dropped to fit the
-// native environment leaves no collector origin behind.
 func (r *RuntimePoolReconciler) externalRuntimeEgressForCollectors(cfg runtimePoolConfig, injection *externalProviderTokenInjection, collectors []string) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
 	type destination struct {
 		host string
@@ -153,7 +116,6 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressForCollectors(cfg runtimePo
 		}
 		policy.Rules = append(policy.Rules, rule)
 	}
-	// Revision hashes the request, so the order must be stable.
 	slices.SortFunc(policy.Rules, func(a, b workspacev1alpha1.RuntimeEgressRule) int {
 		if c := strings.Compare(a.Host, b.Host); c != 0 {
 			return c
@@ -166,9 +128,6 @@ func (r *RuntimePoolReconciler) externalRuntimeEgressForCollectors(cfg runtimePo
 	return policy, nil
 }
 
-// externalRuntimeProviderTokenInjection returns the provider-proxy token
-// injection an admitted request carries, or nil. A request may inject only
-// Core's provider Secret token into Authorization.
 func externalRuntimeProviderTokenInjection(request *workspacev1alpha1.WorkloadRequest) (*externalProviderTokenInjection, error) {
 	if request == nil || request.Runtime == nil || !request.Runtime.Egress.HasCredentialInjection() {
 		return nil, nil
@@ -208,7 +167,6 @@ func externalEgressOrigin(raw string) (string, int32, workspacev1alpha1.RuntimeE
 		}
 		port = int32(number)
 	}
-	// DNS names are case-insensitive; the allowlist admits only lowercase.
 	host := strings.ToLower(parsed.Hostname())
 	if err := workspacev1alpha1.ValidateRuntimeEgressHost(host); err != nil {
 		return "", 0, "", err
@@ -216,14 +174,6 @@ func externalEgressOrigin(raw string) (string, int32, workspacev1alpha1.RuntimeE
 	return host, port, protocol, nil
 }
 
-// externalEgressHostResolvable refuses a short in-cluster Service name. A
-// gateway-enforced runtime resolves allowlisted names through the backend: a
-// Substrate Actor's resolver tries search suffixes its DNS relay refuses, and
-// cluster DNS answers only the fully qualified "<service>.<namespace>.svc.<cluster
-// domain>" form, so a "<service>.<namespace>.svc" origin is admitted but never
-// connects. Core does not know the cluster domain, so it names the form to use
-// rather than rewriting the host. Pod-backed runtimes, which resolve through
-// their Pod's search path, never reach this check.
 func externalEgressHostResolvable(flag, host string) error {
 	if !strings.HasSuffix(host, ".svc") {
 		return nil

@@ -20,9 +20,6 @@ import (
 )
 
 const (
-	// ahpDefaultBranchHost is the only host Orka asks for a repository's
-	// default branch. The namespace's repository credential is never sent
-	// anywhere else, and no other address is reached for a user.
 	ahpDefaultBranchHost    = "github.com"
 	ahpDefaultBranchBase    = "https://" + ahpDefaultBranchHost + "/"
 	ahpDefaultBranchTimeout = 10 * time.Second
@@ -39,15 +36,11 @@ var ahpGitHTTPClient = &http.Client{
 	},
 }
 
-// ahpOnGitHub reports whether a repository URL names a github.com repository,
-// the only host Orka sends a namespace's repository credential to.
 func ahpOnGitHub(repo string) bool {
 	parsed, err := url.Parse(repo)
 	return err == nil && parsed.Scheme == connectorSchemeHTTPS && parsed.Host == ahpDefaultBranchHost && parsed.User == nil
 }
 
-// defaultBranch reads a repository's default branch from git's smart HTTP
-// ref advertisement, without cloning. Any failure leaves it unknown.
 func (b *ahpBackend) defaultBranch(ctx context.Context, namespace, repo string) string {
 	parsed, err := url.Parse(repo)
 	if err != nil || parsed.Scheme != connectorSchemeHTTPS || parsed.Host != ahpDefaultBranchHost ||
@@ -56,8 +49,6 @@ func (b *ahpBackend) defaultBranch(ctx context.Context, namespace, repo string) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, ahpDefaultBranchTimeout)
 	defer cancel()
-	// The request goes to the fixed github.com base; only the repository
-	// path comes from the project.
 	target := ahpDefaultBranchBase + strings.TrimPrefix(parsed.EscapedPath(), "/") + ".git/info/refs?service=git-upload-pack"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -81,13 +72,10 @@ func (b *ahpBackend) defaultBranch(ctx context.Context, namespace, repo string) 
 	return branch
 }
 
-// gitToken returns the namespace's repository credential, if configured.
 func (b *ahpBackend) gitToken(ctx context.Context, namespace string) string {
 	return strings.TrimSpace(string(b.gitSecretToken(ctx, namespace)))
 }
 
-// ahpAdvertisedHead finds the branch HEAD points at in a smart HTTP ref
-// advertisement: the symref capability on the first ref line.
 func ahpAdvertisedHead(body io.Reader) (string, error) {
 	reader := bufio.NewReader(body)
 	for range 4 {

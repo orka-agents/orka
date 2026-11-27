@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Lightweight, vendored fallback for the subset of demo-magic used by the Orka
-# demo scripts. It provides the p/pe/run_cmd functions expected by
-# hack/demos/lib/common.sh without requiring a separate checkout under ~/src.
-#
-# If you prefer the upstream demo-magic behavior, set DEMO_MAGIC_PATH to that
-# demo-magic.sh file before running the demo scripts.
-
-# This file is sourced, so avoid `set -euo pipefail` here.
 
 DEMO_MAGIC_DEBUG=0
 DEMO_MAGIC_NO_WAIT="${DEMO_MAGIC_NO_WAIT:-0}"
@@ -14,7 +6,6 @@ DEMO_MAGIC_NO_WAIT="${DEMO_MAGIC_NO_WAIT:-0}"
 while (($#)); do
   case "$1" in
     -d|--debug|--no-wait)
-      # Keep demo runs non-blocking by default for this vendored fallback.
       DEMO_MAGIC_DEBUG=1
       DEMO_MAGIC_NO_WAIT=1
       ;;

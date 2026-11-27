@@ -14,8 +14,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// requestSpeculativeResume suspends the first turn with verified retained
-// data and lets a continuation request its resume.
 func requestSpeculativeResume(t *testing.T) (*speculativeTaskFixture, *corev1alpha1.Task, *corev1alpha1.RuntimePool) {
 	t.Helper()
 	ctx := context.Background()
@@ -46,8 +44,6 @@ func TestSpeculativeResumeIsRequestedWithoutFlipping(t *testing.T) {
 		t.Fatalf("staged attachment = %q, want the continuation at the next epoch", requested.Annotations[acpWorkspaceAttachmentIntentAnnotation])
 	}
 
-	// The queue pass activates the existing pool; the demand controller holds
-	// it for the pending resume.
 	f.start(t, continuation, false, pool.UID)
 	if active, _ := f.pool(t); active.Spec.DesiredReplicas != 1 {
 		t.Fatal("the pending resume did not activate its pool")
@@ -60,8 +56,6 @@ func TestSpeculativeResumeIsRequestedWithoutFlipping(t *testing.T) {
 		t.Fatal("the pending resume's pool was scaled down")
 	}
 
-	// A rival continuation waits for the RuntimePool's flip; it neither flips
-	// nor takes the demand.
 	rival := f.continuation(t, "rival-continuation")
 	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, rival, f.plan); err != nil || ready {
 		t.Fatalf("rival ensure = (%v, %v), want waiting", ready, err)
@@ -71,7 +65,6 @@ func TestSpeculativeResumeIsRequestedWithoutFlipping(t *testing.T) {
 		t.Fatal("a rival disturbed the pending speculative resume")
 	}
 
-	// The RuntimePool's publication flips and attaches together.
 	installed := f.installStagedAttachment(t, true)
 	if installed == nil || installed.TaskRef.UID != continuation.UID {
 		t.Fatalf("installed attachment = %#v, want the continuation", installed)
@@ -117,7 +110,6 @@ func TestCancelledSpeculativeResumeReleasesEverythingItStaged(t *testing.T) {
 	if active, _ := f.pool(t); active.Spec.DesiredReplicas != 0 {
 		t.Fatal("the cancelled resume kept its pool")
 	}
-	// A rival is free to resume afterwards.
 	rival := f.continuation(t, "rival-after-cancel")
 	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, rival, f.plan); err != nil || ready {
 		t.Fatalf("rival ensure = (%v, %v)", ready, err)
@@ -127,8 +119,6 @@ func TestCancelledSpeculativeResumeReleasesEverythingItStaged(t *testing.T) {
 	}
 }
 
-// An unclaimed speculative resume expires; the requester then flips and
-// attaches itself, recovering the attachment it staged.
 func TestExpiredSpeculativeResumeFallsBackToTheTasksOwnFlipAndAttach(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -144,7 +134,6 @@ func TestExpiredSpeculativeResumeFallsBackToTheTasksOwnFlipAndAttach(t *testing.
 	if flipped.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		t.Fatal("an expired speculative resume did not fall back to the Task's flip")
 	}
-	// The provider observes the flip and reports the stopped predecessor.
 	admitTestACPWorkspace(t, f.r, flipped)
 	f.patchStatus(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		w.Status.State = workspacev1alpha1.ExecutionWorkspaceStatePending
@@ -162,9 +151,6 @@ func TestExpiredSpeculativeResumeFallsBackToTheTasksOwnFlipAndAttach(t *testing.
 	}
 }
 
-// A settlement interrupted after it removed the intent, but before it
-// released the staged Secret and Lease, still releases them on a later pass:
-// the Lease itself is the durable record.
 func TestInterruptedSpeculativeReleaseIsRetriedFromTheLease(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -173,7 +159,6 @@ func TestInterruptedSpeculativeReleaseIsRetriedFromTheLease(t *testing.T) {
 	if !staged {
 		t.Fatal("no staged attachment")
 	}
-	// The crash: the annotations are gone, the Secret and Lease remain.
 	f.patch(t, func(w *workspacev1alpha1.ExecutionWorkspace) {
 		delete(w.Annotations, acpWorkspaceAttachmentIntentAnnotation)
 		delete(w.Annotations, acpWorkspaceSpeculativeStartAnnotation)
@@ -186,7 +171,6 @@ func TestInterruptedSpeculativeReleaseIsRetriedFromTheLease(t *testing.T) {
 	if err := f.r.Get(ctx, types.NamespacedName{Namespace: f.key.Namespace, Name: attachmentLeaseName(f.key.Name)}, &coordinationv1.Lease{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("staged Lease = %v, want released so successors are not blocked", err)
 	}
-	// A successor can resume at once.
 	rival := f.continuation(t, "successor-after-crash")
 	if _, ready, err := f.r.ensureACPClassWorkspace(ctx, rival, f.plan); err != nil || ready {
 		t.Fatalf("successor ensure = (%v, %v)", ready, err)

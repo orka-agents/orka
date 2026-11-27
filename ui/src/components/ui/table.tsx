@@ -7,11 +7,6 @@ function Table({
   scrollRegionLabel,
   ...props
 }: React.ComponentProps<"table"> & {
-  /**
-   * Names the sideways-scrolling container and makes it a focusable region,
-   * so a wide table can be scrolled from the keyboard. Unset, the container
-   * adds no tab stop.
-   */
   scrollRegionLabel?: string
 }) {
   return (

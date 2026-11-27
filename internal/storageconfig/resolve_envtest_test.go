@@ -12,9 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
-// TestResolveAgainstAPIServer resolves adapter Secrets through an uncached
-// client against a real API server, the way the controller does before its
-// manager starts.
 func TestResolveAgainstAPIServer(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("set KUBEBUILDER_ASSETS to run the API server Secret resolution test")

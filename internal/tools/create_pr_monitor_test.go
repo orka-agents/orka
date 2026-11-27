@@ -622,9 +622,6 @@ func containsAnyString(values []any, want string) bool {
 	return false
 }
 
-// TestCreatePRMonitorTool_ExecuteSealsCreatedTask covers the requester seal:
-// a scheduled monitor Task created from chat is handed to the sealer like
-// every other Task-creating tool, so it can use the person's linked accounts.
 func TestCreatePRMonitorTool_ExecuteSealsCreatedTask(t *testing.T) {
 	_, gitSecret := githubRepoTaskWithSecret("https://github.com/orka-agents/orka")
 	fc := newFakeClient(

@@ -31,7 +31,6 @@ type ReviewContextOptions struct {
 	MaxBytes int
 }
 
-// BuildReviewContext builds a bounded deterministic prompt excerpt and manifest for a review slice.
 func BuildReviewContext(root string, slice store.ReviewSlice, opts ReviewContextOptions) (string, ReviewContextManifest, error) {
 	if opts.MaxFiles <= 0 {
 		opts.MaxFiles = defaultMaxReviewContextFiles

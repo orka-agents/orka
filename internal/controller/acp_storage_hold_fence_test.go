@@ -14,8 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// heldTaskObservation prepares a Task whose result receipt the store lost and
-// returns what a recovery pass under fence reads before it holds the Task.
 func heldTaskObservation(
 	t *testing.T, fixture *recoveryFixture, fence store.ControllerEpochFence,
 ) (*corev1alpha1.Task, taskStorageRecordObservation, taskStorageRecordHold) {
@@ -32,8 +30,6 @@ func heldTaskObservation(
 	}
 }
 
-// requireHoldRefused checks that writing hold for observed is refused as a
-// conflict, not reported as a hold, and leaves the Task without one.
 func requireHoldRefused(
 	t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task,
 	observed taskStorageRecordObservation, hold taskStorageRecordHold,
@@ -52,8 +48,6 @@ func requireHoldRefused(
 	}
 }
 
-// A pass that read the attempt before a successor settled it does not hold
-// the settled Task.
 func TestTaskStorageHoldIsNotWrittenAfterTheAttemptMovedOn(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -80,8 +74,6 @@ func TestTaskStorageHoldIsNotWrittenAfterTheAttemptMovedOn(t *testing.T) {
 	requireHoldRefused(t, fixture, task, observed, hold)
 }
 
-// A controller whose epoch was taken over does not hold the Task, even though
-// the Task and its attempt are as it read them.
 func TestTaskStorageHoldIsNotWrittenByAReplacedController(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -97,8 +89,6 @@ func TestTaskStorageHoldIsNotWrittenByAReplacedController(t *testing.T) {
 	requireHoldRefused(t, fixture, task, observed, hold)
 }
 
-// A Task that a later controller epoch already recovered is not held from an
-// earlier epoch's reading.
 func TestTaskStorageHoldIsNotWrittenAfterALaterEpochRecoveredTheTask(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -115,9 +105,6 @@ func TestTaskStorageHoldIsNotWrittenAfterALaterEpochRecoveredTheTask(t *testing.
 	requireHoldRefused(t, fixture, task, observed, hold)
 }
 
-// A Task deleted and created again under the same name is another Task: the
-// hold its predecessor's attempt earned is not written to it, even when it
-// records the same execution and the attempt is unchanged.
 func TestTaskStorageHoldIsNotWrittenToAReplacedTask(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -161,9 +148,6 @@ func TestTaskStorageHoldIsNotWrittenToAReplacedTask(t *testing.T) {
 	}
 }
 
-// taskStorageHoldInterlockStore stands in for a control store with the
-// controller epoch mutation interlock, which refuses a fence that a takeover
-// replaced.
 type taskStorageHoldInterlockStore struct {
 	store.DurableControlStore
 	takenOver bool
@@ -180,8 +164,6 @@ func (s *taskStorageHoldInterlockStore) WithControllerEpochMutation(
 	return write(ctx)
 }
 
-// With a control store that has the epoch mutation interlock, the hold is
-// written under it, so a takeover the interlock reports refuses the write.
 func TestTaskStorageHoldIsWrittenUnderTheEpochMutationInterlock(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)

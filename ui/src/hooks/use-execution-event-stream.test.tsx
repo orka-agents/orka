@@ -27,7 +27,6 @@ function completeFrame(lastSeq: number, type = 'TaskSucceeded') {
   return `id: ${lastSeq}\nevent: stream_complete\ndata: {"lastSeq":${lastSeq},"type":"${type}"}\n\n`
 }
 
-// Controllable SSE response: push chunks, then close.
 function makeStreamResponse() {
   let controller: ReadableStreamDefaultController<Uint8Array>
   const encoder = new TextEncoder()
@@ -89,7 +88,7 @@ describe('useExecutionEventStream', () => {
     await waitFor(() => expect(result.current.status).toBe('streaming'))
 
     conn.push(eventFrame(1))
-    conn.push(eventFrame(1)) // duplicate seq
+    conn.push(eventFrame(1))
     conn.push(eventFrame(2))
     await waitFor(() => expect(result.current.events).toHaveLength(2))
     expect(result.current.events.map((e) => e.seq)).toEqual([1, 2])
@@ -123,15 +122,11 @@ describe('useExecutionEventStream', () => {
 
     conn.push(eventFrame(4))
     await waitFor(() => expect(result.current.events).toHaveLength(1))
-    // Final stream_complete arrives WITHOUT the trailing blank-line separator,
-    // then the stream closes — so it's only drained by flush(), not the in-loop
-    // parser. The flush path must still advance lastSeq to the terminal seq.
     const noSep = `id: 9\nevent: stream_complete\ndata: {"lastSeq":9,"type":"TaskSucceeded"}\n`
     conn.push(noSep)
     conn.close()
     await waitFor(() => expect(result.current.status).toBe('complete'))
     expect(result.current.streamComplete?.type).toBe('TaskSucceeded')
-    // The resume cursor reflects the terminal frame, not the last event (4).
     expect(result.current.lastSeq).toBe(9)
   })
 
@@ -184,13 +179,11 @@ describe('useExecutionEventStream', () => {
     const { result } = renderHook(() =>
       useExecutionEventStream({ url: '/api/v1/tasks/tk/stream', enabled: true, reconnectDelayMs: 20 }),
     )
-    // 401 => clear token (like the API client) and go to a terminal unsupported
-    // state instead of reconnecting forever with the dead token.
     await waitFor(() => expect(result.current.status).toBe('unsupported'))
     expect(clearToken).toHaveBeenCalled()
     const callsAfter = fetchSpy.mock.calls.length
     await new Promise((r) => setTimeout(r, 80))
-    expect(fetchSpy.mock.calls.length).toBe(callsAfter) // no further reconnect attempts
+    expect(fetchSpy.mock.calls.length).toBe(callsAfter)
   })
 
   it('reconnects from the latest seq after an unexpected close', async () => {
@@ -239,8 +232,6 @@ describe('useExecutionEventStream', () => {
       .mockResolvedValueOnce(first.response)
       .mockResolvedValueOnce(second.response)
 
-    // The hook stays mounted; only the url prop changes, mirroring navigating
-    // from one task/session to another without unmounting.
     const { result, rerender } = renderHook(
       ({ url }) => useExecutionEventStream({ url, enabled: true }),
       { initialProps: { url: '/api/v1/tasks/task-a/stream' } },
@@ -250,11 +241,8 @@ describe('useExecutionEventStream', () => {
     await waitFor(() => expect(result.current.events).toHaveLength(1))
     expect(result.current.lastSeq).toBe(7)
 
-    // Switch target without unmounting.
     rerender({ url: '/api/v1/tasks/task-b/stream' })
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2))
-    // Stale events and the old cursor must be cleared, and the new connection
-    // starts from after=0, not the previous stream's seq 7.
     expect(result.current.events).toHaveLength(0)
     expect(result.current.lastSeq).toBe(0)
     const secondUrl = fetchSpy.mock.calls[1][0] as string
@@ -263,16 +251,12 @@ describe('useExecutionEventStream', () => {
   })
 
   it('applies capped exponential backoff across consecutive errors', () => {
-    // A clean 'closed' cycle (errorCount 0) keeps the tight base delay.
     expect(reconnectBackoffMs(2000, 0)).toBe(2000)
-    // Consecutive errors escalate: base, 2x, 4x, 8x, ...
     expect(reconnectBackoffMs(2000, 1)).toBe(2000)
     expect(reconnectBackoffMs(2000, 2)).toBe(4000)
     expect(reconnectBackoffMs(2000, 3)).toBe(8000)
-    // Each step is strictly larger until the cap.
     const seq = [1, 2, 3, 4, 5].map((n) => reconnectBackoffMs(2000, n))
     for (let i = 1; i < seq.length; i++) expect(seq[i]).toBeGreaterThan(seq[i - 1])
-    // Capped at 30s and never exceeded, even past the max step count.
     expect(reconnectBackoffMs(2000, 99)).toBe(30000)
     expect(reconnectBackoffMs(20000, 5)).toBe(30000)
   })

@@ -33,16 +33,12 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 	if phase == corev1alpha1.TaskPhaseRunning && task.Status.StartTime != nil {
 		result.PhaseObservedAt = task.Status.StartTime.Time
 	}
-	// A delayed Finalizing snapshot must retain its transition time rather
-	// than appear newer than an already-recorded terminal snapshot.
 	if outcome := task.Status.ExecutionOutcome; phase == corev1alpha1.TaskPhaseFinalizing && outcome != nil && !outcome.RecordedAt.IsZero() {
 		result.PhaseObservedAt = outcome.RecordedAt.Time
 	}
 	if task.Status.CompletionTime != nil {
 		result.PhaseObservedAt = task.Status.CompletionTime.Time
 	}
-	// Deleting an unfinished Task cancels its retained accounting lifecycle.
-	// Otherwise a snapshot can pin its cohort forever after the Task disappears.
 	if !task.DeletionTimestamp.IsZero() && !phase.IsTerminal() {
 		result.Phase = string(corev1alpha1.TaskPhaseCancelled)
 		result.PhaseObservedAt = task.DeletionTimestamp.Time
@@ -64,8 +60,6 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 			Name: owner.GatewayName, UID: owner.GatewayUID}
 	}
 	result.AHPTurn = task.Labels[labels.LabelAHPTurn] == labels.LabelAHPTurnValue
-	// Only AHP usage is shown by who requested it, so only an AHP Task's
-	// requester outlives the Task: an ordinary Task's identity stays with it.
 	ahpSession := strings.HasPrefix(strings.TrimSpace(result.SessionName), labels.AHPNamePrefix)
 	if requester := task.Spec.RequestedBy; requester != nil && (result.AHPTurn || ahpSession) {
 		result.Requester = &store.UsageRequester{Issuer: requester.Issuer, Subject: requester.Subject}
@@ -87,19 +81,10 @@ func (r *TaskReconciler) retainUsageTask(ctx context.Context, task *corev1alpha1
 	return usageStore.RegisterUsageTask(ctx, snapshot)
 }
 
-// taskTokenUsageReader reads a Task's consumed tokens as usage reports
-// attribute them.
 type taskTokenUsageReader interface {
 	TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error)
 }
 
-// sessionTokenUsage returns a Job-backed Task's final usage to add to the
-// Session whose transcript it appended; the caller adds it while releasing
-// the Session lock. Agent Tasks run as ACP Session turns, whose finalization
-// adds the usage the storage client attributes to the turn's prompt attempt,
-// so they report none here.
-// Chat Sessions count only their chat turns: Tasks a chat creates have no
-// spec.sessionRef, so chat tokens are never double counted.
 func (r *TaskReconciler) sessionTokenUsage(ctx context.Context, task *corev1alpha1.Task) (int64, int64, error) {
 	if r.SessionManager == nil || task.Spec.SessionRef == nil || task.Spec.Type == corev1alpha1.TaskTypeAgent {
 		return 0, 0, nil

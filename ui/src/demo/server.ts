@@ -8,13 +8,8 @@ import { taskHandlers } from './handlers/tasks'
 
 const handlers: RequestHandler[] = [...coreHandlers, ...taskHandlers, ...chatHandlers, ...securityHandlers, ...gatewayHandlers]
 
-/** Simulated network latency, so loading states read naturally. */
 const LATENCY_MS = 120
 
-/**
- * Re-wraps a mocked streaming body so aborting the request errors the body the
- * way a real fetch does, instead of leaving the reader pending forever.
- */
 function abortable(response: Response, signal: AbortSignal | null | undefined): Response {
   if (!signal || !response.body) return response
   const reader = response.body.getReader()
@@ -24,7 +19,6 @@ function abortable(response: Response, signal: AbortSignal | null | undefined): 
         try {
           controller.error(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'))
         } catch {
-          // Already closed.
         }
         void reader.cancel().catch(() => {})
       }
@@ -37,7 +31,6 @@ function abortable(response: Response, signal: AbortSignal | null | undefined): 
         if (done) controller.close()
         else controller.enqueue(value)
       } catch {
-        // Errored by an abort above.
       }
     },
     cancel(reason) {
@@ -47,7 +40,6 @@ function abortable(response: Response, signal: AbortSignal | null | undefined): 
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
 }
 
-/** Answers one API request from the demo fixtures. */
 export async function handleDemoRequest(request: Request): Promise<Response> {
   if (request.signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
   await new Promise((resolve) => setTimeout(resolve, LATENCY_MS))
@@ -55,7 +47,6 @@ export async function handleDemoRequest(request: Request): Promise<Response> {
   return abortable(response, request.signal)
 }
 
-/** Routes the dashboard's /api/ requests to the demo fixtures; everything else goes to the network. */
 export function installDemoFetch() {
   const networkFetch = window.fetch.bind(window)
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {

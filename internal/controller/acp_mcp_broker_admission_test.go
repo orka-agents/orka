@@ -96,7 +96,6 @@ func TestMCPApprovalFirstCallWaitsForDurableAcceptance(t *testing.T) {
 			done := f.start(f.request)
 			waitForMCPAdmissionBarrier(t, storage, done)
 			requireNoMCPApprovalAdmission(t, f)
-			// Execution guards must continue rejecting the submitting attempt.
 			require.Error(t, f.broker.Prompts.AuthorizeACPMCPPrompt(t.Context(), f.request))
 			accepted := *storage.current.Load()
 			accepted.ExecutionState = store.PromptExecutionAccepted

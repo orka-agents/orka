@@ -14,22 +14,12 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// GetTaskMemoryConsolidationReport handles
-// GET /api/v1/tasks/{id}/memory-consolidation-report: the full report of a
-// memory consolidation run (ADR 0051). The Task result holds only the
-// report's structure, since anyone who can read the Task can read it; the
-// full report quotes the Sessions and memories the run read, so its route
-// also requires list and get on sessions and list on memories and memoryproposals. It is served
-// while the Task exists and its run finished.
 func (h *Handlers) GetTaskMemoryConsolidationReport(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
 		return err
 	}
-	// The route's Kubernetes checks cover ServiceAccount callers; a
-	// transaction token needs the scopes that reading the run's inputs needs,
-	// as well as reading the Task.
 	for _, scopes := range [][]string{h.contextTokenAuthorization.SessionReadScopes, h.contextTokenAuthorization.MemoryReadScopes} {
 		if err := h.authorizeContextTokenAction(c, "getMemoryConsolidationReport", scopes); err != nil {
 			return err

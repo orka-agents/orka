@@ -42,17 +42,13 @@ const (
 	repositoryMonitorTokenKey                = "token"
 	repositoryMonitorPasswordKey             = "password"
 	repositoryMonitorGitHubPerPage           = 50
-	// repositoryMonitorGitHubCompareMaxFiles is the documented ceiling of
-	// the compare endpoint's unpaginated "files" array.
-	repositoryMonitorGitHubCompareMaxFiles = 300
-	repositoryMonitorGitHubResponseLimit   = 10 << 20
+	repositoryMonitorGitHubCompareMaxFiles   = 300
+	repositoryMonitorGitHubResponseLimit     = 10 << 20
 
-	repositoryMonitorItemStateOpen       = "open"
-	repositoryMonitorItemStateOutOfScope = "out_of_scope"
-	repositoryMonitorVerdictSkipped      = "skipped"
-	repositoryMonitorSkipReasonMissing   = "not_open_or_base_branch_changed"
-	// repositoryMonitorSkipReasonNotIncluded retires a pull request that lost
-	// every label that put it in the inventory.
+	repositoryMonitorItemStateOpen         = "open"
+	repositoryMonitorItemStateOutOfScope   = "out_of_scope"
+	repositoryMonitorVerdictSkipped        = "skipped"
+	repositoryMonitorSkipReasonMissing     = "not_open_or_base_branch_changed"
 	repositoryMonitorSkipReasonNotIncluded = "not_included"
 	repositoryMonitorSkipReasonReviewed    = "already_reviewed"
 	repositoryMonitorSkipReasonPending     = "review_pending"
@@ -68,26 +64,22 @@ const (
 )
 
 type repositoryMonitorPullRequest struct {
-	Number         int64
-	Title          string
-	Author         string
-	State          string
-	Labels         []string
-	BaseBranch     string
-	HeadBranch     string
-	HeadRepo       string
-	HeadRepoURL    string
-	BaseSHA        string
-	HeadSHA        string
-	Draft          bool
-	MergeableState string
-	Merged         bool
-	MergeCommitSHA string
-	// ChangedFiles is GitHub's authoritative changed-file total. It is only
-	// present on a single pull request read; list responses leave it zero.
-	ChangedFiles int
-	// MaintainerCanModify reports whether a fork's author allows maintainer
-	// pushes to the head branch. Like ChangedFiles, list responses omit it.
+	Number              int64
+	Title               string
+	Author              string
+	State               string
+	Labels              []string
+	BaseBranch          string
+	HeadBranch          string
+	HeadRepo            string
+	HeadRepoURL         string
+	BaseSHA             string
+	HeadSHA             string
+	Draft               bool
+	MergeableState      string
+	Merged              bool
+	MergeCommitSHA      string
+	ChangedFiles        int
 	MaintainerCanModify bool
 }
 
@@ -127,9 +119,6 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		return 0, 0, 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, reason)
 	}
 	pullRequests = filterRepositoryMonitorBasePullRequests(pullRequests, baseBranch)
-	// Excluded PRs leave the inventory before readiness, so they get no status.
-	// A PR that loses its label is retired and its outstanding work cancelled,
-	// since a repair Task could otherwise still push to it.
 	if err := r.retireExcludedRepositoryMonitorPullRequests(ctx, monitor, run, pullRequests); err != nil {
 		return 0, 0, 0, err
 	}
@@ -147,8 +136,6 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 	skipped := 0
 
 	for _, pr := range pullRequests {
-		// PR lists omit mergeability. Automatic repair needs detail even when
-		// readiness publication is disabled; targeted runs already fetch it.
 		if monitor.Spec.Repair.Enabled && !monitor.Spec.Review.Publish.Enabled && run.TargetNumber == 0 {
 			current, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, pr.Number)
 			if err != nil {
@@ -179,17 +166,10 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		if err := r.reconcileRepositoryMonitorReadiness(ctx, monitor, &pr, item, inventories...); err != nil {
 			return selected, createdTasks, skipped, err
 		}
-		// Readiness may observe a newer head or a PR leaving this monitor's scope.
-		// Do not start work from the old inventory; the next poll will rebuild it.
 		if pr.State != repositoryMonitorItemStateOpen || pr.HeadSHA != item.HeadSHA || pr.BaseBranch != baseBranch || !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
-			// A command whose target lost its include label since the first
-			// read is blocked, not left pending for an item that is now retired.
 			if run.CommandEventID != "" && run.TargetNumber == pr.Number && pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
 				return selected, createdTasks, skipped + 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, "target_not_included")
 			}
-			// The fresh read can see an include label removed after the
-			// retirement pass read the list; retire the pull request now so
-			// its running work cannot push before the next poll.
 			if pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
 				if _, err := r.retireExcludedRepositoryMonitorPullRequest(ctx, monitor, run, pr, nil, map[string]struct{}{}); err != nil {
 					return selected, createdTasks, skipped, err
@@ -210,9 +190,6 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			if handled, err := r.tryRepositoryMonitorAutomaticRepair(ctx, monitor, run, owner, repository, pr, item); err != nil {
 				return selected, createdTasks, skipped, err
 			} else if handled {
-				// Only newly started work consumes a slot. Active or exhausted
-				// repairs must not starve later PRs on every workflow poll.
-				// GitHub update-branch queues work without creating a Task.
 				if !repairWasQueued && item.RepairState == repositoryMonitorRepairPhaseQueued {
 					selected++
 				} else {
@@ -296,9 +273,6 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			continue
 		}
 
-		// The head's first exhaustive pass already waited for green CI, and
-		// the pass fence holds CI repair until the chain ends, so a further
-		// pass on the same head must not wait for CI again.
 		continuation, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr)
 		if err != nil {
 			return selected, createdTasks, skipped, err
@@ -375,9 +349,6 @@ func (r *RepositoryMonitorReconciler) processTargetedPullRequestControlCommand(c
 	}
 	existing, getErr := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, fmt.Sprintf("%d", run.TargetNumber))
 	if errors.Is(getErr, store.ErrNotFound) {
-		// Do not synthesize an open inventory item for an unknown control target.
-		// Fall through to the normal targeted GitHub lookup so the command is
-		// applied only after the pull request has been verified.
 		return false, 0, nil
 	}
 	if getErr != nil {
@@ -542,19 +513,6 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 	return taskName, true, r.retainMonitorUsageTask(ctx, task, usageWorkID, repositoryMonitorCommandIntentReview, pr.Number)
 }
 
-// validateRepositoryMonitorReviewTaskMatchesExpected decides whether an
-// already existing Task with the predictable review name may be adopted as
-// this run's review. Task provenance admission does not reserve monitor
-// labels, annotations, or owner references to the controller, so any
-// principal with Task create access could pre-create a Task under this name;
-// metadata alone therefore proves nothing. The invariant is that the adopted
-// spec must be byte-identical to what the controller renders for this head
-// now, including the embedded diff context, which is deterministic for a
-// fixed base/head/head-repo. The only tolerated difference is the
-// controller-shaped "GitHub unavailable" envelope (no files, well-formed
-// error class), which carries no untrusted content, so a Task created while
-// GitHub was down is still adopted once GitHub recovers. An existing Task
-// carrying diff context that cannot be reproduced now fails closed.
 func validateRepositoryMonitorReviewTaskMatchesExpected(existing, expected *corev1alpha1.Task, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string, pr repositoryMonitorPullRequest, plan repositoryMonitorReviewPlan) error {
 	if existing == nil || expected == nil {
 		return fmt.Errorf("repository monitor review task is required")
@@ -584,10 +542,6 @@ func validateRepositoryMonitorReviewTaskMatchesExpected(existing, expected *core
 	return nil
 }
 
-// repositoryMonitorReviewPromptMatchesExpected accepts the existing prompt
-// only when it is exactly the freshly rendered prompt, or exactly the prompt
-// the controller renders for this head with a context-unavailable envelope.
-// A fabricated or unreproducible context block is rejected.
 func repositoryMonitorReviewPromptMatchesExpected(existingPrompt, expectedPrompt string, monitor *corev1alpha1.RepositoryMonitor, owner, repository string, pr repositoryMonitorPullRequest, plan repositoryMonitorReviewPlan) bool {
 	if existingPrompt == expectedPrompt {
 		return true
@@ -605,8 +559,6 @@ func repositoryMonitorReviewPromptMatchesExpected(existingPrompt, expectedPrompt
 }
 
 func repositoryMonitorComparableReviewTaskSpec(spec corev1alpha1.TaskSpec) corev1alpha1.TaskSpec {
-	// The prompt is validated separately against the controller rendering;
-	// clear it here so the remaining spec fields are compared exactly.
 	spec.Prompt = ""
 	spec.ConcurrencyPolicy = ""
 	spec.StartingDeadlineSeconds = nil
@@ -762,8 +714,6 @@ func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor,
 	} else if plan.Mode == repositoryMonitorReviewModeSameHead && plan.Base != nil {
 		followUp = "\n" + renderRepositoryMonitorFollowUpInstructions(plan, "")
 	}
-	// The pull request context, the delta, and the open findings share one
-	// budget, so a follow-up prompt is no larger than a full review's.
 	if followUp != "" {
 		reviewContext = repositoryMonitorReviewContextWithin(reviewContext, max(0, repositoryMonitorReviewContextMaxBytes-len(followUp)))
 	}
@@ -898,19 +848,16 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests
 		if _, ok := seenKeys[item.ItemKey]; ok {
 			continue
 		}
-		// An in-scope peer already reconciled the shared commit outcome above.
 		if _, shared := seenHeads[item.HeadSHA]; !shared {
 			if err := r.revokeRepositoryMonitorReadiness(ctx, monitor, item.HeadSHA); err != nil {
 				return err
 			}
 		}
-		// Already retired, including as excluded or stopped by a command.
 		if item.State == repositoryMonitorItemStateOutOfScope {
 			continue
 		}
 		item.State = repositoryMonitorItemStateOutOfScope
 		item.LastVerdict = repositoryMonitorVerdictSkipped
-		// An explicit stop survives retirement so a reopened PR stays stopped.
 		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
 			item.SkipReason = repositoryMonitorSkipReasonMissing
 		}
@@ -927,23 +874,15 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests
 	return nil
 }
 
-// retireExcludedRepositoryMonitorPullRequests retires open items whose pull
-// request no longer carries an include label and cancels their unfinished
-// review and repair Tasks, so no work started in scope publishes after it.
 func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequests(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pullRequests []repositoryMonitorPullRequest) error {
 	if len(monitor.Spec.Targets.PullRequests.IncludeLabels) == 0 {
 		return nil
 	}
-	// A full run already holds the fresh open inventory, so every excluded PR
-	// in the batch reconciles its shared head against it; a targeted run lists
-	// peers at most once, and only when a readiness status needs reconciling.
 	var peers []repositoryMonitorPullRequest
 	if run == nil || run.TargetNumber == 0 {
 		peers = pullRequests
 	}
 	reconciledHeads := map[string]struct{}{}
-	// One pull request's failure, such as a rejected status write, must not
-	// leave the others in scope; attempt each and report every failure.
 	var errs []error
 	for _, pr := range pullRequests {
 		if repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
@@ -957,8 +896,6 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 	return errors.Join(errs...)
 }
 
-// retireExcludedRepositoryMonitorPullRequest retires one excluded pull
-// request's open item and returns the readiness peers, listed at most once.
 func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pr repositoryMonitorPullRequest, peers []repositoryMonitorPullRequest, reconciledHeads map[string]struct{}) ([]repositoryMonitorPullRequest, error) {
 	item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
 	if errors.Is(err, store.ErrNotFound) {
@@ -973,13 +910,9 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 	if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded); err != nil {
 		return peers, err
 	}
-	// Settle the cancelled work like a stop does, so a returning label
-	// does not find an orphaned running action holding readiness pending.
 	if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded, ""); err != nil {
 		return peers, err
 	}
-	// A targeted run never reaches missing-item cleanup, so revoke the
-	// readiness status here; shared heads keep their peers' outcome.
 	if _, done := reconciledHeads[item.HeadSHA]; !done {
 		if peers, err = r.revokeRepositoryMonitorExcludedReadiness(ctx, monitor, pr.Number, item.HeadSHA, peers); err != nil {
 			return peers, err
@@ -1000,9 +933,6 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 	})
 }
 
-// revokeRepositoryMonitorExcludedReadiness reconciles the readiness status of
-// a head whose pull request left the monitor's scope against peers, listing
-// them first when the caller has none, and returns the peers it used.
 func (r *RepositoryMonitorReconciler) revokeRepositoryMonitorExcludedReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string, peers []repositoryMonitorPullRequest) ([]repositoryMonitorPullRequest, error) {
 	if strings.TrimSpace(headSHA) == "" || !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) {
 		return peers, nil
@@ -1055,28 +985,16 @@ func repositoryMonitorMaxPullRequestsPerRun(spec corev1alpha1.RepositoryMonitorS
 	return int(*spec.Targets.PullRequests.MaxPerRun)
 }
 
-// repositoryMonitorPullRequestIncluded reports whether pr belongs in the
-// monitor's inventory: it is reviewed or carries a CI-only repair label. An
-// empty pull request include list includes every PR.
 func repositoryMonitorPullRequestIncluded(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) bool {
 	return repositoryMonitorPullRequestReviewed(spec, pr) || repositoryMonitorMatchingLabel(spec.Repair.CIOnlyLabels, pr.Labels) != ""
 }
 
-// repositoryMonitorPullRequestReviewed reports whether pr is reviewed and so
-// can receive a published review and readiness status. Repair labels select a
-// pull request for review alongside the pull request include labels.
 func repositoryMonitorPullRequestReviewed(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) bool {
 	return len(spec.Targets.PullRequests.IncludeLabels) == 0 ||
 		repositoryMonitorMatchingLabel(spec.Targets.PullRequests.IncludeLabels, pr.Labels) != "" ||
 		repositoryMonitorMatchingLabel(spec.Repair.IncludeLabels, pr.Labels) != ""
 }
 
-// repositoryMonitorPullRequestRepairScope reports which automatic repairs pr
-// allows. full permits branch updates, finding fixes, and CI fixes; ciOnly
-// permits CI fixes alone. labelled is set when a label granted the repair, so
-// the account that added it must be checked before any work starts. A
-// full-repair label wins, then a CI-only label; without repair include
-// labels, other reviewed pull requests keep full repair.
 func repositoryMonitorPullRequestRepairScope(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) (full, ciOnly, labelled bool) {
 	if repositoryMonitorMatchingLabel(spec.Repair.IncludeLabels, pr.Labels) != "" {
 		return true, false, true
@@ -1090,7 +1008,6 @@ func repositoryMonitorPullRequestRepairScope(spec corev1alpha1.RepositoryMonitor
 	return repositoryMonitorPullRequestReviewed(spec, pr), false, false
 }
 
-// repositoryMonitorRepairLabels returns the labels that can grant pr a repair.
 func repositoryMonitorRepairLabels(spec corev1alpha1.RepositoryMonitorSpec, full bool) []string {
 	if full {
 		return spec.Repair.IncludeLabels
@@ -1111,8 +1028,6 @@ func filterRepositoryMonitorIncludedPullRequests(spec corev1alpha1.RepositoryMon
 	return filtered
 }
 
-// repositoryMonitorPullRequestLabelScopeField names the first configured
-// pull request label list that scopes review or repair.
 func repositoryMonitorPullRequestLabelScopeField(spec corev1alpha1.RepositoryMonitorSpec) string {
 	switch {
 	case len(spec.Targets.PullRequests.IncludeLabels) > 0:
@@ -1126,8 +1041,6 @@ func repositoryMonitorPullRequestLabelScopeField(spec corev1alpha1.RepositoryMon
 	}
 }
 
-// repositoryMonitorIssueImplementationEnabled mirrors the issue part of
-// repositoryMonitorManagedWorkflow.
 func repositoryMonitorIssueImplementationEnabled(spec corev1alpha1.RepositoryMonitorSpec) bool {
 	return spec.Targets.Issues.Enabled && spec.Agents.Implementer != nil && (spec.IssueWorkflow.Implementation.Enabled == nil || *spec.IssueWorkflow.Implementation.Enabled)
 }
@@ -1185,9 +1098,6 @@ func repositoryMonitorPullRequestSkipReason(spec corev1alpha1.RepositoryMonitorS
 	if blockedLabel := repositoryMonitorBlockedLabel(spec, pr.Labels); blockedLabel != "" {
 		return "blocked_label"
 	}
-	// A review already running keeps its queued bookkeeping until ingestion
-	// settles it, even if the pull request has since become CI-only;
-	// publishing still skips a CI-only pull request.
 	if existing != nil && existing.HeadSHA != "" && existing.HeadSHA == pr.HeadSHA && existing.LastReviewID != "" {
 		if existing.LastVerdict == repositoryMonitorRunPhaseQueued {
 			return repositoryMonitorSkipReasonPending
@@ -1225,8 +1135,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewedHeadFresh(ctx con
 		if !repositoryMonitorReviewVerdictMarksHeadFresh(records[i].Verdict) {
 			continue
 		}
-		// The head's latest accepted review decides whether another
-		// exhaustive pass is due; until it runs, the head is not reviewed.
 		if pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, &records[i]); err != nil || pending {
 			return false, err
 		}
@@ -1522,16 +1430,15 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorBranchHead(ctx conte
 }
 
 type repositoryMonitorPullRequestResponse struct {
-	Number         int64  `json:"number"`
-	Title          string `json:"title"`
-	State          string `json:"state"`
-	Draft          bool   `json:"draft"`
-	MergeableState string `json:"mergeable_state"`
-	Merged         bool   `json:"merged"`
-	MergeCommitSHA string `json:"merge_commit_sha"`
-	ChangedFiles   int    `json:"changed_files"`
-	// MaintainerCanModify is present only on single pull request reads.
-	MaintainerCanModify bool `json:"maintainer_can_modify"`
+	Number              int64  `json:"number"`
+	Title               string `json:"title"`
+	State               string `json:"state"`
+	Draft               bool   `json:"draft"`
+	MergeableState      string `json:"mergeable_state"`
+	Merged              bool   `json:"merged"`
+	MergeCommitSHA      string `json:"merge_commit_sha"`
+	ChangedFiles        int    `json:"changed_files"`
+	MaintainerCanModify bool   `json:"maintainer_can_modify"`
 	User                struct {
 		Login string `json:"login"`
 	} `json:"user"`

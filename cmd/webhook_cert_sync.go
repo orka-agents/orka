@@ -30,9 +30,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// webhookCertSyncer bridges the API to a writable, memory-backed CertDir.
-// Rotation and CA injection remain owned by cert-controller. Only generated
-// mode uses this bridge; operator-mounted certificates keep their file watcher.
 type webhookCertSyncer struct {
 	options   webhookCertRotationOptions
 	cache     cache.Cache
@@ -109,8 +106,6 @@ func (s *webhookCertSyncer) Start(ctx context.Context) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		// Re-read from the dedicated cache, not the API. The ticker also rechecks
-		// certificate validity without a new watch event.
 		if err := s.sync(ctx); err != nil {
 			return err
 		}
@@ -147,7 +142,7 @@ func (s *webhookCertSyncer) sync(ctx context.Context) error {
 	if err != nil {
 		s.current = nil
 		s.trustErr = err
-		return nil // cert-controller repairs invalid data; never publish it.
+		return nil
 	}
 	publish := s.current == nil || !bytes.Equal(cert.Certificate[0], s.current.Certificate[0]) ||
 		!bytes.Equal(secret.Data["ca.crt"], s.ca)
@@ -162,8 +157,6 @@ func (s *webhookCertSyncer) sync(ctx context.Context) error {
 			filepath.Join(s.options.CertDir, s.options.KeyName),
 		)
 	} else {
-		// A background read of the old generation can finish after our reload.
-		// Recheck even unchanged Secrets so recovery need not wait for its poll.
 		var loaded *tls.Certificate
 		loaded, err = s.watcher.GetCertificate(nil)
 		if err == nil && (publish || loaded == nil || !bytes.Equal(loaded.Certificate[0], cert.Certificate[0])) {
@@ -194,8 +187,6 @@ func (s *webhookCertSyncer) sync(ctx context.Context) error {
 	return nil
 }
 
-// GetCertificate also gates new TLS connections: readiness alone cannot stop
-// certwatcher's last-good cache from serving an expired or untrusted pair.
 func (s *webhookCertSyncer) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -269,8 +260,6 @@ func verifyWebhookCertificate(cert *tls.Certificate, ca []byte, dnsName string, 
 	return nil
 }
 
-// Publish a complete generation before swapping ..data, just like a projected
-// Secret volume. Independent renames of cert/key could expose a mixed pair.
 func publishWebhookCertificate(secret *corev1.Secret, o webhookCertRotationOptions) error {
 	if err := os.MkdirAll(o.CertDir, 0700); err != nil {
 		return err
@@ -284,8 +273,6 @@ func publishWebhookCertificate(secret *corev1.Secret, o webhookCertRotationOptio
 	if err != nil {
 		return err
 	}
-	// Interrupted publications can survive container restarts in emptyDir.
-	// Reclaim only our inactive directories before allocating another pair.
 	for _, entry := range entries {
 		if entry.IsDir() && strings.HasPrefix(entry.Name(), "..cert-") && entry.Name() != previous {
 			if err := os.RemoveAll(filepath.Join(o.CertDir, entry.Name())); err != nil {
@@ -327,8 +314,6 @@ func publishWebhookCertificate(secret *corev1.Secret, o webhookCertRotationOptio
 		return err
 	}
 	published = true
-	// Removing the old inode also wakes certwatcher's file watches. Only remove
-	// generation directories owned by this writer, including across Pod restarts.
 	if strings.HasPrefix(previous, "..cert-") && filepath.Base(previous) == previous {
 		return os.RemoveAll(filepath.Join(o.CertDir, previous))
 	}

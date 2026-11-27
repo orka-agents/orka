@@ -277,9 +277,6 @@ func fakeJWT() string {
 	}, ".")
 }
 
-// A credential sent as a JSON key is redacted the way a value is, while
-// ordinary keys, including ones naming secrets, are kept; colliding
-// redacted keys are told apart.
 func TestSanitizeExecutionEventJSONRedactsSecretKeys(t *testing.T) {
 	github := "ghp_" + strings.Repeat("a", 36)
 	jwt := "eyJ" + strings.Repeat("b", 12) + "." + strings.Repeat("c", 12) + "." + strings.Repeat("d", 12)
@@ -309,7 +306,6 @@ func TestSanitizeExecutionEventJSONRedactsSecretKeys(t *testing.T) {
 	}
 }
 
-// A literal key equal to another key's redacted form keeps its own field.
 func TestSanitizeExecutionEventJSONKeepsKeysThatCollideWithARedactedKey(t *testing.T) {
 	sanitized, _, err := SanitizeExecutionEventJSON(json.RawMessage(`{"password=1234":"a","password=[REDACTED]":"b"}`))
 	if err != nil {

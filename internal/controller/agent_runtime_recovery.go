@@ -85,8 +85,6 @@ func (r *AgentRuntimeReconciler) recoveryWitnesses(ctx context.Context, runtime 
 		if effect.Spec.Kind != agentRuntimeBootWitnessKind || effect.Spec.AggregateID != string(runtime.UID) {
 			continue
 		}
-		// A pending observation cannot have admitted work. Its exact response
-		// must commit before conformance or public Session creation can start.
 		if (effect.Status.State == corev1alpha1.ExternalEffectControlState(store.ExternalEffectPending) || effect.Status.State == "" && effect.Status.Version == 0) && effect.Status.Response == nil && effect.Status.ResponseDigest == "" {
 			continue
 		}
@@ -149,9 +147,6 @@ func witnessedContainerTermination(witness agentRuntimeBootWitness, pod *corev1.
 	return witnessedContainerTerminationWithTopology(witness, pod, pod.Spec)
 }
 
-// witnessedContainerTerminationWithTopology checks topology, a view of the Pod
-// spec that may omit controller-rendered RuntimePool toolbox init containers;
-// the spec digest still covers the complete Pod spec.
 func witnessedContainerTerminationWithTopology(witness agentRuntimeBootWitness, pod *corev1.Pod, topology corev1.PodSpec) (*corev1.ContainerStateTerminated, error) {
 	if pod == nil || pod.Namespace != witness.Namespace || pod.Name != witness.PodName || pod.UID != witness.PodUID {
 		return nil, errors.New("retirement observation does not match the witnessed Pod UID")
@@ -236,8 +231,6 @@ func (r *AgentRuntimeReconciler) recoveryBootClient(ctx context.Context, witness
 	if err != nil {
 		return nil, err
 	}
-	// A pending DELETE retains the original immutable authority until its
-	// cleanup finalizer can be released after proven boot retirement.
 	if secret.Immutable == nil || !*secret.Immutable || !controllerutil.ContainsFinalizer(secret, agentRuntimeSecretFinalizer) {
 		return nil, errors.New("retained boot authentication must be immutable and retain its cleanup finalizer")
 	}
@@ -298,10 +291,6 @@ func (r *AgentRuntimeReconciler) recoveryBootClient(ctx context.Context, witness
 	)
 }
 
-// A witness owns its boot before retention writes complete. Takeover and
-// deletion must resume that interrupted enrollment before attempting drain.
-// Only the originally observed credentials and physical backend may complete
-// it; changed source auth cannot replace missing retained boot authority.
 func (r *AgentRuntimeReconciler) resumeRecoveryBootRetention(ctx context.Context, witness agentRuntimeBootWitness, fence store.ControllerEpochFence) error {
 	current := &corev1alpha1.AgentRuntime{}
 	if err := r.endpointReader().Get(ctx, client.ObjectKey{Namespace: witness.Namespace, Name: witness.RuntimeName}, current); err != nil {
@@ -408,17 +397,12 @@ func recoveryFoundryBrokerIdentity(ctx context.Context, provider, registeredConf
 	if capabilities.RuntimeProfileDigest != status.Fence.RuntimeProfileDigest || capabilities.ProfileDigestSchemaVersion != status.Fence.ProfileDigestSchemaVersion {
 		return nil, errors.New("authenticated runtime profile does not match its recovery capabilities")
 	}
-	// Unqualified Foundry boots retain their existing enrollment and live
-	// drain contract, but cannot grant remote retirement authority.
 	if !capabilities.SupportsFoundryRecovery {
 		return nil, nil
 	}
 	if status.FoundryBroker == nil || status.FoundryBroker.Validate() != nil {
 		return nil, errors.New("foundry recovery enrollment requires authenticated broker identity before admission")
 	}
-	// The broker ledger must partition sessions under the registered agent
-	// configuration; a different partition could certify retirement of sessions
-	// that never belonged to this profile.
 	if status.FoundryBroker.AgentConfigurationDigest != registeredConfigurationDigest {
 		return nil, errors.New("foundry broker configuration does not match the registered runtime profile")
 	}
@@ -506,9 +490,6 @@ func (r *AgentRuntimeReconciler) observeRecoveryBoot(ctx context.Context, runtim
 	}
 	identity := agentRuntimeRecoveryIdentity(agentRuntimeBootWitnessKind, runtime.UID, runtime.Namespace, string(witness.Fence.SupervisorBootID))
 	if !witnessPublished {
-		// Preparation retains the original Pod identity before an ambiguous
-		// retention PATCH. An existing witness already records that identity;
-		// adding a preparation would hide its legacy retention format.
 		if _, err := r.ControlStore.ReserveExternalEffect(ctx, store.ReserveExternalEffectRequest{
 			Identity: identity, RequestDigest: digest, Fence: fence, CreatedAt: time.Now().UTC(),
 		}); err != nil {
@@ -528,9 +509,6 @@ func (r *AgentRuntimeReconciler) observeRecoveryBoot(ctx context.Context, runtim
 	return witness, r.persistRecoveryBootAuth(ctx, runtime, witness, auth, fence)
 }
 
-// reconcileKubernetesRuntimeRecovery runs before conformance. It never adopts a
-// new boot until every older enrolled boot has positive retirement evidence.
-//
 //nolint:gocyclo // The ordered retirement, observation and epoch-replacement decisions share one fail-closed state boundary.
 func (r *AgentRuntimeReconciler) reconcileKubernetesRuntimeRecovery(ctx context.Context, runtime *corev1alpha1.AgentRuntime) (bool, error) {
 	if runtime.Spec.Deployment.KubernetesRecovery == nil {

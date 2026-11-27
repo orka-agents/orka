@@ -10,7 +10,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Skeleton } from '@/components/ui/skeleton'
 
-// Human-readable bytes: B -> KB -> MB. Keeps one decimal for KB/MB.
 function formatSize(size?: number) {
   if (size == null) return null
   if (size < 1024) return `${size} B`
@@ -30,8 +29,6 @@ export function TaskArtifactsPanel({
   const namespace = useUIStore((s) => s.namespace)
   const { data, isLoading, error } = useTaskArtifacts(taskId, true, taskUid, refetchInterval)
   const artifacts = data?.artifacts ?? []
-  // 501 = artifact store disabled (a normal empty), anything else is a real
-  // failure that must not be silently shown as "No artifacts".
   const isUnsupported = error instanceof ApiError && error.status === 501
   const failed = error && !isUnsupported
 

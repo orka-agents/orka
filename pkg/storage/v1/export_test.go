@@ -35,7 +35,6 @@ func TestExportSchemasAreWellFormed(t *testing.T) {
 		require.True(t, ok)
 		require.Equal(t, schema, got)
 	}
-	// Sessions come before the records that belong to a Session.
 	for _, order := range [][2]string{
 		{"sessions", "session_messages"}, {"sessions", "session_turns"}, {"sessions", "native_session_snapshots"},
 		{"sessions", "native_session_operations"}, {"sessions", "native_session_finalizations"},
@@ -49,8 +48,6 @@ func TestExportSchemasAreWellFormed(t *testing.T) {
 	require.NotEqual(t, "changed", storagev1.ExportSchemas()[0].Fields[0].Name, "ExportSchemas returns copies")
 }
 
-// exampleValues returns a value of each field's kind that differs for each n,
-// with times in a zone other than UTC and with nanoseconds.
 func exampleValues(schema storagev1.ExportFamilySchema, n int) []any {
 	zone := time.FixedZone("UTC-5", -5*60*60)
 	values := make([]any, len(schema.Fields))

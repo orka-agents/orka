@@ -34,84 +34,38 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// Task admission limits (--max-tasks-per-namespace and a coordinator's
-// maxConcurrentChildren) admit Tasks through a slot ledger. A Task is a slot
-// holder once it has been granted a slot, or once its own state shows it
-// admitted (see taskAdmittedByWork and taskAdmissionRetryPending); a Task
-// still waiting for a slot, or a recurring Task's scheduling parent, is not
-// counted. A waiting Task joins the ledger with a resourceVersion-checked
-// update of one shared Lease, so two contenders can never both take the last
-// slot, and whenever a slot is free some contender takes it: waiting Tasks
-// never block each other. Holders that run nothing yet, such as Tasks over a
-// lowered limit, proceed one at a time, oldest first (taskAdmissionView).
-// Holders free their slot by reaching a terminal phase or being deleted.
-//
-// Ledgers live only in the controller namespace, the trust boundary that also
-// holds the controller-epoch Lease, and admission refuses every write to
-// their name prefixes but the controller's
-// (config/admission/acp_workspace_lease_protection.yaml), so a tenant that
-// can write Leases there cannot forge or remove a grant. A grant
-// counts only when it names a live, schedule-free Task of the scope by UID,
-// and every admission, a granted Task's included, requires the running Tasks
-// and the holders ahead of it to number fewer than the limit. A forged or
-// stale grant can therefore only delay admission, never raise capacity above
-// the limit.
-
 const (
-	// taskAdmissionLedgerAnnotation holds the granted Task UIDs, sorted, as a
-	// JSON array.
-	taskAdmissionLedgerAnnotation = "orka.ai/task-admission-slots"
-	taskAdmissionNamespaceLedger  = labels.TaskAdmissionNamespaceLedgerNamePrefix
-	taskAdmissionChildrenLedger   = labels.TaskAdmissionChildrenLedgerNamePrefix
-	// taskAdmissionLedgerKindLabel marks ledgers for the reaper, which reads
-	// the scope a ledger admits from its annotations.
+	taskAdmissionLedgerAnnotation          = "orka.ai/task-admission-slots"
+	taskAdmissionNamespaceLedger           = labels.TaskAdmissionNamespaceLedgerNamePrefix
+	taskAdmissionChildrenLedger            = labels.TaskAdmissionChildrenLedgerNamePrefix
 	taskAdmissionLedgerKindLabel           = "orka.ai/task-admission-ledger"
 	taskAdmissionLedgerKindNamespace       = "namespace"
 	taskAdmissionLedgerKindChildren        = "children"
 	taskAdmissionLedgerNamespaceAnnotation = "orka.ai/task-admission-namespace"
 	taskAdmissionLedgerParentAnnotation    = "orka.ai/task-admission-parent"
 	taskAdmissionLedgerParentUIDAnnotation = "orka.ai/task-admission-parent-uid"
-	// taskAdmissionLedgerStaleAfter is how long a ledger with no live grant
-	// is kept after its last grant.
-	taskAdmissionLedgerStaleAfter   = time.Hour
-	taskAdmissionLedgerReapInterval = 10 * time.Minute
+	taskAdmissionLedgerStaleAfter          = time.Hour
+	taskAdmissionLedgerReapInterval        = 10 * time.Minute
 )
 
-// errTaskAdmissionLedgerUnavailable fails admission closed when no controller
-// namespace is configured to hold admission ledgers.
 var errTaskAdmissionLedgerUnavailable = errors.New(
 	"task admission limits require a controller namespace to hold admission ledgers; no Task is admitted under a limit without one")
 
-// MaxTaskAdmissionSlots bounds every admission limit. A ledger never holds
-// more grants than its limit, each about 40 bytes of JSON, so this keeps a
-// full ledger near 160KiB, well under the 256KiB Kubernetes allows for all of
-// an object's annotations. --max-tasks-per-namespace is validated against it;
-// a larger maxConcurrentChildren admits at most this many children at once.
 const MaxTaskAdmissionSlots = 4096
 
-// effectiveTaskAdmissionLimit clamps a configured limit to
-// MaxTaskAdmissionSlots, the stricter direction.
 func effectiveTaskAdmissionLimit(limit int32) int32 {
 	return min(limit, MaxTaskAdmissionSlots)
 }
 
-// taskAdmissionScope is one limit: its ledger, its size, and how to list
-// every Task it covers from the API server.
 type taskAdmissionScope struct {
-	ledger types.NamespacedName
-	limit  int32
-	// namespace holds every Task the scope lists, and their Jobs.
-	namespace string
-	// list returns the scope's Tasks. It is called after each ledger read,
-	// so every grant the read returns belongs to a Task the list can see
-	// unless that Task is gone.
-	list func(context.Context) ([]corev1alpha1.Task, error)
-	// labels and annotations identify the scope for the reaper.
+	ledger      types.NamespacedName
+	limit       int32
+	namespace   string
+	list        func(context.Context) ([]corev1alpha1.Task, error)
 	labels      map[string]string
 	annotations map[string]string
 }
 
-// namespaceAdmissionScope is the namespace Task limit.
 func (r *TaskReconciler) namespaceAdmissionScope(namespace string, limit int32) taskAdmissionScope {
 	return taskAdmissionScope{
 		ledger: types.NamespacedName{
@@ -129,7 +83,6 @@ func (r *TaskReconciler) namespaceAdmissionScope(namespace string, limit int32) 
 	}
 }
 
-// childrenAdmissionScope is a coordinator's maxConcurrentChildren.
 func (r *TaskReconciler) childrenAdmissionScope(parent *corev1alpha1.Task, limit int32) taskAdmissionScope {
 	return taskAdmissionScope{
 		ledger: types.NamespacedName{
@@ -160,20 +113,11 @@ func (r *TaskReconciler) childrenAdmissionScope(parent *corev1alpha1.Task, limit
 	}
 }
 
-// taskAdmissionChildOf reports whether a Task labelled as parent's child
-// belongs to this incarnation of parent. A child pins its parent's UID with
-// its controller owner reference or, across namespaces, the parent UID
-// annotation, as delegatedBy reads them; a child pinned to another UID
-// belongs to an earlier Task of the same name and is not counted. A child
-// with no pin at all is counted: counting it can only delay admission.
 func taskAdmissionChildOf(child, parent *corev1alpha1.Task) bool {
 	pinned, ok := taskParentUIDPin(child, parent.Name)
 	return !ok || pinned == parent.UID
 }
 
-// taskParentUIDPin returns the parent UID a child pins for the parent named
-// parentName: its controller owner reference to that Task or, failing that,
-// the parent UID annotation.
 func taskParentUIDPin(child *corev1alpha1.Task, parentName string) (types.UID, bool) {
 	if owner := metav1.GetControllerOf(child); owner != nil && owner.Kind == taskResourceKind &&
 		owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Name == parentName {
@@ -194,15 +138,6 @@ func taskAdmissionLedgerDigest(value string) string {
 	return hex.EncodeToString(sum[:])[:20]
 }
 
-// A Task's own state shows it admitted, such as one admitted before the
-// ledger existed, when it is past admission and running work
-// (taskAdmittedByWork) or Pending in retry backoff between Job attempts
-// (taskAdmissionRetryPending). A recurring Task's scheduling parent never
-// holds a slot: it bypasses admission, stays Scheduled, and runs nothing
-// itself; each of its runs is a separate child Task that takes its own slot.
-//
-// taskAdmittedByWork reports a Task Running or Finalizing, or Pending with its
-// execution bound, its Job created, or an ACP attempt.
 func taskAdmittedByWork(task *corev1alpha1.Task) bool {
 	if task.Spec.Schedule != "" {
 		return false
@@ -214,10 +149,6 @@ func taskAdmittedByWork(task *corev1alpha1.Task) bool {
 	return task.Status.AgentExecutionBinding != nil || strings.TrimSpace(task.Status.JobName) != "" || task.Status.Execution != nil
 }
 
-// taskAdmissionRetryPending reports a Pending Task between Job attempts:
-// retryTask cleared its Job, and the retry-pending condition is the only sign
-// it was admitted. It still holds its slot, so a Task admitted before the
-// ledger existed is not overtaken while it backs off.
 func taskAdmissionRetryPending(task *corev1alpha1.Task) bool {
 	if task.Spec.Schedule != "" || task.Status.Phase != corev1alpha1.TaskPhasePending {
 		return false
@@ -226,36 +157,18 @@ func taskAdmissionRetryPending(task *corev1alpha1.Task) bool {
 	return condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == taskRetryPendingReason
 }
 
-// taskAdmissionGrantEligible reports a listed Task a grant may name: live
-// (not terminal) and not a recurring Task's scheduling parent.
 func taskAdmissionGrantEligible(task *corev1alpha1.Task) bool {
 	return task.UID != "" && !task.Status.Phase.IsTerminal() && task.Spec.Schedule == ""
 }
 
-// taskAdmissionView is what a scope's ledger and Task list say about one
-// Task's admission.
 type taskAdmissionView struct {
-	// running counts the other Tasks of the scope running work
-	// (taskAdmittedByWork).
-	running int
-	// claimants counts the other Tasks entitled to a slot that run nothing
-	// yet: those with a valid grant, and those backing off between retries;
-	// claimantsBefore counts the ones ordered before task.
+	running                    int
 	claimants, claimantsBefore int
-	// claimant reports whether task itself is such a Task.
-	claimant bool
-	// valid holds the grants that still count, and granted whether one of
-	// them is task's.
-	valid   []types.UID
-	granted bool
+	claimant                   bool
+	valid                      []types.UID
+	granted                    bool
 }
 
-// admits reports whether task may proceed under limit. A claimant waits only
-// for the running Tasks and the claimants ordered before it, so claimants
-// over a lowered limit proceed one at a time in a fixed order instead of
-// each waiting for all the others; any other Task waits for every running
-// Task and claimant. Either way the running Tasks and the claimants allowed
-// to proceed never number more than limit.
 func (v taskAdmissionView) admits(limit int32) bool {
 	ahead := v.running + v.claimants
 	if v.claimant {
@@ -264,13 +177,6 @@ func (v taskAdmissionView) admits(limit int32) bool {
 	return int32(ahead) < limit //nolint:gosec // bounded by the listed Task count
 }
 
-// newTaskAdmissionView reads task's admission from the scope's grants and
-// Tasks. A grant counts only when it names, by UID, a listed Task of the
-// scope that is grant-eligible. Claimants are ordered oldest first
-// (taskAdmissionOrderedBefore), the same in every scope, so a Task ahead in
-// one ledger is ahead in all of them and two Tasks never each hold a slot
-// the other waits for. No grant is dropped: a claimant not yet elected keeps
-// its place and proceeds once those ahead of it finish.
 func newTaskAdmissionView(task *corev1alpha1.Task, granted []types.UID, tasks []corev1alpha1.Task, jobOwners map[types.UID]struct{}) taskAdmissionView {
 	eligible := make(map[types.UID]*corev1alpha1.Task, len(tasks))
 	for i := range tasks {
@@ -313,8 +219,6 @@ func newTaskAdmissionView(task *corev1alpha1.Task, granted []types.UID, tasks []
 	return view
 }
 
-// taskAdmissionOrderedBefore orders claimants oldest first, by creation time
-// and then UID, a total order every scope and reconcile agrees on.
 func taskAdmissionOrderedBefore(a, b *corev1alpha1.Task) bool {
 	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
 		return a.CreationTimestamp.Before(&b.CreationTimestamp)
@@ -322,16 +226,10 @@ func taskAdmissionOrderedBefore(a, b *corev1alpha1.Task) bool {
 	return a.UID < b.UID
 }
 
-// acquireTaskAdmissionSlot reports whether task holds one of the scope's
-// slots, granting it one if a slot is free (see taskAdmissionView.admits). A
-// grant nobody made can never admit a Task past the limit, and a Task the
-// scope does not list as grant-eligible is never admitted.
 func (r *TaskReconciler) acquireTaskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) (bool, error) {
 	return r.taskAdmissionSlot(ctx, task, scope, true)
 }
 
-// taskAdmissionSlotFree reports whether acquireTaskAdmissionSlot would admit
-// task now, without writing a grant.
 func (r *TaskReconciler) taskAdmissionSlotFree(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) (bool, error) {
 	return r.taskAdmissionSlot(ctx, task, scope, false)
 }
@@ -367,9 +265,6 @@ func (r *TaskReconciler) taskAdmissionSlot(ctx context.Context, task *corev1alph
 		if err != nil {
 			return err
 		}
-		// A grant only counts for a Task the scope lists, so one written for
-		// any other Task would be discarded by the next request and let it
-		// run past the limit.
 		if !slices.ContainsFunc(tasks, func(candidate corev1alpha1.Task) bool {
 			return candidate.UID == task.UID && taskAdmissionGrantEligible(&candidate)
 		}) {
@@ -407,8 +302,6 @@ func (r *TaskReconciler) taskAdmissionSlot(ctx context.Context, task *corev1alph
 		renewed := metav1.NewMicroTime(time.Now())
 		lease.Spec.RenewTime = &renewed
 		if exists {
-			// The read's resourceVersion makes this a compare-and-swap: a
-			// concurrent grant conflicts and the slots are counted again.
 			if err := r.Update(ctx, lease); err != nil {
 				return err
 			}
@@ -424,13 +317,6 @@ func (r *TaskReconciler) taskAdmissionSlot(ctx context.Context, task *corev1alph
 	return granted, err
 }
 
-// taskAdmissionJobOwners returns the UIDs of the Tasks in namespace that own
-// a live Job. A Task counts as running while its Job does, even when its
-// status does not name the Job: a controller that stopped between creating
-// the Job and recording it, such as one from before admission ledgers, left
-// no other trace. Jobs are read from the controller's cache, which is
-// synced before any Task is reconciled, so it holds every Job an earlier
-// leader created.
 func (r *TaskReconciler) taskAdmissionJobOwners(ctx context.Context, namespace string) (map[types.UID]struct{}, error) {
 	jobs := &batchv1.JobList{}
 	if err := uncachedReader(r.APIReader, r.Client).List(ctx, jobs, client.InNamespace(namespace)); err != nil {
@@ -458,12 +344,6 @@ func taskAdmissionJobFinished(job *batchv1.Job) bool {
 	return false
 }
 
-// releaseTaskAdmissionSlot removes task's grant from the scope's ledger, if
-// it has one. A Task held in one scope releases its grant in the others, so
-// no waiting Task holds a slot another Task waits for: a Task never holds a
-// grant in one ledger while waiting in another, and no two Tasks can each
-// wait for the other. A Task running work keeps its grants; removing a grant
-// only frees capacity the waiting Task is not using.
 func (r *TaskReconciler) releaseTaskAdmissionSlot(ctx context.Context, task *corev1alpha1.Task, scope taskAdmissionScope) error {
 	if task == nil || task.UID == "" || scope.limit <= 0 || scope.ledger.Namespace == "" || taskAdmittedByWork(task) {
 		return nil
@@ -487,7 +367,6 @@ func (r *TaskReconciler) releaseTaskAdmissionSlot(ctx context.Context, task *cor
 			return err
 		}
 		lease.Annotations[taskAdmissionLedgerAnnotation] = string(encoded)
-		// The read's resourceVersion makes this a compare-and-swap.
 		return r.Update(ctx, lease)
 	})
 }
@@ -503,11 +382,6 @@ func decodeTaskAdmissionLedger(raw string) ([]types.UID, error) {
 	return entries, nil
 }
 
-// reapTaskAdmissionLedgers deletes admission ledgers that no longer admit
-// anything: none of their grants belongs to a live Task of their scope, and
-// their namespace or coordinator is gone or finished, or none was granted for
-// taskAdmissionLedgerStaleAfter. A deletion is conditional on the ledger's UID
-// and resourceVersion, so a grant made meanwhile keeps it.
 func (r *TaskReconciler) reapTaskAdmissionLedgers(ctx context.Context, now time.Time) error {
 	controllerNamespace := strings.TrimSpace(r.ControllerNamespace)
 	if controllerNamespace == "" {
@@ -599,7 +473,6 @@ func (r *TaskReconciler) taskAdmissionLedgerReapable(
 	return now.Sub(renewed) >= taskAdmissionLedgerStaleAfter, nil
 }
 
-// taskAdmissionLedgerReaper reaps admission ledgers on the leader.
 type taskAdmissionLedgerReaper struct {
 	reconciler *TaskReconciler
 	interval   time.Duration

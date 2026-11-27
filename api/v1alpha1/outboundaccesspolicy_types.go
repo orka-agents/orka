@@ -24,11 +24,7 @@ const (
 	OutboundClientAuthSecretPost    = "ClientSecretPost"
 	OutboundClientAuthPrivateKeyJWT = "PrivateKeyJWT"
 
-	// OutboundAgentIdentityModeSelf issues a credential for the Agent acting
-	// as itself.
-	OutboundAgentIdentityModeSelf = "Self"
-	// OutboundAgentIdentityModeDelegated issues a credential for the Agent
-	// acting for the Task's requester.
+	OutboundAgentIdentityModeSelf      = "Self"
 	OutboundAgentIdentityModeDelegated = "Delegated"
 )
 

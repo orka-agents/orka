@@ -23,21 +23,13 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// AgentHostWebhookPath validates what an AgentHost selects: its template and
-// its GitHub token Secret.
 const AgentHostWebhookPath = "/validate-core-orka-ai-v1alpha1-agenthost"
 
-// AgentHostAuthorizer checks the live admission caller's permissions for an AgentHost.
 type AgentHostAuthorizer interface {
-	// AuthorizeAgentHostTemplate checks use on one AgentHostTemplate.
 	AuthorizeAgentHostTemplate(context.Context, string, string, authenticationv1.UserInfo) error
-	// AuthorizeSecretRead checks get on one Secret.
 	AuthorizeSecretRead(context.Context, string, string, authenticationv1.UserInfo) error
 }
 
-// RegisterAgentHostWebhook registers the fail-closed AgentHost selection
-// handler. reader resolves the Connection a controller-made host names, and
-// controllers are the identities that may make one.
 func RegisterAgentHostWebhook(server webhook.Server, scheme *runtime.Scheme, authorizer AgentHostAuthorizer,
 	reader client.Reader, controllers ExecutionModeConfig) {
 	server.Register(AgentHostWebhookPath, &ctrladmission.Webhook{
@@ -48,8 +40,6 @@ func RegisterAgentHostWebhook(server webhook.Server, scheme *runtime.Scheme, aut
 	})
 }
 
-// AgentHostValidator authorizes an AgentHost's template and token Secret
-// using AdmissionRequest.UserInfo, never identity from the submitted object.
 type AgentHostValidator struct {
 	decoder     ctrladmission.Decoder
 	authorizer  AgentHostAuthorizer
@@ -57,7 +47,6 @@ type AgentHostValidator struct {
 	controllers ExecutionModeConfig
 }
 
-// Handle implements admission.Handler.
 func (v *AgentHostValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
 	if req.SubResource != "" || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
 		return ctrladmission.Allowed("not an AgentHost selection")
@@ -74,13 +63,9 @@ func (v *AgentHostValidator) Handle(ctx context.Context, req ctrladmission.Reque
 		}
 	}
 	namespace := requestNamespace(req.Namespace, host.Namespace)
-	// githubTokenFrom is immutable, so only creation sets it.
 	if host.Spec.GitHubTokenFrom != nil && previous == nil {
 		return v.admitConnectionHost(ctx, namespace, host, req.UserInfo)
 	}
-	// templateRef is immutable, so only creation selects a template. Updates
-	// that change nothing selected, such as the controller's finalizer
-	// removal, must pass after the caller's permission is revoked.
 	checkTemplate := previous == nil
 	secret := ""
 	if ref := host.Spec.GitHubTokenSecretRef; ref != nil {
@@ -104,8 +89,6 @@ func (v *AgentHostValidator) Handle(ctx context.Context, req ctrladmission.Reque
 		}
 	}
 	if secret != "" {
-		// The controller copies the Secret into the host, so only someone who
-		// may read it may name it.
 		if err := v.authorizer.AuthorizeSecretRead(ctx, namespace, secret, req.UserInfo); err != nil {
 			return ctrladmission.Denied("agent host GitHub token Secret authorization failed: " + err.Error())
 		}
@@ -113,9 +96,6 @@ func (v *AgentHostValidator) Handle(ctx context.Context, req ctrladmission.Reque
 	return ctrladmission.Allowed("agent host selection authorized")
 }
 
-// admitConnectionHost admits a host fed by a Connection: only the controller
-// creates one, and only from the template the Connection's provider names.
-// Naming it there is the operator's grant, so no template use check applies.
 func (v *AgentHostValidator) admitConnectionHost(ctx context.Context, namespace string, host *corev1alpha1.AgentHost,
 	user authenticationv1.UserInfo) ctrladmission.Response {
 	if !v.controllers.controller(user.Username) {
@@ -145,8 +125,6 @@ func (v *AgentHostValidator) admitConnectionHost(ctx context.Context, namespace 
 	return ctrladmission.Allowed("agent host fed by a Connection authorized")
 }
 
-// sameSecretKey reports whether two references select the same Secret data.
-// A different key in the same Secret is a new selection too.
 func sameSecretKey(a, b *corev1alpha1.AgentHostSecretKeyReference) bool {
 	if a == nil || b == nil {
 		return a == b

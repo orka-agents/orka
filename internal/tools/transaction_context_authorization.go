@@ -392,8 +392,6 @@ func validateChildToolCredentialConstraints(
 		}
 
 		requirements := childTransactionCredentialRequirements{secretNames: map[string]struct{}{}}
-		// The Substrate egress gateway injects these into the actor's
-		// requests, so invoking the Tool uses them.
 		for _, secretName := range aitools.SubstrateMCPEgressCredentialSecretNames(tool) {
 			if secretName == "" {
 				return fmt.Errorf("child task tool %q has an unresolved egress credential Secret reference", toolName)
@@ -665,8 +663,6 @@ func childTransactionEffectiveRuntimePolicy(child *corev1alpha1.Task, agent *cor
 	if agent.Spec.Runtime.Type != corev1alpha1.AgentRuntimeOpencode {
 		switch agent.Spec.Runtime.Type {
 		case corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeCopilot:
-			// Preserve a non-empty all-blank allowlist as the existing fail-closed
-			// unrestricted sentinel instead of collapsing it into explicit deny-all.
 			if len(allowedTools) > 0 && !hasNonEmptyTransactionTools(allowedTools) {
 				return allowedTools, allowBash
 			}
@@ -799,11 +795,6 @@ func workspaceGitRepo(workspace *corev1alpha1.WorkspaceConfig) string {
 	return workspace.GitRepo
 }
 
-// validateChildDependencyNamespaces binds a transaction-context namespace
-// constraint to every resolved dependency, not only the child Task,
-// mirroring the direct API's dependency-namespace rule: cross-namespace
-// Agent or provider authority must not be exercised under a
-// namespace-scoped delegated token.
 func validateChildDependencyNamespaces(txCtx map[string]string, child *corev1alpha1.Task, agentNamespace string, childCtx childTransactionContext) error {
 	want := strings.TrimSpace(txCtx["namespace"])
 	if want == "" {
@@ -821,10 +812,6 @@ func validateChildDependencyNamespaces(txCtx map[string]string, child *corev1alp
 	return nil
 }
 
-// validateChildWorkspaceSelectorConstraints enforces the transaction-context
-// repo/branch/ref constraints on the child workspace and rejects a ref that
-// would override a branch-only constraint, since execution gives
-// workspace.ref precedence over branch.
 func validateChildWorkspaceSelectorConstraints(txCtx map[string]string, workspace *corev1alpha1.WorkspaceConfig) error {
 	for _, constraint := range []struct {
 		key string

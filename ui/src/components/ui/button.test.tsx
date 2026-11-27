@@ -7,7 +7,6 @@ describe('Button', () => {
     render(<Button variant="destructive">Delete</Button>)
     const button = screen.getByRole('button', { name: 'Delete' })
     expect(button).toHaveClass('bg-destructive', 'text-destructive-foreground')
-    // The dark theme's destructive tokens already set contrast; no dark: override.
     expect(button.className).not.toMatch(/\btext-white\b|dark:bg-destructive/)
   })
 })

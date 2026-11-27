@@ -21,35 +21,13 @@ import (
 )
 
 const (
-	// DefaultTaskWebhookDeliveryWorkers bounds how many Task webhook
-	// attempts run at once. Each worker mostly waits on one receiver for at
-	// most taskwebhook.DefaultRequestTimeout, so this many hanging receivers
-	// delay other notices, never Task reconciliation.
 	DefaultTaskWebhookDeliveryWorkers = 8
-	// MaxTaskWebhookDeliveryWorkers caps the configurable pool.
-	MaxTaskWebhookDeliveryWorkers = 256
+	MaxTaskWebhookDeliveryWorkers     = 256
 
-	// webhookDeliveryRecheckInterval is how often a Task with a due notice
-	// is reconciled again while its delivery is queued or in flight. The
-	// dispatcher's status writes reconcile the Task sooner; this only
-	// bounds a lost wakeup.
 	webhookDeliveryRecheckInterval = time.Minute
-	// webhookResultRecordRetries bounds the re-reads that record an
-	// attempt's result after a concurrent status write.
-	webhookResultRecordRetries = 5
+	webhookResultRecordRetries     = 5
 )
 
-// taskWebhookDispatcher sends Task webhook notices (ADR 0042, ADR 0053)
-// outside the Task reconcile worker.
-//
-// The Task reconciler only decides that a notice is due and enqueues the
-// Task. A bounded pool of workers then advances its delivery against an
-// uncached read, with the same durable claim-before-send lease, attempt
-// bound, signing and destination checks as before. The work queue never
-// hands one Task to two workers at once, so a Task's notices still go one
-// attempt at a time and in stream order, and the persisted lease still
-// fences other replicas. A receiver that hangs holds one delivery worker for
-// at most the request timeout, never the Task reconcile worker.
 type taskWebhookDispatcher struct {
 	notifier *WebhookNotifier
 	reader   ctrlclient.Reader
@@ -62,9 +40,6 @@ type taskWebhookDispatcher struct {
 	sequence uint64
 }
 
-// taskWebhookRequest is what the Task reconciler asked to deliver for one
-// Task incarnation. Approval notices are owed in every phase; the terminal
-// notice only once the reconciler's completion work let it go.
 type taskWebhookRequest struct {
 	uid      types.UID
 	terminal bool
@@ -88,11 +63,8 @@ func newTaskWebhookDispatcher(notifier *WebhookNotifier, reader ctrlclient.Reade
 	}
 }
 
-// NeedLeaderElection keeps delivery on the leader, with the Task controller.
-// The persisted attempt lease still fences any other replica.
 func (d *taskWebhookDispatcher) NeedLeaderElection() bool { return true }
 
-// Start runs the delivery workers until ctx ends.
 func (d *taskWebhookDispatcher) Start(ctx context.Context) error {
 	var workers sync.WaitGroup
 	for range d.workers {
@@ -107,8 +79,6 @@ func (d *taskWebhookDispatcher) Start(ctx context.Context) error {
 	return nil
 }
 
-// enqueue asks for the Task's due notices to be advanced. terminal says the
-// reconciler's completion work allows the terminal notice.
 func (d *taskWebhookDispatcher) enqueue(task *corev1alpha1.Task, terminal bool) {
 	key := ctrlclient.ObjectKeyFromObject(task)
 	d.mu.Lock()
@@ -124,8 +94,6 @@ func (d *taskWebhookDispatcher) enqueue(task *corev1alpha1.Task, terminal bool) 
 	d.queue.Add(key)
 }
 
-// processNext runs one queued delivery pass. It reports false once the
-// queue shuts down.
 func (d *taskWebhookDispatcher) processNext(ctx context.Context) bool {
 	key, shutdown := d.queue.Get()
 	if shutdown {
@@ -153,7 +121,6 @@ func (d *taskWebhookDispatcher) processNext(ctx context.Context) bool {
 	default:
 		d.queue.Forget(key)
 		d.mu.Lock()
-		// A request made during this pass queued the Task again; keep it.
 		if current, ok := d.requests[key]; ok && current.sequence == request.sequence {
 			delete(d.requests, key)
 		}
@@ -162,10 +129,6 @@ func (d *taskWebhookDispatcher) processNext(ctx context.Context) bool {
 	return true
 }
 
-// deliver advances the Task's approval notices and, when allowed, its
-// terminal notice, by at most one attempt each, and returns how long to wait
-// before the next pass (zero when nothing remains). A Task that is gone,
-// replaced or being deleted drops its notices.
 func (d *taskWebhookDispatcher) deliver(ctx context.Context, key types.NamespacedName, request taskWebhookRequest) (time.Duration, error) {
 	task := &corev1alpha1.Task{}
 	if err := d.reader.Get(ctx, key, task); err != nil {
@@ -185,8 +148,6 @@ func (d *taskWebhookDispatcher) deliver(ctx context.Context, key types.Namespace
 		}
 		requeue = next
 	}
-	// Recording the approval attempt may have re-read the Task, so deletion
-	// is checked again before the terminal notice is sent.
 	if request.terminal && task.Status.Phase.IsTerminal() && task.DeletionTimestamp.IsZero() {
 		next, err := d.notifier.reconcileDelivery(ctx, d.status, task)
 		if err != nil {
@@ -197,15 +158,11 @@ func (d *taskWebhookDispatcher) deliver(ctx context.Context, key types.Namespace
 	return requeue, nil
 }
 
-// taskStatusRereader is a status writer that can also refresh a Task from
-// an uncached read, so an attempt's result survives a concurrent status
-// write on the same Task.
 type taskStatusRereader interface {
 	taskStatusWriter
 	reread(ctx context.Context, task *corev1alpha1.Task) error
 }
 
-// rereadingTaskStatus is the dispatcher's status writer.
 type rereadingTaskStatus struct {
 	writer ctrlclient.SubResourceWriter
 	reader ctrlclient.Reader
@@ -215,8 +172,6 @@ func (s *rereadingTaskStatus) Update(ctx context.Context, obj ctrlclient.Object,
 	return s.writer.Update(ctx, obj, opts...)
 }
 
-// reread replaces task with its current state. A Task that was replaced
-// under the same name is reported as gone.
 func (s *rereadingTaskStatus) reread(ctx context.Context, task *corev1alpha1.Task) error {
 	current := &corev1alpha1.Task{}
 	if err := s.reader.Get(ctx, ctrlclient.ObjectKeyFromObject(task), current); err != nil {

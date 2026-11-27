@@ -148,7 +148,6 @@ func TestResolveACPRuntimeImagesBypassesDisabledAndDigestReferences(t *testing.T
 		"  ":       "",
 		digestA:    digestA,
 		digestZero: digestZero,
-		// A tag beside the digest is dropped so the result is admissible.
 		"ghcr.io/orka-agents/runtime:v0.2.0@sha256:" + strings.Repeat("b", 64): digestB,
 	} {
 		t.Run(image, func(t *testing.T) {
@@ -220,8 +219,8 @@ func TestResolveACPRuntimeImagesOrDisableDisablesEveryRuntimeOnFailure(t *testin
 		return nil, errors.New("registry unreachable")
 	})}
 	images, err := resolveACPRuntimeImagesOrDisable(t.Context(), controller.ACPRuntimeImages{
-		Codex:  "ghcr.io/orka-agents/runtime@" + digest, // already pinned, needs no lookup
-		Claude: "ghcr.io/orka-agents/runtime:v0.2.0",    // needs the unreachable registry
+		Codex:  "ghcr.io/orka-agents/runtime@" + digest,
+		Claude: "ghcr.io/orka-agents/runtime:v0.2.0",
 	}, client)
 	if err == nil {
 		t.Fatal("an unreachable registry must be reported")

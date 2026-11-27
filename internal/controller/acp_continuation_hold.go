@@ -22,12 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/taskwait"
 )
 
-// continuationLinkPending holds a continuation's execution until the parked
-// Task it continues has recorded this exact Task in its resumed wait. Until
-// then the continuation provably never ran, so a reconcile that cannot prove
-// it is Orka's may abandon the wait without discarding any work. It reports
-// pending while the predecessor still reserves this Task, and orphaned once
-// nothing can link it any more. Reads are authoritative; a failed read holds.
 func (r *TaskReconciler) continuationLinkPending(ctx context.Context, task *corev1alpha1.Task) (bool, bool, error) {
 	predecessorName := strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfName])
 	predecessorUID := strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID])
@@ -37,8 +31,6 @@ func (r *TaskReconciler) continuationLinkPending(ctx context.Context, task *core
 	if predecessorName == "" || predecessorUID == "" {
 		return false, true, nil
 	}
-	// Decide from one authoritative snapshot of the predecessor, so a link
-	// completed between two reads is never mistaken for an orphan.
 	predecessor := &corev1alpha1.Task{}
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: predecessorName}, predecessor); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -65,9 +57,6 @@ func (r *TaskReconciler) continuationLinkPending(ctx context.Context, task *core
 
 const acpContinuationUnlinkedReason corev1alpha1.TaskExecutionReason = "ContinuationUnlinked"
 
-// cancelUnlinkedContinuation ends a continuation that its predecessor can no
-// longer link. It never ran, so like a queued Task that reached its deadline
-// it is cancelled directly, without a prompt attempt or Session transcript.
 func (r *TaskReconciler) cancelUnlinkedContinuation(ctx context.Context, task *corev1alpha1.Task) error {
 	const message = "the Task this continuation resumes never linked it, so it did not run"
 	reader := uncachedReader(r.APIReader, r.Client)

@@ -75,7 +75,6 @@ func TestRepositoryMonitorCIEvidenceActionsJobLogTail(t *testing.T) {
 		t.Fatalf("secret token or multiline credential was not redacted in logTail:\n%s", logTail)
 	}
 
-	// Verify jobLogs=false leaves LogTail empty.
 	monitor.Spec.Repair.CIEvidence.JobLogs = false
 	evOff := r.repositoryMonitorCIEvidenceFor(ctx, monitor, "orka-agents/orka", pr, failures)
 	if len(evOff.Checks) != 1 || evOff.Checks[0].LogTail != "" {

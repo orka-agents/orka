@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// exportExcludedTables are the tables that hold no export family, each with
-// the reason.
 var exportExcludedTables = map[string]string{
 	"store_dataset":               "dataset identity and binding; an import mints its own",
 	"controller_epochs":           "controller epoch mirror; the next takeover advances the imported dataset",
@@ -23,8 +21,6 @@ var exportExcludedTables = map[string]string{
 	"external_effects":            "duplicate SQL control record",
 }
 
-// exportExcludedColumns are the columns of exported tables that no family
-// field carries, each with the reason.
 var exportExcludedColumns = map[string]string{
 	"results.write_epoch":   "replacement order stamp; relative to the source's controller epochs, so an import stores zero",
 	"results.write_seq":     "replacement order stamp; relative to the source's controller epochs, so an import stores zero",
@@ -32,15 +28,11 @@ var exportExcludedColumns = map[string]string{
 	"artifacts.write_seq":   "replacement order stamp; relative to the source's controller epochs, so an import stores zero",
 }
 
-// exportRowIDFields are family fields the embedded store keeps as a table's
-// implicit rowid rather than a column, each with the reason.
 var exportRowIDFields = map[string]string{
 	"security_scan_runs.admission_seq": "admission order; ListScanRuns and the newer-run guard of UpdateScanRun order by rowid",
 	"auth_sessions.issued_seq":         "issuance order; CreateAuthSession keeps the most recently issued sessions by rowid when creation times tie",
 }
 
-// exportIntegerTimes are INTEGER columns that hold Unix nanoseconds, which
-// the export carries as times.
 var exportIntegerTimes = map[string]bool{
 	"usage_observations.observed_at":  true,
 	"usage_pull_requests.observed_at": true,
@@ -49,10 +41,6 @@ var exportIntegerTimes = map[string]bool{
 	"usage_retention.retained_since":  true,
 }
 
-// TestExportFamiliesCoverEverySQLiteTable pins the export families to the
-// embedded store's layout: every table is a family with the same columns,
-// kinds, nullability and primary key, or is excluded with a reason, so a new
-// table or column cannot be left out of a migration unnoticed.
 func TestExportFamiliesCoverEverySQLiteTable(t *testing.T) {
 	s := setupDiskStore(t)
 	tables := map[string]bool{}

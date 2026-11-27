@@ -60,8 +60,6 @@ func (s *lifecycleProbeState) probeAcceptedPromptReplay(
 	if !duplicate.AcceptedAt.Equal(acceptedAt) {
 		return observed, fmt.Errorf("identical accepted prompt admission did not preserve the original acceptance timestamp")
 	}
-	// Completion can win either round trip. Retain any settled observation
-	// and compare it with the original stream's cancellation settlement.
 	switch duplicate.Classification.Class {
 	case harnessv2.RequestClassificationAlreadyAccepted:
 		if duplicate.Classification.Phase != harnessv2.OperationPhaseAccepted {

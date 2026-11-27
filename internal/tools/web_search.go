@@ -23,7 +23,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// WebSearchTool implements web search functionality
 type WebSearchTool struct {
 	apiKey        string
 	baseURL       string
@@ -32,20 +31,17 @@ type WebSearchTool struct {
 	maxResults    int
 }
 
-// WebSearchArgs are the arguments for the web search tool
 type WebSearchArgs struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit,omitempty"`
 }
 
-// WebSearchResult represents a search result
 type WebSearchResult struct {
 	Title   string `json:"title"`
 	URL     string `json:"url"`
 	Snippet string `json:"snippet"`
 }
 
-// NewWebSearchTool creates a new web search tool
 func NewWebSearchTool() *WebSearchTool {
 	return &WebSearchTool{
 		apiKey:  os.Getenv(workerenv.SearchAPIKey),
@@ -56,9 +52,6 @@ func NewWebSearchTool() *WebSearchTool {
 	}
 }
 
-// NewBrokeredWebSearchTool creates a credential-free web search tool for the
-// controller MCP broker. It intentionally ignores worker search configuration
-// and permits only direct connections to public endpoints.
 func NewBrokeredWebSearchTool() *WebSearchTool {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -87,17 +80,14 @@ const (
 	brokeredWebSearchMaxResults    = 10
 )
 
-// Name returns the tool name
 func (t *WebSearchTool) Name() string {
 	return webSearchToolName
 }
 
-// Description returns the tool description
 func (t *WebSearchTool) Description() string {
 	return "Search the web for information. Use this when you need to find current information or facts."
 }
 
-// Parameters returns the JSON Schema for parameters
 func (t *WebSearchTool) Parameters() json.RawMessage {
 	maxLength := ""
 	if t.maxQueryChars > 0 {
@@ -124,7 +114,6 @@ func (t *WebSearchTool) Parameters() json.RawMessage {
 	}`, maxLength, defaultWebSearchResults, maximum))
 }
 
-// Execute performs the web search
 func (t *WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var searchArgs WebSearchArgs
 	if err := json.Unmarshal(args, &searchArgs); err != nil {
@@ -145,7 +134,6 @@ func (t *WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", fmt.Errorf("limit must be no greater than %d", t.maxResults)
 	}
 
-	// If no API configured, use DuckDuckGo fallback
 	if t.baseURL == "" {
 		return t.duckDuckGoSearch(ctx, searchArgs)
 	}
@@ -194,8 +182,6 @@ var (
 	ddgTagRe     = regexp.MustCompile(`<[^>]+>`)
 )
 
-// duckDuckGoSearch performs a search via DuckDuckGo HTML. Failures are
-// returned as errors so callers never mistake placeholder data for results.
 func (t *WebSearchTool) duckDuckGoSearch(ctx context.Context, args WebSearchArgs) (string, error) {
 	ddgURL := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(args.Query))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ddgURL, nil)
@@ -209,8 +195,6 @@ func (t *WebSearchTool) duckDuckGoSearch(ctx context.Context, args WebSearchArgs
 		return "", fmt.Errorf("DuckDuckGo request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
-	// DuckDuckGo answers some clients with HTTP 202 and a challenge page, so
-	// report any status other than 200 rather than parsing it.
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("DuckDuckGo returned HTTP %d", resp.StatusCode)
 	}
@@ -232,7 +216,6 @@ func (t *WebSearchTool) duckDuckGoSearch(ctx context.Context, args WebSearchArgs
 	return string(output), nil
 }
 
-// parseDDGResults extracts search results from DuckDuckGo HTML
 func parseDDGResults(html string, limit int) []WebSearchResult {
 	linkMatches := ddgLinkRe.FindAllStringSubmatch(html, -1)
 	snippetMatches := ddgSnippetRe.FindAllStringSubmatch(html, -1)
@@ -245,7 +228,6 @@ func parseDDGResults(html string, limit int) []WebSearchResult {
 		rawURL := m[1]
 		title := stripHTMLTags(m[2])
 
-		// Decode DDG redirect URL
 		actualURL := decodeDDGURL(rawURL)
 		if actualURL == "" || title == "" {
 			continue
@@ -265,7 +247,6 @@ func parseDDGResults(html string, limit int) []WebSearchResult {
 	return results
 }
 
-// decodeDDGURL extracts the actual URL from a DuckDuckGo redirect URL
 func decodeDDGURL(rawURL string) string {
 	matches := ddgUddgRe.FindStringSubmatch(rawURL)
 	if len(matches) > 1 {
@@ -275,14 +256,12 @@ func decodeDDGURL(rawURL string) string {
 		}
 		return decoded
 	}
-	// Not a redirect URL, return as-is if it looks like a URL
 	if strings.HasPrefix(rawURL, "http") {
 		return rawURL
 	}
 	return ""
 }
 
-// stripHTMLTags removes HTML tags from a string
 func stripHTMLTags(s string) string {
 	s = ddgTagRe.ReplaceAllString(s, "")
 	s = strings.ReplaceAll(s, "&amp;", "&")
@@ -294,5 +273,4 @@ func stripHTMLTags(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// Ensure WebSearchTool implements Tool
 var _ Tool = (*WebSearchTool)(nil)

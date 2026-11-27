@@ -3,7 +3,6 @@ import { http, HttpResponse } from 'msw'
 const API = '/api/v1'
 
 export const handlers = [
-  // Tasks
   http.get(`${API}/tasks`, () => {
     return HttpResponse.json({ items: [], metadata: {} })
   }),
@@ -30,7 +29,6 @@ export const handlers = [
     return HttpResponse.json({ items: [], metadata: {} })
   }),
 
-  // Attention read models
   http.get(`${API}/attention`, () => {
     return HttpResponse.json({
       namespace: 'default', generatedAt: new Date().toISOString(), items: [], total: 0, counts: {},
@@ -44,7 +42,6 @@ export const handlers = [
     })
   }),
 
-  // Execution events
   http.get(`${API}/tasks/:id/events`, ({ params }) => {
     return HttpResponse.json({
       namespace: 'default',
@@ -110,7 +107,6 @@ export const handlers = [
     })
   }),
 
-  // Sessions
   http.get(`${API}/sessions`, () => {
     return HttpResponse.json({ items: [], metadata: {} })
   }),
@@ -127,7 +123,6 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  // Agents
   http.get(`${API}/agents`, () => {
     return HttpResponse.json({ items: [], metadata: {} })
   }),
@@ -154,7 +149,6 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  // Tools
   http.get(`${API}/tools`, () => {
     return HttpResponse.json({ items: [], metadata: {} })
   }),
@@ -165,17 +159,14 @@ export const handlers = [
     })
   }),
 
-  // Secrets
   http.get(`${API}/secrets`, () => {
     return HttpResponse.json({ items: [] })
   }),
 
-  // Auth
   http.get(`${API}/auth/validate`, () => {
     return new HttpResponse(null, { status: 200 })
   }),
 
-  // Chat
   http.get(`${API}/chat/config`, () => {
     return HttpResponse.json({
       enabled: true,

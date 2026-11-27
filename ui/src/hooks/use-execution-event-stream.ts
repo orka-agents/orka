@@ -13,15 +13,9 @@ export type ExecutionStreamStatus =
   | 'unsupported'
 
 export interface UseExecutionEventStreamOptions {
-  // Full stream URL (e.g. executionEventApi.taskStream(id)). Namespace and after
-  // cursor are appended by the hook.
   url: string
   enabled: boolean
-  // Initial replay cursor. The stream replays events after this seq, so seed it
-  // with the highest seq already loaded from the static events query to avoid
-  // re-fetching history. Defaults to 0 (replay everything).
   after?: number
-  // Delay before reconnecting after an unexpected close, in ms.
   reconnectDelayMs?: number
 }
 
@@ -39,13 +33,9 @@ export interface UseExecutionEventStreamResult {
 type ConnectDisposition = 'complete' | 'closed' | 'error' | 'aborted' | 'unsupported'
 
 const DEFAULT_RECONNECT_DELAY = 2000
-// Cap exponential backoff so a persistently failing endpoint settles at a slow
-// retry cadence instead of being re-hit every reconnectDelayMs.
 const MAX_RECONNECT_DELAY = 30000
 const MAX_ERROR_BACKOFF_STEPS = 5
 
-// Reconnect delay after `errorCount` consecutive errors: base * 2^(n-1), capped.
-// errorCount 0 (a clean 'closed' cycle) returns the tight base delay.
 export function reconnectBackoffMs(
   baseDelay: number,
   errorCount: number,
@@ -57,9 +47,6 @@ export function reconnectBackoffMs(
   return Math.min(baseDelay * 2 ** (step - 1), maxDelay)
 }
 
-// Live execution-event stream over Server-Sent Events. EventSource cannot send an
-// Authorization header, so this reads the SSE body via fetch + ReadableStream,
-// mirroring the existing useTaskLogs streaming approach.
 export function useExecutionEventStream(
   options: UseExecutionEventStreamOptions,
 ): UseExecutionEventStreamResult {
@@ -72,16 +59,12 @@ export function useExecutionEventStream(
   const [error, setError] = useState<string | null>(null)
   const [streamComplete, setStreamComplete] = useState<StreamComplete | null>(null)
 
-  // Dedupe set keyed by seq; survives reconnects so replays never duplicate.
   const seenSeqRef = useRef<Set<number>>(new Set())
   const lastSeqRef = useRef(after)
   const abortRef = useRef<AbortController | null>(null)
   const stoppedRef = useRef(false)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Generation guards against stale async loops writing state after a restart.
   const generationRef = useRef(0)
-  // Consecutive error count drives capped exponential backoff so a persistently
-  // failing endpoint isn't re-hit at the tight interval forever.
   const errorBackoffRef = useRef(0)
 
   const clearReconnectTimer = useCallback(() => {
@@ -99,7 +82,6 @@ export function useExecutionEventStream(
       next.sort((a, b) => a.seq - b.seq)
       return next
     })
-    // Advance the cursor only after the event is accepted.
     if (event.seq > lastSeqRef.current) {
       lastSeqRef.current = event.seq
       setLastSeq(event.seq)
@@ -132,9 +114,6 @@ export function useExecutionEventStream(
       }
 
       if (!response.ok) {
-        // 401 => expired/invalid bearer token. Match the shared API client:
-        // clear the token so the app routes the user back through auth, and stop
-        // retrying instead of reconnecting forever with the same bad header.
         if (response.status === 401) {
           useAuthStore.getState().clearToken()
           if (generation === generationRef.current) {
@@ -142,8 +121,6 @@ export function useExecutionEventStream(
           }
           return 'unsupported'
         }
-        // 501 => execution event storage not enabled. Treat as unsupported and do
-        // not reconnect; the caller surfaces a clear unavailable message.
         if (response.status === 501) {
           if (generation === generationRef.current) {
             setError('execution event streaming is not enabled')
@@ -186,18 +163,11 @@ export function useExecutionEventStream(
               setStreamComplete(frame.complete)
               return 'complete'
             }
-            // heartbeat / unknown: ignore, do not advance cursor.
           }
         }
-        // Drain any trailing partial block on clean close.
         for (const frame of frameBuffer.flush()) {
           if (frame.kind === 'event') acceptEvent(frame.event)
           else if (frame.kind === 'complete') {
-            // Mirror the in-loop completion path: advance the resume cursor to the
-            // terminal lastSeq before signalling complete. Without this, a stream
-            // that closes on a final stream_complete block lacking a trailing
-            // blank-line separator (exactly the case flush() exists to drain)
-            // would leave lastSeq at a stale value.
             if (frame.complete.lastSeq > lastSeqRef.current) {
               lastSeqRef.current = frame.complete.lastSeq
               setLastSeq(frame.complete.lastSeq)
@@ -218,8 +188,6 @@ export function useExecutionEventStream(
     [url, namespace, acceptEvent],
   )
 
-  // Orchestrates connect + reconnect for one generation until terminal,
-  // unsupported, manual stop, or unmount.
   const runLoop = useCallback(
     async (generation: number) => {
       while (!stoppedRef.current && generation === generationRef.current) {
@@ -237,9 +205,6 @@ export function useExecutionEventStream(
         if (disposition === 'aborted') {
           return
         }
-        // 'closed' is the normal end of a long-poll cycle: reconnect promptly and
-        // clear any error backoff. 'error' escalates with capped exponential
-        // backoff so a persistently failing endpoint isn't hammered every 2s.
         let delay = reconnectDelayMs
         if (disposition === 'error') {
           setStatus('error')
@@ -269,10 +234,6 @@ export function useExecutionEventStream(
     setStatus((prev) => (prev === 'complete' || prev === 'unsupported' ? prev : 'idle'))
   }, [teardown])
 
-  // Reset all accumulated stream state and start a fresh connection. Used both
-  // by the public restart() and by the mount/target-change effect, so switching
-  // tasks/sessions or namespaces never carries the previous stream's events,
-  // dedupe set, cursor, or terminal marker into the new connection.
   const startFresh = useCallback(() => {
     stoppedRef.current = false
     generationRef.current += 1
@@ -298,8 +259,6 @@ export function useExecutionEventStream(
       setStatus('idle')
       return
     }
-    // A change to url/namespace/after means a new stream target; reset state so
-    // stale events and an outdated cursor don't bleed across the switch.
     startFresh()
     return () => {
       generationRef.current += 1

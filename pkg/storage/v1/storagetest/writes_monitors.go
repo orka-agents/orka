@@ -8,10 +8,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The repository monitor write cases. Each write that fills IDs, keys or
-// times into the record it is passed gets a fresh record for every attempt,
-// so a replay is checked against what the original call wrote back.
-
 func catalogMonitor(generation int64) *storagev1.RepositoryMonitorRecord {
 	return &storagev1.RepositoryMonitorRecord{Namespace: workflowNamespace, Name: workflowMonitor, UID: "monitor-uid",
 		RepoURL: "https://github.com/org/repo", Owner: "org", Repository: "repo", Branch: "main", Generation: generation}
@@ -137,7 +133,6 @@ func observeMonitorEvents(t *testing.T, p storagev1.StateProvider) any {
 	return events
 }
 
-// rebuiltArgs returns args built anew for every attempt.
 func rebuiltArgs(build func() []any) func(storagev1.ControllerEpochFence) []any {
 	return func(storagev1.ControllerEpochFence) []any { return build() }
 }

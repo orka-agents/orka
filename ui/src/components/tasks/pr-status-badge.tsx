@@ -5,18 +5,15 @@ import type { TaskDeliveryStatus } from '@/schemas/task'
 type PullRequestReceipt = NonNullable<TaskDeliveryStatus['prReceipt']>
 
 interface PRStatusBadgeProps {
-  /** The Task's `status.delivery.prReceipt`, written when publication opens a pull request. */
   receipt?: PullRequestReceipt
 }
 
-// The controller records the forge state as Open, Closed or Merged.
 const statusColors: Record<string, string> = {
   open: 'bg-status-succeeded-bg text-status-succeeded',
   merged: 'bg-type-ai/10 text-type-ai',
   closed: 'bg-status-failed-bg text-status-failed',
 }
 
-/** The receipt URL as a link target, only when it is plain http(s). */
 function safeHref(url?: string): string | undefined {
   if (!url) return undefined
   try {

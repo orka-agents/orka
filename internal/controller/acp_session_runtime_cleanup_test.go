@@ -107,8 +107,6 @@ func TestSessionRuntimeCleanupRecoversAfterDeletionBeforeReceipt(t *testing.T) {
 	if _, err := fixture.persistence.GetSessionCleanupIntent(fixture.ctx, defaultNS, "cleanup-conversation"); err != nil {
 		t.Fatalf("interrupted cleanup lost its durable intent: %v", err)
 	}
-	// A fresh dispatcher has no in-memory session state. Recovery must prove
-	// authenticated absence on the exact frozen runtime and finish the intent.
 	restarted := &ACPDispatcher{
 		Client: fixture.client, APIReader: fixture.client, Store: fixture.controlStore,
 		ResultStore: fixture.persistence, Snapshots: fixture.persistence, Epochs: fixture.epochs,
@@ -376,8 +374,6 @@ func TestSessionRuntimeCleanupKeepsDurableStateWhenAuthorityIsUnavailable(t *tes
 
 func newContinuedSessionCleanupFixture(t *testing.T) (*externalACPDispatchFixture, []*corev1alpha1.Task) {
 	t.Helper()
-	// Both prompt dispatches include event redaction, which needs more setup
-	// time under the race detector than the single-dispatch fixture default.
 	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(),
 		externalACPDispatchFixtureOptions{contextTimeout: time.Minute})
 	tasks := make([]*corev1alpha1.Task, 0, 2)

@@ -24,9 +24,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// parkedDelegatedChild returns a delegated child that parked its turn and the
-// continuation the controller created for it: the continuation inherits the
-// coordinator parent labels but is owned, not controlled, by the child.
 func parkedDelegatedChild(childName string) (*corev1alpha1.Task, *corev1alpha1.Task) {
 	const coordinator = "coordinator-a"
 	child := internalCallerAuthTaskObject(childName, childName+"-uid", "", coordinator, "")
@@ -66,16 +63,13 @@ func TestContinuationOfADelegatedChildKeepsItsCoordinationParent(t *testing.T) {
 	authorizer := internalCallerAuthorizer{k8sReader: k8sClient, taskProvenanceProtected: true}
 	ctx := context.Background()
 
-	// check_messages: the continuation reads its coordinator's channel.
 	parent, err := authorizer.verifiedCoordinationParent(ctx, continuation, "coordinator-a")
 	require.NoError(t, err)
 	require.Equal(t, coordinator.UID, parent.UID)
-	// send_message: to a sibling, to a sibling's continuation, and to the coordinator.
 	require.NoError(t, authorizer.verifyTaskMessageScope(ctx, continuation, "peer", "coordinator-a"))
 	require.NoError(t, authorizer.verifyTaskMessageScope(ctx, continuation, siblingContinuation.Name, "coordinator-a"))
 	require.NoError(t, authorizer.verifyTaskMessageScope(ctx, sibling, continuation.Name, "coordinator-a"))
 	require.NoError(t, authorizer.verifyTaskMessageScope(ctx, continuation, "coordinator-a", "coordinator-a"))
-	// The coordinator still controls its child's continuation.
 	_, err = authorizer.verifiedCoordinationChild(ctx, coordinator, continuation.Name)
 	require.NoError(t, err)
 
@@ -89,8 +83,6 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	coordinator := internalCallerAuthTaskObject("coordinator-a", "coordinator-a-uid", "", "", "")
 
-	// The predecessor's controller-written wait does not name this Task, so
-	// its lineage annotations prove nothing.
 	child, forged := parkedDelegatedChild("worker")
 	child.Status.Wait.ContinuationTaskUID = "someone-else"
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
@@ -99,7 +91,6 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 	_, err := authorizer.verifiedCoordinationParent(ctx, forged, "coordinator-a")
 	requireFiberStatus(t, err, http.StatusForbidden)
 
-	// A predecessor delegated by another coordinator does not grant this one.
 	child, continuation := parkedDelegatedChild("worker")
 	child.Annotations[labels.AnnotationParentTaskName] = "coordinator-b"
 	child.Labels[labels.LabelParentTask] = labels.SelectorValue("coordinator-b")
@@ -110,7 +101,6 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 	_, err = authorizer.verifiedCoordinationParent(ctx, continuation, "coordinator-a")
 	requireFiberStatus(t, err, http.StatusForbidden)
 
-	// A failed predecessor read never grants the parent.
 	child, continuation = parkedDelegatedChild("worker")
 	failing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
 		WithObjects(coordinator, child, continuation).
@@ -124,13 +114,11 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 	_, err = authorizer.verifiedCoordinationParent(ctx, continuation, "coordinator-a")
 	requireFiberStatus(t, err, http.StatusInternalServerError)
 
-	// Without provenance admission the lineage annotations may be forged.
 	authorizer = internalCallerAuthorizer{k8sReader: k8sClient, taskProvenanceProtected: false}
 	_, err = authorizer.verifiedCoordinationParent(ctx, continuation, "coordinator-a")
 	requireFiberStatus(t, err, http.StatusForbidden)
 }
 
-// transcriptSessionNames returns the Session names caller may search.
 func transcriptSessionNames(t *testing.T, objects []client.Object, caller *corev1alpha1.Task) []string {
 	t.Helper()
 	k8sClient := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).
@@ -145,9 +133,6 @@ func transcriptSessionNames(t *testing.T, objects []client.Object, caller *corev
 	return names
 }
 
-// transcriptTree returns a coordinator with a parked child, its continuation
-// and a sibling, plus an unrelated coordinator and its child. Each Task has a
-// Session of its own; a continuation appends to its predecessor's.
 func transcriptTree() (continuation, sibling *corev1alpha1.Task, objects []client.Object) {
 	session := func(task *corev1alpha1.Task, name string) *corev1alpha1.Task {
 		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name}
@@ -168,11 +153,8 @@ func transcriptTree() (continuation, sibling *corev1alpha1.Task, objects []clien
 func TestResumedDelegatedChildKeepsItsTranscriptTree(t *testing.T) {
 	continuation, sibling, objects := transcriptTree()
 
-	// search_transcript from the continuation still reaches its coordinator
-	// and siblings, and nothing of another coordinator's tree.
 	require.ElementsMatch(t, []string{"coordinator-session", "worker-session", "peer-session"},
 		transcriptSessionNames(t, objects, continuation))
-	// The tree still reaches the continuation's Session reference.
 	k8sClient := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).
 		WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(objects...).Build()
 	authorizer := internalCallerAuthorizer{k8sReader: k8sClient, taskProvenanceProtected: true}
@@ -193,8 +175,6 @@ func TestTranscriptTreeIgnoresUnprovenContinuationLineage(t *testing.T) {
 		return nil
 	}
 	for name, breakLink := range map[string]func(objects []client.Object){
-		// The predecessor's controller-written wait names another Task, so
-		// the lineage annotations are only a claim.
 		"wait names another Task": func(objects []client.Object) {
 			find(objects, "worker").Status.Wait.ContinuationTaskUID = "someone-else"
 		},
@@ -204,7 +184,6 @@ func TestTranscriptTreeIgnoresUnprovenContinuationLineage(t *testing.T) {
 		"annotation names another incarnation": func(objects []client.Object) {
 			find(objects, "worker-resume").Annotations[labels.AnnotationContinuationOfUID] = "earlier-worker-uid"
 		},
-		// The proven predecessor belongs to another coordinator's tree.
 		"predecessor has another coordinator": func(objects []client.Object) {
 			worker := find(objects, "worker")
 			worker.Annotations[labels.AnnotationParentTaskName] = "coordinator-b"
@@ -222,7 +201,6 @@ func TestTranscriptTreeIgnoresUnprovenContinuationLineage(t *testing.T) {
 			continuation.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "claimed-session"}
 			breakLink(objects)
 
-			// The claimant reaches only its own Session, and no tree reaches it.
 			require.Equal(t, []string{"claimed-session"}, transcriptSessionNames(t, objects, continuation))
 			require.NotContains(t, transcriptSessionNames(t, objects, sibling), "claimed-session")
 			require.NotContains(t, transcriptSessionNames(t, objects, find(objects, "stranger")), "claimed-session")

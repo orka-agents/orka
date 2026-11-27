@@ -360,9 +360,6 @@ func (r *TaskReconciler) reconcileRepositoryMonitorValidationConfinement(ctx con
 		if err := r.Create(ctx, repositoryMonitorValidationNetworkPolicy(task)); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
 		}
-		// A later reconcile marks the policy ready. The Pod gate then proves the
-		// repository endpoint is blocked from the Pod network namespace before
-		// the validation container can start.
 		return nil
 	}
 	if err := validateRepositoryMonitorValidationNetworkPolicy(task, policy); err != nil {
@@ -522,7 +519,6 @@ func defaultRepositoryMonitorValidationContainer(container *corev1.Container) {
 		container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
 	}
 	for i := range container.Env {
-		// The API server defaults an env fieldRef's apiVersion to v1.
 		if from := container.Env[i].ValueFrom; from != nil && from.FieldRef != nil && from.FieldRef.APIVersion == "" {
 			from.FieldRef.APIVersion = "v1"
 		}

@@ -19,24 +19,13 @@ import (
 	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 )
 
-// RuntimePoolSubstrateRouter is the controller's configured Agent Substrate
-// router. Routed native runtimes are reachable only through it: the router
-// selects the Actor from the ate-target-actor header, ignores Host, and admits
-// only allowlisted pod-certificate mTLS clients. Provider evidence can never
-// choose another router authority.
 type RuntimePoolSubstrateRouter struct {
-	// URL is core's configured router URL (--substrate-router-url).
-	URL string
-	// HTTPClient carries the controller's pod-certificate mTLS identity, as
-	// built by workspace.NewSubstrateRouterHTTPClient. It must not use an
-	// environment proxy.
+	URL        string
 	HTTPClient *http.Client
 }
 
 var errExternalRouterUnconfigured = errors.New("routed native runtime requires the controller's Substrate router configuration")
 
-// externalStartupRouterTarget returns the router target of routed native
-// startup evidence, or "" for direct (legacy or Pod-backed) evidence.
 func externalStartupRouterTarget(evidence *workspacev1alpha1.StartupEvidence) string {
 	if evidence == nil || evidence.Process == nil {
 		return ""
@@ -57,9 +46,6 @@ func normalizedExternalRouterOrigin(raw string) (*url.URL, error) {
 	return &url.URL{Scheme: urlSchemeHTTPS, Host: net.JoinHostPort(strings.ToLower(parsed.Hostname()), port), Path: strings.TrimRight(parsed.Path, "/")}, nil
 }
 
-// pinnedEndpoint verifies that a provider-reported routed endpoint is exactly
-// core's configured router URL (default HTTPS port and trailing slash
-// normalized) and returns the configured origin.
 func (router *RuntimePoolSubstrateRouter) pinnedEndpoint(endpoint string) (*url.URL, error) {
 	if router == nil || router.HTTPClient == nil || strings.TrimSpace(router.URL) == "" {
 		return nil, errExternalRouterUnconfigured
@@ -75,10 +61,6 @@ func (router *RuntimePoolSubstrateRouter) pinnedEndpoint(endpoint string) (*url.
 	return configured, nil
 }
 
-// routedHTTPClient returns a client that reaches exactly one routed native
-// process: every request must address the configured router origin and
-// carries the attested target. A zero timeout leaves deadlines to the caller
-// (long-lived ACP streams); redirects are never followed.
 func (router *RuntimePoolSubstrateRouter) routedHTTPClient(endpoint, target string, timeout time.Duration) (*http.Client, error) {
 	origin, err := router.pinnedEndpoint(endpoint)
 	if err != nil {
@@ -100,9 +82,6 @@ func (router *RuntimePoolSubstrateRouter) routedHTTPClient(endpoint, target stri
 	return &routed, nil
 }
 
-// externalRouterTargetTransport adds the router target to requests for the
-// configured router origin and refuses any other destination, so a routed
-// client can never carry controller credentials elsewhere.
 type externalRouterTargetTransport struct {
 	base   http.RoundTripper
 	scheme string
@@ -127,17 +106,10 @@ func (t *externalRouterTargetTransport) RoundTrip(request *http.Request) (*http.
 	return t.base.RoundTrip(routed)
 }
 
-// DelegatesHTTPTrace reports that request contexts, and so httptrace hooks,
-// reach an *http.Transport unchanged; harness v2 keeps its exact
-// written/unwritten request evidence for routed calls.
 func (t *externalRouterTargetTransport) DelegatesHTTPTrace() bool {
 	return harnessv2.TransportSupportsHTTPTrace(t.base)
 }
 
-// externalRoutedPoolHTTPClient returns the routed client for an external pool
-// whose bound native evidence names a router target, nil for every other pool,
-// and an error when routed evidence cannot be reached through the configured
-// router.
 func externalRoutedPoolHTTPClient(router *RuntimePoolSubstrateRouter, pool *corev1alpha1.RuntimePool, timeout time.Duration) (*http.Client, error) {
 	if !runtimePoolHasExternalWorkspace(pool) {
 		return nil, nil
@@ -152,8 +124,6 @@ func externalRoutedPoolHTTPClient(router *RuntimePoolSubstrateRouter, pool *core
 	return router.routedHTTPClient(evidence.Endpoint, evidence.RouterTarget, timeout)
 }
 
-// externalStartupHTTPClient returns the routed client for routed startup
-// evidence and nil for direct evidence.
 func externalStartupHTTPClient(router *RuntimePoolSubstrateRouter, evidence *workspacev1alpha1.StartupEvidence, timeout time.Duration) (*http.Client, error) {
 	target := externalStartupRouterTarget(evidence)
 	if target == "" {
@@ -162,8 +132,6 @@ func externalStartupHTTPClient(router *RuntimePoolSubstrateRouter, evidence *wor
 	return router.routedHTTPClient(evidence.Endpoint, target, timeout)
 }
 
-// unavailableSupervisorClient fails every call closed when a routed runtime's
-// transport cannot be established.
 type unavailableSupervisorClient struct{ err error }
 
 func (c unavailableSupervisorClient) Probe(context.Context, string, string, []byte) (RuntimePoolProbeResult, error) {
@@ -174,13 +142,6 @@ func (c unavailableSupervisorClient) RequestDrain(context.Context, string, strin
 	return c.err
 }
 
-// externalStartupMatchesBoundEvidence fails closed unless provider startup
-// evidence names exactly the instance, endpoint, router target and worker or
-// Pod that Core independently bound before credential delivery. Provider
-// status can change after binding; it must never redirect controller
-// credentials to another Actor that shares the bound instance identity. Core
-// binds before it delivers credentials, so evidence for a pool with no binding
-// is never trusted either.
 func externalStartupMatchesBoundEvidence(pool *corev1alpha1.RuntimePool, evidence *workspacev1alpha1.StartupEvidence) error {
 	if pool == nil || evidence == nil {
 		return nil
@@ -205,10 +166,6 @@ func externalStartupMatchesBoundEvidence(pool *corev1alpha1.RuntimePool, evidenc
 	return nil
 }
 
-// externalStartupSupervisorClient selects the supervisor transport for exact
-// provider startup evidence: routed evidence uses only the configured router;
-// direct evidence keeps the pool's existing transport. The evidence must match
-// the pool's saved binding first.
 func (r *RuntimePoolReconciler) externalStartupSupervisorClient(pool *corev1alpha1.RuntimePool, evidence *workspacev1alpha1.StartupEvidence) RuntimePoolSupervisorClient {
 	if err := externalStartupMatchesBoundEvidence(pool, evidence); err != nil {
 		return unavailableSupervisorClient{err: err}

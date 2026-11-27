@@ -12,7 +12,6 @@ function snapshot(query: string) {
   return window.matchMedia(query).matches
 }
 
-/** True while the viewport matches `query`; false where matchMedia is unavailable. */
 export function useMediaQuery(query: string): boolean {
   return useSyncExternalStore(
     (onChange) => subscribe(query, onChange),
@@ -21,7 +20,6 @@ export function useMediaQuery(query: string): boolean {
   )
 }
 
-/** Tailwind's `md` breakpoint is 768px; below it the sidebar overlays content. */
 const MOBILE_MEDIA_QUERY = '(max-width: 767px)'
 
 export function useIsMobile(): boolean {

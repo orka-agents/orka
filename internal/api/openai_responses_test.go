@@ -261,7 +261,6 @@ func parseResponsesSSE(t *testing.T, data []byte) []map[string]any {
 	t.Helper()
 	events := []map[string]any{}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	// The complete captured response bounds even its largest event line.
 	scanner.Buffer(nil, len(data)+1)
 	var eventType string
 	for scanner.Scan() {
@@ -558,7 +557,6 @@ func TestResponsesHTTPInterleavedAssistantToolHistory(t *testing.T) {
 		captured <- request
 		upstreamResponse(w, "continued")
 	})
-	// Client-owned history must stay intact even with a tiny coordinator budget.
 	server.openaiHandler.config.MaxSessionSize = 64
 	url := listenResponsesApp(t, server.app)
 	status, _, body := productionResponsesRequest(t, url, token, `{"model":"fixture/test-model","store":false,"input":[

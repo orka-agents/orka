@@ -42,19 +42,14 @@ import (
 )
 
 const (
-	secretUseE2ESecret    = "e2e-secret-use-bot-key"
-	secretUseE2EAuthor    = "e2e-secret-use-author"
-	secretUseE2EWriter    = "e2e-secret-use-writer"
-	secretUseE2ETask      = "e2e-secret-use-task"
-	secretUseE2EScheduled = "e2e-secret-use-scheduled"
-	// secretUseE2EPropagation outlasts the controller's window for API
-	// servers to load the policy before it trusts a Task's admission.
+	secretUseE2ESecret      = "e2e-secret-use-bot-key"
+	secretUseE2EAuthor      = "e2e-secret-use-author"
+	secretUseE2EWriter      = "e2e-secret-use-writer"
+	secretUseE2ETask        = "e2e-secret-use-task"
+	secretUseE2EScheduled   = "e2e-secret-use-scheduled"
 	secretUseE2EPropagation = 35 * time.Second
 )
 
-// The container Task Secret use mode lets a Task whose writer holds `use` on a
-// Secret receive it, and refuses everyone else, including Orka's own worker
-// identity. It restarts the controller, so it runs alone.
 var _ = Describe("Container Task Secret use", Ordered, Serial,
 	Label("agent-runtime", "container-task-secret-use"), func() {
 		var token string
@@ -92,8 +87,6 @@ var _ = Describe("Container Task Secret use", Ordered, Serial,
 				"spec":     spec,
 			}
 		}
-		// createAs creates a Task without updating an existing one and registers
-		// UID-preconditioned cleanup only if the create succeeded.
 		createAs := func(user string, manifest any) (string, error) {
 			body, err := json.Marshal(manifest)
 			Expect(err).NotTo(HaveOccurred())
@@ -153,10 +146,6 @@ var _ = Describe("Container Task Secret use", Ordered, Serial,
 			Expect(err).NotTo(HaveOccurred())
 			policy := strings.NewReplacer("ORKA_NAMESPACE", namespace,
 				"CONTROLLER_SA", deployment.Spec.Template.Spec.ServiceAccountName).Replace(string(canonical))
-			// Create each cluster-wide resource without overwriting any existing
-			// installation, and register cleanup only for objects this run created
-			// using an atomic UID precondition on delete. Once the controller mode
-			// is enabled, keep the policy installed unless controller rollback succeeds.
 			controllerRestored := true
 			for doc := range strings.SplitSeq(policy, "\n---\n") {
 				doc = strings.TrimSpace(doc)

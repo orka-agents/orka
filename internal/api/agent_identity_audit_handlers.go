@@ -24,10 +24,6 @@ const (
 	maxIdentityAuditLimit     = 500
 )
 
-// ListAgentIdentityAudit serves GET /api/v1/audit/identity, returning redacted
-// agent-identity-audit records scoped to the caller's authorized namespace and
-// Tasks. Records never carry tokens, headers, bodies, full URLs, or raw error
-// text, and any record whose Task visibility cannot be established is omitted.
 func (h *Handlers) ListAgentIdentityAudit(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -78,9 +74,6 @@ func (h *Handlers) ListAgentIdentityAudit(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{apiFieldItems: []outboundaccess.AgentIdentityAuditRecord{}})
 	}
 
-	// Read all retained matching candidates before applying per-Task visibility
-	// filtering so hidden or unresolvable Tasks never truncate visible records
-	// below the requested limit.
 	candidates := h.agentIdentityAudit.List(outboundaccess.AgentIdentityAuditFilter{
 		Namespace: namespace,
 		TaskUID:   taskUID,
@@ -111,15 +104,12 @@ func (h *Handlers) ListAgentIdentityAudit(c fiber.Ctx) error {
 	records := make([]outboundaccess.AgentIdentityAuditRecord, 0, min(limit, len(candidates)))
 	for _, rec := range candidates {
 		if rec.TaskUID == "" {
-			// Fail closed: omit records without an established Task binding.
 			continue
 		}
 		allowed, checked := visibleByUID[rec.TaskUID]
 		if !checked {
 			task, ok := tasksByUID[rec.TaskUID]
 			if !ok {
-				// Fail closed when the record's Task cannot be resolved in the
-				// caller's namespace (deleted or cross-namespace).
 				allowed = false
 			} else {
 				allowed, err = h.auditTaskVisible(c, task, gatewayAuthorizations)
@@ -140,8 +130,6 @@ func (h *Handlers) ListAgentIdentityAudit(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: records})
 }
 
-// resolveAuditedTask loads a named Task in namespace and enforces AHP privacy
-// (returning 404 for another person's private AHP turn) and Task visibility.
 func (h *Handlers) resolveAuditedTask(c fiber.Ctx, namespace, taskName string) (*corev1alpha1.Task, error) {
 	task := &corev1alpha1.Task{}
 	if err := h.client.Get(c.Context(), types.NamespacedName{Name: taskName, Namespace: namespace}, task); err != nil {
@@ -163,8 +151,6 @@ func (h *Handlers) resolveAuditedTask(c fiber.Ctx, namespace, taskName string) (
 	return task, nil
 }
 
-// auditTaskVisible applies the same context-token, Gateway, and hidden-Task
-// visibility checks used by ListTasks.
 func (h *Handlers) auditTaskVisible(
 	c fiber.Ctx,
 	task *corev1alpha1.Task,

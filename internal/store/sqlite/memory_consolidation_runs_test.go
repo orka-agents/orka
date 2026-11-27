@@ -17,9 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// A run's input holds transcripts until the run finishes. Its begin receipt
-// keeps only the run's key, so finishing the run leaves no copy behind, and a
-// replay returns the run as it is now.
 func TestBeginMemoryConsolidationRunReceiptKeepsNoInput(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -50,10 +47,6 @@ func TestBeginMemoryConsolidationRunReceiptKeepsNoInput(t *testing.T) {
 	require.Empty(t, replayed.Input)
 }
 
-// A run's report holds text from every Session and memory it read. Its
-// completion receipt keeps only the run's key, so releasing the run's report
-// when its Task is deleted leaves no copy behind, and a replay returns the
-// run as it is now.
 func TestCompleteMemoryConsolidationRunReceiptKeepsNoReport(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

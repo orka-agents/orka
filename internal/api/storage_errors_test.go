@@ -17,9 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Only known uncommitted storage refusals may advertise an HTTP retry. An
-// uncertain write might have consumed messages or created an assigned UUID;
-// a new HTTP request would use a new operation ID and could lose or duplicate it.
 func TestStorageErrorRetryHintsRequireKnownUncommittedOutcome(t *testing.T) {
 	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
 	routes := map[string]struct {
@@ -82,8 +79,6 @@ func TestTaskDataUnknownOutcomeTakesPriorityOverCleanupRetry(t *testing.T) {
 	require.Equal(t, 1, backing.calls, "an uncertain operation must not be reauthorized and repeated")
 }
 
-// unacceptedEventStore refuses execution events, as the storage client does
-// while the controller's fence is not open.
 type unacceptedEventStore struct {
 	*storageclient.Client
 }
@@ -92,8 +87,6 @@ func (unacceptedEventStore) AppendExecutionEvent(context.Context, *store.Executi
 	return nil, fmt.Errorf("append: %w", store.ErrNotReady)
 }
 
-// The worker execution event route answers a write the store has not
-// accepted yet with 503, not 500, so the worker retries it.
 func TestInternalSubmitExecutionEventAnswersServiceUnavailableWhileStorageIsNotReady(t *testing.T) {
 	eventStore := unacceptedEventStore{Client: newInternalExecutionEventStore(t)}
 	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
@@ -102,8 +95,6 @@ func TestInternalSubmitExecutionEventAnswersServiceUnavailableWhileStorageIsNotR
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
-// Memory routes map a temporary storage refusal to 503 before any other
-// storage error.
 func TestMemoryStoreErrorAnswersServiceUnavailableWhileStorageIsNotReady(t *testing.T) {
 	err := memoryStoreError("create memory", "memory", fmt.Errorf("create: %w", store.ErrNotReady))
 	fiberErr, ok := errors.AsType[*fiber.Error](err)

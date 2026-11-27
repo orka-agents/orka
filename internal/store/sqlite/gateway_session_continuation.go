@@ -12,9 +12,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// resolveGatewaySessionNameTx follows completed incarnations without reusing
-// their physical names. The original completions remain available to old Tasks
-// and stale cleanup retries, while fresh events share the same successor.
 func resolveGatewaySessionNameTx(ctx context.Context, tx *sql.Tx, event *store.GatewayEvent) (string, error) {
 	name := event.SessionName
 	for {
@@ -57,6 +54,5 @@ func resolveGatewaySessionNameTx(ctx context.Context, tx *sql.Tx, event *store.G
 func gatewaySessionSuccessorName(namespace, logicalName, operationDigest string) string {
 	encoded, _ := json.Marshal([]string{"orka.gateway.session-continuation.v1", namespace, logicalName, operationDigest})
 	digest := sha256.Sum256(encoded)
-	// Full SHA-256 in unpadded base32 fits in one DNS label with this prefix.
 	return "gateway-" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:]))
 }

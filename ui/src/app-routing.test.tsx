@@ -8,8 +8,6 @@ vi.mock('zustand/middleware', async () => {
   return { ...actual, persist: (fn: any) => fn }
 })
 
-// The app wires the router and the sign-in capture at module load, so each
-// test loads it fresh against the address it starts from.
 async function loadApp(url: string) {
   window.history.replaceState(null, '', url)
   vi.resetModules()
@@ -36,9 +34,6 @@ describe('App routing', () => {
   })
 
   it('signs in from a #token= deep link and lands on the deep link', async () => {
-    // While the router moves to /login, the deep-link page still renders and
-    // asks for its data without a token. Those 401s answer after the token
-    // is validated and must not sign the new session out.
     server.use(http.get('/api/v1/security/repositories', async ({ request }) => {
       if (request.headers.get('Authorization') !== 'Bearer deep-link-token') {
         await delay(150)
@@ -66,7 +61,6 @@ describe('App routing', () => {
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Page not found' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Go to Dashboard' })).toHaveAttribute('href', '/')
-    // Inside the layout: the namespace selector and sidebar render around it.
     expect(screen.getByRole('combobox', { name: 'Namespace' })).toBeInTheDocument()
     expect(screen.getByRole('main')).toContainElement(screen.getByRole('heading', { level: 1, name: 'Page not found' }))
   })

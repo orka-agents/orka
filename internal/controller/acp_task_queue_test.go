@@ -744,7 +744,6 @@ func TestACPRuntimePoolCapacityUsesConfiguredLimits(t *testing.T) {
 	if got.MaxRunningPrompts != 12 || got.MaxResidentSessions != corev1alpha1.DefaultRuntimePoolMaxResidentSessions {
 		t.Fatalf("configured capacity = %+v, want 12 prompts and default sessions", got)
 	}
-	// The returned spec is a copy; pools must not share the reconciler's value.
 	got.MaxRunningPrompts = 1
 	if reconciler.ACPRuntimePoolCapacity.MaxRunningPrompts != 12 {
 		t.Fatal("capacity result aliases reconciler configuration")

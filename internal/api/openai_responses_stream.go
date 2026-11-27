@@ -21,9 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// A single stream writer owns all event sequence numbers and output snapshots.
-// Provider work runs separately so heartbeats detect disconnects even while a
-// provider or coordinator tool is blocked. Write failure cancels that work.
 type responsesStreamWriter struct {
 	writer    *bufio.Writer
 	response  *ResponsesResponse
@@ -125,8 +122,6 @@ func (s *responsesStreamWriter) fail(causes ...error) {
 		code = responsesUnsupportedOutcome
 		detail.Message = responsesUnsupportedRefusalMessage
 	}
-	// The top-level error event permits extension codes. The nested Response
-	// error uses the SDK's closed code vocabulary with the same explicit message.
 	s.response.Status = "failed"
 	s.response.Error = detail
 	_ = s.event("error", map[string]any{apiFieldCode: code, responsesMessage: detail.Message, "param": nil})
@@ -138,8 +133,6 @@ func (h *OpenAICompatHandler) streamResponses(c fiber.Ctx, ctx context.Context, 
 	c.Set("Cache-Control", "no-cache")
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
-	// Fiber runs the writer after the handler returns and cancels ctx. Keep
-	// its values and original budget without inheriting that cancellation.
 	deadline, hasDeadline := ctx.Deadline()
 	base := context.WithoutCancel(ctx)
 	return c.SendStreamWriter(func(w *bufio.Writer) {
@@ -273,8 +266,6 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 		if !structured {
 			completion = stripResponsesGoalStateSentinel(completion)
 		}
-		// Close any coordinator progress before emitting the final messages
-		// with the same boundaries and statuses as the non-streaming result.
 		if !send(llm.StreamChunk{OutputItemDone: true}) {
 			return
 		}
@@ -282,8 +273,6 @@ func (h *OpenAICompatHandler) produceResponsesChunks(ctx context.Context, provid
 		return
 	}
 	if provider.Name() == "anthropic" {
-		// Anthropic labels refusals only at the end of the turn. Do not
-		// release ordinary text deltas until that outcome is validated.
 		produceResponsesBufferedStream(ctx, provider, req, send)
 		return
 	}
@@ -357,8 +346,6 @@ func produceResponsesFallback(ctx context.Context, provider llm.Provider, req *l
 }
 
 func sendResponsesCompletion(completion *llm.CompletionResponse, send func(llm.StreamChunk) bool) {
-	// Apply the non-streaming contract to this final result. Earlier streamed
-	// coordinator progress must not turn an empty final answer into success.
 	var final ResponsesResponse
 	if err := final.setCompletion(completion); err != nil {
 		send(llm.StreamChunk{Error: responsesCompletionError(err)})
@@ -369,8 +356,6 @@ func sendResponsesCompletion(completion *llm.CompletionResponse, send func(llm.S
 		if !send(llm.StreamChunk{Content: item.Content, ToolCall: item.ToolCall}) {
 			return
 		}
-		// An explicit provider status owns the item even when the overall
-		// response is incomplete. Without it, retain the terminal fallback.
 		if (i < len(items)-1 || item.Status != "") && !send(llm.StreamChunk{OutputItemDone: true, OutputItemStatus: item.Status}) {
 			return
 		}
@@ -382,9 +367,6 @@ func sendResponsesCompletion(completion *llm.CompletionResponse, send func(llm.S
 	})
 }
 
-// Only an explicit unsupported-stream capability error permits retry. Channel
-// errors additionally need an HTTP status: protocol/event failures are not
-// evidence that a provider lacks streaming, even before content is emitted.
 func responsesStreamUnsupported(err error, requireHTTP bool) bool {
 	if err == nil {
 		return false

@@ -49,8 +49,6 @@ var controllerSAResources = map[string]schema.GroupVersionResource{
 	"CronJob":               {Group: "batch", Version: "v1", Resource: "cronjobs"},
 }
 
-// controllerSAWorkload builds a workload of kind whose Pod spec sets field to
-// serviceAccount; an empty field names no account.
 func controllerSAWorkload(kind, name, field, serviceAccount string) *unstructured.Unstructured {
 	podSpec := map[string]any{"containers": []any{map[string]any{"name": "c", "image": "busybox"}}}
 	if field != "" {
@@ -127,8 +125,6 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 		oldObject *unstructured.Unstructured
 		allowed   bool
 	}{
-		// Pods: only the ReplicaSet controller, whatever owner reference a
-		// creator writes.
 		{name: "controller Pod from the ReplicaSet controller", username: replicaSetControllerUsername, object: withReplicaSetOwner(asController("Pod", "orka-controller-abc-x1y2z")), allowed: true},
 		{name: "Pod of another ReplicaSet running as the controller", username: replicaSetControllerUsername, object: withNamedReplicaSetOwner(asController("Pod", "legacy-abc-x1y2z"), "legacy-abc")},
 		{name: "Pod named like the controller's for another ReplicaSet", username: replicaSetControllerUsername, object: withNamedReplicaSetOwner(asController("Pod", "orka-controller-abc-x1y2z"), "legacy-abc")},
@@ -139,7 +135,6 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 		{name: "Job controller Pod as the controller", username: "system:serviceaccount:kube-system:job-controller", object: asController("Pod", "p")},
 		{name: "Pod via the deprecated field", username: aiWorkerUsername, object: controllerSAWorkload("Pod", "p", "serviceAccount", protectedControllerSA)},
 		{name: "Pod with its own account", username: aiWorkerUsername, object: controllerSAWorkload("Pod", "p", "serviceAccountName", "other"), allowed: true},
-		// ReplicaSets: only the Deployment controller creates them.
 		{name: "controller ReplicaSet from the Deployment controller", username: deploymentControllerUsername, object: asController("ReplicaSet", "orka-controller-abc"), allowed: true},
 		{name: "ReplicaSet created by someone else", username: aiWorkerUsername, object: asController("ReplicaSet", "rs")},
 		{name: "another Deployment's ReplicaSet as the controller", username: deploymentControllerUsername, object: asController("ReplicaSet", "legacy-abc")},
@@ -171,11 +166,9 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 			name: "ReplicaSet retargeted to the controller", username: aiWorkerUsername,
 			object: asController("ReplicaSet", "rs"), oldObject: controllerSAWorkload("ReplicaSet", "rs", "serviceAccountName", "other"),
 		},
-		// Deployments: only the release's controller Deployment.
 		{name: "controller Deployment", username: "helm-user", object: asController("Deployment", protectedControllerDeployment), allowed: true},
 		{name: "another Deployment as the controller", username: "helm-user", object: asController("Deployment", "lookalike")},
 		{name: "another Deployment with its own account", username: "helm-user", object: controllerSAWorkload("Deployment", "app", "serviceAccountName", "app"), allowed: true},
-		// Every other workload kind.
 		{name: "worker Job as the controller", username: aiWorkerUsername, object: asController("Job", "j")},
 		{name: "CronJob as the controller", username: aiWorkerUsername, object: asController("CronJob", "c")},
 		{name: "StatefulSet as the controller", username: aiWorkerUsername, object: asController("StatefulSet", "s")},
@@ -183,7 +176,6 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 		{name: "ReplicationController as the controller", username: aiWorkerUsername, object: asController("ReplicationController", "r")},
 		{name: "code_exec Job with its own account", username: aiWorkerUsername, object: controllerSAWorkload("Job", "j", "serviceAccountName", "code-exec-run"), allowed: true},
 		{name: "Job with the default account", username: aiWorkerUsername, object: controllerSAWorkload("Job", "j", "", ""), allowed: true},
-		// ServiceAccount token Secrets.
 		{name: "token Secret for the controller", username: aiWorkerUsername, object: serviceAccountTokenSecret(protectedControllerSA, tokenType)},
 		{
 			name: "token Secret retargeted to the controller", username: aiWorkerUsername,
@@ -193,8 +185,6 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 			name: "existing controller token Secret populated", username: "system:kube-controller-manager",
 			object: serviceAccountTokenSecret(protectedControllerSA, tokenType), oldObject: serviceAccountTokenSecret(protectedControllerSA, tokenType), allowed: true,
 		},
-		// The answer to an update carries the token, so an existing one is
-		// written only by the token controller, whatever the change.
 		{
 			name: "existing controller token Secret patched by a worker", username: aiWorkerUsername,
 			object: serviceAccountTokenSecret(protectedControllerSA, tokenType), oldObject: serviceAccountTokenSecret(protectedControllerSA, tokenType),
@@ -222,16 +212,12 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 		})
 	}
 
-	// Outside the controller's namespace the controller ServiceAccount does
-	// not exist, and the policy leaves workloads alone.
 	elsewhere := compileControllerServiceAccountProtection(t, "orka-system", protectedControllerSA)
 	job := asController("Job", "j")
 	require.True(t, elsewhere.admits(t, job.GroupVersionKind(), controllerSAResources["Job"], "j", apiserveradmission.Create,
 		aiWorkerUsername, "", job, nil))
 }
 
-// A running controller Pod keeps its spec: an image swap or an ephemeral
-// container would run other code with its projected token.
 func TestControllerServiceAccountProtectionFreezesControllerPods(t *testing.T) {
 	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, protectedControllerSA)
 	pods := controllerSAResources["Pod"]
@@ -296,10 +282,6 @@ func TestControllerServiceAccountProtectionAdmitsOnlyTheKubeletTokenRequests(t *
 	}
 }
 
-// TestControllerServiceAccountProtectionDeniesExecInControllerPods covers a
-// command run in a controller Pod, which could read the token mounted there:
-// it is refused for everyone, while exec in other Pods of the namespace and
-// in another namespace's Pods is untouched.
 func TestControllerServiceAccountProtectionDeniesExecInControllerPods(t *testing.T) {
 	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, protectedControllerSA)
 	kind := schema.GroupVersionKind{Version: "v1", Kind: "PodExecOptions"}
@@ -322,8 +304,6 @@ func TestControllerServiceAccountProtectionDeniesExecInControllerPods(t *testing
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.allowed, policy.admitsAs(t, kind, pods, tc.pod, apiserveradmission.Connect,
 				tc.requester, "exec", options, nil))
-			// Attaching reaches the same running process, so it is decided
-			// the same way.
 			attach := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "PodAttachOptions", "stdin": true}}
 			require.Equal(t, tc.allowed, policy.admitsAs(t, schema.GroupVersionKind{Version: "v1", Kind: "PodAttachOptions"}, pods, tc.pod,
 				apiserveradmission.Connect, tc.requester, "attach", attach, nil))
@@ -331,9 +311,6 @@ func TestControllerServiceAccountProtectionDeniesExecInControllerPods(t *testing
 	}
 }
 
-// TestControllerServiceAccountProtectionMatchesExecAndAttach covers the
-// policy's match rules, which the evaluator above does not apply: a CONNECT
-// rule that left out a subresource would never reach the validation.
 func TestControllerServiceAccountProtectionMatchesExecAndAttach(t *testing.T) {
 	documents, err := splitYAMLDocuments(filepath.Join("..", "..", "config", "admission", "controller_serviceaccount_protection.yaml"))
 	require.NoError(t, err)
@@ -350,10 +327,6 @@ func TestControllerServiceAccountProtectionMatchesExecAndAttach(t *testing.T) {
 	require.ElementsMatch(t, []string{"pods/exec", "pods/attach"}, connect)
 }
 
-// TestControllerServiceAccountProtectionDeniesExecUnderALongDeploymentName
-// covers a controller Deployment whose name is cut short in its Pods' names:
-// a generated Pod name keeps 58 characters of "<deployment>-<hash>-", so a
-// name of 58 characters or more loses its trailing hyphen there.
 func TestControllerServiceAccountProtectionDeniesExecUnderALongDeploymentName(t *testing.T) {
 	kind := schema.GroupVersionKind{Version: "v1", Kind: "PodExecOptions"}
 	pods := controllerSAResources["Pod"]
@@ -364,8 +337,6 @@ func TestControllerServiceAccountProtectionDeniesExecUnderALongDeploymentName(t 
 		policy := compileAdmissionPolicy(t, "controller_serviceaccount_protection.yaml", strings.NewReplacer(
 			"ORKA_NAMESPACE", admissionTestNamespace, "CONTROLLER_SA", protectedControllerSA, "CONTROLLER_DEPLOYMENT", deployment,
 		))
-		// The API server names the Pod: the first 58 characters of the
-		// ReplicaSet's name and a hyphen, then five random characters.
 		base := deployment + "-7d947dfbff-"
 		if len(base) > 58 {
 			base = base[:58]

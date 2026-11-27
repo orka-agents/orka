@@ -12,9 +12,6 @@ import (
 	"time"
 )
 
-// A relative timer may have elapsed while a backward wall-clock step leaves
-// the controller's wire deadline in the future. Shortening only the timer
-// models that mismatch without mutating a global clock or the absolute bound.
 func TestRuntimeSessionLeaseEarlyCallbackRearmsAbsoluteExpiry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		session, peer := newLeaseTestRuntimeSession(t)
@@ -83,7 +80,7 @@ func TestRuntimeSessionLeaseQueuedCallbackCannotCancelRenewal(t *testing.T) {
 		callback := leaseTestExpiryCallback(session, active)
 		release := make(chan struct{})
 		active.lease = time.AfterFunc(0, func() { <-release; callback() })
-		synctest.Wait() // The relative timer fired, but its callback is queued.
+		synctest.Wait()
 		renewed := time.Now().UTC().Add(3 * time.Second)
 		if err := session.RenewPromptLeaseUntil(active.id, renewed); err != nil {
 			session.finishPrompt(active, PromptResult{Outcome: PromptOutcomeCompleted})
@@ -108,7 +105,7 @@ func TestRuntimeSessionLeaseStaleCallbackCannotCancelReplacement(t *testing.T) {
 		callback := leaseTestExpiryCallback(session, old)
 		session.finishPrompt(old, PromptResult{Outcome: PromptOutcomeCompleted})
 		_, replacement := newLeaseTestActivePrompt(time.Now().UTC().Add(2 * time.Second))
-		session.active = replacement // Even identical IDs cannot revive an old callback.
+		session.active = replacement
 		callbackDone := make(chan struct{})
 		go func() { callback(); close(callbackDone) }()
 		synctest.Wait()
@@ -140,7 +137,7 @@ func TestRuntimeSessionLeaseCancellationDecisionFencesRenewal(t *testing.T) {
 			_, _ = session.CancelPrompt(t.Context(), "cancel-decision")
 			close(cancelDone)
 		}()
-		synctest.Wait() // Cancellation is decided; courtesy cancel is blocked on the pipe.
+		synctest.Wait()
 		err = session.RenewPromptLeaseUntil("cancel-decision", deadline.Add(time.Second))
 		if _, ok := errors.AsType[*StalePromptError](err); !ok {
 			t.Errorf("renewal after cancellation decision = %v, want stale authority", err)
@@ -176,8 +173,6 @@ func TestRuntimeSessionLeaseFiredTimerCannotRenewExpiredAuthority(t *testing.T) 
 	})
 }
 
-// A session/cancel notification has no prompt identity. Even after the old
-// result is published, replacement admission must wait for a delayed write.
 func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		session, peer := newLeaseTestRuntimeSession(t)
@@ -202,8 +197,6 @@ func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
 		}
 		<-run.Events
 
-		// Delay the real courtesy write before bytes reach the peer. Its
-		// writeMu remains held; the independent read loop can still settle.
 		time.Sleep(time.Second)
 		<-gate.entered
 		synctest.Wait()
@@ -223,8 +216,6 @@ func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
 			t.Fatalf("old prompt settlement = %#v, want accepted cancellation", result)
 		}
 		synctest.Wait()
-		// Settlement has already ended the caller's wait. Within the independent
-		// write bound, its pending notification must still fence replacement.
 		time.Sleep(session.config.CancelGrace)
 		synctest.Wait()
 		activations := 0
@@ -246,7 +237,7 @@ func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
 		if err != nil || cancelMessage.Method != MethodSessionCancel {
 			t.Fatalf("old courtesy notification = %#v, error = %v", cancelMessage, err)
 		}
-		synctest.Wait() // The full courtesy write has completed.
+		synctest.Wait()
 		replacement, err := session.StartPromptWithLeaseDeadlineAndActivation(t.Context(), "new", "sha256:new", []ContentBlock{Text("replacement")}, time.Now().Add(time.Minute), activate)
 		if err != nil {
 			t.Fatalf("replacement rejected after old cancel finished: %v", err)
@@ -259,8 +250,6 @@ func TestRuntimeSessionLeasePendingCancelFencesReplacement(t *testing.T) {
 			t.Fatalf("replacement request = %#v, error = %v", newRequest, err)
 		}
 		<-replacement.Events
-		// A subsequent real notification is an ordered wire barrier: any
-		// leftover old cancellation would be observed before this message.
 		barrierDone := make(chan error, 1)
 		go func() { barrierDone <- client.Notify(context.Background(), "test/barrier", nil) }()
 		message, err := readTestMessage(reader)
@@ -309,7 +298,7 @@ func TestRuntimeSessionLeaseBlockedCancelKeepsGraceBounded(t *testing.T) {
 		<-gate.entered
 		synctest.Wait()
 		time.Sleep(session.config.CancelGrace)
-		synctest.Wait() // The nil-process fixture's Stop returns without settlement.
+		synctest.Wait()
 		select {
 		case err := <-cancelled:
 			t.Fatalf("cancellation returned before its context bound: %v", err)
@@ -325,8 +314,6 @@ func TestRuntimeSessionLeaseBlockedCancelKeepsGraceBounded(t *testing.T) {
 		default:
 			t.Fatal("blocked courtesy write prevented bounded cancellation return")
 		}
-		// A response still settles normally while the write is blocked, so
-		// neither grace escalation nor transport waiting holds the session lock.
 		if err := writeTestMessage(peer, map[string]any{
 			"jsonrpc": "2.0", "id": request.ID,
 			"result": map[string]any{"stopReason": StopReasonEndTurn},
@@ -502,8 +489,6 @@ func TestRuntimeSessionActivationFailureLeavesPromptRetryable(t *testing.T) {
 	})
 }
 
-// An HTTP cancellation caller can disconnect before its grace window ends.
-// The absolute lease must still stop a real adapter that ignores cancellation.
 func TestRuntimeSessionLeaseEscalatesAfterCancellationCallerExits(t *testing.T) {
 	session := newTestRuntimeSession(t, "ignore-cancel")
 	session.config.CancelGrace = 100 * time.Millisecond
@@ -558,7 +543,6 @@ func (w *leaseTestCancelWriter) Write(data []byte) (int, error) {
 	return w.Writer.Write(data)
 }
 
-// Captures the callback's authority when the timer is armed.
 func leaseTestExpiryCallback(session *RuntimeSession, active *activePrompt) func() {
 	version := active.leaseVersion
 	return func() { session.expirePrompt(active, version) }

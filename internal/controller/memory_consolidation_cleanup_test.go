@@ -21,9 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// A consolidation Task that ends or is deleted without finishing its run
-// leaves no transcripts behind; a finished run, and other Tasks, are left
-// alone.
 func TestReleaseMemoryConsolidationRunClearsAnUnfinishedRun(t *testing.T) {
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "consolidation.db"))
 	require.NoError(t, err)

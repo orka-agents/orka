@@ -13,8 +13,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// A download stream opened without its request message is ended at the
-// bulk duration limit, before its handler runs, and frees its slot.
 func TestServerEndsDownloadsThatNeverSendTheirRequest(t *testing.T) {
 	provider := newRecordingProvider()
 	config := serveBoth(provider)
@@ -40,8 +38,6 @@ func TestServerEndsDownloadsThatNeverSendTheirRequest(t *testing.T) {
 	require.NoError(t, err, "the bulk slot is free again")
 }
 
-// A server describes the artifact limit it enforces, which its own blob
-// limit can lower below the provider's, though never below the contract's.
 func TestServerDescribesTheArtifactLimitItEnforces(t *testing.T) {
 	provider := newRecordingProvider()
 	larger := describeDefault()

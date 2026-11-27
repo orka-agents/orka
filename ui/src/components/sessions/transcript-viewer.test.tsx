@@ -50,9 +50,7 @@ describe('TranscriptViewer', () => {
 
     const { container } = render(<TranscriptViewer transcript={jsonl} />)
     const rows = container.querySelectorAll('.flex.gap-3')
-    // user message: justify-end
     expect(rows[0].className).toContain('justify-end')
-    // assistant message: justify-start
     expect(rows[1].className).toContain('justify-start')
   })
 
@@ -65,7 +63,6 @@ describe('TranscriptViewer', () => {
     render(<TranscriptViewer transcript={jsonl} />)
     for (const text of ['User msg', 'Bot msg']) {
       const bubble = screen.getByText(text).closest('[data-slot="card"]') as HTMLElement
-      // The Card's own py-6 would stack on the content's p-3.
       expect(bubble).toHaveClass('py-0')
       expect(bubble).not.toHaveClass('py-6')
       expect(bubble.querySelector('[data-slot="card-content"]')).toHaveClass('p-3')
@@ -91,7 +88,6 @@ describe('TranscriptViewer', () => {
     const jsonl = JSON.stringify({ role: 'user', content: 'Plain message' })
     const { container } = render(<TranscriptViewer transcript={jsonl} />)
     expect(screen.getByText('Plain message')).toBeInTheDocument()
-    // No metadata spans should exist
     expect(container.querySelector('.opacity-70')).toBeNull()
   })
 
@@ -118,7 +114,6 @@ describe('TranscriptViewer', () => {
     expect(call.closest('details')).toHaveAttribute('open')
     expect(result.closest('details')).toHaveAttribute('open')
     expect(screen.getByText(/"namespace": "default"/)).toBeVisible()
-    // Long tool content scrolls in a named region the keyboard can reach.
     expect(screen.getByRole('region', { name: 'Tool result list_tasks' })).toHaveAttribute('tabindex', '0')
     expect(screen.getByRole('region', { name: 'Tool call list_tasks' })).toHaveAttribute('tabindex', '0')
     expect(screen.getByText('{"success":true,"data":[]}')).toBeVisible()

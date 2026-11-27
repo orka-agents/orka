@@ -10,10 +10,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// FindSubstrateMCPRecoveryState names the first Substrate cleanup obligation
-// in the watch namespace and reports whether servicing it needs the router
-// client identity. SubstrateActorPool finalization is control-only; dedicated
-// and pooled MCP Tool finalization builds the router-capable executor.
 func FindSubstrateMCPRecoveryState(ctx context.Context, reader client.Reader, namespace string) (state string, routerRequired bool, err error) {
 	if reader == nil || strings.TrimSpace(namespace) == "" {
 		return "", false, fmt.Errorf("reader and watch namespace are required to discover substrate MCP recovery state")
@@ -24,8 +20,6 @@ func FindSubstrateMCPRecoveryState(ctx context.Context, reader client.Reader, na
 	}
 	for i := range tools.Items {
 		tool := &tools.Items[i]
-		// The finalizer survives backend changes; the mutable MCP spec is
-		// not evidence that a prior dedicated or pooled Actor was cleaned up.
 		if controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
 			return fmt.Sprintf("Tool %s/%s", tool.Namespace, tool.Name), true, nil
 		}

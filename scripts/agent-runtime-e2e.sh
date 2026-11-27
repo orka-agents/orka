@@ -123,7 +123,6 @@ script preserves Kubernetes resources and remote effects for investigation.
 USAGE
 }
 
-# Timestamped override of the shared log helper for long-running live runs.
 log() {
   printf '\n[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
 }
@@ -270,16 +269,11 @@ concurrency_tasks="${ACP_E2E_CONCURRENCY_TASKS:-6}"
 wait_seconds="${ACP_E2E_WAIT_SECONDS:-900}"
 state_wait_seconds="${ACP_E2E_STATE_WAIT_SECONDS:-300}"
 keep_resources="${ACP_E2E_KEEP_RESOURCES:-0}"
-# aimock replaces the live Vekil (see scripts/agent-runtime-kind-e2e.sh); its
-# fixtures echo fixed session nonces, so result checks keep their meaning.
 model_backend="${ACP_E2E_MODEL_BACKEND:-vekil}"
 require_parallel="${ACP_E2E_REQUIRE_PARALLEL:-1}"
 timeout_duration="${ACP_E2E_TIMEOUT_DURATION:-90s}"
 cancel_settle_seconds="${ACP_E2E_CANCEL_SETTLE_SECONDS:-120}"
 blocking_prompt="${ACP_E2E_BLOCKING_PROMPT:-Immediately use the Bash tool to run sleep 180 with a command timeout of at least 240 seconds (timeout_ms 240000). Do not return a final answer before the command completes. Do not modify repository files.}"
-# Real agents may spend one inference request per file read or per retried
-# sleep, so the per-Task budget is twice what the prompts below need on a good
-# day; Task timeouts still bound every stage.
 task_max_turns="${ACP_E2E_TASK_MAX_TURNS:-24}"
 long_prompt="${ACP_E2E_LONG_PROMPT:-Read LICENSE, NOTICE.md, go.mod, Makefile, and the first ten Go source files you find. Compare their purpose and provide a detailed evidence-backed summary. Do not modify files.}"
 api_local_port="${ACP_E2E_API_LOCAL_PORT:-$((20000 + ($$ % 20000)))}"
@@ -317,10 +311,6 @@ k() {
   kubectl --context "${context}" "$@"
 }
 
-# load_aimock_fixtures replaces the aimock fixture set with one runtime's
-# script. The read prompt is the same for every runtime, so each runtime's
-# read runs against its own set, which answers only after the runtime's file
-# tool returned the LICENSE line.
 load_aimock_fixtures() {
   [[ "${model_backend}" == "aimock" ]] || return 0
   local provider="$1" file loaded
@@ -559,8 +549,6 @@ start_api_forward_process() {
   local kubectl_path
   kubectl_path="$(type -P kubectl)" || return 1
 
-  # Prevent cleanup from racing the PID assignment, but reset the child signal
-  # handlers before exec so the tracked PID becomes a terminable kubectl process.
   trap '' INT TERM
   (
     trap 'exit 130' INT
@@ -904,7 +892,6 @@ archive_test_sessions() {
     while :; do
       api_request GET "${path}" "" '^(200|404)$' >/dev/null || return 1
       [[ "${api_response_status}" != "404" ]] || break
-      # Retain only identity metadata, never the canonical transcript.
       jq '{name,namespace,createdAt,sessionUID:.executionControl.sessionUID}' \
         "${temp_root}/api-response.json" >"${session_file}" || return 1
       : >"${temp_root}/api-response.json"
@@ -950,7 +937,6 @@ settle_and_delete_test_tasks() {
   local name uid session_uid current_uid
   : >"${owners_file}"
   if [[ "${namespace_shared:-0}" -eq 1 ]]; then
-    # Shared watch-namespace mode: settle and delete only this run's Tasks.
     k -n "${namespace}" get task -l "orka.ai/acp-e2e-run=${run_id}" -o json >"${tasks_file}" || return 1
   else
     k -n "${namespace}" get task -o json >"${tasks_file}" || return 1
@@ -979,8 +965,6 @@ settle_and_delete_test_tasks() {
   done <"${inventory_file}"
   sort -u -o "${owners_file}" "${owners_file}"
 
-  # Named Sessions own archival receipts required by their Tasks' finalizers.
-  # Request cancellation first, then let the public API wait for normal settlement.
   archive_test_sessions "${tasks_file}" || return 1
 
   while IFS=$'\t' read -r name uid _; do
@@ -1009,9 +993,6 @@ delete_test_agents() {
   local agent
   k -n "${namespace}" get agent -o json >"${agents_file}" || return 1
   if [[ "${namespace_shared:-0}" -eq 1 ]]; then
-    # Shared watch-namespace mode: only Agents this run labeled as its own
-    # are removed; a name-suffix match could select unrelated Agents (a
-    # short run id such as "test" would also match "latest").
     while IFS= read -r agent; do
       [[ -n "${agent}" ]] || continue
       k -n "${namespace}" delete agent "${agent}" --ignore-not-found=true --wait=true --timeout=2m >/dev/null || return 1
@@ -1107,8 +1088,6 @@ delete_test_namespace_now() {
   settle_and_delete_test_tasks "${owners_file}" || return 1
   delete_test_agents || return 1
   if [[ "${namespace_shared:-0}" -eq 1 ]]; then
-    # RuntimePools are profile-keyed and may serve unrelated Agents in a
-    # shared namespace; the controller's idle policy retires them.
     log "Shared watch namespace: leaving ${namespace} RuntimePools to the controller idle policy"
   else
     stop_and_delete_test_runtimepools || return 1
@@ -1749,8 +1728,6 @@ apply_agent() {
     }' | k -n "${namespace}" apply -f - >/dev/null
 }
 
-# Toolbox Agents declare one digest-pinned toolbox. Codex keeps its native
-# unrestricted policy so the Task can run the mounted tool through Bash.
 apply_toolbox_agent() {
   local model="$1"
   local name="$2"
@@ -1781,10 +1758,6 @@ apply_toolbox_agent() {
     }' | k -n "${namespace}" apply -f - >/dev/null
 }
 
-# run_toolbox_check proves the toolbox contract live: a Codex agent runs the
-# mounted yq through PATH as a non-root process with NoNewPrivs and no
-# capabilities, and every negative fixture fails its Task with the documented
-# ToolboxUnavailable reason instead of waiting on a pool that never rolls out.
 run_toolbox_check() {
   local model="$1"
   local image="$2"
@@ -1804,8 +1777,6 @@ run_toolbox_check() {
     die "toolbox Task/${task} result does not prove NoNewPrivs=1 for agent processes"
   grep -Eq 'CapEff:[[:space:]]*0{16}' <<<"${result}" || \
     die "toolbox Task/${task} result does not prove an empty CapEff for agent processes"
-  # The copy-mode runtime Pod must carry hardened toolbox init containers; the
-  # image-volume mode mounts the image directly and has none.
   if [[ "${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}" == "copy" ]]; then
     k -n "${runtime_namespace}" get pod -l "orka.ai/runtime-pool-namespace=${namespace}" -o json | jq -e '
       [.items[] | select(.spec.initContainers != null) | .spec.initContainers[] | select(.name == "toolbox-copy-0")
@@ -1815,13 +1786,7 @@ run_toolbox_check() {
   fi
   mark_task_validated "${task}"
 
-  # Expected reasons differ by mount method: the copier rejects special files
-  # and reports a missing source folder itself, while an image volume mounts
-  # files as they are (a FIFO is harmless and the Task succeeds) and a missing
-  # subPath fails inside the container runtime.
   local mount_method="${ACP_E2E_TOOLBOX_MOUNT_METHOD:-copy}"
-  # A syntactically valid digest that no registry serves: the pull must fail
-  # with TOOLBOX_IMAGE_PULL in both modes.
   local unknown_image
   unknown_image="${image%@sha256:*}@sha256:$(printf 'orka-toolbox-unknown-digest-%s' "${run_id}" | "${toolbox_checksum_command[@]}" | cut -c1-64)"
   local case_name case_image case_reason case_mount case_entry negative_agent negative_task
@@ -1858,10 +1823,6 @@ run_toolbox_check() {
     mark_task_validated "${negative_task}"
   done
 
-  # Image volumes mount files unsanitized, so the hostile fixture must stay
-  # harmless under the real node runtime: the setuid-root binary runs with the
-  # agent's own identity, the file-capability binary cannot execute, and the
-  # 0666 device node cannot be opened.
   if [[ "${mount_method}" == "imageVolume" && -n "${ACP_E2E_TOOLBOX_HOSTILE_IMAGE:-}" ]]; then
     local hostile_agent hostile_task hostile_result
     hostile_agent="$(sanitize_name "acp-codex-toolbox-hostile-${run_id}")"
@@ -1881,10 +1842,6 @@ run_toolbox_check() {
   fi
 }
 
-# Read tasks without Bash carry the restricted {Read,Glob,Grep} tool policy for
-# every provider, so codex exercises its native read-only agent mode live.
-# Codex cannot express restricted policies that include Bash, so the blocking
-# timeout/cancel tasks stay unrestricted for it.
 apply_read_task() {
   local name="$1"
   local agent="$2"
@@ -2132,9 +2089,6 @@ pool_transient_counters_zero() {
   local payload
   is_uint "${expected_resident_sessions}" || return 1
   payload="$(k -n "${namespace}" get runtimepool "${pool}" -o json 2>/dev/null)" || return 1
-  # Idle durable RuntimeSessions intentionally retain one provider process each.
-  # Callers must state the exact expected resident count so task-scoped leaks do
-  # not pass as quiescent; drained/stopped validation separately requires zero.
   jq -e --argjson expected "${expected_resident_sessions}" '
     (.status.capacity | type) == "object"
     and (.status.capacity.maxResidentSessions // 0) > 0
@@ -2531,9 +2485,6 @@ assert_task_succeeded_read() {
     if [[ -n "${expected_text}" ]] && ! grep -Fq -- "${expected_text}" <<<"${result}"; then
       die "Task/${task} result did not contain independently observed repository content"
     fi
-    # Provider CLIs have leaked startup diagnostics into the agent message
-    # stream before (Codex WebSocket fallback, Copilot tool exclusions); the
-    # supervisor must keep them out of the result text.
     if grep -Eq 'Info: (Disabled tools|Unknown tool name in the tool excludedlist)|Warning: Falling back from WebSockets' <<<"${result}"; then
       die "Task/${task} result contains provider CLI diagnostics"
     fi
@@ -2541,10 +2492,6 @@ assert_task_succeeded_read() {
   mark_task_validated "${task}"
 }
 
-# assert_cancelled_task requires a controller-owned Cancelled settlement. The
-# execution reason distinguishes why: an explicit cancellation request settles
-# with reason "Cancelled", while a Task deadline settles with reason
-# "TaskTimeout" (message "task deadline cancellation settled").
 assert_cancelled_task() {
   local task="$1"
   local snapshot="$2"
@@ -2600,10 +2547,6 @@ assert_restart_task_settled() {
   mark_task_validated "${task}"
 }
 
-# assert_all_tasks_validated requires every Task this run created to have
-# passed exact fence/result validation. It is scoped to run-owned Tasks so a
-# shared watch namespace (adopted harness-v2 mode) that also hosts unrelated
-# Tasks does not fail the release gate.
 assert_all_tasks_validated() {
   local unvalidated
   unvalidated="$(k -n "${namespace}" get tasks -l "orka.ai/acp-e2e-run=${run_id}" -o json | jq -r '
@@ -2641,8 +2584,6 @@ run_read_smoke() {
   assert_task_succeeded_read "${task}" "${snapshot}" "${read_repo_commit}" "${nonce}" "${expected_line}"
   read_smoke_pool="${pool}"
   if [[ "${release_gate}" -eq 1 ]]; then
-    # The release gate checks each shipped runtime image; continuation and
-    # forks run on every PR in the Go "Agent runtime lifecycle" e2e job.
     acp_report_update '.runtime.providers[$provider] = {read:true,result:true}' --arg provider "${provider}"
     return 0
   fi
@@ -2665,7 +2606,6 @@ run_read_smoke() {
   first_retired="$(k -n "${namespace}" get task "${task}" -o jsonpath='{.status.execution.runtimeSessionRecreationPending}')"
   expected_generation="${first_generation}"
   if [[ "${first_retired}" == true ]]; then
-    # Native checkpointing retires the writer before the next cold continuation.
     expected_generation="$((first_generation + 1))"
   fi
   continued_uid="$(k -n "${namespace}" get task "${continuation}" -o jsonpath='{.status.execution.runtimeSessionUID}')"
@@ -2803,8 +2743,6 @@ assert_unsafe_workspace_rejected() {
   log "Unsafe read workspace URL controls passed"
 
   if [[ "${release_gate}" -eq 1 ]]; then
-    # Admission dry-runs never clone or publish. A syntactically valid fixture
-    # target keeps these positive/negative controls independent of live credentials.
     local publication_fixture=https://github.com/orka-fixtures/publication.git
     build_write_manifest "$(sanitize_name "acp-safe-write-${run_id}")" "${agent}" \
       "${repo_url}" "${publication_fixture}" "${safe_write}"
@@ -3645,7 +3583,6 @@ provider_pool_cleanup_owned() {
       .metadata.uid == $uid and .spec.trustDomain.namespace == $ns
       and .spec.runtime.profile.providerKind == $provider
     ' >/dev/null || return 1
-  # A profile-keyed pool may have acquired another Task since our inventory.
   k -n "${namespace}" get task -o json | jq -e --arg pool "${pool}" --arg uid "${uid}" '
     all(.items[]; .status.execution.runtimePoolName != $pool and .status.execution.runtimePoolUID != $uid)
   ' >/dev/null
@@ -3751,8 +3688,6 @@ if [[ "${release_gate}" -eq 1 ]]; then
   read_repo_commit="$(gh api "repos/${read_repo_slug}/commits/${repo_ref}" --jq '.sha')"
   [[ "$(lower "${read_repo_commit}")" == "$(lower "${repo_ref}")" ]] || \
     die "ACP_E2E_REF did not resolve to the requested immutable commit"
-  # Read to EOF: exiting at the first line can SIGPIPE gh, which pipefail
-  # then reports as a failed gate.
   expected_license_line="$(gh_raw_file "${read_repo_slug}" LICENSE "${read_repo_commit}" | awk 'NF && !found { print; found = 1 }')"
   [[ -n "${expected_license_line}" ]] || die "could not independently read the first non-empty LICENSE line"
   [[ "${model_backend}" == "vekil" || "${expected_license_line}" == "MIT License" ]] || \
@@ -3763,10 +3698,6 @@ if resource_exists get namespace "${namespace}"; then
   if k get namespace "${namespace}" -o json | jq -e '
       .metadata.labels["orka.ai/controller-mode"] == "harness-v2"
     ' >/dev/null; then
-    # Shared watch-namespace mode: the isolated harness-v2 controller only
-    # serves Tasks in its watch namespace, so the validator adopts that
-    # namespace and cleans up its run-labeled resources without ever owning
-    # the namespace lifecycle.
     log "Adopting existing harness-v2 namespace ${namespace} (shared watch-namespace mode)"
     namespace_shared=1
   else
@@ -3798,7 +3729,6 @@ if [[ "${release_gate}" -eq 1 ]] && ! runtimepool_mutations_allowed; then
   die "RELEASE_GATE=1 requires an isolated namespace or ACP_E2E_ALLOW_SHARED_POOL_MUTATION=1 on a dedicated cluster"
 fi
 
-# Smoke cleanup also archives named Sessions through the authenticated API.
 create_api_identity
 start_api_forward
 

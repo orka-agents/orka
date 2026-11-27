@@ -32,15 +32,10 @@ import (
 
 const connectorProviderRefreshInterval = 5 * time.Minute
 
-// ConnectorProviderReconciler validates provider OAuth settings, tool
-// declarations, and the client secret reference. It never reads the client
-// secret value into status or logs.
 type ConnectorProviderReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Scheme    *runtime.Scheme
-	// KnownBuiltinTool reports whether a Builtin tool name exists. Nil accepts
-	// any well-formed name.
+	APIReader        client.Reader
+	Scheme           *runtime.Scheme
 	KnownBuiltinTool connectors.BuiltinToolCheck
 }
 
@@ -49,25 +44,14 @@ type ConnectorProviderReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=connectorproviders/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
-// ConnectorProviderConnectionsFinalizer holds a ConnectorProvider while
-// Connections still reference it, so their tokens can be revoked against the
-// client that issued them before the provider disappears.
 const ConnectorProviderConnectionsFinalizer = "core.orka.ai/connector-connections"
 
-// connectorProviderDeletionRequeue is how often a provider blocked by live
-// Connections re-checks for their removal.
 const connectorProviderDeletionRequeue = 30 * time.Second
 
-// finalize releases a deleting provider only once no Connection in its
-// namespace references it; until then the deletion is held and the
-// remaining Connections are named in the Accepted condition.
 func (r *ConnectorProviderReconciler) finalize(ctx context.Context, provider *corev1alpha1.ConnectorProvider) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(provider, ConnectorProviderConnectionsFinalizer) {
 		return ctrl.Result{}, nil
 	}
-	// The decision below is irreversible (a released provider cannot revoke
-	// its Connections' tokens), so the reference check reads the API server
-	// rather than the cache, which can trail a Connection created moments ago.
 	var reader client.Reader = r.Client
 	if r.APIReader != nil {
 		reader = r.APIReader
@@ -114,9 +98,6 @@ func (r *ConnectorProviderReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if !provider.DeletionTimestamp.IsZero() {
 		return r.finalize(ctx, provider)
 	}
-	// The provider's OAuth client is what revokes the tokens its Connections
-	// hold; it must outlive them, or disconnect would delete the only sealed
-	// copies without revoking anything.
 	if !controllerutil.ContainsFinalizer(provider, ConnectorProviderConnectionsFinalizer) {
 		controllerutil.AddFinalizer(provider, ConnectorProviderConnectionsFinalizer)
 		if err := r.Update(ctx, provider); err != nil {
@@ -194,8 +175,6 @@ func (r *ConnectorProviderReconciler) referenceReader() client.Reader {
 	return r.Client
 }
 
-// requestsForAgentHostTemplate enqueues the providers whose agent hosts use
-// the template, so a missing or changed template shows on them at once.
 func (r *ConnectorProviderReconciler) requestsForAgentHostTemplate(ctx context.Context, object client.Object) []reconcile.Request {
 	providers := &corev1alpha1.ConnectorProviderList{}
 	if err := r.List(ctx, providers, client.InNamespace(object.GetNamespace())); err != nil {
@@ -225,7 +204,6 @@ func (r *ConnectorProviderReconciler) requestsForSecret(ctx context.Context, obj
 	return requests
 }
 
-// SetupWithManager registers provider and client-secret watches.
 func (r *ConnectorProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

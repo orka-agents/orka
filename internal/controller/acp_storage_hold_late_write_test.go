@@ -15,10 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// interceptLateHold makes the hold condition write that a replaced controller
-// sent before it lost its epoch land at the successor's first status write to
-// the Task. That write carried the resourceVersion the successor read, so it
-// lands only before the successor's first write to the Task.
 func interceptLateHold(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task, hold taskStorageRecordHold) {
 	t.Helper()
 	var once sync.Once
@@ -57,10 +53,6 @@ func interceptLateHold(t *testing.T, fixture *recoveryFixture, task *corev1alpha
 	})
 }
 
-// A hold condition that a replaced controller sent before it lost its epoch,
-// and that the API server applies only after the successor has settled the
-// attempt from its restored receipt, does not stay on the settled Task: the
-// successor's terminal epoch write clears it.
 func TestTerminalRecoveryClearsALateHoldFromAReplacedController(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -87,10 +79,6 @@ func TestTerminalRecoveryClearsALateHoldFromAReplacedController(t *testing.T) {
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
 }
 
-// settlingTaskInWorkspaceValidationWithoutCompletion is
-// settlingTaskInWorkspaceValidation without the journaled completion: the
-// successor verifies the receipt, but finds no completion to settle the
-// attempt from, so it records the outcome as unknown.
 func settlingTaskInWorkspaceValidationWithoutCompletion(t *testing.T, fixture *recoveryFixture) *corev1alpha1.Task {
 	t.Helper()
 	task, _, _ := settlingTaskWithReceipt(t, fixture)
@@ -105,8 +93,6 @@ func settlingTaskInWorkspaceValidationWithoutCompletion(t *testing.T, fixture *r
 	return task
 }
 
-// recoverUntilTaskEpoch runs recovery until the Task records the successor's
-// epoch, and returns the Task.
 func recoverUntilTaskEpoch(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) *corev1alpha1.Task {
 	t.Helper()
 	updated := &corev1alpha1.Task{}
@@ -125,10 +111,6 @@ func recoverUntilTaskEpoch(t *testing.T, fixture *recoveryFixture, task *corev1a
 	return nil
 }
 
-// When the successor finds the receipt of an attempt in workspace validation
-// but no journaled completion, it records the outcome as unknown. The same
-// late hold does not stay on that Task either: the receipt it names is in the
-// store, so the terminal epoch write clears it.
 func TestTerminalRecoveryClearsALateHoldAfterRecordingAnUnknownOutcome(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -145,9 +127,6 @@ func TestTerminalRecoveryClearsALateHoldAfterRecordingAnUnknownOutcome(t *testin
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
 }
 
-// An unknown outcome is not evidence that the receipt was found: when the
-// store no longer holds the receipt by the terminal epoch write, the late
-// hold stays, as it does for an attempt recovery has not settled.
 func TestTerminalEpochWriteKeepsALateHoldWhoseReceiptIsMissing(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -166,10 +145,6 @@ func TestTerminalEpochWriteKeepsALateHoldWhoseReceiptIsMissing(t *testing.T) {
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, hold.reason)
 }
 
-// Releasing a late hold is admitted like the record hold writes: when the
-// installation is held after the terminal epoch write found the receipt, the
-// write is refused and the Task keeps both the hold and its earlier epoch,
-// until a pass after the installation hold clears releases it.
 func TestTerminalEpochWriteReleasesALateHoldOnlyWhileStorageIsNotHeld(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -204,8 +179,6 @@ func TestTerminalEpochWriteReleasesALateHoldOnlyWhileStorageIsNotHeld(t *testing
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
 }
 
-// A hold on a Task whose attempt is still Settling is current, and the
-// terminal epoch write leaves it in place.
 func TestTerminalEpochWriteKeepsTheHoldOfASettlingAttempt(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)

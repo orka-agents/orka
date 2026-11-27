@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # acp_report_update arguments are jq programs.
-# Source-only, allowlisted evidence for release qualification.
-# Never persist Task prompts/results, messages, annotations, or Secret data.
 
 acp_report_enabled() {
   [[ "${RELEASE_GATE:-0}" == "1" && -n "${ACP_E2E_REPORT_FILE:-}" ]]
 }
 
-# The existing live canary is an explicit local opt-in. The release workflow
-# fixes this to 0 and needs no GitHub publication credentials.
 acp_live_github_enabled() {
   [[ "${ACP_E2E_WRITE_CREATE_PR:-0}" == "1" ]]
 }
 
-# Require named behavioral tests as well as successful package exits. A skipped,
-# filtered, renamed, or empty suite must not count as publication coverage.
 acp_publication_test_requirements() {
   cat <<'JSON'
 {
@@ -154,8 +148,6 @@ acp_report_task() {
   acp_report_update '.task = $task' --argjson task "${projection}"
 }
 
-# Called only after the validator has checked the exact Pod and resolved its
-# requested OCI index to the observed platform image digest.
 acp_report_image() {
   acp_report_enabled || return 0
   local role="$1" pod="$2" container="$3" projection

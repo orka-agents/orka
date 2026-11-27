@@ -82,7 +82,6 @@ type replacement struct {
 
 func versionFields() map[string][]replacement {
 	bare := strings.TrimPrefix(versionPattern, "v")
-	// The exact development sentinel is an input default, not a release version.
 	versionOrDev := `(?:` + versionPattern + `|v` + regexp.QuoteMeta(developmentVersion) + `)`
 	bareOrDev := `(?:` + bare + `|` + regexp.QuoteMeta(developmentVersion) + `)`
 	fields := map[string][]replacement{
@@ -101,8 +100,6 @@ func versionFields() map[string][]replacement {
 	}
 	for _, provider := range versionedRuntimeProviders {
 		repository := imageRepository("acp-" + provider + "-runtime")
-		// An empty runtime image inherits this repository. A concrete image must
-		// match it exactly; preserve the field prefix, including its whitespace.
 		fields[valuesInputPath] = append(fields[valuesInputPath], replacement{
 			pattern: `^([ \t]+` + provider + `Image:[ \t]*)(?:` +
 				regexp.QuoteMeta(repository) + `:` + bareOrDev + `|"")$`,
@@ -135,8 +132,6 @@ func (w *workflow) checkPreparationAutomation(trusted, candidate string) error {
 	if !shaRE.MatchString(trusted) || !shaRE.MatchString(candidate) {
 		return errors.New("invalid preparation source identity")
 	}
-	// The release command and all its Go sources stay within cmd/build. Any new
-	// repository package it imports must be included in this trusted comparison.
 	paths := []string{
 		".github", "scripts", "cmd/build", ".agents/skills/kindctl", ".agents/skills/vekil-reverse-proxy-deploy",
 		"bin", "vendor", "go.mod", "go.sum", "go.work", "go.work.sum", makefilePath, "GNUmakefile", "makefile",
@@ -217,7 +212,6 @@ func (w *workflow) generateCandidate(version string) (string, error) {
 		{makeCommand, "verify-release-manifest", "NEWVERSION=" + version}, {gitCommand, gitDiff, "--check"},
 	}
 	for _, args := range commands {
-		// These build commands carry no credentials; retain their useful diagnostics.
 		if result := w.run(commandSpec{dir: w.root, args: args, stream: true}); result.err != nil {
 			return "", fmt.Errorf("%s failed", args[0])
 		}

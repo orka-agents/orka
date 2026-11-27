@@ -195,10 +195,7 @@ func TestSCMEgressProxyCONNECTSurvivesQuietRequestDirection(t *testing.T) {
 	publicAddress := netip.MustParseAddr("1.1.1.1")
 	proxy := newTestSCMProxy(t, proxyConfig{
 		AllowedHosts: map[string]struct{}{"github.com": {}},
-		// The response stream outlives the idle timeout, so the quiet request
-		// direction hits its read deadline repeatedly while the response
-		// direction is still moving bytes.
-		IdleTimeout: 500 * time.Millisecond,
+		IdleTimeout:  500 * time.Millisecond,
 		Resolver: resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
 			return []netip.Addr{publicAddress}, nil
 		}),
@@ -233,9 +230,6 @@ func TestSCMEgressProxyCONNECTHalfCloseKeepsResponseStreaming(t *testing.T) {
 			return
 		}
 		defer func() { _ = connection.Close() }()
-		// The upstream only responds after the request direction is fully
-		// drained to EOF, which requires the proxy to propagate the client
-		// half-close instead of tearing the tunnel down.
 		if _, copyErr := io.Copy(io.Discard, connection); copyErr != nil {
 			return
 		}

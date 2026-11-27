@@ -1,7 +1,3 @@
-// Package compatmodel supplies a deterministic OpenAI model for compatibility
-// routing tests. Its fixture credentials identify the expected namespace; they
-// are not real provider credentials. Never expose this fixture as a model service.
-//
 //nolint:goconst // Keep the fixed JSON wire fixtures readable.
 package compatmodel
 
@@ -32,8 +28,6 @@ type request struct {
 	} `json:"input"`
 }
 
-// Handler returns text or performs a fixed create/wait/fetch tool sequence.
-// Both compatibility APIs can use this one OpenAI-backed Provider.
 func Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.WriteHeader(http.StatusOK)

@@ -34,10 +34,6 @@ const (
 	substratePoolActorLeaseToolNameAnno   = "orka.ai/substrate-pool-tool-name"
 	substratePoolActorLeaseToolUIDAnno    = "orka.ai/substrate-pool-tool-uid"
 
-	// Legacy Task-held lease annotations written by controllers that still ran
-	// the removed per-Task workspace path. No current code writes them; they are
-	// recognized only so pre-upgrade leases can be reclaimed after the original
-	// Task is terminal and workspace cleanup is confirmed.
 	legacySubstratePoolActorLeaseTaskNSAnno   = "orka.ai/substrate-pool-task-namespace"
 	legacySubstratePoolActorLeaseTaskNameAnno = "orka.ai/substrate-pool-task-name"
 	legacySubstratePoolActorLeaseTaskUIDAnno  = "orka.ai/substrate-pool-task-uid"
@@ -139,9 +135,6 @@ func substratePoolActorLeaseActorID(lease *coordinationv1.Lease) string {
 	return strings.TrimSpace(lease.Name)
 }
 
-// substratePoolActorLeaseName derives the Lease key from an Actor ID. The
-// deterministic Actor name already hashes its template Atespace, so the
-// pre-native lease key is preserved when the routable ID becomes qualified.
 func substratePoolActorLeaseName(actorID string) string {
 	actorID, _, _ = strings.Cut(strings.TrimSpace(actorID), ".")
 	return strings.TrimSpace(actorID)
@@ -162,13 +155,9 @@ func substratePoolActorLeaseHasActiveHolder(ctx context.Context, reader client.R
 	if taskNamespace != "" && taskName != "" && taskUID != "" {
 		return legacySubstratePoolActorLeaseHasActiveTaskHolder(ctx, reader, taskNamespace, taskName, taskUID)
 	}
-	// Leases without a recognized holder fail closed as busy.
 	return true, nil
 }
 
-// legacySubstratePoolActorLeaseHasActiveTaskHolder keeps pre-upgrade leases busy
-// until their original Task is terminal and confirms workspace cleanup. A missing
-// or replaced Task cannot prove the actor is safe to reuse.
 func legacySubstratePoolActorLeaseHasActiveTaskHolder(
 	ctx context.Context,
 	reader client.Reader,
@@ -192,10 +181,6 @@ func legacySubstratePoolActorLeaseHasActiveTaskHolder(
 	return true, nil
 }
 
-// substratePoolActorLeaseHasActiveToolHolder treats every Tool-held lease as
-// busy: a Tool lease is released only by the Tool controller deleting it, so
-// the holder's presence, absence, or replacement never proves the actor is safe
-// to reuse. The Get is kept so transient reader failures surface to the caller.
 func substratePoolActorLeaseHasActiveToolHolder(
 	ctx context.Context,
 	reader client.Reader,

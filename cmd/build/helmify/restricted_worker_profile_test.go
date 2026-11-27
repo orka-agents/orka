@@ -131,7 +131,6 @@ func TestDefaultWorkerProfileUnchanged(t *testing.T) {
 			t.Errorf("default worker profile changed explicit context mode %q", mode)
 		}
 	}
-	// --reuse-values can replace chart defaults with values from an older release.
 	chart := t.TempDir()
 	if err := os.CopyFS(chart, os.DirFS("static")); err != nil {
 		t.Fatal(err)
@@ -154,7 +153,7 @@ func TestDefaultWorkerProfileUnchanged(t *testing.T) {
 	}
 	helm, err := exec.LookPath("helm")
 	if err != nil {
-		t.Fatal(err) // earlier render helpers require Helm for this test
+		t.Fatal(err)
 	}
 	args := append([]string{"template", "test", chart, "--namespace", "orka-test"}, staticChartDefaultArgs()...)
 	rendered, err := exec.Command(helm, args...).CombinedOutput()

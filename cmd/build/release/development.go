@@ -83,7 +83,6 @@ func (w *workflow) publishDevelopment(directory, sha string) error {
 		images[name] = imageRepository(name) + "@" + digest
 	}
 
-	// Check every uploaded image and immutable tag before changing any tags.
 	shaTag := "sha-" + sha
 	for _, name := range imageNames {
 		digest, err := w.registryDigest(images[name])
@@ -118,8 +117,6 @@ func (w *workflow) publishDevelopment(directory, sha string) error {
 		return err
 	}
 
-	// Workflow concurrency serializes publication. This guard also prevents an
-	// older queued run from replacing the newest main build's rolling aliases.
 	var current gitRef
 	if err := w.api(repoAPI+"/git/ref/heads/main", http.MethodGet, nil, &current); err != nil {
 		return err

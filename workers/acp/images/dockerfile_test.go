@@ -12,10 +12,6 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 )
 
-// runtimeDockerfileCase describes one built-in ACP runtime image. requiredPins
-// reference internal/acp pin constants directly so a pin bump that forgets the
-// Dockerfile fails this suite; extraForbidden holds forbidden substrings that
-// cannot be enforced uniformly (each exception is explained inline).
 type runtimeDockerfileCase struct {
 	provider       string
 	dockerfile     string
@@ -23,9 +19,6 @@ type runtimeDockerfileCase struct {
 	extraForbidden []string
 }
 
-// universalForbiddenSubstrings is the union of the previously per-image
-// forbidden lists that holds for every runtime Dockerfile. Secret-shaped
-// terms are concatenated so scanners do not flag the test itself.
 var universalForbiddenSubstrings = []string{
 	"apt-get ", "apk add", "git clone", "npm install", "RUN npx ", "RUN curl ", "RUN wget ", "ADD http",
 	"GITHUB_" + "TOKEN", "GH_" + "TOKEN", "SSH_AUTH_SOCK",
@@ -33,12 +26,6 @@ var universalForbiddenSubstrings = []string{
 	":latest",
 }
 
-// Bare "curl ", "wget ", and "npx " cannot be universal: the node-based images
-// legitimately mention those names while deleting the binaries
-// (rm -f /usr/local/bin/npx ... /usr/bin/curl /usr/bin/wget). Invocation forms
-// (RUN curl/RUN wget/RUN npx) stay universally forbidden above.
-// "unknown-linux-musl" cannot be universal: the Codex CLI npm package vendors
-// its binaries under *-unknown-linux-musl target triples.
 var (
 	forbiddenFetchTools = []string{"curl ", "wget "}
 	forbiddenMuslTriple = "unknown-linux-musl"
@@ -61,8 +48,6 @@ func runtimeDockerfileCases() []runtimeDockerfileCase {
 				acp.CodexCLILinuxX64SHA256,
 				acp.CodexCLILinuxARM64SHA256,
 			},
-			// Codex vendors musl-triple CLI binaries, so the musl term is
-			// excluded; its node base image removal lines mention npx.
 			extraForbidden: forbiddenFetchTools,
 		},
 		{
@@ -88,8 +73,6 @@ func runtimeDockerfileCases() []runtimeDockerfileCase {
 				acp.CopilotCLILinuxX64SHA256,
 				acp.CopilotCLILinuxARM64SHA256,
 			},
-			// Copilot's hardening line removes /usr/bin/curl and /usr/bin/wget,
-			// so the bare fetch-tool terms are excluded for this image only.
 			extraForbidden: []string{forbiddenMuslTriple},
 		},
 		{
@@ -112,8 +95,6 @@ func runtimeDockerfileCases() []runtimeDockerfileCase {
 				acp.OpenCodeRootInstructionSHA256,
 				acp.OpenCodeImageNoticeSHA256,
 			},
-			// The debian-based OpenCode image ships no node tooling at all, so
-			// even the bare npx term holds there.
 			extraForbidden: append([]string{forbiddenMuslTriple, forbiddenBareNpx}, forbiddenFetchTools...),
 		},
 	}
@@ -340,9 +321,6 @@ func compareVersionCore(left, right [3]int) int {
 	return 0
 }
 
-// Repository-controlled agent configuration must not run commands outside the
-// Orka tool policy: Codex must not trust the cloned session root, and Copilot
-// must only load hooks from a root-owned managed policy.
 func TestRuntimeImagesBlockRepositoryAgentConfiguration(t *testing.T) {
 	t.Parallel()
 	patch, err := os.ReadFile(filepath.Join("codex", "patch-agent-mode.mjs"))

@@ -11,7 +11,6 @@ package ahphost
 
 import "github.com/microsoft/agent-host-protocol/clients/go/ahptypes"
 
-// actionIntroducedIn maps every action type to the protocol version that introduced it.
 var actionIntroducedIn = map[ahptypes.ActionType]string{
 	ahptypes.ActionTypeRootAgentsChanged:                   "0.1.0",
 	ahptypes.ActionTypeRootActiveSessionsChanged:           "0.1.0",
@@ -121,7 +120,6 @@ var actionIntroducedIn = map[ahptypes.ActionType]string{
 	ahptypes.ActionTypeAutomationRunCancelRequested:        "0.8.0",
 }
 
-// clientDispatchable reports whether a client may dispatch an action type.
 var clientDispatchable = map[ahptypes.ActionType]bool{
 	ahptypes.ActionTypeRootAgentsChanged:                   false,
 	ahptypes.ActionTypeRootActiveSessionsChanged:           false,
@@ -231,7 +229,6 @@ var clientDispatchable = map[ahptypes.ActionType]bool{
 	ahptypes.ActionTypeAutomationRunCancelRequested:        true,
 }
 
-// notificationIntroducedIn maps every protocol notification to the version that introduced it.
 var notificationIntroducedIn = map[string]string{
 	"root/sessionAdded":          "0.1.0",
 	"root/sessionRemoved":        "0.1.0",

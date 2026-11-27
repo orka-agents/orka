@@ -22,9 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// countingAttemptStore answers GetPromptAttempt with a fixed attempt and
-// counts the reads; delivery recovery of a settled, non-Session Task reads
-// nothing else from the store.
 type countingAttemptStore struct {
 	store.DurableControlStore
 	mu      sync.Mutex
@@ -93,9 +90,6 @@ func settledDeliveryTestTask(epoch int64) corev1alpha1.Task {
 	}
 }
 
-// A settled Task whose durable attempt can no longer change is read from the
-// store once; later scans of the same Task version skip it. Any change to the
-// Task, or to the controller epoch, makes the next scan read it again.
 func TestDeliveryRecoveryReadsASettledTaskOnlyWhenItChanges(t *testing.T) {
 	epochs, epoch := settledDeliveryTestEpochs(t)
 	attempts := &countingAttemptStore{attempt: store.PromptAttempt{
@@ -143,12 +137,6 @@ func TestDeliveryRecoveryReadsASettledTaskOnlyWhenItChanges(t *testing.T) {
 	}
 }
 
-// A succeeded attempt whose delivery is still NotRequested can move on to
-// Validating without the Task changing, so it is read on every scan and is
-// recovered as soon as its durable delivery needs it.
-// The verdict cache is bounded: past its limit it evicts the least recently
-// used verdict instead of growing, and an evicted Task is only read from the
-// store again, with the same result.
 func TestDeliveryRecoveryVerdictCacheIsBounded(t *testing.T) {
 	epochs, epoch := settledDeliveryTestEpochs(t)
 	attempts := &countingAttemptStore{attempt: store.PromptAttempt{
@@ -179,9 +167,6 @@ func TestDeliveryRecoveryVerdictCacheIsBounded(t *testing.T) {
 	if got := attempts.readCount(); got != len(tasks) {
 		t.Fatalf("store reads on the first scan = %d, want %d", got, len(tasks))
 	}
-	// Every Task is still recognised as settled: the ones kept are skipped,
-	// the evicted ones are read again and found settled again, and the cache
-	// never grows past its limit.
 	for scan := range 3 {
 		before := attempts.readCount()
 		if err := dispatcher.scheduleACPDeliveryRecoveries(ctx, tasks); err != nil {
@@ -194,8 +179,6 @@ func TestDeliveryRecoveryVerdictCacheIsBounded(t *testing.T) {
 			t.Fatalf("scan %d: store reads = %d, want between %d and %d", scan, reads, len(tasks)-limit, len(tasks))
 		}
 	}
-	// A kept verdict is still honoured exactly: with only the cached Tasks
-	// listed, none is read.
 	dispatcher.mu.Lock()
 	kept := make([]corev1alpha1.Task, 0, limit)
 	for i := range tasks {
@@ -211,8 +194,6 @@ func TestDeliveryRecoveryVerdictCacheIsBounded(t *testing.T) {
 	if reads := attempts.readCount() - before; len(kept) != limit || reads != 0 {
 		t.Fatalf("kept=%d store reads=%d, want %d kept Tasks skipped without reads", len(kept), reads, limit)
 	}
-	// A recovery that becomes necessary is still found for an evicted Task
-	// (with no free slot, it is offered and deferred rather than started).
 	dispatcher.sem = make(chan struct{})
 	attempts.setDelivery(store.PromptDeliveryValidating)
 	evicted := tasks[0]
@@ -268,9 +249,6 @@ func TestDeliveryRecoveryKeepsReadingAttemptsThatCanStillChange(t *testing.T) {
 	if got := attempts.readCount(); got != 2 {
 		t.Fatalf("store reads of a still-changeable attempt over two scans = %d, want 2", got)
 	}
-	// The durable delivery advanced while the Task stayed the same version:
-	// the next scan still sees it and asks for recovery (no free slot here,
-	// so the recovery is offered and deferred rather than started).
 	attempts.setDelivery(store.PromptDeliveryValidating)
 	if err := dispatcher.scheduleACPDeliveryRecoveries(ctx, tasks); err != nil {
 		t.Fatal(err)

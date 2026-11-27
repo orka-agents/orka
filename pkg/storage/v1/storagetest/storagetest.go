@@ -1,26 +1,3 @@
-// Package storagetest is the reusable behavioral suite for orka.storage.v1
-// providers.
-//
-// A provider runs RunState and RunArtifacts from its own tests with a factory
-// that returns an empty dataset for each case. The suite uses only the public
-// contract in pkg/storage/v1, so a separately built provider can run it
-// without Orka's internal packages. Cases assert contract behavior: identity
-// and namespace isolation, the typed errors providers return, idempotent
-// replays, atomic grouped writes, bounded queries, one winner among
-// concurrent callers, conditional commands that refuse a changed target or a
-// stale fence, exact nanosecond times, the provider description, the store
-// halves of the Kubernetes control protocols and, for a provider that reports
-// the export capability, export and import.
-// They do not inspect a provider's schema or rely on its clock beyond the
-// times passed in requests.
-//
-// Except for raw-provider missing-envelope rejection cases, the suite attaches
-// a write envelope to every write it sends without one, as
-// the contract requires of callers: the dataset Describe reports, the epoch
-// the dataset holds (a dataset that holds none is given the suite's first
-// epoch), a new operation ID, the request digest, the current time and the
-// next sequence. Cases that test envelopes send their own. A provider that
-// attaches its own envelopes runs the suite with ProviderAttachesEnvelopes.
 package storagetest
 
 import (
@@ -30,15 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// StateFactory returns a state.v1 provider over a fresh, empty dataset: a new
-// provider, or an isolated dataset (such as a schema or key prefix) on a
-// shared one. The factory owns that lifecycle and must release it with
-// t.Cleanup.
 type StateFactory func(t *testing.T) storagev1.StateProvider
 
-// ArtifactFactory returns an artifacts.v1 provider over a fresh, empty
-// dataset, in the same way as StateFactory. The factory owns that lifecycle
-// and must release it with t.Cleanup.
 type ArtifactFactory func(t *testing.T) storagev1.ArtifactProvider
 
 type stateFamily struct {
@@ -107,11 +77,6 @@ var stateFamilies = []stateFamily{
 	{"export-import", runStateExportImport},
 }
 
-// RunState runs every state.v1 case against providers from newProvider, and
-// the optional cases that options enable. Raw writes without envelopes must
-// be rejected; ordinary cases get suite envelopes. ProviderAttachesEnvelopes
-// delegates envelope attachment to the provider and skips the raw-write
-// rejection cases.
 func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	t.Helper()
 	settings := collectOptions(options)
@@ -132,9 +97,6 @@ func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	runOptionalFamilies(t, wrapped, stateWriteCases, settings)
 }
 
-// RunArtifacts runs every artifacts.v1 case against providers from
-// newProvider, and the optional cases that options enable, attaching
-// envelopes as RunState does.
 func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) {
 	t.Helper()
 	settings := collectOptions(options)
@@ -170,8 +132,6 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) 
 	runOptionalFamilies(t, wrapped, artifactWriteCases, settings)
 }
 
-// runOptionalFamilies runs the cases the options enable over every write
-// case of a contract.
 func runOptionalFamilies[P suiteProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], selected suiteOptions) {
 	t.Helper()
 	if selected.maintenance != nil {
@@ -186,8 +146,6 @@ func runOptionalFamilies[P suiteProvider](t *testing.T, newProvider func(t *test
 	}
 }
 
-// run runs one family as a subtest, in parallel with the other families when
-// the Parallel option is set.
 func (o suiteOptions) run(t *testing.T, name string, family func(t *testing.T)) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
@@ -198,8 +156,6 @@ func (o suiteOptions) run(t *testing.T, name string, family func(t *testing.T)) 
 	})
 }
 
-// harnessProvider returns the provider a harness is given: the one the
-// factory returned, which the suite may have wrapped to attach envelopes.
 func harnessProvider(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
 	if wrapped, ok := provider.(suiteWrapped); ok {
 		return wrapped.unwrapped()
@@ -207,8 +163,6 @@ func harnessProvider(provider storagev1.ProviderDescriber) storagev1.ProviderDes
 	return provider
 }
 
-// rewrapHarnessProvider wraps a provider a harness returned in place of
-// replaced, as the suite wrapped replaced.
 func rewrapHarnessProvider(replaced, returned storagev1.ProviderDescriber) storagev1.ProviderDescriber {
 	if wrapped, ok := replaced.(suiteWrapped); ok {
 		return wrapped.rewrap(returned)
@@ -216,7 +170,6 @@ func rewrapHarnessProvider(replaced, returned storagev1.ProviderDescriber) stora
 	return returned
 }
 
-// suiteWrapped is a provider the suite wrapped to attach envelopes.
 type suiteWrapped interface {
 	unwrapped() storagev1.ProviderDescriber
 	rewrap(storagev1.ProviderDescriber) storagev1.ProviderDescriber
@@ -233,8 +186,6 @@ func (e envelopedState) rewrap(provider storagev1.ProviderDescriber) storagev1.P
 
 func (e envelopedArtifacts) unwrapped() storagev1.ProviderDescriber { return e.ArtifactProvider }
 
-// A state provider that also serves artifacts is wrapped twice, as wrapState
-// does it, and unwrapped through its state wrapper.
 func (e stateWithArtifacts) unwrapped() storagev1.ProviderDescriber {
 	return harnessProvider(e.StateProvider)
 }
@@ -253,8 +204,6 @@ func (e envelopedArtifacts) rewrap(provider storagev1.ProviderDescriber) storage
 	return provider
 }
 
-// suiteProvider is what the cases that every contract shares need from a
-// provider.
 type suiteProvider interface {
 	writeCaseProvider
 	storagev1.WriteWatermarkStore

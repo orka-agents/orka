@@ -171,9 +171,6 @@ func TestRunExternalEffectRejectsSuccessReturnedAfterCallDeadline(t *testing.T) 
 	identity := store.ExternalEffectIdentity{
 		Kind: "acp-mcp-tool", Namespace: "default", AggregateID: "session-late", OperationID: "mcp-call-late",
 	}
-	// An effect that ignores cancellation and returns success after its bounded
-	// call deadline must not be committed as Succeeded; the configured timeout
-	// expired, so the effect is left in flight for explicit reconciliation.
 	result, replayed, err := runExternalEffectWithReplayCallTimeout(
 		context.Background(), controlStore, fence, identity, map[string]string{"call": "custom"},
 		time.Millisecond,
@@ -398,10 +395,6 @@ func TestRunExternalEffectKeepsBrokeredClampWhenPublisherTimeoutConfigured(t *te
 }
 
 func TestPublicationSettlementWindowBudgetsSequentialPublisherStages(t *testing.T) {
-	// publishWorkspaceDelta runs up to three sequential publisher-backed
-	// stages under each bounded context (claim-refresh/preflight/prepare and
-	// publish/verify/PR reconcile), so the window must cover
-	// stages x (call timeout + margin) + margin — not a single call timeout.
 	t.Setenv(envACPPublisherEffectTimeout, "")
 	wantDefault := maxSequentialPublisherSettlementStages*(maxACPExternalEffectCallDuration+externalEffectLeaseSettlementMargin) + externalEffectLeaseSettlementMargin
 	if got := publicationSettlementWindow(); got != wantDefault || got != 16*time.Minute {
@@ -443,14 +436,8 @@ func assertInFlightExternalEffectWithOneLease(
 	}
 }
 
-// acpExternalEffectLease is the ledger lease a brokered custom-Tool effect
-// call must fit inside, including the settlement margin.
 const acpExternalEffectLease = maxACPExternalEffectCallDuration + externalEffectLeaseSettlementMargin
 
-// TestRunExternalEffectOnceNeverRunsAStartedEffectAgain covers a forwarded
-// write that a delivery claimed and left in flight: a redelivery of the same
-// identity is refused without calling the effect, where a reclaiming run
-// could send it again once the lease expired.
 func TestRunExternalEffectOnceNeverRunsAStartedEffectAgain(t *testing.T) {
 	controlStore, fence, closeStore := newACPSessionTestStore(
 		t, filepath.Join(t.TempDir(), "external-effect-once.db"),

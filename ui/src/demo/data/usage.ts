@@ -2,21 +2,13 @@ import type { UsageMeasurement } from '@/lib/usage'
 import { DEMO_NAMESPACE, NOW, digest, taskUID, uid } from '../shared'
 import { AGENTS, REPOS, SESSIONS, TASKS, type AgentKey, type DemoTaskSeed, type RepoKey } from '../world'
 
-// The usage ledger behind the Usage page: issue-delivery work requests opened
-// by repository monitors, the Tasks that worked on them, their pull requests,
-// and every model-usage measurement. The current tasks come from world.ts so
-// the report agrees with the task list; older history is generated from a
-// fixed seed so the page has a realistic month of delivery behind it.
-
 export interface UsageRecordTask {
   namespace: string
   taskUID: string
   taskName?: string
   sessionName?: string
-  /** monitor work request the task was created for */
   workID?: string
   repository?: string
-  /** existing PR the task reviewed or repaired */
   prNumber?: number
   phase: string
   role?: string
@@ -67,15 +59,9 @@ export interface UsageLedger {
 
 const MINUTE = 60_000
 const at = (ms: number) => new Date(ms).toISOString()
-/** UID for a Task that has since been cleaned up (usage records outlive their Tasks). */
 export const pastTaskUID = (name: string) => uid(`task:${name}`)
-/**
- * UID of a live world.ts Task, matching the task engine (handlers/tasks.ts), so
- * the usage page links each record to its Task instead of a "previous run".
- */
 const liveTaskUID = (seed: DemoTaskSeed) => taskUID(seed.name, NOW - seed.createdAgo * MINUTE)
 
-/** Small seeded PRNG so the generated history is identical on every load. */
 function mulberry32(seed: number) {
   let state = seed >>> 0
   return () => {
@@ -116,16 +102,12 @@ interface MeasureOptions {
   output: number
   startMs: number
   durationMin: number
-  /** ai tasks report per model call; runtime tasks report per attempt */
   scope: 'call' | 'attempt'
-  /** the task is still running: its attempt is still open */
   running?: boolean
-  /** runtime reports no token counts (e.g. Copilot attempt-level reporting) */
   unreported?: boolean
   failed?: boolean
 }
 
-/** Splits a task's token totals into the measurements the controller records. */
 function measurements(options: MeasureOptions): UsageMeasurement[] {
   const { agent, taskName, input, output, startMs, durationMin, scope } = options
   const provider = AGENTS[agent].provider
@@ -153,9 +135,6 @@ function measurements(options: MeasureOptions): UsageMeasurement[] {
       observedAt: at(startMs + Math.max(1, durationMin) * MINUTE),
     }]
   }
-  // Model calls: the first carries the system prompt and tool catalog, later
-  // calls are mostly served from the prompt cache. A running task's in-flight
-  // call is recorded when it returns, so every recorded call is complete.
   const calls = Math.max(1, Math.min(9, Math.round(output / 600)))
   const weights = Array.from({ length: calls }, (_, i) => (i === 0 ? 1.6 : 1 + (i % 3) * 0.15))
   const total = weights.reduce((sum, w) => sum + w, 0)
@@ -195,7 +174,6 @@ const ROLE_BY_AGENT: Record<AgentKey, string> = {
   security: 'security',
 }
 
-/** Usage records for the live tasks in world.ts. */
 function currentTaskRecord(seed: DemoTaskSeed, workIDs: Map<string, string>): UsageRecordTask | undefined {
   if (!seed.agent || seed.phase === 'Scheduled' || seed.phase === 'Pending' || seed.inputTokens === undefined) return undefined
   const startMs = NOW - seed.createdAgo * MINUTE
@@ -236,17 +214,9 @@ const NOT_READY_REASONS = [
   'Merge conflict with main',
 ]
 
-/**
- * Six weeks of issue-to-PR delivery before the current tasks: triage, an
- * implementation attempt, usually a review, sometimes a repair round, and the
- * resulting pull request. These Tasks have since been cleaned up, so their
- * usage records outlive them, as on a real cluster.
- */
 function generateHistory(ledger: UsageLedger) {
   const random = mulberry32(0x0a17)
   const pick = <T,>(items: readonly T[]) => items[Math.floor(random() * items.length)]
-  // GitHub numbers a repository's issues and pull requests from one sequence,
-  // so each takes the first number at or after its draw that is still unused.
   const taken = new Map<RepoKey, Set<number>>()
   const claim = (repo: RepoKey, from: number) => {
     const used = taken.get(repo) ?? new Set<number>()
@@ -290,7 +260,6 @@ function generateHistory(ledger: UsageLedger) {
     }
 
     add(`triage-issue-${number}-${suffix(`t${i}`)}`, 'triage', 'Succeeded', 0.4, 1, 6000 + Math.round(random() * 4000), 650 + Math.round(random() * 500))
-    // Docs-only infra issues go to the Copilot-backed docs agent, which reports attempts without token counts.
     const implementer: AgentKey = repo === 'infra' && random() < 0.5 ? 'docs' : 'fixer'
     const roll = random()
     const failed = roll < 0.1
@@ -300,8 +269,6 @@ function generateHistory(ledger: UsageLedger) {
       { unreported: implementer === 'docs' && ageMin > 20 * 24 * 60 },
     )
     if (failed) {
-      // A maintainer clarified the issue and re-ran the request days later; on
-      // a month boundary that attempt shows up as usage outside the cohort.
       const retryAfterMin = (9 + random() * 6) * 24 * 60
       if (ageMin < retryAfterMin + 120) continue
       implemented = add(
@@ -338,7 +305,6 @@ function generateHistory(ledger: UsageLedger) {
       observedAt: at(Math.min(NOW - 6 * MINUTE, merged ? mergedMs + 2 * MINUTE : NOW - (8 + random() * 40) * MINUTE)),
     })
     ledger.links.push({ workID: request.id, repository: request.repository, number: pr, origin: 'created', linkedAt: at(implemented) })
-    // A developer sometimes opens their own follow-up PR that cites the agent's analysis.
     if (random() < 0.12) {
       const assisted = claim(repo, pr + 1)
       ledger.pullRequests.push({
@@ -351,7 +317,6 @@ function generateHistory(ledger: UsageLedger) {
   }
 }
 
-/** Issue-delivery work for the live monitor tasks in world.ts. */
 const CURRENT_WORK: Array<{ task: string; repo: RepoKey; issue: number }> = [
   { task: 'fix-cart-rounding-bug-x9m4d', repo: 'checkout', issue: 2214 },
   { task: 'triage-issue-3391-m2x7c', repo: 'inventory', issue: 3391 },
@@ -372,8 +337,6 @@ function buildLedger(): UsageLedger {
     workIDs.set(current.task, request.id)
   }
 
-  // checkout-service#1479 (outbox migration) came out of an earlier issue;
-  // code-reviewer's gateway-triggered review is shared usage on that request.
   const outbox = work('checkout', 2201, NOW - 26 * 60 * MINUTE)
   ledger.works.push(outbox)
   const outboxFix = 'fix-issue-2201-c4r8t'
@@ -393,7 +356,6 @@ function buildLedger(): UsageLedger {
     if (record) ledger.tasks.push(record)
   }
 
-  // Chat turns are measured against the chat Session itself, without a Task.
   for (const [index, session] of [SESSIONS.chatMaya, SESSIONS.releaseChat].entries()) {
     const startMs = NOW - (index === 0 ? 37 : 31) * MINUTE
     ledger.tasks.push({

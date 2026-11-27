@@ -22,7 +22,6 @@ func repositoryMonitorAPIPauseLabels(monitor *corev1alpha1.RepositoryMonitor) []
 }
 
 func repositoryMonitorAcceptsPauseEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
-	// Suspension only pauses scheduling; completed Task handoffs still need pause intake.
 	if monitor == nil || target.IncompletePR {
 		return false
 	}
@@ -39,7 +38,6 @@ func repositoryMonitorAcceptsPauseEvent(monitor *corev1alpha1.RepositoryMonitor,
 		}
 		return target.BaseBranch == "" || strings.TrimSpace(target.BaseBranch) == effectiveRepositoryMonitorBranch(monitor)
 	}
-	// Pause is policy intake, independent of command enablement and issue filters.
 	return target.Kind == repositoryMonitorTargetKindIssue && monitor.Spec.Targets.Issues.Enabled
 }
 
@@ -50,8 +48,6 @@ func (h *Handlers) repositoryMonitorPauseActorPermission(ctx context.Context, mo
 		if repositoryMonitorCredentialRefName(readRef) == "" {
 			return "", fmt.Errorf("pause-label permission checks require a forge or read credential")
 		}
-		// Permission lookup is a read-only GET. Reuse its existing token validation
-		// without changing the forge requirement for any mutation command.
 		permissionMonitor = monitor.DeepCopy()
 		permissionMonitor.Spec.ForgeCredentialRef = readRef
 	}
@@ -105,15 +101,11 @@ func (h *Handlers) handleRepositoryMonitorPauseEvent(c fiber.Ctx, body []byte, p
 		if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
 			return result, lookupErr
 		}
-		// Reconciliation ingests completed Tasks before queued inventory runs.
-		// Persist this guard before exposing a run so its handoff sees the pause.
 		if payload.Action == githubWebhookActionLabeled {
 			if err := h.persistRepositoryMonitorPauseLabel(c, monitor, payload, target); err != nil {
 				return result, err
 			}
 		}
-		// Removal deliveries can arrive before or after a newer label addition.
-		// Only fresh inventory may clear the durable pause guard.
 		if lookupErr == nil {
 			requeued, err := h.requeueFailedRepositoryMonitorEventRun(c, run)
 			if err != nil {
@@ -164,7 +156,6 @@ func (h *Handlers) recordRepositoryMonitorPauseRejection(c fiber.Ctx, monitor *c
 		MetadataJSON: string(metadata),
 	}
 	if err := h.repositoryMonitorStore.CreateMonitorEvent(c.Context(), event); err != nil {
-		// Delivery retries retain one rejection receipt, like accepted intake.
 		existing, _, lookupErr := h.repositoryMonitorStore.ListMonitorEvents(c.Context(), store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ID: event.ID, Limit: 1})
 		if lookupErr == nil && len(existing) == 1 {
 			return nil

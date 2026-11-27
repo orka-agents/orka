@@ -7,23 +7,12 @@ import (
 )
 
 var (
-	// ErrClientConfiguration marks an invalid client configuration or a missing
-	// credential required for an authenticated operation.
-	ErrClientConfiguration = errors.New("harness v2 client configuration error")
-	// ErrClientValidation marks a locally rejected request or identifier.
-	ErrClientValidation = errors.New("harness v2 client validation error")
-	// ErrClientTransport marks an HTTP transport failure before a response was
-	// available.
-	ErrClientTransport = errors.New("harness v2 client transport error")
-	// ErrClientProtocol marks a malformed, oversized, version-skewed, or otherwise
-	// contract-incompatible HTTP response.
-	ErrClientProtocol = errors.New("harness v2 client protocol error")
-	// ErrClientStream marks a prompt stream failure after the response was opened.
-	ErrClientStream = errors.New("harness v2 client stream error")
-	// ErrResponseBodyTooLarge marks a bounded JSON or error body overflow.
-	ErrResponseBodyTooLarge = errors.New("harness v2 response body too large")
-	// ErrPromptStreamDisconnected marks a non-EOF transport failure while reading
-	// the non-reconnectable prompt stream.
+	ErrClientConfiguration      = errors.New("harness v2 client configuration error")
+	ErrClientValidation         = errors.New("harness v2 client validation error")
+	ErrClientTransport          = errors.New("harness v2 client transport error")
+	ErrClientProtocol           = errors.New("harness v2 client protocol error")
+	ErrClientStream             = errors.New("harness v2 client stream error")
+	ErrResponseBodyTooLarge     = errors.New("harness v2 response body too large")
 	ErrPromptStreamDisconnected = errors.New("harness v2 prompt stream disconnected")
 )
 
@@ -38,9 +27,6 @@ const (
 	ClientErrorStream        ClientErrorKind = "stream"
 )
 
-// RequestWriteState is conservative transport evidence for a mutating request.
-// It never treats an unknown/custom RoundTripper as proof that a request was not
-// accepted.
 type RequestWriteState string
 
 const (
@@ -50,10 +36,6 @@ const (
 	RequestWriteAmbiguous RequestWriteState = "request_write_ambiguous"
 )
 
-// RequestWriteEvidence captures only observations exposed by net/http and
-// httptrace. ZeroBytes is reported only for the standard net/http transport when
-// no headers were reported written, no body bytes were consumed, and the full
-// request was not reported written. All other incomplete writes are ambiguous.
 type RequestWriteEvidence struct {
 	State                RequestWriteState
 	RequestBodyBytesRead int64
@@ -63,15 +45,10 @@ type RequestWriteEvidence struct {
 	GotFirstResponseByte bool
 }
 
-// SafeToResendSameIdentity reports whether the transport proved that no request
-// bytes were written. It never authorizes allocating a new prompt identity.
 func (e RequestWriteEvidence) SafeToResendSameIdentity() bool {
 	return e.State == RequestWriteZeroBytes
 }
 
-// ClientError is the exact typed error returned by the v2 client. HTTP protocol
-// errors retain the validated v2 code and replay classification. Authentication
-// values are never included in Message or Error().
 type ClientError struct {
 	Operation      string
 	Kind           ClientErrorKind
@@ -146,10 +123,6 @@ type retryablePreMutationError struct{ err error }
 func (e *retryablePreMutationError) Error() string { return e.err.Error() }
 func (e *retryablePreMutationError) Unwrap() error { return e.err }
 
-// MarkPreMutationRetryable marks a before-mutation validation failure as
-// transient. The client still rejects the mutation locally and reports that no
-// request bytes were written; callers may retry the same sealed identity while
-// its deadline remains valid.
 func MarkPreMutationRetryable(err error) error {
 	if err == nil {
 		return nil

@@ -1,5 +1,3 @@
-// Package safesymlink validates repository-relative symbolic-link graphs
-// without following links on the host filesystem.
 package safesymlink
 
 import (
@@ -10,9 +8,6 @@ import (
 	"unicode/utf8"
 )
 
-// Resolve validates one link and returns its canonical repository-relative
-// lexical target. The target may be dangling, but must not escape the root,
-// point to itself or an ancestor, or contain non-canonical bytes.
 func Resolve(linkPath, target string, maxPathBytes, maxTargetBytes int) (string, error) {
 	if maxPathBytes < 1 || maxTargetBytes < 1 {
 		return "", fmt.Errorf("safe symlink limits must be positive")
@@ -36,9 +31,6 @@ func Resolve(linkPath, target string, maxPathBytes, maxTargetBytes int) (string,
 	return resolved, nil
 }
 
-// ValidateGraph validates all links against the complete archive/repository
-// path set. It rejects cycles and any non-directory archive entry nested below
-// a symlink path, preventing extraction through a link.
 func ValidateGraph(paths map[string]struct{}, links map[string]string, maxPathBytes, maxTargetBytes int) error {
 	resolutions := make(map[string]string, len(links))
 	for linkPath, target := range links {
@@ -52,9 +44,6 @@ func ValidateGraph(paths map[string]struct{}, links map[string]string, maxPathBy
 		resolutions[linkPath] = resolved
 	}
 	if len(links) > 0 {
-		// An entry is nested below a link exactly when the bytes before one
-		// of its "/" separators equal a link path, so walking each entry's
-		// ancestors costs O(paths × depth) instead of O(links × paths).
 		for entryPath := range paths {
 			for index := range len(entryPath) {
 				if entryPath[index] != '/' {
@@ -74,9 +63,6 @@ func ValidateGraph(paths map[string]struct{}, links map[string]string, maxPathBy
 	return nil
 }
 
-// maxSymlinkChainDepth mirrors the Linux SYMLOOP_MAX resolution bound: chains
-// nested deeper than this can never resolve at use time, and the cap keeps
-// graph validation linear in the number of links instead of quadratic.
 const maxSymlinkChainDepth = 40
 
 func resolveGraph(start, value string, resolutions map[string]string, maxPathBytes int, visiting map[string]struct{}) error {

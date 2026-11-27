@@ -114,8 +114,6 @@ func TestTaskGenerationReclamationDoesNotReuseAnAuthorization(t *testing.T) {
 						return nil, err
 					}
 					if reused {
-						// A new incarnation re-registers the same name before the old
-						// request reaches its data access.
 						return nil, client.WithAuthorizedTaskDataAccess(ctx, "ns", "task", allowTaskData, accessNothing)
 					}
 					return nil, nil

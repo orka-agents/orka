@@ -16,7 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 )
 
-// mockTool is a simple mock tool for testing
 type mockTool struct {
 	name        string
 	description string
@@ -262,12 +261,10 @@ func TestKnownBuiltInToolNamesIncludesRegisteredChatAndCoordinationTools(t *test
 }
 
 func TestDefaultRegistry(t *testing.T) {
-	// DefaultRegistry should have built-in tools registered via init()
 	if DefaultRegistry == nil {
 		t.Fatal("DefaultRegistry is nil")
 	}
 
-	// Check that built-in tools are registered
 	expectedTools := []string{webSearchToolName, codeExecToolName, fileReadToolName, webFetchToolName, fileWriteToolName}
 	for _, name := range expectedTools {
 		if _, ok := DefaultRegistry.Get(name); !ok {
@@ -277,7 +274,6 @@ func TestDefaultRegistry(t *testing.T) {
 }
 
 func TestRegisterCoordinationTools(t *testing.T) {
-	// Create a fresh registry to test RegisterCoordinationTools
 	origRegistry := DefaultRegistry
 	DefaultRegistry = NewRegistry()
 	defer func() { DefaultRegistry = origRegistry }()

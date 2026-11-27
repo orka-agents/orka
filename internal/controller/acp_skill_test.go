@@ -167,7 +167,6 @@ func TestPlanAgentExecutionRejectsSkillCombinations(t *testing.T) {
 		!strings.Contains(plan.rejectionReason, "external runtimeRef") {
 		t.Fatalf("runtimeRef with skills must be rejected before the AgentRuntime lookup, got %#v", plan)
 	}
-	// An Agent admitted earlier must still be rejected once the gate closes.
 	disabled := &TaskReconciler{Mode: executionmode.HarnessV2, ACPToolboxPolicy: acpTestToolboxPolicy()}
 	if plan := disabled.planAgentExecution(t.Context(), task, acpTestSkillAgent(acpTestSkill("a"))); plan.path != agentExecutionPathRejected ||
 		!strings.Contains(plan.rejectionReason, "disabled on this controller") {
@@ -228,9 +227,6 @@ func TestPlanACPRuntimeFreezesSkillsIntoTheProfile(t *testing.T) {
 		seen[variant.Digest] = name
 	}
 
-	// A Task binds the RuntimePool profile frozen at planning time. Editing
-	// the Agent afterwards produces a different profile and pool; the frozen
-	// projection keeps the original skills.
 	frozen := RuntimePoolProfileFromPlan(first)
 	edited := plan(acpTestSkill("code-review"))
 	if edited.PoolName == first.PoolName {
@@ -464,11 +460,6 @@ func TestRuntimePoolPodTemplateSkillImageVolumeMode(t *testing.T) {
 	assertRuntimeContainerProtections(t, template)
 }
 
-// TestRuntimePoolSkillStartupProbeOutlastsSkillCheck covers the supervisor's
-// bounded skill check, which runs before it serves and after any toolbox
-// check, with either mount method. The startup probe must allow each check on
-// top of the normal allowance, or kubelet restarts the container before the
-// check reports a classified failure.
 func TestRuntimePoolSkillStartupProbeOutlastsSkillCheck(t *testing.T) {
 	startupBudget := func(template corev1.PodTemplateSpec) time.Duration {
 		probe := template.Spec.Containers[0].StartupProbe
@@ -505,7 +496,6 @@ func TestRuntimePoolSkillStartupProbeOutlastsSkillCheck(t *testing.T) {
 	if got, want := startupBudget(bothTemplate), base+toolbox.ImageVolumeCheckTimeout+acpskill.StartupCheckTimeout; got < want {
 		t.Fatalf("image volume skills with toolboxes: startup probe allows %s, want at least %s", got, want)
 	}
-	// Copy mode has no supervisor-side toolbox check to allow for.
 	_, bothCopyTemplate := renderToolboxTemplate(t, withToolboxes, acpTestSkillPolicy())
 	if got, want := startupBudget(bothCopyTemplate), base+acpskill.StartupCheckTimeout; got != want {
 		t.Fatalf("copied skills with toolboxes: startup probe allows %s, want %s", got, want)
@@ -519,11 +509,6 @@ func TestRuntimePoolSkillStartupProbeOutlastsSkillCheck(t *testing.T) {
 	}
 }
 
-// TestRuntimePoolSkillSessionCopiesAreCountedInSessionStorage covers the
-// private skill copies every resident session receives under /sessions. The
-// sessions volume and the container's ephemeral storage must grow with the
-// pool's resident capacity and skill count, with either mount method, or a
-// pool at capacity exhausts the fixed volume on skill copies alone.
 func TestRuntimePoolSkillSessionCopiesAreCountedInSessionStorage(t *testing.T) {
 	sessionsLimit := func(template corev1.PodTemplateSpec) int64 {
 		for _, volume := range template.Spec.Volumes {
@@ -562,8 +547,6 @@ func TestRuntimePoolSkillSessionCopiesAreCountedInSessionStorage(t *testing.T) {
 				t.Fatalf("%s, %d residents: sessions volume limit %d, want %d", name, residents, got, want)
 			}
 		}
-		// Everything else in the two templates is equal, so the difference in
-		// ephemeral storage is exactly the extra residents' skill copies.
 		want := int64(129-10) * int64(len(skills)) * perSkill
 		smallResources, largeResources := small.Spec.Containers[0].Resources, large.Spec.Containers[0].Resources
 		if got := ephemeral(largeResources.Requests) - ephemeral(smallResources.Requests); got != want {
@@ -572,7 +555,6 @@ func TestRuntimePoolSkillSessionCopiesAreCountedInSessionStorage(t *testing.T) {
 		if got := ephemeral(largeResources.Limits) - ephemeral(smallResources.Limits); got != want {
 			t.Fatalf("%s: ephemeral-storage limit grew by %d for 119 more residents, want %d", name, got, want)
 		}
-		// The sessions volume must fit inside the container's own storage limit.
 		if limit := ephemeral(largeResources.Limits); limit < sessionsLimit(large) {
 			t.Fatalf("%s: ephemeral-storage limit %d is below the sessions volume limit %d", name, limit, sessionsLimit(large))
 		}

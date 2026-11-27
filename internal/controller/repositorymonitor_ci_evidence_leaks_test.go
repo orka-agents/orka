@@ -9,10 +9,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// repositoryMonitorEvidenceLeakCase is CI text that carries a credential in
-// an ordinary shape: a shell trace, a config dump, or a diff. None of
-// secrets may reach the repair prompt; keep lists ordinary text around it
-// that must survive.
 type repositoryMonitorEvidenceLeakCase struct {
 	name    string
 	input   string
@@ -20,8 +16,6 @@ type repositoryMonitorEvidenceLeakCase struct {
 	keep    []string
 }
 
-// Synthetic credential values, assembled at run time so the source holds no
-// literal credential.
 var (
 	repositoryMonitorEvidenceLeakValue  = "Vq7Rk2Lm" + "9Xw4Tz8Np3Hs"
 	repositoryMonitorEvidenceLeakBase64 = "ZGVwbG95" + "OnMzY3JldFZhbHVlOTk="
@@ -107,8 +101,6 @@ func repositoryMonitorEvidenceLeakCases() []repositoryMonitorEvidenceLeakCase {
 		if cases[i].secrets == nil {
 			cases[i].secrets = []string{v}
 		}
-		// Blank lines keep the surrounding lines out of the credential's
-		// continuation chain, which withholds a word directly adjacent to it.
 		cases[i].input = "##[error]deploy failed\n\n" + cases[i].input + "\n\n--- FAIL: TestDeploy (0.01s)"
 		cases[i].keep = append(cases[i].keep, "##[error]deploy failed", "--- FAIL: TestDeploy (0.01s)")
 	}
@@ -143,10 +135,6 @@ func TestRepositoryMonitorEvidenceTextWithholdsCICredentials(t *testing.T) {
 	}
 }
 
-// TestRepositoryMonitorCIRepairPromptWithholdsCICredentials checks the
-// assembled repair prompt of a monitor that opts in to CI free text, which
-// namespace Task readers and the model see: the credential is in a check
-// run's title, summary, and annotation.
 func TestRepositoryMonitorCIRepairPromptWithholdsCICredentials(t *testing.T) {
 	for _, tc := range repositoryMonitorEvidenceLeakCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,8 +166,6 @@ func TestRepositoryMonitorCIRepairPromptWithholdsCICredentials(t *testing.T) {
 	}
 }
 
-// TestRepositoryMonitorEvidenceKeepsOrdinaryCIText guards the CI-evidence
-// credential checks against withholding ordinary failure output.
 func TestRepositoryMonitorEvidenceKeepsOrdinaryCIText(t *testing.T) {
 	lines := []string{
 		"##[error]Process completed with exit code 1.",

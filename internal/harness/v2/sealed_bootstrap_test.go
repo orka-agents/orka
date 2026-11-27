@@ -30,8 +30,6 @@ func TestSealedBootstrapBindsProcessAndActor(t *testing.T) {
 		t.Fatal("receiver could not authenticate and open its payload")
 	}
 
-	// A new process in the same Actor must not receive the previous boot's
-	// credentials, even when it still has the same public template nonce.
 	replacement, err := NewCredentialBootstrapReceiver("template-nonce", actor)
 	if err != nil {
 		t.Fatal(err)

@@ -13,17 +13,11 @@ import (
 const selectMemoryConsolidationRunSQL = `SELECT namespace, task_uid, task_name, mode, status, window_start, window_end,
 	input, report, created_at, completed_at FROM memory_consolidation_runs`
 
-// memoryConsolidationRunKey is all a BeginMemoryConsolidationRun receipt
-// keeps. The run itself holds the transcripts it read until it finishes, and
-// a receipt outlives that, so a replay rereads the run as it is now.
 type memoryConsolidationRunKey struct {
 	Namespace string `json:"namespace"`
 	TaskUID   string `json:"taskUID"`
 }
 
-// BeginMemoryConsolidationRun records a run unless its Task already began one,
-// and writes the stored run back either way. It checks a Task data fence in
-// its context.
 func (s *Store) BeginMemoryConsolidationRun(ctx context.Context, run *store.MemoryConsolidationRun) error {
 	if run == nil {
 		return store.ValidationErrorf("memory consolidation run is required")
@@ -88,9 +82,6 @@ func (s *Store) beginMemoryConsolidationRunWrite(ctx context.Context, run *store
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}
-	// The window was chosen from the mode's cursor before this transaction.
-	// A run in the mode that completed since then read past its start, so
-	// beginning would read those Sessions again.
 	err = executor.QueryRowContext(ctx,
 		`SELECT task_uid FROM memory_consolidation_runs
 		 WHERE namespace = ? AND mode = ? AND status = ? AND window_end > ? LIMIT 1`,
@@ -101,9 +92,6 @@ func (s *Store) beginMemoryConsolidationRunWrite(ctx context.Context, run *store
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}
-	// A running run whose lease ended is taken over: marking it abandoned in
-	// this transaction means its worker can neither resume it nor complete
-	// it, so the two never propose at once.
 	if _, err := executor.ExecContext(ctx,
 		`UPDATE memory_consolidation_runs SET status = ?, input = NULL
 		 WHERE namespace = ? AND status = ? AND created_at <= ?`,
@@ -130,11 +118,6 @@ func (s *Store) beginMemoryConsolidationRunWrite(ctx context.Context, run *store
 	return nil
 }
 
-// CompleteMemoryConsolidationRun finishes a running run and creates its
-// proposals in one transaction. A finished run is returned unchanged. It
-// checks a Task data fence in its context. Its receipt keeps only the run's
-// key, so releasing the run's report also removes the only copy of it, and a
-// replay returns the run as it is now.
 func (s *Store) CompleteMemoryConsolidationRun(ctx context.Context, completion store.MemoryConsolidationCompletion) (*store.MemoryConsolidationRun, error) {
 	var completed *store.MemoryConsolidationRun
 	key := memoryConsolidationRunKey{Namespace: completion.Namespace, TaskUID: completion.TaskUID}
@@ -192,8 +175,6 @@ func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, complet
 	if len(completion.Proposals) > 0 && run.Mode != store.MemoryConsolidationModePropose {
 		return nil, store.ValidationErrorf("only a Propose memory consolidation run creates proposals, not a %q run", run.Mode)
 	}
-	// The proposals are created in this transaction, as CreateMemoryProposal
-	// creates one, so an invalid proposal leaves the run running.
 	txCtx := context.WithValue(ctx, taskDataTransactionKey{}, taskDataTransaction{db: s.db, tx: tx.Tx})
 	for i := range completion.Proposals {
 		proposal := completion.Proposals[i]
@@ -227,10 +208,6 @@ func (s *Store) completeMemoryConsolidationRunWrite(ctx context.Context, complet
 	return completed, nil
 }
 
-// ReleaseMemoryConsolidationRun releases the run of a Task that ended: it
-// abandons an unfinished run and clears its input. For a deleted Task it also
-// clears the report, removes the run when no cursor needs it, and removes
-// earlier deleted runs a later completed run supersedes.
 func (s *Store) ReleaseMemoryConsolidationRun(ctx context.Context, namespace, taskUID string, deleted bool) error {
 	return writeOperationErr(ctx, s, "ReleaseMemoryConsolidationRun", func(ctx context.Context) error {
 		if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskUID) == "" {
@@ -248,10 +225,6 @@ func (s *Store) ReleaseMemoryConsolidationRun(ctx context.Context, namespace, ta
 	})
 }
 
-// A mode's cursor is its latest completed run's window end or, before any
-// completed, its earliest run's window start (GetMemoryConsolidationCursor).
-// A run is kept while it could be that run: ties go to the greatest Task UID
-// among completed runs and the least among the others.
 const (
 	supersededCompletedRunSQL = `EXISTS (SELECT 1 FROM memory_consolidation_runs c
 		WHERE c.namespace = r.namespace AND c.mode = r.mode AND c.status = 'completed' AND c.task_uid <> r.task_uid
@@ -285,11 +258,6 @@ func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, 
 	if !deleted {
 		return nil
 	}
-	// Every run of a deleted Task in this mode goes once no cursor needs it,
-	// whatever its status: this run, and an earlier one kept as the cursor
-	// that a later run now supersedes. A run whose Task still exists is kept,
-	// as its report is still served and an abandoned run must not begin
-	// again.
 	_, err = tx.ExecContext(ctx,
 		`DELETE FROM memory_consolidation_runs AS r WHERE r.namespace = ? AND r.mode = ? AND r.task_deleted = 1 AND (
 		   (r.status = 'completed' AND `+supersededCompletedRunSQL+`) OR
@@ -298,8 +266,6 @@ func releaseMemoryConsolidationRun(ctx context.Context, tx *writeTx, namespace, 
 	return err
 }
 
-// GetMemoryConsolidationRun returns the run of a namespace's Task. It checks
-// a Task data fence in its context.
 func (s *Store) GetMemoryConsolidationRun(ctx context.Context, namespace, taskUID string) (*store.MemoryConsolidationRun, error) {
 	var run *store.MemoryConsolidationRun
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -310,18 +276,14 @@ func (s *Store) GetMemoryConsolidationRun(ctx context.Context, namespace, taskUI
 	return run, err
 }
 
-// GetMemoryConsolidationCursor returns the namespace's cursor: the window
-// end of its latest completed run.
 func (s *Store) GetMemoryConsolidationCursor(ctx context.Context, namespace, mode string) (*time.Time, error) {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(mode) == "" {
 		return nil, store.ValidationErrorf("namespace and mode are required")
 	}
 	executor := s.taskDataExecutor(ctx)
 	for _, query := range []string{
-		// The latest completed run in the mode ends the window it read.
 		`SELECT window_end FROM memory_consolidation_runs WHERE namespace = ? AND mode = ? AND status = ?
 		 ORDER BY window_end DESC LIMIT 1`,
-		// Before any completed, the first run's start holds.
 		`SELECT window_start FROM memory_consolidation_runs WHERE namespace = ? AND mode = ? AND status <> ?
 		 ORDER BY window_start ASC LIMIT 1`,
 	} {
@@ -363,9 +325,6 @@ func (s *Store) readMemoryConsolidationRun(ctx context.Context, q memoryConsolid
 	return &run, nil
 }
 
-// ListMemoryConsolidationSessions lists the namespace's chat and task
-// Sessions changed in (after, through], most recently changed first, and
-// counts them all. It checks a Task data fence in its context.
 func (s *Store) ListMemoryConsolidationSessions(ctx context.Context, namespace string, after, through time.Time, limit int) ([]store.SessionMetadata, int, error) {
 	var sessions []store.SessionMetadata
 	var total int

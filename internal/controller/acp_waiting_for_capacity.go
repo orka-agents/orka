@@ -21,18 +21,12 @@ import (
 
 const waitingForCapacityMetricResourceTask = "task"
 
-// desiredWaitingForCapacityCondition derives the WaitingForCapacity condition
-// from durable admission state. It returns nil when nothing needs recording:
-// the Task never waited for capacity.
 func desiredWaitingForCapacityCondition(task *corev1alpha1.Task) *metav1.Condition {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return nil
 	}
 	condition := &metav1.Condition{Type: corev1alpha1.TaskConditionWaitingForCapacity, ObservedGeneration: task.Generation}
 	if task.Status.Phase == corev1alpha1.TaskPhasePending {
-		// A built-in RuntimePool's prompt 429 is reconciled in place while the
-		// execution is still Submitting: the runtime proved it did not accept
-		// the prompt, and the Task stays Pending until one is accepted.
 		if execution := task.Status.Execution; execution != nil &&
 			execution.Reason == corev1alpha1.TaskExecutionReasonWaitingForCapacity &&
 			(execution.State == corev1alpha1.TaskExecutionStateQueued || execution.State == corev1alpha1.TaskExecutionStateReserved ||
@@ -72,9 +66,6 @@ func waitingForCapacityConditionChanged(task *corev1alpha1.Task, desired *metav1
 	return existing == nil || existing.Status != desired.Status || existing.Reason != desired.Reason || existing.Message != desired.Message
 }
 
-// syncACPWaitingForCapacity keeps the user-visible WaitingForCapacity
-// condition in step with admission. The wait itself stays retryable and
-// bounded by the Task deadline; this only reports it.
 func (r *TaskReconciler) syncACPWaitingForCapacity(ctx context.Context, task *corev1alpha1.Task) error {
 	if !waitingForCapacityConditionChanged(task, desiredWaitingForCapacityCondition(task)) {
 		return nil

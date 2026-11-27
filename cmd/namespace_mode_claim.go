@@ -19,15 +19,6 @@ import (
 
 const namespaceModeClaimAttempts = 3
 
-// claimNamespaceMode settles the watched namespace's execution-mode claim
-// before any reconciler runs. A namespace that already carries the label must
-// name this controller's mode. An unlabeled namespace is claimed by writing
-// the label when claim is true; the update carries the namespace's
-// resourceVersion, so two controllers racing for one namespace cannot both
-// win, and the loser then reads the winner's claim and fails the mode check.
-// The ValidatingAdmissionPolicy installed with the release keeps the label
-// immutable afterwards, and lets only the controller's own ServiceAccount add
-// it to an existing namespace.
 func claimNamespaceMode(
 	ctx context.Context,
 	namespaces typedcorev1.NamespaceInterface,

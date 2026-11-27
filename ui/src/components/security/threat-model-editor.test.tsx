@@ -30,7 +30,6 @@ function threatModel(version: number, content: string) {
 }
 
 describe('ThreatModelEditor', () => {
-  // undefined: no threat model exists yet (GET answers 404).
   let stored: ReturnType<typeof threatModel> | undefined
   let puts: Array<{ content: string; expectedVersion?: number }>
 
@@ -47,7 +46,6 @@ describe('ThreatModelEditor', () => {
       http.put(threatModelPath, async ({ request }) => {
         const body = await request.json() as { content: string; expectedVersion?: number }
         puts.push(body)
-        // expectedVersion 0 expects no model yet; a positive one expects that version.
         const current = stored?.version ?? 0
         if (body.expectedVersion !== undefined && body.expectedVersion !== current) {
           return HttpResponse.json({ error: { code: 409, message: 'threat model changed since it was loaded' } }, { status: 409 })
@@ -82,7 +80,6 @@ describe('ThreatModelEditor', () => {
     render(<ThreatModelEditor repositoryName="payments" />)
 
     const editor = await screen.findByDisplayValue('Generated model v3')
-    // Someone else saves while this editor still holds v3.
     stored = threatModel(4, 'Teammate model v4')
     await user.clear(editor)
     await user.type(editor, 'My local edits')
@@ -116,7 +113,6 @@ describe('ThreatModelEditor', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Threat model saved'))
 
-    // Sent explicitly, not omitted: 0 is the "no model yet" precondition.
     expect(puts[0]).toEqual({ content: 'Initial notes', source: 'edited', expectedVersion: 0 })
     await user.type(editor, ' + more')
     await user.click(screen.getByRole('button', { name: 'Save' }))
@@ -131,15 +127,12 @@ describe('ThreatModelEditor', () => {
 
     await screen.findByText(/No threat model has been generated yet/)
     const editor = screen.getByRole('textbox', { name: 'Threat model' })
-    // A scan generates the first model while this editor still holds none.
     stored = threatModel(1, 'Generated model v1')
     await user.type(editor, 'My first notes')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('The threat model changed since you loaded it')
-    // The conflict refetches, so the "none yet" note stops contradicting it
-    // while the edits stay put.
     await waitFor(() => expect(screen.queryByText(/No threat model has been generated yet/)).not.toBeInTheDocument())
     expect(editor).toBe(screen.getByRole('textbox', { name: 'Threat model' }))
     expect(editor).toHaveValue('My first notes')
@@ -165,7 +158,6 @@ describe('ThreatModelEditor', () => {
     await screen.findByText(/No threat model has been generated yet/)
     const editor = screen.getByRole('textbox', { name: 'Threat model' })
     await user.type(editor, 'Draft notes')
-    // A scan generates the first model and a window-focus refetch brings it in.
     stored = threatModel(1, 'Generated model v1')
     await act(async () => {
       focusManager.setFocused(false)

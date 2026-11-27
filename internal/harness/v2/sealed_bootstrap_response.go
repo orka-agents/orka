@@ -13,8 +13,6 @@ import (
 
 const sealedBootstrapResponseSchema = "orka.harness.v2/sealed-bootstrap-response/v1"
 
-// CredentialBootstrapExchange is private to one request. The response key is
-// distinct from the request key and binds the exact signed request bytes.
 type CredentialBootstrapExchange struct {
 	shared        []byte
 	requestDigest [sha256.Size]byte
@@ -26,8 +24,6 @@ type sealedBootstrapResponse struct {
 	Ciphertext string `json:"ciphertext"`
 }
 
-// SealResponse encrypts for the request's ephemeral sender. The caller must
-// verify the bootstrap signature before requesting a response.
 func (r *CredentialBootstrapReceiver) SealResponse(request, plaintext []byte) ([]byte, error) {
 	var envelope SealedCredentialBootstrap
 	if json.Unmarshal(request, &envelope) != nil {
@@ -55,8 +51,6 @@ func (r *CredentialBootstrapReceiver) SealResponse(request, plaintext []byte) ([
 	})
 }
 
-// OpenResponse accepts only a reply from the challenged process to the exact
-// request that created this exchange. Replies cannot be reflected as requests.
 func (e *CredentialBootstrapExchange) OpenResponse(body []byte) ([]byte, error) {
 	var response sealedBootstrapResponse
 	if json.Unmarshal(body, &response) != nil || response.Schema != sealedBootstrapResponseSchema {

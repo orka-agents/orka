@@ -30,10 +30,6 @@ const (
 	listPaginationAgentsRoute   = "/agents"
 )
 
-// paginatingReader emulates the API server's chunked list semantics on top of
-// the fake client, which ignores Limit/Continue: items are served in name
-// order, Continue is an opaque offset, and RemainingItemCount is populated
-// (the handlers must strip it before responding).
 type paginatingReader struct {
 	client.Reader
 	lists int
@@ -81,8 +77,6 @@ func (r *paginatingReader) List(ctx context.Context, list client.ObjectList, opt
 	return nil
 }
 
-// cacheEmulatingClient behaves like controller-runtime's cache reader for a
-// limited List: it truncates at Limit and stamps the unusable sentinel.
 type cacheEmulatingClient struct {
 	client.Client
 	limitedLists int
@@ -155,9 +149,6 @@ func paginatedListScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// paginatedListNames decodes one list page and returns the listed item names
-// plus the continue token. Handlers either return Kubernetes objects
-// (metadata.name) or flattened maps (name); built-in tools are skipped.
 func paginatedListNames(t *testing.T, app *fiber.App, target string) ([]string, string) {
 	t.Helper()
 	response, err := app.Test(httptest.NewRequest(http.MethodGet, target, nil))
@@ -171,14 +162,10 @@ func paginatedListNames(t *testing.T, app *fiber.App, target string) ([]string, 
 		} `json:"metadata"`
 	}
 	require.NoError(t, json.NewDecoder(response.Body).Decode(&body))
-	// The API server's collection-wide count would reveal how many objects a
-	// scoped caller cannot see on later pages, so it is never forwarded.
 	require.Nil(t, body.Metadata.RemainingItemCount, "remainingItemCount must not be forwarded from paginated lists")
 	names := make([]string, 0, len(body.Items))
 	for _, item := range body.Items {
 		if builtin, _ := item["builtin"].(bool); builtin {
-			// Built-ins are collected like any other item so the caller can
-			// assert they appear exactly once across all pages.
 			name, _ := item["name"].(string)
 			names = append(names, "builtin:"+name)
 			continue
@@ -296,8 +283,6 @@ func TestListPageReportsReaderFailures(t *testing.T) {
 	require.Contains(t, fiberErr.Message, "failed to list tasks: API unavailable")
 }
 
-// splitBuiltinListNames separates the "builtin:" entries paginatedListNames
-// records for built-in tools from the CRD-backed item names.
 func splitBuiltinListNames(names []string) (crd, builtins []string) {
 	for _, name := range names {
 		if rest, ok := strings.CutPrefix(name, "builtin:"); ok {
@@ -310,9 +295,6 @@ func splitBuiltinListNames(names []string) (crd, builtins []string) {
 }
 
 func TestCollectAuthorizedPagesFillsAcrossFilteredPages(t *testing.T) {
-	// Pages where the filter hides every item on page 2 and one item on page
-	// 3: a scoped caller must receive one filled page and one cursor, not an
-	// empty page (and cursor) per hidden object, and never more than limit.
 	pages := map[string]struct {
 		items []string
 		next  string
@@ -347,7 +329,6 @@ func TestCollectAuthorizedPagesFillsAcrossFilteredPages(t *testing.T) {
 	require.Equal(t, []string{"2", "3", "4"}, fetched)
 	require.Equal(t, []int64{2, 2, 1}, limits, "each fetch is asked for only the remaining capacity")
 
-	// An unlimited request is served as one complete page.
 	fetched = nil
 	items, next, err = collectAuthorizedPages(0, "", fetch)
 	require.NoError(t, err)
@@ -355,9 +336,6 @@ func TestCollectAuthorizedPagesFillsAcrossFilteredPages(t *testing.T) {
 	require.Equal(t, "2", next)
 	require.Equal(t, []string{""}, fetched)
 
-	// The walk continues past long runs of hidden objects whether the page
-	// is empty or partially filled, so authorized results are neither hidden
-	// behind an empty page nor split prematurely at a hidden boundary.
 	const hiddenCursor = "more"
 	const firstAuthorized = "first-authorized"
 	calls := 0
@@ -376,11 +354,6 @@ func TestCollectAuthorizedPagesFillsAcrossFilteredPages(t *testing.T) {
 	require.Equal(t, "after-late", next)
 	require.Equal(t, 40, calls)
 
-	// A full authorized page cannot return a cursor bounded by a hidden raw
-	// object. Each raw fetch is capped at the remaining authorized capacity,
-	// so after filtering a hidden boundary leaves the result short and forces
-	// another fetch. The cursor returned when the result fills is therefore
-	// bounded by the authorized object that filled it.
 	type rawItem struct {
 		name    string
 		allowed bool
@@ -413,9 +386,6 @@ func TestCollectAuthorizedPagesFillsAcrossFilteredPages(t *testing.T) {
 	require.Equal(t, []string{"allowed-a", "allowed-b"}, items)
 	require.Equal(t, "after-allowed-b", next)
 
-	// The page budget is the residual bound. It must not expose a raw storage
-	// cursor whose boundary was set by objects hidden from the caller or claim
-	// that the collection ended while more raw pages remain.
 	calls = 0
 	items, next, err = collectAuthorizedPages(1, "", func(string, int64) ([]string, string, error) {
 		calls++

@@ -58,9 +58,7 @@ const (
 )
 
 const (
-	// ExecutionEventStreamTypeTask is the persisted per-task stream type.
-	ExecutionEventStreamTypeTask = "task"
-	// ExecutionEventStreamTypeSession names the public aggregated session stream read model.
+	ExecutionEventStreamTypeTask    = "task"
 	ExecutionEventStreamTypeSession = "session"
 )
 
@@ -137,32 +135,24 @@ func stringSet(values []string) map[string]struct{} {
 	return set
 }
 
-// TerminalTaskEventTypes returns task-level terminal events that complete a task
-// execution stream.
 func TerminalTaskEventTypes() []string {
 	return append([]string(nil), terminalTaskEventTypes...)
 }
 
-// IsTerminalTaskEventType reports whether value is a task-level terminal event.
 func IsTerminalTaskEventType(value string) bool {
 	_, ok := terminalTaskEventTypeSet[strings.TrimSpace(value)]
 	return ok
 }
 
-// IsTerminalApprovalEventType reports whether value is an approval terminal event.
 func IsTerminalApprovalEventType(value string) bool {
 	_, ok := terminalApprovalEventTypeSet[strings.TrimSpace(value)]
 	return ok
 }
 
-// ExecutionEventTypes returns every known execution event type in
-// declaration order, for help text and completion.
 func ExecutionEventTypes() []string {
 	return append([]string(nil), executionEventTypes...)
 }
 
-// CanonicalExecutionEventType maps a case-insensitive spelling of a known
-// event type to its canonical name. Unknown values return "".
 func CanonicalExecutionEventType(value string) string {
 	value = strings.TrimSpace(value)
 	if IsValidExecutionEventType(value) {
@@ -176,13 +166,11 @@ func CanonicalExecutionEventType(value string) string {
 	return ""
 }
 
-// IsValidExecutionEventType reports whether value is a known execution event type.
 func IsValidExecutionEventType(value string) bool {
 	_, ok := validExecutionEventTypes[strings.TrimSpace(value)]
 	return ok
 }
 
-// NormalizeExecutionEventType trims a known event type. Unknown values normalize to empty.
 func NormalizeExecutionEventType(value string) string {
 	value = strings.TrimSpace(value)
 	if !IsValidExecutionEventType(value) {
@@ -191,7 +179,6 @@ func NormalizeExecutionEventType(value string) string {
 	return value
 }
 
-// IsValidExecutionEventSeverity reports whether value is a known severity after normalization.
 func IsValidExecutionEventSeverity(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case ExecutionEventSeverityDebug, ExecutionEventSeverityInfo, ExecutionEventSeverityWarning, ExecutionEventSeverityError:
@@ -201,9 +188,6 @@ func IsValidExecutionEventSeverity(value string) bool {
 	}
 }
 
-// NormalizeExecutionEventSeverity normalizes severity to lowercase.
-// Empty or unsupported values intentionally coerce to info so event producers can be permissive
-// while stores and APIs persist a stable severity value.
 func NormalizeExecutionEventSeverity(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if !IsValidExecutionEventSeverity(value) {
@@ -212,8 +196,6 @@ func NormalizeExecutionEventSeverity(value string) string {
 	return value
 }
 
-// IsValidExecutionEventStreamType reports whether value is a supported persisted stream type.
-// Session timelines are an aggregated read model over task streams, not a direct P1 append target.
 func IsValidExecutionEventStreamType(value string) bool {
 	return strings.TrimSpace(value) == ExecutionEventStreamTypeTask
 }

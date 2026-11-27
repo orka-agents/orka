@@ -38,19 +38,14 @@ const (
 	rbacRoleKind = "Role"
 )
 
-// OutboundAccessPolicyReconciler validates policy structure and references.
 type OutboundAccessPolicyReconciler struct {
 	client.Client
-	APIReader client.Reader
-	// ReservedServiceAccount is the controller's own ServiceAccount, which
-	// no policy may request tokens for.
+	APIReader                  client.Reader
 	ReservedServiceAccount     outboundaccess.ReservedServiceAccount
 	Scheme                     *runtime.Scheme
 	Trust                      outboundaccess.TrustConfig
 	AIWorkerServiceAccountName string
-	// MaxDelegationAge is the controller's cap on delegated agentIdentity
-	// policies (--agent-identity-max-delegation-age); zero means the default.
-	MaxDelegationAge time.Duration
+	MaxDelegationAge           time.Duration
 }
 
 const (
@@ -313,8 +308,6 @@ func outboundTokenRequestControlledBy(policy *corev1alpha1.OutboundAccessPolicy,
 	return policy != nil && object != nil && metav1.IsControlledBy(object, policy)
 }
 
-// outboundTokenRequestMetadataEqual reports whether current is controlled by
-// policy and carries the desired labels, annotations, and owner references.
 func outboundTokenRequestMetadataEqual(policy *corev1alpha1.OutboundAccessPolicy, current, desired metav1.Object) bool {
 	return current != nil && desired != nil && outboundTokenRequestControlledBy(policy, current) &&
 		reflect.DeepEqual(current.GetLabels(), desired.GetLabels()) &&
@@ -539,9 +532,6 @@ func (r *OutboundAccessPolicyReconciler) revokeStaleOutboundTokenRequestRoles(
 	return revokeStaleOutboundTokenRequestObjects[rbacv1.Role](ctx, r.Client, policy, roles, desired, desiredReady, "delete TokenRequest Role")
 }
 
-// revokeStaleOutboundTokenRequestObjects deletes every policy-controlled object
-// except the desired one once it is ready. Objects the policy does not control
-// are never touched.
 func revokeStaleOutboundTokenRequestObjects[T any, PT interface {
 	*T
 	client.Object
@@ -650,7 +640,6 @@ func outboundPolicyReferencesObject(policy *corev1alpha1.OutboundAccessPolicy, o
 	return false
 }
 
-// SetupWithManager registers policy, referenced-object, and managed-RBAC watches.
 func (r *OutboundAccessPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

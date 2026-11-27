@@ -4,8 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Test-only deterministic native worker. It executes the production reply tool
-// and client with the real projected Pod token, not a model or an auth bypass.
 package main
 
 import (
@@ -59,8 +57,6 @@ func runWorker(
 	if err := sender.AuthenticateOrigin(ctx); err != nil {
 		return err
 	}
-	// This deterministic fixture makes one logical call per Task UID. Keep its
-	// host-owned identity fixed across replay; it is never a model argument.
 	const hostOperationID = "gateway-e2e-interim-call"
 	toolCtx := tools.WithToolContext(ctx, &tools.ToolContext{
 		Namespace: cfg.namespace, TaskID: cfg.task, TaskUID: cfg.taskUID,
@@ -95,7 +91,6 @@ func runWorker(
 	if err := ready(report); err != nil {
 		return err
 	}
-	// E2E inspects the durable receipt and Running Task before releasing final.
 	if err := release(ctx); err != nil {
 		return err
 	}
@@ -122,8 +117,6 @@ func parseReceipt(result string) (tools.GatewayReplyReceipt, error) {
 	return envelope.Data, nil
 }
 
-// Only final-result publication uses the fixture transport. Interim calls go
-// through the production tool and workerclient, including its bootstrap retry.
 func (cfg workerConfig) post(ctx context.Context, path string, body []byte) ([]byte, int, error) {
 	for {
 		token, err := workerenv.ReadTokenFile(cfg.tokenFile, "projected worker token")
@@ -149,8 +142,6 @@ func (cfg workerConfig) post(ctx context.Context, path string, body []byte) ([]b
 		if response.StatusCode != http.StatusServiceUnavailable {
 			return data, response.StatusCode, nil
 		}
-		// Preserve the final publisher's transient-503 retry; never retry an
-		// authorization failure. Message replay belongs to workerclient above.
 		if err := wait(ctx, cfg.retryInterval); err != nil {
 			return nil, 0, err
 		}

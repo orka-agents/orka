@@ -13,8 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// CreatePublication persists immutable publication intent and initializes the
-// Preparing state after validating the exact BranchClaim fence.
 func (s *Store) CreatePublication(ctx context.Context, publication *store.Publication, fence store.ControllerEpochFence) (*store.Publication, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -66,7 +64,6 @@ func (s *Store) CreatePublication(ctx context.Context, publication *store.Public
 	return s.completePublicationCreation(ctx, object, normalized, normalizedFence, snapshot)
 }
 
-// GetPublication returns a namespaced Publication by canonical ID.
 func (s *Store) GetPublication(ctx context.Context, id string) (*store.Publication, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -83,7 +80,6 @@ func (s *Store) GetPublication(ctx context.Context, id string) (*store.Publicati
 	return &result, nil
 }
 
-// SetPublicationPRIntent persists the exact forge tuple after preparation.
 func (s *Store) SetPublicationPRIntent(ctx context.Context, request store.SetPublicationPRIntentRequest) (*store.Publication, error) {
 	request.ID = strings.TrimSpace(request.ID)
 	if err := store.ValidateControlIdentifier("publication ID", request.ID); err != nil {
@@ -141,8 +137,6 @@ func (s *Store) SetPublicationPRIntent(ctx context.Context, request store.SetPub
 	return &result, nil
 }
 
-// SetPublicationPRReceipt commits the reconciled forge result before the
-// Publication leaves Verifying.
 func (s *Store) SetPublicationPRReceipt(ctx context.Context, request store.SetPublicationPRReceiptRequest) (*store.Publication, error) {
 	request.ID = strings.TrimSpace(request.ID)
 	if err := store.ValidateControlIdentifier("publication ID", request.ID); err != nil {
@@ -197,8 +191,6 @@ func (s *Store) SetPublicationPRReceipt(ctx context.Context, request store.SetPu
 	return &result, nil
 }
 
-// TransitionPublication applies exact generation/version/state,
-// resourceVersion, receipt, and controller-epoch fences.
 func (s *Store) TransitionPublication(ctx context.Context, transition store.PublicationTransition) (*store.Publication, error) {
 	transition.ID = strings.TrimSpace(transition.ID)
 	if err := store.ValidateControlIdentifier("publication ID", transition.ID); err != nil {

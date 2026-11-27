@@ -20,32 +20,13 @@ import (
 //go:generate go run ./internal/envelopegen/cmd/envelopegen storageclient envelope_gen.go
 //go:generate go run ./internal/envelopegen/cmd/envelopegen storagetest ../../pkg/storage/v1/storagetest/envelope_gen.go
 
-// FenceSource tells the storage client which dataset serves a contract and
-// the controller epoch fence its writes carry there. The controller epoch
-// manager implements it: it opens each dataset's fence once that dataset's
-// own epoch advance succeeds, so a write waits only for the dataset it
-// targets.
 type FenceSource interface {
-	// WriteFence waits until the fence of the dataset that serves contract
-	// is open and returns that dataset's ID and the fence. It returns ctx's
-	// error when ctx ends first.
 	WriteFence(ctx context.Context, contract string) (datasetID string, fence storagev1.ControllerEpochFence, err error)
 }
 
 const (
-	// DefaultFenceWait bounds how long a write waits for its dataset's fence
-	// to open before it is refused with ErrNotReady.
-	DefaultFenceWait = 10 * time.Second
-	// DefaultRetryHorizon bounds the retries of one write: they end, in
-	// flight too, this long after its first ErrUnavailable or
-	// ErrOutcomeUnknown, or at the call's deadline when that is earlier. The
-	// first attempt runs under the call's deadline alone, so a long write is
-	// not cut short. Retries also end before the operation is
-	// storagev1.MaxOperationAge old, less storagev1.MaxClockSkew, so every
-	// retry is within the operation's lifetime.
-	DefaultRetryHorizon = 30 * time.Second
-	// DefaultResolveTimeout bounds one ResolveOperation call, and reading the
-	// result of an operation it found committed.
+	DefaultFenceWait      = 10 * time.Second
+	DefaultRetryHorizon   = 30 * time.Second
 	DefaultResolveTimeout = 5 * time.Second
 )
 
@@ -56,35 +37,23 @@ const (
 	defaultResolveMaxBackoff = 30 * time.Second
 )
 
-// envelopedState runs every state.v1 write under a write envelope. Its write
-// methods are generated (envelope_gen.go); reads and administrative methods
-// are the provider's own.
 type envelopedState struct {
 	storagev1.StateProvider
 	ops *operations
 }
 
-// envelopedArtifacts runs every artifacts.v1 write under a write envelope, in
-// the same way as envelopedState.
 type envelopedArtifacts struct {
 	storagev1.ArtifactProvider
 	ops *operations
 }
 
-// writeCall describes one call of a contract write method.
 type writeCall struct {
 	method   string
 	contract string
-	// args are the arguments after the context, which the request digest
-	// covers.
-	args []any
-	// fence is the controller epoch fence the method takes as a parameter,
-	// or nil. It is authoritative for the write, so the envelope carries it.
-	fence *storagev1.ControllerEpochFence
+	args     []any
+	fence    *storagev1.ControllerEpochFence
 }
 
-// operations attaches write envelopes, retries writes whose outcome is not
-// yet known, and settles them with ResolveOperation.
 type operations struct {
 	resolvers map[string]storagev1.OperationReceiptStore
 
@@ -92,29 +61,21 @@ type operations struct {
 	fences      FenceSource
 	fencesBound chan struct{}
 
-	fenceWait      time.Duration
-	retryHorizon   time.Duration
-	resolveTimeout time.Duration
-	// resolveBackoff and resolveMaxBackoff pace background resolution.
+	fenceWait         time.Duration
+	retryHorizon      time.Duration
+	resolveTimeout    time.Duration
 	resolveBackoff    time.Duration
 	resolveMaxBackoff time.Duration
 	now               func() time.Time
 	newOperationID    func() (string, error)
 	sequence          atomic.Uint64
 
-	mu sync.Mutex
-	// unresolved holds, for each dataset, the operations whose outcome the
-	// client could not settle. While a dataset has any, its new writes are
-	// refused.
+	mu         sync.Mutex
 	unresolved map[string]map[string]pendingOperation
 	resolving  map[string]bool
-	// clockSkews holds, for each dataset whose clock the last check found
-	// too far from Orka's, how far. While a dataset has one, its new writes
-	// are refused.
 	clockSkews map[string]clockSkew
 }
 
-// pendingOperation is an operation whose outcome is not settled yet.
 type pendingOperation struct {
 	contract string
 	request  storagev1.ResolveOperationRequest
@@ -137,7 +98,6 @@ func newOperations(resolvers map[string]storagev1.OperationReceiptStore) *operat
 	}
 }
 
-// newOperationID returns a new UUIDv7, so operation IDs sort by creation.
 func newOperationID() (string, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -146,7 +106,6 @@ func newOperationID() (string, error) {
 	return id.String(), nil
 }
 
-// bindFences sets the fence source once.
 func (o *operations) bindFences(source FenceSource) error {
 	if isNilProvider(source) {
 		return storagev1.ValidationErrorf("storage client fence source is required")
@@ -161,15 +120,11 @@ func (o *operations) bindFences(source FenceSource) error {
 	return nil
 }
 
-// writeFence waits, for at most fenceWait, until a fence source is bound and
-// the fence of the dataset that serves contract is open.
 func (o *operations) writeFence(ctx context.Context, contract string) (string, storagev1.ControllerEpochFence, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, o.fenceWait)
 	defer cancel()
 	notReady := func(cause error) error {
 		if ctx.Err() != nil {
-			// The call ended first; the write is still only not ready, so a
-			// caller can tell it from a definite failure.
 			return fmt.Errorf("%w: the controller epoch fence for %s did not open before the call ended: %w",
 				storagev1.ErrNotReady, contract, ctx.Err())
 		}
@@ -190,22 +145,6 @@ func (o *operations) writeFence(ctx context.Context, contract string) (string, s
 	return datasetID, fence, nil
 }
 
-// run runs one write under a write envelope.
-//
-// A context that already carries an envelope belongs to a caller that owns
-// the operation, such as a provider test; the write runs once with it. That
-// caller owns the request too: the client sends it unchanged, assigning no
-// identity or time, so such a caller stamps them before computing the
-// envelope's digest, and the client refuses a request that lacks one with
-// ErrValidation (see identity.go).
-// Otherwise run waits for the fence of the dataset that serves the write,
-// refuses the write while an earlier write to that dataset has an unknown
-// outcome or while the dataset's clock is out of bounds (see CheckClocks),
-// and creates one operation: a new operation ID, the request digest over the
-// arguments as they are now, the issue time (the one the client filled into
-// the write's records, when it did) and the next sequence.
-// Every retry of that operation reuses the whole envelope and the same
-// arguments.
 func (o *operations) run(ctx context.Context, call writeCall, attempt func(context.Context) error) (err error) {
 	defer func() {
 		if errors.Is(err, storagev1.ErrOutcomeUnknown) {
@@ -252,19 +191,13 @@ func (o *operations) run(ctx context.Context, call writeCall, attempt func(conte
 	return o.drive(ctx, call, envelope, attempt)
 }
 
-// issueTimeKey carries the time the client filled into a write's records, so
-// the write's envelope is issued at that same time.
 type issueTimeKey struct{}
 
-// withIssueTime returns the time the next write issued with the returned
-// context carries as its IssuedAt, for the client to fill into that write's
-// records before computing its digest.
 func (o *operations) withIssueTime(ctx context.Context) (context.Context, time.Time) {
 	now := o.now().UTC()
 	return context.WithValue(ctx, issueTimeKey{}, now), now
 }
 
-// issuedAt returns the issue time ctx carries, or now.
 func issuedAt(ctx context.Context, now func() time.Time) time.Time {
 	if at, ok := ctx.Value(issueTimeKey{}).(time.Time); ok {
 		return at
@@ -272,27 +205,9 @@ func issuedAt(ctx context.Context, now func() time.Time) time.Time {
 	return now().UTC()
 }
 
-// drive makes the attempts of one operation.
-//
-// ErrUnavailable means the attempt committed nothing, and ErrOutcomeUnknown
-// that it may have committed; drive retries the same envelope after either.
-// The first attempt runs under the call's context alone. The first failure
-// starts the retry horizon (see retryBounds), and every retry runs under it:
-// a retry that the horizon ends in flight may have committed, so drive
-// resolves the operation, as after ErrOutcomeUnknown. When the call's
-// deadline comes first, it ends the retries instead: a retry it ends returns
-// the call's context error without resolution, as any call its caller
-// abandons does, unless an earlier attempt's outcome was unknown, which
-// drive resolves as before. Any other error settles the operation as
-// refused, unless an earlier attempt's outcome is unknown: then the refusal
-// settles only that attempt, and drive resolves the operation. Before every
-// retry, drive checks the write's fence again (see admitRetry); a fence that
-// closed since the first attempt refuses the retry in the same way.
 func (o *operations) drive(
 	ctx context.Context, call writeCall, envelope storagev1.WriteEnvelope, attempt func(context.Context) error,
 ) error {
-	// deadline is the end of the retry horizon, and capAt the deadline every
-	// retry runs under. Both are zero until the first failure.
 	var deadline, capAt time.Time
 	unknown := false
 	var last error
@@ -310,9 +225,6 @@ func (o *operations) drive(
 		case errors.Is(err, storagev1.ErrOperationAborted):
 			return err
 		case errors.Is(err, storagev1.ErrClockSkew):
-			// The store refuses writes from this controller until the clocks
-			// agree again: not ready, also when it ends an attempt after an
-			// unknown outcome and resolution finds the operation aborted.
 			skew := fmt.Errorf("%w: %w", storagev1.ErrNotReady, err)
 			if unknown {
 				return o.resolve(ctx, call, envelope, attempt, skew)
@@ -351,22 +263,6 @@ func (o *operations) drive(
 	return last
 }
 
-// admitRetry waits, before a retry, until the fence of the dataset that
-// serves contract is open, as run does before the first attempt, but no
-// longer than fenceWait and never past the retry horizon. A fence closes
-// after it opened when the installation is held for storage recovery, at
-// once, or while its dataset is checked again after a restart or switch, so
-// a retry never reaches a dataset that a new write could not. A fence the
-// source reports closed (an error that matches ErrNotReady, as a hold does),
-// or one still not open when fenceWait ends while the call and its retry
-// horizon are live, refuses the retry with ErrNotReady. When the call or its
-// retry horizon ends during the wait instead, admitRetry reports ended, and
-// the caller ends its retries as when they end between attempts.
-//
-// capAt is the deadline retries run under (see retryBounds): zero when the
-// call's own deadline ends the retries, and the call's context then bounds
-// the wait alone, so the call's deadline error is set whenever the wait ends
-// with it.
 func (o *operations) admitRetry(ctx context.Context, contract string, capAt time.Time) (ended bool, err error) {
 	horizonCtx := ctx
 	if !capAt.IsZero() {
@@ -380,8 +276,6 @@ func (o *operations) admitRetry(ctx context.Context, contract string, capAt time
 	source := o.fences
 	o.fencesMu.Unlock()
 	if _, _, err := source.WriteFence(waitCtx, contract); err != nil {
-		// Once the call or the horizon ended, an error that does not report
-		// the fence closed comes from that end, whatever the source wrapped.
 		if horizonCtx.Err() != nil && !errors.Is(err, storagev1.ErrNotReady) {
 			return true, nil
 		}
@@ -391,14 +285,6 @@ func (o *operations) admitRetry(ctx context.Context, contract string, capAt time
 	return false, nil
 }
 
-// retryBounds returns the end of the retry horizon a write's first failure
-// starts, and the deadline its retries run under. The horizon ends
-// retryHorizon from now, but before the operation is MaxOperationAge old,
-// less MaxClockSkew, because a provider refuses an older envelope and its
-// clock may run that far ahead. When the call's deadline comes first, it
-// ends the retries instead, and they run under the call's context alone
-// (capAt is zero): a second timer for the same instant could otherwise end
-// an attempt first and pass the call's own deadline off as the horizon's.
 func (o *operations) retryBounds(ctx context.Context, envelope storagev1.WriteEnvelope) (deadline, capAt time.Time) {
 	deadline = o.now().Add(o.retryHorizon)
 	if lifetime := envelope.IssuedAt.Add(storagev1.MaxOperationAge - storagev1.MaxClockSkew); lifetime.Before(deadline) {
@@ -410,9 +296,6 @@ func (o *operations) retryBounds(ctx context.Context, envelope storagev1.WriteEn
 	return deadline, deadline
 }
 
-// attemptWithin makes one attempt with envelope. Once deadline is set, the
-// attempt runs under it, and capped reports that the deadline ended the
-// attempt while the call's own context had not ended.
 func attemptWithin(
 	ctx context.Context, deadline time.Time, envelope storagev1.WriteEnvelope, attempt func(context.Context) error,
 ) (capped bool, err error) {
@@ -426,13 +309,6 @@ func attemptWithin(
 	return err != nil && attemptCtx.Err() != nil && ctx.Err() == nil, err
 }
 
-// resolve settles an operation whose outcome is unknown. A committed
-// operation is attempted once more with the same envelope, which reads its
-// original result as a replay. An operation that cannot be settled now joins
-// the unresolved set of its dataset, and the write returns ErrOutcomeUnknown.
-// An error that leaves the outcome unknown matches only ErrOutcomeUnknown,
-// never the refusal or resolution error behind it, so no caller reads it as
-// a definite failure.
 func (o *operations) resolve(
 	ctx context.Context, call writeCall, envelope storagev1.WriteEnvelope, attempt func(context.Context) error, cause error,
 ) error {
@@ -454,10 +330,6 @@ func (o *operations) resolve(
 	case err == nil && outcome.State == storagev1.OperationCommitted:
 		return o.replay(resolveCtx, envelope, attempt)
 	case err == nil && outcome.State == storagev1.OperationAborted:
-		// The operation is settled: nothing committed, and it never will.
-		// When only transient failures ended the attempts, the write is
-		// as safe to run again as after ErrUnavailable, so it matches that
-		// too; a refusal that ended the attempts stays matchable instead.
 		if errors.Is(cause, storagev1.ErrOutcomeUnknown) || errors.Is(cause, storagev1.ErrUnavailable) {
 			return fmt.Errorf("%w: operation %s did not commit and never will (%w after %v)",
 				storagev1.ErrOperationAborted, envelope.OperationID, storagev1.ErrUnavailable, cause)
@@ -466,20 +338,12 @@ func (o *operations) resolve(
 	case err == nil:
 		err = fmt.Errorf("unexpected operation state %q", outcome.State)
 	case errors.Is(err, storagev1.ErrOperationExpired), unsettleable(err):
-		// Retrying cannot settle the operation, so it does not block the
-		// dataset. Whether it committed stays unknown.
 		return fmt.Errorf("%w: operation %s cannot be settled: %v (after %v)", storagev1.ErrOutcomeUnknown, envelope.OperationID, err, cause)
 	}
 	o.addUnresolved(envelope.DatasetID, envelope.OperationID, pendingOperation{contract: call.contract, request: request})
 	return fmt.Errorf("%w: operation %s is not settled yet: %v (after %v)", storagev1.ErrOutcomeUnknown, envelope.OperationID, err, cause)
 }
 
-// replay reads the result of a committed operation by attempting it again
-// with the same envelope. A replay is served whatever the current controller
-// epoch fence, but not past a Task data fence in the context that cleanup or
-// a Job revocation has moved since. Every refusal leaves the result unreadable,
-// so the write returns ErrOutcomeUnknown rather than a refusal that could
-// cause the caller to authorize again and repeat a committed operation.
 func (o *operations) replay(ctx context.Context, envelope storagev1.WriteEnvelope, attempt func(context.Context) error) error {
 	var err error
 	for retry := 0; ; retry++ {
@@ -498,17 +362,12 @@ func (o *operations) replay(ctx context.Context, envelope storagev1.WriteEnvelop
 		storagev1.ErrOutcomeUnknown, envelope.OperationID, err)
 }
 
-// unsettleable reports whether a ResolveOperation error is a definite
-// refusal that repeating the request cannot change.
 func unsettleable(err error) bool {
 	return errors.Is(err, storagev1.ErrDuplicateMismatch) ||
 		errors.Is(err, storagev1.ErrDatasetMismatch) ||
 		errors.Is(err, storagev1.ErrValidation)
 }
 
-// requireSettled refuses a new write while a write to the same dataset has
-// an unknown outcome, so nothing that depends on that outcome can run before
-// it is settled.
 func (o *operations) requireSettled(datasetID string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -532,7 +391,6 @@ func (o *operations) addUnresolved(datasetID, operationID string, operation pend
 	}
 }
 
-// unresolvedCount returns how many operations have an unknown outcome.
 func (o *operations) unresolvedCount() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -543,8 +401,6 @@ func (o *operations) unresolvedCount() int {
 	return count
 }
 
-// pending returns the unresolved operations of a dataset in operation ID
-// order, or reports that none are left and stops its resolver.
 func (o *operations) pending(datasetID string) (map[string]pendingOperation, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -565,8 +421,6 @@ func (o *operations) settle(datasetID, operationID string) {
 	delete(o.unresolved[datasetID], operationID)
 }
 
-// resolveInBackground keeps resolving the unresolved operations of one
-// dataset, with backoff, until none are left.
 func (o *operations) resolveInBackground(datasetID string) {
 	log := logf.Log.WithName("storage-client").WithValues("dataset", datasetID)
 	delay := o.resolveBackoff
@@ -604,8 +458,6 @@ func (o *operations) resolveInBackground(datasetID string) {
 	}
 }
 
-// backoff returns the wait before retry number retry: exponential from
-// initial, capped at maximum, with up to 20% jitter.
 func backoff(retry int, initial, maximum time.Duration) time.Duration {
 	wait := initial
 	for range retry {
@@ -618,7 +470,6 @@ func backoff(retry int, initial, maximum time.Duration) time.Duration {
 	return wait - time.Duration(rand.Int64N(int64(wait)/5+1)) //nolint:gosec // jitter needs no cryptographic randomness
 }
 
-// sleep waits for d and reports whether ctx is still live.
 func sleep(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()

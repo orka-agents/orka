@@ -5,10 +5,6 @@ import (
 	"time"
 )
 
-// SessionTurnCleanupReceipt retains only the finalization evidence needed by
-// Task reclamation. Prompt and transcript content are deliberately absent.
-// Payload is bytes rather than RawMessage so encoding preserves the exact
-// immutable projection bytes, including any whitespace.
 type SessionTurnCleanupReceipt struct {
 	Namespace          string                  `json:"namespace"`
 	SessionName        string                  `json:"sessionName"`
@@ -33,9 +29,6 @@ type SessionTurnCleanupReceipt struct {
 	DeliveredAt        *time.Time              `json:"deliveredAt,omitempty"`
 }
 
-// Validate proves the archived metadata still pins one exact terminal
-// projection. DeadLetter receipts are retained as evidence, but callers must
-// still require Delivered before authorizing Task reclamation.
 func (r *SessionTurnCleanupReceipt) Validate(namespace, sessionName, turnID string) error {
 	if r == nil || r.Namespace != namespace || r.SessionName != sessionName || r.TurnID != turnID {
 		return ConflictErrorf("Session cleanup receipt does not match its requested identity")
@@ -56,8 +49,6 @@ func (r *SessionTurnCleanupReceipt) Validate(namespace, sessionName, turnID stri
 			return err
 		}
 	}
-	// Older turns may name a publication without retaining its receipt. Keep
-	// that archival shape readable; it cannot authorize delivery compatibility.
 	if r.PublicationReceipt != nil {
 		if r.PublicationID == "" || r.PublicationReceipt.PublicationID != r.PublicationID ||
 			r.PublicationReceipt.Generation < 1 || !IsTerminalPublicationState(r.PublicationReceipt.State) {
@@ -97,7 +88,6 @@ func (r *SessionTurnCleanupReceipt) validateTerminalProjection() error {
 	return nil
 }
 
-// SessionTurn returns only the archived metadata used by finalization checks.
 func (r *SessionTurnCleanupReceipt) SessionTurn() *SessionTurn {
 	return &SessionTurn{
 		ID: r.TurnID, Key: r.Key, PromptAttemptID: r.PromptAttemptID,
@@ -107,7 +97,6 @@ func (r *SessionTurnCleanupReceipt) SessionTurn() *SessionTurn {
 	}
 }
 
-// OutboxProjection returns the exact archived terminal delivery evidence.
 func (r *SessionTurnCleanupReceipt) OutboxProjection() *OutboxProjection {
 	return &OutboxProjection{
 		ID: r.ProjectionID, AggregateKind: r.AggregateKind, AggregateID: r.AggregateID,

@@ -6,7 +6,6 @@ MIT License - see LICENSE file for details.
 
 package tools
 
-// Test-only fixture constants shared across this package's tests.
 const (
 	shortPollIntervalString        = "100ms"
 	taskPhaseRunningString         = "Running"

@@ -139,7 +139,6 @@ func TestUsageCLITablesExposeCoverageDetailsAndPagination(t *testing.T) {
 				require.Contains(t, output, want)
 			}
 			if tc.view == "summary" {
-				// The API total includes usage outside the displayed work page.
 				require.Regexp(t, `(?m)^TOTAL +2 +250 +1 +1 +0 +250 +Unavailable +partial$`, output)
 			} else {
 				found := false
@@ -212,7 +211,6 @@ func TestUsageCLITablesPreserveZeroUnavailableAndExactLimit(t *testing.T) {
 					totalLine = line
 				}
 			}
-			// Check the token column and both unavailable ratios independently.
 			require.Equal(t, strings.Fields("TOTAL 0 "+tc.want+" 0 0 0 Unavailable Unavailable "+tc.totals.Completeness), strings.Fields(totalLine))
 			require.NotContains(t, output, "Next page:")
 		})
@@ -270,8 +268,6 @@ func TestUsageCLIReturnsAPIErrorsWithoutReport(t *testing.T) {
 }
 
 func TestUsageBinary(t *testing.T) {
-	// Exercise the actual command registration, config, formatting, and exit
-	// status against a read-only API fixture, without a Kubernetes cluster.
 	binary := filepath.Join(t.TempDir(), "orka")
 	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
 	buildOutput, err := build.CombinedOutput()

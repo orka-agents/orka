@@ -30,16 +30,11 @@ type copyState struct {
 	buffer  []byte
 }
 
-// Copy sanitizes Source from the toolbox image into Destination/root. It is
-// idempotent across init-container retries: a finished copy is skipped and a
-// partial one is discarded and redone.
 func Copy(opts Options) (Summary, error) {
 	arch, err := validateCopyOptions(opts)
 	if err != nil {
 		return Summary{}, err
 	}
-	// The sanitized modes below are exact; never let an inherited umask
-	// narrow them below what the agent identities need.
 	unix.Umask(0o022)
 
 	dstFd, err := unix.Open(opts.Destination, openDirFlags, 0)
@@ -51,8 +46,6 @@ func Copy(opts Options) (Summary, error) {
 	if summary, done := completedSummary(dstFd, arch); done {
 		return summary, nil
 	}
-	// Discard any partial state from an interrupted run: the staging tree,
-	// and a root folder whose completion marker was never written.
 	for _, stale := range []string{stagingName, OutputRootName} {
 		if err := os.RemoveAll(filepath.Join(opts.Destination, stale)); err != nil {
 			return Summary{}, failf(ReasonCopyFailed, "remove stale %s: %v", stale, err)
@@ -116,7 +109,6 @@ func validateCopyOptions(opts Options) (string, error) {
 	return arch, nil
 }
 
-// completedSummary reports a finished earlier run from its completion marker.
 func completedSummary(dstFd int, arch string) (Summary, bool) {
 	var completeStat unix.Stat_t
 	if err := unix.Fstatat(dstFd, completeName, &completeStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -130,8 +122,6 @@ func completedSummary(dstFd int, arch string) (Summary, bool) {
 	return summary, true
 }
 
-// publishCopy renames the finished staging tree to root and then writes the
-// completion marker, in that order, so a crash between the two is redone.
 func publishCopy(dstFd int, summary Summary) error {
 	if err := unix.Renameat(dstFd, stagingName, dstFd, OutputRootName); err != nil {
 		return failf(ReasonCopyFailed, "publish copied toolbox: %v", err)
@@ -146,9 +136,6 @@ func publishCopy(dstFd int, summary Summary) error {
 	return nil
 }
 
-// openSourceDirectory opens every component of an absolute path with
-// O_NOFOLLOW so a symlink anywhere in the chain fails instead of being
-// followed.
 func openSourceDirectory(source string) (int, error) {
 	fd, err := unix.Open("/", openDirFlags, 0)
 	if err != nil {
@@ -177,10 +164,6 @@ func (s *copyState) account(entries, bytes int64) error {
 	return nil
 }
 
-// directoryBatch bounds how many untrusted directory entries are held in
-// memory at once; limits are enforced while streaming, so a folder with
-// millions of entries fails with TOOLBOX_TOO_MANY_ENTRIES instead of
-// exhausting the copier's memory.
 const directoryBatch = 1024
 
 func (s *copyState) copyTree(srcFd, dstFd int, display string, depth int) error {
@@ -236,8 +219,6 @@ func (s *copyState) copyEntry(srcFd, dstFd int, display, name string, depth int)
 			if err != nil {
 				return failf(ReasonCopyFailed, "read symlink %s: %v", entryDisplay, err)
 			}
-			// Link text occupies output space too; count it so the total
-			// stays within the volume sized for the copier's limit.
 			if err := s.account(0, int64(len(target))); err != nil {
 				return err
 			}
@@ -294,7 +275,6 @@ func (s *copyState) copyRegular(srcFd, dstFd int, name, display string, expected
 		return failf(ReasonCopyFailed, "create %s: %v", display, err)
 	}
 	dst := os.NewFile(uintptr(out), display)
-	// Read one byte past the limit so a file that grew after stat still fails.
 	written, copyErr := io.CopyBuffer(dst, io.LimitReader(src, s.limits.MaxFileBytes+1), s.buffer)
 	if closeErr := dst.Close(); copyErr == nil {
 		copyErr = closeErr
@@ -311,12 +291,8 @@ func (s *copyState) copyRegular(srcFd, dstFd int, name, display string, expected
 	return s.account(0, written)
 }
 
-// checkArchEntryLimit bounds how many entries one PATH folder may hold during
-// the architecture check; tests lower it.
 var checkArchEntryLimit = DefaultMaxEntries
 
-// readDirectoryNamesBounded reads a directory in fixed-size batches and fails
-// with TOOLBOX_TOO_MANY_ENTRIES once more than limit names were seen.
 func readDirectoryNamesBounded(dirFd int, limit int64) ([]string, error) {
 	dup, err := unix.Dup(dirFd)
 	if err != nil {
@@ -381,8 +357,6 @@ func writeFileAt(dirFd int, name string, mode uint32, data []byte) error {
 	return file.Close()
 }
 
-// requireDirectoryAt walks a clean relative path component by component with
-// O_NOFOLLOW and reports whether it ends at a real folder.
 func requireDirectoryAt(rootFd int, relative string) error {
 	fd, err := openRelativeDirectory(rootFd, relative)
 	if err != nil {
@@ -414,20 +388,12 @@ func hasDotDot(relative string) bool {
 	return slices.Contains(strings.Split(relative, "/"), "..")
 }
 
-// checkArchInTree verifies that every executable ELF file directly inside each
-// path entry folder matches arch. Symlinks are resolved only while they stay inside
-// the toolbox tree (rootFd is the tree root and mountPath its runtime path);
-// paths that leave the root fail closed because an external alias may re-enter
-// the mount. The walk never follows a symlink at the kernel level.
 func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch string) error {
 	for _, entry := range pathEntries {
 		dirFd, err := openRelativeDirectory(rootFd, entry)
 		if err != nil {
 			return failf(ReasonMissingPathEntry, "path entry %s is not a folder in %s: %v", entry, mountPath, err)
 		}
-		// Image volumes have no copier in front of them, so the folder is
-		// read in bounded batches and capped; a folder with millions of
-		// entries fails instead of exhausting the supervisor's memory.
 		names, err := readDirectoryNamesBounded(dirFd, checkArchEntryLimit)
 		_ = unix.Close(dirFd)
 		if err != nil {
@@ -466,11 +432,6 @@ func checkArchInTree(rootFd int, mountPath string, pathEntries []string, arch st
 	return nil
 }
 
-// resolveInsideTree resolves both directory and file links without letting the
-// kernel follow either. Relative link targets retain their component order:
-// cleaning away ".." before resolving an earlier directory link checks a
-// different file. Only dangling paths, loops and non-files are skipped; paths leaving the root,
-// inspection failures and chains beyond maxLinkHops fail closed.
 func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, error) {
 	dirFd, err := unix.Dup(rootFd)
 	if err != nil {
@@ -514,9 +475,6 @@ func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, er
 			}
 			return path.Join(strings.Join(resolved, "/"), component), true, nil
 		case unix.S_IFDIR:
-			// A terminal directory is not a tool, even if its link target
-			// ends in slashes or dots. Do not demand read access to data
-			// folders; children and ".." still require real traversal.
 			if !slices.ContainsFunc(pending, func(component string) bool { return component != "" && component != "." }) {
 				return "", false, nil
 			}
@@ -551,8 +509,6 @@ func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, er
 				}
 				resolved = nil
 			}
-			// Restart from the pinned root with the real parent components,
-			// raw target components and unconsumed suffix, in that order.
 			next := append([]string(nil), resolved...)
 			next = append(next, targetComponents...)
 			pending = append(next, pending...)
@@ -576,8 +532,6 @@ func resolveInsideTree(rootFd int, mountPath, relative string) (string, bool, er
 	return "", false, nil
 }
 
-// openVerifiedToolboxDirectory binds a no-follow directory open to the
-// metadata observed before opening it. The caller owns the returned descriptor.
 func openVerifiedToolboxDirectory(parent int, name string, expected *unix.Stat_t, display string) (int, error) {
 	fd, err := unix.Openat(parent, name, openDirFlags, 0)
 	if err != nil {
@@ -595,9 +549,6 @@ func openVerifiedToolboxDirectory(parent int, name string, expected *unix.Stat_t
 	return fd, nil
 }
 
-// absoluteLinkInsideTree matches a clean mount path against absolute link
-// components, accepting repeated slashes and dots in its prefix. Never clean
-// "..": suffix components must be resolved in order against the pinned root.
 func absoluteLinkInsideTree(mountPath string, components []string) ([]string, error) {
 	for component := range strings.SplitSeq(strings.TrimPrefix(mountPath, "/"), "/") {
 		for len(components) > 0 && (components[0] == "" || components[0] == ".") {
@@ -624,13 +575,9 @@ func elfArchAt(rootFd int, relative string) (string, bool, error) {
 	if statMode(&expected)&unix.S_IFMT != unix.S_IFREG {
 		return "", false, failf(ReasonSourceChanged, "%s is no longer a regular file", relative)
 	}
-	// Non-executable PATH data needs no content check and may be unreadable
-	// to this verifier. Decide from no-follow metadata before O_RDONLY.
 	if statMode(&expected)&0o111 == 0 {
 		return "", false, nil
 	}
-	// Both ELF tools and scripts must work for arbitrary agent identities,
-	// independently of this verifier's UID or the image's ownership.
 	if statMode(&expected)&uint32(worldAccessBits) != uint32(worldAccessBits) {
 		return "", false, failf(ReasonPermissionDenied, "%s (mode %04o) is not readable and executable by every agent identity; it needs o+rx", relative, statMode(&expected)&0o7777)
 	}
@@ -650,10 +597,6 @@ func elfArchAt(rootFd int, relative string) (string, bool, error) {
 	return elfArch(file)
 }
 
-// CheckMounted verifies a toolbox that is already mounted at mountPath: every
-// executable ELF file in its path entry folders must match arch. It opens the
-// mount path component by component with O_NOFOLLOW and never follows a symlink out of
-// the toolbox tree. It runs as an unprivileged user.
 func CheckMounted(mountPath string, pathEntries []string, arch string) error {
 	arch, err := NormalizeArch(arch)
 	if err != nil {

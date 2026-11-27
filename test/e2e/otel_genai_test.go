@@ -95,8 +95,6 @@ var _ = Describe("OpenTelemetry GenAI export", Ordered, Serial, func() {
 			otelResource{kind: "secret", name: otelProviderAuthRefName},
 		)
 
-		// The readiness probe below runs in the fake OpenAI Pod, so delete these
-		// last, and also when the restore or the probe fails.
 		defer deleteOTelResources(
 			otelResource{kind: "deployment", name: otelCollectorName},
 			otelResource{kind: "service", name: otelCollectorName},
@@ -109,8 +107,6 @@ var _ = Describe("OpenTelemetry GenAI export", Ordered, Serial, func() {
 		By("restoring controller telemetry settings")
 		restoreOTelControllerSnapshot(controllerSnapshot)
 		if controllerTelemetryPatched {
-			// Restoring restarts the controller just as enabling did, so the
-			// next spec's workers need the same API readiness.
 			By("waiting for the restored controller API Service to be ready from a task-network Pod")
 			waitForOTelControllerAPIReady()
 		}
@@ -307,9 +303,6 @@ func waitForOTelDeploymentAvailable(name string, timeout time.Duration) {
 }
 
 func waitForOTelControllerAPIReady() {
-	// Rollout readiness probes the manager directly on 8081. Workers use the
-	// API Service on 8080, whose routes can lag a Recreate rollout. Probe that
-	// path from an existing Pod, not through an API-server proxy or port-forward.
 	endpoint := fmt.Sprintf("http://%s.%s.svc:8080/readyz", controllerAPIService, namespace)
 	const probe = `import sys, urllib.request
 with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
@@ -424,10 +417,6 @@ func patchOTelControllerManager(deploymentName string, containerIndex int, args 
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed waiting for controller-manager rollout")
 
-	// The rollout reports done once the new Pod is Ready, which can precede
-	// both the API listener and the Service endpoints; a worker started in
-	// that window fails its first API call. Wait until the API answers
-	// through its Service.
 	EventuallyWithOffset(1, func() error {
 		_, err := fetchServiceProxyBody(namespace, controllerAPIService, 8080, "/healthz")
 		return err

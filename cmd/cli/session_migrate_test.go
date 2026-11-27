@@ -76,7 +76,6 @@ func TestMigrateImportRetriesFrozenRequest(t *testing.T) {
 	if err := migrationCommand(t, server.URL, args...); err == nil {
 		t.Fatal("lost response accepted")
 	}
-	// The source is no longer readable; a safe retry must use its saved bundle.
 	if err := os.Remove(filepath.Join(dir, name)); err != nil {
 		t.Fatal(err)
 	}
@@ -153,12 +152,10 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	// Automatic migration must not invoke an attacker-controlled kubectl.
 	bin := t.TempDir()
 	marker := filepath.Join(bin, "invoked")
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "kubectl"), []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 1\n"), 0o700))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// Migration must not contact the selected Kubernetes cluster at all.
 	kubeRequests := 0
 	kube := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		kubeRequests++
@@ -172,7 +169,6 @@ func TestMigrateImportRejectsUntrustedAutomaticDiscovery(t *testing.T) {
 		require.NoError(t, os.WriteFile(kubeconfig, []byte(fmt.Sprintf("apiVersion: v1\nkind: Config\ncurrent-context: test\ncontexts:\n- name: test\n  context:\n    cluster: test\n    user: test\nclusters:\n- name: test\n  cluster:\n    server: %s\n    insecure-skip-tls-verify: true\nusers:\n- name: test\n  user:\n    token: test-kube-only\n", cluster)), 0o600))
 	}
 	writeKubeconfig(kube.URL)
-	// A cached tunnel is deliberately unrelated to the selected cluster.
 	cached := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("migration reused an unbound cached tunnel")
 	}))
@@ -242,7 +238,6 @@ func TestMigrateExportInstallsAndReconcilesSamePlan(t *testing.T) {
 	if !bytes.Contains(rollout, []byte("native-export-context")) {
 		t.Fatal("context absent from native target")
 	}
-	// A direct destination override and a symlink to it are the same safe home.
 	t.Setenv("CODEX_SQLITE_HOME", home)
 	if err := migrationCommand(t, server.URL, args...); err != nil {
 		t.Fatal(err)
@@ -287,11 +282,9 @@ func TestMigrateExportRejectsExternalSQLiteHomeBeforeAPI(t *testing.T) {
 				sqliteHome = filepath.Join(home, "sqlite")
 				require.NoError(t, os.Mkdir(sqliteHome, 0o700))
 			case "relative-process-home":
-				// Export runs inside the home, but Codex will resume in another CWD.
 				t.Chdir(home)
 				sqliteHome = "."
 			case "space-suffix-alias", "unicode-space-suffix-alias":
-				// Codex trims the value, so the spaced alias must not pass validation.
 				external = filepath.Join(t.TempDir(), "sqlite-home")
 				require.NoError(t, os.Mkdir(external, 0o700))
 				suffix := " "
@@ -388,7 +381,6 @@ func TestMigrateRejectsWrongDestinationVersion(t *testing.T) {
 	defer server.Close()
 	cmd := newRootCmd()
 	cmd.SetArgs([]string{"--server", server.URL, "--namespace", "test", "--token", "test-only", "session", "migrate", "export", "source", "--codex-home", t.TempDir(), "--cwd", t.TempDir(), "--journal-dir", t.TempDir(), "--codex-bin", "missing"})
-	// Version mismatch is caught before contacting the API.
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("unsupported destination accepted")
 	}
@@ -456,7 +448,6 @@ func TestMigrationTargetAllowsTransactionTokenWithoutBearer(t *testing.T) {
 	require.Equal(t, "http://explicit.example", target)
 }
 
-// ORKA_SERVER names the endpoint as explicitly as --server does.
 func TestMigrationTargetAcceptsServerFromEnvironment(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(envServer, "http://env.example")
@@ -472,8 +463,6 @@ func TestMigrationTargetAcceptsServerFromEnvironment(t *testing.T) {
 	require.Equal(t, target, c.BaseURL)
 }
 
-// The journal and import receipt are bound to a namespace, so migration does
-// not leave it to the server to choose one.
 func TestMigrateImportRequiresNamespaceBeforeCapture(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	home, journal := t.TempDir(), t.TempDir()

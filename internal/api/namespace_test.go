@@ -21,9 +21,9 @@ func TestResolveNamespace(t *testing.T) {
 		explicit         string
 		watchNamespace   string
 		enforceIsolation bool
-		userInfo         *UserInfo // nil means no auth context
+		userInfo         *UserInfo
 		wantNS           string
-		wantStatus       int // 0 means expect success
+		wantStatus       int
 	}{
 		{
 			name:           "explicit matches watchNamespace",

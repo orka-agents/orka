@@ -33,7 +33,6 @@ describe('RuntimeControlBar', () => {
     expect(screen.getByRole('button', { name: /following/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /refresh/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /fork/i })).toBeInTheDocument()
-    // The header Delete is visible on every tab; Open only reloaded this page.
     expect(screen.queryByRole('button', { name: /delete/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /open/i })).not.toBeInTheDocument()
   })
@@ -79,7 +78,6 @@ describe('RuntimeControlBar', () => {
     expect(posts).toBe(1)
     expect(idem).toBeTruthy()
     expect(body).toMatchObject({ afterSeq: 42, newTaskName: 't1-branch' })
-    // The new task is offered as a link, not opened behind the user's back.
     expect(navigate).not.toHaveBeenCalled()
   })
 

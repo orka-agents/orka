@@ -27,9 +27,6 @@ const (
 	anthropicTextDelta = "text_delta"
 )
 
-// handleStreamingMessages handles an Anthropic Messages API request with streaming and tool execution.
-// It runs an agentic tool loop: stream LLM response → execute tools → stream results → repeat.
-// The full Anthropic SSE envelope (message_start → ... → message_stop) spans all iterations.
 func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 	c fiber.Ctx,
 	ctx context.Context,
@@ -53,7 +50,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		streamCtx, streamCancel := context.WithTimeout(streamBaseCtx, h.config.MaxDuration)
 		defer streamCancel()
 
-		// Emit message_start once for the entire tool loop
 		if err := writeMessageStart(w, msgID, model, 0); err != nil {
 			anthropicLog.Error(err, "failed to write message_start")
 			return
@@ -68,10 +64,8 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 		prematureEndRetries := 0
 
 		for iteration := 0; iteration < h.config.MaxIterations; iteration++ {
-			// Check context cancellation
 			select {
 			case <-streamCtx.Done():
-				// Emit timeout message and close
 				if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err == nil {
 					_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{Type: anthropicTextDelta, Text: "Request timed out during tool execution."})
 					_ = writeContentBlockStop(w, blockIndex)
@@ -82,15 +76,11 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			default:
 			}
 
-			// Truncate a view of the whole conversation if needed, never the
-			// conversation itself, so the cut stays where it was and the prompt
-			// prefix stays cacheable.
 			sent := messages
 			if h.config.MaxSessionSize > 0 {
 				sent = llm.TruncateMessages(messages, h.config.MaxSessionSize/4)
 			}
 
-			// Build request for this iteration
 			compReq := &llm.CompletionRequest{
 				Model:        model,
 				Messages:     sent,
@@ -100,7 +90,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				Temperature:  capturedReq.Temperature,
 			}
 
-			// Aggregate a validated provider turn before exposing or executing it.
 			resp, streamErr := completeViaStream(streamCtx, capturedProvider, compReq)
 			usedStream := streamErr == nil
 			if streamErr != nil {
@@ -139,17 +128,8 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				return
 			}
 
-			// No tool calls — potentially final response. Guard against premature
-			// end-of-turn: if the streamed text lacks the GOAL_STATE sentinel and
-			// we haven't yet exhausted the retry budget, inject a "continue with
-			// next tool_use" reminder and re-loop. The client will see the
-			// premature text already streamed plus the recovery, but the
-			// workflow continues instead of validation/review/PR being skipped.
 			if len(toolCalls) == 0 {
 				if isTokenBudgetTruncatedText(resp) {
-					// The caller's max_tokens budget ended the turn: deliver the
-					// partial text with the truthful stop reason instead of
-					// treating it as a premature end and asking for more work.
 					writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
 					_ = writeMessageDelta(w, oaiParamMaxTokens, totalUsage)
 					_ = writeMessageStop(w)
@@ -206,17 +186,14 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			)
 			writeAnthropicTextProgress(w, &blockIndex, stripGoalStateSentinel(textContent))
 
-			// Append assistant message with tool calls
 			messages = append(messages, llm.Message{
 				Role:      chatRoleAssistant,
 				Content:   textContent,
 				ToolCalls: toolCalls,
 			})
 
-			// Execute tools and emit results
 			var repetitionWarning string
 			for _, tc := range toolCalls {
-				// Check repetition
 				argsHash := hashArgs(tc.Name, tc.Arguments)
 				repetitionTracker[argsHash]++
 				if repetitionTracker[argsHash] >= 3 {
@@ -226,8 +203,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 
 				result := executeExposedToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx, exposedToolNames)
 
-				// Emit safe tool progress metadata only. Raw tool results can
-				// contain file contents, task logs, transcripts, or credentials.
 				writeAnthropicTextProgress(w, &blockIndex, formatToolProgress(tc, result))
 
 				messages = append(messages, llm.Message{
@@ -245,9 +220,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 				})
 			}
 
-			// Auto-poll: if all tool calls were wait_for_task/check_task_progress
-			// and all returned "still running", skip the LLM call and re-execute
-			// directly. This prevents the LLM from randomly ending the loop.
 			if repetitionWarning == "" && isAllWaitingPolls(toolCalls, messages) {
 				for {
 					select {
@@ -258,7 +230,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					default:
 					}
 
-					// Emit progress
 					if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{Type: oaiContentTypeText, Text: ""}); err == nil {
 						_ = writeContentBlockDelta(w, blockIndex, AnthropicDelta{
 							Type: anthropicTextDelta, Text: "[⏳ Auto-polling tasks...]",
@@ -267,9 +238,7 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 						blockIndex++
 					}
 
-					// Re-execute the same wait/check calls
 					allStillRunning := true
-					// Remove the old tool results from messages (last len(toolCalls) messages)
 					messages = messages[:len(messages)-len(toolCalls)]
 					for _, tc := range toolCalls {
 						result := executeExposedToolCall(streamCtx, tc, h.config.ToolTimeout, toolCtx, exposedToolNames)
@@ -285,7 +254,6 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 					}
 
 					if !allStillRunning {
-						// Task finished — break out to let the LLM process the result
 						anthropicLog.Info("auto-poll: task state changed, resuming LLM loop")
 						break
 					}
@@ -298,14 +266,11 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			}
 		}
 
-		// Reached iteration limit — emit final message and close
 		_ = writeMessageDelta(w, oaiStopReasonEndTurn, totalUsage)
 		_ = writeMessageStop(w)
 	})
 }
 
-// handleStreamingProxy is the transparent-proxy streaming path.
-// It streams the LLM response directly to the client without executing tools server-side.
 func (h *AnthropicCompatHandler) handleStreamingProxy(
 	c fiber.Ctx,
 	ctx context.Context,
@@ -340,7 +305,6 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 				_ = writeAnthropicStreamError(w, "provider_error")
 				return
 			}
-			// Fallback to non-streaming Complete
 			h.handleStreamingFallback(w, streamCtx, capturedProvider, capturedReq)
 			return
 		}
@@ -426,7 +390,6 @@ func (h *AnthropicCompatHandler) handleStreamingProxy(
 	})
 }
 
-// estimateTokens provides a rough token count estimate from text length.
 func estimateTokens(text string) int {
 	return len(text) / 4
 }
@@ -461,7 +424,6 @@ func mapAnthropicStreamStopReason(reason string, hasToolCalls bool) (string, boo
 	}
 }
 
-// handleStreamingFallback uses provider.Complete() and emits the result as a complete SSE sequence.
 func (h *AnthropicCompatHandler) handleStreamingFallback(
 	w *bufio.Writer,
 	ctx context.Context,
@@ -486,7 +448,6 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 
 	blockIndex := 0
 
-	// Emit text content
 	if resp.Content != "" {
 		if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
 			Type: oaiContentTypeText,
@@ -509,7 +470,6 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 		blockIndex++
 	}
 
-	// Emit tool calls
 	for _, tc := range resp.ToolCalls {
 		if err := writeContentBlockStart(w, blockIndex, AnthropicContentBlock{
 			Type:  "tool_use",
@@ -544,7 +504,6 @@ func (h *AnthropicCompatHandler) handleStreamingFallback(
 	_ = writeMessageStop(w)
 }
 
-// writeAnthropicSSE writes a named SSE event in Anthropic format.
 func writeAnthropicSSE(w *bufio.Writer, eventType string, data any) error {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
@@ -581,7 +540,6 @@ func writeAnthropicTextProgress(w *bufio.Writer, blockIndex *int, text string) {
 	(*blockIndex)++
 }
 
-// writeMessageStart emits the message_start event.
 func writeMessageStart(w *bufio.Writer, id, model string, inputTokens int) error {
 	return writeAnthropicSSE(w, "message_start", AnthropicStreamEvent{
 		Type: "message_start",
@@ -600,8 +558,6 @@ func writeMessageStart(w *bufio.Writer, id, model string, inputTokens int) error
 	})
 }
 
-// Anthropic message deltas permit input/cache counts to be absent. Keep them
-// distinct from explicit zero, including when a tool-loop turn omits usage.
 type anthropicStreamingUsage struct {
 	InputTokens           *int64 `json:"input_tokens,omitempty"`
 	OutputTokens          int64  `json:"output_tokens"`
@@ -627,8 +583,6 @@ func (usage *anthropicStreamingUsage) addResponse(resp *llm.CompletionResponse) 
 	var input *int64
 	if resp.UsageReported || resp.InputTokens > 0 {
 		count := int64(resp.InputTokens)
-		// Anthropic input_tokens excludes cache reads and writes. OpenAI
-		// reports an inclusive input count, so remove its known breakdown.
 		if !resp.InputExcludesCache {
 			if resp.CachedInputTokens != nil {
 				count -= *resp.CachedInputTokens
@@ -663,8 +617,6 @@ func (usage *anthropicStreamingUsage) addResponse(resp *llm.CompletionResponse) 
 		usage.CachedInputTokens = resp.CachedInputTokens
 		usage.CacheWriteInputTokens = resp.CacheWriteInputTokens
 	}
-	// An inclusive count was reduced by these cache tokens. If the aggregate
-	// breakdown is unavailable, the reduced input would silently omit them.
 	if usage.deductedCacheRead && usage.CachedInputTokens == nil || usage.deductedCacheWrite && usage.CacheWriteInputTokens == nil {
 		usage.InputTokens = nil
 	}
@@ -703,7 +655,6 @@ func retainStreamUsage(resp *llm.CompletionResponse, chunk llm.StreamChunk) {
 	resp.UsageReported = resp.UsageReported || chunk.UsageReported
 }
 
-// writeMessageDelta emits cumulative usage for the whole SSE message.
 func writeMessageDelta(w *bufio.Writer, stopReason string, usage anthropicStreamingUsage) error {
 	return writeAnthropicSSE(w, "message_delta", struct {
 		Type  string                  `json:"type"`
@@ -718,14 +669,12 @@ func writeMessageDelta(w *bufio.Writer, stopReason string, usage anthropicStream
 	})
 }
 
-// writeMessageStop emits the message_stop event.
 func writeMessageStop(w *bufio.Writer) error {
 	return writeAnthropicSSE(w, "message_stop", AnthropicStreamEvent{
 		Type: "message_stop",
 	})
 }
 
-// writeContentBlockStart emits a content_block_start event.
 func writeContentBlockStart(w *bufio.Writer, index int, block AnthropicContentBlock) error {
 	return writeAnthropicSSE(w, "content_block_start", AnthropicStreamEvent{
 		Type:         "content_block_start",
@@ -734,7 +683,6 @@ func writeContentBlockStart(w *bufio.Writer, index int, block AnthropicContentBl
 	})
 }
 
-// writeContentBlockDelta emits a content_block_delta event.
 func writeContentBlockDelta(w *bufio.Writer, index int, delta AnthropicDelta) error {
 	return writeAnthropicSSE(w, "content_block_delta", AnthropicStreamEvent{
 		Type:  "content_block_delta",
@@ -743,7 +691,6 @@ func writeContentBlockDelta(w *bufio.Writer, index int, delta AnthropicDelta) er
 	})
 }
 
-// writeContentBlockStop emits a content_block_stop event.
 func writeContentBlockStop(w *bufio.Writer, index int) error {
 	return writeAnthropicSSE(w, "content_block_stop", AnthropicStreamEvent{
 		Type:  "content_block_stop",
@@ -751,10 +698,6 @@ func writeContentBlockStop(w *bufio.Writer, index int) error {
 	})
 }
 
-// isAllWaitingPolls returns true if every tool call in the last iteration was
-// wait_for_task and every result indicates the task is still running.
-// Only wait_for_task is allowed (it has a built-in 2s polling interval).
-// check_task_progress is excluded because it returns instantly and would cause a tight loop.
 func isAllWaitingPolls(toolCalls []llm.ToolCall, messages []llm.Message) bool {
 	if len(toolCalls) == 0 {
 		return false
@@ -764,7 +707,6 @@ func isAllWaitingPolls(toolCalls []llm.ToolCall, messages []llm.Message) bool {
 			return false
 		}
 	}
-	// Check the last N messages (tool results) for running phase
 	for i := len(messages) - len(toolCalls); i < len(messages); i++ {
 		if i < 0 || i >= len(messages) {
 			return false
@@ -780,7 +722,6 @@ func isAllWaitingPolls(toolCalls []llm.ToolCall, messages []llm.Message) bool {
 	return true
 }
 
-// isTaskStillRunning parses a tool result JSON and checks if the task is in a non-terminal phase.
 func isTaskStillRunning(result string) bool {
 	var parsed struct {
 		Success bool `json:"success"`
@@ -794,6 +735,5 @@ func isTaskStillRunning(result string) bool {
 	if !parsed.Success {
 		return false
 	}
-	// Auto-poll stops once the Task is terminal.
 	return !corev1alpha1.TaskPhase(parsed.Data.Phase).IsTerminal()
 }

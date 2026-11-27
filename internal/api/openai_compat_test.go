@@ -29,7 +29,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/llm"
 
-	// Register LLM providers for integration tests
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 )
@@ -198,7 +197,6 @@ func TestHandleListModels_WithProviders(t *testing.T) {
 		t.Fatalf("expected 2 models (prefixed and plain), got %d", len(modelList.Data))
 	}
 
-	// Check we have both "anthropic/claude-sonnet-4-20250514" and "claude-sonnet-4-20250514"
 	ids := map[string]bool{}
 	for _, m := range modelList.Data {
 		ids[m.ID] = true
@@ -377,10 +375,6 @@ func TestExtractContent(t *testing.T) {
 }
 
 func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
-	// Point the provider at a local mock so the handler never reaches the real
-	// api.openai.com. A real outbound call would make this test slow (and flaky
-	// under load) and couples it to network egress; the mock proves provider
-	// resolution succeeds (status != 400) deterministically and instantly.
 	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -388,7 +382,6 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 	}))
 	defer mockAPI.Close()
 
-	// Create provider and secret
 	provider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "default",
@@ -433,16 +426,11 @@ func TestHandleChatCompletions_NonStreamingResponse(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The request will fail because the mock rejects the key, but it should get
-	// past the provider resolution phase (status != 400). We expect a 500 from the
-	// upstream call failing.
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == 400 {
 		t.Errorf("did not expect 400; provider resolution should have succeeded. body: %s", string(respBody))
 	}
 }
-
-// --- Tests: writeStreamChunk & writeStreamDone ---
 
 func TestWriteStreamChunk(t *testing.T) {
 	var buf bytes.Buffer
@@ -496,8 +484,6 @@ func TestWriteStreamError(t *testing.T) {
 		t.Fatalf("writeStreamError() = %q", got)
 	}
 }
-
-// --- Tests: handleNonStreamingCompletion ---
 
 type oaiMockProvider struct {
 	name      string
@@ -709,8 +695,6 @@ func TestHandleNonStreamingCompletion_RejectsInvalidOutcome(t *testing.T) {
 		})
 	}
 }
-
-// --- Tests: handleStreamingCompletion ---
 
 func TestHandleStreamingCompletion_StreamSuccess(t *testing.T) {
 	ch := make(chan llm.StreamChunk, 3)
@@ -1332,10 +1316,7 @@ func TestHandleStreamingToolLoop_DoesNotStreamPrematureCoordinatorText(t *testin
 	}
 }
 
-// --- Tests: extractContent edge cases ---
-
 func TestExtractContent_NonStringNonArray(t *testing.T) {
-	// Test the default branch (non-string, non-array) with a number
 	got := extractContent(42)
 	if got != "42" {
 		t.Errorf("extractContent(42) = %q, want %q", got, "42")
@@ -1343,14 +1324,11 @@ func TestExtractContent_NonStringNonArray(t *testing.T) {
 }
 
 func TestExtractContent_JSONStringViaDefault(t *testing.T) {
-	// A boolean should go through the default path
 	got := extractContent(true)
 	if got != "true" {
 		t.Errorf("extractContent(true) = %q, want %q", got, "true")
 	}
 }
-
-// --- Tests: resolveProviderFromModel edge cases ---
 
 func TestResolveProviderFromModel_SecretMissingKey(t *testing.T) {
 	provider := &corev1alpha1.Provider{
@@ -1388,7 +1366,7 @@ func TestResolveProviderFromModel_NoModel(t *testing.T) {
 		Data:       map[string][]byte{"api-key": []byte("val")},
 	}
 	handler, _ := setupTestOpenAIHandler(provider, secret)
-	handler.config.Model = "" // no default
+	handler.config.Model = ""
 	_, _, err := handler.resolver.Resolve(context.Background(), ResolveOpts{ModelStr: "", Namespace: "default", RequireModel: true})
 	if err == nil {
 		t.Fatal("expected error for no model")
@@ -1435,8 +1413,6 @@ func TestHandleChatCompletions_MaxTokensTooSmall(t *testing.T) {
 }
 
 func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
-	// Mock API server returns a quick error so the test doesn't time out
-	// reaching the real Anthropic API.
 	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -1444,7 +1420,6 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 	}))
 	defer mockAPI.Close()
 
-	// Create provider and secret
 	provider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "anthropic",
@@ -1473,7 +1448,6 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 	handler, app := setupTestOpenAIHandler(provider, secret)
 	app.Post("/openai/v1/chat/completions", handler.HandleChatCompletions)
 
-	// Use "provider/model" format
 	reqBody := OAIRequest{
 		Model: "anthropic/claude-sonnet-4-20250514",
 		Messages: []OAIMessage{
@@ -1485,14 +1459,11 @@ func TestHandleChatCompletions_ProviderSlashModel(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	// The provider points at the local mockAPI above, so this stays in-process and
-	// returns immediately; the modest timeout just guards against a hang.
 	resp, err := app.Test(req, fiber.TestConfig{Timeout: 10 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should NOT fail with a provider resolution error (400)
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == 400 {
 		t.Errorf("did not expect 400; provider/model split should have worked. body: %s", string(respBody))
@@ -1535,8 +1506,6 @@ func TestOpenAICompatContextTokenDoesNotRevealDisallowedProviderExistence(t *tes
 			"allowedProviders": []string{"openai"},
 		},
 	})
-	// The token grants the "openai" provider type, so a Provider of another
-	// type is disallowed whatever its name; its existence must not show.
 	provider := &corev1alpha1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: "hidden", Namespace: "default"},
 		Spec: corev1alpha1.ProviderSpec{

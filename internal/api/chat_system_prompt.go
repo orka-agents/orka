@@ -16,25 +16,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ConversationMessage represents a single message in a chat conversation.
 type ConversationMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// SystemPromptBuilder constructs the orchestrator system prompt with
-// dynamic context from the cluster (agents, tools).
 type SystemPromptBuilder struct {
 	client              client.Client
 	namespace           string
 	runtimeAvailability ACPRuntimeAvailability
 	chatProvider        string
-	// availableChatTools, when set, holds the only chat tools offered on the
-	// turn; nil means every chat tool is offered.
-	availableChatTools map[string]bool
+	availableChatTools  map[string]bool
 }
 
-// NewSystemPromptBuilder creates a new SystemPromptBuilder.
 func NewSystemPromptBuilder(c client.Client, namespace string, availability ACPRuntimeAvailability) *SystemPromptBuilder {
 	return &SystemPromptBuilder{
 		client:              c,
@@ -43,16 +37,10 @@ func NewSystemPromptBuilder(c client.Client, namespace string, availability ACPR
 	}
 }
 
-// SetChatProvider names the Provider serving this chat session so the prompt
-// can tell the model which provider to reuse.
 func (b *SystemPromptBuilder) SetChatProvider(name string) {
 	b.chatProvider = name
 }
 
-// SetAvailableChatTools limits the prompt to the chat tools offered on this
-// turn, such as for a caller whose token allows only some tools. Guidance parts
-// that require any other chat tool are left out, so the model is never told to
-// call a tool it does not have.
 func (b *SystemPromptBuilder) SetAvailableChatTools(names []string) {
 	b.availableChatTools = make(map[string]bool, len(names))
 	for _, name := range names {
@@ -60,7 +48,6 @@ func (b *SystemPromptBuilder) SetAvailableChatTools(names []string) {
 	}
 }
 
-// Chat tools that prompt guidance depends on.
 const (
 	promptToolContainerTask = "create_container_task"
 	promptToolAgentTask     = "create_agent_task"
@@ -70,30 +57,19 @@ const (
 	promptToolCancel        = "cancel_task"
 )
 
-// promptTaskCreators are the chat tools that create tasks.
 var promptTaskCreators = []string{promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask}
 
-// promptActionCreators includes Agent and Tool creation and recurring monitors for the action-call mandate,
-// but not for guidance to wait for and fetch a task result immediately.
 var promptActionCreators = []string{
 	promptToolContainerTask, chatCreateAITaskTool, promptToolAgentTask,
 	promptToolCreateAgent, "create_tool", "create_pr_monitor",
 }
 
-// promptPart is one piece of guidance and the chat tools it needs. A part with
-// no requirements is general and always kept. Requirements are declared rather
-// than read from the text, so rewording a part cannot change who sees it.
-// TestPromptPartsDeclareTheChatToolsTheyName keeps them in step with the chat
-// tools each part names.
 type promptPart struct {
-	text string
-	// requires lists chat tools that must all be offered.
+	text     string
 	requires []string
-	// anyOf, when set, lists chat tools of which at least one must be offered.
-	anyOf []string
+	anyOf    []string
 }
 
-// offers reports whether the part's tools are offered on this turn.
 func (b *SystemPromptBuilder) offers(part promptPart) bool {
 	if b.availableChatTools == nil {
 		return true
@@ -106,7 +82,6 @@ func (b *SystemPromptBuilder) offers(part promptPart) bool {
 	return len(part.anyOf) == 0 || slices.ContainsFunc(part.anyOf, func(name string) bool { return b.availableChatTools[name] })
 }
 
-// render joins the parts whose tools are offered.
 func (b *SystemPromptBuilder) render(parts []promptPart) string {
 	var sb strings.Builder
 	for _, part := range parts {
@@ -117,9 +92,6 @@ func (b *SystemPromptBuilder) render(parts []promptPart) string {
 	return sb.String()
 }
 
-// renderNumbered joins the parts whose tools are offered as a list numbered
-// from 1, so leaving a part out leaves no gap. label gives each item's prefix
-// and sep goes between items.
 func (b *SystemPromptBuilder) renderNumbered(parts []promptPart, label func(int) string, sep string) string {
 	var items []string
 	for _, part := range parts {
@@ -130,17 +102,12 @@ func (b *SystemPromptBuilder) renderNumbered(parts []promptPart, label func(int)
 	return strings.Join(items, sep)
 }
 
-// chatCatalogStart opens the cluster catalog, the first part of the chat
-// system prompt that changes with the cluster.
 const chatCatalogStart = "<available_agents>\n"
 
-// chatPromptStable is how many leading bytes of a chat system prompt are the
-// fixed sections, which stay the same while the cluster changes.
 func chatPromptStable(systemPrompt string) int {
 	return max(strings.Index(systemPrompt, chatCatalogStart), 0)
 }
 
-// BuildSystemPrompt assembles the full system prompt with dynamic context.
 func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string) (string, error) {
 	agentsSection, toolsSection, providersSection, skillsSection, err := b.buildDynamicContext(ctx)
 	if err != nil {
@@ -151,8 +118,6 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 
 	sb.WriteString(buildIdentitySection())
 	if b.availableChatTools == nil {
-		// Restricted callers get the available_chat_tools section instead,
-		// which states what they can do.
 		sb.WriteString(buildCapabilitiesSection())
 	}
 	sb.WriteString(b.behaviorSection())
@@ -168,10 +133,6 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	sb.WriteString(b.rulesSection())
 	sb.WriteString(b.examplesSection())
 
-	// The cluster catalog comes after every fixed section, so a new Agent or
-	// Tool leaves the instructions before it cached: a provider that caches
-	// prefixes itself reuses them up to the first changed byte, and
-	// chatPromptStable tells one that needs breakpoints where they end.
 	sb.WriteString(chatCatalogStart)
 	sb.WriteString("Skills are loaded on-demand. Read skill content only when relevant to the current task.\n")
 	sb.WriteString(agentsSection)
@@ -235,10 +196,6 @@ wait for results, and report back.
 `
 }
 
-// behaviorParts splits the behavior guidance so the instruction to call tools
-// in the same response survives when the polling tools are not offered, and
-// the rule to call a tool for run and create requests applies only when a task
-// or recurring monitor creation tool is offered.
 func behaviorParts() []promptPart {
 	return []promptPart{
 		{text: `<behavior>
@@ -265,7 +222,6 @@ has completed or failed. After completion, call fetch_task_output to get the res
 	}
 }
 
-// behaviorSection keeps the behavior guidance whose tools are offered.
 func (b *SystemPromptBuilder) behaviorSection() string {
 	return b.render(behaviorParts())
 }
@@ -282,9 +238,6 @@ Keep narration brief and value-dense; avoid repeating obvious steps.
 	}
 }
 
-// taskTypeParts describes each task type separately, and splits out sentences
-// that point to another task tool, so a caller offered only some task tools
-// still gets guidance for the ones it has.
 func taskTypeParts() []promptPart {
 	return []promptPart{
 		{text: `- container: Run a command in a container. Use create_container_task.
@@ -337,7 +290,6 @@ func taskTypeParts() []promptPart {
 	}
 }
 
-// taskTypesSection describes the task types whose tools are offered.
 func (b *SystemPromptBuilder) taskTypesSection() string {
 	parts := b.render(taskTypeParts())
 	if parts == "" {
@@ -346,7 +298,6 @@ func (b *SystemPromptBuilder) taskTypesSection() string {
 	return "<task_types>\n" + parts + "</task_types>\n\n"
 }
 
-// validationParts guides validation container tasks.
 func validationParts() []promptPart {
 	return []promptPart{
 		{text: `<validation>
@@ -366,8 +317,6 @@ Report the selected validation image, command, workspace ref/branch, and evidenc
 	}
 }
 
-// coordinationParts splits the coordination guidance by the chat tools each
-// part relies on, so a caller offered only some of them keeps the rest.
 func coordinationParts() []promptPart {
 	return []promptPart{
 		{text: `For complex multi-step tasks, use the self-bootstrapping coordinator pattern:
@@ -416,8 +365,6 @@ or when a child task's result makes other tasks unnecessary.
 const coordinationFallbackHeader = `When no agents exist and the user needs complex work done:
 `
 
-// coordinationFallbackParts says what to use when no agents exist. The last
-// item points to the one-shot pattern, which needs create_agent.
 func coordinationFallbackParts() []promptPart {
 	return []promptPart{
 		{text: `- For simple commands (e.g., "list pods", "check disk"): use create_container_task
@@ -430,7 +377,6 @@ func coordinationFallbackParts() []promptPart {
 	}
 }
 
-// coordinationSection keeps the coordination guidance whose tools are offered.
 func (b *SystemPromptBuilder) coordinationSection() string {
 	parts := b.render(coordinationParts())
 	if fallback := b.render(coordinationFallbackParts()); fallback != "" {
@@ -442,8 +388,6 @@ func (b *SystemPromptBuilder) coordinationSection() string {
 	return "<coordination>\n" + parts + "</coordination>\n\n"
 }
 
-// schedulingParts explains recurring tasks, which any task creation tool can
-// make.
 func schedulingParts() []promptPart {
 	return []promptPart{
 		{text: `<scheduling>
@@ -461,8 +405,6 @@ set the schedule parameter on the task.
 	}
 }
 
-// ruleParts lists the orchestration rules. General rules have no
-// requirements, so a caller missing a tool keeps them.
 func ruleParts() []promptPart {
 	return []promptPart{
 		{text: `PREFER create_container_task for shell commands, CLI tools, scripts.
@@ -529,7 +471,6 @@ func ruleParts() []promptPart {
 	}
 }
 
-// rulesSection numbers the rules whose tools are offered.
 func (b *SystemPromptBuilder) rulesSection() string {
 	rules := b.renderNumbered(ruleParts(), func(n int) string { return fmt.Sprintf("%d. ", n) }, "")
 	if rules == "" {
@@ -538,8 +479,6 @@ func (b *SystemPromptBuilder) rulesSection() string {
 	return "<rules>\n" + rules + "</rules>\n\n"
 }
 
-// exampleParts lists worked examples. The coordinator examples apply when the
-// caller can create a coordinator or start one with a task.
 func exampleParts() []promptPart {
 	return []promptPart{
 		{text: `"list all pods in the cluster"
@@ -583,7 +522,6 @@ func exampleParts() []promptPart {
 	}
 }
 
-// examplesSection numbers the examples whose tools are offered.
 func (b *SystemPromptBuilder) examplesSection() string {
 	examples := b.renderNumbered(exampleParts(), func(n int) string { return fmt.Sprintf("Example %d: ", n) }, "\n")
 	if examples == "" {
@@ -592,12 +530,7 @@ func (b *SystemPromptBuilder) examplesSection() string {
 	return "<examples>\n" + examples + "</examples>\n"
 }
 
-// buildDynamicContext fetches agents, tools, and providers from the cluster and formats them.
-// Each list is sorted by name: a cached client lists in no fixed order, and the
-// system prompt must not change between requests while the cluster does not, or
-// every request misses the provider's prompt cache.
 func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSection, toolsSection, providersSection, skillsSection string, err error) {
-	// Fetch agents
 	var agentList corev1alpha1.AgentList
 	if err := b.client.List(ctx, &agentList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing agents: %w", err)
@@ -617,7 +550,6 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 		agentsSection = strings.Join(agentLines, "\n") + "\n"
 	}
 
-	// Fetch custom tools
 	var toolList corev1alpha1.ToolList
 	if err := b.client.List(ctx, &toolList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing tools: %w", err)
@@ -625,7 +557,6 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	slices.SortFunc(toolList.Items, func(a, b corev1alpha1.Tool) int { return strings.Compare(a.Name, b.Name) })
 
 	toolLines := make([]string, 0, len(toolList.Items)+5)
-	// Built-in tools
 	toolLines = append(toolLines,
 		"web_search - Search the web for information (built-in)",
 		"code_exec - Execute code snippets (built-in)",
@@ -641,7 +572,6 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 
 	toolsSection = strings.Join(toolLines, "\n") + "\n"
 
-	// Fetch providers
 	var providerList corev1alpha1.ProviderList
 	if err := b.client.List(ctx, &providerList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing providers: %w", err)
@@ -679,7 +609,6 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	providersSection = fmt.Sprintf("Runtime: %s | providers=[%s] | agents=%d | tools=%d | container=yes | agent_runtimes=[%s]\n",
 		sessionInfo, strings.Join(providerNames, ", "), len(agentList.Items), len(toolList.Items)+5, runtimeInfo)
 
-	// Fetch skills
 	var skillList corev1alpha1.SkillList
 	if err := b.client.List(ctx, &skillList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing skills: %w", err)
@@ -705,7 +634,6 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	return agentsSection, toolsSection, providersSection, skillsSection, nil
 }
 
-// formatAgent produces a single-line summary for an agent.
 func formatAgent(agent *corev1alpha1.Agent) string {
 	var parts []string
 

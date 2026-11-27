@@ -68,8 +68,6 @@ func TestEnsureSubstrateActorEgressPolicyReplacesChangedCredentialEffects(t *tes
 	if control.updates != 1 || !strings.Contains(control.policy.GetRules()[0].GetHttps().GetEffects().GetReplaceHeaders()[0].GetCredentialUri(), "github-token-v2") {
 		t.Fatal("a changed credential reference was not re-applied")
 	}
-	// Dropping the credential also replaces the rule rather than leaving
-	// the gateway injecting a Secret the Tool no longer names.
 	if err := ensureSubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", []SubstrateEgressRule{{Scheme: "https", Host: "api.github.com"}}); err != nil {
 		t.Fatal(err)
 	}

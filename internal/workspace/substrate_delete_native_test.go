@@ -33,7 +33,6 @@ func TestSubstrateNativeDeleteDoesNotRequireSnapshot(t *testing.T) {
 					}, nil
 				case ateapipb.Control_SuspendActor_FullMethodName:
 					suspends.Add(1)
-					// Upstream gVisor rejects Data capture without durable mounts.
 					return nil, status.Error(codes.FailedPrecondition, "no durable-dir volumes found for VOLUMES snapshot")
 				case ateapipb.Control_DeleteActor_FullMethodName:
 					deletes.Add(1)

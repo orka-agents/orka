@@ -10,8 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runLostResponses checks the retries a lost response causes: each replays
-// the original outcome without a second effect.
 func runLostResponses(t *testing.T, newProvider StateFactory) {
 	prepare := func(t *testing.T) (storagev1.StateProvider, string) {
 		provider := newProvider(t)
@@ -63,7 +61,6 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 		release := envelope(t, dataset, "ReleaseLockWithTokenUsage", lockOwner("tenant", "session", "task-a", "uid-a"), 5, 6)
 		releaseCtx := storagev1.WithWriteEnvelope(ctx, release)
 		require.NoError(t, provider.ReleaseLockWithTokenUsage(releaseCtx, lockOwner("tenant", "session", "task-a", "uid-a"), 5, 6))
-		// The Task's next attempt keeps its UID and takes the lock again.
 		require.NoError(t, provider.AcquireLock(ctx, "tenant", "session", "task-a", "uid-a", leaseNow))
 		require.NoError(t, provider.ReleaseLockWithTokenUsage(releaseCtx, lockOwner("tenant", "session", "task-a", "uid-a"), 5, 6))
 
@@ -259,8 +256,6 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 	t.Run("a replayed send returns the assigned ID without a second message", func(t *testing.T) {
 		provider, dataset := prepare(t)
 		ctx := t.Context()
-		// A caller that supplies its own envelope stamps the creation time
-		// before computing the digest.
 		sent := inboxMessage("hello")
 		sent.CreatedAt = writeCaseCreated
 		send := envelope(t, dataset, "SendMessage", sent)
@@ -416,7 +411,6 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// inboxMessage returns a message to the inbox the retry cases read.
 func inboxMessage(content string) *storagev1.Message {
 	return &storagev1.Message{Namespace: "tenant", FromTask: "writer", ToTask: "reader", ParentTask: "parent", Content: content}
 }
@@ -426,7 +420,6 @@ func sendInboxMessage(t *testing.T, provider storagev1.StateProvider, content st
 	require.NoError(t, provider.SendMessage(t.Context(), inboxMessage(content)))
 }
 
-// inboxRequest consumes up to limit messages of the retry cases' inbox.
 func inboxRequest(limit int) storagev1.ConsumeMessagesRequest {
 	return storagev1.ConsumeMessagesRequest{Namespace: "tenant", TaskName: "reader", ParentTask: "parent", Limit: limit}
 }

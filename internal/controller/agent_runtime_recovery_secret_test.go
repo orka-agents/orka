@@ -89,8 +89,6 @@ func TestAgentRuntimeRecoverySupervisorSecretTypes(t *testing.T) {
 			t.Run(source+"/"+string(secretType), func(t *testing.T) {
 				spec := recoverySecretTestPodSpec()
 				addRecoverySupervisorSecret(&spec, source)
-				// Secret type is unavailable to the pure PodSpec validator. These
-				// references must be resolved before enrollment or retirement use.
 				if err := validateAgentRuntimeRecoveryPodSpec(spec, "supervisor", "agentkit"); err != nil {
 					t.Fatalf("pure topology rejected a supported reference: %v", err)
 				}
@@ -119,7 +117,6 @@ func TestAgentRuntimeRecoverySupervisorSecretsFailClosed(t *testing.T) {
 		t.Run(source, func(t *testing.T) {
 			spec := recoverySecretTestPodSpec()
 			addRecoverySupervisorSecret(&spec, source)
-			// A same-name Secret in another namespace cannot satisfy the read.
 			base := recoverySecretTestClient(t, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "configuration"}, Type: corev1.SecretTypeOpaque})
 			reader := &recoverySecretTypeReader{Reader: base}
 			r := &AgentRuntimeReconciler{Client: base, APIReader: reader}
@@ -192,7 +189,6 @@ func TestAgentRuntimeRecoverySupervisorSecretsKeepBrokerIdentityAndDeduplicateCo
 	if !reflect.DeepEqual(before, &spec) {
 		t.Fatal("validation changed the original Pod specification")
 	}
-	// Sharing that same volume with the supervisor must restore the refusal.
 	supervisor, err := recoverySupervisorContainer(&spec, "supervisor")
 	if err != nil {
 		t.Fatal(err)
@@ -232,8 +228,6 @@ func TestAgentRuntimeRecoverySupervisorSecretsBlockBackendEnrollment(t *testing.
 			rs.Spec.Template.Spec = *deployment.Spec.Template.Spec.DeepCopy()
 			pod.Spec = *deployment.Spec.Template.Spec.DeepCopy()
 			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "configuration"}, Type: corev1.SecretTypeServiceAccountToken}
-			// recoveryBackend rejects at the Deployment check before endpoint
-			// admission or a boot witness. No server, provider, or credential is used.
 			base := recoverySecretTestClient(t, deployment, rs, pod, service, slice, secret)
 			reader := &recoverySecretTypeReader{Reader: base}
 			r := &AgentRuntimeReconciler{Client: base, APIReader: reader}

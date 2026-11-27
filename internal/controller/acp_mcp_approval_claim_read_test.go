@@ -66,8 +66,6 @@ func configureApprovalClaimReadFault(t *testing.T, f *mcpApprovalFixture, source
 			if len(values) != 1 || values[0].ExecutionOutcome != "running" {
 				return nil
 			}
-			// Preparation retains the review deadline; the authority
-			// watchdog uses a five-second read.
 			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= 5*time.Second {
 				select {
 				case watchdogReads <- struct{}{}:
@@ -135,9 +133,6 @@ func TestMCPApprovalPreparationPreservesExecutionBudgetAndLease(t *testing.T) {
 	require.NotNil(t, claimed.LeaseExpiresAt)
 	require.WithinDuration(t, pending.ExpiresAt.Add(harnessv2.MCPApprovalExecutionTimeout+externalEffectLeaseSettlementMargin), *claimed.LeaseExpiresAt, time.Millisecond)
 
-	// Hold the acknowledged claim before releasing its preparation reads.
-	// The executor must still receive its full budget, not the time left
-	// from a deadline installed before this outage.
 	timer := time.NewTimer(250 * time.Millisecond)
 	defer timer.Stop()
 	select {
@@ -247,8 +242,6 @@ func TestMCPApprovalClaimReadRecoveryKeepsOneExecutionOwner(t *testing.T) {
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 			claimed := requireApprovalClaimReadRetrying(t, f, fault, done, duplicate)
 			if source == "final prompt" {
-				// Keep the outage through multiple watchdog polls. A strict
-				// execution watcher must not cancel preparation on unreadability.
 				for range 2 {
 					select {
 					case <-watchdogReads:
@@ -305,8 +298,6 @@ func TestMCPApprovalClaimReadRecoveryRechecksAuthorityAndExpiry(t *testing.T) {
 			code := acpApprovalCodeExpired
 			switch change {
 			case "credential drift":
-				// Let an existing guarded read return the outage before
-				// recovery, so the next iteration must refresh credentials.
 				guard := f.broker.EpochMutations.(*approvalTestGuard)
 				guard.Lock()
 				f.authorized.Store(false)

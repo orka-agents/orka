@@ -12,8 +12,6 @@ func TestBrokeredApprovalCapabilityRemainsOptInOnTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Older controllers reject unknown capability fields. An unqualified
-	// supervisor must still decode against their approval-free wire contract.
 	var legacy struct {
 		ProviderKinds       []string `json:"providerKinds"`
 		SupportsPermissions bool     `json:"supportsPermissions"`

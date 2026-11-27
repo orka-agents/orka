@@ -16,13 +16,9 @@ import { api, apiError, DEMO_NAMESPACE, digest, inDemoNamespace, list, notFound,
 import { REPOS, type AgentKey, type RepoKey } from '../world'
 import { cancelDemoTask, createDemoTask } from './tasks'
 
-// Repository monitor API. Runs, commands, and the work they queue progress on
-// timers that are settled lazily on the next request.
-
 const PR_INTENTS = new Set(['review', 'fix', 'fix_ci', 'update_branch'])
 const ISSUE_INTENTS = new Set(['triage', 'research', 'plan', 'implement', 'decompose', 'stop', 'resume'])
 
-/** Which agent handles a command intent, and the issue phase it queues. */
 const INTENT_AGENT: Record<string, AgentKey> = {
   review: 'reviewer', fix: 'fixer', fix_ci: 'fixer',
   triage: 'triage', research: 'coordinator', plan: 'coordinator', decompose: 'coordinator', implement: 'fixer',
@@ -34,7 +30,6 @@ const DONE_PHASE: Record<string, string> = {
   triage: 'triaged', research: 'researched', plan: 'plan_ready', decompose: 'plan_ready', implement: 'patch_ready',
 }
 
-/** Timers for work queued from the dashboard. */
 interface Pending {
   commandID: string
   commandProcessedMs: number
@@ -47,7 +42,6 @@ interface Pending {
 }
 const pending: Pending[] = []
 
-/** Monitors created in the demo report Pending until this time. */
 const readyAt = new Map<string, number>()
 
 const findMonitor = (name: string) => monitors.find((m) => m.metadata.name === name)
@@ -61,7 +55,6 @@ function settle(nowMs = Date.now()) {
       command.processedAt = new Date(entry.commandProcessedMs).toISOString()
     }
     if (!entry.workActionID) {
-      // Stop and resume only flip the command's status.
       if (nowMs >= entry.commandProcessedMs) pending.splice(pending.indexOf(entry), 1)
       continue
     }
@@ -81,7 +74,6 @@ function settle(nowMs = Date.now()) {
       work.completedAt = doneAt
       const job = implementationJobs.find((j) => j.workActionID === work.id)
       if (job) {
-        // A ready patch still waits for its pull request, so the job stays active.
         Object.assign(job, { phase: 'patch_ready', validationState: 'passed', patchArtifactID: `art_${digest(`${job.id}:patch`, 8)}`, updatedAt: doneAt })
       }
     }
@@ -89,14 +81,8 @@ function settle(nowMs = Date.now()) {
   }
 }
 
-/** Implementation job phases the controller still treats as in flight. */
 const ACTIVE_JOB_PHASES = new Set(['implementation_queued', 'implementing', 'patch_ready', 'mutation_queued', 'mutating_to_pr'])
 
-/**
- * Stop fences the item's in-flight work the way the controller does: queued and
- * running work actions, active implementation jobs, and the work's tasks are
- * cancelled, so work that would have finished later cannot undo the stop.
- */
 function cancelItemWork(monitorName: string, kind: string, number: number, nowMs: number) {
   const at = new Date(nowMs).toISOString()
   const reason = 'stopped by command'
@@ -116,7 +102,6 @@ function cancelItemWork(monitorName: string, kind: string, number: number, nowMs
   }
 }
 
-/** Applies the outcome of finished work to the item and records an action. */
 function completeItem(entry: Pending, doneAt: string, work?: MonitorWorkAction) {
   const item = findItem(entry.monitorName, entry.itemKey)
   if (!item) return
@@ -155,14 +140,12 @@ function completeItem(entry: Pending, doneAt: string, work?: MonitorWorkAction) 
   })
 }
 
-/** A monitor with run bookkeeping and readiness derived from the current state. */
 function viewMonitor(monitor: RepositoryMonitor): RepositoryMonitor {
   const name = monitor.metadata.name
   const monitorRuns = runs.filter((r) => r.run.monitorName === name).sort((a, b) => b.startedMs - a.startedMs).map((r) => viewMonitorRun(r))
   const lastSucceeded = monitorRuns.find((r) => r.phase === 'succeeded')
   const pendingUntil = readyAt.get(name)
   const phase = pendingUntil && Date.now() < pendingUntil ? 'Pending' : monitor.status?.phase === 'Pending' ? 'Ready' : monitor.status?.phase
-  // Queue counters follow the recorded items so dashboard commands move them.
   const prs = items.filter((i) => i.monitorName === name && i.kind === 'pull_request')
   const issues = items.filter((i) => i.monitorName === name && i.kind === 'issue')
   const counters = prs.length === 0 ? {} : {
@@ -229,7 +212,6 @@ function taskPrompt(intent: string, item: MonitorItem | undefined, kind: string,
   }
 }
 
-/** Starts a demo task for the command, if the tasks domain can create one. */
 function startTask(intent: string, monitor: RepositoryMonitor, item: MonitorItem | undefined, kind: string, number: number): string | undefined {
   const agent = INTENT_AGENT[intent]
   if (!agent) return undefined
@@ -255,7 +237,6 @@ const byMonitor = <T extends { monitorName: string }>(collection: T[], request: 
   return list(collection.filter((entry) => !name || entry.monitorName === name))
 }
 
-/** Repository monitors: inventory, runs, commands, and the audit trail. */
 export const monitorHandlers: RequestHandler[] = [
   http.get(api('/monitors/repositories'), ({ request }) => {
     settle()

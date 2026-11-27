@@ -60,7 +60,6 @@ describe('TaskSchedulePanel', () => {
           items: [
             run('nightly-older', 'parent-uid', 120, 'Failed'),
             run('nightly-newer', 'parent-uid', 10, 'Succeeded'),
-            // Owned by an earlier Task with the same name: not this schedule's run.
             run('nightly-stale', 'old-parent-uid', 5, 'Succeeded'),
           ],
           metadata: {},

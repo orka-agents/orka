@@ -20,16 +20,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// acpDispatchWakeMinInterval bounds how often wakeups can start a dispatch
-// scan. Each scan lists every Task and reads durable state, so a burst of
-// events coalesces into at most one extra scan per interval; the periodic
-// ticker is unchanged.
 const acpDispatchWakeMinInterval = 200 * time.Millisecond
 
-// Wake asks the dispatcher to scan before its next tick. It never blocks, and
-// wakeups that arrive while one is pending coalesce. A wakeup only moves a
-// scan earlier: reservation still re-reads the Task, the epoch fence, and the
-// RuntimePool admission state.
 func (d *ACPDispatcher) Wake() {
 	d.wokenAt.CompareAndSwap(0, time.Now().UnixNano())
 	select {
@@ -43,28 +35,15 @@ func (d *ACPDispatcher) wakeChannel() chan struct{} {
 	return d.wake
 }
 
-// wakeForAdmission is Wake for a RuntimePool that has just begun admitting
-// work: the next scan starts as soon as the current one ends, without the
-// minimum interval. Admission openings happen once per runtime instance, not
-// per prompt, so they cannot turn into a burst of scans; the scan itself and
-// every reservation check are unchanged.
 func (d *ACPDispatcher) wakeForAdmission() {
 	d.admissionWake.Store(true)
 	d.Wake()
 }
 
-// takeAdmissionWake reports, once, that a wakeup came from an admission
-// opening.
 func (d *ACPDispatcher) takeAdmissionWake() bool {
 	return d.admissionWake.Swap(false)
 }
 
-// waitForNextDispatchScan blocks until the ticker fires, or a wakeup arrives
-// and at least acpDispatchWakeMinInterval has passed since lastScan. A wakeup
-// for which immediate reports true starts the scan at once, including one that
-// arrives while an earlier wakeup waits out the interval. Whatever starts the
-// scan, a pending admission wakeup is consumed with it, so it never lets a
-// later ordinary wakeup skip the interval. It reports false when ctx ends.
 func waitForNextDispatchScan(ctx context.Context, tick <-chan time.Time, wake <-chan struct{}, lastScan time.Time, immediate func() bool) bool {
 	admission := func() bool { return immediate != nil && immediate() }
 	select {
@@ -76,8 +55,6 @@ func waitForNextDispatchScan(ctx context.Context, tick <-chan time.Time, wake <-
 	case <-wake:
 	}
 	for {
-		// Consume the admission flag before the interval test so it cannot
-		// outlive the scan this wakeup starts.
 		admitted := admission()
 		if admitted || acpDispatchWakeMinInterval-time.Since(lastScan) <= 0 {
 			return true
@@ -95,16 +72,11 @@ func waitForNextDispatchScan(ctx context.Context, tick <-chan time.Time, wake <-
 			admission()
 			return true
 		case <-wake:
-			// Re-evaluate: this wakeup may be an admission opening.
 			timer.Stop()
 		}
 	}
 }
 
-// registerDispatchWakeHandlers wakes the dispatcher when a Task becomes
-// queued for dispatch and when a RuntimePool starts serving or accepting, or
-// frees capacity. Without informers, or if registration fails, the dispatcher keeps
-// its periodic scan only. The returned function removes the handlers.
 func (d *ACPDispatcher) registerDispatchWakeHandlers(ctx context.Context) func() {
 	if d.Informers == nil {
 		return func() {}
@@ -152,8 +124,6 @@ func (d *ACPDispatcher) registerDispatchWakeHandlers(ctx context.Context) func()
 	}
 }
 
-// acpTaskEnteredDispatchQueue reports a Task update that the next dispatch
-// scan can act on: it newly reached Queued, or was rebound to another target.
 func acpTaskEnteredDispatchQueue(oldTask, newTask *corev1alpha1.Task) bool {
 	if newTask == nil || newTask.Status.Execution == nil ||
 		newTask.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
@@ -167,12 +137,6 @@ func acpTaskEnteredDispatchQueue(oldTask, newTask *corev1alpha1.Task) bool {
 		previous.RuntimePoolUID != current.RuntimePoolUID || previous.AgentRuntimeUID != current.AgentRuntimeUID
 }
 
-// acpRuntimePoolOpenedForDispatch reports a RuntimePool update after which a
-// waiting Task may now be reservable, mirroring runtimePoolReservationAdmission:
-// prompt slots need a Serving pool with an active instance, and only a new
-// resident session also needs Accepting. It wakes when the pool starts
-// serving, starts accepting sessions, changes its active instance, or frees
-// prompt or session capacity while serving.
 func acpRuntimePoolOpenedForDispatch(oldPool, newPool *corev1alpha1.RuntimePool) bool {
 	if !runtimePoolServingForDispatch(newPool) {
 		return false
@@ -180,9 +144,6 @@ func acpRuntimePoolOpenedForDispatch(oldPool, newPool *corev1alpha1.RuntimePool)
 	if acpRuntimePoolAdmissionOpened(oldPool, newPool) {
 		return true
 	}
-	// Reopening to sessions is always a dispatch wake, even when it is only
-	// capacity turnover on a full pool, which the admission fast path leaves
-	// behind the minimum interval.
 	if newPool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
 		oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting {
 		return true
@@ -195,11 +156,6 @@ func acpRuntimePoolOpenedForDispatch(oldPool, newPool *corev1alpha1.RuntimePool)
 		len(current.Reservations) < len(previous.Reservations)
 }
 
-// acpRuntimePoolAdmissionOpened reports the subset of
-// acpRuntimePoolOpenedForDispatch in which the pool itself began admitting:
-// it starts serving, starts accepting sessions other than by freeing capacity
-// on a full pool, or serves a new active instance. A Task waiting for a
-// booting or resuming runtime is reservable from this update on.
 func acpRuntimePoolAdmissionOpened(oldPool, newPool *corev1alpha1.RuntimePool) bool {
 	if !runtimePoolServingForDispatch(newPool) {
 		return false
@@ -207,9 +163,6 @@ func acpRuntimePoolAdmissionOpened(oldPool, newPool *corev1alpha1.RuntimePool) b
 	if !runtimePoolServingForDispatch(oldPool) {
 		return true
 	}
-	// A full pool is Serving and Closed only because it is at capacity;
-	// freeing a slot reopens it during ordinary capacity turnover, which
-	// stays behind the minimum scan interval like any other capacity free.
 	if newPool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting &&
 		oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionAccepting &&
 		(oldPool.Status.AdmissionState != corev1alpha1.RuntimePoolAdmissionClosed || !runtimePoolAtCapacity(oldPool.Status.Capacity)) {

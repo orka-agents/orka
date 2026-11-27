@@ -14,11 +14,8 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// minRedactedCredentialBytes ignores values too short to be a credential, as
-// the workspace-delta credential check does: replacing them would mangle text.
 const minRedactedCredentialBytes = 8
 
-// Harness bounds on agent-controlled strings, applied again after redaction.
 const (
 	maxACPToolNameBytes         = 253
 	maxACPToolKindBytes         = 128
@@ -26,12 +23,7 @@ const (
 	maxPermissionOptionNameByte = 512
 )
 
-// credentialRedactor replaces the exact credential values a session's agent
-// can see or the supervisor holds. It runs on every event before it leaves the
-// supervisor; the shared pattern redaction then covers credential shapes
-// Orka did not issue.
 type credentialRedactor struct {
-	// values are unique and longest first, so the longest match wins.
 	values   []string
 	replacer *strings.Replacer
 }
@@ -55,9 +47,6 @@ func newCredentialRedactor(values ...string) *credentialRedactor {
 	return redactor
 }
 
-// sessionCredentialRedactor covers the session's proxy credentials, their
-// derived forms placed in the agent's environment, and the supervisor's own
-// controller, capability and upstream provider credentials.
 func (s *Server) sessionCredentialRedactor(state *sessionState) *credentialRedactor {
 	values := []string{s.cfg.ControllerBearerToken, string(s.cfg.CapabilitySecret), s.cfg.ProviderProxy.UpstreamBearerToken}
 	if state != nil && state.providerProxy != nil && len(state.providerProxy.credential) > 0 {
@@ -89,8 +78,6 @@ func (r *credentialRedactor) containedIn(data []byte) bool {
 	return false
 }
 
-// heldPrefixLength is the length of the longest suffix of text that begins a
-// credential, which must wait for the next chunk.
 func (r *credentialRedactor) heldPrefixLength(text string) int {
 	held := 0
 	for _, value := range r.values {
@@ -104,22 +91,10 @@ func (r *credentialRedactor) heldPrefixLength(text string) int {
 	return held
 }
 
-// redactionStream redacts one stream of text that arrives in chunks, so a
-// credential split across chunks is still replaced. It holds back a suffix
-// that could begin an exact credential, and text whose pattern redaction
-// could still change: the last word, and anything still waiting for a value.
 type redactionStream struct {
 	redactor *credentialRedactor
 	held     string
-	// overflow takes everything once the held text passed
-	// maxPatternHeldBytes with no safe cut. The stream then releases nothing
-	// until it ends, so a long unfinished construct costs one pass rather
-	// than one per chunk.
 	overflow *strings.Builder
-	// released is how many bytes at the start of the held text were sent
-	// already, ahead of an interleaved event, and sent is the text the client
-	// got for them. The held text stays, so what follows is redacted together
-	// with it, and only what the client has not got is sent.
 	released int
 	sent     string
 }
@@ -128,9 +103,6 @@ func (r *credentialRedactor) stream() *redactionStream {
 	return &redactionStream{redactor: r}
 }
 
-// write returns the text that can no longer be part of a credential, with
-// exact credentials replaced. Pattern redaction of the returned text cannot
-// change with what follows.
 func (s *redactionStream) write(chunk string) string {
 	if s == nil {
 		return chunk
@@ -146,13 +118,10 @@ func (s *redactionStream) write(chunk string) string {
 		limit = len(text) - s.redactor.heldPrefixLength(text)
 	}
 	cut := 0
-	// Without new whitespace and with the held text unchanged, the only
-	// candidate cuts are the ones the held text was already refused at.
 	if text != joined || strings.ContainsAny(chunk, redactionWhitespace) {
 		cut = patternSafeCut(text, limit)
 	}
 	if cut < s.released {
-		// A cut inside text already sent would split what the client got.
 		cut = 0
 	}
 	if cut == 0 && len(text) > maxPatternHeldBytes {
@@ -168,12 +137,6 @@ func (s *redactionStream) write(chunk string) string {
 	return s.unsent(text[:cut], cut > 0)
 }
 
-// unsent returns what the client has not got of final, the start of the held
-// text, and with done forgets what was sent of it. With nothing sent early,
-// final is returned as it is, to be redacted by the caller. Otherwise final is
-// redacted whole, so a credential that began in the text sent early is still
-// recognized, and the client gets the redacted text past what it has. When
-// the redaction covers some of what it has, it gets the redaction itself.
 func (s *redactionStream) unsent(final string, done bool) string {
 	if s.released == 0 {
 		return final
@@ -184,8 +147,6 @@ func (s *redactionStream) unsent(final string, done bool) string {
 	redacted := executionevents.RedactExecutionEventText(final)
 	common := 0
 	if len(redacted) >= len(s.sent) && strings.EqualFold(redacted[:len(s.sent)], s.sent) {
-		// The text sent early is plain ASCII; URL serialization can only
-		// lowercase it as a scheme, which the client's copy already shows.
 		common = len(s.sent)
 	}
 	for common < len(redacted) && common < len(s.sent) && redacted[common] == s.sent[common] {
@@ -198,27 +159,14 @@ func (s *redactionStream) unsent(final string, done bool) string {
 	return redacted[common:]
 }
 
-// maxPatternHeldBytes bounds the text a stream re-examines on each chunk.
-// Text with no safe cut in that much is held to the end of the stream, never
-// released early.
 const maxPatternHeldBytes = harnessv2.MaxProtocolStringBytes
 
-// redactionWhitespace is what `\s` matches in the redaction patterns.
 const redactionWhitespace = " \t\n\f\r"
 
-// redactionProbes stand in for a value that has not arrived yet. If one
-// changes when appended, the text before it ends in a construct that redacts
-// what follows, such as "token is " or `password: "`.
 var redactionProbes = []string{
 	"Q7f2Lk9Xw3Rt8Zp1Vn5Bc6Md4Hs0Gy", `Q7f2Lk9Xw3Rt8Zp1Vn5Bc6Md4Hs0Gy"`, `Q7f2Lk9Xw3Rt8Zp1Vn5Bc6Md4Hs0Gy'`,
 }
 
-// patternSafeCut returns where text can be cut, at or before limit, so that
-// pattern redaction of the part before the cut cannot change with what
-// follows, or 0 when there is no such cut yet. A cut follows whitespace, so
-// no word is split; nothing before it waits for a value; and no match crosses
-// it. Only the last whitespace and the last line break are tried, so the work
-// per chunk stays bounded by the held text.
 func patternSafeCut(text string, limit int) int {
 	space := strings.LastIndexAny(text[:limit], redactionWhitespace) + 1
 	line := strings.LastIndexByte(text[:limit], '\n') + 1
@@ -230,7 +178,6 @@ func patternSafeCut(text string, limit int) int {
 	return 0
 }
 
-// patternFinal reports whether prefix redacts the same whatever follows it.
 func patternFinal(prefix, rest string) bool {
 	redacted := executionevents.RedactExecutionEventText(prefix)
 	for _, probe := range redactionProbes {
@@ -241,7 +188,6 @@ func patternFinal(prefix, rest string) bool {
 	return redacted+executionevents.RedactExecutionEventText(rest) == executionevents.RedactExecutionEventText(prefix+rest)
 }
 
-// flush returns the held text once its stream ended.
 func (s *redactionStream) flush() string {
 	if s == nil {
 		return ""
@@ -257,24 +203,10 @@ func (s *redactionStream) flush() string {
 	return s.unsent(text, true)
 }
 
-// releasablePlainText is held text that can be sent before an interleaved
-// event: ASCII words, spaces and sentence punctuation. Without URL, query,
-// assignment, quoting or escaping characters it can hold no part of a URL's
-// password, query or fragment, and redacting it together with what follows
-// can only replace it, never rewrite it, so the client's copy stays a prefix.
 var releasablePlainText = regexp.MustCompile(`^[A-Za-z0-9 \t\n\f\r.,;!'()*_~-]*$`)
 
-// heldCredentialShape matches plain text that may still be the start of a
-// credential: a JWT, or a long token-like run.
 var heldCredentialShape = regexp.MustCompile(`eyJ|[A-Za-z0-9_~-]{16,}`)
 
-// release sends the held text before an event of another kind, so the text
-// keeps its place among them, when it is no part of a credential on its own:
-// it is plain text, begins no exact credential, waits for no value, and does
-// not look like the start of a credential. The text stays held, and what follows it is
-// redacted together with it, so a credential it turns out to begin, such as
-// "password" followed by "=value", is still redacted. Otherwise nothing is
-// sent until the stream's next chunk or end. The returned text is redacted.
 func (s *redactionStream) release() string {
 	if s == nil || s.overflow != nil || len(s.held) == s.released {
 		return ""
@@ -298,7 +230,6 @@ func (s *redactionStream) pending() bool {
 	return s != nil && (len(s.held) > s.released || s.overflow != nil && s.overflow.Len() > 0)
 }
 
-// redactPermission redacts the agent-controlled text of a permission request.
 func (r *credentialRedactor) redactPermission(permission *harnessv2.PermissionRequestedEvent) {
 	permission.Title = boundACPToolCallTitle(r.replace(permission.Title))
 	for i := range permission.Options {
@@ -306,8 +237,6 @@ func (r *credentialRedactor) redactPermission(permission *harnessv2.PermissionRe
 	}
 }
 
-// permissionRawInput returns the redacted input of the call a permission
-// request is for, or nothing when it is not a JSON value within the bound.
 func (r *credentialRedactor) permissionRawInput(toolCall json.RawMessage) json.RawMessage {
 	var call struct {
 		RawInput json.RawMessage `json:"rawInput"`
@@ -325,7 +254,6 @@ func (r *credentialRedactor) permissionRawInput(toolCall json.RawMessage) json.R
 	return raw
 }
 
-// redactText applies exact then pattern redaction to a complete value.
 func (r *credentialRedactor) redactText(value string) string {
 	if value == "" {
 		return value
@@ -333,12 +261,6 @@ func (r *credentialRedactor) redactText(value string) string {
 	return executionevents.RedactExecutionEventText(r.replace(value))
 }
 
-// redactToolCall redacts every text field of a tool update. Content, raw
-// input and diffs are complete snapshots in ACP, so exact replacement needs no
-// hold-back across updates.
-//
-// Redaction can lengthen text, so each field is bounded again afterwards:
-// content or edits that no longer fit are dropped and marked omitted.
 func (r *credentialRedactor) redactToolCall(tool *harnessv2.ToolCallUpdate) {
 	if tool == nil {
 		return
@@ -373,7 +295,6 @@ func (r *credentialRedactor) redactToolCall(tool *harnessv2.ToolCallUpdate) {
 	}
 }
 
-// truncateUTF8 bounds text to limit bytes on a rune boundary.
 func truncateUTF8(text string, limit int) string {
 	if len(text) <= limit {
 		return text
@@ -385,8 +306,6 @@ func truncateUTF8(text string, limit int) string {
 	return text[:cut]
 }
 
-// redactRawInput redacts every string in a JSON value. It returns nil when
-// the value cannot be decoded, so undecodable input never leaves unredacted.
 func (r *credentialRedactor) redactRawInput(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return nil
@@ -409,7 +328,6 @@ func (r *credentialRedactor) redactJSONValue(value any) any {
 	case string:
 		return r.redactText(typed)
 	case json.Number:
-		// A credential made only of digits decodes as a number.
 		if replaced := r.replace(string(typed)); replaced != string(typed) {
 			return replaced
 		}
@@ -430,9 +348,6 @@ func (r *credentialRedactor) redactJSONValue(value any) any {
 	}
 }
 
-// scrubEvent is the last check before an event is encoded: any exact
-// credential still present anywhere in the event is replaced in every string.
-// The per-field redaction above makes this a no-op in practice.
 func (r *credentialRedactor) scrubEvent(event *harnessv2.Event) error {
 	if r == nil || r.replacer == nil || event == nil {
 		return nil
@@ -462,7 +377,6 @@ func (r *credentialRedactor) scrubEvent(event *harnessv2.Event) error {
 		return err
 	}
 	if r.containedIn(encoded) {
-		// Fail closed: the event is not sent.
 		return errEventCarriesCredential
 	}
 	*event = replaced
@@ -496,8 +410,6 @@ func (r *credentialRedactor) replaceJSONValue(value any) any {
 	}
 }
 
-// textRedaction returns the redaction stream of an assistant or thought
-// update.
 func (p *promptState) textRedaction(update *harnessv2.UpdateEvent) (*redactionStream, bool) {
 	switch {
 	case update.AssistantMessage != nil:
@@ -520,7 +432,6 @@ func updateText(update *harnessv2.UpdateEvent) string {
 	}
 }
 
-// redactUpdate redacts a non-text update in place.
 func (p *promptState) redactUpdate(update *harnessv2.UpdateEvent) {
 	switch {
 	case update.ToolCall != nil:
@@ -543,9 +454,6 @@ func (p *promptState) redactUpdate(update *harnessv2.UpdateEvent) {
 	}
 }
 
-// textUpdateEventsLocked builds the events for redacted text of one kind,
-// pattern-redacting it and splitting it to the per-event bound. Callers hold
-// s.mu.
 func (s *Server) textUpdateEventsLocked(
 	state *sessionState, prompt *promptState, kind harnessv2.UpdateKind, text string, at time.Time,
 ) []harnessv2.Event {
@@ -567,7 +475,6 @@ func (s *Server) textUpdateEventsLocked(
 	return events
 }
 
-// identifiedLocked gives an event the prompt's next sequence. Callers hold s.mu.
 func (s *Server) identifiedLocked(state *sessionState, prompt *promptState, at time.Time, event harnessv2.Event) harnessv2.Event {
 	prompt.sequence++
 	prompt.lastEventAt = at
@@ -576,8 +483,6 @@ func (s *Server) identifiedLocked(state *sessionState, prompt *promptState, at t
 	return event
 }
 
-// flushHeldTextLocked ends both text streams and returns their held text as
-// events. Callers hold s.mu.
 func (s *Server) flushHeldTextLocked(state *sessionState, prompt *promptState, at time.Time) []harnessv2.Event {
 	var events []harnessv2.Event
 	if prompt.assistantRedaction.pending() {
@@ -591,12 +496,6 @@ func (s *Server) flushHeldTextLocked(state *sessionState, prompt *promptState, a
 	return events
 }
 
-// releaseHeldTextLocked returns as events the held text of the streams other
-// than except that can be released before an interleaved event, so a word
-// held at the end of a message does not follow the tool call or thought that
-// came after it. Text that could still be part of a credential stays held:
-// a tool update or another stream can come between two chunks of one
-// message. Callers hold s.mu.
 func (s *Server) releaseHeldTextLocked(
 	state *sessionState, prompt *promptState, except *redactionStream, at time.Time,
 ) []harnessv2.Event {
@@ -612,11 +511,6 @@ func (s *Server) releaseHeldTextLocked(
 	return events
 }
 
-// flushTextRedaction ends both text streams when the prompt's event stream
-// ends. Before then, held text is released by its own stream's next chunk,
-// or before an interleaved event only when releaseHeldTextLocked finds it
-// safe. The held text keeps the last event's time, so it never follows the
-// terminal event's settlement time.
 func (s *Server) flushTextRedaction(state *sessionState, prompt *promptState) []harnessv2.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -627,7 +521,6 @@ func (s *Server) flushTextRedaction(state *sessionState, prompt *promptState) []
 	return s.flushHeldTextLocked(state, prompt, at)
 }
 
-// splitUTF8 splits text into pieces of at most limit bytes on rune boundaries.
 func splitUTF8(text string, limit int) []string {
 	var pieces []string
 	for len(text) > limit {

@@ -18,23 +18,12 @@ import (
 	"github.com/orka-agents/orka/internal/security"
 )
 
-// Review context bounds. The encoded orka.prReview.context.v1 payload is
-// embedded in Task.spec.prompt, so the total budget must stay well below the
-// etcd object size limit (~1.5 MiB) together with the rest of the prompt and
-// the Task object; 700 KiB leaves that margin while matching the documented
-// contract in website/docs/guides/repository-monitors.md. Patches are carried
-// for at most MaxFiles files; identities (path, status, counts) are carried
-// for at most MaxFileEntries files so the reviewer can still discover every
-// changed file in the Git-metadata-free checkout. Identities take precedence
-// over patches inside the byte budget.
 const (
-	repositoryMonitorReviewContextSchemaVersion  = "orka.prReview.context.v1"
-	repositoryMonitorReviewContextMaxFiles       = 100
-	repositoryMonitorReviewContextMaxFileEntries = 2000
-	repositoryMonitorReviewContextMaxBytes       = 700 << 10
-	repositoryMonitorReviewContextMaxPatchBytes  = 64 << 10
-	// repositoryMonitorReviewDeltaMaxBytes bounds a follow-up review's delta,
-	// which shares repositoryMonitorReviewContextMaxBytes with the full context.
+	repositoryMonitorReviewContextSchemaVersion    = "orka.prReview.context.v1"
+	repositoryMonitorReviewContextMaxFiles         = 100
+	repositoryMonitorReviewContextMaxFileEntries   = 2000
+	repositoryMonitorReviewContextMaxBytes         = 700 << 10
+	repositoryMonitorReviewContextMaxPatchBytes    = 64 << 10
 	repositoryMonitorReviewDeltaMaxBytes           = 192 << 10
 	repositoryMonitorReviewContextMaxPathBytes     = 512
 	repositoryMonitorReviewContextMaxStatusBytes   = 32
@@ -49,10 +38,8 @@ const (
 	repositoryMonitorReviewContextPatchCapped      = "capped"
 	repositoryMonitorReviewContextBeginMarker      = "--- BEGIN orka.prReview.context.v1 ---"
 	repositoryMonitorReviewContextEndMarker        = "--- END orka.prReview.context.v1 ---"
-	// The follow-up delta is a second orka.prReview.context.v1 payload with its
-	// own framing, so the pull request context block still parses on its own.
-	repositoryMonitorReviewDeltaBeginMarker = "--- BEGIN orka.prReview.followUpDelta ---"
-	repositoryMonitorReviewDeltaEndMarker   = "--- END orka.prReview.followUpDelta ---"
+	repositoryMonitorReviewDeltaBeginMarker        = "--- BEGIN orka.prReview.followUpDelta ---"
+	repositoryMonitorReviewDeltaEndMarker          = "--- END orka.prReview.followUpDelta ---"
 
 	repositoryMonitorReviewContextErrorGitHubStatus   = "github_api_status_"
 	repositoryMonitorReviewContextErrorTimeout        = "timeout"
@@ -60,9 +47,6 @@ const (
 	repositoryMonitorReviewContextErrorInvalidPayload = "invalid_response"
 	repositoryMonitorReviewContextErrorRequestFailed  = "request_failed"
 
-	// repositoryMonitorReviewContextArrayItemPrefix mirrors the indentation
-	// json.MarshalIndent("", "  ") applies to elements of the top-level
-	// "files" array so per-file size accounting matches the final encoding.
 	repositoryMonitorReviewContextArrayItemPrefix = "    "
 	repositoryMonitorReviewContextIndent          = "  "
 )
@@ -94,8 +78,6 @@ type repositoryMonitorReviewContext struct {
 	ContextUnavailable string                                   `json:"contextUnavailable,omitempty"`
 }
 
-// repositoryMonitorReviewContextDriftError reports that the pull request base,
-// head, or head repository changed while the review context was assembled.
 type repositoryMonitorReviewContextDriftError struct {
 	Number int64
 	Field  string
@@ -118,19 +100,8 @@ func newRepositoryMonitorReviewContext(owner, repository string, pr repositoryMo
 	}
 }
 
-// buildRepositoryMonitorReviewContext fetches the pull request file list with
-// patches, then refetches the pull request and fails closed when the base,
-// head, or head repository drifted. The drift check runs even when the file
-// listing failed so a moved head is never reviewed against stale identity.
-// GitHub read failures do not fail the review: the returned context is
-// marked unavailable with a sanitized error class only, so the reviewer
-// inspects the checked-out tree instead.
 func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewContext(ctx context.Context, owner, repository, token string, pr repositoryMonitorPullRequest) (repositoryMonitorReviewContext, error) {
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
-	// The file set is bound to the exact base/head SHAs through the compare
-	// endpoint rather than the mutable pull request listing: a force-push
-	// A->B->A between two PR reads would otherwise pass the drift check while
-	// labelling B's patches as A.
 	files, filesErr := r.listRepositoryMonitorCompareFiles(ctx, owner, repository, token, pr.BaseSHA, pr.HeadSHA)
 	current, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, pr.Number)
 	if err != nil {
@@ -151,12 +122,6 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorReviewContext(ctx co
 	return repositoryMonitorReviewContextBindChangedFileCount(repositoryMonitorReviewContextFromFiles(owner, repository, pr, files), len(files), current.ChangedFiles), nil
 }
 
-// repositoryMonitorReviewContextBindChangedFileCount reconciles the compare
-// listing against GitHub's authoritative changed-file total from the pull
-// request read. The compare endpoint silently caps its file array, so a
-// listing shorter than the total (or a cap-sized listing when the total is
-// unknown) means files were never represented to the reviewer and the change
-// set is incomplete.
 func repositoryMonitorReviewContextBindChangedFileCount(reviewContext repositoryMonitorReviewContext, listed, total int) repositoryMonitorReviewContext {
 	switch {
 	case total > listed:
@@ -185,9 +150,6 @@ func repositoryMonitorReviewContextDrift(expected, current repositoryMonitorPull
 	return nil
 }
 
-// repositoryMonitorReviewContextErrorClass reduces a GitHub read failure to a
-// short class label. It never includes the error text, which may carry
-// request URLs or response bodies.
 func repositoryMonitorReviewContextErrorClass(err error) string {
 	var apiErr *repositoryMonitorGitHubAPIError
 	switch {
@@ -213,21 +175,10 @@ func repositoryMonitorReviewContextErrorClass(err error) string {
 	return repositoryMonitorReviewContextErrorRequestFailed
 }
 
-// repositoryMonitorReviewContextFromFiles renders the bounded context payload:
-// identities for at most repositoryMonitorReviewContextMaxFileEntries files,
-// patches (at most repositoryMonitorReviewContextMaxPatchBytes encoded each)
-// for the first repositoryMonitorReviewContextMaxFiles of them, and at most
-// repositoryMonitorReviewContextMaxBytes encoded payload overall. Identities
-// are placed first: patches are only added while the budget allows, and
-// identities are dropped only when the path list alone does not fit.
-// truncated.files therefore means the change set is not fully represented,
-// which the prompt turns into a mandatory non-passing verdict.
 func repositoryMonitorReviewContextFromFiles(owner, repository string, pr repositoryMonitorPullRequest, files []repositoryMonitorPullRequestFileResponse) repositoryMonitorReviewContext {
 	return repositoryMonitorReviewContextFromFilesWithin(owner, repository, pr, files, repositoryMonitorReviewContextMaxBytes)
 }
 
-// repositoryMonitorReviewContextFromFilesWithin builds the context within
-// maxBytes of encoded payload.
 func repositoryMonitorReviewContextFromFilesWithin(owner, repository string, pr repositoryMonitorPullRequest, files []repositoryMonitorPullRequestFileResponse, maxBytes int) repositoryMonitorReviewContext {
 	reviewContext := newRepositoryMonitorReviewContext(owner, repository, pr)
 	reviewContext.ChangedFileCount = len(files)
@@ -240,13 +191,6 @@ func repositoryMonitorReviewContextFromFilesWithin(owner, repository string, pr 
 	used := repositoryMonitorReviewContextEncodedSize(reviewContext)
 	for i, file := range files {
 		if repositoryMonitorReviewContextPathAltered(file) || repositoryMonitorReviewContextDeletedLinesAltered(file.Patch) {
-			// A clipped, redacted, or control-stripped path or previous
-			// path loses the file's exact identity, and the checkout
-			// carries no Git metadata (and may not contain a deleted or
-			// renamed-from path) to recover it, so the change set is no
-			// longer completely represented. Likewise, a deleted patch
-			// line that sanitization rewrote exists nowhere else: the
-			// checkout holds only the new content.
 			reviewContext.Truncated.Files = true
 		}
 		entry := repositoryMonitorReviewContextIdentityEntry(file, i >= repositoryMonitorReviewContextMaxFiles)
@@ -276,30 +220,14 @@ func repositoryMonitorReviewContextFromFilesWithin(owner, repository string, pr 
 	return repositoryMonitorReviewContextWithin(reviewContext, maxBytes)
 }
 
-// repositoryMonitorReviewContextWithin trims reviewContext to maxBytes of
-// encoded payload and marks the change set incomplete when a trimmed patch
-// hides what changed.
 func repositoryMonitorReviewContextWithin(reviewContext repositoryMonitorReviewContext, maxBytes int) repositoryMonitorReviewContext {
 	reviewContext = repositoryMonitorReviewContextTrimToBudget(reviewContext, maxBytes)
 	return repositoryMonitorReviewContextMarkUnreviewableOmissions(reviewContext)
 }
 
-// repositoryMonitorReviewContextMarkUnreviewableOmissions marks the change
-// set incomplete whenever an omitted patch (unavailable, truncated, or
-// capped) hides what changed. The only exemption is a wholly added or copied
-// file with no deletions: its complete new content is positively present in
-// the head checkout, so nothing about the change is hidden. Everything else
-// fails closed — a removed file, any patchless rename (a pure rename and a
-// content-changing binary rename are reported identically, so the harmless
-// case cannot be proven without the base blob), any deleted lines, and any
-// modified/changed file (even addition-only: the checkout shows the final
-// file but cannot identify which lines the change introduced).
 func repositoryMonitorReviewContextMarkUnreviewableOmissions(reviewContext repositoryMonitorReviewContext) repositoryMonitorReviewContext {
 	for _, file := range reviewContext.Files {
 		if file.PatchOmitted == "" {
-			// A complete patch must agree with GitHub's own line counts; a
-			// short-served or otherwise inconsistent patch would hide part
-			// of the change while claiming completeness.
 			if file.Patch != "" && !patchMatchesLineCounts(file.Patch, file.Additions, file.Deletions) {
 				reviewContext.Truncated.Files = true
 				return reviewContext
@@ -315,9 +243,6 @@ func repositoryMonitorReviewContextMarkUnreviewableOmissions(reviewContext repos
 	return reviewContext
 }
 
-// repositoryMonitorReviewContextTrimToBudget verifies the final encoding,
-// because the per-entry accounting is an estimate, and trims conservatively:
-// the last remaining patch goes first, then the last identity entry.
 func repositoryMonitorReviewContextTrimToBudget(reviewContext repositoryMonitorReviewContext, maxBytes int) repositoryMonitorReviewContext {
 	for repositoryMonitorReviewContextEncodedSize(reviewContext) > maxBytes && len(reviewContext.Files) > 0 {
 		reviewContext.Truncated.Bytes = true
@@ -340,14 +265,8 @@ func repositoryMonitorReviewContextLastPatchIndex(files []repositoryMonitorRevie
 	return -1
 }
 
-// repositoryMonitorReviewContextIdentityEntry renders the patch-free entry
-// for a changed file. Files beyond the patch cap are marked capped; files
-// inside it are marked truncated until a patch is attached, or unavailable
-// when GitHub supplied none.
 func repositoryMonitorReviewContextIdentityEntry(file repositoryMonitorPullRequestFileResponse, capped bool) repositoryMonitorReviewContextFile {
 	if capped {
-		// The patch is never rendered for a capped entry, so it is not
-		// sanitized either: identity-only entries stay cheap.
 		entry := repositoryMonitorReviewContextFileIdentity(file)
 		entry.PatchOmitted = repositoryMonitorReviewContextPatchCapped
 		return entry
@@ -385,9 +304,6 @@ func repositoryMonitorReviewContextDropPatch(entry repositoryMonitorReviewContex
 	return entry
 }
 
-// repositoryMonitorReviewContextTruncatePatch keeps whole lines of patch so
-// that the JSON-encoded string fits within maxEncodedBytes. It returns the
-// omission marker when anything was cut.
 func repositoryMonitorReviewContextTruncatePatch(patch string, maxEncodedBytes int) (string, string) {
 	if repositoryMonitorReviewContextEncodedStringSize(patch) <= maxEncodedBytes {
 		return patch, ""
@@ -408,9 +324,6 @@ func repositoryMonitorReviewContextTruncatePatch(patch string, maxEncodedBytes i
 	}
 }
 
-// repositoryMonitorReviewContextPathAltered reports whether the embedded
-// path or previous path differs from GitHub's: bounding dropped bytes, or
-// sanitization stripped controls or redacted a credential-shaped segment.
 func repositoryMonitorReviewContextPathAltered(file repositoryMonitorPullRequestFileResponse) bool {
 	for _, value := range []string{file.Filename, file.PreviousFilename} {
 		if repositoryMonitorReviewContextBoundedField(value, repositoryMonitorReviewContextMaxPathBytes) != value {
@@ -439,29 +352,10 @@ func repositoryMonitorReviewContextBoundedField(value string, maxBytes int) stri
 	return value[:cut]
 }
 
-// repositoryMonitorReviewContextSanitize drops invalid UTF-8 and control
-// characters other than newline and tab so GitHub-supplied text cannot carry
-// terminal escapes or NUL bytes into the prompt, then redacts credential
-// shapes: patches are untrusted pull request content that is persisted in
-// Task.spec.prompt and readable through the Tasks API. Controls are stripped
-// before redaction so a control byte inside a token cannot split it past the
-// redactor and be reassembled into a credential by the strip.
-// repositoryMonitorReviewContextDeletedLinesAltered reports whether
-// sanitizing the patch would rewrite a deleted ("-") line — a redacted
-// credential-shaped value, a stripped control rune, or invalid UTF-8. The
-// reviewer cannot recover the original deleted content from the Git-free
-// checkout, so the change set must be marked incomplete. The original text is
-// never retained.
 func repositoryMonitorReviewContextDeletedLinesAltered(patch string) bool {
-	// GitHub file patches are hunk fragments without "--- a/…" file
-	// headers, so every "-"-prefixed line is deleted content — including
-	// one whose original text begins with "--".
 	if !strings.HasPrefix(patch, "-") && !strings.Contains(patch, "\n-") {
 		return false
 	}
-	// Sanitize the whole patch rather than each deleted line alone so a
-	// credential spanning adjacent deleted lines is seen the way the
-	// review context will render it.
 	original := strings.Split(patch, "\n")
 	sanitized := strings.Split(repositoryMonitorReviewContextSanitize(patch), "\n")
 	if len(original) != len(sanitized) {
@@ -475,8 +369,6 @@ func repositoryMonitorReviewContextDeletedLinesAltered(patch string) bool {
 	return false
 }
 
-// patchMatchesLineCounts verifies a hunk fragment's added/deleted line
-// totals against the counts GitHub reported for the file.
 func patchMatchesLineCounts(patch string, additions, deletions int) bool {
 	adds, dels := 0, 0
 	inHunk := false
@@ -485,8 +377,6 @@ func patchMatchesLineCounts(patch string, additions, deletions int) bool {
 			inHunk = true
 			continue
 		}
-		// Anything before the first hunk marker is header material
-		// ("--- a/…", "+++ b/…"), not change content.
 		if !inHunk || len(line) == 0 {
 			continue
 		}
@@ -500,10 +390,6 @@ func patchMatchesLineCounts(patch string, additions, deletions int) bool {
 	return adds == additions && dels == deletions
 }
 
-// repositoryMonitorReviewContextSecretWindowLines bounds how many adjacent
-// patch lines are reconstructed when looking for a credential that only
-// becomes recognizable once its physical lines are joined (a YAML scalar
-// folded or escaped across lines, a value continued on the next line).
 const repositoryMonitorReviewContextSecretWindowLines = 8
 
 func repositoryMonitorReviewContextSanitize(value string) string {
@@ -514,21 +400,11 @@ func repositoryMonitorReviewContextSanitize(value string) string {
 		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
 			return -1
 		}
-		// Unicode format runes (zero-width spaces, joiners, directional
-		// marks) are as invisible as C0/C1 controls and can split a
-		// credential past the redactor; drop them before redaction too.
 		if unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
 	}, strings.ToValidUTF8(value, ""))
-	// Newlines and tabs survive the strip because they carry diff and code
-	// structure, but both can split a credential past the redactor: a tab
-	// within one line, a line break across two patch lines. Detection runs
-	// on a shadow of each line with its diff marker and tabs removed; a
-	// line the full secret policy recognizes is withheld outright, and so is
-	// every line of a short window of adjacent lines that the policy only
-	// recognizes once they are joined back together.
 	lines := strings.Split(stripped, "\n")
 	prefixes := make([]string, len(lines))
 	shadows := make([]string, len(lines))
@@ -577,17 +453,9 @@ func repositoryMonitorReviewContextSanitize(value string) string {
 			break
 		}
 	}
-	// A final whole-text pass keeps any cross-line reassembly the redactor
-	// itself performs.
 	return redact.SensitiveText(strings.Join(lines, "\n"))
 }
 
-// repositoryMonitorReviewContextLineMayContinue reports whether a line could
-// start an assignment whose value continues on the following lines: it
-// carries a key separator and ends with an escaped line break, an open
-// quote, a bare key, or a YAML block-scalar indicator. Only such lines seed
-// the multi-line reconstruction, which keeps the policy cost proportional to
-// the patch rather than to the patch times the window size.
 func repositoryMonitorReviewContextLineMayContinue(shadow string) bool {
 	trimmed := strings.TrimRight(shadow, " ")
 	if trimmed == "" || !strings.ContainsAny(trimmed, ":=") {
@@ -620,15 +488,11 @@ func repositoryMonitorReviewContextEncodedStringSize(value string) int {
 	return len(encoded)
 }
 
-// repositoryMonitorReviewContextEntrySize estimates the bytes one file entry
-// adds to the indented payload, including the array separator and the
-// per-element indentation applied by json.MarshalIndent.
 func repositoryMonitorReviewContextEntrySize(entry repositoryMonitorReviewContextFile, existingEntries int) int {
 	encoded, err := json.MarshalIndent(entry, repositoryMonitorReviewContextArrayItemPrefix, repositoryMonitorReviewContextIndent)
 	if err != nil {
 		return repositoryMonitorReviewContextMaxBytes + 1
 	}
-	// "[]" becomes "[\n    {...}\n  ]" for the first element; later elements add ",\n    ".
 	overhead := len(",\n") + len(repositoryMonitorReviewContextArrayItemPrefix)
 	if existingEntries == 0 {
 		overhead = len("\n") + len(repositoryMonitorReviewContextArrayItemPrefix) + len("\n") + len(repositoryMonitorReviewContextIndent)
@@ -636,10 +500,6 @@ func repositoryMonitorReviewContextEntrySize(entry repositoryMonitorReviewContex
 	return len(encoded) + overhead
 }
 
-// renderRepositoryMonitorReviewContext wraps the indented JSON payload in
-// line-anchored markers. JSON string values cannot contain a raw newline, so a
-// marker preceded by a newline can only come from the renderer, never from a
-// patch or path embedded in the payload.
 func renderRepositoryMonitorReviewContext(reviewContext repositoryMonitorReviewContext) string {
 	if reviewContext.Files == nil {
 		reviewContext.Files = []repositoryMonitorReviewContextFile{}
@@ -657,8 +517,6 @@ func renderRepositoryMonitorReviewContext(reviewContext repositoryMonitorReviewC
 	return repositoryMonitorReviewContextBeginMarker + "\n" + string(encoded) + "\n" + repositoryMonitorReviewContextEndMarker
 }
 
-// renderRepositoryMonitorReviewDelta renders the follow-up delta with its own
-// markers.
 func renderRepositoryMonitorReviewDelta(delta repositoryMonitorReviewContext) string {
 	rendered := renderRepositoryMonitorReviewContext(delta)
 	rendered = strings.TrimPrefix(rendered, repositoryMonitorReviewContextBeginMarker)
@@ -666,8 +524,6 @@ func renderRepositoryMonitorReviewDelta(delta repositoryMonitorReviewContext) st
 	return repositoryMonitorReviewDeltaBeginMarker + rendered + repositoryMonitorReviewDeltaEndMarker
 }
 
-// repositoryMonitorReviewPromptDelta parses the follow-up delta block of a
-// rendered review prompt.
 func repositoryMonitorReviewPromptDelta(prompt string) (repositoryMonitorReviewContext, bool) {
 	beginLine := "\n" + repositoryMonitorReviewDeltaBeginMarker + "\n"
 	endLine := "\n" + repositoryMonitorReviewDeltaEndMarker
@@ -686,10 +542,6 @@ func repositoryMonitorReviewPromptDelta(prompt string) (repositoryMonitorReviewC
 	return parsed, true
 }
 
-// repositoryMonitorReviewPromptContextBounds locates the rendered context
-// block: the first line-anchored begin marker and the LAST line-anchored end
-// marker after it. Untrusted payload text is JSON-encoded, so it can never
-// place a marker at the start of a line; only the renderer's markers match.
 func repositoryMonitorReviewPromptContextBounds(prompt string) (int, int, bool) {
 	beginLine := "\n" + repositoryMonitorReviewContextBeginMarker + "\n"
 	endLine := "\n" + repositoryMonitorReviewContextEndMarker
@@ -697,7 +549,7 @@ func repositoryMonitorReviewPromptContextBounds(prompt string) (int, int, bool) 
 	if start < 0 {
 		return 0, 0, false
 	}
-	start++ // keep the newline that precedes the block
+	start++
 	end := strings.LastIndex(prompt, endLine)
 	if end < start {
 		return 0, 0, false
@@ -705,8 +557,6 @@ func repositoryMonitorReviewPromptContextBounds(prompt string) (int, int, bool) 
 	return start, end + len(endLine), true
 }
 
-// repositoryMonitorReviewPromptContext parses the embedded context block of a
-// rendered review prompt.
 func repositoryMonitorReviewPromptContext(prompt string) (repositoryMonitorReviewContext, bool) {
 	start, end, found := repositoryMonitorReviewPromptContextBounds(prompt)
 	if !found {
@@ -722,10 +572,6 @@ func repositoryMonitorReviewPromptContext(prompt string) (repositoryMonitorRevie
 	return parsed, true
 }
 
-// repositoryMonitorReviewContextIsUnavailableEnvelope reports whether the
-// context is exactly the controller-shaped "GitHub unavailable" envelope for
-// the expected pull request: no files, no truncation, and a well-formed error
-// class. Such an envelope carries no untrusted content.
 func repositoryMonitorReviewContextIsUnavailableEnvelope(candidate, expected repositoryMonitorReviewContext) bool {
 	if candidate.SchemaVersion != expected.SchemaVersion || candidate.Repo != expected.Repo || candidate.PRNumber != expected.PRNumber ||
 		candidate.BaseSHA != expected.BaseSHA || candidate.HeadSHA != expected.HeadSHA {
@@ -754,13 +600,6 @@ func repositoryMonitorReviewContextErrorClassWellFormed(class string) bool {
 	return true
 }
 
-// repositoryMonitorReviewVerdictGateReason enforces, controller-side, the
-// rule the review prompt states: a "passed" verdict is only trustworthy when
-// the reviewer saw the complete change set. A review Task whose embedded
-// context is missing, unavailable, or file-truncated cannot have verified
-// every changed file against a checkout without Git history, so its passed
-// verdict must not become the automerge gate. The returned reason is empty
-// when the verdict may stand.
 func repositoryMonitorReviewVerdictGateReason(prompt, verdict string) string {
 	if strings.TrimSpace(verdict) != repositoryMonitorReviewVerdictPassed {
 		return ""
@@ -768,8 +607,6 @@ func repositoryMonitorReviewVerdictGateReason(prompt, verdict string) string {
 	return repositoryMonitorReviewContextGap(prompt)
 }
 
-// repositoryMonitorReviewContextGap explains why a review prompt did not
-// show the reviewer every change it covers, or returns "" when it did.
 func repositoryMonitorReviewContextGap(prompt string) string {
 	reviewContext, ok := repositoryMonitorReviewPromptContext(prompt)
 	switch {
@@ -780,8 +617,6 @@ func repositoryMonitorReviewContextGap(prompt string) string {
 	case reviewContext.Truncated.Files:
 		return "the change set was not completely represented in the diff context"
 	}
-	// A follow-up review must also have seen every change since the last
-	// review; a small final diff can hide a large truncated delta.
 	if delta, ok := repositoryMonitorReviewPromptDelta(prompt); ok && (delta.ContextUnavailable != "" || delta.Truncated.Files) {
 		return "the changes since the last review were not completely represented"
 	}

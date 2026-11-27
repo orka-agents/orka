@@ -142,8 +142,6 @@ func TestRuntimePoolBootTerminationRetiresHistoricalTurns(t *testing.T) {
 			if err := f.r.Update(t.Context(), &current); err != nil {
 				t.Fatal(err)
 			}
-			// A fresh reconciler and a different current profile/active pointer
-			// must consume the old boot, not contact a replacement supervisor.
 			restarted := &RuntimePoolReconciler{Client: f.r.Client, APIReader: f.r.APIReader, ControlStore: f.control, Epochs: f.r.Epochs, RuntimeNamespace: f.r.RuntimeNamespace}
 			if err := restarted.reconcileNativeRuntimePoolRetirement(t.Context(), f.pool); err != nil {
 				t.Fatal(err)
@@ -155,7 +153,7 @@ func TestRuntimePoolBootTerminationRetiresHistoricalTurns(t *testing.T) {
 				if !runtimeSessionCleanupCompleteForUID(task, task.UID) {
 					t.Fatal("exact container retirement lost a historical Task receipt")
 				}
-				proofTask := original[i].DeepCopy() // also works before the eager Task receipt write
+				proofTask := original[i].DeepCopy()
 				if retired, err := verifiedNativeRuntimePoolRetirement(t.Context(), f.control, proofTask, proofTask.UID); err != nil || !retired {
 					t.Fatalf("read-only retirement gate: %t %v", retired, err)
 				}
@@ -198,8 +196,6 @@ func TestRuntimePoolBootNoAbsenceBasedOrRetroactiveProof(t *testing.T) {
 		t.Fatalf("absence retirement: %t %v", retired, err)
 	}
 	f.assertNoReceipt(t, task)
-	// A historical unenrolled boot remains unsupported even with a complete
-	// frozen Task identity. A replacement's empty status cannot supply proof.
 	task.Status.Execution.RuntimeInstanceID = runtimePoolRuntimeInstanceID(w.PodUID, "unenrolled-old-boot")
 	task.Status.Execution.RuntimeSessionSupervisorBootID = "unenrolled-old-boot"
 	if retired, err := verifiedNativeRuntimePoolRetirement(t.Context(), f.control, task, task.UID); err != nil || retired {
@@ -470,7 +466,6 @@ func TestRuntimePoolBootRetirementRunsDuringDeletionAndCleanupOnly(t *testing.T)
 				}
 			}
 			f.assertNoReceipt(t, task)
-			// Retirement must not require admission configuration or a healthy runtime.
 			f.r.ProviderProxy = RuntimePoolProviderProxyConfig{}
 			f.supervisor.probeErr = errors.New("old runtime is gone")
 			f.terminate(t, false)
@@ -519,7 +514,6 @@ func TestRuntimePoolBootAuthenticatedDrainRequiresExactQuiescence(t *testing.T) 
 	if retired, err := verifiedNativeRuntimePoolRetirement(t.Context(), f.control, task, task.UID); err != nil || !retired {
 		t.Fatalf("authenticated native retirement: %t %v", retired, err)
 	}
-	// Retirement is permanent even if a later status purports to accept work.
 	f.supervisor.probe.Status = runtimePoolValidProbe(f.pool, &f.pod, "native-boot", false).Status
 	if _, err := f.r.Reconcile(t.Context(), runtimePoolBootTestRequest(f.pool)); err == nil {
 		t.Fatal("retired boot became accepting again")
@@ -662,9 +656,6 @@ func TestRuntimePoolBootChangedEnrollmentTopologyRejected(t *testing.T) {
 	}
 }
 
-// Existing boots may have diagnostic history that is deliberately inadmissible
-// for new container-death witnesses. Their positive authenticated drain remains
-// usable without enrolling them or attaching any native retention finalizer.
 func TestRuntimePoolBootLegacyDiagnosticPodDrainsWithoutEnrollment(t *testing.T) {
 	f := newNativePoolBootFixture(t, false)
 	deployment := runtimePoolTestDeployment(t, f.r, f.pool.Namespace, runtimePoolResourceName(f.pool.Namespace, f.pool.Name))
@@ -694,8 +685,6 @@ func TestRuntimePoolBootLegacyDiagnosticPodDrainsWithoutEnrollment(t *testing.T)
 	if err := validateAgentRuntimeRecoveryPodSpec(pod.Spec, runtimePoolBootContainerName, runtimePoolProviderCodex); err == nil {
 		t.Fatal("diagnostic topology was relaxed for witness enrollment")
 	}
-	// Reconstruct only the old controller's existing active observation, not a
-	// new witness. The desired marked template must trigger rollout, not admission.
 	current := runtimePoolTestGetPool(t, f.r, f.pool)
 	cfg, err := f.r.runtimePoolConfig(&current)
 	if err != nil {
@@ -825,7 +814,6 @@ func TestRuntimePoolBootSupersededUnretainedPreparationAllowsLifecycle(t *testin
 			if err := f.r.Update(t.Context(), &current); err != nil {
 				t.Fatal(err)
 			}
-			// The obsolete unadmitted Pod must not monopolize the pre-rollout replay.
 			if _, err := f.r.Reconcile(t.Context(), runtimePoolBootTestRequest(f.pool)); err != nil {
 				t.Fatalf("superseded unretained preparation blocked lifecycle: %v", err)
 			}
@@ -894,8 +882,6 @@ func TestRuntimePoolBootUnretainedPreparationWithdrawsAfterMultipleRestarts(t *t
 	status.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{
 		StartedAt: metav1.NewTime(preparation.StartedAt.Add(40 * time.Second)),
 	}}
-	// Only the intervening container remains in last-termination history. This
-	// is deliberately NOT termination evidence for the original preparation.
 	status.LastTerminationState.Terminated = &corev1.ContainerStateTerminated{
 		ContainerID: "containerd://unadmitted-restart-1",
 		StartedAt:   metav1.NewTime(preparation.StartedAt.Add(20 * time.Second)),
@@ -930,7 +916,6 @@ func TestRuntimePoolBootUnretainedPreparationWithdrawsAfterMultipleRestarts(t *t
 	f.serve(t)
 }
 
-// taskReadCounter counts authoritative Task reads a reconciliation performs.
 type taskReadCounter struct {
 	client.Reader
 	reads atomic.Int64
@@ -950,8 +935,6 @@ func (r *taskReadCounter) List(ctx context.Context, list client.ObjectList, opts
 	return r.Reader.List(ctx, list, opts...)
 }
 
-// Retired boots are never forgotten, so their receipted Tasks must not cost
-// authoritative reads on every reconciliation.
 func TestRuntimePoolBootRetiredHistoryDoesNotRereadReceiptedTasks(t *testing.T) {
 	f := newNativePoolBootFixture(t, false)
 	f.serve(t)

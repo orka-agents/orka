@@ -15,8 +15,6 @@ import (
 	"testing"
 )
 
-// eventsServer serves a task event stream with paging by `after`/`limit`
-// and `type` filters, the way the API does.
 func eventsServer(t *testing.T, all []map[string]any) (*httptest.Server, *[]string) {
 	t.Helper()
 	var queries []string
@@ -115,7 +113,6 @@ func TestTaskEventsTailKeepsLastMatchingEvents(t *testing.T) {
 	if len(events) != 1 || !strings.HasSuffix(anyString(events[0].(map[string]any)["summary"]), "x") {
 		t.Fatalf("json tail output is truncated or wrong: %s", jsonOut)
 	}
-	// The envelope keeps the caller's cursor, not the last page's.
 	if int64Field(resp, "afterSeq") != 0 || int64Field(resp, "latestSeq") != 1200 {
 		t.Fatalf("tail envelope cursor changed: afterSeq=%v latestSeq=%v", resp["afterSeq"], resp["latestSeq"])
 	}

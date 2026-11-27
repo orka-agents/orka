@@ -2869,8 +2869,6 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	if len(transcript) != 2 {
 		t.Fatalf("idempotent retry duplicated transcript: %d entries", len(transcript))
 	}
-	// controller_epochs holds only the mirror of the Kubernetes epoch that
-	// SQLite checks fences against; it never decides ownership.
 	for _, table := range []string{"prompt_attempts", "session_controls", "branch_claims", "publications", "external_effects"} {
 		var count int
 		if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil { //nolint:gosec // fixed test-only table allowlist
@@ -2956,8 +2954,6 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 		RuntimeSessionGeneration: 1, RuntimeSessionSupervisorBootID: "publication-boot",
 		RuntimeSessionProfileDigest: testDigest("publication-profile"), ControllerEpoch: fence.Epoch,
 	}
-	// The interrupted recovery wrote the initial delivery into its immutable
-	// turn even though the authoritative attempt and publication had succeeded.
 	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
 		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
 	}

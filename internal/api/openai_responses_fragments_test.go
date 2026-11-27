@@ -51,8 +51,6 @@ func TestResponsesProductionFunctionArgumentSnapshotPrefix(t *testing.T) {
 	}
 }
 
-// A failed terminal must not follow executable output from an unfinished call,
-// including when an unsupported stream falls back to non-streaming completion.
 func TestResponsesProductionTerminalFunctionStatus(t *testing.T) {
 	for _, status := range []string{"", "completed", "incomplete", "in_progress"} {
 		for _, mode := range []string{"json", "sse", "stream-unsupported"} {
@@ -112,7 +110,7 @@ func TestResponsesProductionPartialFunctionStateMerge(t *testing.T) {
 	for _, fragments := range [][2]string{{full, full}, {prefix, full}, {full, prefix}, {conflict, full}, {full, conflict}} {
 		for _, bridge := range []string{"added", "done-omitted", "index-done"} {
 			if bridge == "index-done" && fragments[1] == prefix {
-				continue // A completed argument record must contain a full JSON object.
+				continue
 			}
 			t.Run(fmt.Sprintf("%s/%q/%q", bridge, fragments[0], fragments[1]), func(t *testing.T) {
 				server, token := setupProductionResponses(t, func(w http.ResponseWriter, _ *http.Request) {

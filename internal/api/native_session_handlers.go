@@ -18,7 +18,6 @@ import (
 
 const maxNativeSessionBundleBytes = harnessv2.DefaultMaxNativeSessionBytes
 
-// isNativeSessionImportPath identifies only the bounded native import route.
 func isNativeSessionImportPath(path string) bool {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	return len(parts) == 5 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
@@ -36,8 +35,6 @@ type nativeSessionExportResponse struct {
 	ProviderSessionID string `json:"providerSessionID"`
 }
 
-// ImportNativeSession explicitly creates a fresh Session. Imported provider
-// state remains private and staged until its first authenticated Task admission.
 func (h *Handlers) ImportNativeSession(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -114,8 +111,6 @@ func (h *Handlers) ImportNativeSession(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(receipt)
 }
 
-// ExportNativeSession exposes the portable bundle only through an explicitly
-// authorized Session migration endpoint, never regular Session/event payloads.
 func (h *Handlers) ExportNativeSession(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {

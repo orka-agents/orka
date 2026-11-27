@@ -19,15 +19,12 @@ import (
 
 const defaultServer = "http://localhost:8080"
 
-// version is set via -ldflags at build time.
 var version = "dev"
 
 func main() {
 	rootCmd := newRootCmd()
 	if err := rootCmd.Execute(); err != nil {
 		if exitErr, ok := errors.AsType[*operatorExitError](err); ok {
-			// A remote command's own status is passed through; only Orka-side
-			// outcomes (timeouts, limits, refusals) print a message.
 			if exitErr.code != 0 && !strings.HasPrefix(exitErr.message, "command exited with status") {
 				fmt.Fprintln(os.Stderr, "Error:", exitErr.message)
 			}
@@ -46,12 +43,9 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPostRun: func(cmd *cobra.Command, args []string) {
-			// Don't kill port-forward on normal exit — let it persist for caching.
-			// It will be cleaned up when the cache expires or on interrupt.
 		},
 	}
 
-	// Global flags
 	cmd.PersistentFlags().StringP("server", "s", "",
 		"Orka server URL, or set "+envServer+" (default: the Orka Service reached through kubeconfig, else \""+defaultServer+"\")")
 	cmd.PersistentFlags().StringP("token", "t", "", tokenFlagUsage)
@@ -66,7 +60,6 @@ func newRootCmd() *cobra.Command {
 		"Kubernetes namespace, or set "+envNamespace+" (default: from config, else the namespace the Orka server watches)")
 	cmd.PersistentFlags().String("kubeconfig", "", "Path to kubeconfig file")
 
-	// Register subcommands
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newDashboardCmd())
 	cmd.AddCommand(newConnectCmd())
@@ -101,11 +94,8 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
-// serviceAccountTokenFunc creates the ServiceAccount token orka dashboard signs the browser in with.
-// Tests can replace this to avoid calling kubectl.
 var serviceAccountTokenFunc = createServiceAccountToken
 
-// createServiceAccountToken generates a token for the given ServiceAccount using kubectl.
 func createServiceAccountToken(serviceAccount, namespace string) (string, error) {
 	kubectlPath, err := exec.LookPath("kubectl")
 	if err != nil {
@@ -128,11 +118,8 @@ func createServiceAccountToken(serviceAccount, namespace string) (string, error)
 	return token, nil
 }
 
-// openBrowserFunc is the function used to open URLs in the default browser.
-// Tests can replace this to avoid launching a real browser.
 var openBrowserFunc = openBrowserDefault
 
-// openBrowser opens the given URL in the default browser.
 func openBrowser(url string) error {
 	return openBrowserFunc(url)
 }

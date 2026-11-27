@@ -189,9 +189,6 @@ func TestNativeFormatRejectionClassificationStaysNarrow(t *testing.T) {
 	}
 }
 
-// Capture runs after the writer stopped, so a session with no readable rollout
-// is a terminal unsupported outcome, never a retry. Timeouts and other I/O
-// failures stay distinct and retryable.
 func TestCaptureReportsAMissingOrUnreadableSessionAsUnsupported(t *testing.T) {
 	home, _ := fixtureHome(t)
 	rollout := filepath.Join(home, "sessions", "2026", "10", "02", fixtureName)

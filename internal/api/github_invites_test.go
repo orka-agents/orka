@@ -29,16 +29,12 @@ import (
 	"github.com/orka-agents/orka/internal/githubauth"
 )
 
-// inviteGitHub serves the device flow, approving with approved, and records
-// the tokens the app revokes; check-token and membership are fakeGitHub's.
 type inviteGitHub struct {
-	mu       sync.Mutex
-	approved map[string]any
-	revoked  *revocations
-	// onApprove runs as GitHub hands out the approved tokens.
+	mu        sync.Mutex
+	approved  map[string]any
+	revoked   *revocations
 	onApprove func()
-	// codes counts the device flows started.
-	codes atomic.Int32
+	codes     atomic.Int32
 }
 
 func newInviteHarness(t *testing.T, approved map[string]any) (*connectorTestHarness, *inviteGitHub) {
@@ -84,7 +80,6 @@ func (h *connectorTestHarness) invite(login string) (int, InviteResponse) {
 	return resp.StatusCode, invite
 }
 
-// inviteOutcome waits for the invite to end and returns it.
 func (h *connectorTestHarness) inviteOutcome(id string) InviteResponse {
 	h.t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -119,7 +114,6 @@ func TestInviteLinksTheInvitedPerson(t *testing.T) {
 	if len(gh.revoked.list()) != 0 {
 		t.Fatalf("an accepted invite revokes nothing: %v", gh.revoked.list())
 	}
-	// The outcome reads back through the API.
 	resp, raw := h.do(http.MethodGet, "/api/v1/agent-hosts/invites/"+invite.ID, nil)
 	var read InviteResponse
 	if err := json.Unmarshal(raw, &read); err != nil || resp.StatusCode != http.StatusOK || read.State != InviteAccepted {
@@ -162,9 +156,6 @@ func TestInviteRefusesSomeoneElseOrAnOutsider(t *testing.T) {
 	}
 }
 
-// A provider changed while the code was pending, its agent host included,
-// is not what the person was told about: the invite is refused and the
-// token revoked with the app that issued it.
 func TestInviteRefusesAProviderChangedWhilePending(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	gh.onApprove = func() {
@@ -187,9 +178,6 @@ func TestInviteRefusesAProviderChangedWhilePending(t *testing.T) {
 	}
 }
 
-// A change to the provider's scopes alone, outside its authority digest,
-// also refuses the invite: custody would record scopes the host path no
-// longer accepts.
 func TestInviteRefusesAScopeChangeWhilePending(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	gh.onApprove = func() {
@@ -204,7 +192,6 @@ func TestInviteRefusesAScopeChangeWhilePending(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		// The provider is ready again by the time the invite checks it.
 		for i := range provider.Status.Conditions {
 			provider.Status.Conditions[i].ObservedGeneration = provider.Generation
 		}
@@ -221,8 +208,6 @@ func TestInviteRefusesAScopeChangeWhilePending(t *testing.T) {
 	}
 }
 
-// An app Secret that cannot be read after approval still lets the invite
-// revoke what GitHub issued, with the credentials read at creation.
 func TestInviteRevokesWhenTheAppSecretIsGone(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	gh.onApprove = func() {
@@ -240,8 +225,6 @@ func TestInviteRevokesWhenTheAppSecretIsGone(t *testing.T) {
 	}
 }
 
-// Without host creation an invite would only link an account its owner
-// cannot use, so none is started.
 func TestInvitesNeedHostCreation(t *testing.T) {
 	h, gh := newInviteHarness(t, nil)
 	h.handlers.githubSignIn.CreateHosts = false
@@ -253,8 +236,6 @@ func TestInvitesNeedHostCreation(t *testing.T) {
 	}
 }
 
-// A link that fails before storing anything revokes the token the invite
-// would have linked, since nothing else holds it.
 func TestInviteRevokesWhenLinkingStoresNothing(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	name := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
@@ -282,9 +263,6 @@ func TestInviteRevokesWhenLinkingStoresNothing(t *testing.T) {
 	}
 }
 
-// An account renamed between the approval's check and the refreshed token's
-// is no longer the invited login, and its membership would be read for the
-// old one: the invite is refused and the refreshed token revoked.
 func TestInviteRefusesAnAccountRenamedDuringItsChecks(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice_renamed", "expires_in": 28800})
 	_, invite := h.invite("alice")
@@ -296,13 +274,9 @@ func TestInviteRefusesAnAccountRenamedDuringItsChecks(t *testing.T) {
 	}
 }
 
-// An invite gives a host, and a host takes only a token that expires: a token
-// GitHub issued without an expiry is refused and revoked.
 func TestInviteRefusesATokenWithoutAnExpiry(t *testing.T) {
 	for name, response := range map[string]map[string]any{
-		"no expiry": {"access_token": "ghu_alice"},
-		// An expiry with no refresh token beside it is one Orka cannot
-		// refresh, which a host does not take.
+		"no expiry":        {"access_token": "ghu_alice"},
 		"no refresh token": {"access_token": "ghu_alice", "expires_in": 28800},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -325,7 +299,6 @@ func TestInviteRefusesATokenWithoutAnExpiry(t *testing.T) {
 	}
 }
 
-// A revocation GitHub did not confirm is reported as such, never as done.
 func TestInviteReportsARevocationThatFailed(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
 	gh.revoked.mu.Lock()
@@ -338,9 +311,6 @@ func TestInviteReportsARevocationThatFailed(t *testing.T) {
 	}
 }
 
-// A provider moved to another GitHub app while the code was pending: the
-// approved token is revoked with the app that issued it, not with the new
-// app's secret.
 func TestInviteRevokesWithTheIssuingAppAfterAnAppChange(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice"})
 	gh.onApprove = func() {
@@ -374,7 +344,6 @@ func TestInviteRevokesWithTheIssuingAppAfterAnAppChange(t *testing.T) {
 	}
 }
 
-// inviteRevocationAPI accepts only the expected issuing-app credentials.
 func inviteRevocationAPI(t *testing.T, wantSecret string, attempts *atomic.Int32, revoked *atomic.Bool) string {
 	t.Helper()
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -402,8 +371,6 @@ func inviteRevocationAPI(t *testing.T, wantSecret string, attempts *atomic.Int32
 	return api.URL
 }
 
-// A valid rotated secret must remain available for revocation even when the
-// provider's disclosed settings changed and the creation secret was revoked.
 func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
 	for _, change := range []string{
 		"scopes", "host template", "secret reference", "secret reference with missing original",
@@ -498,9 +465,6 @@ func TestInviteRevokesWithRotatedSecretAfterProviderChange(t *testing.T) {
 	}
 }
 
-// An app secret changed to a wrong value while the code was pending fails
-// the invite's checks, and the approved token is revoked with the secret
-// read when the invite was created.
 func TestInviteRevokesWithTheCreationSecretAfterASecretChange(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	gh.onApprove = func() {
@@ -523,8 +487,6 @@ func TestInviteRevokesWithTheCreationSecretAfterASecretChange(t *testing.T) {
 	}
 }
 
-// Inviting someone whose link already works keeps it and revokes the
-// approved token; a revocation GitHub refused is reported on the outcome.
 func TestInviteForAWorkingLinkRevokesTheUnusedToken(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	_, first := h.invite("alice")
@@ -547,7 +509,6 @@ func TestInviteForAWorkingLinkRevokesTheUnusedToken(t *testing.T) {
 	}
 }
 
-// A full invite table refuses before asking GitHub for a code.
 func TestInvitesReserveCapacityBeforeStartingTheDeviceFlow(t *testing.T) {
 	h, gh := newInviteHarness(t, nil)
 	for i := range maxPendingInvites {
@@ -563,10 +524,6 @@ func TestInvitesReserveCapacityBeforeStartingTheDeviceFlow(t *testing.T) {
 	}
 }
 
-// Custody committed with a status write that failed is an accepted invite:
-// the Connection reconciler records the link from the committed completion.
-// The host it promises starts too: a decline the person's link carried is
-// lifted with the commit, since nothing repairs it later.
 func TestInviteAcceptsALinkCommittedButNotYetRecorded(t *testing.T) {
 	h, gh := newInviteHarness(t, map[string]any{"access_token": "ghu_alice", "refresh_token": "ghr_alice", "expires_in": 28800})
 	wantName := connectors.ConnectionName("github", githubauth.Issuer, signInTestUserID)
@@ -603,8 +560,6 @@ func TestInviteAcceptsALinkCommittedButNotYetRecorded(t *testing.T) {
 	}
 }
 
-// Only Kubernetes identities, whose create on agenthosts the route's policy
-// checked, invite; a person's own session or OIDC sign-in does not.
 func TestInvitesNeedKubernetesCredentials(t *testing.T) {
 	h, _ := newInviteHarness(t, nil)
 	for _, identity := range []*UserInfo{

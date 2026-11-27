@@ -6,21 +6,12 @@ interface ChatState {
   messages: ChatMessage[]
   currentSessionId: string | null
   isStreaming: boolean
-  // Set by the Stop control while a turn streams; the in-flight turn watches
-  // it and cancels itself server-side. Cleared whenever streaming starts or ends.
   stopRequested: boolean
-  // Provider CRD name and model sent with each turn; empty means "server default".
-  // These mirror `selections[activeNamespace]`: Providers are namespace-scoped,
-  // so the persisted picker choice is keyed by namespace and swapped in with
-  // `selectNamespace` whenever the active namespace changes.
   provider: string
   model: string
   activeNamespace: string
   selections: Record<string, ChatSelection>
-  // Incremented whenever the transcript is reset (namespace switch, new
-  // session) so an in-flight turn can tell it no longer owns the transcript.
   turnEpoch: number
-  // Actions
   setProvider: (provider: string) => void
   setModel: (model: string) => void
   selectNamespace: (namespace: string) => void
@@ -33,15 +24,10 @@ interface ChatState {
   setUsageOnLastAssistant: (usage: ChatUsage, tasksCreatedNames?: string[]) => void
 }
 
-// Browser localStorage when available; an in-memory fallback otherwise (Node
-// exposes a bare `localStorage` global that is unusable without a backing file,
-// and some jsdom setups have none). The fallback keeps the picker working for
-// the page lifetime without persisting across reloads.
 function rawStorage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> {
   try {
     if (typeof window !== 'undefined' && window.localStorage) return window.localStorage
   } catch {
-    // Access can throw (opaque origin, blocked site data); fall through.
   }
   const memory = new Map<string, string>()
   return {
@@ -62,8 +48,6 @@ interface ChatSelection {
 
 type PersistedChatState = Pick<ChatState, 'selections'>
 
-// Hand-rolled JSON storage (instead of createJSONStorage) so test suites that
-// stub `zustand/middleware` with only `persist` keep working.
 function chatStorage(): PersistStorage<PersistedChatState> {
   const raw = rawStorage()
   return {
@@ -112,10 +96,6 @@ export const useChatStore = create<ChatState>()(
   selectNamespace: (namespace) =>
     set((state) => {
       const selection = state.selections[namespace]
-      // Chat sessions are server-side namespace-scoped: moving between two
-      // namespaces drops the previous transcript and session ID (and orphans
-      // any turn still streaming) instead of replaying them against a
-      // different namespace. The initial activation keeps whatever is there.
       const switching = state.activeNamespace !== '' && state.activeNamespace !== namespace
       return {
         activeNamespace: namespace,
@@ -133,10 +113,6 @@ export const useChatStore = create<ChatState>()(
   requestStop: () => set((state) => (state.isStreaming ? { stopRequested: true } : {})),
   newSession: () => set((state) => ({ messages: [], currentSessionId: null, isStreaming: false, stopRequested: false, turnEpoch: state.turnEpoch + 1 })),
 
-  // Chat state belongs to the identity that created it. On a token change the
-  // transcript, session, provider/model choices, and their persisted
-  // per-namespace selections are all dropped, and the epoch bump orphans any
-  // in-flight turn (aborting its request via the turn's epoch subscription).
   resetForIdentityChange: () =>
     set((state) => ({
       messages: [],
@@ -167,9 +143,6 @@ export const useChatStore = create<ChatState>()(
       return { messages: msgs }
     }),
     }),
-    // Only the per-namespace picker choices survive reloads; transcripts stay
-    // per-page. Version 0 persisted one global {provider, model}; it is dropped
-    // on upgrade because it cannot be attributed to a namespace.
     {
       name: 'orka-chat',
       version: 1,

@@ -98,7 +98,6 @@ function StructuredResultView({ result }: { result: StructuredResult }) {
 
 interface TaskResultViewerProps {
   taskId: string
-  /** A terminal task's result loads as soon as the tab opens. */
   taskPhase?: string
   taskUid?: string
 }
@@ -170,9 +169,6 @@ export function TaskResultViewer({ taskId, taskPhase, taskUid }: TaskResultViewe
         {structured ? (
           <StructuredResultView result={structured} />
         ) : (
-          // No fixed-height cap: a long result grows with the page instead of
-          // hiding most of itself in a short inner scroller, and long tokens
-          // wrap rather than forcing horizontal scrolling.
           <pre className="overflow-x-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap break-words">
             {data?.result ?? 'No result available'}
           </pre>

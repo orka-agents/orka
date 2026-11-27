@@ -32,7 +32,6 @@ const (
 	acpToolCallTitleEllipsis = "…"
 )
 
-// acpSessionUpdateAgentMessageChunk is the ACP update carrying assistant text.
 const acpSessionUpdateAgentMessageChunk = "agent_message_chunk"
 
 const (
@@ -65,19 +64,10 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 	return mapACPUpdateWithOptions(notification, acpUpdateOptions{})
 }
 
-// acpUpdateOptions selects what a prompt's controller asked to receive.
 type acpUpdateOptions struct {
-	// live adds assistant thoughts and the tool name, raw input and file
-	// edits; a controller asks for them with the live-updates header.
-	live bool
-	// rawInputs holds the digest of each tool call's last sent raw input, so
-	// an adapter repeating it does not resend it.
-	rawInputs map[string]string
-	// exact replaces credential values in text before it is bounded, so a
-	// credential cut by the bound cannot leave an unmatched prefix.
-	exact func(string) string
-	// workspaceRoot is the session's workspace, the ACP session cwd; file
-	// edits are sent relative to it.
+	live          bool
+	rawInputs     map[string]string
+	exact         func(string) string
 	workspaceRoot string
 }
 
@@ -88,8 +78,6 @@ func (o acpUpdateOptions) replace(value string) string {
 	return o.exact(value)
 }
 
-// newRawInput returns the tool call's raw input if it is new, bounded, and a
-// JSON value; otherwise nil.
 func (o acpUpdateOptions) newRawInput(toolCallID string, raw json.RawMessage) json.RawMessage {
 	raw = json.RawMessage(bytes.TrimSpace(raw))
 	if len(raw) == 0 || string(raw) == acpJSONNull || len(raw) > harnessv2.MaxToolCallRawInputBytes || !json.Valid(raw) {
@@ -106,8 +94,6 @@ func (o acpUpdateOptions) newRawInput(toolCallID string, raw json.RawMessage) js
 	return append(json.RawMessage(nil), raw...)
 }
 
-// liveToolContent is a live tool content snapshot: text content and the file
-// edits that fit, with whether either was left out.
 type liveToolContent struct {
 	blocks         []harnessv2.ContentBlock
 	diffs          []harnessv2.ToolCallDiff
@@ -115,10 +101,6 @@ type liveToolContent struct {
 	diffsOmitted   bool
 }
 
-// mapACPToolCallLiveContent keeps text content and file edits. Terminal or
-// unknown content omits the whole snapshot as the non-live mapping does. A
-// file edit outside the workspace root, or over the update bound, is left out
-// on its own, keeping the text content.
 func mapACPToolCallLiveContent(raw json.RawMessage, workspaceRoot string) (liveToolContent, error) {
 	var result liveToolContent
 	if len(raw) == 0 || string(raw) == acpJSONNull {
@@ -184,9 +166,6 @@ func mapACPToolCallLiveContent(raw json.RawMessage, workspaceRoot string) (liveT
 	return result, nil
 }
 
-// workspaceRelativeDiffPath maps an ACP diff path to a path relative to the
-// session's workspace root. It reports false for an empty path, one outside
-// the root, or one with ".." segments.
 func workspaceRelativeDiffPath(workspaceRoot, value string) (string, bool) {
 	if strings.TrimSpace(value) == "" || strings.ContainsRune(value, 0) {
 		return "", false
@@ -287,16 +266,9 @@ func mapACPUpdateWithOptions(notification *acp.SessionNotification, options acpU
 		var name string
 		var rawInput json.RawMessage
 		if options.live {
-			// A conflicting or oversized identity is not an error here: the
-			// permission path enforces identity, and the name is display data.
 			name, _ = envelope.name()
 			rawInput = options.newRawInput(toolCallID, envelope.RawInput)
 		}
-		// ACP adapters may stream tool output through provider-specific fields
-		// that harness v2 deliberately does not project. A status-less update
-		// with no visible metadata would otherwise become an unbounded series of
-		// synthetic in_progress events carrying identical state. A raw input is
-		// visible only when it changed.
 		if envelope.SessionUpdate == acpUpdateToolCallUpdate && envelope.Status == "" &&
 			envelope.Title == "" && envelope.Kind == "" && !contentPresent && len(rawInput) == 0 {
 			return nil, "", false, nil
@@ -430,9 +402,6 @@ func acpToolContentExceedsHarnessLimits(block harnessv2.ContentBlock) bool {
 		len(block.MimeType) > harnessv2.MaxContentMIMETypeBytes
 }
 
-// boundACPToolContentToEventLine keeps a tool update within one event line:
-// it drops the live raw input and file edits first, then the content snapshot,
-// which receivers then treat as omitted.
 func boundACPToolContentToEventLine(event *harnessv2.Event, maxLineBytes int) error {
 	if event == nil || event.Update == nil || event.Update.ToolCall == nil {
 		return nil
@@ -516,9 +485,6 @@ func acpAssistantMessagePhase(notification *acp.SessionNotification) string {
 	}
 }
 
-// acpAssistantMessageID returns the messageId of an agent_message_chunk.
-// codex-acp 2.x sends message phases only to JetBrains AIR clients, but it
-// still names every model message, so the last named message is the answer.
 func acpAssistantMessageID(notification *acp.SessionNotification) string {
 	if notification == nil {
 		return ""
@@ -572,9 +538,6 @@ func (identity acpToolCallIdentity) name() (string, error) {
 	return name, nil
 }
 
-// rememberToolCallName retains structured identities only for this prompt.
-// Claude and Codex can identify a tool in a preceding update while their
-// permission request carries only the toolCallId, never an authoritative title.
 func (prompt *promptState) rememberToolCallName(
 	notification *acp.SessionNotification, provider string, policy harnessv2.MCPToolPolicy,
 ) error {
@@ -600,10 +563,6 @@ func (prompt *promptState) rememberToolCallName(
 	outsidePolicy := false
 	if provider == providerKindCodex {
 		name, err = codexMCPPermissionToolName(call.Meta.IsMCPToolCall, call.Kind, call.RawInput, name, policy)
-		// The model can name any MCP server or tool, and the prompt broker
-		// refuses a call outside the frozen policy. Record the call without a
-		// name, so a permission request for it identifies no tool and a later
-		// update cannot give it one.
 		outsidePolicy = errors.Is(err, errCodexMCPToolOutsidePolicy)
 		if err != nil && !outsidePolicy {
 			return err
@@ -634,9 +593,6 @@ func (prompt *promptState) rememberToolCallName(
 
 var errCodexMCPToolOutsidePolicy = errors.New("codex MCP tool identity is outside the frozen broker policy")
 
-// The pinned Codex adapter marks MCP updates and supplies structured server/tool
-// fields instead of name. Only the configured Orka server and a frozen brokered
-// descriptor can supply an identity; titles and native-tool collisions cannot.
 func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput json.RawMessage, name string, policy harnessv2.MCPToolPolicy) (string, error) {
 	mcpCall, err := codexMCPToolCallMarker(marker)
 	if err != nil {
@@ -668,8 +624,6 @@ func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput js
 	return descriptor.Name, nil
 }
 
-// Omitted markers are valid on ID-only permission callbacks. A present Codex
-// marker must be a JSON boolean on both updates and permission callbacks.
 func codexMCPToolCallMarker(marker json.RawMessage) (bool, error) {
 	if len(marker) == 0 {
 		return false, nil
@@ -682,8 +636,6 @@ func codexMCPToolCallMarker(marker json.RawMessage) (bool, error) {
 }
 
 func canonicalPermissionToolName(provider string, policy harnessv2.MCPToolPolicy, name string) string {
-	// Only the configured Orka server's provider alias can identify a brokered
-	// tool. Display titles and another MCP server's names never grant authority.
 	if provider == providerKindClaude {
 		if tool, prefixed := strings.CutPrefix(name, "mcp__orka__"); prefixed {
 			if descriptor, allowed := policy.Descriptor(tool); allowed && descriptor.Source.Brokered() {
@@ -721,10 +673,6 @@ func mapPermission(event *acp.PermissionRequestEvent, at time.Time, ttl time.Dur
 	if err != nil {
 		return nil, err
 	}
-	// Copilot CLI 1.0.96 omits name on its native shell permission request.
-	// Recognize its command envelope only for this provider; titles and the
-	// generic execute kind alone cannot identify an authorized tool. The
-	// controller and supervisor still require Bash in the frozen tool policy.
 	if provider == providerKindCopilot && toolName == "" && toolCall.Kind == "execute" {
 		var input struct {
 			Command  string   `json:"command"`

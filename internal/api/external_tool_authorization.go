@@ -38,8 +38,6 @@ const (
 	externalToolPermissionDenied = "permission_denied"
 )
 
-// authorizeExternalToolContext keeps API tool calls on the caller's resource
-// permissions. Controller and worker clients are never changed.
 func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, events store.GatewayEventStore) {
 	authorizedClient := newExternalToolClient(tc.Client, tc.KubeClient, userInfo, tc.Namespace, tc.WatchNamespace, tc.EnforceNamespaceIsolation, events)
 	authorization := authorizedClient.authorization
@@ -119,8 +117,6 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 	}
 }
 
-// Direct policy reads preserve freshness, but Agent and Provider references
-// supplied by an API caller must not bypass the caller's get permission.
 type externalToolReferenceReader struct {
 	client.Reader
 	client *externalToolClient
@@ -136,8 +132,6 @@ func (r externalToolReferenceReader) Get(ctx context.Context, key client.ObjectK
 	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
-// The proxy's GitHub tools retain their constructor client. Bind those two
-// instances to this request without modifying the shared registry.
 func registryForExternalToolCall(tc *tools.ToolContext, name string) *tools.Registry {
 	if tc == nil {
 		return tools.DefaultRegistry
@@ -185,8 +179,6 @@ func externalToolForbidden(group, resource, name string) error {
 	return apierrors.NewForbidden(schema.GroupResource{Group: group, Resource: resource}, name, errors.New("not authorized"))
 }
 
-// externalToolClient authorizes the actual client operation, after each tool
-// resolves its arguments and defaults. It deliberately does not expose Watch.
 type externalToolClient struct {
 	client.Client
 	authorization *externalToolAuthorization
@@ -200,8 +192,6 @@ func newExternalToolClient(c client.Client, kubeClient kubernetes.Interface, use
 	}}
 }
 
-// Discovery omits unavailable metadata while keeping ordinary chat usable.
-// Executable tools receive the strict client and still return authorization errors.
 type externalToolDiscoveryClient struct {
 	client.Client
 }
@@ -225,8 +215,6 @@ func (c *externalToolClient) authorize(ctx context.Context, obj runtime.Object, 
 	return c.authorization.authorize(ctx, namespace, verb, resource.Group, resource.Resource, name)
 }
 
-// These are the concrete resources used by management tools and code_exec.
-// New resource access must be assigned an explicit permission here.
 func externalToolResource(obj runtime.Object) (schema.GroupResource, bool) {
 	group := corev1alpha1.GroupVersion.Group
 	resource := ""
@@ -264,9 +252,6 @@ func (c *externalToolClient) authorizeTask(ctx context.Context, task *corev1alph
 	if err != nil {
 		return err
 	}
-	// Gateway Tasks require the dedicated Gateway read/operate API checks.
-	// Generic chat tools cannot act on them or reveal their transcripts.
-	// Nor another person's AHP turns, which only their requester may see.
 	if gatewayOwned || ahpTaskHidden(c.authorization.userInfo, task) {
 		return apierrors.NewNotFound(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: externalToolTaskResource}, task.Name)
 	}
@@ -323,9 +308,6 @@ func (c *externalToolClient) Create(ctx context.Context, obj client.Object, opts
 	if err := c.authorize(ctx, obj, obj.GetNamespace(), externalToolCreateVerb, ""); err != nil {
 		return err
 	}
-	// A Task cannot continue an AHP session, which would read the
-	// conversation into a Task that is not private: another person's is not
-	// found, and the owner's own is refused.
 	if task, ok := obj.(*corev1alpha1.Task); ok && task.Spec.SessionRef != nil {
 		hidden, err := ahpSessionHiddenIn(ctx, c.Client, c.authorization.userInfo, task.Namespace, task.Spec.SessionRef.Name)
 		if err != nil {
@@ -353,7 +335,6 @@ func (c *externalToolClient) Delete(ctx context.Context, obj client.Object, opts
 		if err := c.authorizeTask(ctx, current); err != nil {
 			return err
 		}
-		// Fence the loaded ownership decision against replacement or mutation.
 		opts = append(opts, client.Preconditions{UID: &current.UID, ResourceVersion: &current.ResourceVersion})
 	}
 	return c.Client.Delete(ctx, obj, opts...)
@@ -373,8 +354,6 @@ func (c *externalToolClient) Patch(ctx context.Context, obj client.Object, patch
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
-// No external tool needs apply, collection deletion, or subresource mutation.
-// Keep those entry points closed instead of inheriting the controller client.
 func (c *externalToolClient) Apply(context.Context, runtime.ApplyConfiguration, ...client.ApplyOption) error {
 	return externalToolForbidden("", "resources", "")
 }
@@ -432,8 +411,7 @@ type externalToolSessionDeleter struct {
 		DeleteSession(context.Context, string, string) error
 	}
 	authorization *externalToolAuthorization
-	// reader finds the owner of an AHP session.
-	reader client.Reader
+	reader        client.Reader
 }
 
 func (d *externalToolSessionDeleter) DeleteSession(ctx context.Context, namespace, sessionID string) error {

@@ -54,8 +54,6 @@ const (
 	mappedJournalRecordPromptTerminal
 )
 
-// MapContext supplies Orka-owned stream metadata for a validated harness v2
-// update. Protocol events do not own namespace, task name, or session linkage.
 type MapContext struct {
 	Namespace   string
 	TaskName    string
@@ -94,10 +92,6 @@ func (c MapContext) validate() error {
 	return nil
 }
 
-// MappedUpdateIdentity is the safe protocol identity persisted with each
-// execution event. RequestDigest is deliberately excluded: the validated
-// stream already enforces it, and journaling must not change or expose prompt
-// digest/fencing data.
 type MappedUpdateIdentity struct {
 	Protocol                 string                      `json:"protocol"`
 	RuntimeInstanceID        harnessv2.RuntimeInstanceID `json:"runtimeInstanceID"`
@@ -150,7 +144,6 @@ func (i MappedUpdateIdentity) samePrompt(other MappedUpdateIdentity) bool {
 		i.PromptID == other.PromptID
 }
 
-// Key returns the stable recovery-deduplication key for one protocol update.
 func (i MappedUpdateIdentity) Key() string {
 	return mappedPromptIdentityKey(i) + mappedUpdateIdentityKeySeparator + strconv.FormatUint(i.Sequence, 10)
 }
@@ -168,9 +161,6 @@ func mappedPromptIdentityKey(identity MappedUpdateIdentity) string {
 	}, mappedUpdateIdentityKeySeparator)
 }
 
-// MappedUpdateIdentityFromEvent extracts a persisted harness v2 update
-// identity. Events from other producers and malformed/truncated payloads are
-// ignored.
 func MappedUpdateIdentityFromEvent(event store.ExecutionEvent) (MappedUpdateIdentity, bool) {
 	if len(event.Content) == 0 {
 		return MappedUpdateIdentity{}, false
@@ -261,8 +251,6 @@ func mappedJournalDedupeKey(key string) string {
 	return mappedJournalDedupeKeyPrefix + hex.EncodeToString(digest[:])
 }
 
-// PlanProjection is the durable/public read model derived from one ACP plan
-// update.
 type PlanProjection struct {
 	Summary                    string
 	ProgressPct                int
@@ -277,8 +265,6 @@ type PlanProjection struct {
 	Completed                  int
 }
 
-// ProjectPlanUpdate converts structured ACP plan entries into the existing
-// PlanStore contract and a bounded, redacted text representation for events.
 func ProjectPlanUpdate(update harnessv2.PlanUpdate) PlanProjection {
 	projection, _ := projectPlanUpdate(update, nil, false)
 	return projection
@@ -363,8 +349,6 @@ func redactPlanEntries(
 	for _, entry := range entries {
 		content := strings.TrimSpace(executionevents.RedactExecutionEventText(strings.TrimSpace(entry.Content)))
 		if !summaryAssigned && entry.Status == harnessv2.PlanEntryInProgress && content != "" {
-			// The entry is exposed inside both summaries, but only up to the
-			// final cutoff after the progress prefix and formatter redaction.
 			summaryAssigned = true
 			summary, _, _ := executionevents.RedactAndTruncateExecutionEventText(
 				summaryPrefix+compactSummary(content), executionevents.MaxExecutionEventSummaryChars,
@@ -403,9 +387,6 @@ func projectDiagnosticUpdate(
 	return diagnosticProjection{code: values[0], message: values[1]}, publishedFields
 }
 
-// Diagnostic messages publish contentText; failures publish raw JSON instead.
-// Their summary is shared: derive its contributions after formatting the whole
-// code/message pair, retaining the generated colon and the actual cutoff.
 func redactDiagnosticFields(
 	code, message string,
 	messageKind logicalFieldCopyKind,
@@ -435,7 +416,6 @@ func projectToolUpdate(
 	title := executionevents.RedactExecutionEventText(tool.Title)
 	contentOmitted := contentTruncated || tool.ContentOmitted
 	if contentOmitted && strings.TrimSpace(title) != "" {
-		// A titled tool has no output summary, and mapUpdate drops its text.
 		contentText = nil
 	}
 	values := []string{title, tool.Kind}
@@ -446,7 +426,6 @@ func projectToolUpdate(
 		if strings.TrimSpace(title) == "" {
 			kind = logicalFieldContentSummaryCopies
 			if contentOmitted {
-				// mapUpdate retains the summary before clearing contentText.
 				kind = logicalFieldCompactSummaryCopy
 			}
 		}
@@ -468,9 +447,6 @@ func redactLogicalFieldsWithHistory(
 	return redactLogicalFieldsWithPublicCopies(history, historySaturated, nil, values...)
 }
 
-// Each model-bearing event publishes its provider and effective model, including
-// configured fallbacks. Check them together against history and fields already
-// projected for this event, then return all fields actually published.
 func redactModelWithHistory(
 	provider, model string,
 	history []logicalFieldBoundaries,
@@ -501,9 +477,6 @@ const (
 	logicalFieldCompactSummaryCopy
 )
 
-// Count the actual field locations of a public record. Providers and models each
-// have two raw DTO locations; text-only fields have bounded content/summary copies.
-// Replays of the same event identity do not introduce another logical field.
 func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string {
 	switch kind {
 	case logicalFieldTrimmedCopies:
@@ -511,7 +484,6 @@ func logicalFieldPublicCopies(value string, kind logicalFieldCopyKind) []string 
 	case logicalFieldSummaryCopies:
 		return []string{value, compactWhitespace(value)}
 	case logicalFieldContentTextCopy, logicalFieldContentSummaryCopies:
-		// Text-only fields have no raw JSON copy; remember only published text.
 		contentText, _, _ := executionevents.RedactAndTruncateExecutionEventText(value, executionevents.MaxExecutionEventContentTextChars)
 		if kind == logicalFieldContentTextCopy {
 			return []string{contentText}
@@ -557,8 +529,6 @@ func redactLogicalFieldsWithSummaryCopies(
 		}
 		redacted[index] = executionevents.RedactExecutionEventText(value)
 		if trimmed {
-			// URL removal can expose trailing whitespace. Match the final
-			// model/plan value before a downstream projection trims it again.
 			redacted[index] = strings.TrimSpace(redacted[index])
 		}
 		copies := logicalFieldPublicCopies(redacted[index], kind)
@@ -606,8 +576,6 @@ const (
 	maxLogicalFieldPermutationBitWords = 4 * maxLogicalFieldPermutationFields / 64
 )
 
-// Public copies share one logical field's history slot, but each needs its own
-// permutation bit because the record exposes them together.
 type logicalFieldBoundaries []logicalFieldBoundary
 
 type logicalFieldBoundary struct {
@@ -627,9 +595,7 @@ type logicalFieldPermutationCandidate struct {
 type logicalFieldSensitiveMarkerState struct {
 	marker  int
 	matched int
-	// Each consumed copy advances the marker by at least one byte. The
-	// longest current marker is 18 bytes; leave room for future additions.
-	used [32]int
+	used    [32]int
 }
 
 func (state logicalFieldSensitiveMarkerState) consume(index int) (logicalFieldSensitiveMarkerState, bool) {
@@ -685,7 +651,6 @@ var logicalFieldSensitiveMarkers = []string{
 	"//",
 	"?",
 	"#",
-	// Signed query parameters can occur without a preceding question mark.
 	"&sig=",
 	"&signature=",
 	"&sas=",
@@ -693,35 +658,17 @@ var logicalFieldSensitiveMarkers = []string{
 	"&x-goog-signature=",
 }
 
-// A complete pwd marker is sensitive only while it can still form an
-// assignment key (internal/redact.sensitiveAssignmentRe). A fixed delimiter
-// such as the ampersand in `pwd && ls` cannot become an assignment by joining
-// more fields. Keep open keys conservative, including quoted/whitespace tails.
 var logicalFieldPWDAssignmentRe = regexp.MustCompile(`(?i)pwd[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
 var logicalFieldTokenAssignmentRe = regexp.MustCompile(`(?i)token[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
 
-// Only a delimiter reachable from the beginning of another public copy can
-// complete an open assignment key. A colon after fixed words in a generated
-// usage summary cannot do so.
 var logicalFieldAssignmentDelimiterRe = regexp.MustCompile(`(?i)\A[a-z0-9_.-]*["']?\s*[:=]`)
 
-// Assignment keys and quoted values have no fixed length in the text redactor.
-// Remember when clipping would discard an unfinished assignment, including
-// aliases and Unicode case folds accepted by internal/redact.sensitiveAssignmentRe.
-// The capture group identifies an unfinished quoted value.
 var logicalFieldOpenAssignmentRe = regexp.MustCompile(`(?i)(?:api[-_]?key|token|secret|password|passwd|pwd|credential|private[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token)[a-z0-9_.-]*["']?\s*(?:\z|[:=]\s*("[^"\r\n]*|'[^'\r\n]*)?\z)`)
 
-// A long field can finish a marker begun in another field. Its omitted middle
-// must continue the key to a delimiter or its end, not through a fixed separator
-// such as the ampersand in a shell command.
 var logicalFieldAssignmentContinuationRe = regexp.MustCompile(`(?i)\A[a-z0-9_.-]*["']?\s*(?:[:=]|\z)`)
 
 var logicalFieldWhitespaceRunRe = regexp.MustCompile(`[\t\n\f\r ]{2,}`)
 
-// The text redactors accept arbitrary ASCII whitespace between header and
-// natural-language credential parts. Keep that whitespace from clipping away
-// an unfinished marker. This changes only the bounded matcher representation,
-// retains line-break barriers, and leaves Unicode whitespace untouched.
 func compactLogicalFieldWhitespace(value string) string {
 	return logicalFieldWhitespaceRunRe.ReplaceAllStringFunc(value, func(run string) string {
 		if !strings.ContainsAny(run, "\r\n") {
@@ -777,16 +724,11 @@ func logicalFieldTruncatesAssignment(value, suffix string) bool {
 	if clippedBytes <= 0 {
 		return false
 	}
-	// Another marker inside a quoted value does not preserve the assignment
-	// whose key was clipped. Check the original match's position instead.
 	match := logicalFieldOpenAssignmentRe.FindStringIndex(value)
 	return match != nil && match[0] < clippedBytes
 }
 
 func logicalFieldsMayReconstructSensitiveMarker(fields []logicalFieldBoundaries) bool {
-	// First reject unreachable markers without tracking copies. Otherwise a
-	// bounded copy-aware search could exhaust its work budget on benign text
-	// whose fragments cannot form any marker, even with unlimited reuse.
 	return logicalFieldsHaveSensitiveMarker(fields, false) && logicalFieldsHaveSensitiveMarker(fields, true)
 }
 
@@ -828,7 +770,6 @@ func logicalFieldsHaveSensitiveMarker(fields []logicalFieldBoundaries, countCopi
 			}
 			text := prefixes[index]
 			if marker[state.matched-1] == ' ' {
-				// A marker's whitespace can span several source fields.
 				text = strings.TrimLeft(text, " ")
 			}
 			if text == "" {
@@ -842,9 +783,6 @@ func logicalFieldsHaveSensitiveMarker(fields []logicalFieldBoundaries, countCopi
 				if logicalFieldAssignmentDelimiterRe.MatchString(tail) || boundary.assignmentDelimiter {
 					return true
 				}
-				// Fixed text after the marker cannot be removed by appending
-				// another copy. Clipped fields must also have a feasible tail
-				// in the original text, beyond the retained prefix.
 				if logicalFieldAssignmentContinuationRe.MatchString(tail) &&
 					(boundary.whole || boundary.assignmentContinuation) && logicalFieldAssignmentPossible(next, delimiters, countCopies) {
 					return true
@@ -937,9 +875,6 @@ func initialLogicalFieldMarkerStates(
 }
 
 func foldLogicalFieldMarkerText(value string) string {
-	// Match the redactor's case-insensitive regular expressions, including
-	// Unicode folds and ASCII whitespace in natural-language API key text.
-	// Only the conservative fallback folds line breaks into spaces.
 	value = strings.Map(func(r rune) rune {
 		switch r {
 		case '\t', '\n', '\f', '\r':
@@ -957,16 +892,9 @@ func foldLogicalFieldMarkerText(value string) string {
 }
 
 func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool {
-	// Exact permutation tracking is bounded. Histories can contain one full
-	// 128-entry plan plus a later update, so exceeding this logical-field limit is not
-	// itself evidence of sensitive content. Fall back to the conservative marker
-	// reachability check used when the candidate work cap is exhausted.
 	if len(fields) > maxLogicalFieldPermutationFields {
 		return logicalFieldsMayReconstructSensitiveMarker(fields)
 	}
-	// Fields have one to four public copies. An in-progress plan entry has
-	// raw and normalized text in both the plan record and its journal event.
-	// Flatten only for exact search; history accounting still uses fields.
 	boundaries := make([]logicalFieldBoundary, 0, 4*len(fields))
 	needsExactSearch := false
 	for _, field := range fields {
@@ -978,15 +906,9 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 	if len(boundaries) < 2 {
 		return false
 	}
-	// Rule out marker-free histories before spending the exact permutation
-	// budget. Unlimited copy reuse makes this precheck conservative for whole
-	// fields. Clipped assignment prefixes need the exact truncation checks, and
-	// malformed relative URLs can require redaction without a credential marker.
 	if !needsExactSearch && !logicalFieldsHaveSensitiveMarker(fields, false) {
 		return false
 	}
-	// Equal complete copies are interchangeable. Consume them in index order
-	// so the search counts distinct text sequences instead of copy identities.
 	previousEqualWhole := make([]int, len(boundaries))
 	lastEqualWhole := make(map[logicalFieldBoundary]int, len(boundaries))
 	for index, boundary := range boundaries {
@@ -1035,16 +957,12 @@ func permutedLogicalFieldSubsetsSensitive(fields []logicalFieldBoundaries) bool 
 			next := candidate
 			next.used[word] |= bit
 			if boundary.whole {
-				// Measure clipping against the same normalized text as the
-				// suffix, not against whitespace removed by compression.
 				joined = compactLogicalFieldWhitespace(joined)
 				next.suffix = logicalFieldSuffix(joined)
 				if logicalFieldTruncatesAssignment(joined, next.suffix) {
 					return true
 				}
 			} else {
-				// Punctuation can end a key, but still belongs to an open quoted
-				// value whose assignment would be lost with this prefix.
 				assignment := logicalFieldOpenAssignmentRe.FindStringSubmatchIndex(joined)
 				if assignment != nil && (boundary.assignmentContinuation || assignment[2] >= 0) {
 					return true
@@ -1090,13 +1008,6 @@ const (
 	recoveredToolOutcomeUnknownSummary     = "Tool call outcome unknown"
 )
 
-// mapUpdate maps one validated harness v2 update to the public execution-event
-// taxonomy. Streamed assistant and tool text is deliberately omitted unless
-// options supply it: independently redacting chunks can leak credentials split
-// across update boundaries. Journal state supplies tool text only after the
-// logical stream is complete, and assistant text is persisted from the
-// terminal transcript.
-//
 //nolint:gocyclo // Each update kind maps in one explicit switch, easier to audit together.
 func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOptions) (*store.ExecutionEvent, error) {
 	if err := mapCtx.validate(); err != nil {
@@ -1140,7 +1051,6 @@ func mapUpdate(event harnessv2.Event, mapCtx MapContext, options mapUpdateOption
 		mapped.Summary = "Assistant message streamed"
 		content["contentOmitted"] = "streamed_text_pending_terminal_redaction"
 	case harnessv2.UpdateAssistantThoughtChunk:
-		// Reasoning is live-only and never persisted; the journal skips it.
 		mapped.Type = executionevents.ExecutionEventTypeModelMessage
 		mapped.Summary = "Assistant reasoning streamed"
 		content["contentOmitted"] = "reasoning_not_persisted"
@@ -1304,10 +1214,6 @@ func mapUsageUpdateWithHistory(
 		return nil, nil, fmt.Errorf("invalid usage: %w", err)
 	}
 	mapCtx = mapCtx.normalized()
-	// Preserve metadata that is safe against history before checking the new
-	// summary. Its trailing "tokens" may complete an assignment, or exhaust
-	// the conservative search budget; masking the summary must not needlessly
-	// discard independently safe provider/model values.
 	provider, model, publishedFields := redactModelWithHistory(
 		mapCtx.Provider, mapCtx.Model, history, historySaturated, nil,
 	)
@@ -1421,8 +1327,6 @@ func mapToolUpdateWithoutMetadata(event harnessv2.Event, mapCtx MapContext) (*st
 	return mapUpdate(event, mapCtx, mapUpdateOptions{omitToolMetadata: true})
 }
 
-// mapTerminalUsageWithHistory projects usage reported only by a completed
-// result while retaining the terminal event's durable protocol identity.
 func mapTerminalUsageWithHistory(
 	event harnessv2.Event,
 	mapCtx MapContext,
@@ -1449,11 +1353,6 @@ func mapTerminalUsageWithHistory(
 	return mapUsageUpdateWithHistory(update, mapCtx, mappedTerminalUsageKind, history, historySaturated)
 }
 
-// MapPromptLifecycle maps prompt acceptance and settlement into the existing
-// model-request lifecycle taxonomy used by task traces and UI execution graphs.
-// Journal state uses mapPromptLifecycleWithHistory directly; this entry point
-// serves callers outside the package that need a mapped lifecycle event
-// without journal deduplication.
 func MapPromptLifecycle(event harnessv2.Event, mapCtx MapContext) (*store.ExecutionEvent, error) {
 	mapped, _, err := mapPromptLifecycleWithHistory(event, mapCtx, nil, false)
 	return mapped, err
@@ -1597,10 +1496,6 @@ func mapPromptLifecycleWithHistory(
 	return mapped, publishedFields, nil
 }
 
-// mapPromptStreamFailure maps a controller-observed stream failure into a
-// terminal model-request lifecycle event. It deliberately uses only the safe
-// mapped prompt identity because controller-synthesized events do not own a
-// runtime request digest or wire-protocol event payload.
 func mapPromptStreamFailure(
 	identity MappedUpdateIdentity,
 	at time.Time,
@@ -1661,8 +1556,6 @@ func mapPromptStreamFailure(
 	return mapped, publishedFields, nil
 }
 
-// mapPromptSettlement maps a proven settlement into the prompt lifecycle
-// taxonomy when the terminal stream event was unavailable.
 func mapPromptSettlement(
 	identity MappedUpdateIdentity,
 	settlement harnessv2.PromptSettlement,
@@ -1761,8 +1654,6 @@ func validPromptCancellationReason(reason harnessv2.CancelReason) bool {
 	}
 }
 
-// MapAssistantTranscript maps the complete terminal assistant transcript as a
-// single event so redaction sees credential shapes spanning protocol chunks.
 func MapAssistantTranscript(
 	event harnessv2.Event,
 	mapCtx MapContext,
@@ -1787,8 +1678,6 @@ func MapAssistantTranscript(
 		return nil, fmt.Errorf("assistant transcript is required")
 	}
 	if contentOmitted {
-		// Never retain a prefix once the complete logical stream exceeded its
-		// bound; a credential may span the discarded cutoff.
 		transcript = ""
 	}
 

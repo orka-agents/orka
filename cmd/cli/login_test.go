@@ -21,7 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/cli/client"
 )
 
-// fakeGitHubDeviceFlow approves the device code on the first poll.
 func fakeGitHubDeviceFlow(t *testing.T) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,8 +77,6 @@ func TestLoginSignsInLinksGitHubAndWaitsForTheHost(t *testing.T) {
 			}
 			hostPolls++
 			if hostPolls == 1 {
-				// Until the new link's host exists, a ready host kept from
-				// another link is not the one to use.
 				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 					"name": "gh-alice-old", "environment": "orka-gh-alice-old", "connection": "github-old-alice", "phase": "Ready", "ready": true,
 				})
@@ -118,12 +115,8 @@ func TestLoginRefusesAPlainHTTPServer(t *testing.T) {
 	}
 }
 
-// A session that ends soon renews itself on the next command, and is sent only
-// to the server it came from.
 func TestSessionRenewsBeforeItEndsAndStaysWithItsServer(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	// A kubeconfig with a bearer token, which must not stand in for a session
-	// withheld from another server.
 	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
 	if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
 kind: Config
@@ -166,7 +159,6 @@ current-context: x
 		t.Fatalf("config = %+v", cfg)
 	}
 
-	// Another server never receives the session.
 	var leaked bool
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auth := r.Header.Get("Authorization"); strings.Contains(auth, "orka_s_") || strings.Contains(auth, "kube-bearer-token") {
@@ -179,7 +171,6 @@ current-context: x
 	if leaked {
 		t.Fatal("a session, or a Kubernetes credential in its place, must be sent only to the session's server")
 	}
-	// Nor after the configured server changes.
 	if _, err := runLoginCLI(t, "config", "set-server", other.URL); err != nil {
 		t.Fatal(err)
 	}
@@ -189,9 +180,6 @@ current-context: x
 	}
 }
 
-// A command that read one person's session in its renewal window does not
-// renew or use another person's session saved before it took the config
-// lock. A successor of its own session, renewed by another process, is used.
 func TestSessionRenewalLeavesAnotherPersonsSessionAlone(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	renewals := 0
@@ -214,7 +202,6 @@ func TestSessionRenewalLeavesAnotherPersonsSessionAlone(t *testing.T) {
 	if got := configuredSession(cmd, orka.URL, alice); got != "orka_s_alice" || renewals != 0 {
 		t.Fatalf("token = %q after %d renewals, want alice's own session and no renewal", got, renewals)
 	}
-	// Another account that took over alice's former login is not alice.
 	renamed := alice
 	renamed.Token, renamed.SessionSubject = "orka_s_renamed", "1003"
 	if err := saveConfig(renamed); err != nil {
@@ -234,8 +221,6 @@ func TestSessionRenewalLeavesAnotherPersonsSessionAlone(t *testing.T) {
 	}
 }
 
-// Two orka processes in a session's renewal window renew it once and both
-// use the successor: the server renews a session only once.
 func TestConcurrentCommandsRenewASessionOnce(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var renewals atomic.Int32
@@ -289,8 +274,6 @@ func TestLogoutEndsTheSession(t *testing.T) {
 	}))
 	defer orka.Close()
 	later := time.Now().Add(10 * time.Hour)
-	// Logout ends the session at the server that issued it, wherever the
-	// configured server points now.
 	if err := saveConfig(orkaConfig{Server: "https://elsewhere.example", SessionServer: orka.URL, Token: "orka_s_session",
 		TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &later}); err != nil {
 		t.Fatal(err)
@@ -303,7 +286,6 @@ func TestLogoutEndsTheSession(t *testing.T) {
 		t.Fatalf("config = %+v", cfg)
 	}
 
-	// A session whose saved server would carry it in the clear is not sent.
 	ended = ""
 	if err := saveConfig(orkaConfig{Server: orka.URL, SessionServer: "http://orka.example.com", Token: "orka_s_session",
 		TokenKind: tokenKindGitHubSession, SessionSubject: "1001", TokenExpiresAt: &later}); err != nil {
@@ -314,7 +296,6 @@ func TestLogoutEndsTheSession(t *testing.T) {
 	}
 }
 
-// A token set by hand is not a session from orka login.
 func TestSetTokenReplacesASession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	later := time.Now().Add(10 * time.Hour)
@@ -330,9 +311,6 @@ func TestSetTokenReplacesASession(t *testing.T) {
 	}
 }
 
-// A redirect from the server, or a proxy in front of it, never carries the
-// GitHub tokens or the session anywhere: credential requests do not follow
-// redirects.
 func TestCredentialsNeverFollowARedirect(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	fakeGitHubDeviceFlow(t)
@@ -359,8 +337,6 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 	if _, err := runLoginCLI(t, "login", "--server", orka.URL, "--no-open", "--no-host", "--timeout", "10s"); err == nil {
 		t.Fatal("a redirected sign-in must fail")
 	}
-	// After a sign-in that succeeds, waiting for the host never follows a
-	// redirect with the new session either.
 	signedIn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -381,16 +357,12 @@ func TestCredentialsNeverFollowARedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = runLoginCLI(t, "host", "status")
-	// A session passed explicitly is not sent through a redirect either.
 	_, _ = runLoginCLI(t, "host", "status", "--server", orka.URL, "--token", "orka_s_explicit")
 	if leaked {
 		t.Fatal("a redirect carried credentials to another origin")
 	}
 }
 
-// A session's API calls follow no redirect but have no overall deadline,
-// which would cut streamed logs and chat replies off; the sign-in calls keep
-// theirs.
 func TestSessionAPICallsHaveNoOverallDeadline(t *testing.T) {
 	if sessionAPIClient.Timeout != 0 {
 		t.Fatalf("session API client timeout = %s, want none", sessionAPIClient.Timeout)
@@ -400,13 +372,10 @@ func TestSessionAPICallsHaveNoOverallDeadline(t *testing.T) {
 	}
 }
 
-// A config write during a renewal waits for it and builds on the saved
-// successor, so neither undoes the other.
 func TestConfigWritesWaitForARenewal(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	setter := make(chan error, 1)
 	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Another command changes the namespace while this renewal runs.
 		go func() {
 			_, err := runLoginCLI(t, "config", "set-namespace", "team")
 			setter <- err
@@ -435,8 +404,6 @@ func TestConfigWritesWaitForARenewal(t *testing.T) {
 	}
 }
 
-// A lock file left by a process that exited holds nothing: the lock is the
-// operating system's, and only one caller holds it at a time.
 func TestConfigLockIsExclusiveAndNeverStale(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := os.MkdirAll(filepath.Dir(configPath()), 0o700); err != nil {
@@ -474,8 +441,6 @@ func TestConfigLockIsExclusiveAndNeverStale(t *testing.T) {
 	}
 }
 
-// Logout waits for a renewal in flight and ends the session it saved, not
-// the one it replaced.
 func TestLogoutWaitsForARenewal(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var ended atomic.Value
@@ -512,8 +477,6 @@ func TestLogoutWaitsForARenewal(t *testing.T) {
 	}
 }
 
-// When the server offers no host, so the CLI showed no disclosure, the
-// sign-in declines a host even if one is enabled while the code is pending.
 func TestLoginDeclinesAHostItDidNotDisclose(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	fakeGitHubDeviceFlow(t)
@@ -540,8 +503,6 @@ func TestLoginDeclinesAHostItDidNotDisclose(t *testing.T) {
 	}
 }
 
-// Signing in over a token saved by hand says, before the code, that the token
-// will be replaced. Signing in over a session says nothing.
 func TestLoginWarnsBeforeReplacingASavedToken(t *testing.T) {
 	fakeGitHubDeviceFlow(t)
 	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -589,7 +550,6 @@ func TestLoginWarnsBeforeReplacingASavedToken(t *testing.T) {
 	}
 }
 
-// Readers never see a partly written config while another command saves it.
 func TestConfigSavesAreAtomic(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := orkaConfig{Server: "https://orka.example", Namespace: strings.Repeat("n", 4096)}
@@ -622,8 +582,6 @@ func TestConfigSavesAreAtomic(t *testing.T) {
 	wg.Wait()
 }
 
-// A host kept from before the person left the org still reports that until
-// the controller sees the new sign-in; login waits through it.
 func TestLoginWaitsThroughAStaleMembershipFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	fakeGitHubDeviceFlow(t)
@@ -656,8 +614,6 @@ func TestLoginWaitsThroughAStaleMembershipFailure(t *testing.T) {
 	}
 }
 
-// An answer cut off after its headers is a failure: neither login nor a
-// renewal saves an empty session over the one it holds.
 func TestATruncatedAnswerSavesNoSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	fakeGitHubDeviceFlow(t)
@@ -667,7 +623,6 @@ func TestATruncatedAnswerSavesNoSession(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{"github": map[string]any{"clientID": "Iv23app"}}) //nolint:errcheck
 			return
 		}
-		// A 201 that promises a body and closes before sending it.
 		w.Header().Set("Content-Length", "100")
 		w.WriteHeader(http.StatusCreated)
 	}))
@@ -690,8 +645,6 @@ func TestATruncatedAnswerSavesNoSession(t *testing.T) {
 	}
 }
 
-// A returning person's host may be suspended: one that idled out is woken,
-// and one an operator suspended is reported, not overridden.
 func TestLoginWakesAnIdleHostAndReportsAnOperatorSuspension(t *testing.T) {
 	previousHost := agentHostReadyPollInterval
 	agentHostReadyPollInterval = time.Millisecond
@@ -739,8 +692,6 @@ func TestLoginWakesAnIdleHostAndReportsAnOperatorSuspension(t *testing.T) {
 	}
 }
 
-// A logout the server could not process keeps the saved session, so it can
-// be ended on a retry instead of left live.
 func TestLogoutKeepsTheSessionWhenTheServerCannotAnswer(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -760,7 +711,6 @@ func TestLogoutKeepsTheSessionWhenTheServerCannotAnswer(t *testing.T) {
 	}
 }
 
-// An operator's suspension wins over a Ready left from the host's last run.
 func TestWaitReportsAnOperatorSuspensionOverAStaleReady(t *testing.T) {
 	previousHost := agentHostReadyPollInterval
 	agentHostReadyPollInterval = time.Millisecond
@@ -785,9 +735,6 @@ func TestWaitReportsAnOperatorSuspensionOverAStaleReady(t *testing.T) {
 	}
 }
 
-// An Orka session passed with --token never crosses the network in the clear:
-// the command stops before sending it, as a saved session's would. The CLI
-// exits on the refusal, so the command runs in a child process.
 func TestExplicitSessionStaysOffPlainHTTP(t *testing.T) {
 	if os.Getenv("ORKA_CLI_EXPLICIT_SESSION_CHILD") == "1" {
 		_, _ = runLoginCLI(t, "host", "status", "--server", "http://orka.example.com", "--token", "orka_s_explicit")
@@ -804,8 +751,6 @@ func TestExplicitSessionStaysOffPlainHTTP(t *testing.T) {
 	}
 }
 
-// ORKA_TOKEN is used as given, never mistaken for the saved session, and
-// ORKA_SERVER naming another server does not receive the saved session.
 func TestEnvironmentCredentialsAndASavedSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "none"))
@@ -846,8 +791,6 @@ func TestEnvironmentCredentialsAndASavedSession(t *testing.T) {
 	}
 }
 
-// orka login signs in to the server every other command reaches: --server,
-// then ORKA_SERVER, then the config.
 func TestLoginServerFollowsTheCLIServerOrder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := saveConfig(orkaConfig{Server: "https://saved.example"}); err != nil {

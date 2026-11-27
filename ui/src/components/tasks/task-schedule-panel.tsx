@@ -17,8 +17,6 @@ function untilLabel(ts?: string): string {
   return seconds > 0 ? ` (in ${humanizeDuration(seconds)})` : ' (due)'
 }
 
-// A run belongs to this schedule when the controller made this exact Task
-// (by UID) its owner; a same-name recreation must not list older runs.
 function isRunOf(child: Task, parent: Task): boolean {
   const owners = child.metadata.ownerReferences ?? []
   if (parent.metadata.uid && owners.length > 0) {
@@ -27,10 +25,6 @@ function isRunOf(child: Task, parent: Task): boolean {
   return child.metadata.labels?.['orka.ai/scheduled-run'] === 'true'
 }
 
-/**
- * Schedule state for a cron Task: the expression, suspension, last and next
- * run, and links to the recent runs it created.
- */
 export function TaskSchedulePanel({ task }: { task: Task }) {
   const schedule = task.spec.schedule
   const { data, isLoading, error } = useTaskChildren(task.metadata.name, Boolean(schedule), task.metadata.uid)

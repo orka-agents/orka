@@ -22,10 +22,7 @@ const secrets = [
   { name: 'datadog-api-keys', type: 'Opaque' },
 ].map((secret) => ({ ...secret, namespace: DEMO_NAMESPACE }))
 
-/** Sign-in, chat configuration, providers, and secrets. */
 export const coreHandlers = [
-  // Only the demo credential signs in, so the demo never stores a real token
-  // a visitor pastes or links in.
   http.get(api('/auth/validate'), ({ request }) =>
     request.headers.get('Authorization') === `Bearer ${DEMO_TOKEN}`
       ? HttpResponse.json({ valid: true, subject: 'demo-user' })

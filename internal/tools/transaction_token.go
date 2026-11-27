@@ -29,11 +29,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// prepareChildTransactionToken exchanges the parent's transaction token for a
-// child-scoped TxToken and stores it in a Secret referenced by the child task.
-// The Secret is initially owned by the parent task because a newly delegated
-// child may not yet have a UID. After the child is created,
-// adoptChildTransactionTokenSecret rewrites the owner reference to the child.
 func prepareChildTransactionToken(ctx context.Context, k8sClient client.Client, parentTask, childTask *corev1alpha1.Task, operation, agent string) error {
 	ttsConfig, enabled, err := childTransactionTokenExchangeConfigForParent(parentTask)
 	if err != nil {
@@ -198,14 +193,6 @@ func childOwnerReference(childTask *corev1alpha1.Task) []metav1.OwnerReference {
 	return taskOwnerReference(childTask)
 }
 
-// requireSameNamespaceChildTokenExchange fails child transaction token
-// exchange closed for cross-namespace delegation. The raw child TxToken must
-// only ever exist in an owner-referenced Secret, and a namespaced owner
-// reference is only valid within the owner's namespace: a cross-namespace
-// parent owner would be garbage-collected before the child adopts the Secret,
-// while an unowned Secret would orphan the token if the tool crashes between
-// Secret creation and child-Task creation. Neither window is acceptable, so
-// the combination is rejected before any token is exchanged or stored.
 func requireSameNamespaceChildTokenExchange(parentTask, childTask *corev1alpha1.Task) error {
 	if parentTask == nil || childTask == nil || parentTask.Namespace == childTask.Namespace {
 		return nil
@@ -216,12 +203,6 @@ func requireSameNamespaceChildTokenExchange(parentTask, childTask *corev1alpha1.
 	)
 }
 
-// childTokenSecretOwnerReferences returns the pre-adoption owner references
-// for a child transaction token Secret. requireSameNamespaceChildTokenExchange
-// guarantees parent and child share a namespace before any Secret is created;
-// returning no owner for a cross-namespace pair is defense in depth against
-// an invalid cross-namespace owner reference that garbage collection would
-// act on before the child adopts the Secret.
 func childTokenSecretOwnerReferences(parentTask, childTask *corev1alpha1.Task) []metav1.OwnerReference {
 	if parentTask == nil || childTask == nil || parentTask.Namespace != childTask.Namespace {
 		return nil
@@ -284,14 +265,8 @@ func validateChildTransactionScope(parentTask *corev1alpha1.Task, childScope str
 	return nil
 }
 
-// childTokenCleanupTimeout bounds a cleanup that runs on a context its caller
-// cannot cancel.
 const childTokenCleanupTimeout = 10 * time.Second
 
-// cleanupChildTransactionTokenSecret deletes a prepared child token Secret.
-// It runs on a context the caller cannot cancel: a delegation cancelled
-// right after preparing the token still removes it, since its owner, the
-// parent, is kept.
 func cleanupChildTransactionTokenSecret(ctx context.Context, k8sClient client.Client, childTask *corev1alpha1.Task) {
 	if childTask == nil || childTask.Annotations == nil {
 		return

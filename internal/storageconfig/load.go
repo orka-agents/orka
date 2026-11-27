@@ -21,37 +21,21 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// DefaultStorePath is the default embedded SQLite database file.
 const DefaultStorePath = "/data/orka.db"
 
-// DefaultSQLiteSynchronous is the default synchronous mode of the embedded
-// SQLite database.
 const DefaultSQLiteSynchronous = "normal"
 
-// MaxFileBytes bounds the configuration file. It matches the largest
-// ConfigMap Kubernetes stores.
 const MaxFileBytes = 1 << 20
 
-// adapterURLPattern is the endpoint form AgentRuntime registrations use,
-// restricted to https: no whitespace, credentials, query or fragment.
 var adapterURLPattern = regexp.MustCompile(`^https://[^\s@?#]+$`)
 
-// Flags holds the storage command-line flags.
 type Flags struct {
-	storeBackend storeBackendFlag
-	// StorePath is the embedded SQLite file used by every contract bound to
-	// sqlite.
-	StorePath string
-	// SQLiteSynchronous is the synchronous mode of the embedded SQLite store,
-	// normal or full. The controller validates it when it opens the store.
+	storeBackend      storeBackendFlag
+	StorePath         string
 	SQLiteSynchronous string
-	// ConfigPath is the configuration file; empty selects the default
-	// configuration.
-	ConfigPath string
+	ConfigPath        string
 }
 
-// storeBackendFlag records whether --store-backend was given, so a
-// configuration file and a backend flag cannot both select storage.
 type storeBackendFlag struct {
 	value string
 	set   bool
@@ -70,8 +54,6 @@ func (f *storeBackendFlag) Set(value string) error {
 	return nil
 }
 
-// AddFlags registers --store-backend, --store-path, --store-sqlite-synchronous
-// and --storage-config.
 func (f *Flags) AddFlags(fs *flag.FlagSet) {
 	f.storeBackend = storeBackendFlag{value: EmbeddedSQLiteBackend}
 	fs.Var(&f.storeBackend, "store-backend",
@@ -86,8 +68,6 @@ func (f *Flags) AddFlags(fs *flag.FlagSet) {
 			"Empty binds both contracts to embedded SQLite at --store-path.")
 }
 
-// Load builds the configuration from the flags and, when --storage-config is
-// set, the configuration file. It reads no Secrets and contacts no backend.
 func (f *Flags) Load() (*Config, error) {
 	var cfg *Config
 	if f.ConfigPath == "" {
@@ -145,8 +125,6 @@ func readFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-// file is the configuration file format. Contract names are the short forms
-// state and artifacts; adapters are keyed by name.
 type file struct {
 	Bindings *fileBindings             `json:"bindings"`
 	Adapters map[string]*AdapterSource `json:"adapters,omitempty"`
@@ -157,9 +135,6 @@ type fileBindings struct {
 	Artifacts string `json:"artifacts"`
 }
 
-// parse decodes and validates a configuration file. It holds at most one
-// YAML document, field names match exactly, and unknown and duplicate fields
-// are rejected, so no setting is silently ignored.
 func parse(data []byte, storePath string) (*Config, error) {
 	if err := requireOneDocument(data); err != nil {
 		return nil, invalidf("decode storage configuration: %w", err)
@@ -197,9 +172,6 @@ func parse(data []byte, storePath string) (*Config, error) {
 	return cfg, nil
 }
 
-// requireOneDocument rejects a file with more than one YAML document. The
-// strict decoder reads only the first, so a later document would otherwise
-// go unvalidated and outside the digest.
 func requireOneDocument(data []byte) error {
 	decoder := yamlv3.NewDecoder(bytes.NewReader(data))
 	for documents := 0; ; documents++ {
@@ -316,7 +288,6 @@ func validateAdapter(adapter *AdapterSource, path *field.Path) field.ErrorList {
 	return errs
 }
 
-// validateAdapterURL never echoes the URL, which could carry credentials.
 func validateAdapterURL(raw string, path *field.Path) field.ErrorList {
 	const detail = "must be one https:// URL without whitespace, credentials, query or fragment"
 	if !adapterURLPattern.MatchString(raw) {
@@ -354,8 +325,6 @@ func cloneAdapter(adapter *AdapterSource) *AdapterSource {
 		ref := *adapter.ServiceRef
 		clone.ServiceRef = &ref
 	}
-	// An empty tls block means the same as none, so it must not change the
-	// digest.
 	clone.TLS = nil
 	if adapter.TLS != nil && (adapter.TLS.ServerName != "" || adapter.TLS.CASecretRef != nil) {
 		tls := *adapter.TLS

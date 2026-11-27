@@ -15,7 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// SavePlan upserts an autonomous plan state.
 func (s *Store) SavePlan(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
 	return writeOperationErr(ctx, s, "SavePlan", func(ctx context.Context) error {
 		return s.savePlanWrite(ctx, namespace, taskName, plan)
@@ -59,7 +58,6 @@ func upsertSQLitePlan(
 	return err
 }
 
-// GetPlan retrieves the autonomous plan state for a task.
 func (s *Store) GetPlan(ctx context.Context, namespace, taskName string) (*store.PlanState, error) {
 	var plan *store.PlanState
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -88,7 +86,6 @@ func (s *Store) getPlanUnfenced(ctx context.Context, namespace, taskName string)
 	return &p, nil
 }
 
-// DeletePlan removes the autonomous plan state for a task.
 func (s *Store) DeletePlan(ctx context.Context, namespace, taskName string) error {
 	return writeOperationErr(ctx, s, "DeletePlan", func(ctx context.Context) error {
 		return s.deletePlanWrite(ctx, namespace, taskName)

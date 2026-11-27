@@ -69,7 +69,6 @@ func TestSessionCleanupPhasesAllowUnrelatedControlAndSerializeRetries(t *testing
 	_, writeErr := s.CreateSessionControl(writeCtx, other, fence)
 	stopWrite()
 	if writeErr == nil {
-		// The durable intent still fences new authority for the deleting Session.
 		_, err := s.CreateBranchClaim(ctx, &controlstore.BranchClaim{
 			RepositoryID: "github.com/orka/late", Ref: "refs/heads/late",
 			OwnerKind: controlstore.BranchClaimOwnerSession, OwnerUID: control.SessionUID,

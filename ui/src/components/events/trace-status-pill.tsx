@@ -1,8 +1,5 @@
 import { Badge } from '@/components/ui/badge'
 
-// Map a trace item status (running / completed / succeeded / failed / cancelled
-// / phase strings) onto the shared deep-ocean status palette. Status is an
-// encoding axis, so it draws from the same tokens as task phases.
 function statusToken(status?: string): { className: string; live: boolean; label: string } {
   switch ((status ?? '').toLowerCase()) {
     case 'running':
@@ -19,8 +16,6 @@ function statusToken(status?: string): { className: string; live: boolean; label
   }
 }
 
-// A compact, accessible status pill: a colored dot (with a motion-safe pulse for
-// live states) plus a text label, so status is never conveyed by color alone.
 export function TraceStatusPill({ status }: { status?: string }) {
   const { className, live, label } = statusToken(status)
   return (

@@ -117,11 +117,6 @@ func validateACPAgentTools(agent *corev1alpha1.Agent) error {
 		if toolRef.Enabled != nil && !*toolRef.Enabled {
 			continue
 		}
-		// Agent.spec.tools is additive for the managed AI worker, while a non-empty
-		// ACP allowlist replaces the provider-native default set. Merging enabled
-		// references would therefore silently remove native tools, with no defined
-		// precedence against runtime defaults or Task overrides. Explicitly disabled
-		// references are inert and safe to ignore.
 		return errors.New("built-in ACP runtimes do not support enabled Agent.spec.tools; refusing to omit declared tools")
 	}
 	return nil
@@ -234,13 +229,6 @@ func validateACPProviderNativePolicy(provider string, intent corev1alpha1.Worksp
 	}
 }
 
-// codexReadOnlyNativePolicy reports whether the provider-native slice of the
-// allowed tools is exactly the {Glob, Grep, Read} read-only surface. That is
-// the single restricted policy codex sessions support: instead of per-tool
-// switches, the RuntimeSession boundary rejects every elevation request,
-// mediates file writes through the supervisor, and fails any read-intent turn
-// whose workspace delta shows a modification. Brokered and custom tool names
-// are ignored here because the MCP broker enforces them, not codex.
 func codexReadOnlyNativePolicy(allowed []string) bool {
 	native := providerNativeTools[strings.ToLower(string(corev1alpha1.AgentRuntimeCodex))]
 	surface := make(map[string]struct{}, 3)
@@ -280,7 +268,6 @@ func validateACPProviderSystemPrompt(provider string, configuration harnessv2.Ag
 	case string(corev1alpha1.AgentRuntimeCopilot):
 		return acp.ValidateCopilotInstructions(configuration.SystemPrompt)
 	case string(corev1alpha1.AgentRuntimeOpencode):
-		// The supervisor delivers literal, protected additive instructions.
 		return nil
 	}
 	return nil

@@ -29,27 +29,23 @@ type sessionExecutionEventKey struct {
 	sessionName string
 }
 
-// FakeExecutionEventStore is an in-memory test implementation of store.ExecutionEventStore.
 type FakeExecutionEventStore struct {
 	mu            sync.Mutex
 	now           func() time.Time
 	events        []store.ExecutionEvent
 	latest        map[executionEventStreamKey]int64
 	latestSession map[sessionExecutionEventKey]int64
-	// sessionSeqs holds each stored event's Session sequence by event ID.
-	sessionSeqs map[string]int64
-	dedupe      map[executionEventDedupeIndexKey]store.ExecutionEvent
+	sessionSeqs   map[string]int64
+	dedupe        map[executionEventDedupeIndexKey]store.ExecutionEvent
 }
 
 var _ store.ExecutionEventStore = (*FakeExecutionEventStore)(nil)
 var _ store.DeduplicatingExecutionEventStore = (*FakeExecutionEventStore)(nil)
 
-// NewFakeExecutionEventStore creates an empty in-memory execution event store for tests.
 func NewFakeExecutionEventStore() *FakeExecutionEventStore {
 	return NewFakeExecutionEventStoreWithClock(time.Now)
 }
 
-// NewFakeExecutionEventStoreWithClock creates a fake store with a deterministic clock.
 func NewFakeExecutionEventStoreWithClock(now func() time.Time) *FakeExecutionEventStore {
 	if now == nil {
 		now = time.Now
@@ -63,14 +59,11 @@ func NewFakeExecutionEventStoreWithClock(now func() time.Time) *FakeExecutionEve
 	}
 }
 
-// AppendExecutionEvent appends an event and assigns a per-stream sequence when missing.
 func (s *FakeExecutionEventStore) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	appended, _, err := s.appendExecutionEvent(ctx, event, "")
 	return appended, err
 }
 
-// AppendExecutionEventIfAbsent atomically appends an event only when its
-// stream-scoped deduplication key has not already been used.
 func (s *FakeExecutionEventStore) AppendExecutionEventIfAbsent(
 	ctx context.Context,
 	event *store.ExecutionEvent,
@@ -167,7 +160,6 @@ func (s *FakeExecutionEventStore) appendExecutionEvent(
 	return &copy, true, nil
 }
 
-// ListExecutionEvents returns events matching filter in ascending sequence order per stream.
 func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -229,7 +221,6 @@ func (s *FakeExecutionEventStore) ListExecutionEvents(ctx context.Context, filte
 	return matches, nil
 }
 
-// ListSessionExecutionEvents returns task-derived events for one session with an aggregated cursor.
 func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context, filter store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
@@ -275,7 +266,6 @@ func (s *FakeExecutionEventStore) ListSessionExecutionEvents(ctx context.Context
 	return matches, latestSeq, nil
 }
 
-// GetLatestExecutionEventSeq returns the latest sequence for a stream or zero when empty.
 func (s *FakeExecutionEventStore) GetLatestExecutionEventSeq(ctx context.Context, namespace, streamType, streamID string) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -290,7 +280,6 @@ func (s *FakeExecutionEventStore) GetLatestExecutionEventSeq(ctx context.Context
 	return s.latest[key], nil
 }
 
-// GetLatestExecutionEventSeqs reads all requested stream heads under one lock.
 func (s *FakeExecutionEventStore) GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -310,7 +299,6 @@ func (s *FakeExecutionEventStore) GetLatestExecutionEventSeqs(ctx context.Contex
 	return sequences, nil
 }
 
-// DeleteExecutionEvents removes all events for a stream.
 func (s *FakeExecutionEventStore) DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error {
 	if err := ctx.Err(); err != nil {
 		return err

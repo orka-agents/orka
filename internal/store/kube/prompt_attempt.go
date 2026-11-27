@@ -22,8 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// CreatePromptAttempt creates the immutable PromptAttempt spec and initializes
-// its status under the exact controller-epoch fence.
 func (s *Store) CreatePromptAttempt(ctx context.Context, attempt *store.PromptAttempt, fence store.ControllerEpochFence) (*store.PromptAttempt, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -157,7 +155,6 @@ func (s *Store) findPromptAttemptOwnerTask(ctx context.Context, namespace, taskU
 	return found, nil
 }
 
-// GetPromptAttempt returns a PromptAttempt by canonical ID within the configured watch scope.
 func (s *Store) GetPromptAttempt(ctx context.Context, id string) (*store.PromptAttempt, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -216,9 +213,6 @@ type promptAttemptReclamationMarker struct {
 	RelatedExternalEffectAggregateIDs   []string                           `json:"relatedExternalEffectAggregateIds,omitempty"`
 }
 
-// PreparePromptAttemptReclamation proves the deletion barriers and persists a
-// durable marker before any PromptAttempt is removed. The marker makes partial
-// deletion retries safe until ReclaimPromptAttempts removes it after completion.
 func (s *Store) PreparePromptAttemptReclamation(ctx context.Context, request store.ReclaimPromptAttemptsRequest) error {
 	if err := s.requireClient(); err != nil {
 		return err
@@ -237,13 +231,6 @@ func (s *Store) PreparePromptAttemptReclamation(ctx context.Context, request sto
 	return err
 }
 
-// ReclaimPromptAttempts removes every PromptAttempt authorized by the durable
-// reclamation marker. If no marker exists, it performs the same preflight and
-// creates the marker before issuing the first delete. The final attempt is
-// deleted last so a partial Kubernetes deletion remains safely retryable. Once
-// every authorized PromptAttempt is absent, the marker is removed with exact
-// object preconditions; a later projected retry with no marker or candidates is
-// treated as an already-completed deletion.
 func (s *Store) ReclaimPromptAttempts(ctx context.Context, request store.ReclaimPromptAttemptsRequest) (int, error) {
 	if err := s.requireClient(); err != nil {
 		return 0, err
@@ -480,10 +467,6 @@ func (s *Store) removeCompletedPromptAttemptReclamationMarker(
 func promptAttemptReclamationCompletionDigest(request store.ReclaimPromptAttemptsRequest) (string, error) {
 	terminalProjectionID := request.TerminalProjectionID
 	if request.ContinuitySession && !request.FinalContinuitySession {
-		// Before a continuity Session is bound, the initial cleanup proves the
-		// standalone Task projection through the durable marker. After the final
-		// PromptAttempt is gone the controller intentionally cannot reconstruct
-		// that ID, so the Task-scoped completion receipt treats it as a wildcard.
 		terminalProjectionID = ""
 	}
 	receipt := promptAttemptReclamationCompletionReceipt{
@@ -599,8 +582,6 @@ func validatePromptAttemptReclamationTaskIdentityKube(
 		return store.ConflictErrorf("Task %s/%s restored final PromptAttempt does not match source identity %q", task.Namespace, task.Name, request.TaskUID)
 	}
 	if len(candidates) == 0 {
-		// A prepared retry may observe no candidates after deletion. The immutable
-		// marker and Task-scoped completion digest still revalidate the full request.
 		return nil
 	}
 	for _, object := range candidates {
@@ -1135,8 +1116,6 @@ func (s *Store) verifyPromptAttemptTerminalProjectionMarkerKube(ctx context.Cont
 	return payloadDigest, nil
 }
 
-// RecoverPromptAttemptPreSubmission refreshes Reserved or returns a
-// pre-acceptance attempt to Reserved after an unambiguous recovery decision.
 func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery store.PromptAttemptPreSubmissionRecovery) (*store.PromptAttempt, error) {
 	recovery.ID = strings.TrimSpace(recovery.ID)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", recovery.ID); err != nil {
@@ -1206,8 +1185,6 @@ func (s *Store) RecoverPromptAttemptPreSubmission(ctx context.Context, recovery 
 	return &result, nil
 }
 
-// TransitionPromptAttemptExecution applies exact domain-version, state,
-// immutable binding, resourceVersion, and controller-epoch fences.
 func (s *Store) TransitionPromptAttemptExecution(ctx context.Context, transition store.PromptAttemptExecutionTransition) (*store.PromptAttempt, error) {
 	transition.ID = strings.TrimSpace(transition.ID)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", transition.ID); err != nil {
@@ -1275,7 +1252,6 @@ func (s *Store) TransitionPromptAttemptExecution(ctx context.Context, transition
 	return &result, nil
 }
 
-// TransitionPromptAttemptDelivery applies an exact delivery-state CAS.
 func (s *Store) TransitionPromptAttemptDelivery(ctx context.Context, transition store.PromptAttemptDeliveryTransition) (*store.PromptAttempt, error) {
 	transition.ID = strings.TrimSpace(transition.ID)
 	if err := store.ValidateControlIdentifier("prompt attempt ID", transition.ID); err != nil {
@@ -1501,9 +1477,6 @@ func promptAttemptFromObject(object *corev1alpha1.PromptAttempt) store.PromptAtt
 	}
 }
 
-// normalizePromptAttemptForCreate applies the shared prompt attempt contract
-// and additionally freezes role-separated credential bindings, which only the
-// Kubernetes store persists.
 func normalizePromptAttemptForCreate(attempt *store.PromptAttempt, fence store.ControllerEpochFence) (store.PromptAttempt, store.ControllerEpochFence, error) {
 	normalized, normalizedFence, err := store.NormalizePromptAttemptForCreate(attempt, fence)
 	if err != nil {

@@ -10,7 +10,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// describeOnly is an artifacts provider that only describes its dataset.
 type describeOnly struct {
 	storagev1.ArtifactProvider
 	dataset string
@@ -21,10 +20,6 @@ func (p describeOnly) Describe(context.Context) (storagev1.ProviderInfo, error) 
 		Limits: storagev1.ProviderLimits{MaxArtifactBytes: storagev1.MaxArtifactBytes}}, nil
 }
 
-// An admitted write answers for the dataset its admission checked. A
-// description that clears the serving dataset after the admission, but
-// before the response header is set, does not take the dataset out of a
-// response whose write may already have committed.
 func TestAdmittedCallsAnswerForTheDatasetTheyWereCheckedAgainst(t *testing.T) {
 	server, err := NewServer(ServerConfig{Artifacts: describeOnly{dataset: "dataset-a"}})
 	require.NoError(t, err)

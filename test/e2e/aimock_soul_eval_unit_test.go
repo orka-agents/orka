@@ -16,8 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/agentcontext"
 )
 
-// The soul eval oracle must accept the real composed prompt and reject each
-// delivery defect it exists to catch.
 func TestSoulEvalCheckControls(t *testing.T) {
 	const marker = "[e2e:soul-eval-unit-first]"
 	role := "SOUL_EVAL_ROLE_UNIT Answer briefly."
@@ -29,7 +27,6 @@ func TestSoulEvalCheckControls(t *testing.T) {
 	}
 	persona := strings.TrimPrefix(composed(first), role)
 	tools := []any{map[string]any{"type": "function", "function": map[string]any{"name": "read"}}}
-	// raw builds a captured request to path whose fixture matched fixtureMarker.
 	raw := func(path, fixtureMarker string, body map[string]any) mockLLMEvalRequest {
 		encoded, err := json.Marshal(body)
 		if err != nil {
@@ -46,7 +43,6 @@ func TestSoulEvalCheckControls(t *testing.T) {
 		journal.Response.Fixture = fixture
 		return mockLLMEvalRequest{capture: mockLLMCaptureEntry{Path: path, Body: string(encoded)}, journal: journal}
 	}
-	// chat builds a Chat Completions Agent turn; title builds a tool-free one.
 	chat := func(fixtureMarker, system, user string) mockLLMEvalRequest {
 		return raw("/v1/chat/completions", fixtureMarker, map[string]any{"tools": tools, "messages": []any{
 			map[string]any{"role": "system", "content": system}, map[string]any{"role": "user", "content": user},
@@ -70,7 +66,6 @@ func TestSoulEvalCheckControls(t *testing.T) {
 	metadata := raw(chatPath, marker, map[string]any{
 		"tools": tools, "messages": user("hi " + marker), "metadata": map[string]any{"debug": composed(first)},
 	})
-	// Each protocol's instruction field is not an instruction field elsewhere.
 	chatInstructions := raw(chatPath, marker, map[string]any{
 		"tools": tools, "messages": user("hi " + marker), "instructions": composed(first),
 	})
@@ -79,7 +74,6 @@ func TestSoulEvalCheckControls(t *testing.T) {
 	})
 	messagesSystemRole := raw(messagesPath, marker, map[string]any{"tools": tools, "messages": append([]any{
 		map[string]any{"role": "system", "content": composed(first)}}, user("hi "+marker)...)})
-	// Content parts count only with their protocol's text type.
 	anthropicWrongPart := raw(messagesPath, marker, map[string]any{"tools": tools, "messages": user("hi " + marker),
 		"system": []any{map[string]any{"type": "input_text", "text": composed(first)}}})
 	responsesUntypedPart := raw(responsesPath, marker, map[string]any{"tools": tools, "input": append([]any{

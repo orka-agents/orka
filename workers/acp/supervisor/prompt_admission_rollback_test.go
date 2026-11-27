@@ -28,8 +28,6 @@ func TestPendingCancellationAdmissionRollbackAllowsExactRetry(t *testing.T) {
 	prompt := stageUnacceptedPromptAdmission(t, server, state, request)
 	providerGate, mcpGate := promptAdmissionGates(state)
 
-	// Exercise the production rejection path directly: injecting a blocked
-	// private ACP cancellation writer would require a new runtime test API.
 	rejected := httptest.NewRecorder()
 	server.mu.Lock()
 	server.handlePromptStartFailureLocked(rejected, state, prompt, fmt.Errorf("admission: %w", acp.ErrPromptCancellationPending))
@@ -57,8 +55,6 @@ func TestPendingCancellationAdmissionRollbackAllowsExactRetry(t *testing.T) {
 		t.Fatal("rejection stranded provider or MCP admission")
 	}
 
-	// Identical metadata must classify as fresh, not already_accepted. Use the
-	// real authenticated HTTP path and adapter subprocess for the retry.
 	retry := performMutation(t, server.Handler(), http.MethodPut,
 		"/v2/runtime-sessions/session-1/prompts/prompt-1", request, cfg)
 	if retry.Code != http.StatusOK {
@@ -242,7 +238,6 @@ func TestPromptAdmissionRollbackIgnoresReplacedOwner(t *testing.T) {
 func TestPromptLeaseExpiredRollbackAllowsFreshAdmission(t *testing.T) {
 	server, state, prompt := newPromptAdmissionRollbackState(t)
 	providerGate, mcpGate := promptAdmissionGates(state)
-	// Request cancellation may already have closed the unaccepted MCP gate.
 	server.revokePromptRequestCapabilities(state, prompt)
 	response := httptest.NewRecorder()
 	server.mu.Lock()
@@ -361,8 +356,6 @@ func assertUnacceptedPromptOperationRemoved(t *testing.T, server *Server, state 
 	}
 }
 
-// An automatic cleanup can defer to a prompt that the runtime has not accepted.
-// Once rollback removes that owner, there is no stream finisher to retry cleanup.
 func TestPendingCancellationRollbackResumesDeferredCleanup(t *testing.T) {
 	for _, disposition := range []string{"drain", "poison-pool", "poison-session"} {
 		t.Run(disposition, func(t *testing.T) {
@@ -420,8 +413,6 @@ func TestPendingCancellationRollbackResumesDeferredCleanup(t *testing.T) {
 					break
 				}
 				server.mu.Lock()
-				// An unproven native cleanup must remain closed and retained,
-				// not be mistaken for retirement (notably on non-Linux hosts).
 				attempted := server.poisoned && state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned &&
 					!state.drainCleanupScheduled && server.drain.Reason == "drain_session_cleanup_unproven"
 				server.mu.Unlock()
@@ -529,8 +520,6 @@ func TestPromptActivationFailureSchedulesCleanup(t *testing.T) {
 				server.mu.Lock()
 				resident := server.sessions[state.id] == state
 				_, retired := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
-				// Unproven native cleanup stays sealed and retained rather
-				// than falsely claiming retirement, including on macOS.
 				retained := resident && server.poisoned && state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned && !state.drainCleanupScheduled
 				server.mu.Unlock()
 				if (!resident && retired) || retained {

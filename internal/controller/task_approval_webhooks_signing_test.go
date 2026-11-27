@@ -16,7 +16,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// requestedNotice returns the stored notice of approvalID's request.
 func (h *approvalWebhookHarness) requestedNotice(approvalID string) corev1alpha1.TaskApprovalWebhookNotice {
 	h.t.Helper()
 	id := approvalWebhookDeliveryID(string(approvalWebhookTestUID), approvalID, corev1alpha1.TaskApprovalWebhookRequested)
@@ -43,10 +42,6 @@ func countPendingApprovalNotices(state *corev1alpha1.TaskApprovalWebhooks) int {
 	return pending
 }
 
-// A notice that cannot be signed within its persisted window is retired
-// unsent, without consuming an attempt, so the next notice is sent once
-// signing returns. Every reconcile uses a fresh notifier, so the deadline
-// comes from status alone, as after a controller restart.
 func TestApprovalWebhooksSigningOutageRetiresStaleNoticeUnsent(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskWebhookEventApprovalRequested))
 	h.signingUnavailable = true
@@ -70,7 +65,6 @@ func TestApprovalWebhooksSigningOutageRetiresStaleNoticeUnsent(t *testing.T) {
 		t.Fatalf("second notice = %+v", second)
 	}
 
-	// The requeue never sleeps past the head's deadline.
 	h.now = queued.Add(approvalWebhookSigningWindow - 10*time.Second)
 	if requeue := h.reconcile(); requeue != 10*time.Second {
 		t.Fatalf("requeue = %v, want the time left before the signing deadline", requeue)
@@ -92,8 +86,6 @@ func TestApprovalWebhooksSigningOutageRetiresStaleNoticeUnsent(t *testing.T) {
 		t.Fatalf("receipts = %d while signing is unavailable", got)
 	}
 
-	// Signing returns: the next notice proceeds, and the retired one is never
-	// regenerated or sent.
 	h.signingUnavailable = false
 	for range 3 {
 		h.reconcile()
@@ -109,9 +101,6 @@ func TestApprovalWebhooksSigningOutageRetiresStaleNoticeUnsent(t *testing.T) {
 	}
 }
 
-// Every pending notice waits on the same keys, so a pass retires all that
-// are past their deadline at once, including after a controller restart that
-// finds many of them stale.
 func TestApprovalWebhooksSigningOutageRetiresEveryStaleNoticeInOnePass(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, bothApprovalEvents...))
 	h.signingUnavailable = true
@@ -135,9 +124,6 @@ func TestApprovalWebhooksSigningOutageRetiresEveryStaleNoticeInOnePass(t *testin
 	}
 }
 
-// A sustained signing outage with steady approvals never fills the queue:
-// retired notices free their slots. The cutoff stays reachable only by the
-// documented rule, 15 notices pending inside one window.
 func TestApprovalWebhooksSigningOutageDoesNotLatchOverflow(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskWebhookEventApprovalRequested))
 	h.signingUnavailable = true
@@ -161,8 +147,6 @@ func TestApprovalWebhooksSigningOutageDoesNotLatchOverflow(t *testing.T) {
 		t.Fatalf("receipts = %d while signing is unavailable", got)
 	}
 
-	// Signing returns: the notices still inside their window are sent in
-	// stream order, and nothing retired is sent.
 	h.signingUnavailable = false
 	for range 2 * corev1alpha1.MaxTaskApprovalWebhookNotices {
 		h.reconcile()
@@ -181,8 +165,6 @@ func TestApprovalWebhooksSigningOutageDoesNotLatchOverflow(t *testing.T) {
 		t.Fatalf("last receipt = %s, want the newest approval", last)
 	}
 
-	// The documented rule still holds: a burst that leaves 15 notices pending
-	// inside one window overflows, whatever keeps them pending.
 	h.signingUnavailable = true
 	for i := range limit + 1 {
 		h.request(approvalWebhookTestUID, fmt.Sprintf("burst-%02d", i))
@@ -193,10 +175,6 @@ func TestApprovalWebhooksSigningOutageDoesNotLatchOverflow(t *testing.T) {
 	}
 }
 
-// A notice recorded without a signing deadline, by a controller from before
-// the field existed, gets a persisted one starting from the first pass that
-// finds signing unavailable, rather than being retired at once or waiting
-// forever.
 func TestApprovalWebhooksSigningDeadlineIsBackfilledOnce(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskWebhookEventApprovalRequested))
 	h.request(approvalWebhookTestUID, "approval-1")
@@ -228,9 +206,6 @@ func TestApprovalWebhooksSigningDeadlineIsBackfilledOnce(t *testing.T) {
 	}
 }
 
-// Terminal notices keep waiting for signing without consuming attempts,
-// however long the outage lasts, while the Task's approval notices are
-// retired around them.
 func TestApprovalWebhooksSigningOutageLeavesTerminalNoticePending(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseSucceeded, bothApprovalEvents...))
 	h.signingUnavailable = true
@@ -262,9 +237,6 @@ func TestApprovalWebhooksSigningOutageLeavesTerminalNoticePending(t *testing.T) 
 	}
 }
 
-// Projection decides overflow irreversibly, so a controller that comes back
-// after an outage outlived the pending notices' deadlines retires them before
-// projecting the transitions recorded meanwhile.
 func TestApprovalWebhooksSigningOutageRetiresStaleNoticesBeforeProjection(t *testing.T) {
 	h := newApprovalWebhookHarness(t, newApprovalWebhookTask(corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskWebhookEventApprovalRequested))
 	h.signingUnavailable = true
@@ -277,7 +249,6 @@ func TestApprovalWebhooksSigningOutageRetiresStaleNoticesBeforeProjection(t *tes
 		t.Fatalf("%d pending before the restart, want %d", countPendingApprovalNotices(state), limit-1)
 	}
 
-	// The controller is down past every deadline while approvals continue.
 	h.now = h.now.Add(time.Hour)
 	h.request(approvalWebhookTestUID, "approval-late-1")
 	h.request(approvalWebhookTestUID, "approval-late-2")

@@ -63,9 +63,6 @@ const (
 	acpDispatcherToolResultPath      = "README.md"
 )
 
-// dispatchQueuedTask reserves the queued Task on its RuntimePool and executes
-// the reserved attempt, mirroring the dispatcher's production reserve/execute
-// sequence.
 func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispatcher, queued *corev1alpha1.Task) {
 	t.Helper()
 	if dispatcher.EventStore == nil {
@@ -759,8 +756,6 @@ func TestRuntimeSessionStartFailureMessageAllowsOnlyKnownStages(t *testing.T) {
 	if status != http.StatusBadRequest || code != harnessv2.ErrorCodeInvalidRequest || diagnostic != "runtime session request rejected before classified creation" {
 		t.Fatalf("unknown stage diagnostic = %d/%s/%q", status, code, diagnostic)
 	}
-	// Separators are dropped, not spaced, so a line-wrapped credential
-	// reassembles for the redactor; prose merely loses the break.
 	unknown.Message = "  fixed server detail\nwith control  "
 	if got := boundedRuntimeSessionServerMessage(unknown); got != "fixed server detailwith control" {
 		t.Fatalf("bounded server message = %q", got)
@@ -1865,8 +1860,6 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
 	assertACPDispatcherPublishedLiveEvents(t, live, task)
-	// The turn reads its namespace once, to verify the binding; Session
-	// lineage records that verified UID instead of reading it again.
 	if got := namespaceReads.namespaces.Load(); got != 1 {
 		t.Fatalf("uncached namespace reads for one turn = %d, want 1", got)
 	}
@@ -2927,9 +2920,6 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 	}
 	var cancelAfterAcceptance <-chan error
 	if workspaceLifetime {
-		// Exercise the real workspace deadline through reserve/execute and
-		// authenticated cancellation. The Task's own 30-second timeout must
-		// not be the cause of settlement within this test's 10-second bound.
 		dispatcher.runtimeContextFactory = nil
 		bootstrapPort, err := strconv.ParseInt(parsed.Port(), 10, 32)
 		if err != nil {
@@ -2945,8 +2935,6 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		if err := kubeClient.Create(ctx, worker); err != nil {
 			t.Fatal(err)
 		}
-		// Model the core fence persisted after the one-time native challenge. This
-		// test exercises deadline settlement; the endpoint test verifies admission.
 		if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(pool), pool); err != nil {
 			t.Fatal(err)
 		}
@@ -3343,12 +3331,10 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 
 type dispatcherPublisherServerOptions struct {
 	disablePRPresentation bool
-	// resolvedBaselineOID, when set, is the branch head workspace resolution
-	// reports, for example the commit an earlier turn published.
-	resolvedBaselineOID func() string
-	inspectPrepare      func(publisherservice.PublicationPrepareRequest)
-	inspectPublish      func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest  func(publisher.PullRequestIntent)
+	resolvedBaselineOID   func() string
+	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
+	inspectPublish        func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest    func(publisher.PullRequestIntent)
 }
 
 //nolint:gocyclo // Publisher test fixture exposes protocol operations and their fault-injection controls.
@@ -3897,22 +3883,16 @@ type dispatcherRuntimeServerOptions struct {
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
 	nativePermissionAsk              bool
-	// rejectCreate answers a create request with the returned error response
-	// and status instead of creating the session when the response is non-nil.
-	// resident makes the runtime keep reporting the exact requested session as
-	// Idle, as a supervisor does after an earlier send of the same create
-	// already created it.
-	rejectCreate            func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
-	onDelete                func(harnessv2.DeleteRuntimeSessionRequest)
-	deleteFailure           func() *harnessv2.ErrorResponse
-	nativeSnapshot          *harnessv2.NativeSessionSnapshot
-	nativeInstallUnresolved bool
-	onNativeCapture         func(harnessv2.CaptureNativeSessionRequest) error
-	onPrompt                func(harnessv2.StartPromptRequest)
-	workspaceDeltaState     harnessv2.WorkspaceDeltaState
-	workspaceDeltaFailure   *harnessv2.ErrorResponse
-	// onCapabilities observes every capabilities request.
-	onCapabilities func()
+	rejectCreate                     func(request harnessv2.CreateRuntimeSessionRequest) (status int, response *harnessv2.ErrorResponse, resident bool)
+	onDelete                         func(harnessv2.DeleteRuntimeSessionRequest)
+	deleteFailure                    func() *harnessv2.ErrorResponse
+	nativeSnapshot                   *harnessv2.NativeSessionSnapshot
+	nativeInstallUnresolved          bool
+	onNativeCapture                  func(harnessv2.CaptureNativeSessionRequest) error
+	onPrompt                         func(harnessv2.StartPromptRequest)
+	workspaceDeltaState              harnessv2.WorkspaceDeltaState
+	workspaceDeltaFailure            *harnessv2.ErrorResponse
+	onCapabilities                   func()
 }
 
 func newDispatcherRuntimeServerWithOptions(
@@ -4046,7 +4026,6 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				Sequence: seq, RequestDigest: request.Metadata.RequestDigest, Timestamp: at,
 			}
 		}
-		// Like a current supervisor, confirm live updates when asked.
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{
 			AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1, LiveUpdates: r.Header.Get(harnessv2.LiveUpdatesHeader) == "1",
 		}})
@@ -4471,8 +4450,6 @@ func TestACPDispatcherSettlesCancelledTaskBeforeRuntimePoolAdmissionWithItsReque
 	}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", false)
 }
 
-// A cancel request recorded before the controller writes the Cancelled phase
-// already stops runtime admission: the queued Task is settled, not started.
 func TestACPDispatcherSettlesCancelRequestedTaskBeforeRuntimePoolAdmission(t *testing.T) {
 	for _, throughDispatch := range []bool{false, true} {
 		runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
@@ -4824,8 +4801,6 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 	}
 }
 
-// promptAdmissionWorkspacePool turns the reservation fixture's pool into a
-// dedicated execution-workspace pool in the given lifecycle and admission.
 func promptAdmissionWorkspacePool(
 	t *testing.T, kubeClient client.Client, pool *corev1alpha1.RuntimePool, workspace bool,
 	lifecycle corev1alpha1.RuntimePoolLifecycle, admission corev1alpha1.RuntimePoolAdmissionState, annotations map[string]string,
@@ -4853,12 +4828,6 @@ func promptAdmissionWorkspacePool(
 	return current.DeepCopy()
 }
 
-// A rate-limited prompt that was never accepted is requeued, not held for
-// capacity on the same exact instance, only when that instance is being
-// replaced: always for external runtimes, and for a dedicated
-// execution-workspace pool only while its current state shows a drain,
-// retirement, or eviction. A Serving and Accepting workspace pool, whose 429
-// means its prompt slot is busy, waits for capacity like a shared pool.
 func TestPromptAdmissionRejectionRequeuesReplaceableInstances(t *testing.T) {
 	evicted := map[string]string{externalRuntimeEvictionAnnotation: "{}"}
 	for _, test := range []struct {
@@ -4892,10 +4861,6 @@ func TestPromptAdmissionRejectionRequeuesReplaceableInstances(t *testing.T) {
 	}
 }
 
-// A prompt waiting for capacity after a 429 stops waiting once its
-// execution-workspace instance starts retiring, so it can be requeued for the
-// replacement instead of failing when the instance changes. A shared pool
-// keeps waiting.
 func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstance(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -4926,10 +4891,6 @@ func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstance(t *testing.T) {
 	}
 }
 
-// A retiring instance whose running prompts still hold every slot refuses a
-// prompt for capacity, not admission. The prompt was never accepted, so it is
-// requeued for the replacement instead of waiting on the retiring instance
-// until the runtime context ends. A serving instance at capacity keeps waiting.
 func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstanceAtCapacity(t *testing.T) {
 	evicted := map[string]string{externalRuntimeEvictionAnnotation: "{}"}
 	for _, test := range []struct {
@@ -4962,10 +4923,6 @@ func TestWaitForPromptCapacityReleasesRetiringWorkspaceInstanceAtCapacity(t *tes
 	}
 }
 
-// A prompt-only reservation is not gated on admission, so capacity can open on
-// an instance that started retiring while the prompt waited. The reservation
-// is released and the prompt requeued for the replacement rather than retried
-// on the retiring instance.
 func TestWaitForPromptCapacityDoesNotReuseCapacityOnARetiringInstance(t *testing.T) {
 	dispatcher, kubeClient, pool, task, _ := newRuntimePoolReservationTestFixture(t)
 	dispatcher.RateLimitRetryInterval = 10 * time.Millisecond
@@ -6065,7 +6022,6 @@ func TestRenewPromptLeaseLoopRetriesTransientFailures(t *testing.T) {
 		digests = append(digests, string(request.Metadata.OperationID)+"|"+string(request.Metadata.RequestDigest))
 		digestsMu.Unlock()
 		if n == 1 {
-			// A busy supervisor answering through a proxy: a non-v2 502 body.
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusBadGateway)
 			_, _ = io.WriteString(w, "<html>bad gateway</html>")
@@ -6276,8 +6232,6 @@ func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
 	}
 }
 
-// assertACPDispatcherPublishedLiveEvents checks that every event of the
-// Task's prompt reached live subscribers in protocol order.
 func assertACPDispatcherPublishedLiveEvents(t *testing.T, live *liveevents.Subscription, task *corev1alpha1.Task) {
 	t.Helper()
 	var published []harnessv2.EventType

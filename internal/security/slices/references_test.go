@@ -151,14 +151,12 @@ func TestGoImportGraphParsesOnlyIndexedFiles(t *testing.T) {
 	if got := newGoImportGraph(root, files, lines).imports("a"); len(got) != 1 || got[0] != "b" {
 		t.Fatalf("imports(a) = %v, want [b]", got)
 	}
-	// A file over the reference size bound has no line count and is not read.
 	delete(lines, "a/a.go")
 	if got := newGoImportGraph(root, files, lines).imports("a"); len(got) != 0 {
 		t.Fatalf("imports(a) = %v, want none for an unindexed file", got)
 	}
 }
 
-// Large packages are split into bounded parts; no file is left unreviewed.
 func TestMapRepositoryCoversEveryFileOfLargePackages(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "backend/package.json", `{"name":"backend"}`)
@@ -254,8 +252,6 @@ func TestReferenceFilesFollowTSConfigPathAliases(t *testing.T) {
 	}
 }
 
-// Node package tests are slice tests, as Go package tests are: they do not
-// take excerpt budget from the package's source or form fallback slices.
 func TestMapRepositoryKeepsNodeTestsOutOfOwnedFiles(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "backend/package.json", `{"name":"backend","scripts":{"test":"bun test"}}`)
@@ -336,7 +332,6 @@ func TestReferenceFilesFollowRequireExportConditions(t *testing.T) {
 	}
 }
 
-// Node picks the first matching condition in the package's own key order.
 func TestReferenceFilesHonorExportConditionOrder(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "nodefirst/package.json", `{"name":"@app/nodefirst","exports":{"node":"./node.ts","default":"./fallback.ts"}}`)
@@ -405,13 +400,11 @@ func TestReferenceFilesFollowNodeAddonsAndFallbackArrays(t *testing.T) {
 
 func TestReferenceFilesFollowInheritedAliasesAndSubpathImports(t *testing.T) {
 	root := t.TempDir()
-	// A shared base outside the package's own directories defines the alias.
 	writeFile(t, root, "configs/tsconfig.base.json", `{"compilerOptions":{"paths":{"@shared/*":["../shared/src/*"]}}}`)
 	writeFile(t, root, "packages/web/tsconfig.json", `{"extends":"../../configs/tsconfig.base","compilerOptions":{"strict":true}}`)
 	writeFile(t, root, "packages/web/package.json", `{"name":"@app/web"}`)
 	writeFile(t, root, "packages/web/src/app.ts", "import { util } from '@shared/util'\n")
 	writeFile(t, root, "shared/src/util.ts", "export const util = 1\n")
-	// Subpath imports resolve through the importer's own package.
 	writeFile(t, root, "packages/api/package.json", `{"name":"@app/api","imports":{"#db":"./src/db.ts","#internal/*":{"node":"./src/internal/*.ts"}}}`)
 	writeFile(t, root, "packages/api/src/server.ts", "import { db } from '#db'\nimport { auth } from '#internal/auth'\n")
 	writeFile(t, root, "packages/api/src/db.ts", "export const db = 1\n")
@@ -451,8 +444,6 @@ func TestReferenceFilesFollowJSONImports(t *testing.T) {
 	}
 }
 
-// An exports map hides subpaths it does not export, while an exported build
-// output still maps back to the package's source.
 func TestReferenceFilesRespectPackageExportsEncapsulation(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "lib/package.json", `{"name":"@app/lib","exports":{".":"./dist/index.js"}}`)
@@ -472,8 +463,6 @@ func TestReferenceFilesRespectPackageExportsEncapsulation(t *testing.T) {
 	}
 }
 
-// A baseUrl resolves bare specifiers from its directory after every paths
-// entry, and workspace packages still resolve when it has no match.
 func TestReferenceFilesFollowTSConfigBaseURL(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "web/tsconfig.json", `{"compilerOptions":{"baseUrl":"src","paths":{"@lib/*":["lib/*"]}}}`)
@@ -482,7 +471,6 @@ func TestReferenceFilesFollowTSConfigBaseURL(t *testing.T) {
 	writeFile(t, root, "web/src/lib/x.ts", "export const x = 1\n")
 	writeFile(t, root, "shared/package.json", `{"name":"@app/shared","main":"./index.ts"}`)
 	writeFile(t, root, "shared/index.ts", "export const shared = 1\n")
-	// An inherited baseUrl applies to a config that sets neither option.
 	writeFile(t, root, "api/tsconfig.base.json", `{"compilerOptions":{"baseUrl":"."}}`)
 	writeFile(t, root, "api/tsconfig.json", `{"extends":"./tsconfig.base.json"}`)
 	writeFile(t, root, "api/server.ts", "import { db } from 'store/db'\n")
@@ -505,7 +493,6 @@ func TestReferenceFilesFollowTSConfigBaseURL(t *testing.T) {
 	}
 }
 
-// A config's own paths resolve from the baseUrl it inherits.
 func TestReferenceFilesResolvePathsFromAnInheritedBaseURL(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "app/tsconfig.base.json", `{"compilerOptions":{"baseUrl":"./src"}}`)

@@ -64,7 +64,6 @@ func TestCLISecurityCleanupWaitsForDeletingAndLateOwnedTasks(t *testing.T) {
 					if err := delegate.Get(ctx, key, current); err != nil {
 						return err
 					}
-					// Simulate the product controller completing normal cleanup.
 					current.Finalizers = nil
 					if err := delegate.Update(ctx, current); err != nil {
 						return err
