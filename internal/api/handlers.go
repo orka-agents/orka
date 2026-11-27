@@ -1036,18 +1036,17 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 		}
 	}
 
-	var cur []byte
+	cur := tailLineBuffer{maxBytes: maxBytes}
 	for {
 		frag, err := br.ReadSlice('\n')
 		if len(frag) > 0 {
-			cur = appendBoundedTailBytes(cur, frag, maxBytes)
+			cur.write(frag)
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
-		if len(cur) > 0 {
-			pushLine(string(cur))
-			cur = cur[:0]
+		if cur.len() > 0 {
+			pushLine(cur.takeString())
 		}
 		if errors.Is(err, io.EOF) {
 			break
@@ -1067,17 +1066,75 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 	return out.String(), nil
 }
 
-func appendBoundedTailBytes(dst, src []byte, maxBytes int64) []byte {
-	if int64(len(src)) >= maxBytes {
-		return append(dst[:0], src[int64(len(src))-maxBytes:]...)
+type tailLineBuffer struct {
+	buf      []byte
+	maxBytes int64
+	writePos int64
+	full     bool
+}
+
+func (b *tailLineBuffer) len() int64 {
+	if b.full {
+		return int64(len(b.buf))
 	}
-	total := int64(len(dst)) + int64(len(src))
-	if total > maxBytes {
-		drop := total - maxBytes
-		copy(dst, dst[drop:])
-		dst = dst[:int64(len(dst))-drop]
+	return b.writePos
+}
+
+func (b *tailLineBuffer) write(src []byte) {
+	if len(src) == 0 || b.maxBytes <= 0 {
+		return
 	}
-	return append(dst, src...)
+	if int64(len(src)) >= b.maxBytes {
+		tail := src[int64(len(src))-b.maxBytes:]
+		if int64(len(b.buf)) < b.maxBytes {
+			b.buf = make([]byte, b.maxBytes)
+		}
+		copy(b.buf, tail)
+		b.writePos = 0
+		b.full = true
+		return
+	}
+	if !b.full && b.writePos+int64(len(src)) <= b.maxBytes {
+		b.buf = append(b.buf[:b.writePos], src...)
+		b.writePos += int64(len(src))
+		if b.writePos == b.maxBytes {
+			b.writePos = 0
+			b.full = true
+		}
+		return
+	}
+	if int64(len(b.buf)) < b.maxBytes {
+		grown := make([]byte, b.maxBytes)
+		copy(grown, b.buf[:b.writePos])
+		b.buf = grown
+	}
+	remaining := src
+	for len(remaining) > 0 {
+		space := b.maxBytes - b.writePos
+		n := copy(b.buf[b.writePos:b.writePos+space], remaining)
+		b.writePos += int64(n)
+		if b.writePos == b.maxBytes {
+			b.writePos = 0
+			b.full = true
+		}
+		remaining = remaining[n:]
+	}
+}
+
+func (b *tailLineBuffer) takeString() string {
+	defer func() {
+		b.writePos = 0
+		b.full = false
+		b.buf = b.buf[:0]
+	}()
+	if !b.full {
+		return string(b.buf[:b.writePos])
+	}
+	var sb strings.Builder
+	sb.Grow(len(b.buf))
+	sb.Write(b.buf[b.writePos:])
+	sb.Write(b.buf[:b.writePos])
+	return sb.String()
 }
 
 const (
