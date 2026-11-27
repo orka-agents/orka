@@ -46,10 +46,10 @@ func ParseMCPResourceURL(raw string) (string, error) {
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	hostname := strings.ToLower(parsed.Hostname())
-	if scheme != "https" && (scheme != connectorSchemeHTTP || !isLoopbackHostname(hostname)) {
+	if scheme != connectorSchemeHTTPS && (scheme != connectorSchemeHTTP || !isLoopbackHostname(hostname)) {
 		return "", errors.New("MCP resource URL must use https, or http only for localhost")
 	}
-	if (scheme == "https" && portNum == 443) || (scheme == connectorSchemeHTTP && portNum == 80) {
+	if (scheme == connectorSchemeHTTPS && portNum == 443) || (scheme == connectorSchemeHTTP && portNum == 80) {
 		return "", errors.New("MCP resource URL must omit the default port so clients and metadata match under RFC 9728")
 	}
 	if strings.Contains(hostname, ":") {
