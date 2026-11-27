@@ -11,9 +11,6 @@ import (
 
 const GatewayReplyToolName = "reply_in_conversation"
 
-// ResolveWithGatewayReply is the native tool projection. Eligibility MUST come
-// from the controller's durable event/TaskUID resolution, never Task metadata.
-// Resolve without that grant strips even explicitly requested gateway-only tools.
 func ResolveWithGatewayReply(task *corev1alpha1.Task, agent *corev1alpha1.Agent, eligible bool) []string {
 	names := Resolve(task, agent)
 	if !eligible || task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || !usesAIWorkerToolRegistry(task, agent) || labels.ParentTaskName(task.Labels, task.Annotations) != "" || !gatewayReplyPolicyAllows(task, agent) {
@@ -22,7 +19,6 @@ func ResolveWithGatewayReply(task *corev1alpha1.Task, agent *corev1alpha1.Agent,
 	return append(names, GatewayReplyToolName)
 }
 
-// Explicit native policy remains authoritative even with a durable origin grant.
 func gatewayReplyPolicyAllows(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	contains := func(names []string) bool {
 		return slices.ContainsFunc(names, func(name string) bool { return strings.TrimSpace(name) == GatewayReplyToolName })

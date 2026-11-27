@@ -8,42 +8,26 @@ import (
 	"strings"
 )
 
-// Repository ignore rules let the post-prompt capture skip build output such
-// as node_modules/ or target/ that the repository itself ignores. The rules
-// are read only from the trusted baseline, so an agent's edit to .gitignore
-// cannot widen what is skipped, and they only ever apply to paths absent from
-// the baseline: like git, ignore rules never hide a tracked path.
-
 const (
 	gitignoreName   = ".gitignore"
 	gitInfoExclude  = ".git/info/exclude"
 	utf8ByteOrderMk = "\xef\xbb\xbf"
 
-	// A baseline whose ignore files exceed these bounds gets no ignore rules,
-	// so the capture keeps today's full walk instead of spending unbounded
-	// time matching every path against them.
 	maxIgnoreSourceBytes = 1 << 20
 	maxIgnorePatterns    = 10_000
 )
 
-// ignorePattern is one parsed gitignore(5) line. segments are git wildmatch
-// patterns for single path components (see globMatch), with "**" standing
-// for any number of whole components.
 type ignorePattern struct {
 	segments []string
 	negate   bool
 	dirOnly  bool
 }
 
-// ignoreRules holds the baseline's patterns: .git/info/exclude first, then
-// each .gitignore keyed by the directory that contains it ("" is the root).
 type ignoreRules struct {
 	exclude []ignorePattern
 	byDir   map[string][]ignorePattern
 }
 
-// retainForCapture keeps the content of a baseline's ignore sources so their
-// rules are parsed from the exact bytes the walk hashed.
 func retainForCapture(retainContent bool, baseline *Snapshot, relative string, protected bool) bool {
 	return retainContent || (baseline == nil && isIgnoreSource(relative, protected))
 }
@@ -55,10 +39,6 @@ func isIgnoreSource(relative string, protected bool) bool {
 	return !protected && path.Base(relative) == gitignoreName
 }
 
-// collectIgnoreRules parses the ignore sources a baseline walk (one without a
-// baseline of its own) retained and drops their content from the snapshot
-// entries. It returns nil for a post-prompt walk or when the baseline has no
-// usable pattern.
 func collectIgnoreRules(baseline *Snapshot, entries map[string]entry, retained bool) *ignoreRules {
 	if baseline != nil {
 		return nil
@@ -74,7 +54,6 @@ func collectIgnoreRules(baseline *Snapshot, entries map[string]entry, retained b
 			current.content = nil
 			entries[relative] = current
 		}
-		// Past either bound, keep looping only to release retained content.
 		sourceBytes += len(content)
 		if sourceBytes > maxIgnoreSourceBytes || patternCount > maxIgnorePatterns {
 			continue
@@ -129,8 +108,6 @@ func parseIgnoreLine(line string) (ignorePattern, bool) {
 		pattern.dirOnly = true
 		line = strings.TrimSuffix(line, "/")
 	}
-	// A pattern without a leading or middle slash matches a name at any depth,
-	// which "**/" expresses for the segment matcher.
 	if !strings.Contains(line, "/") {
 		line = "**/" + line
 	}
@@ -154,9 +131,6 @@ func parseIgnoreLine(line string) (ignorePattern, bool) {
 	return pattern, true
 }
 
-// trimUnescapedTrailingSpaces drops trailing spaces unless a backslash quotes
-// them, reading left to right as git does: `foo\\ ` (an escaped backslash
-// and a space) still loses its space.
 func trimUnescapedTrailingSpaces(line string) string {
 	keep := 0
 	for i := 0; i < len(line); i++ {
@@ -171,10 +145,6 @@ func trimUnescapedTrailingSpaces(line string) string {
 	return line[:keep]
 }
 
-// matches reports whether relative, a path inside the workspace, is ignored by
-// the rules for itself. The last matching pattern wins, read in increasing
-// precedence: .git/info/exclude, then each .gitignore from the root down to
-// the path's parent directory.
 func (r *ignoreRules) matches(relative string, isDir bool) bool {
 	parts := strings.Split(relative, "/")
 	ignored := false
@@ -195,13 +165,7 @@ func (r *ignoreRules) matches(relative string, isDir bool) bool {
 	return ignored
 }
 
-// matchIgnoreSegments matches path components against pattern segments, where
-// "**" matches zero or more components, except at the end, where it matches
-// at least one ("dir/**" matches what is inside dir, not dir itself). It runs
-// in O(len(pattern) * len(parts)).
 func matchIgnoreSegments(pattern, parts []string) bool {
-	// reach[j] reports whether the pattern prefix consumed so far can end
-	// right before parts[j].
 	reach := make([]bool, len(parts)+1)
 	next := make([]bool, len(parts)+1)
 	reach[0] = true
@@ -230,11 +194,6 @@ func matchIgnoreSegments(pattern, parts []string) bool {
 	return reach[len(parts)]
 }
 
-// globMatch matches one path component against one pattern component byte by
-// byte, as git's wildmatch does: '*' matches any run of bytes, '?' one byte,
-// '[...]' one byte from a set (ranges, '!' or '^' negation, POSIX classes),
-// and '\' makes the next byte literal. Patterns are checked by validGlob when
-// parsed.
 func globMatch(pattern, name string) bool {
 	p, n := 0, 0
 	starP, starN := -1, 0
@@ -283,9 +242,6 @@ func globMatch(pattern, name string) bool {
 	return p == len(pattern)
 }
 
-// validGlob reports whether every bracket expression in pattern is closed and
-// uses known classes, and no backslash is left dangling. Git matches nothing
-// for such patterns, so they are dropped.
 func validGlob(pattern string) bool {
 	for p := 0; p < len(pattern); p++ {
 		switch pattern[p] {
@@ -305,8 +261,6 @@ func validGlob(pattern string) bool {
 	return true
 }
 
-// matchBracket matches b against the bracket expression at the start of
-// pattern and returns the expression's width; ok is false when it is malformed.
 func matchBracket(pattern string, b byte) (matched bool, width int, ok bool) {
 	i := 1
 	negate := false
@@ -367,7 +321,6 @@ func isGraphByte(b byte) bool { return 0x21 <= b && b <= 0x7e }
 func isAlphaByte(b byte) bool { return isUpperByte(b) || isLowerByte(b) }
 func isAlnumByte(b byte) bool { return isAlphaByte(b) || isDigitByte(b) }
 
-// posixClasses are the bracket classes git's wildmatch supports, over ASCII.
 var posixClasses = map[string]func(byte) bool{
 	"alnum":  isAlnumByte,
 	"alpha":  isAlphaByte,
@@ -391,9 +344,6 @@ func posixClass(name string, b byte) (in, known bool) {
 	return class(b), true
 }
 
-// ignoreFilter decides, during the post-prompt walk, which paths to skip.
-// WalkDir visits a directory before its contents, so ignoredDirs is filled
-// before any child asks for its parent.
 type ignoreFilter struct {
 	rules       *ignoreRules
 	baseline    map[string]entry
@@ -407,8 +357,6 @@ func newIgnoreFilter(baseline *Snapshot) *ignoreFilter {
 	return &ignoreFilter{rules: baseline.ignore, baseline: baseline.entries, ignoredDirs: make(map[string]bool)}
 }
 
-// skipEntry reports whether the walk leaves dirEntry out, and the value the
-// WalkDir callback returns for it. Protected paths are never skipped.
 func (f *ignoreFilter) skipEntry(relative string, protected bool, dirEntry fs.DirEntry) (bool, error) {
 	if f == nil || protected || !f.skip(relative, dirEntry.IsDir()) {
 		return false, nil
@@ -419,10 +367,6 @@ func (f *ignoreFilter) skipEntry(relative string, protected bool, dirEntry fs.Di
 	return true, nil
 }
 
-// skip reports whether relative is new since the baseline and ignored, either
-// itself or through an ignored ancestor directory. Tracked paths are never
-// skipped, but a tracked ignored directory still marks its new contents as
-// ignored, as in git.
 func (f *ignoreFilter) skip(relative string, isDir bool) bool {
 	parent := path.Dir(relative)
 	if parent == "." {

@@ -103,7 +103,6 @@ func TestUsageTotalsRejectOverflowAcrossWorksAndTeams(t *testing.T) {
 					CounterID: task.TaskUID, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: new(store.MaxUsageTokenCount),
 					OutputTokens: new(int64(0)), Complete: true, ObservedAt: filter.From})
 			}
-			// Paging must check the complete selection, even when each work is valid.
 			_, err := usage.BuildPage(data, filter, usage.Page{Limit: 1}, "")
 			require.ErrorIs(t, err, usage.ErrTotalsOutOfRange)
 		})
@@ -173,10 +172,6 @@ func TestUsageAggregateCacheAvailabilityRequiresEveryMeasurement(t *testing.T) {
 	}
 }
 
-// A session counter spans its turns, so a gain on it may belong to any turn
-// of its session. A counter a hidden turn reported on, or a session counter
-// of a session a hidden turn continued, credits nothing to visible turns and
-// shows the gap; other counters are untouched.
 func TestUsageHiddenTurnsStayOffASharedCounter(t *testing.T) {
 	count := func(n int64) *int64 { return &n }
 	type report struct {
@@ -204,8 +199,6 @@ func TestUsageHiddenTurnsStayOffASharedCounter(t *testing.T) {
 			{"first", store.UsageStatusCompleted, count(500)}}},
 		{name: "hidden turn in another session", hiddenSession: "elsewhere", visible: 250, reports: append(slices.Clone(first),
 			report{"second", store.UsageStatusCompleted, count(250)})},
-		// Retention pruned the reporter's row but kept its usage: its own
-		// usage stays hidden, and the later turn's gain is the later turn's.
 		{name: "pruned reporter", hiddenSession: "elsewhere", visible: 150, reports: []report{
 			{"pruned", store.UsageStatusCompleted, count(100)}, {"second", store.UsageStatusCompleted, count(250)}}},
 		{name: "no hidden turn keeps the baseline", hiddenSession: "elsewhere", visible: 600, reports: []report{
@@ -235,7 +228,6 @@ func TestUsageHiddenTurnsStayOffASharedCounter(t *testing.T) {
 			encoded, err := json.Marshal(report)
 			require.NoError(t, err)
 			require.Equal(t, tc.visible == 0, strings.Contains(string(encoded), "Shared with a Task this report does not show"), "the gap shows")
-			// A visible Task's measurement shows its latest report.
 			for _, work := range report.Works {
 				for _, task := range work.Tasks {
 					if task.TaskUID != "first" || len(task.Measurements) == 0 {
@@ -256,7 +248,6 @@ func TestUsageHiddenTurnsStayOffASharedCounter(t *testing.T) {
 	}
 }
 
-// A session whose first total is hidden needs no HiddenTasks from the caller.
 func TestBuildHidesASessionBaselineWithoutHiddenTasks(t *testing.T) {
 	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	in := int64(4242)

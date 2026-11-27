@@ -4,14 +4,9 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package genai contains the small hand-rolled subset of the OpenTelemetry
-// GenAI semantic conventions Orka emits. The upstream GenAI conventions are
-// Development-stage and have moved across Go semconv versions, so Orka keeps
-// these string constants local and narrow.
 package genai
 
 const (
-	// SchemaURL is the development schema URL Orka emits for GenAI instruments.
 	SchemaURL = "gen-ai-dev/1.42.0-dev"
 
 	InstrumentationName = "orka.gen_ai"
@@ -27,8 +22,6 @@ const (
 	ToolTypeExtension    = "extension"
 	ToolTypeDatastore    = "datastore"
 
-	// ErrorTypeOther is the semantic-convention fallback error.type value
-	// when no more specific low-cardinality class is known.
 	ErrorTypeOther = "_OTHER"
 )
 
@@ -120,18 +113,13 @@ var ProviderNames = []string{
 	ProviderMoonshotAI,
 }
 
-// OperationDurationBuckets are the explicit histogram buckets (seconds) used
-// by GenAI client operation and first-chunk latency metrics.
 var OperationDurationBuckets = []float64{
 	0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64,
 	1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
 }
 
-// TokenUsageBuckets are explicit token-count buckets for GenAI token usage.
 var TokenUsageBuckets = []float64{1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144}
 
-// ToolDurationBuckets are explicit histogram buckets (seconds) for bounded tool execution.
 var ToolDurationBuckets = []float64{0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92}
 
-// InvokeAgentDurationBuckets are explicit histogram buckets (seconds) for long-running agent invocations.
 var InvokeAgentDurationBuckets = []float64{1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 14400}

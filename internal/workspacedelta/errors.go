@@ -18,7 +18,6 @@ var (
 	ErrUnsupportedFilesystem = errors.New("unsupported filesystem safety primitive")
 )
 
-// PathError associates a safety failure with a slash-separated workspace path.
 type PathError struct {
 	Op   string
 	Path string

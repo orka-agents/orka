@@ -16,7 +16,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// AssertNoSpanText inspects the complete span payload for forbidden content.
 func AssertNoSpanText(t *testing.T, span sdktrace.ReadOnlySpan, forbidden ...string) {
 	t.Helper()
 	if span == nil {
@@ -54,7 +53,6 @@ func AssertNoSpanText(t *testing.T, span sdktrace.ReadOnlySpan, forbidden ...str
 	}
 }
 
-// AssertSpanError checks that useful classification survives message removal.
 func AssertSpanError(t *testing.T, span sdktrace.ReadOnlySpan, errorType string) {
 	t.Helper()
 	if span == nil {

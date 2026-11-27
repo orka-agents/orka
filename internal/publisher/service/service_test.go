@@ -538,8 +538,6 @@ func TestPublicationPreparePublishVerifyLocalBareRepository(t *testing.T) {
 	if bytes.Contains(encoded, []byte("bundlePath")) || bytes.Contains(encoded, []byte(fixture.config.ArtifactRoot)) {
 		t.Fatalf("response exposed local durable path: %s", encoded)
 	}
-	// Simulate complete loss of the Publisher-local prepared cache. Publish and
-	// Verify must recover exclusively from the controller artifact API receipt.
 	if err := os.RemoveAll(filepath.Join(fixture.config.ArtifactRoot, publicationID)); err != nil {
 		t.Fatal(err)
 	}
@@ -963,8 +961,6 @@ func readWorkspaceTar(t *testing.T, data []byte) map[string]string {
 		}
 	}
 	if !sort.StringsAreSorted(names) {
-		// Parent directories are deliberately emitted before descendants; within
-		// each depth and for files, ordering is deterministic rather than globally lexical.
 		seen := append([]string(nil), names...)
 		if len(seen) == 0 {
 			t.Fatal("empty workspace tar")
@@ -1263,7 +1259,6 @@ func TestPublicationReclaimIsCapabilityProtectedAndIdempotent(t *testing.T) {
 	}
 }
 
-// PRReconcilerFactoryFunc adapts a function to PRReconcilerFactory for tests.
 type PRReconcilerFactoryFunc func(context.Context, string) (publisher.PullRequestReconciler, error)
 
 func (f PRReconcilerFactoryFunc) New(ctx context.Context, credentialPath string) (publisher.PullRequestReconciler, error) {

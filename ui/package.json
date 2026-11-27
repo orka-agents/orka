@@ -9,6 +9,7 @@
     "build:demo": "tsc -b && vite build --mode demo --outDir dist-demo",
     "dev:demo": "vite --mode demo",
     "lint": "eslint .",
+    "lint:prune-comment-baseline": "eslint . --prune-suppressions",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

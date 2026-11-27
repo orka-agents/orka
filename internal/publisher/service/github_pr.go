@@ -42,9 +42,6 @@ const (
 
 var githubRepositoryComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 
-// GitHubPRReconcilerFactoryConfig contains only non-secret GitHub REST client
-// configuration. Each reconciler receives its token from the operation-scoped
-// credential file passed to PRReconcilerFactory.New.
 type GitHubPRReconcilerFactoryConfig struct {
 	APIBaseURL       string
 	HTTPClient       *http.Client
@@ -52,8 +49,6 @@ type GitHubPRReconcilerFactoryConfig struct {
 	MaxResponseBytes int64
 }
 
-// GitHubPRReconcilerFactory creates one short-lived reconciler per operation.
-// It never accepts a token in configuration or environment variables.
 type GitHubPRReconcilerFactory struct {
 	apiBaseURL       *url.URL
 	httpClient       *http.Client
@@ -61,8 +56,6 @@ type GitHubPRReconcilerFactory struct {
 	maxResponseBytes int64
 }
 
-// NewGitHubPRReconcilerFactory creates a strict GitHub REST factory. Redirects
-// are denied, every request has a hard deadline, and every response is bounded.
 func NewGitHubPRReconcilerFactory(config GitHubPRReconcilerFactoryConfig) (*GitHubPRReconcilerFactory, error) {
 	apiBaseURL, err := normalizeGitHubAPIBaseURL(config.APIBaseURL)
 	if err != nil {
@@ -594,8 +587,6 @@ func githubBodyHasReconciliationMarker(body, marker string) bool {
 	if strings.Count(body, marker) != 1 || (body != marker && !strings.HasSuffix(body, "\n\n"+marker)) {
 		return false
 	}
-	// A body claiming multiple Sessions is ambiguous even if one exact marker
-	// is the final line. A per-head marker alone never authorizes continuation.
 	return !strings.HasPrefix(marker, githubSessionMarkerPrefix) || strings.Count(body, githubSessionMarkerPrefix) == 1
 }
 

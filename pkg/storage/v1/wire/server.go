@@ -334,6 +334,75 @@ func (p datasetProvider) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// ownershipProvider is the part of the contract every contract part serves:
+// operation receipts, the controller epoch, the dataset binding and the write
+// watermark.
+type ownershipProvider interface {
+	storagev1.OperationReceiptStore
+	storagev1.ControllerEpochAdvancer
+	storagev1.DatasetBindingStore
+	storagev1.WriteWatermarkStore
+}
+
+// owner returns the provider that answers the Ownership service. When the
+// server serves both contract parts they serve one dataset, whose receipts,
+// epoch, binding and watermark are one record each, so the state provider
+// answers for both, as it answers Describe.
+func (p datasetProvider) owner() ownershipProvider {
+	if p.server.state != nil {
+		return p.server.state
+	}
+	return p.server.artifacts
+}
+
+func (p datasetProvider) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	return p.owner().ResolveOperation(ctx, request)
+}
+
+func (p datasetProvider) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
+	return p.owner().PruneOperationReceipts(ctx, limit)
+}
+
+func (p datasetProvider) AdvanceControllerEpoch(
+	ctx context.Context, request storagev1.AdvanceControllerEpochRequest,
+) (storagev1.ControllerEpochMirrorState, error) {
+	return p.owner().AdvanceControllerEpoch(ctx, request)
+}
+
+func (p datasetProvider) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	return p.owner().GetControllerEpochMirror(ctx, name)
+}
+
+func (p datasetProvider) BindDataset(ctx context.Context, request storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	return p.owner().BindDataset(ctx, request)
+}
+
+func (p datasetProvider) GetDatasetBinding(ctx context.Context, datasetID string) (storagev1.DatasetBinding, error) {
+	return p.owner().GetDatasetBinding(ctx, datasetID)
+}
+
+func (p datasetProvider) DetachDatasetBinding(ctx context.Context, request storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	return p.owner().DetachDatasetBinding(ctx, request)
+}
+
+func (p datasetProvider) UpdateBindingKeyFingerprint(
+	ctx context.Context, request storagev1.UpdateBindingKeyRequest,
+) (storagev1.DatasetBinding, error) {
+	return p.owner().UpdateBindingKeyFingerprint(ctx, request)
+}
+
+func (p datasetProvider) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
+	return p.owner().CompleteDatasetBootstrap(ctx, datasetID)
+}
+
+func (p datasetProvider) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	return p.owner().AdvanceWriteWatermark(ctx)
+}
+
+func (p datasetProvider) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	return p.owner().GetWriteWatermark(ctx)
+}
+
 // tap authenticates every call before its request is read, and marks the
 // call's context so the interceptors know it did. It does not depend on
 // recognizing the method, so a path the method table does not name is never

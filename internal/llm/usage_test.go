@@ -213,7 +213,6 @@ func TestUsageOpenAIResponsesTerminalAccounting(t *testing.T) {
 						return
 					}
 					if !body.Stream {
-						// Discovery must succeed so the terminal event reaches the SDK stream.
 						w.Header().Set("Content-Type", "application/json")
 						_, _ = fmt.Fprint(w, `{"id":"probe","object":"response","status":"completed","model":"requested-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"probe"}]}]}`)
 						return
@@ -268,7 +267,6 @@ func TestUsageOpenAIResponsesTerminalAccounting(t *testing.T) {
 					require.Equal(t, "openai", terminal.Provider)
 					require.Equal(t, tt.completeness == "complete", terminal.UsageReported)
 				}
-				// One discovery call and one stream, including invalid accounting.
 				require.EqualValues(t, 2, requests.Load())
 				got := report()
 				require.Equal(t, 2, got.Summary.Calls)
@@ -327,8 +325,6 @@ func TestUsageOpenAIRejectsCacheBreakdownsExceedingInput(t *testing.T) {
 					}
 					response := map[string]any{"id": "response", "object": "response", "status": "completed", "model": "served-model",
 						"output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok"}}}}}
-					// The Responses stream first probes support with a unary call.
-					// Keep the probe unavailable so only the stream supplies bad counts.
 					if !streaming || body.Stream {
 						response["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "input_tokens_details": map[string]any{"cached_tokens": 100}}
 					}
@@ -421,8 +417,6 @@ func TestUsageStreamFailureAndCancellationPreserveInput(t *testing.T) {
 	}
 }
 
-// Complete streams too, so a stream that fails or ends after message_start
-// must keep the input it was billed for.
 func TestUsageCompleteFailurePreservesInput(t *testing.T) {
 	for _, truncated := range []bool{false, true} {
 		t.Run(fmt.Sprintf("truncated=%t", truncated), func(t *testing.T) {

@@ -21,9 +21,6 @@ const (
 	defaultVerifyBackoff  = 100 * time.Millisecond
 )
 
-// Options configures the clean-room publisher. ArtifactRoot is durable trusted
-// storage; TempRoot may be ephemeral. Child process environments are always
-// rebuilt from an empty allowlist.
 type Options struct {
 	ArtifactRoot     string
 	TempRoot         string
@@ -37,9 +34,6 @@ type Options struct {
 	ProxyEnvironment ProxyEnvironment
 }
 
-// Publisher is safe for concurrent use within one controller process. The
-// first release intentionally serializes local durable receipt updates; remote
-// correctness still relies on exact ref CAS, not this mutex.
 type Publisher struct {
 	artifactRoot     string
 	tempRoot         string
@@ -56,8 +50,6 @@ type Publisher struct {
 
 	mu sync.Mutex
 
-	// Test-only fault boundaries. They remain unexported so production callers
-	// cannot weaken the mutation protocol.
 	beforeCAS     func(context.Context, PublishRequest) error
 	afterPush     func(context.Context, PublishRequest) error
 	observeFault  func(context.Context, Repository, string) error

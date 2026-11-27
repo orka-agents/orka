@@ -196,8 +196,8 @@ func toWire(f *goFile, target, source string, c *conversion, label, onErr string
 		f.printf("if %s != nil {\n%s := %s(*%s)\n%s = &%s\n}\n", source, value, c.wireType, source, target, value)
 	case convBytes:
 		f.printf("%s = []byte(%s)\n", target, source)
-	case convStringMap:
-		f.printf("%s = map[string]string(%s)\n", target, source)
+	case convScalarMap:
+		f.printf("%s = map[string]%s(%s)\n", target, c.wireType, source)
 	case convTime:
 		f.printf("if %s, err = timeToWire(%s, %q); err != nil {\n%s\n}\n", target, source, label, onErr)
 	case convNullableTime:
@@ -239,21 +239,34 @@ func fromWire(f *goFile, target, source string, c *conversion, label, exact, onE
 	goType := func() string { return f.typeString(c.goType) }
 	switch c.kind {
 	case convScalar:
-		if c.cast {
+		if isGoInt(c.goType) {
+			if c.goType == types.Typ[types.Int] {
+				f.printf("if %s, err = intFromWire(%s, %q); err != nil {\n%s\n}\n", target, source, label, onErr)
+			} else {
+				converted := f.fresh("v")
+				f.printf("if %s, err := intFromWire(%s, %q); err != nil {\n%s\n} else {\n%s = %s(%s)\n}\n", converted, source, label, onErr, target, goType(), converted)
+			}
+		} else if c.cast {
 			f.printf("%s = %s(%s)\n", target, goType(), source)
 		} else {
 			f.printf("%s = %s\n", target, source)
 		}
 	case convOptional:
 		value := f.fresh("v")
-		elem := f.typeString(c.goType.(*types.Pointer).Elem())
-		f.printf("if %s != nil {\n%s := %s(*%s)\n%s = &%s\n}\n", source, value, elem, source, target, value)
+		elemType := c.goType.(*types.Pointer).Elem()
+		elem := f.typeString(elemType)
+		if isGoInt(elemType) {
+			converted := f.fresh("n")
+			f.printf("if %s != nil {\n%s, err := intFromWire(*%s, %q)\nif err != nil {\n%s\n}\n%s := %s(%s)\n%s = &%s\n}\n", source, converted, source, label, onErr, value, elem, converted, target, value)
+		} else {
+			f.printf("if %s != nil {\n%s := %s(*%s)\n%s = &%s\n}\n", source, value, elem, source, target, value)
+		}
 	case convBytes:
 		// Protobuf decodes empty bytes as nil. A decoded bytes value is never
 		// nil, so a present record keeps an empty value a provider may
 		// require, as it would receive in process.
 		f.printf("%s = %s(%s)\nif %s == nil {\n%s = %s{}\n}\n", target, goType(), source, target, target, goType())
-	case convStringMap:
+	case convScalarMap:
 		f.printf("%s = %s(%s)\n", target, goType(), source)
 	case convTime:
 		f.printf("if %s, err = timeFromWire(%s, %q); err != nil {\n%s\n}\n", target, source, label, onErr)
@@ -288,6 +301,12 @@ func fromWire(f *goFile, target, source string, c *conversion, label, exact, onE
 		}
 		f.printf("}\n")
 	}
+}
+
+// isGoInt reports whether t's underlying type is Go's architecture-sized int.
+func isGoInt(t types.Type) bool {
+	basic, ok := t.Underlying().(*types.Basic)
+	return ok && basic.Kind() == types.Int
 }
 
 // zeroValue renders the zero value of t.

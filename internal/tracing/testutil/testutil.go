@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// SpanHarness installs an in-memory span recorder for a test.
 type SpanHarness struct {
 	Recorder *tracetest.SpanRecorder
 	Provider *sdktrace.TracerProvider
@@ -37,7 +36,6 @@ func NewSpanHarness(t *testing.T) *SpanHarness {
 	return &SpanHarness{Recorder: recorder, Provider: provider}
 }
 
-// MetricHarness installs an in-memory manual metric reader for a test.
 type MetricHarness struct {
 	Reader   *sdkmetric.ManualReader
 	Provider *sdkmetric.MeterProvider
@@ -65,7 +63,6 @@ func (h *MetricHarness) Collect(t *testing.T) metricdata.ResourceMetrics {
 	return rm
 }
 
-// AttributeMap converts span attributes to a key/value map for assertions.
 func AttributeMap(span sdktrace.ReadOnlySpan) map[string]attribute.Value {
 	attrs := map[string]attribute.Value{}
 	if span == nil {
@@ -77,7 +74,6 @@ func AttributeMap(span sdktrace.ReadOnlySpan) map[string]attribute.Value {
 	return attrs
 }
 
-// SpanNamed returns the first span with the given name.
 func SpanNamed(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
 	for _, span := range spans {
 		if span.Name() == name {
@@ -87,7 +83,6 @@ func SpanNamed(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan
 	return nil
 }
 
-// SpansNamed returns all spans with the given name in recorder order.
 func SpansNamed(spans []sdktrace.ReadOnlySpan, name string) []sdktrace.ReadOnlySpan {
 	out := []sdktrace.ReadOnlySpan{}
 	for _, span := range spans {

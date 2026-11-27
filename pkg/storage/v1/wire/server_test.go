@@ -821,3 +821,27 @@ func dialInsecure(t *testing.T, address string) *grpc.ClientConn {
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
+
+// Ownership is one record per dataset, so a server that serves both contract
+// parts asks its state provider, and an artifacts-only server asks its
+// artifacts provider.
+func TestOwnershipIsAnsweredByTheDatasetsOwner(t *testing.T) {
+	watermark := storagev1.WriteWatermark{DatasetID: testDataset, Value: 3, AdvancedAt: time.Date(2026, 11, 25, 1, 2, 3, 0, time.UTC)}
+
+	state, artifacts := newRecordingProvider(), newRecordingProvider()
+	state.set("GetWriteWatermark", []any{watermark}, nil)
+	client := wiretest.Serve(t, wire.ServerConfig{State: state, Artifacts: artifacts})
+	got, err := client.GetWriteWatermark(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, watermark.Value, got.Value)
+	require.Len(t, state.callsTo("GetWriteWatermark"), 1)
+	require.Empty(t, artifacts.callsTo("GetWriteWatermark"), "the state provider answers for both parts")
+
+	only := newRecordingProvider()
+	only.set("GetWriteWatermark", []any{watermark}, nil)
+	client = wiretest.Serve(t, wire.ServerConfig{Artifacts: only})
+	got, err = client.GetWriteWatermark(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, watermark.Value, got.Value)
+	require.Len(t, only.callsTo("GetWriteWatermark"), 1)
+}

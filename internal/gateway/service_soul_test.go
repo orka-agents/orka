@@ -77,10 +77,8 @@ func TestGatewayTerminalSoulUnboundRequiresPreExecutionFailure(t *testing.T) {
 				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
 					Name: "unrecorded-job", Namespace: task.Namespace, OwnerReferences: []metav1.OwnerReference{*owner},
 				}}
-				// Only the uncached reader sees this Job. Labels are not authority.
 				service.APIReader = fake.NewClientBuilder().WithScheme(service.Client.Scheme()).WithObjects(job).Build()
 			}
-			// Exercise projection directly for all status/type boundary cases.
 			projected, err := service.projectTerminal(ctx, event, task)
 			require.NoError(t, err)
 			require.True(t, projected)
@@ -140,8 +138,6 @@ func TestGatewaySoulUnboundJobReadFailureRetriesProjection(t *testing.T) {
 	require.Equal(t, "true", messages[1].Metadata[store.SessionSoulUnboundMetadata])
 }
 
-// A paused Gateway Task is still the deterministic Task the event created, not
-// a name collision.
 func TestGatewayTaskMatchIgnoresControlFields(t *testing.T) {
 	now := time.Now()
 	event := &store.GatewayEvent{ReceivedAt: now, ExpiresAt: now.Add(time.Hour)}

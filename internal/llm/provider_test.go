@@ -11,7 +11,6 @@ import (
 	"testing"
 )
 
-// mockProvider is a mock implementation of Provider for testing
 type mockProvider struct {
 	name string
 }
@@ -32,7 +31,6 @@ func (p *mockProvider) Name() string {
 }
 
 func TestRegisterProvider(t *testing.T) {
-	// Clear the registry first
 	originalRegistry := providerRegistry
 	providerRegistry = make(map[string]ProviderFactory)
 	defer func() { providerRegistry = originalRegistry }()
@@ -49,12 +47,10 @@ func TestRegisterProvider(t *testing.T) {
 }
 
 func TestNewProvider(t *testing.T) {
-	// Clear the registry first
 	originalRegistry := providerRegistry
 	providerRegistry = make(map[string]ProviderFactory)
 	defer func() { providerRegistry = originalRegistry }()
 
-	// Register a test provider
 	RegisterProvider("mock", func(config ProviderConfig) (Provider, error) {
 		return &mockProvider{name: "mock"}, nil
 	})
@@ -259,7 +255,6 @@ func TestMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Basic validation - ensure messages can be created
 			if tt.msg.Role == "" {
 				t.Error("Message role should not be empty")
 			}
@@ -325,7 +320,6 @@ func TestStreamChunk(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Basic validation
 			_ = tt.chunk
 		})
 	}

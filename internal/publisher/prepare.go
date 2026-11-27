@@ -76,9 +76,6 @@ func (p *Publisher) Prepare(ctx context.Context, request PrepareRequest) (Prepar
 	if observed.Absent || observed.OID != request.BaselineOID {
 		return PreparedPublication{}, operationError(ErrSourceMoved, "observe source ref", fmt.Sprintf("expected %s, observed %s", request.BaselineOID, formatRemoteRef(observed)), nil)
 	}
-	// Publication bundles are restored into an empty verifier, so they must
-	// contain the baseline's complete parent history rather than a shallow
-	// boundary that exists only in this temporary repository.
 	if _, err := p.runGit(ctx, box, box.root, nil, nil, "--git-dir="+repositoryPath, "fetch", "--no-tags", "--no-recurse-submodules", "--", request.Source.URL, request.SourceRef+":refs/orka/source"); err != nil {
 		return PreparedPublication{}, operationError(ErrSourceMoved, "fetch exact source baseline", "", err)
 	}

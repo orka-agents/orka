@@ -108,8 +108,6 @@ func New(config Config) (*Server, error) {
 	return server, nil
 }
 
-// Handler returns the bounded HTTP API. The handler never logs request bodies,
-// headers, repository URLs, credentials, or upstream error strings.
 func (s *Server) Handler() http.Handler { return s.handler }
 
 func (s *Server) routes() http.Handler {
@@ -215,9 +213,6 @@ func (s *Server) serveOperation(writer http.ResponseWriter, request *http.Reques
 		s.writeOperationError(writer, operation, metadata, requestDigest, apiError(ErrUnauthorized, "unauthorized", "authorization failed", http.StatusForbidden, false, nil))
 		return
 	}
-	// Acquire the global operation slot only after the operation capability is
-	// verified: an unauthenticated peer must not be able to hold slots (and
-	// starve legitimate operations with 429s) by drip-feeding request bodies.
 	select {
 	case s.semaphore <- struct{}{}:
 		defer func() { <-s.semaphore }()
@@ -318,8 +313,6 @@ func (s *Server) writeOperationError(writer http.ResponseWriter, operation Opera
 	s.writePublicJSON(writer, status, response)
 }
 
-// logOperationFailure records only fields already returned to the controller,
-// never request bodies, credentials, repository URLs, or upstream error text.
 func (s *Server) logOperationFailure(operation Operation, metadata OperationMetadata, status int, response ErrorResponse) {
 	s.config.Logger.Warn("workspace publisher operation failed",
 		"operation", operation, "namespace", metadata.Namespace, "operationId", metadata.OperationID,

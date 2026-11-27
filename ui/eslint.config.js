@@ -3,6 +3,7 @@ import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 import globals from "globals";
+import orka from "./eslint-rules/no-comments.js";
 
 export default tseslint.config(
   { ignores: ["dist", "dist-demo", "coverage", "src/routeTree.gen.ts"] },
@@ -16,9 +17,11 @@ export default tseslint.config(
     plugins: {
       "react-hooks": reactHooks,
       "react-refresh": reactRefresh,
+      orka,
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      "orka/no-comments": "error",
       "react-refresh/only-export-components": [
         "warn",
         { allowConstantExport: true },

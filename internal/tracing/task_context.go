@@ -16,9 +16,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// StampTaskTraceContext stores the current W3C trace context on a Task using
-// annotations. It is intentionally annotation-based to avoid CRD churn while
-// GenAI telemetry remains experimental.
 func StampTaskTraceContext(ctx context.Context, task *corev1alpha1.Task) {
 	if task == nil || !trace.SpanContextFromContext(ctx).IsValid() {
 		return
@@ -39,7 +36,6 @@ func StampTaskTraceContext(ctx context.Context, task *corev1alpha1.Task) {
 	delete(task.Annotations, labels.AnnotationTraceBaggage)
 }
 
-// ExtractTaskTraceContext returns ctx with any Task-carried W3C trace context.
 func ExtractTaskTraceContext(ctx context.Context, task *corev1alpha1.Task) context.Context {
 	if task == nil || task.Annotations == nil {
 		return ctx

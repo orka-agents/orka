@@ -17,22 +17,13 @@ import (
 )
 
 const (
-	// DefaultAgentTaskTimeout is the deadline the ACP dispatcher applies to a
-	// harness v2 Task without spec.timeout.
 	DefaultAgentTaskTimeout = 30 * time.Minute
-	// MinContinuationBudget is the least time a continuation turn must have
-	// before the chain deadline. A wait that cannot leave this much expires.
-	MinContinuationBudget = time.Minute
-	// MaxReasonLength bounds the agent-supplied wait reason.
-	MaxReasonLength = 512
+	MinContinuationBudget   = time.Minute
+	MaxReasonLength         = 512
 )
 
-// ErrIneligible reports a Task that cannot park its turn.
 var ErrIneligible = errors.New("task cannot park its turn")
 
-// Deadline returns the absolute deadline of an ACP Task. It matches the
-// dispatcher: spec.timeout, or the harness v2 default, from creation, never
-// later than the chain deadline a continuation inherited.
 func Deadline(task *corev1alpha1.Task) time.Time {
 	if task == nil {
 		return time.Time{}
@@ -44,9 +35,6 @@ func Deadline(task *corev1alpha1.Task) time.Time {
 	return ClampToChainDeadline(task, task.CreationTimestamp.Add(timeout))
 }
 
-// ChainDeadline returns the absolute deadline a continuation inherited from
-// the first Task of its chain. Its timeout alone is relative to its own
-// creation, which happens after the remaining budget was computed.
 func ChainDeadline(task *corev1alpha1.Task) (time.Time, bool) {
 	if task == nil {
 		return time.Time{}, false
@@ -62,8 +50,6 @@ func ChainDeadline(task *corev1alpha1.Task) (time.Time, bool) {
 	return deadline.UTC(), true
 }
 
-// ClampToChainDeadline returns deadline, or the inherited chain deadline when
-// that is earlier. The annotation can only shorten a Task's deadline.
 func ClampToChainDeadline(task *corev1alpha1.Task, deadline time.Time) time.Time {
 	if chain, ok := ChainDeadline(task); ok && chain.Before(deadline) {
 		return chain
@@ -71,10 +57,6 @@ func ClampToChainDeadline(task *corev1alpha1.Task, deadline time.Time) time.Time
 	return deadline
 }
 
-// Eligibility explains why a Task cannot park its turn, or returns nil. A
-// continuation resumes from the Session transcript under the same frozen
-// authority, so parking requires a Session that records this turn and
-// rejects inputs that a later Task cannot safely inherit.
 func Eligibility(task *corev1alpha1.Task) error {
 	switch {
 	case task == nil:
@@ -99,11 +81,6 @@ func Eligibility(task *corev1alpha1.Task) error {
 	return nil
 }
 
-// boundToAgentIdentity reports whether the Task's binding froze an Agent
-// identity. A continuation is created by the controller, not the requester,
-// so it cannot re-prove the delegation: a Delegated identity would restart its
-// maximum age at the wake, and a delegated child loses the parent control its
-// identity requires.
 func boundToAgentIdentity(task *corev1alpha1.Task) bool {
 	binding := task.Status.AgentExecutionBinding
 	return binding != nil && binding.Agent != nil && binding.Agent.Identity != nil

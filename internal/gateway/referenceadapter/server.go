@@ -4,8 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package referenceadapter provides a deterministic, provider-neutral
-// orka.gateway.v1 implementation for conformance and end-to-end tests.
 package referenceadapter
 
 import (
@@ -20,23 +18,18 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
 
-// Bound all retained identities, including failed fixture attempts. Do not evict
-// receipts: forgetting one could turn a retry into a duplicate provider send.
 const maxRetainedDeliveries = 1024
 
 type eventRoute struct {
 	event, account, context, thread, reply string
 }
 
-// Option configures immutable reference adapter behavior at construction.
 type Option func(*Server)
 
-// WithInterimDelivery allows legacy fixtures/controllers to omit the capability.
 func WithInterimDelivery(enabled bool) Option {
 	return func(s *Server) { s.interimDelivery = enabled }
 }
 
-// Server is an in-memory deterministic reference adapter.
 type Server struct {
 	authValue       string
 	interimDelivery bool
@@ -49,7 +42,6 @@ type Server struct {
 	terminalEvents map[eventRoute]bool
 }
 
-// New creates a reference adapter protected by one outbound bearer token.
 func New(token string, options ...Option) *Server {
 	s := &Server{
 		authValue:       strings.TrimSpace(token),
@@ -65,7 +57,6 @@ func New(token string, options ...Option) *Server {
 	return s
 }
 
-// Handler returns the HTTP adapter contract; callers choose the TLS serving layer.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.auth(s.handleHealth))
@@ -74,7 +65,6 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Deliveries returns a snapshot of successfully recorded provider sends.
 func (s *Server) Deliveries() []protocol.DeliveryRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -85,7 +75,6 @@ func (s *Server) Deliveries() []protocol.DeliveryRequest {
 	return result
 }
 
-// Attempts returns how many times one stable delivery ID reached the adapter.
 func (s *Server) Attempts(deliveryID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -185,7 +174,6 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 	if existing, ok := s.responses[delivery.DeliveryID]; ok {
 		response = existing
 	} else if delivery.Kind == protocol.DeliveryKindMessage && (!s.interimDelivery || s.terminalEvents[route]) {
-		// Recheck under the send lock: a delayed fixture may race a terminal send.
 		response = protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "interim delivery unsupported or event already terminal"}
 	} else {
 		if delivery.Kind != protocol.DeliveryKindMessage {
