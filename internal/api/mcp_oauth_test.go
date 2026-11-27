@@ -50,6 +50,17 @@ func TestParseMCPResourceURL(t *testing.T) {
 		"/mcp",
 		"orka.example.com/mcp",
 		"ftp://orka.example.com/mcp",
+		"https://:8443/mcp",
+		"https://orka.example.com:/mcp",
+		"http://[::1]:/mcp",
+		"https://orka.example.com:443/mcp",
+		"http://localhost:80/mcp",
+		"http://[::1]:80/mcp",
+		"https://orka.example.com:0/mcp",
+		"https://orka.example.com:08443/mcp",
+		"https://orka.example.com:65536/mcp",
+		"http://[::1]:65536/mcp",
+		"https://[2001:0db8:0:0:0:0:0:1]/mcp",
 	} {
 		_, err := ParseMCPResourceURL(raw)
 		require.Error(t, err, raw)
@@ -207,6 +218,7 @@ func TestMCPProtectedResourceMetadataNeedsResourceURLAndOIDC(t *testing.T) {
 }
 
 func TestWithMCPBearerChallengeOnlyOnUnauthorized(t *testing.T) {
+	const baseChallenge = `Bearer resource_metadata="x"`
 	for status, wantChallenge := range map[int]bool{
 		fiber.StatusUnauthorized:       true,
 		fiber.StatusForbidden:          false,
@@ -215,13 +227,25 @@ func TestWithMCPBearerChallengeOnlyOnUnauthorized(t *testing.T) {
 		app := fiber.New()
 		app.Post("/", withMCPBearerChallenge(func(fiber.Ctx) error {
 			return fiber.NewError(status, "refused")
-		}, `Bearer resource_metadata="x"`))
+		}, baseChallenge))
 		response, err := app.Test(httptest.NewRequest(http.MethodPost, "/", nil))
 		require.NoError(t, err)
 		require.NoError(t, response.Body.Close())
 		require.Equal(t, status, response.StatusCode)
 		require.Equal(t, wantChallenge, response.Header.Get(fiber.HeaderWWWAuthenticate) != "", status)
 	}
+
+	app := fiber.New()
+	app.Post("/", withMCPBearerChallenge(func(fiber.Ctx) error {
+		return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
+	}, baseChallenge))
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set(fiber.HeaderAuthorization, "Bearer expired-token")
+	response, err := app.Test(req)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, fiber.StatusUnauthorized, response.StatusCode)
+	require.Equal(t, baseChallenge+`, error="invalid_token"`, response.Header.Get(fiber.HeaderWWWAuthenticate))
 }
 
 func TestAuthConfigAdvertisesOnlyConfiguredOIDCScopes(t *testing.T) {

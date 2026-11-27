@@ -95,13 +95,21 @@ provider, signs you in with PKCE, and refreshes the token itself. Orka checks th
 like any other OIDC token: issuer, signature, the `--oidc-audience` audience and the
 subject allow-list. Orka issues no tokens and registers no clients.
 
-- The URL must be the one clients use, with https (http only for localhost) and the
-  path `/mcp`. Orka refuses to start if it is invalid, or set without
-  `--mcp-server-enabled` and OIDC.
+- The URL must be the exact canonical URL clients use, with `https`, the path `/mcp`,
+  and no default port (`:443`). Loopback `http` (such as `http://localhost:8080/mcp`) is
+  also accepted as a nonstandard local-development mode, though strict RFC 9728 clients
+  require `https` and TLS certificate validation. Orka refuses to start if the URL is
+  invalid, or set without `--mcp-server-enabled` and OIDC.
 - `--oidc-scopes` (or `ORKA_OIDC_SCOPES`) sets the scopes clients request. The default is
   `openid profile email offline_access`; add `groups` if your provider needs it to
-  include group claims, and with Microsoft Entra ID add the API's scope, such as
-  `<oidc-audience>/.default`. When set, `orka auth login` requests the same scopes.
+  include group claims. With Microsoft Entra ID, set `api.requestedAccessTokenVersion`
+  to `2` on the API app, register the advertised MCP URL (such as
+  `https://orka.example.com/mcp`) as its Application ID URI, add a delegated scope under
+  that URI (such as `https://orka.example.com/mcp/user_impersonation`), and configure
+  `--oidc-scopes="openid profile email offline_access https://orka.example.com/mcp/user_impersonation"`
+  so Entra matches the MCP client's `resource` parameter while issuing v2 tokens whose
+  `aud` is the API's client-ID GUID (`--oidc-audience`). When set, `orka auth login`
+  requests the same scopes.
 - The token's audience must be `--oidc-audience`. If your provider sets a token's
   audience to the client ID that requested it, as Dex does, MCP clients must use the
   installation's own public client, the one whose ID is `--oidc-audience`. Providers
@@ -111,11 +119,14 @@ subject allow-list. Orka issues no tokens and registers no clients.
   client ID in the MCP client. In Claude Code:
 
   ```bash
-  claude mcp add --transport http orka https://orka.example.com/mcp --client-id <oidc-audience>
+  claude mcp add --transport http orka https://orka.example.com/mcp --client-id <oauth-client-id>
   claude mcp login orka
   ```
 
-  Add `--callback-port <port>` when your provider only accepts registered redirect
+  Use `--oidc-audience` as `<oauth-client-id>` when your provider sets a token's audience
+  to the requesting client ID (such as Dex), or the public MCP client app's ID when the
+  client and API are registered separately (such as Microsoft Entra ID). Add
+  `--callback-port <port>` when your provider only accepts registered redirect
   URIs. A Dex public client with no `redirectURIs` accepts `http://localhost` on any
   port, while listing any redirect URI replaces that rule with exact matches.
 

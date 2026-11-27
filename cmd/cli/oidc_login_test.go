@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -345,7 +346,10 @@ func TestAuthLoginRequestsAdvertisedScopesForAdvertisedIssuer(t *testing.T) {
 	openBrowserFunc = func(string) error { return nil }
 	t.Cleanup(func() { openBrowserFunc = origBrowser })
 
-	var gotScope string
+	var (
+		scopeMu  sync.Mutex
+		gotScope string
+	)
 	var idp *httptest.Server
 	idp = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -358,7 +362,9 @@ func TestAuthLoginRequestsAdvertisedScopesForAdvertisedIssuer(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			scopeMu.Lock()
 			gotScope = r.Form.Get("scope")
+			scopeMu.Unlock()
 			reply = map[string]any{"device_code": "dev", "user_code": "CODE", "verification_uri": "https://idp.example/device", "expires_in": 60, "interval": 1}
 		case "/token":
 			reply = map[string]any{"access_token": testCompactJWT(t, idp.URL, "orka-client-id", time.Now().Add(time.Hour).Unix()), "expires_in": 3600}
@@ -392,7 +398,9 @@ func TestAuthLoginRequestsAdvertisedScopesForAdvertisedIssuer(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
+			scopeMu.Lock()
 			gotScope = ""
+			scopeMu.Unlock()
 			var out bytes.Buffer
 			root := newRootCmd()
 			root.SetOut(&out)
@@ -401,8 +409,11 @@ func TestAuthLoginRequestsAdvertisedScopesForAdvertisedIssuer(t *testing.T) {
 			if err := root.Execute(); err != nil {
 				t.Fatalf("auth login: %v\n%s", err, out.String())
 			}
-			if gotScope != tc.wantScope {
-				t.Fatalf("device-code scope = %q, want %q", gotScope, tc.wantScope)
+			scopeMu.Lock()
+			capturedScope := gotScope
+			scopeMu.Unlock()
+			if capturedScope != tc.wantScope {
+				t.Fatalf("device-code scope = %q, want %q", capturedScope, tc.wantScope)
 			}
 		})
 	}

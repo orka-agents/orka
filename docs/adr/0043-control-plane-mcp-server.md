@@ -6,8 +6,9 @@ Date: 2026-11-06
 
 Accepted. Adds an opt-in `POST /mcp` endpoint on the API port
 (`--mcp-server-enabled`) that IDE agents use to delegate Tasks, track them, answer
-approvals, and read results. It changes no existing route or permission. Amended
-2026-11-26 to serve OAuth protected-resource metadata (see below).
+approvals, and read results. It changes no existing route or permission. Partly superseded
+by [0055](0055-mcp-oauth-protected-resource-metadata.md) for OAuth protected-resource
+discovery.
 
 ## Context
 
@@ -81,31 +82,3 @@ an `input_required` state when a human must answer.
   a client that wants them gone deletes the Task through the REST API.
 - The endpoint does not implement MCP OAuth discovery or `tasks/list`; clients
   configure a bearer or transaction-token header, and use `list_tasks`.
-
-## Amendment (2026-11-26): OAuth sign-in for MCP clients
-
-MCP clients that implement MCP authorization look for OAuth 2.0 protected-resource
-metadata (RFC 9728) when a request is refused. Without it, such a client cannot find
-the identity provider, and people paste a bearer token that never refreshes.
-
-- With `--mcp-server-enabled`, OIDC configured, and the new `--mcp-resource-url`, the
-  API serves `GET /.well-known/oauth-protected-resource/mcp` without authentication.
-  It names the resource URL, `--oidc-issuer` as the only authorization server, the
-  scopes clients should request, and header bearer tokens. It holds nothing secret.
-- An authentication refusal of `POST /mcp` carries `WWW-Authenticate: Bearer
-  resource_metadata="<metadata URL>", scope="<scopes>"`. Other routes and other
-  refusals (`403`, `503`) are unchanged.
-- `--oidc-scopes` sets the scopes, defaulting in the metadata to `openid profile email
-  offline_access`. When set, `GET /api/v1/auth/config` advertises it, and
-  `orka auth login` requests it for the advertised issuer.
-- Nothing about token validation changes. Orka is not an authorization server: it
-  registers no clients, issues and exchanges no tokens, and checks a token from an MCP
-  client exactly as any OIDC token, including the exact `--oidc-audience`. A provider
-  that sets `aud` to the client ID therefore needs MCP clients to use the
-  installation's own public client, whose ID is the audience; providers without
-  dynamic client registration need that client ID configured in the client.
-- The resource URL must use https (http only for localhost) and the path `/mcp`.
-  RFC 9728 derives the metadata location from the resource path, so a path prefix
-  would need the ingress to route a second well-known path; that is left out until
-  someone needs it. Startup fails if the URL is invalid, or set without the endpoint
-  or OIDC.

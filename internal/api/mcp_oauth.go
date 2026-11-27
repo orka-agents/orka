@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -32,12 +33,33 @@ func ParseMCPResourceURL(raw string) (string, error) {
 		return "", nil
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", errors.New("MCP resource URL must be an absolute URL with no credentials, query or fragment")
 	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return "", errors.New("MCP resource URL has an empty port")
+	}
+	var portNum uint64
+	if port := parsed.Port(); port != "" {
+		n, portErr := strconv.ParseUint(port, 10, 16)
+		if portErr != nil || n == 0 || strconv.FormatUint(n, 10) != port {
+			return "", errors.New("MCP resource URL has an invalid port")
+		}
+		portNum = n
+	}
 	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "https" && (scheme != "http" || !isLoopbackHostname(parsed.Hostname())) {
+	hostname := strings.ToLower(parsed.Hostname())
+	if scheme != "https" && (scheme != "http" || !isLoopbackHostname(hostname)) {
 		return "", errors.New("MCP resource URL must use https, or http only for localhost")
+	}
+	if (scheme == "https" && portNum == 443) || (scheme == "http" && portNum == 80) {
+		return "", errors.New("MCP resource URL must omit the default port so clients and metadata match under RFC 9728")
+	}
+	if strings.Contains(hostname, ":") {
+		ip := net.ParseIP(hostname)
+		if ip == nil || ip.To4() != nil || ip.String() != hostname {
+			return "", errors.New("MCP resource URL must use a canonical IPv6 literal")
+		}
 	}
 	if strings.ContainsFunc(parsed.Host, func(r rune) bool {
 		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]", r)
@@ -107,7 +129,8 @@ func serveMCPProtectedResourceMetadata(metadata mcpProtectedResourceMetadata) fi
 }
 
 // withMCPBearerChallenge adds the OAuth challenge to an authentication
-// refusal, so an MCP client can find where to sign in.
+// refusal, so an MCP client can find where to sign in. When a Bearer token was
+// presented and rejected, it also sets RFC 6750 error="invalid_token".
 func withMCPBearerChallenge(auth fiber.Handler, challenge string) fiber.Handler {
 	if challenge == "" {
 		return auth
@@ -117,10 +140,19 @@ func withMCPBearerChallenge(auth fiber.Handler, challenge string) fiber.Handler 
 		var fiberErr *fiber.Error
 		if (errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusUnauthorized) ||
 			(err == nil && c.Response().StatusCode() == fiber.StatusUnauthorized) {
-			c.Set(fiber.HeaderWWWAuthenticate, challenge)
+			header := challenge
+			if hasBearerAuthorization(c.Get(fiber.HeaderAuthorization)) {
+				header += `, error="invalid_token"`
+			}
+			c.Set(fiber.HeaderWWWAuthenticate, header)
 		}
 		return err
 	}
+}
+
+func hasBearerAuthorization(raw string) bool {
+	fields := strings.Fields(raw)
+	return len(fields) >= 2 && strings.EqualFold(fields[0], "bearer")
 }
 
 func isLoopbackHostname(host string) bool {
