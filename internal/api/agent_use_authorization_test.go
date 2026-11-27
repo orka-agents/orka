@@ -159,9 +159,9 @@ func TestCreateManualSecurityScanEnforcesValidationAgentUse(t *testing.T) {
 			ValidationAgentRef: &corev1alpha1.AgentReference{Name: "restricted-validator"},
 		},
 	}
-	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, scan)
+	_, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, scan)
 	handlers.clientset = clientset
-	app = fiber.New()
+	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview})
 		return c.Next()
