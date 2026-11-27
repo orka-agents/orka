@@ -12,10 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// runtimePoolStartFailedTask is a standalone Task the dispatcher planned on the
-// pool's active instance whose RuntimeSession creation then failed. Planning
-// records the instance and RuntimeSession identity; the supervisor boot is
-// recorded only after the RuntimeSession is created, so it can be empty.
 func runtimePoolStartFailedTask(t *testing.T, pool *corev1alpha1.RuntimePool, name, bootID string) *corev1alpha1.Task {
 	t.Helper()
 	task := runtimePoolRetirementTask(t, pool, name)
@@ -52,8 +48,6 @@ func (f *nativePoolBootFixture) assertRetiredTaskCleanup(t *testing.T, task *cor
 	if !runtimeSessionCleanupCompleteForUID(task, task.UID) {
 		t.Fatal("retired boot did not record cleanup for the Task whose RuntimeSession never started")
 	}
-	// The deleting Task's own cleanup path uses the read-only gate, which must
-	// not depend on the receipt the pool already wrote.
 	if retired, err := verifiedNativeRuntimePoolRetirement(t.Context(), f.control, proofTask, proofTask.UID); err != nil || !retired {
 		t.Fatalf("read-only retirement gate for the deleted Task: %t %v", retired, err)
 	}
@@ -146,7 +140,6 @@ func TestRuntimePoolDrainCleanupAcceptsTaskWithoutSupervisorBoot(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "other-boot-turn lacks exact RuntimePool retirement authority") {
 		t.Fatalf("Task frozen to another supervisor boot was accepted: %v", err)
 	}
-	// Remove the mismatched Task so the drain can record the remaining one.
 	if err := r.Get(t.Context(), client.ObjectKeyFromObject(otherBoot), otherBoot); err != nil {
 		t.Fatal(err)
 	}

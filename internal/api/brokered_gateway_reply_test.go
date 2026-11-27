@@ -287,8 +287,6 @@ func TestBrokeredGatewayReplyReconstructedContextAndConflict(t *testing.T) {
 	require.Equal(t, http.StatusOK, f.call(t).Code)
 	require.NotNil(t, captured)
 	service.Config.InterimMessagesPerTask = 1
-	// A new ToolContext with the same sealed operation must recover the gateway
-	// receipt at exhaustion, independently of the external-effect cached result.
 	tc := *captured
 	result, err := tools.NewReplyInConversationTool().Execute(tools.WithToolContext(t.Context(), &tc), f.request.Call.Arguments)
 	require.NoError(t, err)

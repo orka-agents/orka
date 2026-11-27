@@ -16,8 +16,6 @@ const (
 	FoundryBootRetirementOperation = "retire_foundry_boot"
 )
 
-// FoundryBrokerIdentity is obtained through the authenticated supervisor before
-// admission. A new or replaced ledger cannot prove cleanup of an older ledger.
 type FoundryBrokerIdentity struct {
 	Protocol                 string `json:"protocol"`
 	LedgerIdentityDigest     string `json:"ledgerIdentityDigest"`
@@ -37,9 +35,6 @@ func (i FoundryBrokerIdentity) Validate() error {
 	return nil
 }
 
-// FoundryBootRetirementRequest uses the current supervisor only as an
-// authenticated relay. RetiredFence identifies a different, previously
-// witnessed boot; it never grants that boot admission or execution authority.
 type FoundryBootRetirementRequest struct {
 	Protocol     string                `json:"protocol"`
 	Metadata     MutationMetadata      `json:"metadata"`
@@ -79,8 +74,6 @@ func (r FoundryBootRetirementRequest) ValidateAt(now time.Time) error {
 	return r.Metadata.ValidateDigest(r)
 }
 
-// BrokerRequestBody is the exact broker wire representation. Its byte digest
-// is echoed in the authenticated proof, independently of the v2 request digest.
 func (r FoundryBootRetirementRequest) BrokerRequestBody() ([]byte, error) {
 	return json.Marshal(struct {
 		Protocol                 string `json:"protocol"`
@@ -92,8 +85,6 @@ func (r FoundryBootRetirementRequest) BrokerRequestBody() ([]byte, error) {
 		r.RetiredFence, string(r.Metadata.OperationID)})
 }
 
-// FoundryBootRetirementProof certifies the broker's permanent admission seal
-// and every owner under the retired boot. It is not a prompt outcome receipt.
 type FoundryBootRetirementProof struct {
 	Protocol                 string `json:"protocol"`
 	LedgerIdentityDigest     string `json:"ledgerIdentityDigest"`
@@ -175,8 +166,6 @@ func (p FoundryBootRetirementProof) ValidateFor(r FoundryBootRetirementRequest) 
 	return nil
 }
 
-// CanonicalProofDigest binds the durable retirement evidence independently of
-// the relay operation identity. A fresh retry may prove the same sealed boot.
 func (p FoundryBootRetirementProof) CanonicalProofDigest() string {
 	body, _ := json.Marshal(struct {
 		Protocol                 string `json:"protocol"`

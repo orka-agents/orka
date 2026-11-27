@@ -13,7 +13,7 @@ import (
 func TestIgnoreRulesMatchGitignoreSemantics(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		rules  map[string]string // directory ("" for root, or info/exclude) -> file content
+		rules  map[string]string
 		path   string
 		isDir  bool
 		ignore bool
@@ -291,7 +291,6 @@ func TestBuildDoesNotCountIgnoredTreesAgainstLimits(t *testing.T) {
 	}
 	assertChangedPaths(t, result, "index.js")
 
-	// Without the rule the same tree exceeds the limits.
 	if err := os.Remove(filepath.Join(root, ".gitignore")); err != nil {
 		t.Fatalf("remove .gitignore: %v", err)
 	}

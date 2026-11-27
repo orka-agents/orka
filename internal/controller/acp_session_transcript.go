@@ -23,8 +23,6 @@ const (
 	acpBootstrapRoleUser         = "user"
 )
 
-// ACPBootstrapLimits bound the canonical transcript artifact used to recreate
-// an ACP provider session after runtime loss, scale-to-zero, or profile rotation.
 type ACPBootstrapLimits struct {
 	MaxMessages     int
 	MaxBytes        int
@@ -53,9 +51,6 @@ func (l ACPBootstrapLimits) withDefaults() (ACPBootstrapLimits, error) {
 	return l, nil
 }
 
-// ACPBootstrapTranscript is a deterministic JSONL suffix of the canonical Orka
-// transcript. Structured tool arguments are intentionally omitted: continuity
-// restores conversation text without replaying provider-native or tool state.
 type ACPBootstrapTranscript struct {
 	SessionUID       string
 	Messages         []ACPBootstrapMessage
@@ -67,7 +62,6 @@ type ACPBootstrapTranscript struct {
 	VerifiedBaseline *store.VerifiedBranchBaseline
 }
 
-// ACPBootstrapMessage is the portable, provider-neutral transcript shape.
 type ACPBootstrapMessage struct {
 	Role       string `json:"role"`
 	Content    string `json:"content"`
@@ -75,17 +69,10 @@ type ACPBootstrapMessage struct {
 	ToolCallID string `json:"toolCallID,omitempty"`
 }
 
-// BuildBootstrapTranscript returns a bounded, deterministic suffix of the Orka
-// transcript. It refuses reconciliation-blocked Sessions and returns the last
-// independently verified branch baseline for separate workspace recovery.
 func (c *ACPSessionContinuity) BuildBootstrapTranscript(ctx context.Context, session store.SessionControl) (*ACPBootstrapTranscript, error) {
 	return c.buildBootstrapTranscript(ctx, session, 0)
 }
 
-// BuildBootstrapTranscriptWithLimit returns the same canonical suffix while
-// applying the Task-specific transcript limit before the continuity-wide byte
-// and message caps. The explicit limit prevents a caller's narrower context
-// boundary from being widened during provider-session recreation.
 func (c *ACPSessionContinuity) BuildBootstrapTranscriptWithLimit(
 	ctx context.Context, session store.SessionControl, maxMessages int,
 ) (*ACPBootstrapTranscript, error) {
@@ -125,10 +112,6 @@ func (c *ACPSessionContinuity) buildBootstrapTranscript(
 	return bootstrap, nil
 }
 
-// BuildBootstrapTranscriptThrough returns the bounded transcript ending at one
-// exact stable message ID together with that untruncated terminal message.
-// Gateway Tasks use the terminal user message as the durable SessionTurn prompt
-// while avoiding a duplicate prompt block in provider input.
 func (c *ACPSessionContinuity) BuildBootstrapTranscriptThrough(
 	ctx context.Context, session store.SessionControl, throughMessageID string, maxMessages int, excludeThroughMessage bool,
 ) (*ACPBootstrapTranscript, *store.SessionMessage, error) {
@@ -287,7 +270,6 @@ func truncateUTF8WithSuffix(value string, maxBytes int, suffix string) string {
 	return truncateUTF8(value, maxBytes-len(suffix)) + suffix
 }
 
-// clockNow returns fn().UTC() when a test clock is injected, else time.Now().UTC().
 func clockNow(fn func() time.Time) time.Time {
 	if fn != nil {
 		return fn().UTC()
@@ -295,12 +277,10 @@ func clockNow(fn func() time.Time) time.Time {
 	return time.Now().UTC()
 }
 
-// sanitizeStatusMessage redacts, normalizes, and bounds a controller status message.
 func sanitizeStatusMessage(message string) string {
 	return sanitizeStatusValue(message, 1024)
 }
 
-// sanitizeStatusValue redacts, normalizes, and bounds a status string to maxBytes.
 func sanitizeStatusValue(value string, maxBytes int) string {
 	value = events.RedactExecutionEventText(strings.TrimSpace(value))
 	return truncateUTF8(strings.ToValidUTF8(value, "�"), maxBytes)

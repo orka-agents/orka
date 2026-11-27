@@ -15,9 +15,6 @@ const (
 	maxControlTextBytes = 4 * 1024 * 1024
 )
 
-// ControllerEpochCAS creates or advances an epoch. Creation requires both
-// expected values to be zero; advancement requires exact version and epoch
-// matches and increments the epoch by one.
 type ControllerEpochCAS struct {
 	Name            string    `json:"name"`
 	ExpectedVersion int64     `json:"expectedVersion"`
@@ -28,7 +25,6 @@ type ControllerEpochCAS struct {
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
-// PromptAttemptKey is the immutable identity of a prompt execution attempt.
 type PromptAttemptKey struct {
 	Namespace string `json:"namespace"`
 	TaskUID   string `json:"taskUid"`
@@ -36,7 +32,6 @@ type PromptAttemptKey struct {
 	PromptID  string `json:"promptId"`
 }
 
-// CanonicalID returns a stable content-derived identifier for the exact key.
 func (k PromptAttemptKey) CanonicalID() (string, error) {
 	if err := k.Validate(); err != nil {
 		return "", err
@@ -44,7 +39,6 @@ func (k PromptAttemptKey) CanonicalID() (string, error) {
 	return CanonicalControlID("prompt-attempt", k.Namespace, k.TaskUID, strconv.FormatInt(k.Attempt, 10), k.PromptID), nil
 }
 
-// Validate validates the immutable prompt attempt identity.
 func (k PromptAttemptKey) Validate() error {
 	if err := validateControlIdentifier("prompt attempt namespace", k.Namespace); err != nil {
 		return err
@@ -58,7 +52,6 @@ func (k PromptAttemptKey) Validate() error {
 	return validateControlIdentifier("prompt ID", k.PromptID)
 }
 
-// PromptExecutionState is the durable prompt execution state.
 type PromptExecutionState string
 
 const (
@@ -107,7 +100,6 @@ var promptExecutionTransitions = map[PromptExecutionState]map[PromptExecutionSta
 	},
 }
 
-// IsKnownPromptExecutionState reports whether state is supported.
 func IsKnownPromptExecutionState(state PromptExecutionState) bool {
 	switch state {
 	case PromptExecutionQueued, PromptExecutionReserved, PromptExecutionSessionStarting,
@@ -121,8 +113,6 @@ func IsKnownPromptExecutionState(state PromptExecutionState) bool {
 	}
 }
 
-// IsTerminalPromptExecutionState reports whether no further execution
-// transition is permitted. OutcomeUnknown is deliberately terminal.
 func IsTerminalPromptExecutionState(state PromptExecutionState) bool {
 	switch state {
 	case PromptExecutionSucceeded, PromptExecutionFailed, PromptExecutionCancelled, PromptExecutionOutcomeUnknown:
@@ -132,7 +122,6 @@ func IsTerminalPromptExecutionState(state PromptExecutionState) bool {
 	}
 }
 
-// ValidatePromptExecutionTransition validates one exact state transition.
 func ValidatePromptExecutionTransition(from, to PromptExecutionState) error {
 	if !IsKnownPromptExecutionState(from) {
 		return ValidationErrorf("unsupported prompt execution state %q", from)
@@ -146,8 +135,6 @@ func ValidatePromptExecutionTransition(from, to PromptExecutionState) error {
 	return nil
 }
 
-// PromptDeliveryState is the durable delivery/publication projection attached
-// to a PromptAttempt.
 type PromptDeliveryState string
 
 const (
@@ -190,7 +177,6 @@ var promptDeliveryTransitions = map[PromptDeliveryState]map[PromptDeliveryState]
 	},
 }
 
-// IsKnownPromptDeliveryState reports whether state is supported.
 func IsKnownPromptDeliveryState(state PromptDeliveryState) bool {
 	switch state {
 	case PromptDeliveryNotRequested, PromptDeliveryValidating, PromptDeliveryPreparing,
@@ -206,7 +192,6 @@ func IsKnownPromptDeliveryState(state PromptDeliveryState) bool {
 	}
 }
 
-// IsTerminalPromptDeliveryState reports whether delivery is resolved.
 func IsTerminalPromptDeliveryState(state PromptDeliveryState) bool {
 	switch state {
 	case PromptDeliveryNotRequested, PromptDeliveryVerifiedExact, PromptDeliveryDeliveredSuperseded,
@@ -219,7 +204,6 @@ func IsTerminalPromptDeliveryState(state PromptDeliveryState) bool {
 	}
 }
 
-// ValidatePromptDeliveryTransition validates one delivery transition.
 func ValidatePromptDeliveryTransition(from, to PromptDeliveryState) error {
 	if !IsKnownPromptDeliveryState(from) {
 		return ValidationErrorf("unsupported prompt delivery state %q", from)
@@ -233,7 +217,6 @@ func ValidatePromptDeliveryTransition(from, to PromptDeliveryState) error {
 	return nil
 }
 
-// PromptCredentialRole identifies one non-overlapping credential authority.
 type PromptCredentialRole string
 
 const (
@@ -244,7 +227,6 @@ const (
 	PromptCredentialCommitSign  PromptCredentialRole = "CommitSign"
 )
 
-// PromptCredentialBinding freezes one Secret identity without credential data.
 type PromptCredentialBinding struct {
 	Role            PromptCredentialRole `json:"role"`
 	Namespace       string               `json:"namespace"`
@@ -272,7 +254,6 @@ func (b PromptCredentialBinding) Validate() error {
 	return nil
 }
 
-// PromptAttempt is the durable execution/delivery aggregate for one prompt.
 type PromptAttempt struct {
 	ID                     string                    `json:"id"`
 	Key                    PromptAttemptKey          `json:"key"`
@@ -296,7 +277,6 @@ type PromptAttempt struct {
 	UpdatedAt              time.Time                 `json:"updatedAt"`
 }
 
-// PromptAttemptExecutionTransition performs a fenced execution-state CAS.
 type PromptAttemptExecutionTransition struct {
 	ID                     string               `json:"id"`
 	Fence                  ControllerEpochFence `json:"fence"`
@@ -313,9 +293,6 @@ type PromptAttemptExecutionTransition struct {
 	UpdatedAt              time.Time            `json:"updatedAt"`
 }
 
-// PromptAttemptPreSubmissionRecovery refreshes Reserved or resets an attempt
-// that crossed no prompt acceptance boundary back to Reserved under a
-// controller epoch. Submitting requires proof that the prompt was not accepted.
 type PromptAttemptPreSubmissionRecovery struct {
 	ID                string               `json:"id"`
 	Fence             ControllerEpochFence `json:"fence"`
@@ -328,7 +305,6 @@ type PromptAttemptPreSubmissionRecovery struct {
 	RecoveredAt       time.Time            `json:"recoveredAt"`
 }
 
-// PromptAttemptDeliveryTransition performs a fenced delivery-state CAS.
 type PromptAttemptDeliveryTransition struct {
 	ID              string               `json:"id"`
 	Fence           ControllerEpochFence `json:"fence"`
@@ -341,11 +317,6 @@ type PromptAttemptDeliveryTransition struct {
 	UpdatedAt       time.Time            `json:"updatedAt"`
 }
 
-// PromptAttemptReclamationMode identifies why a deleting Task may reclaim its
-// durable attempts. Projected Tasks require an exact delivered terminal
-// projection. Unbound Tasks cover the crash window where a queued attempt was
-// persisted before Task.status.execution. NoAttempt is limited to failures that
-// were proven to happen before any durable attempt existed.
 type PromptAttemptReclamationMode string
 
 const (
@@ -354,14 +325,6 @@ const (
 	PromptAttemptReclamationNoAttempt PromptAttemptReclamationMode = "NoAttempt"
 )
 
-// ReclaimPromptAttemptsRequest removes every PromptAttempt owned by one
-// immutable deleting Task only after the store can re-prove the relevant
-// terminal barriers. The store derives the newest attempt and verifies the
-// caller's expected final identity instead of trusting it as deletion authority.
-// An Unbound request is authoritative discovery: when no attempt exists, the
-// prepared durable marker records NoAttempt so retries remain crash-safe.
-// ContinuitySession distinguishes SessionTurn-backed tasks from standalone
-// runtime-session identities, which also populate PromptAttempt.SessionUID.
 type ReclaimPromptAttemptsRequest struct {
 	Namespace                         string                       `json:"namespace"`
 	TaskName                          string                       `json:"taskName"`
@@ -375,7 +338,6 @@ type ReclaimPromptAttemptsRequest struct {
 	Fence                             ControllerEpochFence         `json:"fence"`
 }
 
-// SessionAvailability is the state that gates mutation-lease acquisition.
 type SessionAvailability string
 
 const (
@@ -383,8 +345,6 @@ const (
 	SessionReconciliationBlocked SessionAvailability = "ReconciliationBlocked"
 )
 
-// SessionMutationLease is a fenced ownership token. Generation is monotonic
-// for the immutable SessionUID and is never reused.
 type SessionMutationLease struct {
 	Generation    int64      `json:"generation"`
 	TaskUID       string     `json:"taskUid"`
@@ -395,8 +355,6 @@ type SessionMutationLease struct {
 	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
 }
 
-// SessionControl stores the immutable SessionUID, monotonic lease generation,
-// availability, and independently verified branch baseline.
 type SessionControl struct {
 	Namespace                string                  `json:"namespace"`
 	SessionName              string                  `json:"sessionName"`
@@ -420,8 +378,6 @@ type SessionControl struct {
 	UpdatedAt                time.Time               `json:"updatedAt"`
 }
 
-// CommitSessionRuntimeGenerationRequest records the newest provider
-// RuntimeSession generation proven live under the exact active Session lease.
 type CommitSessionRuntimeGenerationRequest struct {
 	Namespace              string               `json:"namespace"`
 	SessionName            string               `json:"sessionName"`
@@ -433,29 +389,22 @@ type CommitSessionRuntimeGenerationRequest struct {
 	CommittedAt            time.Time            `json:"committedAt"`
 }
 
-// AcquireSessionMutationLeaseRequest acquires the next lease generation using
-// exact session version/generation and controller epoch fences.
 type AcquireSessionMutationLeaseRequest struct {
-	Namespace               string               `json:"namespace"`
-	SessionName             string               `json:"sessionName"`
-	SessionUID              string               `json:"sessionUid"`
-	Fence                   ControllerEpochFence `json:"fence"`
-	ExpectedVersion         int64                `json:"expectedVersion"`
-	ExpectedLeaseGeneration int64                `json:"expectedLeaseGeneration"`
-	TaskUID                 string               `json:"taskUid"`
-	Attempt                 int64                `json:"attempt"`
-	PromptID                string               `json:"promptId"`
-	RequestDigest           string               `json:"requestDigest"`
-	AcquiredAt              time.Time            `json:"acquiredAt"`
-	ExpiresAt               *time.Time           `json:"expiresAt,omitempty"`
-	// Lineage is established or verified in the same Kubernetes
-	// RuntimeSessionControl status CAS that records the acquired Lease. It is
-	// required by the Kubernetes-authoritative store.
-	Lineage *ClaimSessionLineageRequest `json:"lineage,omitempty"`
+	Namespace               string                      `json:"namespace"`
+	SessionName             string                      `json:"sessionName"`
+	SessionUID              string                      `json:"sessionUid"`
+	Fence                   ControllerEpochFence        `json:"fence"`
+	ExpectedVersion         int64                       `json:"expectedVersion"`
+	ExpectedLeaseGeneration int64                       `json:"expectedLeaseGeneration"`
+	TaskUID                 string                      `json:"taskUid"`
+	Attempt                 int64                       `json:"attempt"`
+	PromptID                string                      `json:"promptId"`
+	RequestDigest           string                      `json:"requestDigest"`
+	AcquiredAt              time.Time                   `json:"acquiredAt"`
+	ExpiresAt               *time.Time                  `json:"expiresAt,omitempty"`
+	Lineage                 *ClaimSessionLineageRequest `json:"lineage,omitempty"`
 }
 
-// ReleaseSessionMutationLeaseRequest aborts a pre-prompt lease only while the
-// exact SessionTurn fence and lease request digest still own the Session.
 type ReleaseSessionMutationLeaseRequest struct {
 	Namespace              string               `json:"namespace"`
 	SessionName            string               `json:"sessionName"`
@@ -469,8 +418,6 @@ type ReleaseSessionMutationLeaseRequest struct {
 	ReleasedAt             time.Time            `json:"releasedAt"`
 }
 
-// ReconcileSessionControlRequest explicitly establishes the actual remote
-// baseline and unblocks a fenced Session and BranchClaim after ambiguity.
 type ReconcileSessionControlRequest struct {
 	Namespace                     string                 `json:"namespace"`
 	SessionName                   string                 `json:"sessionName"`
@@ -489,16 +436,12 @@ type ReconcileSessionControlRequest struct {
 	ReconciledAt                  time.Time              `json:"reconciledAt"`
 }
 
-// CreateSessionTurnRequest opens a turn only under the matching active lease.
 type CreateSessionTurnRequest struct {
 	Turn                   SessionTurn          `json:"turn"`
 	Fence                  ControllerEpochFence `json:"fence"`
 	ExpectedSessionVersion int64                `json:"expectedSessionVersion"`
 }
 
-// FinalizeSessionTurnRequest atomically finalizes the turn, optionally appends
-// canonical transcript entries, snapshots the publication receipt, updates the
-// verified baseline, releases the matching lease, and enqueues the terminal projection.
 type FinalizeSessionTurnRequest struct {
 	Key                    SessionTurnKey          `json:"key"`
 	Fence                  ControllerEpochFence    `json:"fence"`
@@ -515,15 +458,9 @@ type FinalizeSessionTurnRequest struct {
 	Projection             OutboxProjection        `json:"projection"`
 	FinalizedAt            time.Time               `json:"finalizedAt"`
 	NativeSession          *NativeSessionRecord    `json:"-"`
-	// NativeSessionCarried marks NativeSession as the Session's existing checkpoint
-	// carried across a non-success outcome marker, not a fresh capture.
-	NativeSessionCarried bool `json:"-"`
+	NativeSessionCarried   bool                    `json:"-"`
 }
 
-// ResumeSessionTurnFinalizationRequest resumes only the Kubernetes and outbox
-// activation tail of a SessionTurn whose SQLite finalization transaction is
-// already durable. The immutable key, PromptAttempt identity, and finalization
-// digest prevent a caller from redirecting recovery to a different turn.
 type ResumeSessionTurnFinalizationRequest struct {
 	Key                SessionTurnKey       `json:"key"`
 	PromptAttemptID    string               `json:"promptAttemptId"`
@@ -531,7 +468,6 @@ type ResumeSessionTurnFinalizationRequest struct {
 	Fence              ControllerEpochFence `json:"fence"`
 }
 
-// BranchClaimOwnerKind identifies who owns a publication branch.
 type BranchClaimOwnerKind string
 
 const (
@@ -539,7 +475,6 @@ const (
 	BranchClaimOwnerSession BranchClaimOwnerKind = "Session"
 )
 
-// BranchClaim is the durable ownership and exact-baseline record.
 type BranchClaim struct {
 	ID                   string                  `json:"id"`
 	RepositoryID         string                  `json:"repositoryId"`
@@ -561,7 +496,6 @@ type BranchClaim struct {
 	UpdatedAt            time.Time               `json:"updatedAt"`
 }
 
-// CanonicalBranchClaimID derives the stable claim ID for a canonical repository and full ref.
 func CanonicalBranchClaimID(repositoryID, ref string) (string, error) {
 	if err := validateControlIdentifier("publication repository ID", repositoryID); err != nil {
 		return "", err
@@ -572,8 +506,6 @@ func CanonicalBranchClaimID(repositoryID, ref string) (string, error) {
 	return CanonicalControlID("branch-claim", repositoryID, ref), nil
 }
 
-// BranchClaimCAS updates only the exact claim generation, version, baseline,
-// and availability observed by the caller.
 type BranchClaimCAS struct {
 	ID                   string                  `json:"id"`
 	Fence                ControllerEpochFence    `json:"fence"`
@@ -591,12 +523,6 @@ type BranchClaimCAS struct {
 	UpdatedAt            time.Time               `json:"updatedAt"`
 }
 
-// ReclaimBranchClaimRequest removes only the exact available claim observed by
-// the caller. Reconciliation-blocked claims are never reclaimable. Session
-// claims are reclaimed only by higher-level Session lifecycle code. A missing
-// claim, or a claim whose immutable owner/request
-// identity has already been replaced, is an idempotent success; every mutable
-// fence must still match before an existing claim can be deleted.
 type ReclaimBranchClaimRequest struct {
 	ID                    string                  `json:"id"`
 	Fence                 ControllerEpochFence    `json:"fence"`
@@ -626,7 +552,6 @@ var publicationTransitions = map[PublicationState]map[PublicationState]struct{}{
 	},
 }
 
-// IsKnownPublicationState reports whether state is supported.
 func IsKnownPublicationState(state PublicationState) bool {
 	switch state {
 	case PublicationPreparing, PublicationPrepared, PublicationPublishing, PublicationVerifying,
@@ -639,7 +564,6 @@ func IsKnownPublicationState(state PublicationState) bool {
 	}
 }
 
-// ValidatePublicationTransition validates the clean-room state machine.
 func ValidatePublicationTransition(from, to PublicationState) error {
 	if !IsKnownPublicationState(from) {
 		return ValidationErrorf("unsupported publication state %q", from)
@@ -653,11 +577,8 @@ func ValidatePublicationTransition(from, to PublicationState) error {
 	return nil
 }
 
-// PreparedPublicationReceipt is the deterministic prepare result.
-
 const PreparedBundleMediaType = "application/vnd.orka.git-bundle.v1"
 
-// Publication is the durable clean-room publication aggregate.
 type Publication struct {
 	ID                       string                          `json:"id"`
 	Namespace                string                          `json:"namespace"`
@@ -699,8 +620,6 @@ type Publication struct {
 	UpdatedAt                time.Time                       `json:"updatedAt"`
 }
 
-// PublicationTransition performs an exact generation/version/state CAS and
-// persists the receipt required by the destination state.
 type PublicationTransition struct {
 	ID                  string                          `json:"id"`
 	Fence               ControllerEpochFence            `json:"fence"`
@@ -717,8 +636,6 @@ type PublicationTransition struct {
 	UpdatedAt           time.Time                       `json:"updatedAt"`
 }
 
-// SetPublicationPRIntentRequest persists the exact forge tuple after the
-// deterministic commit SHA is known and before any forge API call.
 type SetPublicationPRIntentRequest struct {
 	ID                 string               `json:"id"`
 	Fence              ControllerEpochFence `json:"fence"`
@@ -731,8 +648,6 @@ type SetPublicationPRIntentRequest struct {
 	UpdatedAt          time.Time            `json:"updatedAt"`
 }
 
-// SetPublicationPRReceiptRequest commits the exact forge receipt while the
-// Publication remains Verifying and before terminal status is exposed.
 type SetPublicationPRReceiptRequest struct {
 	ID                 string                      `json:"id"`
 	Fence              ControllerEpochFence        `json:"fence"`
@@ -745,7 +660,6 @@ type SetPublicationPRReceiptRequest struct {
 	UpdatedAt          time.Time                   `json:"updatedAt"`
 }
 
-// ExternalEffectState is the durable state of an idempotent external effect.
 type ExternalEffectState string
 
 const (
@@ -756,8 +670,6 @@ const (
 	ExternalEffectOutcomeUnknown ExternalEffectState = "OutcomeUnknown"
 )
 
-// ExternalEffectIdentity is a canonical effect identity. The operation ID must
-// never be reused for different input.
 type ExternalEffectIdentity struct {
 	Kind        string `json:"kind"`
 	Namespace   string `json:"namespace"`
@@ -765,7 +677,6 @@ type ExternalEffectIdentity struct {
 	OperationID string `json:"operationId"`
 }
 
-// CanonicalID returns a stable effect identity.
 func (i ExternalEffectIdentity) CanonicalID() (string, error) {
 	if err := i.Validate(); err != nil {
 		return "", err
@@ -773,7 +684,6 @@ func (i ExternalEffectIdentity) CanonicalID() (string, error) {
 	return CanonicalControlID("external-effect", i.Kind, i.Namespace, i.AggregateID, i.OperationID), nil
 }
 
-// Validate validates the external effect identity.
 func (i ExternalEffectIdentity) Validate() error {
 	if err := validateControlIdentifier("external effect kind", i.Kind); err != nil {
 		return err
@@ -787,7 +697,6 @@ func (i ExternalEffectIdentity) Validate() error {
 	return validateControlIdentifier("external effect operation ID", i.OperationID)
 }
 
-// ExternalEffect is the durable idempotency record for one external effect.
 type ExternalEffect struct {
 	ID                  string                 `json:"id"`
 	Identity            ExternalEffectIdentity `json:"identity"`
@@ -805,21 +714,14 @@ type ExternalEffect struct {
 	UpdatedAt           time.Time              `json:"updatedAt"`
 }
 
-// ReserveExternalEffectRequest creates or returns the same-digest identity.
 type ReserveExternalEffectRequest struct {
-	Identity      ExternalEffectIdentity `json:"identity"`
-	RequestDigest string                 `json:"requestDigest"`
-	Fence         ControllerEpochFence   `json:"fence"`
-	CreatedAt     time.Time              `json:"createdAt"`
-	// ApprovalTaskUID is an immutable Kubernetes Task binding, with a discovery
-	// label for approval recovery, when Tasks share a RuntimeSession aggregate.
-	// Legacy records receive only the discovery label, preserving their spec.
-	// Other backends may ignore it. It does not change the canonical identity,
-	// grant execution authority, or make the record subject to Task garbage collection.
-	ApprovalTaskUID string `json:"approvalTaskUid,omitempty"`
+	Identity        ExternalEffectIdentity `json:"identity"`
+	RequestDigest   string                 `json:"requestDigest"`
+	Fence           ControllerEpochFence   `json:"fence"`
+	CreatedAt       time.Time              `json:"createdAt"`
+	ApprovalTaskUID string                 `json:"approvalTaskUid,omitempty"`
 }
 
-// ExternalEffectTransition performs a version/state CAS.
 type ExternalEffectTransition struct {
 	ID                 string               `json:"id"`
 	Fence              ControllerEpochFence `json:"fence"`
@@ -835,8 +737,6 @@ type ExternalEffectTransition struct {
 	UpdatedAt          time.Time            `json:"updatedAt"`
 }
 
-// CanonicalControlID derives a domain-separated stable identifier from exact
-// length-prefixed components. It does not normalize components.
 func SessionMutationLeaseRequestDigest(
 	sessionUID string,
 	leaseGeneration int64,
@@ -890,7 +790,6 @@ func SessionLeaseReleaseOperationDigest(turnID, leaseRequestDigest string) (stri
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// ValidateWorkspaceRelativeRoot requires a bounded canonical repository-relative path.
 func ValidateWorkspaceRelativeRoot(value string) error {
 	if value == "" || value == "." {
 		return nil
@@ -905,7 +804,6 @@ func ValidateWorkspaceRelativeRoot(value string) error {
 	return nil
 }
 
-// ValidateControlText validates bounded UTF-8 prompt/result content.
 func ValidateControlText(field, value string) error {
 	if len(value) > maxControlTextBytes {
 		return ValidationErrorf("%s exceeds %d bytes", field, maxControlTextBytes)

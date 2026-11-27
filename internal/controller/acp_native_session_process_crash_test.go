@@ -42,10 +42,6 @@ import (
 
 const nativeProcessCrashChildEnv = "ORKA_NATIVE_PROCESS_CRASH_CHILD"
 
-// Only this store call is intercepted. The child has already received the
-// runtime's capture receipt and persisted its capture intent to the API server.
-// It acknowledges the boundary over a pipe and cannot unwind or close SQLite.
-// The parent must terminate it with SIGKILL to release this barrier.
 type nativeProcessCrashStore struct {
 	store.DurableControlStore
 	boundary string
@@ -109,8 +105,6 @@ func nativeProcessCrashScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-// This entry point runs in the current test executable, never in the parent
-// process. Its runtime server and Kubernetes API server belong to the parent.
 func TestACPDispatcherNativeProcessCrashChild(t *testing.T) {
 	configPath := os.Getenv(nativeProcessCrashChildEnv)
 	if configPath == "" {
@@ -161,8 +155,6 @@ func TestACPDispatcherNativeProcessCrashChild(t *testing.T) {
 	if config.Recover {
 		task := &corev1alpha1.Task{}
 		require.NoError(t, kube.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: "turn"}, task))
-		// A surviving runtime still fenced to the dead leader must not settle or
-		// delete anything. The parent observes this before advancing its fixture.
 		err = dispatcher.recoverStaleTask(ctx, task, fence)
 		require.ErrorIs(t, err, store.ErrNotReady)
 		signal("old-epoch-fail-closed")
@@ -272,8 +264,6 @@ func (p *nativeProcessCrashProcess) release(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Each captured response is retained by the parent, keyed by the immutable
-// operation ID and digest. Reconciliation returns that receipt, never recaptures.
 type nativeProcessCrashRuntime struct {
 	mu         sync.Mutex
 	epoch      atomic.Int64
@@ -424,8 +414,6 @@ func newNativeProcessCrashRuntime(t *testing.T, config nativeProcessCrashConfig,
 	return server, observed
 }
 
-// Both the parent and killed/replacement processes must connect directly to
-// the same local API. A loopback server URL alone does not exclude a proxy.
 func nativeProcessCrashRESTConfig(path string) (*rest.Config, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", path)
 	if err != nil {
@@ -441,7 +429,6 @@ func nativeProcessCrashRESTConfig(path string) (*rest.Config, error) {
 	if host := target.Hostname(); host != "127.0.0.1" && host != "localhost" && host != "::1" {
 		return nil, fmt.Errorf("crash-test API must be local to the test host")
 	}
-	// Do not fall back to ambient HTTP(S)_PROXY settings in client-go.
 	config.Proxy = func(*http.Request) (*url.URL, error) { return nil, nil }
 	return config, nil
 }
@@ -562,7 +549,6 @@ func TestACPDispatcherNativeSessionProcessCrash(t *testing.T) {
 			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "native-process-crash-"}}
 			require.NoError(t, kube.Create(ctx, namespace))
 			t.Cleanup(func() {
-				// Only resources created in this test's unique namespace are removed.
 				tasks := &corev1alpha1.TaskList{}
 				require.NoError(t, kube.List(context.Background(), tasks, client.InNamespace(namespace.Name)))
 				for index := range tasks.Items {
@@ -656,7 +642,6 @@ func TestACPDispatcherNativeSessionProcessCrash(t *testing.T) {
 			require.Equal(t, completedSnapshot.Data, receipt.Snapshot.Data)
 			require.Equal(t, completedSnapshot.ProviderSessionID, receipt.Snapshot.ProviderSessionID)
 			observed.mu.Unlock()
-			// No injected failure, cancellation or graceful close reaches the child.
 			require.NoError(t, victim.cmd.Process.Signal(syscall.SIGKILL))
 			select {
 			case waitErr := <-victim.done:
@@ -699,8 +684,6 @@ func TestACPDispatcherNativeSessionProcessCrash(t *testing.T) {
 			require.Len(t, observed.captures, 2)
 			require.Len(t, observed.prompts, 2)
 			observed.mu.Unlock()
-			// The surviving scripted runtime acknowledges the new control epoch.
-			// No Task status, capture intent or receipt is reconstructed here.
 			require.NoError(t, kube.Get(ctx, client.ObjectKeyFromObject(pool), pool))
 			pool.Status.ActiveInstance.ControllerEpoch = restart.Epoch
 			require.NoError(t, kube.Status().Update(ctx, pool))

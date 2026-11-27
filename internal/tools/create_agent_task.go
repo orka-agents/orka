@@ -29,7 +29,6 @@ const (
 	workspacePRBodyDescription  = "Optional PR body authored by the Task-creating agent. When createPR is true, describe the requested change and validation plan, not executing sandbox output. Omit or use an empty string for the publisher's default body. Secret-like text and reserved publisher reconciliation comments are rejected. Does not enable createPR or write intent."
 )
 
-// CreateAgentTaskTool creates an agent-runtime Task CR.
 type CreateAgentTaskTool struct{}
 
 func (t *CreateAgentTaskTool) Name() string { return createAgentTaskToolName }
@@ -106,8 +105,6 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		},
 	}
 
-	// Check only the reference before lookup. Full Task authorization needs the
-	// external runtime's materialized tool policy and runs after construction.
 	if tc.AuthorizeAgentReference != nil {
 		reference := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: agentRef, Namespace: namespace}}
 		if err := tc.AuthorizeAgentReference(ctx, reference); err != nil {
@@ -188,9 +185,6 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 		if wsErr := agentWorkspaceArgError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
 			return ChatToolErrorResult(wsErr.Type, wsErr.Message, wsErr.Suggestion)
 		}
-		// Only attach read credentials alongside a gitRepo: the controller
-		// workspace preflight rejects readCredentialRef without gitRepo, so
-		// auto-discovery must not doom a repository-free workspace.
 		if strings.TrimSpace(wsCfg.GitRepo) != "" {
 			readRef, err := resolveWorkspaceCredentialRef(ctx, tc.Client, namespace, agent, readCredential)
 			if err != nil {
@@ -236,9 +230,6 @@ func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage)
 	return ChatToolSuccess(map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: taskPhasePendingString, messageField: taskCreatedMsg(schedule)})
 }
 
-// agentWorkspacePullRequestArgTypeError distinguishes omitted strings from
-// invalid types, including null, without echoing argument values. Match the
-// case-insensitive field lookup used by encoding/json for WorkspaceArgs.
 func agentWorkspacePullRequestArgTypeError(wsMap map[string]any) *ChatToolError {
 	for _, field := range []string{"prTitle", "prBody"} {
 		for key, value := range wsMap {
@@ -257,9 +248,6 @@ func agentWorkspacePullRequestArgTypeError(wsMap map[string]any) *ChatToolError 
 	return nil
 }
 
-// agentWorkspaceArgError runs the full workspace-argument preflight mirror:
-// PR text, credential/publication prerequisites, canonical source selectors,
-// and the harness-v2 subPath rule.
 func agentWorkspaceArgError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
 	if wsErr := agentWorkspacePreflightError(wsCfg, readCredential, publicationReadCredential, publicationCredential, forgeCredential); wsErr != nil {
 		return wsErr
@@ -270,11 +258,6 @@ func agentWorkspaceArgError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential,
 	return agentWorkspaceSubPathError(wsCfg.SubPath)
 }
 
-// agentWorkspacePreflightError mirrors the tool-expressible subset of the
-// controller's validateACPWorkspacePreflight rules so obviously doomed Tasks
-// are rejected before consuming the session task budget. The controller-side
-// preflight remains authoritative; keep the mirrored conditions in exact
-// behavior parity with it (not stricter and not looser).
 func agentWorkspacePreflightError(wsCfg *corev1alpha1.WorkspaceConfig, readCredential, publicationReadCredential, publicationCredential, forgeCredential string) *ChatToolError {
 	invalidArgs := func(message, suggestion string) *ChatToolError {
 		return &ChatToolError{Type: invalidArgumentsErrorType, Message: message, Suggestion: suggestion}
@@ -330,10 +313,6 @@ func agentWorkspacePreflightError(wsCfg *corev1alpha1.WorkspaceConfig, readCrede
 	return nil
 }
 
-// canonicalAgentWorkspaceRepositoryArg canonicalizes a workspace repository
-// argument through security.CanonicalWorkspaceRepositoryCloneURL, the shared
-// mirror of the controller's canonicalWorkspaceRepositoryURL rule, and wraps
-// rejections into tool errors carrying the offending field name.
 func canonicalAgentWorkspaceRepositoryArg(field, raw string) (string, *ChatToolError) {
 	canonical, err := security.CanonicalWorkspaceRepositoryCloneURL(raw)
 	if err != nil {
@@ -347,12 +326,6 @@ func canonicalAgentWorkspaceRepositoryArg(field, raw string) (string, *ChatToolE
 	return canonical, nil
 }
 
-// agentWorkspaceSourceSelectorError mirrors the controller's
-// runtimeWorkspaceSourceRef selector validation with the same canonical
-// source-ref validator, so a Task with a malformed branch or ref selector is
-// rejected before creation instead of failing preflight afterwards. Keep the
-// mirrored conditions in exact behavior parity with the controller (not
-// stricter and not looser).
 func agentWorkspaceSourceSelectorError(wsCfg *corev1alpha1.WorkspaceConfig) *ChatToolError {
 	if ref := strings.TrimSpace(wsCfg.Ref); ref != "" {
 		if _, err := publisherservice.CanonicalWorkspaceSourceRef(ref); err != nil {
@@ -379,11 +352,6 @@ func agentWorkspaceSourceSelectorError(wsCfg *corev1alpha1.WorkspaceConfig) *Cha
 	return nil
 }
 
-// agentWorkspaceSubPathError mirrors the harness-v2 workspace relative-root
-// validation (validateWorkspaceRelativeRoot) so an unsafe subPath is rejected
-// before the Task is created instead of failing RuntimeSession creation. Keep
-// the mirrored conditions in exact behavior parity (not stricter and not
-// looser).
 func agentWorkspaceSubPathError(subPath string) *ChatToolError {
 	root := strings.TrimSpace(subPath)
 	if root == "" || root == "." {
@@ -413,8 +381,6 @@ func agentWorkspaceSubPathError(subPath string) *ChatToolError {
 	return nil
 }
 
-// validateWorkspaceBranchArg mirrors the controller's canonicalWorkspaceBranchRef
-// check with the same canonical branch-ref validator.
 func validateWorkspaceBranchArg(branch string) error {
 	ref := branch
 	if !strings.HasPrefix(ref, "refs/heads/") {

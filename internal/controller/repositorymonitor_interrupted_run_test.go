@@ -27,8 +27,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// heldControllerEpochManager returns an epoch manager that holds epoch as
-// this process's current controller epoch.
 func heldControllerEpochManager(epoch int64) *ControllerEpochManager {
 	ready := make(chan struct{})
 	close(ready)
@@ -115,8 +113,6 @@ func interruptedRunEvent(t *testing.T, monitorStore *storageclient.Client, monit
 func TestRepositoryMonitorReconcileReclaimsRunFromPreviousControllerEpoch(t *testing.T) {
 	ctx := context.Background()
 	reconciler, monitorStore, monitor := newInterruptedRunTestReconciler(t, "previous-epoch", heldControllerEpochManager(7), "")
-	// The run is running in storage, but this process, which holds the
-	// current epoch, is not executing it: an earlier epoch claimed it.
 	createRunningMonitorRun(t, monitorStore, monitor.Name, "orphan-run")
 
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
@@ -180,8 +176,6 @@ func TestRepositoryMonitorReconcileKeepsRunExecutingInCurrentControllerEpoch(t *
 		t.Fatalf("run = %#v, want still running", run)
 	}
 
-	// Once the execution in this process returns without recording
-	// completion, nothing executes the run any more and it is reclaimed.
 	reconciler.markMonitorRunInactive(key)
 	staleRun, _, err = reconciler.failStaleRunningMonitorRun(ctx, monitor)
 	if err != nil {
@@ -194,8 +188,6 @@ func TestRepositoryMonitorReconcileKeepsRunExecutingInCurrentControllerEpoch(t *
 
 func TestRepositoryMonitorKeepsRunningRunUntilTimeoutWithoutControllerEpoch(t *testing.T) {
 	ctx := context.Background()
-	// Without a held controller epoch this process cannot rule out a live
-	// executor elsewhere, so only the timeout backstop applies.
 	reconciler, monitorStore, monitor := newInterruptedRunTestReconciler(t, "no-epoch", &ControllerEpochManager{ready: make(chan struct{})}, "")
 	createRunningMonitorRun(t, monitorStore, monitor.Name, "unknown-run")
 
@@ -218,8 +210,6 @@ func TestRepositoryMonitorKeepsRunningRunUntilTimeoutWithoutControllerEpoch(t *t
 func TestRepositoryMonitorRecordsTerminalStateWhenRunContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// The GitHub API call cancels the run's context, as a controller shutdown
-	// does in the middle of a run.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		<-r.Context().Done()

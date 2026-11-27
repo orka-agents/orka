@@ -12,9 +12,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// memoryStorageRecords is an in-memory store.StorageRecordStore for test
-// epoch stores that keep no ControllerEpoch object. It applies the same
-// merge rules as the Kubernetes store and checks no fence.
 type memoryStorageRecords struct {
 	mu     sync.Mutex
 	record store.StorageRecord
@@ -110,7 +107,6 @@ func (r *memoryStorageRecords) ReleaseStorageHold(
 
 var _ store.StorageRecordStore = (*memoryStorageRecords)(nil)
 
-// AdvanceWriteWatermark advances the fake dataset's write watermark.
 func (d *recordingEpochDataset) AdvanceWriteWatermark(context.Context) (storagev1.WriteWatermark, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -119,7 +115,6 @@ func (d *recordingEpochDataset) AdvanceWriteWatermark(context.Context) (storagev
 	return storagev1.WriteWatermark{DatasetID: d.datasetID, Value: d.watermark, AdvancedAt: d.watermarkAt}, nil
 }
 
-// GetWriteWatermark returns the fake dataset's write watermark.
 func (d *recordingEpochDataset) GetWriteWatermark(context.Context) (storagev1.WriteWatermark, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -17,13 +17,8 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// leaseClockBase is far from the wall clock, so a lease judged on the store's
-// own clock gives a different answer than one judged at the request time.
 var leaseClockBase = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-// A consuming read keeps the consumed IDs with its receipt, and a replay reads
-// those messages again: it never returns a message sent later, and it marks
-// nothing more.
 func TestConsumeMessagesReplayReadsTheReceiptIDs(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -56,9 +51,6 @@ func TestConsumeMessagesReplayReadsTheReceiptIDs(t *testing.T) {
 	require.Equal(t, "two", unread[0].Content)
 }
 
-// A consuming replay reads its messages again only from the reader's own
-// inbox, so a row stored under a deleted message's ID for another Task is
-// never returned to the reader and stays unread for its recipient.
 func TestConsumeMessagesReplayRereadsOnlyItsInbox(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -74,8 +66,6 @@ func TestConsumeMessagesReplayRereadsOnlyItsInbox(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"writer", "deleted-writer"}, messageContentsOf(first))
 	require.NoError(t, s.DeleteTaskMessages(ctx, "tenant", "deleted-writer"))
-	// SQLite never reuses an ID; store a row under the deleted one directly to
-	// stand in for a backend that would.
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO messages (id, namespace, from_task, to_task, parent_task, content) VALUES (?, ?, ?, ?, ?, ?)`,
 		first[1].ID, "tenant", "x", "victim", "other", "for the victim")
@@ -97,9 +87,6 @@ func messageContentsOf(messages []store.Message) []string {
 	return contents
 }
 
-// The SendMessage receipt keeps the assigned identity, not the content, so
-// the content leaves the store with the message when cleanup deletes it, and
-// a replay still writes the identity back.
 func TestSendMessageReceiptKeepsOnlyTheIdentity(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -132,8 +119,6 @@ func TestSendMessageReceiptKeepsOnlyTheIdentity(t *testing.T) {
 	require.Len(t, unread, 1, "the replay stored no second message")
 }
 
-// A send that is refused leaves the caller's message as it was: the store
-// writes the identity back only once the write has committed.
 func TestRefusedSendLeavesTheMessageUnchanged(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -150,9 +135,6 @@ func TestRefusedSendLeavesTheMessageUnchanged(t *testing.T) {
 	require.Empty(t, unread)
 }
 
-// A transient lock is judged at the time of each request, not on the store
-// clock: an owner write before the expiry passes and one at or after it is
-// fenced, and another owner reclaims the lock once it has expired.
 func TestTransientLockExpiryIsJudgedAtTheRequestTime(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -190,9 +172,6 @@ func TestTransientLockExpiryIsJudgedAtTheRequestTime(t *testing.T) {
 	require.Equal(t, "owner-b", session.ActiveTask)
 }
 
-// ReleaseLockWithTokenUsage counts the owner's tokens only while its
-// transient lock is live at the request time, and releases the lock either
-// way.
 func TestReleaseLockWithTokenUsageJudgesTheLockAtTheRequestTime(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
@@ -221,8 +200,6 @@ func TestReleaseLockWithTokenUsageJudgesTheLockAtTheRequestTime(t *testing.T) {
 	}
 }
 
-// Session cleanup judges a chat turn reservation at the plan's preparation
-// time.
 func TestSessionCleanupJudgesLocksAtThePreparationTime(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

@@ -46,9 +46,6 @@ func seedUsageAPIWork(t *testing.T, backend *storageclient.Client, namespace str
 	return work
 }
 
-// usageReportHasNumber reports whether any JSON number in a usage response
-// equals want. Matching decoded numbers rather than raw text keeps nanosecond
-// timestamps, which can contain the same digits, from deciding the result.
 func usageReportHasNumber(t *testing.T, body string, want int64) bool {
 	t.Helper()
 	decoder := json.NewDecoder(strings.NewReader(body))
@@ -181,8 +178,6 @@ func TestUsageAPIRejectsOversizedReportsAndLoadsRequestedWork(t *testing.T) {
 	f := newExternalAuthorizationFixture(t)
 	work := seedUsageAPIWork(t, f.store, "default", 100)
 	at := time.Now().UTC().Add(-time.Minute)
-	// Seed the observations in one SQLite transaction, as RecordUsage would
-	// store them, so the oversized report needs no 20,000 separate commits.
 	tx, err := f.db.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
 	for i := range usageMaxRecords {
@@ -224,7 +219,6 @@ func TestUsageAPIRejectsOutOfRangeTotals(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(body), &report))
 	require.Equal(t, store.MaxUsageTokenCount, report.Summary.TotalTokens)
 	require.Contains(t, body, `"totalTokens":9007199254740991`)
-	// Both observations are individually valid, but the selected total is not.
 	require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: "task", ID: "extra",
 		CounterID: "extra", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, InputTokens: new(int64(1)), OutputTokens: new(int64(0)),
 		Complete: true, Status: store.UsageStatusCompleted, ObservedAt: time.Now().UTC().Add(-time.Minute)}))
@@ -281,7 +275,6 @@ func TestUsageAPIHidesHistoryAfterNamespaceRecreation(t *testing.T) {
 	require.NoError(t, f.kube.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
 	require.NoError(t, f.kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "replacement-uid"}}))
 
-	// Token-count digits in a timestamp must not be mistaken for leaked usage.
 	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second).Add(9999 * time.Nanosecond)
 	work := store.UsageWorkID("default", "replacement-monitor", "org/repo", "issue", 1)
 	require.NoError(t, f.store.RegisterUsageWork(t.Context(), store.UsageWorkRequest{Namespace: "default", NamespaceUID: "replacement-uid",
@@ -291,11 +284,8 @@ func TestUsageAPIHidesHistoryAfterNamespaceRecreation(t *testing.T) {
 	require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", TaskUID: "replacement-task",
 		ID: "replacement-call", CounterID: "call", Scope: store.UsageScopeCall, Source: store.UsageSourceProvider, Model: "model",
 		InputTokens: new(int64(100)), OutputTokens: new(int64(0)), Complete: true, Status: store.UsageStatusCompleted, ObservedAt: at}))
-	// Reusing the same repository and PR number must not import the prior
-	// namespace's verified merge, even when the current link has no observation.
 	require.NoError(t, f.store.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: "default", WorkID: work,
 		Repository: "org/repo", Number: 2, Origin: store.UsagePRCreated, EvidenceID: "replacement-publication", LinkedAt: at}))
-	// Unowned accounting and old native chat records must also remain hidden.
 	for _, uid := range []string{"", "namespace-uid"} {
 		require.NoError(t, f.store.RecordUsage(t.Context(), store.UsageObservation{Namespace: "default", NamespaceUID: uid,
 			ID: "chat-" + uid, CounterID: "chat-" + uid, Scope: store.UsageScopeCall, Source: store.UsageSourceProvider,
@@ -562,9 +552,6 @@ func TestUsageWorkerAuthorityRejectsUntrustedExecution(t *testing.T) {
 	}
 }
 
-// encoding/json decodes any key equal under strings.EqualFold into a tagged
-// field, including non-ASCII folds such as U+017F (ſ) for "s". The handler
-// must recognize the reserved content keys in every such spelling.
 func TestUsageWorkerReservedContentKeysMatchAnySpelling(t *testing.T) {
 	harness := map[string]any{"taskUID": "other-task-uid", "taskAttempt": 1, "promptID": "prompt-1", "sequence": 1}
 	harnessContent := func(key string) map[string]any {
@@ -642,8 +629,6 @@ func TestUsageDetachedStreamingContextRetainsRecorder(t *testing.T) {
 	detached := detachedSpanContext(ctx)
 	cancel()
 	require.NoError(t, detached.Err())
-	// A real provider call exercises the copied recorder after cancellation of
-	// the request context, as happens with SendStreamWriter.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		require.NoError(t, kube.Delete(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}))
 		require.NoError(t, kube.Create(t.Context(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "replacement-uid"}}))

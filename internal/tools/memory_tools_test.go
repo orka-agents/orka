@@ -207,8 +207,6 @@ func TestRecallMemoryToolDoesNotCountAResultTooLargeToReturn(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// A recall that fits is counted, so waiting on it also waits on any
-	// count the oversized recall would have started.
 	memories.memories = []store.Memory{{ID: "mem-a", Namespace: "test-ns"}}
 	if _, err := NewRecallMemoryTool().Execute(ctx, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -253,8 +251,6 @@ func TestRecallMemoryToolMarksNativeRecall(t *testing.T) {
 	}
 }
 
-// blockingMemoryRecalls never finishes recording a recall until its context
-// ends, like a storage write that keeps retrying.
 type blockingMemoryRecalls struct {
 	*recordingMemoryRecalls
 }

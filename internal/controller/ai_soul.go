@@ -13,23 +13,18 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// resolvedAISoul is a prepared input, not a worker-controlled environment value.
 type resolvedAISoul struct {
 	Prompt     string
 	UserPrompt string
 	Binding    corev1alpha1.TaskSoulBinding
 }
 
-// memoryConsolidationRun reports whether task is a memory consolidation run,
-// which uses Orka's fixed consolidation prompt and never its Agent's soul.
 func memoryConsolidationRun(task *corev1alpha1.Task) bool {
 	return task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil
 }
 
 func resolveAISoul(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (*resolvedAISoul, error) {
 	if memoryConsolidationRun(task) {
-		// The run sends none of the Agent's prompts, so its soul is neither
-		// read nor bound, and a missing soul ConfigMap cannot block the run.
 		return nil, nil
 	}
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || agent == nil || agent.Spec.Soul == nil {
@@ -67,8 +62,6 @@ func resolveAISoul(ctx context.Context, reader client.Reader, task *corev1alpha1
 		return nil, invalidAISoulConfiguration("AI Task prompt exceeds the safe literal environment limit")
 	}
 
-	// Kubernetes expands EnvVar.Value. Count the actual escaped envelope before
-	// persisting a binding; the worker receives the original literal bytes.
 	if len(literalKubernetesPrompt(prompt)) > maxContainerDeliveredPromptBytes {
 		return nil, invalidAISoulConfiguration("composed AI soul prompt exceeds the safe environment limit")
 	}
@@ -84,15 +77,11 @@ func resolveAISoul(ctx context.Context, reader client.Reader, task *corev1alpha1
 		if !agentcontext.SoulBindingMatches(*recorded, binding) {
 			return nil, invalidAISoulConfiguration("AI prompt configuration changed after binding; create a new Task")
 		}
-		// Keep the recorded binding: a control-field edit can advance the
-		// generation without changing what was bound.
 		binding = *recorded
 	}
 	return &resolvedAISoul{Prompt: prompt, UserPrompt: userPrompt, Binding: binding}, nil
 }
 
-// validateAISoulIntroduction preserves legacy no-soul execution while preventing
-// an already-started Task from acquiring its first persona on retry or iteration.
 func validateAISoulIntroduction(task *corev1alpha1.Task) error {
 	if task.Status.SoulBinding == nil && (task.Status.Attempts > 0 || task.Status.StartTime != nil ||
 		task.Status.JobName != "" || task.Status.JobUID != "" || task.Status.Iteration > 0) {
@@ -165,8 +154,6 @@ func (r *TaskReconciler) prepareAISoul(ctx context.Context, task *corev1alpha1.T
 	return resolved, r.pinAISoulSession(ctx, task, resolved)
 }
 
-// Pin before Job creation: final transcript/result/lock-release failures cannot
-// make a used Session appear unestablished or let its next Task change persona.
 func (r *TaskReconciler) pinAISoulSession(ctx context.Context, task *corev1alpha1.Task, prepared *resolvedAISoul) error {
 	if task.Spec.SessionRef == nil {
 		return nil
@@ -180,12 +167,12 @@ func (r *TaskReconciler) pinAISoulSession(ctx context.Context, task *corev1alpha
 	if _, gateway, err := r.SessionManager.gatewayEventForTask(ctx, task); err != nil {
 		return err
 	} else if gateway {
-		return nil // Canonical Gateway projection owns its revision and lock.
+		return nil
 	}
 	writer, ok := r.SessionManager.store.(store.SessionSoulWriter)
 	if !ok {
 		if prepared == nil {
-			return nil // Legacy adapters cannot execute soul-enabled continuations.
+			return nil
 		}
 		return invalidAISoulConfiguration("session store does not support durable soul revision pinning")
 	}
@@ -200,7 +187,7 @@ func (m *SessionManager) validateSoulContext(ctx context.Context, task *corev1al
 	reader, ok := m.store.(store.SessionSoulReader)
 	if !ok {
 		if binding == nil {
-			return nil // Preserve no-soul behavior for legacy Session store adapters.
+			return nil
 		}
 		return invalidAISoulConfiguration("session store does not support soul revision metadata")
 	}

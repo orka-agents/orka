@@ -158,8 +158,6 @@ del(.images.copilot)
 MUTATIONS
 printf '%s\n' 'ok - skipped publication, moved base, inconsistent receipts, missing images and incomplete cleanup fail qualification'
 
-# The normal release has no live GitHub effects or credential copies. Its
-# evidence must still prove every required runtime scenario and fixture suite.
 cp "${fixture}/qualified.json" "${fixture}/qualified-live.json"
 jq '
   .coverage.liveGitHub = "not_tested"
@@ -334,7 +332,6 @@ done <<'MUTATIONS'
 MUTATIONS
 printf '%s\n' 'ok - workflow reruns and status changes during artifact download invalidate qualification'
 
-# Release-line evidence must name that exact workflow and candidate branch.
 rm -f "${fixture}/run-after-download.json" "${fixture}/download-complete"
 jq '.head_branch = "release-0.2"' "${fixture}/run-original.json" >"${fixture}/run.json"
 cp "${fixture}/qualified.json" "${fixture}/qualified-main.json"

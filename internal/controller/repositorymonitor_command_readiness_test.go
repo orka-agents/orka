@@ -28,8 +28,6 @@ func TestRepositoryMonitorRecoveredCommandRevokesReadinessBeforeDispatch(t *test
 				fixture.runID = "legacy-review-run"
 				fixture.createRun(t, time.Now().Add(-time.Minute))
 			}
-			// Partial intake leaves only the command. Legacy recovery can also
-			// find an already-queued run with no workflow action.
 			fixture.reconcile(t)
 			actionID := store.RepositoryMonitorWorkActionID(fixture.command.ID, repositoryMonitorCommandIntentReview)
 			action, err := fixture.reconciler.Store.GetWorkAction(t.Context(), fixture.monitor.Namespace, actionID)

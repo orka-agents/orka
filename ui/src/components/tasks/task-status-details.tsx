@@ -11,13 +11,9 @@ interface TaskStatusDetailsProps {
 
 function nonSecretEntries(record?: Record<string, string>): [string, string][] {
   if (!record) return []
-  // Secret-looking or long values are dropped, as are values that show a
-  // credential sign the YAML view would hide (a signed URL, say), and kubectl's
-  // annotations.
   return Object.entries(record).filter(([k, v]) => !UNSAFE_KEY_PATTERN.test(k) && !looksSecret(k, v) && !containsCredential(v))
 }
 
-/** A collapsible, read-only section. Rendered only when it has content. */
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <details open className="rounded-md border border-border/60">
@@ -38,11 +34,6 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
-/**
- * The Task resource's status beyond its phase: conditions, the execution
- * binding and workspace it was placed in, session and result references, and
- * its labels and annotations, with secret-looking ones filtered out.
- */
 export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
   const { status, spec, metadata } = task
   const conditions = status?.conditions ?? []
@@ -68,9 +59,6 @@ export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
             <ul className="space-y-1.5">
               {conditions.map((c, i) => (
                 <li key={`${c.type}-${i}`}>
-                  {/* Messages can carry long unbroken IDs (approval digests);
-                      they wrap anywhere so the card keeps its width and the
-                      status badge stays beside the type. */}
                   <div className="flex items-center gap-1.5">
                     <span className="min-w-0 wrap-anywhere font-mono">{c.type}</span>
                     <Badge className="shrink-0" variant={c.status === 'True' ? 'secondary' : 'outline'}>{c.status}</Badge>
@@ -82,7 +70,6 @@ export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
           </Section>
         )}
 
-        {/* Digests stay abbreviated, as everywhere else on the dashboard. */}
         {binding && (
           <Section title="Execution binding">
             <Field label="Backend" value={binding.backend} />

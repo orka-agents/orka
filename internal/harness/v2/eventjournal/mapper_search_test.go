@@ -10,8 +10,6 @@ import (
 )
 
 func TestProjectPlanUpdateRedactsSplitMalformedRelativeURL(t *testing.T) {
-	// A malformed relative URL needs no credential marker or query string to
-	// trigger the public redactor's fail-closed URL parsing behavior.
 	for _, parts := range [][]string{
 		{"/reports", "%zz"},
 		{"/", "reports%zz"},

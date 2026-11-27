@@ -39,8 +39,6 @@ function ViewToggle({ view }: { view: KanbanView }) {
   )
 }
 
-// One column per backend task phase, in lifecycle order, so every task lands in
-// its real column instead of being mis-bucketed as Pending.
 const columns: { phase: TaskPhase; label: string }[] = [
   { phase: 'Pending', label: 'Pending' },
   { phase: 'Scheduled', label: 'Scheduled' },
@@ -80,12 +78,7 @@ export function KanbanBoard({ view = 'phase' }: { view?: KanbanView }) {
 }
 
 function PhaseBoard() {
-  // Walk every page up to the shared summary cap (like the Dashboard) so
-  // column counts cover the namespace instead of the first 100 names; the
-  // walk is heavier than one page, so it polls at the Live view's cadence.
   const { data, isLoading, error: listError } = useTaskListAll('100', 10000)
-  // A 403 always replaces the board; any other failure only blocks a board
-  // that never loaded, so a failed background refresh keeps the last one.
   const error = listError && (isForbiddenError(listError) || !data) ? listError : null
   const tasks = data?.items ?? []
   const truncated = Boolean(data?.truncated)
@@ -98,8 +91,6 @@ function PhaseBoard() {
           Column counts use {tasks.length.toLocaleString()} loaded tasks in resource-key order. More tasks exist.
         </p>
       )}
-      {/* A failed walk (403 or server error) leaves nothing to bucket; say so
-          instead of rendering every column as an empty "No ... tasks". */}
       {error ? (
         <Card><CardContent><ListAccessError error={error} resource="tasks" /></CardContent></Card>
       ) : (
@@ -126,8 +117,6 @@ function PhaseBoard() {
               <h2 className="font-semibold text-sm">{label}</h2>
               <span
                 className={cn(
-                  // On the card surface, not the column's own tint, so the
-                  // status color keeps AA contrast.
                   'inline-flex items-center justify-center rounded-full border bg-card px-2 py-0.5 text-xs font-medium tabular-nums',
                   style.textClass,
                 )}
@@ -174,21 +163,10 @@ function LaneHeader({ label, count, loading }: { label: string; count: number | 
   )
 }
 
-/**
- * The attention board: "Needs you" comes from the server's attention ranking,
- * and every other Task lands in "Agent working" or "Done" by its state. Those
- * two lanes depend on the ranking, so they wait for it, and a failed ranking
- * leaves them unclassified rather than putting Tasks that need you in Done.
- */
 function AttentionBoard() {
   const { data, isLoading, error: listError } = useTaskListAll('100', 10000)
   const attention = useAttentionAll(200, 10000)
   const error = listError && (isForbiddenError(listError) || !data) ? listError : null
-  // A 403 replaces the cached ranking (polling has stopped); any other
-  // refresh failure keeps the last loaded Needs you items with a note. Either
-  // way Agent working and Done stop classifying: the Task list keeps
-  // refreshing, and sorting it against a stale ranking could put a Task that
-  // newly needs you in Done.
   const attentionError = attention.error && (isForbiddenError(attention.error) || !attention.data) ? attention.error : null
   const attentionStale = attention.error && !attentionError ? attention.error : null
   const unsorted = Boolean(attention.error)
@@ -230,10 +208,7 @@ function AttentionBoard() {
         {attentionLanes.map(({ lane, label, description }) => {
           const needsYou = lane === 'needsYou'
           const blocked = needsYou ? Boolean(attentionError) : unsorted
-          // Needs you counts the whole ranking plus the Task-derived cards it has no item for.
           const count = blocked ? undefined : needsYou ? (ranking ? ranking.total + grouped.needsYou.length - items.length : undefined) : grouped[lane].length
-          // Agent working and Done wait for the ranking as well as the Tasks:
-          // without it every Task that needs you would be classified as Done.
           const loading = !blocked && (attention.isPending || (!needsYou && isLoading))
           return (
             <section

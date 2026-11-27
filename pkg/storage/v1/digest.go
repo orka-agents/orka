@@ -15,15 +15,10 @@ import (
 	"time"
 )
 
-// requestDigestDomain separates request digests from every other digest Orka
-// computes. Changing the encoding changes this value.
 const requestDigestDomain = "orka.storage.v1 request digest 1\x00"
 
-// maxRequestDigestDepth bounds how deeply nested a request may be, which also
-// stops a pointer cycle.
 const maxRequestDigestDepth = 64
 
-// canonicalNaNBits is the one encoding every NaN shares.
 const canonicalNaNBits = 0x7ff8000000000001
 
 const (
@@ -47,56 +42,6 @@ var (
 	errDigestNested = errors.New("value is nested too deeply")
 )
 
-// RequestDigest returns the canonical "sha256:<hex>" digest of one call of a
-// provider method: the method name, then each argument after the context, in
-// order. A [WriteEnvelope] carries it so that an operation ID reused with a
-// different request is refused (see [WriteEnvelope.RequestDigest] for who
-// computes and checks it). The envelope itself is never an argument.
-//
-// The encoding walks Go values rather than their JSON form, so fields tagged
-// json:"-" are covered (except inside dynamic values, described below, which
-// follow encoding/json), and it is stable across additive contract changes
-// and across a process boundary:
-//
-//   - A struct is encoded as its exported fields in declaration order, under
-//     their Go names. A field holding a zero value is left out, so a field
-//     added later and left unset does not change the digest. Zero values are
-//     zero numbers, false, empty strings, nil or empty slices and maps
-//     (including maps of interfaces), arrays whose elements are all zero, nil
-//     pointers and interfaces, dynamic values that encode as JSON null, the
-//     zero time, and structs whose fields are all left out.
-//   - In a slice, an array, a map value or an argument position, a zero value
-//     still takes its place, so positions keep their meaning.
-//   - A non-nil pointer is encoded even when it points to a zero value, so an
-//     absent value and a zero value stay distinct.
-//   - Maps are encoded in the order of their encoded keys.
-//   - A time is encoded as UTC seconds and nanoseconds since the Unix epoch;
-//     its location and monotonic reading do not matter. Inside a dynamic
-//     value a time is part of the JSON text, so there its zone offset counts.
-//   - Every NaN encodes the same, and a float field holding negative zero is
-//     zero. (Inside dynamic JSON, -0 stays -0, as encoding/json writes it.)
-//   - Dynamic values (interface values, non-empty maps whose keys or values
-//     are interfaces, and json.RawMessage) are encoded as canonical JSON: the
-//     encoding/json form, decoded and encoded again with object keys sorted
-//     and every number kept exactly as written, so distinct numbers never
-//     share a digest. An empty or whitespace-only json.RawMessage is zero. A
-//     JSON null is zero; an empty JSON array or object is a value like any
-//     other. Decoding replaces invalid UTF-8 and unpaired surrogate escapes
-//     with U+FFFD and keeps the last of duplicate object keys, so JSON texts
-//     that differ only in those ways digest the same. A server that
-//     recomputes the digest from a decoded request must decode dynamic values
-//     losslessly, with json.Decoder.UseNumber or as json.RawMessage bytes, as
-//     it must anyway to store them unchanged. A copy decoded into float64
-//     instead is only guaranteed to match a typed value's floating-point
-//     numbers and integers up to 2^53; where it rewrote a number, it digests
-//     differently rather than matching another request.
-//
-// A typed request that holds an unexported struct field, a channel, a
-// function, a complex number, invalid JSON, a dynamic value encoding/json
-// cannot encode (such as a NaN), or a typed value nested more than 64 levels
-// deep returns [ErrValidation]. Inside a dynamic value, encoding/json's rules
-// apply instead: it leaves out unexported and json:"-" fields, and bounds
-// nesting itself.
 func RequestDigest(method string, request ...any) (string, error) {
 	if err := ValidateControlIdentifier("request digest method", method); err != nil {
 		return "", err
@@ -120,7 +65,6 @@ func RequestDigest(method string, request ...any) (string, error) {
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// digestNode is the canonical form of one value before it is written.
 type digestNode struct {
 	tag   byte
 	text  string
@@ -250,8 +194,6 @@ func jsonDigestNode(encoded []byte) (digestNode, error) {
 	return digestNode{tag: digestTagJSON, raw: canonical}, nil
 }
 
-// canonicalJSON decodes one JSON value, keeping every number exactly as
-// written, and encodes it again with object keys sorted.
 func canonicalJSON(encoded []byte) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.UseNumber()
@@ -320,7 +262,6 @@ func mapDigestNode(v reflect.Value, depth int) (digestNode, error) {
 		if c := bytes.Compare(a.keyBytes, b.keyBytes); c != 0 {
 			return c
 		}
-		// Only keys that encode the same, such as NaN keys, reach this.
 		return bytes.Compare(encodeDigestNode(a.value), encodeDigestNode(b.value))
 	})
 	items := make([]digestNode, 0, 2*len(entries))
@@ -360,7 +301,6 @@ func encodeDigestNode(node digestNode) []byte {
 	return buf.Bytes()
 }
 
-// digestWriter writes the self-delimiting canonical form of digest nodes.
 type digestWriter struct {
 	w       io.Writer
 	scratch [binary.MaxVarintLen64]byte

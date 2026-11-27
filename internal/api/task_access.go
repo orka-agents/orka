@@ -24,9 +24,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// taskAccess owns the safe Task read path for public API handlers: name-scoped
-// context-token authorization, Kubernetes object loading, not-found mapping, and
-// loaded-object authorization for effective Task context.
 type taskAccess struct {
 	h *Handlers
 }
@@ -39,8 +36,6 @@ func (a taskAccess) load(c fiber.Ctx, namespace, taskName string) (*corev1alpha1
 	return a.loadFrom(c, a.h.client, namespace, taskName)
 }
 
-// loadLive reads the Task from the uncached API reader, for identity checks
-// that must not see the same stale cached object as an earlier read.
 func (a taskAccess) loadLive(c fiber.Ctx, namespace, taskName string) (*corev1alpha1.Task, error) {
 	return a.loadFrom(c, a.h.uncachedReader(), namespace, taskName)
 }
@@ -86,9 +81,6 @@ func (a taskAccess) ensureReadable(c fiber.Ctx, action, namespace, taskName stri
 	return err
 }
 
-// loadReadableForContextToken preserves handlers whose non-context-token callers
-// historically did not need the parent Task object to exist before continuing.
-// The caller should already have run authorizeReadable for the URL task name.
 func (a taskAccess) loadReadableForContextToken(c fiber.Ctx, action, namespace, taskName string) (*corev1alpha1.Task, error) {
 	ui := GetUserInfo(c)
 	contextTokenCaller := a.h.contextTokenAuthorization.Enabled() && ui != nil &&

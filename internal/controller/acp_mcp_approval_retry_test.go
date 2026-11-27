@@ -157,7 +157,6 @@ func TestMCPApprovalStorageReadRecoveryContinuesOriginalCall(t *testing.T) {
 			fault.active.Store(true)
 			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
-			// A separate post-decision channel cannot consume buffered Pending reads.
 			fault.decided.Store(true)
 			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.approvedReads)
 			fault.active.Store(false)
@@ -199,9 +198,6 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 					fault.observeReceiptRead = func(ctx context.Context) {
 						readMu.Lock()
 						defer readMu.Unlock()
-						// Expiry settlement has a detached context. Its expiry-append
-						// attempt marks that phase even if an earlier approval won.
-						// Never classify retries by whether their deadline is correct.
 						if settlementStarted {
 							settlementReads++
 							return
@@ -222,12 +218,9 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 				readMu.Unlock()
 				fault.active.Store(true)
 				if source == "decision" || source == "receipt" {
-					// Observe Pending-phase outages first. Receipt polling only follows
-					// a pending decision, so approval could bypass that branch entirely.
 					requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusPending, done, fault.reads)
 				}
 				f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
-				// A separate post-decision channel cannot consume buffered Pending reads.
 				fault.decided.Store(true)
 				requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.approvedReads)
 				synctest.Wait()
@@ -243,9 +236,6 @@ func TestMCPApprovalReadRetriesKeepOriginalExpiry(t *testing.T) {
 				synctest.Wait()
 				require.True(t, time.Now().Equal(originalExpiry), "retries must stop at the exact original expiry")
 				if source == "receipt" || source == "decision" {
-					// Unreadable receipts cannot rule out another execution claim.
-					// Unreadable history cannot prove a retained request for the
-					// expiry projection. Neither outage may be treated as absence.
 					select {
 					case response := <-done:
 						require.Equal(t, http.StatusServiceUnavailable, response.Code, "body=%s", response.Body.String())
@@ -294,7 +284,6 @@ func TestMCPApprovalSecretReadRetriesStopOnCancellation(t *testing.T) {
 			pending := f.pending()
 			fault.active.Store(true)
 			f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
-			// A separate post-decision channel cannot consume buffered Pending reads.
 			fault.decided.Store(true)
 			requireApprovalReadRetrying(t, f, pending.ID, approvals.StatusApproved, done, fault.approvedReads)
 			if cancellation == "caller" {
@@ -322,8 +311,6 @@ func (s *approvalAmbiguousClaimStore) TransitionExternalEffect(ctx context.Conte
 		return effect, err
 	}
 	s.claims.Add(1)
-	// Even an error classified as unavailable must not retry a mutation that
-	// committed but lost its response.
 	return nil, acpMCPAuthorityReadError(errors.New("simulated lost claim response"))
 }
 

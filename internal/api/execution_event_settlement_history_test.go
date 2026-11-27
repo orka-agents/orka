@@ -25,8 +25,6 @@ func TestExecutionEventSettlementDedupHistory(t *testing.T) {
 				t.Fatal(err)
 			}
 			appendModelHistoryAccepted(t, winner, true)
-			// Open after acceptance so the synthetic terminal is the first
-			// store duplicate encountered by the competing State.
 			competing, err := journal.Open(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -53,8 +51,6 @@ func TestExecutionEventSettlementDedupHistory(t *testing.T) {
 			if err != nil || isNew || row != nil {
 				t.Fatalf("duplicate settlement: new=%t error=%v", isNew, err)
 			}
-			// The journal API permits transcript publication after settlement.
-			// A losing writer must not forget the already-public prefix.
 			appendSettlementHistoryTranscript(t, state, "d=synthetic-settlement-fixture")
 			rows := modelHistoryRows(t, journal)
 			if len(rows) != 3 {

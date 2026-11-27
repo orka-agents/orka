@@ -58,8 +58,6 @@ func TestResponsesChatTerminalValidatesWholeCallSet(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			provider := chatTerminalProvider(t, func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
-				// Include both calls in one delta, which JustFinishedToolCall
-				// cannot reliably emit. No transition is required to complete them.
 				chatTerminalDelta(t, w, json.RawMessage(`{"tool_calls":[{"index":0,"id":"first","type":"function","function":{"name":"first_tool","arguments":"{}"}},`+tt.second+`]}`), tt.finish)
 				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 			})
@@ -195,7 +193,6 @@ func TestResponsesChatTerminalTransportErrorAfterFinish(t *testing.T) {
 		w.Header().Set("Content-Length", "1000000")
 		chatTerminalDelta(t, w, json.RawMessage(`{"tool_calls":[{"index":0,"id":"call","type":"function","function":{"name":"client_tool","arguments":"{}"}}]}`), "")
 		chatTerminalDelta(t, w, map[string]any{}, "tool_calls")
-		// No [DONE], and the declared HTTP body is incomplete.
 	})
 	chunks, err := provider.Stream(t.Context(), &llm.CompletionRequest{Model: "test-model", ResponsesInput: true})
 	require.NoError(t, err)

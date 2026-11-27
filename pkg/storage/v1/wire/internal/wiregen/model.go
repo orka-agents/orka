@@ -15,15 +15,12 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
-// model is the checked mapping between the Go contract and the wire.
 type model struct {
 	revision int
 	services []*service
 	records  []*record
 }
 
-// Contracts a service serves: one contract part, or both for the Dataset
-// service every provider serves.
 const (
 	contractState     = "state"
 	contractArtifacts = "artifacts"
@@ -38,59 +35,45 @@ type service struct {
 	methods    []*rpcMethod
 }
 
-// streamShape is how an RPC carries its request and response.
 type streamShape int
 
 const (
-	// streamNone is a unary RPC.
 	streamNone streamShape = iota
-	// streamUpload is a client-streaming RPC whose request carries a blob.
 	streamUpload
-	// streamDownload is a server-streaming RPC whose response carries a blob.
 	streamDownload
-	// streamList is a server-streaming RPC whose response splits a list
-	// across its messages.
 	streamList
 )
 
 type rpcMethod struct {
-	service *service
-	desc    protoreflect.MethodDescriptor
-	name    string
-	sig     *types.Signature
-	kind    storagev1.MethodKind
-	class   storagev1.CallClass
-	since   int
-	stream  streamShape
-	params  []*binding
-	// request is set when the method's only parameter is the record the
-	// request message carries whole, such as ConsumeMessagesRequest.
+	service    *service
+	desc       protoreflect.MethodDescriptor
+	name       string
+	sig        *types.Signature
+	kind       storagev1.MethodKind
+	class      storagev1.CallClass
+	since      int
+	stream     streamShape
+	params     []*binding
 	request    *record
 	results    []*binding
 	writeBacks []*writeBack
 	library    []protoreflect.FieldDescriptor
 }
 
-// writeBack pairs a parameter that points to a record the provider writes
-// into with the response field that carries the written record back.
 type writeBack struct {
 	param *binding
 	field protoreflect.FieldDescriptor
 	conv  *conversion
 }
 
-// lookupMethod returns a method's entry in the contract's method catalog.
 type lookupMethod func(name string) (storagev1.MethodInfo, bool)
 
-// methodKinds pairs the wire kind annotation with the catalog's kinds.
 var methodKinds = map[storagepb.MethodKind]storagev1.MethodKind{
 	storagepb.MethodKind_METHOD_KIND_READ:  storagev1.MethodRead,
 	storagepb.MethodKind_METHOD_KIND_WRITE: storagev1.MethodWrite,
 	storagepb.MethodKind_METHOD_KIND_ADMIN: storagev1.MethodAdmin,
 }
 
-// binding pairs one Go parameter, result or record field with its wire
-// field.
 type binding struct {
 	goName string
 	goType types.Type
@@ -120,8 +103,6 @@ func (b *builder) problemf(format string, args ...any) {
 	b.problems = append(b.problems, fmt.Sprintf(format, args...))
 }
 
-// buildModel checks the Go contract against the wire descriptors and the
-// method catalog, and returns the mapping or every mismatch found.
 func buildModel(contract *types.Package, catalog lookupMethod, files []protoreflect.FileDescriptor, revision int) (*model, error) {
 	b := &builder{
 		contract: contract,
@@ -229,7 +210,6 @@ func listField(field protoreflect.FieldDescriptor) bool {
 	return value
 }
 
-// listFields returns the fields of message marked as streamed lists.
 func listFields(message protoreflect.MessageDescriptor) []protoreflect.FieldDescriptor {
 	var found []protoreflect.FieldDescriptor
 	for index := range message.Fields().Len() {
@@ -245,8 +225,6 @@ func fieldGoName(field protoreflect.FieldDescriptor) string {
 	return value
 }
 
-// buildService maps one service to the Go interfaces it names. mapped
-// records which service already maps each Go method.
 func (b *builder) buildService(desc protoreflect.ServiceDescriptor, mapped map[string]string) *service {
 	svc := &service{desc: desc, name: string(desc.Name())}
 	interfaceNames, _ := proto.GetExtension(desc.Options(), storagepb.E_GoInterface).([]string)
@@ -325,8 +303,6 @@ func (b *builder) providerImplements(provider string, iface *types.Interface) bo
 	return types.Implements(object.Type(), iface)
 }
 
-// buildMethod maps one RPC: parameters by name to request fields, and
-// results by position to response fields.
 func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, goMethod *types.Func) *rpcMethod {
 	sig := goMethod.Type().(*types.Signature)
 	method := &rpcMethod{service: svc, desc: rpc, name: goMethod.Name(), sig: sig}
@@ -371,10 +347,6 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 	return method
 }
 
-// checkCatalog sets the method's kind from its wire annotation and requires
-// the contract's method catalog to give the same kind and contract part. It
-// takes the method's call class from the catalog, and requires an RPC that
-// streams a blob to be a bulk call.
 func (b *builder) checkCatalog(method *rpcMethod, rpc protoreflect.MethodDescriptor) {
 	where := string(rpc.FullName())
 	wireKind, _ := proto.GetExtension(rpc.Options(), storagepb.E_Kind).(storagepb.MethodKind)
@@ -402,8 +374,6 @@ func (b *builder) checkCatalog(method *rpcMethod, rpc protoreflect.MethodDescrip
 	}
 }
 
-// checkBlobs requires a streaming RPC to carry exactly one blob field in the
-// direction it streams and none in the other, and a unary RPC to carry none.
 func (b *builder) checkBlobs(method *rpcMethod) {
 	where := string(method.desc.FullName())
 	request := blobPaths(method.desc.Input(), nil, map[protoreflect.FullName]bool{})
@@ -421,9 +391,6 @@ func (b *builder) checkBlobs(method *rpcMethod) {
 	b.checkLists(method)
 }
 
-// checkLists requires a list stream's response to mark exactly one repeated
-// message field as its list, and every other RPC to mark none. Nested
-// messages never carry a list.
 func (b *builder) checkLists(method *rpcMethod) {
 	where := string(method.desc.FullName())
 	if found := listFields(method.desc.Input()); len(found) > 0 {
@@ -445,17 +412,11 @@ func (b *builder) checkLists(method *rpcMethod) {
 	}
 }
 
-// blobPath is the chain of fields from a request or response message to one
-// blob field, and any problem with that blob field.
 type blobPath struct {
 	fields  []protoreflect.FieldDescriptor
 	problem string
 }
 
-// blobPaths finds the blob fields in message and in the messages it holds.
-// A blob is a singular bytes field outside any oneof, reached through
-// singular message fields, so a framed message names exactly one place for
-// its blob.
 func blobPaths(message protoreflect.MessageDescriptor, prefix []protoreflect.FieldDescriptor,
 	visiting map[protoreflect.FullName]bool) []blobPath {
 	if visiting[message.FullName()] {
@@ -493,10 +454,6 @@ func blobPaths(message protoreflect.MessageDescriptor, prefix []protoreflect.Fie
 	return paths
 }
 
-// bindParams maps every Go parameter after the context, by name, to a
-// request field, and requires every request field to have one. A method
-// whose only parameter is the record named like its request message sends
-// that record as the whole request.
 func (b *builder) bindParams(method *rpcMethod) bool {
 	params := method.sig.Params()
 	if params.Len() == 0 || !isContext(params.At(0).Type()) {
@@ -555,8 +512,6 @@ func (b *builder) bindParams(method *rpcMethod) bool {
 				field.FullName(), bound.since, method.since, b.revision)
 		}
 		if bound.since != 0 && method.kind == storagev1.MethodWrite {
-			// A write's request digest covers every parameter, so a server
-			// that does not take one cannot recompute the digest.
 			b.problemf("request field %s of write %s cannot declare since", field.FullName(), method.name)
 		}
 		method.params = append(method.params, bound)
@@ -569,9 +524,6 @@ func (b *builder) bindParams(method *rpcMethod) bool {
 	return true
 }
 
-// bindResults maps the Go results before the final error, by position, to
-// the response fields in field-number order. Library fields have no Go
-// counterpart.
 func (b *builder) bindResults(method *rpcMethod) bool {
 	results := method.sig.Results()
 	if results.Len() == 0 || !isError(results.At(results.Len()-1).Type()) {
@@ -613,9 +565,6 @@ func (b *builder) bindResults(method *rpcMethod) bool {
 	return true
 }
 
-// bindWriteBack pairs a write_back response field with the request
-// parameter of the same name, which must point to the record the field
-// carries.
 func (b *builder) bindWriteBack(method *rpcMethod, field protoreflect.FieldDescriptor) {
 	if method.kind != storagev1.MethodWrite {
 		b.problemf("response field %s writes back, but %s is not a write", field.FullName(), method.name)
@@ -637,8 +586,6 @@ func (b *builder) bindWriteBack(method *rpcMethod, field protoreflect.FieldDescr
 	b.problemf("response field %s writes back, but %s has no request parameter %s", field.FullName(), method.name, field.Name())
 }
 
-// fieldFor finds the wire field for a Go name: the field whose go_name
-// option names it, or else the field named its snake case.
 func (b *builder) fieldFor(message protoreflect.MessageDescriptor, goName string) protoreflect.FieldDescriptor {
 	var byName protoreflect.FieldDescriptor
 	for index := 0; index < message.Fields().Len(); index++ {
@@ -656,7 +603,6 @@ func (b *builder) fieldFor(message protoreflect.MessageDescriptor, goName string
 	return byName
 }
 
-// record maps a contract record to its wire message, once.
 func (b *builder) record(name string, wireName protoreflect.FullName) *record {
 	if existing, ok := b.records[name]; ok {
 		return existing
@@ -751,8 +697,6 @@ func isError(t types.Type) bool {
 	return types.Identical(t, types.Universe.Lookup("error").Type())
 }
 
-// snakeCase converts a Go identifier to a wire field name: DatasetID becomes
-// dataset_id and taskName becomes task_name.
 func snakeCase(name string) string {
 	runes := []rune(name)
 	var builder strings.Builder

@@ -9,8 +9,6 @@ import { PageHeader } from '@/components/layout/page-header'
 import { useTool } from '@/hooks/use-tools'
 import { isForbiddenError, isNotFoundError } from '@/lib/api-client'
 
-// A missing or unreadable tool keeps the page heading (and so the tab title)
-// and a way back to the list.
 function ToolUnavailable({ title, icon, headline, hint, alert = false }: {
   title: string
   icon: LucideIcon
@@ -48,9 +46,6 @@ export function ToolDetail({ toolName }: { toolName: string }) {
     return <div className="space-y-4"><Skeleton className="h-8 w-64" /><Skeleton className="h-64 w-full" /></div>
   }
 
-  // A 403 or 404 wins over cached data (React Query keeps the last
-  // successful `data` when a refetch fails); any other failure only replaces
-  // the page when nothing was loaded.
   const missing = isNotFoundError(error)
   const forbidden = isForbiddenError(error)
   if (forbidden || (error && !missing && !tool)) {
@@ -79,13 +74,10 @@ export function ToolDetail({ toolName }: { toolName: string }) {
     )
   }
 
-  // Built-in tools have a simpler shape with a `builtin` field
   const isBuiltin = 'builtin' in tool && (tool as Record<string, unknown>).builtin === true
   const httpConfig = !isBuiltin ? tool.spec?.http : undefined
   const mcpConfig = !isBuiltin ? tool.spec?.mcp : undefined
   const actor = !isBuiltin ? tool.status?.actor : undefined
-  // Built-in tools return a flat {name, builtin, description, parameters}
-  // payload; custom tools carry the schema under spec.parameters.
   const rawParameters = isBuiltin ? (tool as Record<string, unknown>).parameters : tool.spec?.parameters
   const parameters =
     rawParameters && typeof rawParameters === 'object' && Object.keys(rawParameters as object).length > 0
@@ -197,8 +189,6 @@ export function ToolDetail({ toolName }: { toolName: string }) {
         <Card>
           <CardHeader><CardTitle>Parameters (JSON Schema)</CardTitle></CardHeader>
           <CardContent>
-            {/* A named, focusable region, so keyboard users can scroll a schema
-                taller or wider than the box. */}
             <pre
               tabIndex={0}
               role="region"

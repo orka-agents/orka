@@ -11,9 +11,6 @@ import (
 	"time"
 )
 
-// The proxy can revoke provider access exactly at expiry before the runtime's
-// lease callback runs. A conclusive adapter error must not win that race and
-// erase the authoritative lease cancellation.
 func TestRuntimeSessionLeaseExpiryWinsDelayedWatchdog(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		session, peer := newLeaseTestRuntimeSession(t)
@@ -28,8 +25,6 @@ func TestRuntimeSessionLeaseExpiryWinsDelayedWatchdog(t *testing.T) {
 		if event := <-run.Events; event.Type != PromptEventAccepted {
 			t.Fatalf("first event = %q, want accepted", event.Type)
 		}
-		// Stop only the callback, modeling an arbitrarily delayed timer
-		// goroutine without changing the controller's lease deadline.
 		session.mu.Lock()
 		stopped := session.active.lease.Stop()
 		session.mu.Unlock()
@@ -104,8 +99,6 @@ func TestRuntimeSessionLeasePreservesReceiptBeforeLockWait(t *testing.T) {
 		Outcome: PromptOutcomeFailed, Accepted: true, SettledAt: deadline.Add(-time.Nanosecond),
 		Err: &RPCError{Code: -32603, Message: "provider failed before expiry"},
 	}
-	// The response arrived before expiry, but settlement cannot acquire the
-	// session lock until after the deadline. No wall-clock sleep is required.
 	session.mu.Lock()
 	entered := make(chan struct{})
 	go func() {
@@ -153,8 +146,6 @@ func TestRuntimeSessionLeaseRenewalCannotReviveExpiredAuthority(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				deadline := time.Now().Add(time.Second)
 				session, active := newLeaseTestActivePrompt(deadline)
-				// The timer is deliberately late: its Stop still succeeds even
-				// after the exact authority deadline has passed.
 				active.lease = time.AfterFunc(time.Hour, func() {})
 				defer active.lease.Stop()
 				time.Sleep(elapsed)

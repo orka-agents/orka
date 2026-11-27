@@ -53,8 +53,6 @@ func TestInternalDataRejectsJobRevokedDuringAuthorization(t *testing.T) {
 					if reads != test.taskReads {
 						return nil
 					}
-					// The API read already returned the old active binding. The
-					// controller revokes it before publishing the retry state.
 					if err := data.RevokeTaskJob(ctx, store.TaskJobIdentity{
 						Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID,
 					}); err != nil {
@@ -97,8 +95,6 @@ func TestInternalPlanReadAllowsOtherTaskCleanupDuringAuthorization(t *testing.T)
 		},
 	})
 	app := newTaskScopedInternalApp(h, internalCallerAuthWorkerUser("my-task-pod", "my-task-pod-uid"))
-	// The first request authorizes once to register its Task, then again under
-	// that stable fence. Later reads require only the normal authorization.
 	for _, expectedReads := range []int{4, 2} {
 		reads = 0
 		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/internal/v1/plans/default/my-task", nil))

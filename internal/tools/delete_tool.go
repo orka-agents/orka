@@ -16,7 +16,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// DeleteToolTool deletes a Tool CRD.
 type DeleteToolTool struct{}
 
 func (t *DeleteToolTool) Name() string { return deleteToolToolName }

@@ -29,12 +29,8 @@ const (
 	repositoryMonitorAutomergeStateStarted    = "started"
 	repositoryMonitorAutomergeStatePending    = repositoryMonitorReviewTaskStatePending
 	repositoryMonitorAutomergeReasonCIPending = "ci_pending"
-	// repositoryMonitorCIAwaitingApproval means GitHub holds the commit's
-	// workflow runs until a maintainer approves them.
-	repositoryMonitorCIAwaitingApproval = "ci_awaiting_approval"
-	// repositoryMonitorCIChecksIncomplete means GitHub returned fewer checks
-	// or statuses than it counted.
-	repositoryMonitorCIChecksIncomplete = "ci_checks_incomplete"
+	repositoryMonitorCIAwaitingApproval       = "ci_awaiting_approval"
+	repositoryMonitorCIChecksIncomplete       = "ci_checks_incomplete"
 )
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
@@ -82,8 +78,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if err != nil || result.reason == repositoryMonitorCINotGreen || result.reason == repositoryMonitorCIChecksIncomplete {
 		return result, err
 	}
-	// A held workflow run reports no check run, so the reported checks can
-	// look pending or green while the repository's CI has not run at all.
 	awaiting, err := r.repositoryMonitorCIAwaitingApproval(ctx, baseURL, owner, repo, token, sha)
 	if err != nil || !awaiting {
 		return result, err
@@ -91,9 +85,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	return repositoryMonitorCIResult{reason: repositoryMonitorCIAwaitingApproval}, nil
 }
 
-// repositoryMonitorCIAwaitingApproval reports whether GitHub holds a workflow
-// run for sha until a maintainer approves it, as it does for pull requests
-// from forks. A token without Actions access cannot tell and reports false.
 func (r *RepositoryMonitorReconciler) repositoryMonitorCIAwaitingApproval(ctx context.Context, baseURL, owner, repo, token, sha string) (bool, error) {
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/runs?head_sha=%s&status=action_required&per_page=1", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(sha))
 	var response struct {
@@ -101,8 +92,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIAwaitingApproval(ctx co
 	}
 	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
 		var apiErr *repositoryMonitorGitHubAPIError
-		// A 403 is also how GitHub reports rate limiting, which says nothing
-		// about Actions access; only a permission refusal falls back.
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound ||
 			apiErr.StatusCode == http.StatusForbidden && !repositoryMonitorGitHubErrorLooksRateLimited(apiErr.Body)) {
 			return false, nil
@@ -112,8 +101,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIAwaitingApproval(ctx co
 	return response.TotalCount > 0, nil
 }
 
-// repositoryMonitorCheckReportedCI evaluates the check runs and commit
-// statuses reported for sha.
 func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx context.Context, baseURL, owner, repo, token, sha string) (repositoryMonitorCIResult, error) {
 	total := -1
 	var checks []repositoryMonitorCheckRunResponse
@@ -153,8 +140,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx conte
 			failed = append(failed, check.failure())
 		}
 	}
-	// Check runs and commit statuses come from different CI systems. Read both
-	// so a failing or pending check run never hides a failing status context.
 	status, err := r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
 	if err != nil {
 		return repositoryMonitorCIResult{}, err
@@ -188,8 +173,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 	}
 	considered, pending, incomplete := 0, false, false
 	var failed []repositoryMonitorCIFailure
-	// Combined status is paginated and contains only the latest status for each
-	// context. Recompute after excluding audited IDs; its aggregate includes us.
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/status?per_page=100&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha), page)
 		var response struct {

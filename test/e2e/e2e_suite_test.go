@@ -33,10 +33,8 @@ import (
 )
 
 var (
-	// managerImage is the manager image to be built and loaded for testing.
 	managerImage = "ghcr.io/orka-agents/orka:latest"
 
-	// Worker, ACP runtime, clean-room publisher, and focused fixture images used by the e2e cluster.
 	aiWorkerImage                = "ghcr.io/orka-agents/orka/ai-worker:latest"
 	generalWorkerImage           = "ghcr.io/orka-agents/orka/general-worker:latest"
 	acpCodexRuntimeImage         = "ghcr.io/orka-agents/orka/acp-codex-runtime:e2e"
@@ -60,7 +58,6 @@ var (
 	e2eRegistryContainerName     string
 	e2eRegistryAddress           string
 
-	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey            string
 	e2eOpenAIBaseURL           string
 	e2eOpenAIModel             string
@@ -69,12 +66,9 @@ var (
 	e2eAnthropicModel          string
 	e2eGitHubToken             string
 	e2eLiveCopilotProxyBaseURL string
-	// e2eACPIdlePoolTTL is the controller's idle RuntimePool TTL for this run.
-	e2eACPIdlePoolTTL time.Duration
+	e2eACPIdlePoolTTL          time.Duration
 )
 
-// TestE2E runs the e2e test suite to validate the solution in an isolated environment.
-// The default setup requires Kind.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting orka e2e test suite\n")
@@ -283,10 +277,6 @@ var _ = BeforeSuite(func() {
 	}, 30*time.Second, time.Second).Should(Succeed())
 	_, _ = fmt.Fprintf(GinkgoWriter, "Resolved controller-manager deployment: %s\n", controllerManagerDeployment)
 
-	// make deploy installs the fail-closed orka-admission webhooks. Like a
-	// production rollout's second wave, the controller trusts Task provenance
-	// (and so enables coordination messaging and cancel_task) only after the
-	// provenance handler is in place.
 	By("verifying the Task provenance webhook is installed")
 	cmd = exec.Command("kubectl", "get", "validatingwebhookconfiguration", "orka-admission",
 		"-o", "jsonpath={.webhooks[*].clientConfig.service.path}")
@@ -295,10 +285,6 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, webhookPaths).To(ContainSubstring("/validate-core-orka-ai-v1alpha1-task-provenance"))
 
 	By("patching the controller-manager deployment to use kind-loaded images")
-	// Profile checks can start many distinct runtime pools in a minute, so the
-	// default lane releases idle workers after 5s to leave CPU for the
-	// following container tests. The agent runtime lifecycle job sets the
-	// production default, which its park and resume checks rely on.
 	idleTTL := strings.TrimSpace(os.Getenv("E2E_ACP_IDLE_POOL_TTL"))
 	if idleTTL == "" {
 		idleTTL = "5s"
@@ -313,8 +299,6 @@ var _ = BeforeSuite(func() {
 			`{"name":"ORKA_ENABLE_WORKSPACE_PROVIDER_API","value":"true"},`+
 			`{"name":"ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED","value":"true"},`+
 			`{"name":"ORKA_ACP_WORKSPACE_DISPATCH_ENABLED","value":"true"},`+
-			// Runtime skills reuse toolbox delivery; only the suite's own skill
-			// images are allowed.
 			`{"name":"ORKA_ACP_TOOLBOXES_ENABLED","value":"true"},`+
 			`{"name":"ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES","value":"`+e2eRegistryAddress+"/"+repositoryConfigSkillRegistryPath+`"},`+
 			`{"name":"ORKA_ACP_SKILLS_ENABLED","value":"true"}],`+
@@ -425,9 +409,6 @@ func runBoundedE2ECleanup(timeout time.Duration, name string, args ...string) er
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	// CommandContext kills only the direct process. A timed-out make recipe
-	// can leave kubectl holding the output pipes open, so Wait would otherwise
-	// outlive this helper's deadline and eventually trip the suite timeout.
 	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -438,7 +419,6 @@ func runBoundedE2ECleanup(timeout time.Duration, name string, args ...string) er
 	return nil
 }
 
-// loadEnvFile reads a .env file and sets environment variables that are not already set.
 func loadEnvFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -502,18 +482,10 @@ func controllerManagerDeploymentName() (string, error) {
 	return name, nil
 }
 
-// controllerRolloutStartupMargin covers scheduling, image start and readiness
-// of the replacement controller-manager Pod.
 const controllerRolloutStartupMargin = 3 * time.Minute
 
-// controllerRolloutMinimumTimeout keeps a short grace period from making the
-// wait shorter than the fixed 5m these rollouts used before.
 const controllerRolloutMinimumTimeout = 5 * time.Minute
 
-// controllerRolloutTimeout bounds a controller-manager rollout. The Deployment
-// uses the Recreate strategy, so the new Pod starts only after the old one has
-// exited, and the old one may spend its whole termination grace period in the
-// upgrade drain.
 func controllerRolloutTimeout(deployment string) time.Duration {
 	output, err := utils.Run(exec.Command("kubectl", "get", "deployment", deployment, "-n", namespace,
 		"-o", "jsonpath={.spec.template.spec.terminationGracePeriodSeconds}"))
@@ -526,7 +498,6 @@ func controllerRolloutTimeout(deployment string) time.Duration {
 	return max(time.Duration(grace)*time.Second+controllerRolloutStartupMargin, controllerRolloutMinimumTimeout)
 }
 
-// createK8sSecret creates a Kubernetes Secret with the given key-value data.
 func createK8sSecret(name, ns string, data map[string]string) error {
 	secret := map[string]interface{}{
 		"apiVersion": "v1",
@@ -652,14 +623,11 @@ func sanitizeDockerName(value string) string {
 
 }
 
-// e2eImageBuild is one image the suite builds before any spec runs.
 type e2eImageBuild struct {
 	image string
 	args  []string
 }
 
-// e2eImageBuilds lists exactly the images the suite loads. Platform images use
-// their Makefile targets so the Dockerfile and build flags stay in one place.
 func e2eImageBuilds() []e2eImageBuild {
 	makeTarget := func(target, variable, image string) e2eImageBuild {
 		return e2eImageBuild{image: image, args: []string{"make", target, variable + "=" + image}}
@@ -691,9 +659,6 @@ func e2eImageBuilds() []e2eImageBuild {
 	return builds
 }
 
-// buildE2EImages runs the builds E2E_IMAGE_BUILD_JOBS at a time (default 3).
-// Concurrent builds overlap their downloads, and BuildKit cache mounts let
-// later Go builds reuse modules and packages compiled by earlier ones.
 func buildE2EImages(builds []e2eImageBuild) {
 	jobs := 3
 	if value := strings.TrimSpace(os.Getenv("E2E_IMAGE_BUILD_JOBS")); value != "" {

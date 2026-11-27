@@ -216,7 +216,6 @@ func TestGetIssueTool_NoComments(t *testing.T) {
 func TestGetIssueTool_IssueNumberRequired(t *testing.T) {
 	tool := NewGetIssueTool(nil)
 
-	// Test with issue_number = 0 (default)
 	args, _ := json.Marshal(GetIssueArgs{
 		RepoURL: testOrgRepoURL,
 	})
@@ -229,7 +228,6 @@ func TestGetIssueTool_IssueNumberRequired(t *testing.T) {
 		t.Errorf("got error %q, want it to contain 'issue_number is required'", err.Error())
 	}
 
-	// Test with negative issue_number
 	args, _ = json.Marshal(GetIssueArgs{
 		RepoURL:     testOrgRepoURL,
 		IssueNumber: -1,
@@ -375,18 +373,15 @@ func TestGetIssueTool_CommentsEndpointFailure(t *testing.T) {
 		t.Fatalf("failed to parse result: %v", err)
 	}
 
-	// Issue details should still be returned
 	if issue.Number != 7 {
 		t.Errorf("number = %d, want 7", issue.Number)
 	}
 	if issue.Title != "Issue with broken comments" {
 		t.Errorf("title = %q", issue.Title)
 	}
-	// Comments should be empty (graceful degradation)
 	if len(issue.Comments) != 0 {
 		t.Errorf("comments len = %d, want 0 (graceful degradation)", len(issue.Comments))
 	}
-	// But comment_count from the issue itself should still be 3
 	if issue.CommentCount != 3 {
 		t.Errorf("comment_count = %d, want 3", issue.CommentCount)
 	}
@@ -467,7 +462,6 @@ func TestGetIssueTool_EnvVarRepoFallback(t *testing.T) {
 			fmt.Fprint(w, `[]`) //nolint:errcheck
 			return
 		}
-		// Verify it resolved from ORKA_GIT_REPO
 		if !strings.Contains(r.URL.Path, "/repos/envorg/envrepo/issues/1") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
@@ -509,9 +503,6 @@ func TestGetIssueTool_EnvVarRepoFallback(t *testing.T) {
 	}
 }
 
-// TestGetIssueTool_CommentsFailureNoteIsBounded covers a comments request
-// that fails with a large GitHub body: the quoted error is cut, so the
-// result still fits the broker's size bound.
 func TestGetIssueTool_CommentsFailureNoteIsBounded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -542,9 +533,6 @@ func TestGetIssueTool_CommentsFailureNoteIsBounded(t *testing.T) {
 	}
 }
 
-// TestGetIssueTool_PaginatesNewestComments covers an issue with more
-// comments than one page holds: the newest pages are read, and a result
-// that still omits older comments says so instead of looking complete.
 func TestGetIssueTool_PaginatesNewestComments(t *testing.T) {
 	total := (maxIssueCommentPages+1)*issueCommentsPerPage + 7
 	var pages []string
@@ -591,8 +579,6 @@ func TestGetIssueTool_PaginatesNewestComments(t *testing.T) {
 	}
 }
 
-// TestFetchIssueDetailsBoundsLargeErrorBodies covers a non-2xx response with
-// a large body: the error carries a bounded note, not the whole response.
 func TestFetchIssueDetailsBoundsLargeErrorBodies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

@@ -28,16 +28,11 @@ const (
 	liveRuntimeRepoSentinel = "Hello World!"
 	liveRuntimeTimeout      = 8 * time.Minute
 
-	// Mock-mode models. aimock answers by the prompt markers, so the names
-	// only need the shapes each runtime expects.
 	runtimeMatrixMockCodexModel    = "gpt-5.4-mini"
 	runtimeMatrixMockOpenCodeModel = "openai/gpt-4.1"
 	runtimeMatrixMockClaudeModel   = "claude-sonnet-4.5"
 )
 
-// The built-in runtimes run against the live Copilot proxy when
-// E2E_LIVE_COPILOT_PROXY_BASE_URL is set. Otherwise aimock stands in for Vekil
-// behind the production provider proxy and replays agent_runtime_matrix.json.
 var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 	const (
 		codexAgentName         = "e2e-live-runtime-codex-agent"
@@ -198,9 +193,6 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 		))
 		Expect(err).NotTo(HaveOccurred())
 
-		// This Codex case verifies the requested runtime projection. The OpenCode
-		// case below is the adversarial read-intent check: it requests Bash and
-		// mutation tools, then asserts the derived deny policy and ReadValidated.
 		verifyACPTaskRuntimeForTask(codexTaskReadName, acpTaskExpectation{
 			ProviderKind:    "codex",
 			Model:           gptModel,
@@ -321,7 +313,6 @@ var _ = Describe("Agent Runtime Matrix", Ordered, func() {
 			var withTools int
 			var bashResults []string
 			for _, request := range requests {
-				// Requests without tools, such as title generation, are skipped.
 				if len(request.Body.Tools) == 0 {
 					continue
 				}
@@ -519,8 +510,6 @@ type liveACPTaskEventsResponse struct {
 	} `json:"events"`
 }
 
-// Keep CI diagnostics to known metadata and error markers. Titles, arguments,
-// tool output and arbitrary error messages can contain credentials.
 func liveACPToolFailureDiagnostics(listed liveACPTaskEventsResponse) string {
 	var failures []map[string]any
 	for _, event := range listed.Events {
@@ -553,8 +542,6 @@ func liveACPToolFailureDiagnostics(listed liveACPTaskEventsResponse) string {
 		} else {
 			diagnostic["metadataUnavailable"] = true
 		}
-		// These are text matches, not a diagnosis. Never copy matching lines or
-		// unknown values into the report, even if the API already redacted them.
 		lower := strings.ToLower(event.ContentText)
 		var markers []string
 		for _, marker := range []string{

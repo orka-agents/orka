@@ -154,7 +154,6 @@ func TestJobBuilderAzureDeploymentEnvControllerOwned(t *testing.T) {
 					if source == "Agent Secret EnvFrom" {
 						require.True(t, hasAgentEnvFromSecret(container.EnvFrom), "missing direct Agent Secret EnvFrom")
 					}
-					// Explicit Env entries override same-named keys in Agent Secret EnvFrom.
 					for _, key := range keys {
 						var entries []corev1.EnvVar
 						for _, envVar := range container.Env {

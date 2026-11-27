@@ -141,8 +141,6 @@ func TestSoulParameterSchemaDocumentsRuntimeCompatibility(t *testing.T) {
 	}
 }
 
-// A built-in Agent stored without a contract runs under the namespace's mode,
-// so update_agent validates a new soul against that effective contract.
 func TestUpdateAgentSoulDefaultsOmittedContract(t *testing.T) {
 	for _, tc := range []struct {
 		mode    executionmode.Mode

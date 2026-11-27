@@ -13,7 +13,6 @@ import (
 	"testing"
 )
 
-// mockSessionDeleter implements the SessionDeleter interface for testing.
 type mockSessionDeleter struct {
 	deletedNamespace string
 	deletedSessionID string
@@ -148,7 +147,6 @@ func TestDeleteSessionTool_Execute(t *testing.T) {
 				t.Errorf("expected message 'Session deleted', got %v", data[messageField])
 			}
 
-			// Verify the deleter was called with correct args
 			if tt.deleter != nil {
 				expectedNS := defaultNamespace
 				if ns, ok := tt.args[namespaceField].(string); ok && ns != "" {

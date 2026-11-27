@@ -13,10 +13,6 @@ import (
 
 const testCurrentCtxName = "ctx"
 
-// ---------------------------------------------------------------------------
-// newRootCmd
-// ---------------------------------------------------------------------------
-
 func TestNewRootCmd_Structure(t *testing.T) {
 	cmd := newRootCmd()
 
@@ -58,7 +54,6 @@ func TestNewRootCmd_PersistentFlags(t *testing.T) {
 		}
 	}
 
-	// Check shorthands
 	if f := cmd.PersistentFlags().Lookup("server"); f != nil && f.Shorthand != "s" {
 		t.Errorf("server shorthand = %q, want %q", f.Shorthand, "s")
 	}
@@ -88,10 +83,6 @@ func TestNewRootCmd_VersionFlag(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// kubeconfigNamespace
-// ---------------------------------------------------------------------------
-
 func writeKubeconfig(t *testing.T, dir string, config *clientcmdapi.Config) string {
 	t.Helper()
 	path := filepath.Join(dir, "kubeconfig")
@@ -101,8 +92,6 @@ func writeKubeconfig(t *testing.T, dir string, config *clientcmdapi.Config) stri
 	return path
 }
 
-// kubeconfigNamespace, extractToken and kubeconfigIdentity read the current
-// context of the kubeconfig at path.
 func kubeconfigNamespace(path string) string { return currentKubeconfigContext(path).namespace }
 
 func extractToken(path string) (string, error) { return currentKubeconfigContext(path).token() }
@@ -133,7 +122,6 @@ func TestKubeconfigNamespace_WithNamespace(t *testing.T) {
 	}
 }
 
-// A context without a namespace yields none, not Kubernetes' "default".
 func TestKubeconfigNamespace_NoNamespace(t *testing.T) {
 	dir := t.TempDir()
 
@@ -161,7 +149,6 @@ func TestKubeconfigNamespace_NoCurrentContext(t *testing.T) {
 	dir := t.TempDir()
 
 	config := clientcmdapi.NewConfig()
-	// No current context set
 
 	path := writeKubeconfig(t, dir, config)
 
@@ -181,7 +168,6 @@ func TestKubeconfigNamespace_MissingContext(t *testing.T) {
 
 	config := clientcmdapi.NewConfig()
 	config.CurrentContext = "missing-context"
-	// Context not actually defined
 
 	path := writeKubeconfig(t, dir, config)
 
@@ -189,10 +175,6 @@ func TestKubeconfigNamespace_MissingContext(t *testing.T) {
 		t.Errorf("namespace = %q, want empty for missing context", ns)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// extractToken
-// ---------------------------------------------------------------------------
 
 func TestExtractToken_WithDirectToken(t *testing.T) {
 	dir := t.TempDir()
@@ -221,7 +203,6 @@ func TestExtractToken_WithTokenFile(t *testing.T) {
 	dir := t.TempDir()
 
 	tokenFile := filepath.Join(dir, "token")
-	// A token file usually ends in a newline, which is not part of the token.
 	if err := os.WriteFile(tokenFile, []byte("file-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -339,12 +320,7 @@ func TestExtractToken_MissingContext(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// openBrowser
-// ---------------------------------------------------------------------------
-
 func TestOpenBrowser_DoesNotPanic(t *testing.T) { //nolint:unparam
-	// Stub out the browser opener so we never launch a real browser.
 	orig := openBrowserFunc
 	openBrowserFunc = func(string) error { return nil }
 	t.Cleanup(func() { openBrowserFunc = orig })
@@ -354,10 +330,6 @@ func TestOpenBrowser_DoesNotPanic(t *testing.T) { //nolint:unparam
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// defaultServer constant
-// ---------------------------------------------------------------------------
 
 func TestDefaultServer(t *testing.T) {
 	if defaultServer != "http://localhost:8080" {

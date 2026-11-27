@@ -23,12 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// These tests pin what the repository monitor makes visible today: the
-// readiness commit status a held pull request receives, the records a repair
-// leaves across a controller restart, and how a GitHub timeout fails a run.
-
-// A held draft gets its readiness status once per head: repeated polls of an
-// unchanged head write nothing new, and each new head is evaluated afresh.
 func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
@@ -78,7 +72,6 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 
 	mutation := assertDraftHoldOnce("head-1", 4)
 
-	// A new head is still a draft: it gets its own status on the first poll, written once.
 	forge.set("head-2", true)
 	pr.HeadSHA = "head-2"
 	item = repositoryMonitorItemFromPullRequest(monitor, pr, item)
@@ -87,7 +80,6 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 		t.Fatalf("head-2 readiness mutation = %+v, want distinct external ID from head-1 %s", head2Mutation, mutation.ExternalID)
 	}
 
-	// Marking it ready replaces the hold on the first poll with the next blocker.
 	forge.set("head-2", false)
 	pr.Draft = false
 	item = repositoryMonitorItemFromPullRequest(monitor, pr, item)
@@ -104,11 +96,6 @@ func TestRepositoryMonitorReadinessDraftHoldIsWrittenOncePerHead(t *testing.T) {
 	}
 }
 
-// A repair handoff writes its repair job and started push record before it
-// creates the Task, all keyed by the command. A controller that stops at the
-// Task create, or restarts after the Task exists or after the result was
-// ingested, replays the handoff without a second Task, job or push record, and
-// never reopens a settled push.
 func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 	ctx := context.Background()
 	monitor, first, monitorStore := newRepositoryMonitorPolicyReconciler(t, "repair-restart", nil, nil)
@@ -128,22 +115,13 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 		commandID:    "cmd-repair-restart",
 	}
 
-	// The controller crashes at the Task create of its first handoff, before
-	// error handling can update the job. By then the repair job and the started
-	// push record must already be durable.
 	h.runCrashBeforeTaskCreate()
 
-	// Next, an ordinary Create error records LastError without creating a Task;
-	// a subsequent restart still recovers against the same records and clears it.
 	h.runTransientCreateError()
 
-	// The restarted controller creates the Task in the API server, then crashes
-	// before it can observe the Create response or run post-Create bookkeeping.
 	h.runCrashAfterTaskCreate()
 	h.assertOne("crash after API server stored Task", repositoryMonitorAutomergeStateStarted)
 
-	// The next restart adopts the already-created Task against the same records
-	// and clears the earlier create error.
 	h.handoff(h.restart(), 0)
 	h.assertOne("restart after Task creation", repositoryMonitorAutomergeStateStarted)
 	if got := h.jobs(); got[0].LastError != "" || got[0].Phase != repositoryMonitorRepairPhaseQueued {
@@ -156,8 +134,6 @@ func TestRepositoryMonitorRepairRestartReusesTaskAndPushRecord(t *testing.T) {
 	}
 	h.assertOne("ingest", repositoryMonitorRunPhaseSucceeded)
 
-	// A restart after ingestion that replays the handoff and the ingest
-	// neither creates work nor reopens the settled push.
 	after := h.restart()
 	h.handoff(after, 0)
 	if ingested, err := after.ingestCompletedRepositoryMonitorRepairTasks(ctx, monitor); err != nil || ingested {
@@ -330,10 +306,6 @@ func (h *repairRestartHarness) runCrashAfterTaskCreate() {
 	}
 }
 
-// A GitHub call that exceeds the client timeout fails the whole inventory
-// run. The run is retried a bounded number of times, each failure writes one
-// run_failed event naming the failed request, and the last one marks the run
-// failed. No Task starts.
 func TestRepositoryMonitorGitHubTimeoutFailsRunWithBoundedRetries(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -401,7 +373,6 @@ func assertRepositoryMonitorTimeoutRetryScheduled(t *testing.T, ctx context.Cont
 			t.Fatalf("attempt %d failure event = %+v, want a scheduled retry", attempt, failure)
 		}
 	}
-	// Make the delayed retry due now.
 	run.StartedAt = time.Now().Add(-time.Second)
 	if err := monitorStore.UpdateMonitorRun(ctx, run); err != nil {
 		t.Fatal(err)
@@ -427,8 +398,6 @@ func assertRepositoryMonitorTimeoutTerminalFailure(t *testing.T, run *store.Moni
 	}
 }
 
-// repositoryMonitorDraftReadinessForge serves one pull request and records
-// the readiness statuses written to each commit.
 type repositoryMonitorDraftReadinessForge struct {
 	t      *testing.T
 	mu     sync.Mutex

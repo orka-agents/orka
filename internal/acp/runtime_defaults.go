@@ -36,23 +36,15 @@ var builtInRuntimeNativeTools = map[string][]string{
 	"opencode": {nativeToolRead, nativeToolWrite, nativeToolEdit, nativeToolApplyPatch, nativeToolBash, nativeToolGlob, nativeToolGrep},
 }
 
-// BuiltInRuntimeSupportsNativePermissionAsk reports whether a built-in
-// runtime can be launched to ask before every policy-allowed native tool that
-// acts, so the controller can hold those requests for a Task's requester.
 func BuiltInRuntimeSupportsNativePermissionAsk(provider string) bool {
 	_, ok := builtInRuntimeNativeTools[strings.ToLower(strings.TrimSpace(provider))]
 	return ok
 }
 
-// BuiltInRuntimeNativeToolNames returns the provider-native tool names owned by
-// one built-in ACP runtime. Callers receive a copy so policy tables remain
-// immutable.
 func BuiltInRuntimeNativeToolNames(provider string) []string {
 	return append([]string(nil), builtInRuntimeNativeTools[strings.ToLower(strings.TrimSpace(provider))]...)
 }
 
-// IsBuiltInRuntimeNativeTool reports whether name is provider-native for the
-// selected built-in runtime. Brokered and custom tool names return false.
 func IsBuiltInRuntimeNativeTool(provider, name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -66,13 +58,6 @@ func IsBuiltInRuntimeNativeTool(provider, name string) bool {
 	return false
 }
 
-// BuiltInRuntimeNativePolicyUnrestricted compares only provider-native grants.
-// A full native grant remains unrestricted when brokered tools are added; an
-// explicit empty allowlist remains deny-all. Denying a provider-native tool,
-// whole or scoped as in "Read(/workspace/private/**)", narrows the policy.
-// Denying any other tool, such as a brokered Tool or a forwarding Tool's
-// write tool, does not: the MCP policy enforces that deny, and the provider's
-// own tools are untouched.
 func BuiltInRuntimeNativePolicyUnrestricted(provider string, allowed, disallowed []string, allowBash bool) bool {
 	if !allowBash {
 		return false
@@ -98,9 +83,6 @@ func BuiltInRuntimeNativePolicyUnrestricted(provider string, allowed, disallowed
 	return true
 }
 
-// NormalizeBuiltInRuntimeToolPolicy expands an implicit provider-native tool
-// surface only when deny-only metadata or the Bash gate narrows it. Explicit
-// allowlists, including an explicit empty deny-all list, remain authoritative.
 func NormalizeBuiltInRuntimeToolPolicy(
 	provider string,
 	allowed, disallowed []string,
@@ -133,9 +115,6 @@ func NormalizeBuiltInRuntimeToolPolicy(
 	return normalizedAllowed, disallowed, allowBash
 }
 
-// BuiltInRuntimeEffectiveAllowedTools returns the tools that a normalized
-// non-OpenCode policy can execute after deny metadata and the Bash gate apply.
-// A nil allowlist remains nil so callers can preserve the unrestricted sentinel.
 func BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed []string, allowBash bool) []string {
 	if allowed == nil {
 		return nil
@@ -161,8 +140,6 @@ func BuiltInRuntimeEffectiveAllowedTools(allowed, disallowed []string, allowBash
 	return sortedUniqueToolNames(result)
 }
 
-// BuiltInRuntimeEffectiveAllowBash projects the effective Bash capability into
-// the separate gate used by authorization subset checks.
 func BuiltInRuntimeEffectiveAllowBash(allowed, disallowed []string, allowBash bool) bool {
 	if !allowBash {
 		return false
@@ -188,14 +165,10 @@ func builtInRuntimeToolBaseName(value string) string {
 	return value
 }
 
-// OpenCodeDefaultAllowedTools returns the governed provider-native tool defaults
-// used when an OpenCode Agent omits runtime.defaultAllowedTools.
 func OpenCodeDefaultAllowedTools() []string {
 	return append([]string(nil), openCodeDefaultAllowedTools[:]...)
 }
 
-// NormalizeOpenCodeToolPolicy canonicalizes OpenCode-native tool names and
-// applies the fail-closed read-intent restrictions used by the runtime.
 func NormalizeOpenCodeToolPolicy(
 	readIntent bool,
 	allowed, disallowed []string,
@@ -206,8 +179,6 @@ func NormalizeOpenCodeToolPolicy(
 	if !readIntent {
 		return allowed, disallowed, allowBash
 	}
-	// OpenCode's Grep permission cannot carry the path-specific secret-file
-	// exclusions applied to Read, so read-intent sessions disable it entirely.
 	blocked := map[string]struct{}{
 		nativeToolApplyPatch: {}, openCodeToolBash: {}, "edit": {}, "grep": {}, "write": {},
 	}
@@ -221,8 +192,6 @@ func NormalizeOpenCodeToolPolicy(
 	return sortedUniqueToolNames(filtered), sortedUniqueToolNames(disallowed), false
 }
 
-// OpenCodeEffectiveAllowedTools returns the tools that the normalized policy
-// can actually execute after disallowed names and the Bash gate are applied.
 func OpenCodeEffectiveAllowedTools(allowed, disallowed []string, allowBash bool) []string {
 	denied := make(map[string]struct{}, len(disallowed))
 	for _, name := range disallowed {
@@ -238,18 +207,11 @@ func OpenCodeEffectiveAllowedTools(allowed, disallowed []string, allowBash bool)
 	return sortedUniqueToolNames(result)
 }
 
-// NormalizeOpenCodeAuthorizationTools canonicalizes user-facing OpenCode tool
-// grants so token and transaction allowlists can be compared with runtime
-// policy names without exposing internal alias details to issuers.
 func NormalizeOpenCodeAuthorizationTools(values []string) []string {
 	allowed, _, _ := NormalizeOpenCodeToolPolicy(false, values, nil, true)
 	return allowed
 }
 
-// normalizeOpenCodeToolNames canonicalizes OpenCode-native permissions while
-// preserving brokered/custom tool identifiers. OpenCode selects apply_patch for
-// GPT-family models and edit/write for others, so those aliases are one governed
-// mutation capability.
 func normalizeOpenCodeToolNames(values []string) []string {
 	mutation := false
 	result := make([]string, 0, len(values)+2)

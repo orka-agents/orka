@@ -243,14 +243,13 @@ func TestWaitForTaskTool_Execute_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ctx = WithToolContext(ctx, tc)
-	cancel() // cancel immediately
+	cancel()
 
 	result, err := tool.Execute(ctx, json.RawMessage(`{"name": "running-task", "timeout": 60}`))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should return timeout/still-running result
 	if !strings.Contains(result, "still running") {
 		t.Errorf("expected still running message, got %q", result)
 	}
@@ -294,7 +293,6 @@ func TestWaitForTaskTool_RegistryTimeout(t *testing.T) {
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 					reads++
 					err := c.Get(ctx, key, obj, opts...)
-					// Cancel after the first read so valid controls never wait for a poll.
 					cancel()
 					return err
 				},
@@ -352,7 +350,6 @@ func TestWaitForTaskTool_Execute_TimeoutClampsToMax(t *testing.T) {
 				if err != nil || !strings.Contains(result, "still running") {
 					t.Fatalf("wait = %q, %v; want running-task continuation", result, err)
 				}
-				// Polling can add one two-second tick after the capped deadline.
 				if elapsed := time.Since(started); elapsed < 60*time.Second || elapsed > 62*time.Second {
 					t.Fatalf("timeout %d waited %s, want the 60-second cap plus at most one poll", timeout, elapsed)
 				}

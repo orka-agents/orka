@@ -35,7 +35,6 @@ func TestStaticChartAgentIdentityFlags(t *testing.T) {
 	require.Contains(t, deployment, `"--agent-identity-entra-tenant-id=11111111-1111-1111-1111-111111111111"`)
 	require.Contains(t, deployment, `"--agent-identity-entra-blueprint-client-id=22222222-2222-2222-2222-222222222222"`)
 
-	// One value alone would crash-loop the controller, so rendering fails.
 	out, err := helmTemplateStaticChart(t,
 		"--set-string", "controller.agentIdentity.entra.tenantID=11111111-1111-1111-1111-111111111111",
 		"--show-only", "templates/deployment.yaml")
@@ -59,9 +58,6 @@ func TestStaticChartMountsTheAgentIdentityToken(t *testing.T) {
 	require.Contains(t, deployment, `"--agent-identity-entra-authority=https://login.microsoftonline.us"`)
 }
 
-// The raw policy's admission tests cover which workloads may run as the
-// controller ServiceAccount. Helm must render the same rules, with its release
-// namespace and ServiceAccount, whenever it projects the blueprint's token.
 func TestStaticChartProtectsTheControllerServiceAccountWithAgentIdentities(t *testing.T) {
 	const template = "templates/controller-serviceaccount-admission-policy.yaml"
 	rendered, err := helmTemplateStaticChartForRelease(t, "orka", "orka-system", "--show-only", template)

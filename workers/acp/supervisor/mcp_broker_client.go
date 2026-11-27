@@ -47,9 +47,6 @@ func NewControllerMCPBrokerClient(baseURL, namespace, bearer string, capabilityS
 		return nil, fmt.Errorf("MCP broker identity is invalid")
 	}
 	transport := &http.Transport{
-		// Broker requests target the in-cluster controller endpoint with the
-		// controller bearer and operation capability in headers; environment
-		// proxies must never carry them.
 		Proxy:                  nil,
 		DialContext:            (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:      true,
@@ -62,12 +59,7 @@ func NewControllerMCPBrokerClient(baseURL, namespace, bearer string, capabilityS
 	return &controllerMCPBrokerClient{
 		endpoint: parsed,
 		client: &http.Client{
-			Transport: transport,
-			// The broker does not write response headers until the authorized tool
-			// finishes. A client-wide timeout would therefore override longer tool
-			// deadlines such as wait_for_tasks' 10-minute default. Request-context
-			// cancellation and its deadline remain authoritative for the complete
-			// call; the transport independently bounds connection setup.
+			Transport:     transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		namespace: namespace, controllerBearer: bearer,
@@ -103,11 +95,8 @@ func (c *controllerMCPBrokerClient) Call(ctx context.Context, request harnessv2.
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+c.controllerBearer)
 	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, capability)
-	// Carry the non-secret pool identity so the broker can verify the bearer
-	// before reading the body.
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, request.Namespace)
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(request.Metadata.Fence.RuntimePoolUID))
-	// Trace context is transport metadata, outside the sealed call and capability.
 	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(httpRequest.Header))
 	response, err := c.client.Do(httpRequest)
 	if err != nil {

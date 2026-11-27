@@ -24,8 +24,6 @@ func TestNativeMigrationSourceNonceOnlyInToolOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// TestE2E's command runner leaves the process at the repository root.
-	// Exercise that full-binary ordering even in focused unit runs.
 	t.Chdir(projectDir)
 	fixture := "rollout-2026-10-02T21-57-44-" + nativeMigrationThread + ".jsonl"
 	original, err := os.ReadFile(filepath.Join(projectDir, "internal/codexstate/testdata", fixture))
@@ -141,9 +139,6 @@ func TestNativeMigrationFixturesMatchContinuationMarkersAndPreferReturnLeg(t *te
 		{nativeMigrationClusterMarker, nativeMigrationClusterReply},
 	} {
 		fixture := file.Fixtures[i]
-		// A continuation ends in a new user message. aimock's toolResultContains
-		// checks only the final message, not the historical tool output. The
-		// E2E journal assertion, not a last-message matcher, proves native replay.
 		if len(fixture.Match) != 1 || fixture.Match["userMessage"] != want.marker ||
 			fixture.Response.Content != want.reply {
 			t.Fatal("native fixture must match its continuation marker, with the local return first")

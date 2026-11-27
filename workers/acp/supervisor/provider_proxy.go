@@ -126,68 +126,44 @@ type providerProxySession struct {
 	baseURL    string
 	basePath   string
 
-	mu                sync.Mutex
-	activePromptID    string
-	leaseExpiresAt    time.Time
-	leaseVersion      uint64
-	leaseTimer        *time.Timer
-	gateContext       context.Context
-	gateCancel        context.CancelCauseFunc
-	revokedGate       context.Context
-	turnPromptID      string
-	maxTurns          int32
-	inferenceRequests int32
-	// inflightInference counts inference requests between admission and
-	// handler completion, separately from the session-wide inflight counter:
-	// prompt settlement must only fail closed on an unresolved *inference*
-	// outcome, not on a stalled metadata read such as GET /models.
-	inflightInference int
-	drainedInference  chan struct{}
-	turnLimitExceeded bool
-	// Per-prompt upstream inference response accounting. ACP agents such as
-	// Codex and Copilot report provider errors as ordinary assistant text and
-	// end their turn, so the supervisor needs its own evidence that the
-	// prompt's final inference call succeeded before it trusts an end_turn
-	// settlement. Outcomes are ordered by issuance, not completion: with two
-	// concurrent slots a later-issued request can fail before an earlier one
-	// succeeds, and the prompt's final outcome is the highest-sequence one.
-	inferenceSuccesses int32
-	inferenceFailures  int32
-	issuedInference    uint64
-	// firstInferenceResponseStartedAt is when the first non-error inference
-	// response of the active prompt began relaying to the child. Model output
-	// can only be derived from those bytes, so assistant text the child
-	// emitted before that instant cannot be model output.
+	mu                              sync.Mutex
+	activePromptID                  string
+	leaseExpiresAt                  time.Time
+	leaseVersion                    uint64
+	leaseTimer                      *time.Timer
+	gateContext                     context.Context
+	gateCancel                      context.CancelCauseFunc
+	revokedGate                     context.Context
+	turnPromptID                    string
+	maxTurns                        int32
+	inferenceRequests               int32
+	inflightInference               int
+	drainedInference                chan struct{}
+	turnLimitExceeded               bool
+	inferenceSuccesses              int32
+	inferenceFailures               int32
+	issuedInference                 uint64
 	firstInferenceResponseStartedAt time.Time
 	lastSuccessSeq                  uint64
 	lastFailureSeq                  uint64
 	lastCodexRejectionSeq           uint64
 	lastUpstreamStatus              int
 	lastUpstreamDetail              string
-	// Closing admission wakes pending retries without cancelling a response
-	// still draining to the child.
-	admissionDone       chan struct{} // nil once closed
-	pendingCodexRetries map[*codexRetryDispatch]struct{}
-	inflight            int
-	drained             chan struct{}
-	closed              bool
-	requestSlots        chan struct{}
-	// telemetry is the GenAI recorder of telemetryPromptID; chats holds its
-	// in-flight model calls by issuance sequence so accounted outcomes reach
-	// their chat spans. Both are nil when GenAI telemetry is disabled.
-	telemetryPromptID string
-	telemetry         *promptGenAI
-	chats             map[uint64]*promptGenAIChat
+	admissionDone                   chan struct{}
+	pendingCodexRetries             map[*codexRetryDispatch]struct{}
+	inflight                        int
+	drained                         chan struct{}
+	closed                          bool
+	requestSlots                    chan struct{}
+	telemetryPromptID               string
+	telemetry                       *promptGenAI
+	chats                           map[uint64]*promptGenAIChat
 }
 
 type providerProxyAuthorization struct {
 	upstreamBase *url.URL
 	gateContext  context.Context
 	promptID     string
-	// inferenceSeq is the issuance order assigned atomically at admission
-	// for inference-route requests (0 for metadata). Allocating it here —
-	// not after body validation — keeps "final request" meaning final by
-	// admission order even when concurrent bodies validate out of order.
 	inferenceSeq uint64
 	release      func()
 }
@@ -230,8 +206,6 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 	if c.UpstreamBearerToken == "" || strings.IndexFunc(c.UpstreamBearerToken, func(value rune) bool { return value <= ' ' || value == 0x7f }) >= 0 {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream bearer token is required")
 	}
-	// Events are redacted of the exact token only from this length on: a
-	// shorter one could reach live events and the Task's result.
 	if len(c.UpstreamBearerToken) < minRedactedCredentialBytes {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream bearer token must be at least %d bytes", minRedactedCredentialBytes)
 	}
@@ -277,11 +251,8 @@ func newProviderProxy(cfg ProviderProxyConfig) (*providerProxy, error) {
 		return nil, fmt.Errorf("listen on provider proxy loopback: %w", err)
 	}
 	transport := &http.Transport{
-		Proxy:       nil,
-		DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		// A provider request owns its upstream connection so revoking one
-		// session lease cannot interfere with another session sharing an HTTP/2
-		// connection, and cancellation can close the exact request transport.
+		Proxy:                  nil,
+		DialContext:            (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:      false,
 		DisableKeepAlives:      true,
 		MaxIdleConns:           16,
@@ -409,8 +380,6 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.lastCodexRejectionSeq = 0
 	s.lastUpstreamStatus = 0
 	s.lastUpstreamDetail = ""
-	// Issuance sequences restart per prompt; a previous prompt's late chat
-	// keeps its own observation but no longer receives accounted outcomes.
 	s.chats = nil
 	s.leaseVersion++
 	version := s.leaseVersion
@@ -443,11 +412,6 @@ func (s *providerProxySession) renew(promptID string, expiresAt, now time.Time) 
 	return nil
 }
 
-// closeAdmission stops admitting new provider requests for promptID once the
-// ACP child has settled its turn. Requests already authorized keep relaying
-// under the prompt's gate context so the bounded drain before deactivate can
-// finish accounting them; a child cannot launch further inference calls
-// against the settled prompt's quota during that window.
 func (s *providerProxySession) closeAdmission(promptID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -479,9 +443,6 @@ func (s *providerProxySession) deactivateWithCause(promptID string, cause *promp
 		return
 	}
 	if cause != nil && s.gateCancel != nil {
-		// Install the local cause before Foundry settlement can reject an
-		// in-flight request. New authenticated requests keep this exact gate
-		// until the next prompt activates.
 		s.revokedGate = s.gateContext
 		s.gateCancel(cause)
 	}
@@ -567,19 +528,12 @@ func (s *providerProxySession) wait(ctx context.Context) error {
 			localErr = ctx.Err()
 		}
 	}
-	// Closing the local transport says nothing about remote compute. Even
-	// a session with no observed inference needs a broker tombstone so a
-	// delayed authorized request cannot create remote work after deletion.
 	if s.foundry != nil {
 		return errors.Join(localErr, s.foundry.retire(ctx))
 	}
 	return localErr
 }
 
-// authorize admits one request and, atomically under the same lock, starts
-// the in-flight accounting the settlement drain depends on. The route class
-// is registered here — not after body validation — so there is no window in
-// which an authorized inference request exists that the drain cannot see.
 func (s *providerProxySession) authorize(r *http.Request, class providerRequestClass, now time.Time) (providerProxyAuthorization, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -636,9 +590,6 @@ func (s *providerProxySession) releaseRequest() {
 	}
 }
 
-// consumeInferenceRequest admits one inference request against the prompt's
-// turn budget. The issuance sequence is assigned earlier, atomically at
-// route admission in authorize; metadata requests consume nothing.
 func (s *providerProxySession) consumeInferenceRequest(promptID string, class providerRequestClass, now time.Time) error {
 	if class != providerRequestInference {
 		return nil
@@ -656,8 +607,6 @@ func (s *providerProxySession) consumeInferenceRequest(promptID string, class pr
 	return nil
 }
 
-// releaseInferenceRequest ends the in-flight accounting for one authorized
-// inference-route request; metadata classes are a no-op.
 func (s *providerProxySession) releaseInferenceRequest(class providerRequestClass) {
 	if s == nil || class != providerRequestInference {
 		return
@@ -673,10 +622,6 @@ func (s *providerProxySession) releaseInferenceRequest(class providerRequestClas
 	}
 }
 
-// waitInference waits for the in-flight inference requests to finish. Unlike
-// wait, it ignores metadata requests: their outcomes never feed prompt
-// classification, so they must not convert a completed prompt into a
-// provider failure.
 func (s *providerProxySession) waitInference(ctx context.Context) error {
 	return s.waitPromptInference(ctx, "")
 }
@@ -711,13 +656,6 @@ func (s *providerProxySession) maxTurnsExceeded(promptID string) bool {
 	return s.turnPromptID == strings.TrimSpace(promptID) && s.turnLimitExceeded
 }
 
-// recordInferenceOutcome accounts one upstream inference response, issued
-// with sequence seq, for the prompt that owns the current turn. Status codes
-// below 400 count as successes; everything else is a failure whose bounded,
-// sanitized detail is kept for the terminal failure message. The outcome
-// that decides the prompt is the one with the highest issuance sequence,
-// regardless of the order in which responses complete. Metadata requests and
-// responses for other prompts are ignored.
 func (s *providerProxySession) recordInferenceOutcome(promptID string, class providerRequestClass, seq uint64, statusCode int, detail string) {
 	if s == nil || class != providerRequestInference || seq == 0 {
 		return
@@ -731,12 +669,6 @@ func (s *providerProxySession) recordInferenceOutcome(promptID string, class pro
 	s.recordInferenceOutcomeLocked(seq, statusCode, detail)
 }
 
-// recordRejectedInferenceRequest accounts an inference request the proxy
-// itself refused (capacity, profile, or lifecycle rejection) as a failed
-// inference in issuance order, without consuming turn budget. ACP agents can
-// render such a rejection as ordinary assistant text and end their turn, so
-// without this evidence the prompt would settle Completed even though its
-// final inference attempt never reached the provider.
 func (s *providerProxySession) recordRejectedInferenceRequest(promptID string, class providerRequestClass, seq uint64, statusCode int, detail string) {
 	if s == nil || class != providerRequestInference {
 		return
@@ -748,8 +680,6 @@ func (s *providerProxySession) recordRejectedInferenceRequest(promptID string, c
 		return
 	}
 	if seq == 0 {
-		// A reject with no admission-allocated sequence (rejected before
-		// authorization completed) still gets ordered at issuance.
 		s.issuedInference++
 		seq = s.issuedInference
 	}
@@ -774,10 +704,6 @@ func (s *providerProxySession) recordInferenceOutcomeLocked(seq uint64, statusCo
 	s.lastUpstreamDetail = sanitizeProviderUpstreamDetail(detail)
 }
 
-// attachInferenceFailureDetail fills in the sanitized detail for the failure
-// recorded by recordInferenceResponse once the relayed error body prefix has
-// been observed. It is a no-op when a later inference already succeeded or a
-// different failure has been recorded since.
 func (s *providerProxySession) attachInferenceFailureDetail(promptID string, class providerRequestClass, seq uint64, detail string) {
 	if s == nil || class != providerRequestInference || seq == 0 || detail == "" {
 		return
@@ -790,18 +716,6 @@ func (s *providerProxySession) attachInferenceFailureDetail(promptID string, cla
 	s.lastUpstreamDetail = sanitizeProviderUpstreamDetail(detail)
 }
 
-// upstreamFailureUnrecovered reports whether the latest-issued accounted
-// inference response for promptID failed and no later-issued inference
-// succeeded. It is false when the prompt made no inference requests or when
-// the latest-issued response succeeded. An earlier success (for example the
-// tool-call round before a 429 on the follow-up request) does not mask a
-// final failure: the agent may render that error as assistant text and settle
-// end_turn, which must not become a successful Task. Completion order is
-// irrelevant: a later-issued failure stays unrecovered even if an
-// earlier-issued request succeeds afterwards.
-// markInferenceResponseStarted records that a non-error inference response
-// for the active prompt is about to be relayed to the child; only the first
-// one per prompt is timestamped.
 func (s *providerProxySession) markInferenceResponseStarted(promptID string, class providerRequestClass, now time.Time) {
 	if s == nil || class != providerRequestInference {
 		return
@@ -814,12 +728,6 @@ func (s *providerProxySession) markInferenceResponseStarted(promptID string, cla
 	s.firstInferenceResponseStartedAt = now
 }
 
-// modelOutputPossibleAt reports whether a non-error inference response for
-// the active prompt had begun relaying to the child by at: whether assistant
-// text the child emitted at that instant could be model output. Comparing
-// against the instant an ACP event was received, rather than the current
-// state, keeps the answer correct when the prompt stream consumer drains a
-// queued event only after the proxy has moved on.
 func (s *providerProxySession) modelOutputPossibleAt(promptID string, at time.Time) bool {
 	if s == nil {
 		return false
@@ -842,30 +750,12 @@ func (s *providerProxySession) upstreamFailureUnrecovered(promptID string) (bool
 	return true, s.lastUpstreamStatus, s.lastUpstreamDetail
 }
 
-// sanitizeProviderUpstreamDetail bounds an upstream error detail to printable
-// text of at most providerUpstreamDetailMaxBytes, strips any private
-// provider-proxy route path that an upstream might echo back, and redacts
-// credential-shaped values (API keys, bearer/JWT tokens, signed or
-// credentialed URLs). The result is persisted in the terminal Failed event,
-// the PromptAttempt, and Task status, so it must never carry a secret the
-// upstream echoed into its error message. Non-printable runes are dropped
-// before redaction so a control character cannot split a token past the
-// redactor.
-// providerUpstreamDetailWithheld replaces an upstream detail that still
-// matches the secret policy after redaction.
 const providerUpstreamDetailWithheld = "upstream error detail withheld: credential-shaped content"
 
 func sanitizeProviderUpstreamDetail(detail string) string {
-	// Drop non-printable runes first: U+0085 and friends are both controls
-	// and Unicode whitespace, so splitting into fields before removing them
-	// would fragment a credential (or the private proxy path) past both the
-	// path filter and the redactor.
 	var printable strings.Builder
 	for _, r := range detail {
 		switch {
-		// Separators are dropped, not spaced: a credential wrapped across a
-		// line break or tab must reassemble into one contiguous token for
-		// the redactor, matching the other ACP sanitizers.
 		case r == utf8.RuneError || !unicode.IsPrint(r):
 			continue
 		default:
@@ -888,22 +778,12 @@ func sanitizeProviderUpstreamDetail(detail string) string {
 		}
 		sanitized = strings.TrimSpace(sanitized[:limit])
 	}
-	// The redactor knows a fixed set of credential shapes; the broader
-	// secret policy recognizes more (a bare AWS access-key ID, for one).
-	// A detail that still looks like a credential after redaction is
-	// withheld entirely rather than persisted in durable Task state.
 	if sanitized != "" && security.LooksLikeSecret(sanitized) {
 		return providerUpstreamDetailWithheld
 	}
 	return sanitized
 }
 
-// providerUpstreamErrorDetail extracts a human-readable detail from a
-// buffered upstream error body prefix: the JSON error.message when present,
-// otherwise the trimmed raw prefix. The result is not display-bounded here:
-// sanitizeProviderUpstreamDetail redacts the whole captured prefix first and
-// bounds afterwards, so a credential whose recognizer needs trailing syntax
-// (such as the "@" of a URL userinfo) is never cut away before redaction.
 func providerUpstreamErrorDetail(prefix []byte) string {
 	var payload struct {
 		Error json.RawMessage `json:"error"`
@@ -923,7 +803,6 @@ func providerUpstreamErrorDetail(prefix []byte) string {
 	return strings.TrimSpace(string(prefix))
 }
 
-// countingWriter counts the bytes that reached the downstream client.
 type countingWriter struct {
 	w io.Writer
 	n int64
@@ -935,9 +814,6 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// deliveredSSEWriter scans only the prefix accepted by the downstream
-// client. A ResponseWriter may return both n > 0 and an error, so
-// io.MultiWriter cannot preserve this delivery boundary.
 type deliveredSSEWriter struct {
 	w       io.Writer
 	scanner *sseTerminalErrorScanner
@@ -951,9 +827,6 @@ func (w *deliveredSSEWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// prefixCapture retains the first limit bytes written through it so an
-// upstream error body can be relayed to the ACP child as it arrives while a
-// bounded prefix is kept for the failure detail.
 type prefixCapture struct {
 	limit  int
 	buffer []byte
@@ -1011,8 +884,6 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// The route class (path + method) is known before authorization, so the
-	// drain accounting can start atomically with admission inside authorize.
 	_, _, routeClass := providerRequestRoute(p.providerKind, suffix, r.Method)
 	authorization, ok := session.authorize(r, routeClass, time.Now().UTC())
 	if !ok {
@@ -1059,8 +930,6 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errProviderBodyTooLarge):
 			reject(http.StatusRequestEntityTooLarge, "provider request body exceeds limit")
 		case requestContext.Err() != nil && authorization.gateContext.Err() == nil:
-			// The ACP child abandoned its own request mid-body; that is
-			// not provider evidence and must not outrank an earlier success.
 			providerproxy.WriteError(w, http.StatusForbidden, "provider request is no longer active")
 		default:
 			waitForCancellation(err)
@@ -1073,8 +942,6 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(http.StatusForbidden, "provider request is outside the immutable profile")
 		return
 	}
-	// Normalization can collapse duplicate model/stream keys. Qualification
-	// must check what the child submitted, not only the rewritten request.
 	originalBody := body
 	body, err = normalizeProviderRequestBody(p.providerKind, p.model, suffix, p.modelOutputLimit, body)
 	if err != nil {
@@ -1102,8 +969,6 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if requestClass == providerRequestInference {
 		chat := session.startChat(authorization.promptID, inferenceSeq, time.Now().UTC())
-		// Runs before finishRequest cancels requestContext, so a cancelled
-		// request is told apart from one whose outcome was never accounted.
 		defer func() { session.finishChat(inferenceSeq, chat, requestContext.Err() != nil) }()
 	}
 	target := providerproxy.Target(authorization.upstreamBase, suffix, r.URL.RawQuery)
@@ -1123,8 +988,6 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			reject(http.StatusForbidden, "Foundry inference ownership is no longer active")
 			return
 		}
-		// Always replace child input, including duplicates, with the context
-		// derived from the authenticated v2 session and prompt requests.
 		upstreamRequest.Header.Set(foundryContextHeader, trustedContext)
 	}
 
@@ -1141,8 +1004,6 @@ func (s *providerProxySession) forwardProviderRequest(
 	var response *http.Response
 	var err error
 	if codexResponsesPost {
-		// A rewindable POST with a caller's (X-)Idempotency-Key can be
-		// retried by net/http on a reused connection without a response.
 		req.GetBody = nil
 		deadline := time.Now().Add(codexInferenceRetryWindow)
 		var result *codexInferenceResponse
@@ -1154,7 +1015,6 @@ func (s *providerProxySession) forwardProviderRequest(
 				if err == nil && result.StatusCode >= http.StatusBadRequest {
 					timer := time.AfterFunc(time.Until(deadline), result.cancel)
 					defer timer.Stop()
-					// A deadline can shorten the error body, never its HTTP status.
 					result.Header.Del("Content-Length")
 					result.Body = codexRetryErrorBody{result.Body, result.ctx}
 					writer := http.NewResponseController(w)
@@ -1172,8 +1032,6 @@ func (s *providerProxySession) forwardProviderRequest(
 		response, err = s.proxy.client.Do(req)
 	}
 	if err != nil {
-		// Cancelling a transport before headers supplies no new upstream
-		// evidence. Only a live request accounts a transport failure.
 		if ctx.Err() == nil {
 			s.recordInferenceOutcome(auth.promptID, class, auth.inferenceSeq, http.StatusBadGateway, providerUpstreamTransportFailure)
 		}
@@ -1185,9 +1043,6 @@ func (s *providerProxySession) forwardProviderRequest(
 	s.proxy.relayUpstreamResponseWithCancellation(ctx, w, s, auth.promptID, class, auth.inferenceSeq, response, waitForCancellation)
 }
 
-// newProviderProxyRequestContext revokes the upstream transport immediately.
-// Its separate wait holds only resulting local cancellation errors, using the
-// original downstream context and the exact gate captured at authorization.
 func newProviderProxyRequestContext(r *http.Request, gate context.Context) (context.Context, func(), func(error)) {
 	requestContext, cancel := context.WithCancel(r.Context())
 	stopGate := context.AfterFunc(gate, cancel)
@@ -1196,8 +1051,6 @@ func newProviderProxyRequestContext(r *http.Request, gate context.Context) (cont
 	var upstreamConnection net.Conn
 	connectionRevoked, connectionClosedByGate := false, false
 	closeUpstreamConnection := func() {
-		// Cancel first so net/http attributes the read failure to this
-		// request rather than only to the closed underlying connection.
 		cancel()
 		connectionMu.Lock()
 		connectionRevoked = true
@@ -1234,8 +1087,6 @@ func newProviderProxyRequestContext(r *http.Request, gate context.Context) (cont
 
 func (p *providerProxy) rejectInactiveRequest(w http.ResponseWriter, r *http.Request, session *providerProxySession, gate context.Context) {
 	if gate != nil {
-		// A cancelled prompt grants no authority. Only its authenticated,
-		// slot-bounded rejection waits for courtesy cancellation to settle.
 		if !providerproxy.TryAcquireSlot(session.requestSlots) {
 			providerproxy.WriteError(w, http.StatusTooManyRequests, "provider session request capacity is exhausted")
 			return
@@ -1251,11 +1102,6 @@ func (p *providerProxy) rejectInactiveRequest(w http.ResponseWriter, r *http.Req
 	providerproxy.WriteError(w, http.StatusForbidden, "provider access is not active")
 }
 
-// relayUpstreamResponse forwards an upstream response to the ACP child and
-// accounts the inference outcome for the owning prompt. Successful responses
-// stream through untouched; error responses have a bounded prefix probed for
-// a detail message before the identical bytes are relayed.
-//
 //nolint:unparam // Keep the direct relay entry point for existing streaming tests.
 func (p *providerProxy) relayUpstreamResponse(
 	ctx context.Context,
@@ -1299,32 +1145,19 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 	upstreamFailed := response.StatusCode >= http.StatusBadRequest
 	var capture *prefixCapture
 	if upstreamFailed {
-		// Upstream errors are accounted before the relay so the failure
-		// survives even when the child abandons the error body. The detail
-		// is captured from a bounded prefix as the body is relayed rather
-		// than read ahead: a chunked 4xx that stalls after a short payload
-		// must not hold the child's request until the lease expires.
 		session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
 		capture = &prefixCapture{limit: providerUpstreamDetailProbeBytes}
 		body = io.TeeReader(response.Body, capture)
 	}
-	// A 200 status line does not prove a streamed inference succeeded:
-	// providers report terminal errors inside the SSE body. Scan the relayed
-	// stream for explicit error events so they are accounted as failures.
 	var streamScanner *sseTerminalErrorScanner
 	if !upstreamFailed && strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
 		streamScanner = &sseTerminalErrorScanner{}
-		// The scanner attaches on the WRITE side below, so it sees only
-		// bytes the child actually received. A marker read upstream but
-		// never delivered must not count as delivered.
 	}
 	if !upstreamFailed {
 		session.markInferenceResponseStarted(promptID, requestClass, time.Now().UTC())
 	}
 	providerproxy.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	// Flushing after every chunk keeps streamed provider responses (SSE)
-	// flowing to the ACP child without buffering delays.
 	flusher, _ := w.(http.Flusher)
 	relayed := &countingWriter{w: w}
 	var destination io.Writer = relayed
@@ -1336,8 +1169,6 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 		if streamScanner == nil {
 			return false
 		}
-		// A stream can end on an unterminated line (no trailing newline);
-		// the residual buffer must be scanned before the verdict.
 		streamScanner.flush()
 		return streamScanner.failed
 	}
@@ -1353,10 +1184,6 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 	if err != nil {
 		if !upstreamFailed {
 			if errors.Is(err, providerproxy.ErrDestinationWrite) || ctx.Err() != nil {
-				// A child disconnect is not upstream evidence by itself. A
-				// partially delivered SSE response still needs a terminal
-				// marker, while a zero-byte relay remains unaccounted and a
-				// partially delivered non-SSE response stays unaccounted.
 				if streamFailed() {
 					recordStreamFailure()
 				} else if relayed.n > 0 && streamScanner != nil {
@@ -1366,22 +1193,11 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 						session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
 					}
 				}
-				// A partially delivered non-SSE body is left unaccounted:
-				// it proves nothing about the inference outcome, and an
-				// unaccounted request can neither mask an earlier failure
-				// nor certify success.
 			} else {
-				// A 2xx whose body overran the response limit or broke
-				// mid-stream on the upstream side never delivered a usable
-				// inference result; count it as a failure so
-				// upstreamFailureUnrecovered does not mistake it for a
-				// success.
 				session.recordInferenceOutcome(promptID, requestClass, seq, http.StatusBadGateway, "provider upstream stream failed")
 			}
 		}
 		if waitForCancellation != nil && providerResponseCanWaitForCancellation(err, upstreamFailed, streamScanner) {
-			// Hold only locally cancelled termination. An HTTP/SSE error, a
-			// completed result, or a protocol/limit failure keeps its meaning.
 			waitForCancellation(err)
 		}
 		panic(http.ErrAbortHandler)
@@ -1395,9 +1211,6 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 			recordIncompleteStream()
 			return
 		}
-		// A success is only accounted once the whole body reached the
-		// child; a streamed response must also carry a provider terminal
-		// success marker so a truncated 2xx cannot mask an earlier failure.
 		session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
 	}
 }
@@ -1413,25 +1226,12 @@ func providerResponseCanWaitForCancellation(err error, upstreamFailed bool, stre
 	return true
 }
 
-// sseTerminalErrorScanner watches a relayed text/event-stream body for an
-// explicit terminal result. Providers can fail after a 200 status line, and
-// a clean EOF without a success marker is only evidence of a truncated
-// stream. Marker matching uses a bounded rolling window of compacted line
-// bytes: model-generated content carries embedded markers JSON-escaped and
-// cannot spoof them.
 type sseTerminalErrorScanner struct {
-	linePrefix []byte
-	lineWindow []byte
-	compactLen int
-	failed     bool
-	// pendingMarker is the error payload marker matched on the current
-	// line. The failure latches once the whole line has been seen so the
-	// recorded detail carries the complete error payload rather than the
-	// prefix up to the marker.
-	pendingMarker []byte
-	// awaitingErrorData is set after an error event line (`event: error`):
-	// the failure latches on the following data line, whose payload is the
-	// detail, or on the blank line/end of stream that closes the event.
+	linePrefix        []byte
+	lineWindow        []byte
+	compactLen        int
+	failed            bool
+	pendingMarker     []byte
 	awaitingErrorData bool
 	eventMarker       []byte
 	completed         bool
@@ -1443,10 +1243,6 @@ const (
 	sseScannerWindowBytes       = 64
 )
 
-// Markers are matched against a whitespace-stripped copy of each line, so
-// valid spaced JSON ({"type": "response.failed"}) and unspaced JSON match
-// identically. Content deltas still cannot spoof them: quotes inside model
-// text arrive JSON-escaped (\"), and stripping whitespace does not unescape.
 var sseTerminalErrorEventMarkers = [][]byte{
 	[]byte("event:error"),
 	[]byte("event:response.failed"),
@@ -1472,7 +1268,6 @@ var sseTerminalSuccessPayloadMarkers = [][]byte{
 
 var sseDoneMarker = []byte("data:[DONE]")
 
-// sseDataFieldPrefix is the whitespace-stripped SSE data field name.
 var sseDataFieldPrefix = []byte("data:")
 
 func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
@@ -1496,8 +1291,6 @@ func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
 		}
 		c.compactLen++
 		if c.pendingMarker != nil {
-			// The verdict is already known; keep buffering the rest of the
-			// line so the detail is the full payload.
 			continue
 		}
 		if len(c.lineWindow) < sseScannerWindowBytes {
@@ -1511,8 +1304,6 @@ func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// flush scans any residual unterminated line at end of stream and settles a
-// failure that was still waiting for the end of its line or data payload.
 func (c *sseTerminalErrorScanner) flush() {
 	if c.failed {
 		return
@@ -1546,13 +1337,10 @@ func (c *sseTerminalErrorScanner) finishLine() {
 	if c.awaitingErrorData {
 		switch {
 		case c.compactLen == 0:
-			// Blank line: the error event carried no data payload.
 			c.markFailure(c.eventMarker)
 		case bytes.HasPrefix(c.lineWindow, sseDataFieldPrefix):
 			c.markFailure(c.eventMarker)
 		default:
-			// Another field of the same event (id:, retry:): keep waiting
-			// for its data line.
 		}
 		return
 	}
@@ -1581,8 +1369,6 @@ func (c *sseTerminalErrorScanner) markFailure(marker []byte) {
 	c.awaitingErrorData = false
 	if len(c.linePrefix) < sseScannerDetailPrefixBytes {
 		payload := bytes.TrimSpace(bytes.TrimSuffix(c.linePrefix, []byte{'\r'}))
-		// Strip the SSE field name so a JSON payload parses and yields the
-		// provider's message instead of the raw `data: {...}` line.
 		if rest, ok := bytes.CutPrefix(payload, sseDataFieldPrefix); ok {
 			payload = bytes.TrimSpace(rest)
 		}
@@ -1655,9 +1441,6 @@ func normalizeProviderRequestBody(providerKind, model, requestPath string, model
 	return json.Marshal(payload)
 }
 
-// providerOutputLimitFields maps a provider inference path to the request
-// fields that bound generated output, plus the canonical field to force-set
-// when the caller omitted one.
 func providerOutputLimitFields(providerKind, requestPath string) (fields []string, canonical string) {
 	switch providerKind {
 	case providerKindCodex, providerKindCopilot, providerKindAgentKit, providerKindFoundry:
@@ -1675,11 +1458,6 @@ func providerOutputLimitFields(providerKind, requestPath string) (fields []strin
 	return nil, ""
 }
 
-// clampProviderOutputLimit enforces the immutable profile's model output
-// limit on Codex, Claude, and Copilot inference requests: an untrusted ACP
-// child holding a prompt-scoped proxy credential must not exceed the reviewed
-// token bound by inflating or omitting the output-limit field. OpenCode
-// requests are normalized separately with the same enforcement.
 func clampProviderOutputLimit(providerKind, requestPath string, modelOutputLimit int64, body []byte) ([]byte, error) {
 	if modelOutputLimit <= 0 {
 		return body, nil
@@ -1746,9 +1524,6 @@ func ensureProviderJSONEOF(decoder *json.Decoder) error {
 	return fmt.Errorf("decode provider request trailer: %w", err)
 }
 
-// providerRequestRoute classifies a provider request by path and method
-// alone, before the body is read, so proxy-side rejections of inference
-// requests can be accounted in issuance order.
 func providerRequestRoute(providerKind, requestPath, method string) (allowed, requiresModel bool, class providerRequestClass) {
 	class = providerRequestMetadata
 	switch providerKind {
@@ -1904,8 +1679,6 @@ func (p *providerProxy) close(ctx context.Context) error {
 	return closeErr
 }
 
-// setPromptTelemetry binds the GenAI recorder of the prompt that will own
-// this session's provider requests.
 func (s *providerProxySession) setPromptTelemetry(promptID string, telemetry *promptGenAI) {
 	if s == nil {
 		return
@@ -1917,8 +1690,6 @@ func (s *providerProxySession) setPromptTelemetry(promptID string, telemetry *pr
 	s.chats = nil
 }
 
-// startChat opens a chat observation for one admitted inference request of
-// promptID, or returns nil when GenAI telemetry is disabled.
 func (s *providerProxySession) startChat(promptID string, seq uint64, now time.Time) *promptGenAIChat {
 	if s == nil || seq == 0 {
 		return nil
@@ -1936,8 +1707,6 @@ func (s *providerProxySession) startChat(promptID string, seq uint64, now time.T
 	return chat
 }
 
-// finishChat records the chat span with the outcome accounted for its
-// sequence, if any.
 func (s *providerProxySession) finishChat(seq uint64, chat *promptGenAIChat, cancelled bool) {
 	if s == nil || chat == nil {
 		return

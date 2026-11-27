@@ -42,11 +42,8 @@ type UpdateRepositoryScanRequest struct {
 }
 
 type UpdateThreatModelRequest struct {
-	Content string `json:"content"`
-	Source  string `json:"source,omitempty"`
-	// ExpectedVersion is the threat model version the edit was based on, 0
-	// when it was loaded with no model; the save is rejected if the stored
-	// model changed since. Omitted, the edit replaces whatever is stored.
+	Content         string `json:"content"`
+	Source          string `json:"source,omitempty"`
 	ExpectedVersion *int64 `json:"expectedVersion,omitempty"`
 }
 
@@ -77,8 +74,6 @@ func (h *Handlers) normalizeRepositoryScanSpec(spec *corev1alpha1.RepositoryScan
 	}
 }
 
-// validateRepositoryScanSpecValues rejects settings the controller cannot run.
-// The CRD schema leaves some of these limits unbounded.
 func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) error {
 	for _, limit := range []struct {
 		path  string
@@ -100,9 +95,6 @@ func validateRepositoryScanSpecValues(spec corev1alpha1.RepositoryScanSpec) erro
 	return nil
 }
 
-// validateRepositoryScanAgentRuntimes rejects analysis and patch agents in the
-// scan namespace that have no runtime, because every scan Task they run is a
-// type: agent Task. A missing Agent stays allowed so it can be created later.
 func (h *Handlers) validateRepositoryScanAgentRuntimes(ctx context.Context, namespace string, spec corev1alpha1.RepositoryScanSpec) error {
 	refs := []struct {
 		field string
@@ -344,7 +336,6 @@ func (h *Handlers) createSecurityScanRun(ctx context.Context, ui *UserInfo, scan
 	if err := h.ensureSecurityStore(); err != nil {
 		return nil, err
 	}
-	// Resolve the baseline without changing admission state before authorization.
 	staleStatus := false
 	if scan.Status.LastScanID != "" {
 		bound, err := h.securityStore.GetScanRun(ctx, scan.Namespace, scan.Status.LastScanID)
@@ -666,7 +657,6 @@ func (h *Handlers) createSecurityPatchTask(ctx context.Context, ui *UserInfo, sc
 	return proposal, nil
 }
 
-// ListRepositoryScans lists configured repository scans.
 func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -717,7 +707,6 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 		return err
 	}
 	if filteredList {
-		// The raw count describes scans the caller is not allowed to see.
 		remainingItemCount = nil
 	}
 
@@ -730,7 +719,6 @@ func (h *Handlers) ListRepositoryScans(c fiber.Ctx) error {
 	})
 }
 
-// GetRepositoryScan returns a repository scan configuration.
 func (h *Handlers) GetRepositoryScan(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -749,7 +737,6 @@ func (h *Handlers) GetRepositoryScan(c fiber.Ctx) error {
 	return c.JSON(scan)
 }
 
-// CreateRepositoryScan creates a new repository scan configuration.
 func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	var req CreateRepositoryScanRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -833,7 +820,6 @@ func (h *Handlers) CreateRepositoryScan(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(scan)
 }
 
-// UpdateRepositoryScan updates an existing repository scan.
 func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	var req UpdateRepositoryScanRequest
 	if err := c.Bind().JSON(&req); err != nil {
@@ -912,7 +898,6 @@ func (h *Handlers) UpdateRepositoryScan(c fiber.Ctx) error {
 	return c.JSON(updated)
 }
 
-// DeleteRepositoryScan deletes a repository scan configuration.
 func (h *Handlers) DeleteRepositoryScan(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -934,7 +919,6 @@ func (h *Handlers) DeleteRepositoryScan(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// GetThreatModel returns the current threat model for a repository.
 func (h *Handlers) GetThreatModel(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -963,7 +947,6 @@ func (h *Handlers) GetThreatModel(c fiber.Ctx) error {
 	return c.JSON(model)
 }
 
-// UpdateThreatModel replaces the current threat model.
 func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1004,8 +987,6 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	if model.Source == "" {
 		model.Source = "edited"
 	}
-	// Without an expected version, the edit replaces whatever is stored, which
-	// keeps older clients working. Version 0 requires that no model exists yet.
 	if req.ExpectedVersion != nil {
 		err = h.securityStore.SaveThreatModelIfVersion(c.Context(), model, *req.ExpectedVersion)
 	} else {
@@ -1020,7 +1001,6 @@ func (h *Handlers) UpdateThreatModel(c fiber.Ctx) error {
 	return c.JSON(model)
 }
 
-// ListSecurityScanRuns lists stored scan runs for a repository.
 func (h *Handlers) ListSecurityScanRuns(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1051,17 +1031,12 @@ func (h *Handlers) ListSecurityScanRuns(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: runs, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// SecurityScanProgressResponse reports a scan run's per-stage Task counts.
 type SecurityScanProgressResponse struct {
 	Scan     store.ScanRun            `json:"scan"`
 	Stages   []security.StageProgress `json:"stages"`
 	Complete bool                     `json:"complete"`
 }
 
-// GetSecurityScanProgress reports how far one scan run has come, stage by
-// stage. The server lists the run's Tasks by the orka.ai/security-scan-id
-// label under its own identity, so a caller with security read permission
-// can watch progress without permission to list every Task in the namespace.
 func (h *Handlers) GetSecurityScanProgress(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1101,9 +1076,6 @@ func (h *Handlers) GetSecurityScanProgress(c fiber.Ctx) error {
 	); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list scan tasks: %v", err))
 	}
-	// Labels are mutable, so only Tasks controlled by the RepositoryScan that
-	// admitted this run count; an unrelated Task carrying the same labels
-	// cannot add counts or names to another user's scan progress.
 	owned := make([]corev1alpha1.Task, 0, len(tasks.Items))
 	for i := range tasks.Items {
 		if security.ScanRunOwnsTask(run, scan, &tasks.Items[i]) {
@@ -1117,7 +1089,6 @@ func (h *Handlers) GetSecurityScanProgress(c fiber.Ctx) error {
 	})
 }
 
-// CreateManualSecurityScan creates and starts a manual scan task.
 func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
@@ -1132,6 +1103,12 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	}
 	if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, scan.Spec.AnalysisAgentRef); err != nil {
 		return err
+	}
+	if security.EffectiveValidationMode(scan) != "off" &&
+		scan.Spec.ValidationAgentRef != nil && strings.TrimSpace(scan.Spec.ValidationAgentRef.Name) != "" {
+		if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, securityValidationAgentRef(scan)); err != nil {
+			return err
+		}
 	}
 	if err := security.ValidateRepositoryScanSource(scan.Spec); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
@@ -1150,7 +1127,6 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(run)
 }
 
-// ListSecurityFindings lists findings for a repository.
 func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1205,7 +1181,6 @@ func (h *Handlers) ListSecurityFindings(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: findings, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// ListSecurityReviewSlices lists deterministic review slices for a repository.
 func (h *Handlers) ListSecurityReviewSlices(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1244,7 +1219,6 @@ func (h *Handlers) ListSecurityReviewSlices(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: slices, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// GetSecurityReviewSlice returns one deterministic review slice.
 func (h *Handlers) GetSecurityReviewSlice(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1273,7 +1247,6 @@ func (h *Handlers) GetSecurityReviewSlice(c fiber.Ctx) error {
 	return c.JSON(slice)
 }
 
-// ListSecurityDroppedFindings lists diagnostics for v2 findings rejected during ingestion.
 func (h *Handlers) ListSecurityDroppedFindings(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1322,7 +1295,6 @@ func (h *Handlers) ListSecurityDroppedFindings(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{apiFieldItems: dropped, apiFieldMetadata: fiber.Map{commandIntentContinue: next}})
 }
 
-// GetSecurityFinding returns a finding by ID.
 func (h *Handlers) GetSecurityFinding(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1356,7 +1328,6 @@ func (h *Handlers) GetSecurityFinding(c fiber.Ctx) error {
 	return c.JSON(finding)
 }
 
-// DismissSecurityFinding marks a finding as dismissed.
 func (h *Handlers) DismissSecurityFinding(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1395,7 +1366,6 @@ func (h *Handlers) DismissSecurityFinding(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// ReopenSecurityFinding reopens a dismissed finding.
 func (h *Handlers) ReopenSecurityFinding(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1434,7 +1404,6 @@ func (h *Handlers) ReopenSecurityFinding(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
-// ValidateSecurityFinding creates a validator/repro task for a finding.
 func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1471,7 +1440,6 @@ func (h *Handlers) ValidateSecurityFinding(c fiber.Ctx) error {
 	return c.SendStatus(fiber.StatusAccepted)
 }
 
-// GenerateSecurityPatch creates a patch proposal task for a finding.
 func (h *Handlers) GenerateSecurityPatch(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1515,7 +1483,6 @@ func (h *Handlers) GenerateSecurityPatch(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(proposal)
 }
 
-// ListSecurityPatchProposals lists patch proposals for a finding.
 func (h *Handlers) ListSecurityPatchProposals(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err
@@ -1640,7 +1607,6 @@ func (h *Handlers) canonicalSecurityFinding(ctx context.Context, namespace strin
 	return finding, nil
 }
 
-// CreateSecurityPullRequest returns the pull request reconciled by the governed patch Task.
 func (h *Handlers) CreateSecurityPullRequest(c fiber.Ctx) error {
 	if err := h.ensureSecurityStore(); err != nil {
 		return err

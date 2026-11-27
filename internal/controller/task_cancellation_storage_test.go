@@ -65,8 +65,6 @@ func TestRequestedCancellationStopsJobWhenSharedStateWritesAreRefused(t *testing
 			}
 			shared, err := storageclient.New(storageclient.Options{State: backend, Artifacts: backend, Embedded: backend, Fences: fences})
 			require.NoError(t, err)
-			// Production supplies one application client for usage and results.
-			// Closing its state fence refuses the early RegisterUsageTask write.
 			r.ResultStore, r.ExecutionEventStore = shared, shared
 			r.MessageStore, r.PlanStore = shared, shared
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)}
@@ -142,8 +140,6 @@ func TestRequestedCancellationStopsJobDuringStorageOutage(t *testing.T) {
 			require.NoError(t, r.Get(t.Context(), request.NamespacedName, current))
 			require.Equal(t, corev1alpha1.TaskPhaseRunning, current.Status.Phase)
 			require.Nil(t, current.Status.CompletionTime)
-			// Storage recovery must still collect the worker's result and finish
-			// cancellation; stopping the Job must not mark finalization done.
 			r.ResultStore = originalStore
 			require.NoError(t, originalStore.SaveResult(t.Context(), task.Namespace, task.Name, []byte("retained result")))
 			_, err = r.Reconcile(t.Context(), request)
@@ -179,9 +175,6 @@ func TestCancellationCollectsResultBeforeJobCleanup(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(job), &batchv1.Job{})))
 }
 
-// TestCancellationStopsTheParentBeforeItsChildren covers a cancelled native
-// Task with delegated work: it is marked Cancelled, which stops its run,
-// before any child is asked to cancel, so a large tree never delays it.
 func TestCancellationStopsTheParentBeforeItsChildren(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -241,9 +234,6 @@ func TestCancellationStopsTheParentBeforeItsChildren(t *testing.T) {
 	require.Contains(t, order, "child cancelled")
 }
 
-// TestCancelledParentsJobStopsBeforeItsChildren covers a native Task already
-// Cancelled whose Job still runs: the Job is deleted before any child is
-// asked to cancel, so a large tree never keeps the parent's container going.
 func TestCancelledParentsJobStopsBeforeItsChildren(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -294,9 +284,6 @@ func TestCancelledParentsJobStopsBeforeItsChildren(t *testing.T) {
 	require.Equal(t, []string{"job deleted", "child cancelled"}, order)
 }
 
-// TestCancelRequestStopsTheJobBeforeItsChildren covers the reconcile that
-// applies a cancel request to a running native Task: its Job is deleted in
-// that reconcile, before any child is asked to cancel, not on a later one.
 func TestCancelRequestStopsTheJobBeforeItsChildren(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{

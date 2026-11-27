@@ -362,9 +362,10 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 	repoURL := securityTestRepoURL
 
 	tests := []struct {
-		name    string
-		scanRef string
-		tctx    map[string]any
+		name               string
+		scanRef            string
+		validationAgentRef *corev1alpha1.AgentReference
+		tctx               map[string]any
 	}{
 		{
 			name: "mismatched repo denied",
@@ -414,6 +415,16 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 				"agent":     "demo/other",
 			},
 		},
+		{
+			name:               "analysis-only token denies distinct validation agent",
+			validationAgentRef: &corev1alpha1.AgentReference{Name: "validator"},
+			tctx: map[string]any{
+				"namespace": "demo",
+				"repo":      repoURL,
+				"branch":    "main",
+				"agent":     "demo/analysis",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -424,10 +435,11 @@ func TestCreateManualSecurityScan_ContextTokenTransactionContextAuthorizationDen
 					Namespace: "demo",
 				},
 				Spec: corev1alpha1.RepositoryScanSpec{
-					RepoURL:          repoURL,
-					Branch:           "main",
-					Ref:              tt.scanRef,
-					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
+					RepoURL:            repoURL,
+					Branch:             "main",
+					Ref:                tt.scanRef,
+					AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "analysis"},
+					ValidationAgentRef: tt.validationAgentRef,
 				},
 			}
 			app, handlers := setupSecurityHandlersWithAuthzFixture(t, ctxTokenConfig, ContextTokenAuthorizationModeEnforce, scan)
@@ -980,7 +992,6 @@ func TestRepositoryScanMutationsRejectUnclonableRepositoryURL(t *testing.T) {
 			err = handlers.client.Get(ctx, client.ObjectKey{Namespace: "demo", Name: "new-scan"}, &corev1alpha1.RepositoryScan{})
 			require.True(t, apierrors.IsNotFound(err), "an invalid repository must not create a RepositoryScan")
 
-			// Scans admitted before validation can neither be saved nor run.
 			body, err = json.Marshal(UpdateRepositoryScanRequest{
 				Spec: corev1alpha1.RepositoryScanSpec{RepoURL: tt.repoURL, Branch: "dev", AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"}},
 			})
@@ -1314,8 +1325,6 @@ func TestThreatModelExpectedVersionRejectsLostUpdate(t *testing.T) {
 
 	version := func(v int64) *int64 { return &v }
 
-	// Two editors load the repository before any model exists; the first
-	// save creates version 1 and the second must not overwrite it.
 	status, _ := put(t, UpdateThreatModelRequest{Content: "Generated model.", ExpectedVersion: version(0)})
 	require.Equal(t, http.StatusOK, status)
 	requireStored(t, "Generated model.", 1)
@@ -1324,7 +1333,6 @@ func TestThreatModelExpectedVersionRejectsLostUpdate(t *testing.T) {
 	require.Contains(t, message, "threat model changed since it was loaded")
 	requireStored(t, "Generated model.", 1)
 
-	// Two editors load version 1; the first save wins and the second conflicts.
 	status, _ = put(t, UpdateThreatModelRequest{Content: "First editor.", ExpectedVersion: version(1)})
 	require.Equal(t, http.StatusOK, status)
 	requireStored(t, "First editor.", 2)
@@ -1337,7 +1345,6 @@ func TestThreatModelExpectedVersionRejectsLostUpdate(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status)
 	requireStored(t, "First editor.", 2)
 
-	// Clients that send no expected version keep last-write-wins behavior.
 	status, _ = put(t, UpdateThreatModelRequest{Content: "Legacy client."})
 	require.Equal(t, http.StatusOK, status)
 	requireStored(t, "Legacy client.", 3)
@@ -1763,8 +1770,6 @@ func TestSecurityFindingMutationsResolveCanonicalAlias(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, resp.StatusCode)
 		require.NoError(t, handlers.client.List(context.Background(), &tasks, client.InNamespace("demo")))
 		require.Len(t, tasks.Items, 2)
-		// Task names include a timestamp. Check their canonical scan scope
-		// without generating new names against a later wall-clock second.
 		scanRuns := make([]string, 0, len(tasks.Items))
 		for i := range tasks.Items {
 			task := &tasks.Items[i]

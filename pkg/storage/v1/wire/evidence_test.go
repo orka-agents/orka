@@ -20,12 +20,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
 )
 
-// These tests check grpc-go's behavior that send evidence depends on, with
-// faults injected below the gRPC layer. They use plaintext TCP because the
-// faults are written as raw HTTP/2.
-
-// A refused dial never creates a stream, so even a write is safely
-// unavailable.
 func TestSendEvidenceRefusedDialIsNotSent(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -37,14 +31,11 @@ func TestSendEvidenceRefusedDialIsNotSent(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrUnavailable)
 	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "nothing was sent: %v", err)
 
-	// A streaming write carries the same evidence.
 	err = client.SaveResult(t.Context(), "n", "t", []byte("result"))
 	require.ErrorIs(t, err, storagev1.ErrUnavailable)
 	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "nothing was sent: %v", err)
 }
 
-// A write that fails before grpc-go starts any attempt sent nothing, on a
-// connection built with Dial.
 func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 	t.Run("closed connection", func(t *testing.T) {
 		conn := dialInsecure(t, "127.0.0.1:1")
@@ -54,9 +45,6 @@ func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 		require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown), "nothing was sent: %v", err)
 	})
 	t.Run("deadline while waiting for name resolution", func(t *testing.T) {
-		// The manual resolver never reports an address, so the call waits for
-		// resolution until its deadline. Dial takes no resolver option, so the
-		// test registers the scheme globally.
 		resolver.Register(manual.NewBuilderWithScheme("wire-evidence-never"))
 		conn, err := wire.Dial("wire-evidence-never:///storage", wire.DialConfig{TransportCredentials: insecure.NewCredentials()})
 		require.NoError(t, err)
@@ -87,8 +75,6 @@ func TestSendEvidenceFailuresBeforeAnyAttemptAreNotSent(t *testing.T) {
 	})
 }
 
-// slowFirstDial delays the first connection, so a call can start an attempt
-// and fail on its deadline before any stream exists.
 type slowFirstDial struct {
 	once  sync.Once
 	delay time.Duration
@@ -99,9 +85,6 @@ func (d *slowFirstDial) dial(ctx context.Context, address string) (net.Conn, err
 	return (&net.Dialer{}).DialContext(ctx, "tcp", address)
 }
 
-// firstThenDetached is a caller interceptor that first tries the call on its
-// own context with a short deadline, which fails before a stream exists, and
-// then sends it again on a fresh context that carries only its metadata.
 func firstThenDetached(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn,
 	invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
@@ -113,10 +96,6 @@ func firstThenDetached(ctx context.Context, method string, req, reply any, cc *g
 	return invoker(metadata.NewOutgoingContext(context.Background(), header), method, req, reply, cc, opts...)
 }
 
-// A caller interceptor can retry a call where its send evidence cannot see
-// it. On a connection that admits caller interceptors, a write that reached
-// the provider must stay an unknown outcome, even when the evidence it can
-// see shows only an attempt that sent nothing.
 func TestSendEvidenceIsConservativeWithCallerInterceptors(t *testing.T) {
 	for _, wrapped := range []bool{false, true} {
 		name := "interceptor on a DialOptions connection"
@@ -129,8 +108,6 @@ func TestSendEvidenceIsConservativeWithCallerInterceptors(t *testing.T) {
 	}
 }
 
-// retryingConn wraps a connection and retries each call the way
-// firstThenDetached does, outside the connection's own interceptors.
 type retryingConn struct {
 	inner *grpc.ClientConn
 }
@@ -195,7 +172,6 @@ func testRetriedWriteStaysUnknown(t *testing.T, wrapped bool) {
 	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
 }
 
-// trackingListener remembers accepted connections so a test can reset them.
 type trackingListener struct {
 	net.Listener
 	mu    sync.Mutex
@@ -223,9 +199,6 @@ func (l *trackingListener) resetAll() {
 	}
 }
 
-// A connection reset after the server received a write's headers may follow
-// a commit, so the write's outcome is unknown; the same failure on a read is
-// safe to repeat.
 func TestSendEvidenceResetAfterTheServerReceivedTheCall(t *testing.T) {
 	for _, call := range []struct {
 		method  string
@@ -273,10 +246,6 @@ func TestSendEvidenceResetAfterTheServerReceivedTheCall(t *testing.T) {
 	}
 }
 
-// goAwayListener answers its first connection with a raw HTTP/2 server that
-// sends GOAWAY (last stream 0) as soon as the call's headers arrive, so the
-// server never processes the stream. Later connections go to the real
-// server.
 type goAwayListener struct {
 	net.Listener
 	once       sync.Once
@@ -304,7 +273,6 @@ func (l *goAwayListener) goAwayOnFirstStream(conn net.Conn) {
 	if _, err := io.ReadFull(conn, preface); err != nil {
 		return
 	}
-	// An empty SETTINGS frame is the server preface.
 	if _, err := conn.Write([]byte{0, 0, 0, 0x4, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
@@ -319,12 +287,9 @@ func (l *goAwayListener) goAwayOnFirstStream(conn net.Conn) {
 		}
 		switch frameType, flags := header[3], header[4]; {
 		case frameType == 0x4 && flags&0x1 == 0:
-			_, _ = conn.Write([]byte{0, 0, 0, 0x4, 0x1, 0, 0, 0, 0}) // SETTINGS ACK
+			_, _ = conn.Write([]byte{0, 0, 0, 0x4, 0x1, 0, 0, 0, 0})
 		case frameType == 0x1:
-			// Signal before the GOAWAY goes out: once the client reads it,
-			// the retried call can return before this goroutine runs again.
 			close(l.sawHeaders)
-			// GOAWAY: last processed stream 0, NO_ERROR.
 			_, _ = conn.Write([]byte{0, 0, 8, 0x7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
 			_, _ = io.Copy(io.Discard, conn)
 			return
@@ -332,9 +297,6 @@ func (l *goAwayListener) goAwayOnFirstStream(conn net.Conn) {
 	}
 }
 
-// A GOAWAY that excludes a stream means the server never processed it, so
-// grpc-go retries it transparently on a new connection, below send evidence
-// and without storage configuring any retry policy.
 func TestSendEvidenceGoAwayBeforeProcessingIsRetriedTransparently(t *testing.T) {
 	provider := newRecordingProvider()
 	server, err := wire.NewServer(wire.ServerConfig{State: provider})

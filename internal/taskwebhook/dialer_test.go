@@ -36,8 +36,6 @@ func staticResolver(addresses ...string) resolverFunc {
 	}
 }
 
-// loopbackOnly stands in for "public" so tests can reach httptest servers
-// while every other address stays forbidden.
 func loopbackOnly(address netip.Addr) bool { return address == netip.MustParseAddr("127.0.0.1") }
 
 func serverPort(t *testing.T, server *httptest.Server) string {
@@ -95,8 +93,6 @@ func TestDialerTimeoutBoundsResolution(t *testing.T) {
 			return nil, ctx.Err()
 		}),
 	}
-	// net/http detaches dials from request cancellation, so the dial must
-	// bound a stalled lookup itself rather than rely on the caller's context.
 	done := make(chan error, 1)
 	go func() {
 		_, err := dialer.DialContext(context.Background(), "tcp", "hook.example.com:443")
@@ -157,9 +153,6 @@ func TestDialerRejectsNonTCPNetworks(t *testing.T) {
 	}
 }
 
-// TestHTTPClientRechecksEveryConnectionAgainstRebinding resolves the same
-// name to an allowed address and then to a forbidden one. The check runs per
-// connection, so the rebound answer is refused rather than reused.
 func TestHTTPClientRechecksEveryConnectionAgainstRebinding(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int32
@@ -218,8 +211,6 @@ func TestHTTPClientNeverFollowsRedirects(t *testing.T) {
 	}
 }
 
-// TestHTTPClientIgnoresProxyEnvironment proves a proxy cannot dial on the
-// client's behalf and bypass the address policy.
 func TestHTTPClientIgnoresProxyEnvironment(t *testing.T) {
 	var proxyHits atomic.Int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -270,12 +261,9 @@ func TestPinnedAddressesBypassDNSAndAllowOnlyPinnedTargets(t *testing.T) {
 	}
 }
 
-// Unreachable candidates listed before a reachable one must not each consume
-// a full connect timeout: one deadline covers the whole connect.
 func TestDialerSharesOneDeadlineAcrossCandidates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	t.Cleanup(server.Close)
-	// TEST-NET addresses are never routed, so connects to them stall or fail.
 	unreachable := []string{"192.0.2.1", "198.51.100.1", "203.0.113.1"}
 	allowed := func(address netip.Addr) bool {
 		return address == netip.MustParseAddr("127.0.0.1") || slices.Contains(unreachable, address.String())

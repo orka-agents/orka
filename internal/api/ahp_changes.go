@@ -18,25 +18,16 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ahpChanges keeps one session's changeset: a file record per changed file,
-// with the contents its before and after sides name, and the actions that
-// show them.
 type ahpChanges struct {
 	b         *ahpBackend
 	ctx       context.Context
 	principal ahphost.Principal
 	session   ahpSession
 	emit      ahphost.Emitter
-	// released holds the contents files stopped naming during a change.
-	released map[string]bool
-	// unshown holds the files whose change could not be shown.
-	unshown map[string]bool
+	released  map[string]bool
+	unshown   map[string]bool
 }
 
-// change makes a batch of changes, then deletes the stored contents the batch
-// left no file naming. The session's files share contents, so batches take
-// turns: one cannot delete a content another is about to name. Contents an
-// earlier change could not delete are tried again.
 func (c *ahpChanges) change(fn func()) {
 	unlock := c.b.lockChanges(c.principal.UserKey)
 	defer unlock()
@@ -69,12 +60,9 @@ func (c *ahpChanges) change(fn func()) {
 	}
 }
 
-// showAgain shows files an earlier change could not, as they are stored now:
-// clients read the changeset from what was shown, not from the records.
 func (c *ahpChanges) showAgain(paths map[string]bool) {
 	for full := range paths {
 		if c.unshown[full] {
-			// This change already tried, and failed, to show it.
 			continue
 		}
 		var file ahpFileContent
@@ -97,7 +85,6 @@ func (c *ahpChanges) markUnshown(full string) {
 	c.unshown[full] = true
 }
 
-// release notes contents a file may no longer name.
 func (c *ahpChanges) release(nonces ...string) {
 	for _, nonce := range nonces {
 		if nonce == "" {
@@ -110,9 +97,6 @@ func (c *ahpChanges) release(nonces ...string) {
 	}
 }
 
-// dropReleased deletes the released contents no file of the session names.
-// Contents it could not decide about or delete, when the files cannot be
-// listed or a delete fails, stay released for the next change to retry.
 func (c *ahpChanges) dropReleased() {
 	if len(c.released) == 0 {
 		return
@@ -141,7 +125,6 @@ func (c *ahpChanges) contentURI(nonce string) string {
 	return ahpContentScheme + c.hash()[:24] + "/" + nonce
 }
 
-// putContent stores a side's content and returns its nonce.
 func (c *ahpChanges) putContent(text string) (string, bool) {
 	nonce := "sha256:" + ahpHash(text)
 	err := c.b.store.PutAHPRecord(c.ctx, store.AHPRecord{
@@ -160,9 +143,6 @@ func (c *ahpChanges) text(nonce string) string {
 	return ""
 }
 
-// setFile records a changed file and shows it. A nil before is a new file
-// and a nil after a deleted one. keepBefore keeps the before side a file
-// already has, as reported edits accumulate on the first version.
 func (c *ahpChanges) setFile(full string, before, after *string, keepBefore bool) {
 	var file ahpFileContent
 	key := c.hash() + "/" + full
@@ -171,8 +151,6 @@ func (c *ahpChanges) setFile(full string, before, after *string, keepBefore bool
 		return
 	}
 	known := err == nil
-	// Whatever this leaves unnamed, including a content stored for a write
-	// that then fails, goes when the change ends.
 	previous := file
 	defer func() { c.release(previous.Before, previous.After, file.Before, file.After) }()
 	if !known || !keepBefore {
@@ -193,8 +171,6 @@ func (c *ahpChanges) setFile(full string, before, after *string, keepBefore bool
 		}
 		file.After = nonce
 	}
-	// A file edited back to how it began, or created and deleted again, no
-	// longer differs: nothing else would take it off the changeset.
 	if file.Before == file.After {
 		c.removeFile(full)
 		return
@@ -205,7 +181,6 @@ func (c *ahpChanges) setFile(full string, before, after *string, keepBefore bool
 	c.emitFile(file)
 }
 
-// removeFile drops a file that no longer differs.
 func (c *ahpChanges) removeFile(full string) {
 	if c.b.store.DeleteAHPRecord(c.ctx, c.principal.UserKey, ahpRecordFile, c.hash()+"/"+full) != nil {
 		return
@@ -241,7 +216,6 @@ func (c *ahpChanges) emitFile(file ahpFileContent) {
 	}
 }
 
-// files returns the session's changed files by path.
 func (c *ahpChanges) files() map[string]ahpFileContent {
 	files, _ := c.listFiles()
 	return files
@@ -265,7 +239,6 @@ func (c *ahpChanges) listFiles() (map[string]ahpFileContent, error) {
 	return files, nil
 }
 
-// emitCounts updates the chat's change counts from every changed file.
 func (c *ahpChanges) emitCounts() {
 	var additions, deletions, count int64
 	for _, file := range c.files() {
@@ -278,12 +251,10 @@ func (c *ahpChanges) emitCounts() {
 	}})
 }
 
-// ahpGitChange is one file's sides in a branch's diff; nil is absent.
 type ahpGitChange struct {
 	Before, After *string
 }
 
-// sync makes the changeset exactly the given files.
 func (c *ahpChanges) sync(changed map[string]ahpGitChange) {
 	c.change(func() {
 		for full, file := range c.files() {

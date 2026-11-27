@@ -215,20 +215,14 @@ export ACP_E2E_MODEL_BACKEND="${LIVE_ACP_MODEL_BACKEND}"
 
 validator_args=(--context "${LIVE_ACP_CONTEXT}")
 if [[ -z "${namespace}" ]]; then
-  # The isolated harness-v2 controller only serves Tasks in its watch
-  # namespace, so the validator runs there in shared watch-namespace mode.
   namespace="orka-system"
 fi
 validator_args+=(--namespace "${namespace}")
-# This wrapper owns a dedicated Kind cluster, so the shared controller watch
-# namespace cannot contain unrelated RuntimePool consumers.
 export ACP_E2E_ALLOW_SHARED_POOL_MUTATION="${ACP_E2E_ALLOW_SHARED_POOL_MUTATION:-1}"
 if [[ "${LIVE_ACP_MODEL_BACKEND}" == "aimock" ]]; then
   live_acp_kind_log "Running agent runtime validator against scripted aimock models"
 else
   live_acp_kind_log "Running agent runtime validator against real model providers"
 fi
-# Persist this before launching the child. If it is killed, an absent Task
-# receipt alone cannot establish that publication never started.
 acp_report_update '.validatorStarted = true'
 "${LIVE_ACP_VALIDATOR_SCRIPT}" "${validator_args[@]}"

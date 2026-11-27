@@ -27,8 +27,6 @@ func TestExternalWorkspaceClassRejectsReservedLegacyControllerRoute(t *testing.T
 			if err := r.Update(ctx, provider); err != nil {
 				t.Fatal(err)
 			}
-			// Re-pin the fixture's hash to its complete current inputs so the
-			// only admission difference is the reserved routing identity.
 			profile := &unstructured.Unstructured{}
 			profile.SetGroupVersionKind(config.GroupVersionKind().GroupVersion().WithKind("WorkspaceProfile"))
 			if err := r.Get(ctx, client.ObjectKey{Namespace: class.Namespace, Name: class.Spec.ParametersRef.Name}, profile); err != nil {
@@ -68,9 +66,6 @@ func TestExternalWorkspaceClassRejectsReservedLegacyControllerRoute(t *testing.T
 	}
 }
 
-// A generic provider without the lifecycle contract must not claim the legacy
-// ACP routing identity either: Core treats workspaces and checkpoints carrying
-// it as legacy-owned and skips their generic routing.
 func TestGenericWorkspaceProviderRejectsReservedLegacyControllerRoute(t *testing.T) {
 	for _, controllerName := range []string{acpWorkspaceControllerLabelValue, acpWorkspaceProviderControllerName, "generic." + acpWorkspaceControllerLabelValue} {
 		t.Run(controllerName, func(t *testing.T) {

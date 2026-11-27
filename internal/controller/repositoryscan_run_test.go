@@ -24,8 +24,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Existing controller fixtures predate owner checks. Give their declared scan
-// Tasks the same controller reference that production task creation installs.
 func repositoryScanTestObjects(scan *corev1alpha1.RepositoryScan, objects ...client.Object) []client.Object {
 	for _, object := range objects {
 		if task, ok := object.(*corev1alpha1.Task); ok && metav1.GetControllerOf(task) == nil &&
@@ -112,8 +110,6 @@ func TestRepositoryScanReconcileRetiresStaleIdentityBeforeIngestion(t *testing.T
 			require.Empty(t, current.Status.LastScanID)
 			require.Equal(t, repositoryScanPhasePending, current.Status.Phase)
 
-			// An unscheduled scan starts a replacement instead of remaining stuck
-			// in Scanning, and late output from the old run stays unconsumed.
 			_, err = r.Reconcile(ctx, request)
 			require.NoError(t, err)
 			_, err = r.Reconcile(ctx, request)
@@ -281,8 +277,6 @@ func TestRepositoryScanReconcileDoesNotRetireNewerRunFromStaleCache(t *testing.T
 			r := &RepositoryScanReconciler{Client: cached, APIReader: live, Scheme: live.Scheme(), SecurityStore: db}
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(current)})
 			require.ErrorIs(t, err, store.ErrConflict)
-			// Identity may change after finalizer admission and before cleanup
-			// collects the replacement object's newly admitted run.
 			_, err = security.RetireStaleScanRuns(ctx, db, cached, live, stale)
 			require.ErrorIs(t, err, store.ErrConflict)
 			after, err := db.GetScanRun(ctx, run.Namespace, run.ID)
@@ -365,7 +359,6 @@ func TestRepositoryScanReconcileFailedRunsAdvanceSchedule(t *testing.T) {
 					RepoURL: "https://github.com/example/repo", Schedule: "@every 1h",
 					AnalysisAgentRef: corev1alpha1.AgentReference{Name: "analysis"},
 				},
-				// No scan has ever succeeded, so LastSuccessfulScanAt stays unset.
 				Status: corev1alpha1.RepositoryScanStatus{Phase: repositoryScanPhaseError, LastScanID: "scan_failed"},
 			}
 			if tt.publishedCompletion {
@@ -1022,8 +1015,6 @@ func TestRepositoryScanCancellationConfirmsLateTasksAfterCreatorCrash(t *testing
 	require.NoError(t, base.Update(ctx, current))
 	_, err := security.RetireStaleScanRuns(ctx, db, base, base, current)
 	require.ErrorIs(t, err, security.ErrScanRunCancellationPending)
-	// The creator's preflight succeeded, but its Create response is lost and it
-	// never reaches post-create validation. No in-memory compensation can run.
 	late := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "late-mapper", Namespace: scan.Namespace, UID: "task-uid", Finalizers: []string{"test.orka.ai/hold-cleanup"},
@@ -1094,8 +1085,6 @@ func TestRepositoryScanCancellationRediscoversLateTasksAfterReplacement(t *testi
 	require.NoError(t, db.CreateScanRun(ctx, replacement))
 	current.Status.LastScanID = replacement.ID
 	require.NoError(t, base.Status().Update(ctx, current))
-	// Create succeeds only after cleanup completed and a replacement became
-	// newest. The creator crashes without reaching post-create validation.
 	late := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "late-mapper", Namespace: scan.Namespace, UID: "late-uid", Finalizers: []string{"test.orka.ai/hold-cleanup"},
@@ -1177,8 +1166,6 @@ func TestCreateScanRunBlocksCancellationObservedDuringTaskLookup(t *testing.T) {
 	reader := interceptor.NewClient(base, interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if _, ok := list.(*corev1alpha1.TaskList); ok && !requested {
-				// Another cleanup caller records intent after the pending-run
-				// snapshot, then stops before it can request Task deletion.
 				requested = true
 				if err := db.RequestScanRunCancellation(ctx, old, "concurrent late Task cleanup"); err != nil {
 					return err

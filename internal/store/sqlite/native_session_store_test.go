@@ -15,9 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// nativeStore is a SQLite store with the storage client that seals its
-// native session state. Native session reads and writes go through the
-// client, as in production; every other method is the store's own.
 type nativeStore struct {
 	*Store
 	client *storageclient.Client
@@ -52,8 +49,6 @@ func nativeTestStore(t *testing.T, path string) nativeStore {
 	return nativeStore{Store: s, client: activateTestKey(t, s)}
 }
 
-// appendCanonicalNativeTestMessages sets up a canonical transcript boundary
-// directly inside a test transaction, without authorizing a legacy append.
 func appendCanonicalNativeTestMessages(t *testing.T, s *Store, namespace, name string, messages []store.SessionMessage) {
 	t.Helper()
 	tx, err := s.db.BeginTx(t.Context(), nil)
@@ -182,7 +177,6 @@ func TestNativeSessionRejectsChatTurnWithoutChangingCheckpoint(t *testing.T) {
 			require.Empty(t, session.ActiveTaskUID)
 			require.Zero(t, session.MessageCount)
 			require.Empty(t, session.Messages)
-			// Native Tasks use the ACP mutation lease, never a legacy Task lock.
 			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid", time.Now().UTC()), store.ErrValidation)
 			require.NoError(t, s.ReleaseLock(t.Context(), request.Namespace, request.SessionName, "agent-task", "agent-task-uid"))
 		})
@@ -214,7 +208,7 @@ func TestNativeSessionCaptureMonotonicBoundary(t *testing.T) {
 	second.RuntimeSessionGeneration = 2
 	second.SourceOperationID = "capture-two"
 	require.NoError(t, s.SaveNativeSession(ctx, second))
-	require.NoError(t, s.SaveNativeSession(ctx, first)) // Its existing receipt converges without overwriting newer state.
+	require.NoError(t, s.SaveNativeSession(ctx, first))
 	got, err := s.GetNativeSession(ctx, "tenant", "captured", "canonical-uid")
 	require.NoError(t, err)
 	require.Equal(t, int64(2), got.RuntimeSessionGeneration)
@@ -385,9 +379,6 @@ func TestNativeSessionAtomicCanonicalFinalization(t *testing.T) {
 	}
 }
 
-// TestNativeSessionFinalizationAfterMessageWithoutID covers a transcript whose
-// last message was stored before messages carried IDs: the client seals
-// against a boundary with a count but no last ID, and the commit accepts it.
 func TestNativeSessionFinalizationAfterMessageWithoutID(t *testing.T) {
 	s := nativeTestStore(t, ":memory:")
 	ctx := t.Context()
@@ -493,7 +484,6 @@ func TestNativeSessionRejectsLegacyTaskMutation(t *testing.T) {
 			require.NoError(t, err)
 			require.ErrorIs(t, s.AppendMessages(t.Context(), request.Namespace, request.SessionName, []store.SessionMessage{{Role: "assistant", Content: "unowned legacy result"}}), store.ErrValidation)
 			require.ErrorIs(t, s.AcquireLock(t.Context(), request.Namespace, request.SessionName, "legacy-task", "legacy-uid", time.Now().UTC()), store.ErrValidation)
-			// A previously acquired or corrupt legacy lock must not authorize append.
 			_, err = s.db.ExecContext(t.Context(), `UPDATE sessions SET active_task='legacy-task',active_task_uid='legacy-uid' WHERE namespace=? AND name=?`, request.Namespace, request.SessionName)
 			require.NoError(t, err)
 			require.ErrorIs(t, s.AppendMessagesWithLock(t.Context(), store.SessionOwnerWrite{Namespace: request.Namespace, Name: request.SessionName, OwnerName: "legacy-task", OwnerUID: "legacy-uid", Now: time.Now().UTC()}, []store.SessionMessage{{Role: "assistant", Content: "legacy result"}}), store.ErrValidation)

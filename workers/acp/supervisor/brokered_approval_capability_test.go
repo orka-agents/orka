@@ -31,8 +31,6 @@ func TestSupervisorSessionRequiresBrokeredApprovalCapability(t *testing.T) {
 	}{
 		{"missing capability", false, false},
 		{"qualified brokered approval", true, false},
-		// A forwarding write tool's approval is waited for by the
-		// supervisor's client forwarder, so any runtime carries it.
 		{"forwarded write without the capability", false, true},
 	} {
 		supported := tc.supported
@@ -63,7 +61,6 @@ func TestSupervisorSessionRequiresBrokeredApprovalCapability(t *testing.T) {
 			cfg.Capabilities.SupportsAgentSessionConfiguration = false
 			cfg.Capabilities.Provider = providerCapabilities(providerKindAgentKit, profile.Model)
 			cfg.Capabilities.Provider.SupportsBrokeredToolApprovals = supported
-			// Native ACP permission support cannot substitute for the broker gate.
 			cfg.Capabilities.Provider.SupportsPermissions = !supported
 			cfg.Provider.Kind = providerKindAgentKit
 			cfg.Provider.ProjectSession = func(request harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, _ ProviderProxyBinding) (ProviderSessionProjection, error) {

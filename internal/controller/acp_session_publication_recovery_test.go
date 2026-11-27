@@ -127,7 +127,6 @@ func TestRecoveredPublicationSessionFinalizationUsesDurableDelivery(t *testing.T
 	baseline := harnessv2.WorkspaceBaseline{RepositoryIdentity: publication.SourceRepositoryID, Revision: publication.SourceBaselineSHA}
 	delta := harnessv2.WorkspaceDeltaDescriptor{Artifact: &harnessv2.ArtifactReference{Digest: publication.ArtifactDigest}}
 	wantDelivery := publicationTaskDeliveryStatus(task.Spec.Workspace, baseline, delta, publication, task.Spec.Workspace.PushBranch)
-	// Recovery writes the new Task status without refreshing this caller's copy.
 	if err := dispatcher.patchDeliveryStatus(ctx, task, wantDelivery); err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +162,6 @@ func TestRecoveredPublicationSessionFinalizationUsesDurableDelivery(t *testing.T
 	if _, err := taskterminal.ValidateFinalizedSessionProjection(projection.Payload, current, string(task.UID), attempt, finalized); err != nil {
 		t.Fatalf("recovered projection cannot pass Session reclamation: %v", err)
 	}
-	// A receipt produced by the controller's canonical publication ID must also
-	// authorize cleanup of the exact historical stale-delivery shape.
 	legacy := payload
 	legacy.Delivery = task.Status.Delivery.DeepCopy()
 	legacyPayload, err := json.Marshal(legacy)

@@ -52,7 +52,6 @@ func TestRemoteMCPControllerDoesNotHostOrProbe(t *testing.T) {
 		t.Fatalf("remote gained hosting state: %+v", tool)
 	}
 	assertRemoteMCPStatusStable(t, r, tool, statusWrites)
-	// Schemaless admission stays compatible; controller rejection must revoke acceptance.
 	tool.Spec.Parameters = nil
 	if err := c.Update(t.Context(), tool); err != nil {
 		t.Fatal(err)
@@ -122,7 +121,6 @@ func TestRemoteMCPControllerRejectsConnectionPolicy(t *testing.T) {
 	if err := r.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "egress"}, policy); err != nil {
 		t.Fatal(err)
 	}
-	// Even a malformed overlap must be rejected as non-gateway remote policy.
 	policy.Spec.Connection = &corev1alpha1.ConnectionOutboundAccess{}
 	if err := r.Update(t.Context(), policy); err != nil {
 		t.Fatal(err)
@@ -215,7 +213,6 @@ func TestRemoteMCPBackendTransitionClearsAccepted(t *testing.T) {
 				if got := meta.FindStatusCondition(tool.Status.Conditions, unrelated.Type); got == nil || !reflect.DeepEqual(*got, unrelated) {
 					t.Fatalf("unrelated condition changed: %+v", got)
 				}
-				// Actor ownership is recorded before the first health/status update.
 				if backend.name == "actor" {
 					reconcileAndGetRemoteMCPTool(t, r, tool)
 				}

@@ -13,12 +13,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// settledTestResult is the result the hold tests settle with.
 const settledTestResult = "the settled result"
 
-// settlingTaskWithReceipt moves the fixture's attempt to Settling through the
-// settling transition, which saves the result receipt first, and returns the
-// Task, the receipt and the attempt's settling digest.
 func settlingTaskWithReceipt(t *testing.T, fixture *recoveryFixture) (*corev1alpha1.Task, *store.PromptResultReceipt, string) {
 	t.Helper()
 	task := configureRecoveryJournalIdentity(t, fixture)
@@ -43,8 +39,6 @@ func settlingTaskWithReceipt(t *testing.T, fixture *recoveryFixture) (*corev1alp
 	return task, receipt, attempt.LastOperationDigest
 }
 
-// loseResultReceipt removes the attempt's result receipt and result, as a
-// store that lost acknowledged writes would.
 func loseResultReceipt(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) {
 	t.Helper()
 	if err := fixture.controlStore.DeleteResult(fixture.ctx, task.Namespace, task.Name); err != nil {
@@ -55,9 +49,6 @@ func loseResultReceipt(t *testing.T, fixture *recoveryFixture, task *corev1alpha
 	}
 }
 
-// requireTaskHeld checks that recovery held the Task: the attempt stays
-// Settling, the Task reports neither success nor an unknown outcome, and its
-// StorageRecoveryRequired condition names the hold.
 func requireTaskHeld(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task, hold taskStorageRecordHold) {
 	t.Helper()
 	err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx)
@@ -118,12 +109,6 @@ func requireTaskStorageCondition(t *testing.T, fixture *recoveryFixture, task *c
 	}
 }
 
-// A settling attempt whose result receipt the store lost holds the Task: the
-// prompt is not run again, the outcome is not guessed and success is not
-// reported, until the operator acknowledges the exact hold, after which the
-// outcome is recorded as unknown. Whitespace around the acknowledged ID, as a
-// value written from a file or a YAML block scalar carries, is ignored, as it
-// is for the ControllerEpoch's hold.
 func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -149,10 +134,10 @@ func testHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T, acknowledge 
 	}
 
 	requireTaskHeld(t, fixture, task, hold)
-	requireTaskHeld(t, fixture, task, hold) // Recovery runs again and stays held.
+	requireTaskHeld(t, fixture, task, hold)
 
 	acknowledgeTaskStorageHold(t, fixture, task, "record-0000000000000000")
-	requireTaskHeld(t, fixture, task, hold) // Another hold's ID releases nothing.
+	requireTaskHeld(t, fixture, task, hold)
 
 	acknowledgeTaskStorageHold(t, fixture, task, acknowledge(hold.id()))
 	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
@@ -175,8 +160,6 @@ func testHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T, acknowledge 
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
 }
 
-// A receipt found again after the store was recovered releases the hold, and
-// recovery settles the Task from it as it would have without the loss.
 func TestACPDispatcherReleasesTaskHoldWhenResultReceiptIsRestored(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -207,8 +190,6 @@ func TestACPDispatcherReleasesTaskHoldWhenResultReceiptIsRestored(t *testing.T) 
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
 }
 
-// A receipt that differs from what the attempt settled with is a conflicting
-// record, and recovery holds the Task instead of choosing either result.
 func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptConflicts(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -235,9 +216,6 @@ func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptConflicts(t *testing.T)
 	})
 }
 
-// A receipt bound to another Task conflicts even when its data, operation and
-// digest match the attempt's settling transition, whose digest does not cover
-// the Task: recovery holds the Task instead of taking that result as its own.
 func TestACPDispatcherHoldsSettlingTaskWhoseReceiptNamesAnotherTask(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -265,8 +243,6 @@ func TestACPDispatcherHoldsSettlingTaskWhoseReceiptNamesAnotherTask(t *testing.T
 	}
 }
 
-// A journaled completion does not stand in for a lost receipt: the result the
-// receipt protected may be gone too, or belong to something else.
 func TestACPDispatcherHoldsJournaledCompletionWhoseResultReceiptIsMissing(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -314,8 +290,6 @@ func TestACPDispatcherHoldsJournaledCompletionWhoseResultReceiptIsMissing(t *tes
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
 }
 
-// A restore that changed the Task's UID recovers the source attempt through
-// another path, which holds the restored Task the same way.
 func TestACPDispatcherHoldsRestoredTaskWhoseResultReceiptIsMissing(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -351,9 +325,6 @@ func TestACPDispatcherHoldsRestoredTaskWhoseResultReceiptIsMissing(t *testing.T)
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
 }
 
-// An attempt that reached Settling without the settling transition never
-// had a result receipt, so its absence holds nothing and recovery records the
-// outcome as unknown, as before.
 func TestACPDispatcherDoesNotHoldSettlingAttemptWithoutReceiptTransition(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionSettling)
 	defer fixture.close(t)
@@ -378,8 +349,6 @@ func TestACPDispatcherDoesNotHoldSettlingAttemptWithoutReceiptTransition(t *test
 	}
 }
 
-// Hold IDs are derived from the evidence: the same evidence gives the same
-// ID, so an acknowledgement keeps applying, and other evidence another one.
 func TestTaskStorageRecordHoldIDIsStableAndSpecific(t *testing.T) {
 	hold := taskStorageRecordHold{
 		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,

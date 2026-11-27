@@ -19,64 +19,47 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// PostReviewCommentTool posts a review on a GitHub pull request.
 type PostReviewCommentTool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// PostReviewCommentArgs are the arguments for the post_review_comment tool.
 type PostReviewCommentArgs struct {
-	// TaskName is an optional task to read workspace config and credentials from.
-	TaskName string `json:"task_name,omitempty"`
-	// RepoURL is an optional GitHub repository URL.
-	RepoURL string `json:"repo_url,omitempty"`
-	// PRNumber is the GitHub PR number.
-	PRNumber int `json:"pr_number"`
-	// Body is the top-level review body text.
-	Body string `json:"body"`
-	// Event is one of reviewEventApprove, reviewEventRequestChanges, reviewEventComment.
-	Event string `json:"event"`
-	// Comments is an optional list of line-level review comments.
+	TaskName string          `json:"task_name,omitempty"`
+	RepoURL  string          `json:"repo_url,omitempty"`
+	PRNumber int             `json:"pr_number"`
+	Body     string          `json:"body"`
+	Event    string          `json:"event"`
 	Comments []ReviewComment `json:"comments,omitempty"`
 }
 
-// ReviewComment represents a line-level review comment on a PR diff.
 type ReviewComment struct {
-	// Path is the file path relative to the repo root.
 	Path string `json:"path"`
-	// Line is the line number in the diff (new file line number).
-	Line int `json:"line"`
-	// Body is the comment text.
+	Line int    `json:"line"`
 	Body string `json:"body"`
 }
 
-// PostReviewCommentResult is the result of posting a review.
 type PostReviewCommentResult struct {
 	ReviewID int    `json:"review_id"`
 	Status   string `json:"status"`
 	HTMLURL  string `json:"html_url"`
 }
 
-// NewPostReviewCommentTool creates a new post_review_comment tool.
 func NewPostReviewCommentTool(k8sClient client.Client) *PostReviewCommentTool {
 	return &PostReviewCommentTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *PostReviewCommentTool) Name() string {
 	return postReviewCommentToolName
 }
 
-// Description returns the tool description.
 func (t *PostReviewCommentTool) Description() string {
 	return "Post a review on a GitHub pull request with an optional verdict (APPROVE, REQUEST_CHANGES, COMMENT) " +
 		"and line-level comments. Use this after analyzing a PR diff to submit your review feedback."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *PostReviewCommentTool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional task whose workspace config has the repo and git credentials"}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: scopedRepositoryURLDescription}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number"}, githubBodyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Top-level review body text"},
 		githubReviewEventField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaEnumField: []string{reviewEventApprove, reviewEventRequestChanges, reviewEventComment},
@@ -95,7 +78,6 @@ func (t *PostReviewCommentTool) Parameters() json.RawMessage {
 	return data
 }
 
-// Execute posts a review on a GitHub pull request.
 func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args PostReviewCommentArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
@@ -106,10 +88,8 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", notSent(fmt.Errorf("pr_number, body, and event are required"))
 	}
 
-	// Validate event value
 	switch args.Event {
 	case reviewEventApprove, reviewEventRequestChanges, reviewEventComment:
-		// valid
 	default:
 		return "", notSent(fmt.Errorf("invalid event value %q: must be APPROVE, REQUEST_CHANGES, or COMMENT", args.Event))
 	}
@@ -124,7 +104,6 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 		return "", notSent(err)
 	}
 
-	// Post the review via GitHub API
 	reviewID, htmlURL, err := postGitHubReview(ctx, token, owner, repo, args.PRNumber, args.Body, args.Event, args.Comments, t.apiBaseURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to post review: %w", err)
@@ -139,7 +118,6 @@ func (t *PostReviewCommentTool) Execute(ctx context.Context, argsJSON json.RawMe
 	return string(resultJSON), nil
 }
 
-// postGitHubReview posts a pull request review via the GitHub REST API.
 func postGitHubReview(ctx context.Context, token, owner, repo string, prNumber int, body, event string, comments []ReviewComment, apiBaseURL string) (int, string, error) {
 	baseURL := githubAPIBaseURL
 	if apiBaseURL != "" {

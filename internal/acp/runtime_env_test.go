@@ -347,9 +347,6 @@ func TestSessionOwnershipReclaimOrdersParentsAndChownBeforeChmod(t *testing.T) {
 	}
 }
 
-// GitHub repository identities are case-insensitive: a continuation that
-// changes only capitalization must be judged the same repository so the
-// preserved durable tree resumes instead of being wiped.
 func TestSameDurableWorkspaceIdentity(t *testing.T) {
 	const canonicalRepo = "github.com/orka-agents/orka"
 	cases := []struct {
@@ -463,7 +460,7 @@ func TestReadOnlyWorkspaceProtectionModes(t *testing.T) {
 			}
 			for path := range files {
 				if _, ok := want[path]; !ok {
-					want[path] = 0 // already read-only for the group: no chmod
+					want[path] = 0
 				}
 			}
 			for path, mode := range want {

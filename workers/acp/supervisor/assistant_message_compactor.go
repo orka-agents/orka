@@ -13,10 +13,6 @@ import (
 
 const assistantMessageCoalesceWindow = 25 * time.Millisecond
 
-// assistantMessageCompactor batches only adjacent ACP assistant text deltas,
-// and adjacent thought deltas, never one kind with the other. It runs before
-// harness identity assignment so emitted sequences remain contiguous while
-// the protocol rate limiter still sees every meaningful lifecycle update.
 type assistantMessageCompactor struct {
 	maxBytes      int
 	flushInterval time.Duration
@@ -126,7 +122,7 @@ func (c *assistantMessageCompactor) flush() acp.PromptEvent {
 		Meta: c.meta,
 	})
 	if err != nil {
-		panic(err) // json.Marshal cannot fail for this fixed string-only shape.
+		panic(err)
 	}
 	event.Update = &acp.SessionNotification{SessionID: event.Update.SessionID, Update: encoded}
 	c.text.Reset()
@@ -169,8 +165,6 @@ type assistantMessageChunk struct {
 
 const acpUpdateAgentMessageChunk = "agent_message_chunk"
 
-// decodeCoalescibleChunk recognizes the text deltas the compactor batches:
-// assistant message and thought chunks.
 func decodeCoalescibleChunk(event acp.PromptEvent) (assistantMessageChunk, bool) {
 	var envelope assistantMessageChunk
 	if event.Type != acp.PromptEventUpdate || event.Update == nil {

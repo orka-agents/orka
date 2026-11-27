@@ -10,11 +10,6 @@ import (
 	"time"
 )
 
-// RebaseBranchRequest performs a clean-room, non-interactive rebase of
-// HeadOID onto BaseOID and pushes the resulting linear history to TargetRef
-// using exact --force-with-lease CAS against HeadOID. If any commit conflicts
-// or any merge commit is encountered, the operation fails closed with
-// ErrCASRejected and never mutates the remote.
 type RebaseBranchRequest struct {
 	OperationID       string     `json:"operationId"`
 	Target            Repository `json:"target"`
@@ -29,7 +24,6 @@ type RebaseBranchRequest struct {
 	SigningKey        []byte     `json:"-"`
 }
 
-// RebaseBranchResult reports the verified post-rebase remote head OID.
 type RebaseBranchResult struct {
 	OperationID  string `json:"operationId"`
 	PreviousOID  string `json:"previousOid"`
@@ -41,11 +35,6 @@ type RebaseBranchResult struct {
 
 const maxRebaseCommits = 64
 
-// RebaseBranch replays the linear commit chain BaseOID..HeadOID onto BaseOID
-// using git merge-tree --write-tree in an isolated bare repository, optionally
-// adding DCO Signed-off-by trailers and SSHSIG signatures, and pushes with
-// exact --force-with-lease=<TargetRef>:<HeadOID>.
-//
 //nolint:gocyclo // Clean-room rebase validates every boundary, commit, signature, and CAS step explicitly.
 func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchRequest) (RebaseBranchResult, error) {
 	if err := validateRebaseBranchRequest(request); err != nil {
@@ -74,7 +63,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		return RebaseBranchResult{}, fmt.Errorf("initialize bare rebase repository: %w", err)
 	}
 
-	// Verify exact remote head before fetching or rebasing.
 	observed, err := p.observeRef(ctx, box, request.Target, request.TargetRef)
 	if err != nil {
 		return RebaseBranchResult{}, err
@@ -83,7 +71,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		return RebaseBranchResult{}, operationError(ErrBranchMoved, "preflight rebase branch", fmt.Sprintf("expected %s, observed %s", request.HeadOID, formatRemoteRef(observed)), nil)
 	}
 
-	// Fetch both base and head refs into the isolated bare repo.
 	if _, err := p.runGit(ctx, box, box.root, nil, nil,
 		"--git-dir="+repositoryPath, "fetch", "--no-tags", "--no-recurse-submodules", "--",
 		request.Target.URL, request.BaseRef+":refs/orka/base", request.TargetRef+":refs/orka/head"); err != nil {
@@ -98,7 +85,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		return RebaseBranchResult{}, operationError(ErrBranchMoved, "verify rebase head commit", fmt.Sprintf("expected %s, fetched %s", request.HeadOID, fetchedHead), err)
 	}
 
-	// If head already contains base, no rewrite is needed.
 	if ancestor, ancErr := p.isAncestor(ctx, box, repositoryPath, request.BaseOID, request.HeadOID); ancErr == nil && ancestor {
 		return RebaseBranchResult{
 			OperationID: request.OperationID,
@@ -109,9 +95,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		}, nil
 	}
 
-	// List commits in BaseOID..HeadOID in chronological order (oldest first),
-	// bounded to maxRebaseCommits+1 so oversized branches hit ErrRebaseRefused
-	// instead of runGit's output buffer cap.
 	revList, err := p.runGit(ctx, box, box.root, nil, nil,
 		"--git-dir="+repositoryPath, "rev-list", "--max-count="+strconv.Itoa(maxRebaseCommits+1), "--reverse", "--parents", request.BaseOID+".."+request.HeadOID)
 	if err != nil {
@@ -135,7 +118,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 	for _, line := range lines {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
-			// Refuse merge commits or root commits during automated linear rebase.
 			return RebaseBranchResult{}, operationError(ErrRebaseRefused, "rebase branch", "automated rebase requires linear non-merge commits", nil)
 		}
 		origOID, origParent := fields[0], fields[1]
@@ -143,7 +125,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 			return RebaseBranchResult{}, err
 		}
 
-		// Compute replayed tree using clean-room 3-way merge-tree (no working tree).
 		merged, mergeErr := p.runGit(ctx, box, box.root, nil, nil,
 			"--git-dir="+repositoryPath, "merge-tree", "--write-tree", "--merge-base="+origParent, currentParent, origOID)
 		if mergeErr != nil {
@@ -154,8 +135,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 			return RebaseBranchResult{}, operationError(ErrRebaseRefused, "rebase branch", "rebase produced invalid tree", err)
 		}
 
-		// Preserve original author metadata and commit message; use configured
-		// committer identity and optional DCO trailer / SSHSIG signature.
 		meta, err := p.runGit(ctx, box, box.root, nil, nil,
 			"--git-dir="+repositoryPath, "show", "-s", "--format=%an%x00%ae%x00%ad%x00%B", "--date=raw", origOID)
 		if err != nil {
@@ -225,7 +204,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 		return RebaseBranchResult{}, fmt.Errorf("record rebased ref: %w", err)
 	}
 
-	// Push with exact --force-with-lease=<TargetRef>:<HeadOID> CAS.
 	lease := "--force-with-lease=" + request.TargetRef + ":" + request.HeadOID
 	refspec := "refs/orka/rebased:" + request.TargetRef
 	mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.publishTimeout)
@@ -233,8 +211,6 @@ func (p *Publisher) RebaseBranch(ctx context.Context, request RebaseBranchReques
 	if _, pushErr := p.runGit(mutationCtx, box, box.root, nil, nil,
 		"--git-dir="+repositoryPath, "push", "--porcelain", "--no-verify", "--no-recurse-submodules",
 		lease, "--", request.Target.URL, refspec); pushErr != nil {
-		// Reconcile remote ref on push error: the server may have accepted the
-		// rewrite before the connection dropped.
 		if postObserved, obsErr := p.observeRef(mutationCtx, box, request.Target, request.TargetRef); obsErr == nil && !postObserved.Absent && postObserved.OID == currentParent {
 			return RebaseBranchResult{
 				OperationID:  request.OperationID,

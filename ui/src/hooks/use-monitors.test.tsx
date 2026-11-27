@@ -91,13 +91,11 @@ describe('useRepositoryMonitor on 404', () => {
       return notFound()
     }))
 
-    // The app's default of one retry, which the hook must override for a 404.
     const appClient = new QueryClient({ defaultOptions: { queries: { retry: 1, gcTime: 0 } } })
     renderHook(() => useRepositoryMonitor('new-monitor'), { wrapper: createWrapper(appClient) })
 
     await advance(9_000)
     expect(calls).toBe(1)
-    // The create form opens a monitor right away; it can 404 until the API cache catches up.
     await advance(1_500)
     expect(calls).toBe(2)
   })

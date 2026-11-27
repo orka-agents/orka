@@ -147,7 +147,6 @@ func TestWorkspaceParameterReadersCanonicalRBAC(t *testing.T) {
 			t.Fatalf("canonical RBAC kustomization omits %s", file)
 		}
 	}
-	// Include all canonical RBAC documents to reject any cluster binding of the profile reader.
 	for _, file := range kustomization.Resources {
 		contents, err := os.ReadFile(filepath.Join(root, file))
 		if err != nil {

@@ -445,7 +445,6 @@ func TestGatewayNativeAIRejectsRuntimeOnlyDefaultsAtDispatch(t *testing.T) {
 	require.NoError(t, service.Client.Update(ctx, binding))
 	_, err := service.AdmitEvent(ctx, "default", "chat", "Bearer inbound-token", gatewayEventBody(t, "native-defaults", "user-1"))
 	require.NoError(t, err)
-	// Readiness can lag an Agent edit after admission. Dispatch must not drop the runtime-only default.
 	setGatewayAgentNativeAI(t, service, true)
 	require.ErrorContains(t, service.DispatchOnce(ctx), "agentRuntimeMaxTurns")
 	var tasks corev1alpha1.TaskList
@@ -1653,14 +1652,10 @@ func TestExpiredLinkedTaskReleasesSessionWithVisibleError(t *testing.T) {
 	if err != nil || linked.State != store.GatewayEventTaskCreated || linked.TaskUID == "" {
 		t.Fatalf("linked event = (%+v, %v)", linked, err)
 	}
-	// Advance the projection clock only after dispatch has linked the Task.
-	// Admission and SQLite I/O must not race a millisecond expiry in CI.
 	events := []store.GatewayEvent{*linked}
 	if err := service.projectTerminalEvents(ctx, events, linked.ExpiresAt.Add(time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	// The next projection observes the deleted Task and creates an error
-	// delivery at the current time, so delivery needs no wall-clock sleep.
 	if err := service.projectTerminalEvents(ctx, events, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}

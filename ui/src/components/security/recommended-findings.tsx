@@ -14,7 +14,6 @@ export function RecommendedFindings({ repositoryName }: { repositoryName: string
         <CardTitle>Recommended Findings</CardTitle>
       </CardHeader>
       <CardContent>
-        {/* A failed load must not read as "no findings"; a later failed poll keeps what loaded. */}
         {error && (isForbiddenError(error) || !data) ? (
           <ListAccessError error={error} resource="recommended findings" />
         ) : isLoading ? (

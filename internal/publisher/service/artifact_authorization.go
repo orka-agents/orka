@@ -17,16 +17,11 @@ import (
 )
 
 const (
-	// ArtifactAuthorizationBrokerPath is the controller endpoint that exchanges
-	// one authenticated Publisher operation for one exact artifact capability.
 	ArtifactAuthorizationBrokerPath = "/internal/v2/acp/publisher-artifact-authorizations"
 	maxArtifactBrokerResponseBytes  = int64(32 << 10)
 	maxArtifactRemoteAttempts       = 20
 )
 
-// ArtifactAuthorizationRequest binds one artifact transfer to the exact
-// Publisher operation that is currently executing. Raw capability-signing
-// material is never delivered to the Publisher when broker mode is enabled.
 type ArtifactAuthorizationRequest struct {
 	ParentOperation   Operation                   `json:"parentOperation"`
 	Metadata          OperationMetadata           `json:"metadata"`
@@ -35,8 +30,6 @@ type ArtifactAuthorizationRequest struct {
 	Attempt           int                         `json:"attempt"`
 }
 
-// Validate validates the immutable transfer binding independently of any
-// controller-side Task or Publication state.
 func (r ArtifactAuthorizationRequest) Validate() error {
 	if r.ParentOperation.Path() == "" || r.Attempt < 1 || r.Attempt > maxArtifactRemoteAttempts {
 		return fmt.Errorf("artifact authorization request is invalid")
@@ -66,15 +59,11 @@ func (r ArtifactAuthorizationRequest) Validate() error {
 	return nil
 }
 
-// ArtifactAuthorizationResponse contains only a one-operation capability and
-// its exact request digest. It never exposes the artifact signing key.
 type ArtifactAuthorizationResponse struct {
 	Capability    string `json:"capability"`
 	RequestDigest string `json:"requestDigest"`
 }
 
-// ArtifactOperationID returns a deterministic, bounded replay-ledger identity
-// for one remote transfer attempt.
 func ArtifactOperationID(request ArtifactAuthorizationRequest) string {
 	return "publisher-" + hashID(
 		request.Metadata.Namespace,
@@ -129,8 +118,6 @@ func newBrokerArtifactAuthorizer(rawURL string, client *http.Client, bearer []by
 	parsed.Path = ArtifactAuthorizationBrokerPath
 	parsed.RawPath = ""
 	if client == nil {
-		// Authenticated in-cluster controller traffic must never traverse an
-		// inherited environment proxy.
 		client = &http.Client{Timeout: timeout, Transport: harnessv2.NewProxylessTransport()}
 	} else {
 		clone := *client

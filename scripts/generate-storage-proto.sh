@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Generate or verify the orka.storage.v1 wire code in the nested storage module:
-# the protobuf and gRPC code under pkg/storage/v1/wire/storagepb, and the
-# Go-to-wire mapping that wiregen writes from the Go contract and those
-# descriptors. buf compiles the .proto files, so no protoc install is needed.
 set -Eeuo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,8 +11,6 @@ readonly protoc_gen_go_version=v1.36.12
 readonly protoc_gen_go_grpc_version=v1.5.1
 tool_root="${root_dir}/bin/storage-proto"
 
-# install_tool installs one pinned Go tool into its own versioned directory and
-# prints that directory.
 install_tool() {
   local name="$1" package="$2" version="$3"
   local dir="${tool_root}/${name}-${version}"
@@ -38,7 +32,6 @@ tool_path="${buf_dir}:${go_dir}:${grpc_dir}"
 [[ "$(PATH="${tool_path}" protoc-gen-go-grpc --version)" == "protoc-gen-go-grpc ${protoc_gen_go_grpc_version#v}" ]] || {
   printf 'protoc-gen-go-grpc %s is required\n' "${protoc_gen_go_grpc_version}" >&2; exit 1; }
 
-# generate_into regenerates the wire code inside one copy of the module.
 generate_into() {
   local dir="$1"
   (

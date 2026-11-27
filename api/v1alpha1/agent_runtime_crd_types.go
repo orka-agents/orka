@@ -17,7 +17,6 @@ import (
 type AgentRuntimeContractVersion string
 
 const (
-	// AgentRuntimeContractHarnessV2 is the session-centric HTTP+NDJSON contract.
 	AgentRuntimeContractHarnessV2 AgentRuntimeContractVersion = "orka.harness.v2"
 )
 
@@ -26,7 +25,6 @@ const (
 type AgentRuntimeDeploymentMode string
 
 const (
-	// AgentRuntimeDeploymentModeExternalEndpoint points at a pre-deployed harness endpoint.
 	AgentRuntimeDeploymentModeExternalEndpoint AgentRuntimeDeploymentMode = "external-endpoint"
 )
 
@@ -122,11 +120,7 @@ type AgentRuntimeClientAuth struct {
 type AgentRuntimeWorkspaceGovernanceMode string
 
 const (
-	// AgentRuntimeWorkspaceGovernanceStrict is eligible only for the exact
-	// workspace intent pinned in the immutable runtime profile.
-	AgentRuntimeWorkspaceGovernanceStrict AgentRuntimeWorkspaceGovernanceMode = "strict-governed"
-	// AgentRuntimeWorkspaceGovernanceTrusted marks an explicitly trusted runtime
-	// whose tools and workspace behavior are outside Orka governance.
+	AgentRuntimeWorkspaceGovernanceStrict  AgentRuntimeWorkspaceGovernanceMode = "strict-governed"
 	AgentRuntimeWorkspaceGovernanceTrusted AgentRuntimeWorkspaceGovernanceMode = "trusted-non-governed"
 )
 
@@ -154,7 +148,6 @@ type AgentRuntimeWorkspaceGovernanceCapabilities struct {
 	CancellationSettlement          bool `json:"cancellationSettlement"`
 }
 
-// Strict reports whether every strict workspace governance guarantee is claimed.
 func (c AgentRuntimeWorkspaceGovernanceCapabilities) Strict() bool {
 	return c.Mode == AgentRuntimeWorkspaceGovernanceStrict && !c.Trusted &&
 		c.OrkaOwnedWorkspaceDeltas && c.PromptScopedBrokerAuthorization &&
@@ -320,8 +313,6 @@ type AgentRuntimeCapabilitiesSpec struct {
 	WorkspaceGovernance *AgentRuntimeWorkspaceGovernanceCapabilities `json:"workspaceGovernance,omitempty"`
 }
 
-// SupportsStrictWorkspaceIntent returns true only for the exact intent pinned
-// by a fully governed v2 profile. Trusted/non-governed runtimes return false.
 func (c AgentRuntimeCapabilitiesSpec) SupportsStrictWorkspaceIntent(intent WorkspaceIntent) bool {
 	if c.WorkspaceGovernance == nil || c.Profile == nil {
 		return false
@@ -330,7 +321,6 @@ func (c AgentRuntimeCapabilitiesSpec) SupportsStrictWorkspaceIntent(intent Works
 		(intent != WorkspaceIntentWrite || c.SupportsPublicationFinalization)
 }
 
-// ValidateStrictWorkspaceIntent rejects trusted/non-governed runtimes and exact-profile intent mismatches.
 func (c AgentRuntimeCapabilitiesSpec) ValidateStrictWorkspaceIntent(intent WorkspaceIntent) error {
 	if intent != WorkspaceIntentRead && intent != WorkspaceIntentWrite {
 		return fmt.Errorf("unsupported strict workspace intent %q", intent)
@@ -467,9 +457,6 @@ type AgentRuntime struct {
 	Status AgentRuntimeStatus       `json:"status,omitempty"`
 }
 
-// RegisteredContractVersion returns the stored contract selector, or empty
-// when absent. The CRD defaults it, so an absent value means the object never
-// passed through the current schema; callers must reject it.
 func (in *AgentRuntime) RegisteredContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.ContractVersion == nil {
 		return ""

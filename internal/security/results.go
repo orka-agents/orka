@@ -22,12 +22,10 @@ const (
 	AgentResultKindValidation  = "orka.security.validation.v1"
 	AgentResultKindPatch       = "orka.security.patch.v1"
 
-	maxThreatModelResultBytes = 1 << 20
-	maxFindingsResultBytes    = 512 << 10
-	maxValidationResultBytes  = 256 << 10
-	maxPatchResultBytes       = 64 << 10
-	// MaxPatchSummaryArtifactBytes bounds a pre-existing patch summary
-	// artifact before it is decoded; it matches the terminal-result cap.
+	maxThreatModelResultBytes    = 1 << 20
+	maxFindingsResultBytes       = 512 << 10
+	maxValidationResultBytes     = 256 << 10
+	maxPatchResultBytes          = 64 << 10
 	MaxPatchSummaryArtifactBytes = maxPatchResultBytes
 	maxPatchSummaryBytes         = 16 << 10
 	maxPatchChangedFiles         = 64
@@ -45,15 +43,9 @@ const (
 	maxResolvedQuestions         = 32
 	maxResolvedQuestionBytes     = 4 << 10
 
-	// MaxReviewContextReferenceFiles bounds the files a review may cite
-	// beyond its excerpts; it keeps a whole-repository index within the
-	// review context byte limit.
 	MaxReviewContextReferenceFiles = 4000
 )
 
-// AgentResultBinding is controller-owned identity that every SecurityScan
-// agent result must echo exactly. It contains no credentials or mutable runtime
-// configuration.
 type AgentResultBinding struct {
 	RepositoryScan string
 	ScanID         string
@@ -61,9 +53,6 @@ type AgentResultBinding struct {
 	ContextDigest  string
 }
 
-// MarshalReviewContext encodes a review context within the size a scan
-// accepts. When the reference listing would not fit, trailing references are
-// dropped; the mapper lists the most relevant ones first.
 func MarshalReviewContext(manifest ReviewContextManifest) ([]byte, error) {
 	data, err := json.Marshal(manifest)
 	if err != nil || len(data) <= maxReviewContextBytes {
@@ -83,13 +72,8 @@ func MarshalReviewContext(manifest ReviewContextManifest) ([]byte, error) {
 	return json.Marshal(manifest)
 }
 
-// MaxReviewContextsBytes bounds the review contexts one mapper run
-// publishes together, below the worker's 50 MiB artifact upload limit.
 const MaxReviewContextsBytes = 40 << 20
 
-// MarshalReviewContexts encodes a mapper run's review contexts within budget
-// bytes in total. While they do not fit, the longest reference listing is
-// halved, keeping its most relevant entries.
 func MarshalReviewContexts(manifests []ReviewContextManifest, budget int) ([][]byte, error) {
 	encoded := make([][]byte, len(manifests))
 	total := 0
@@ -123,16 +107,8 @@ func MarshalReviewContexts(manifests []ReviewContextManifest, budget int) ([][]b
 	return encoded, nil
 }
 
-// minScaledReviewContextBytes is the smallest per-slice excerpt budget
-// BuildReviewContexts scales down to before it gives up.
 const minScaledReviewContextBytes = 2 << 10
 
-// BuildReviewContexts builds and encodes the review contexts of one mapper
-// run within budget bytes in total. When the default-sized contexts exceed
-// the budget even without reference files, as in a repository with thousands
-// of slices, the per-slice excerpt budget is scaled down until they fit in half
-// of it, leaving the rest for reference listings; reviewers read the rest of
-// each file from their workspace. Otherwise contexts keep the default size.
 func BuildReviewContexts(
 	root string,
 	slices []store.ReviewSlice,
@@ -158,18 +134,13 @@ func BuildReviewContexts(
 		}
 		scaled := maxBytes < defaultMaxReviewContextBytes
 		if !scaled && bare <= budget || scaled && bare <= budget/2 || maxBytes == minScaledReviewContextBytes {
-			// At the floor, MarshalReviewContexts still fails closed when
-			// the contexts do not fit.
 			return MarshalReviewContexts(manifests, budget)
 		}
-		// bare > budget > 0 here: any total within budget returned above.
 		next := int(int64(maxBytes) * int64(budget/2) / int64(bare))
 		maxBytes = max(minScaledReviewContextBytes, min(next, maxBytes*3/4))
 	}
 }
 
-// ParseTrustedReviewContextManifest validates the mapper-owned context used as
-// an evidence boundary for a review Task.
 func ParseTrustedReviewContextManifest(data []byte) (*ReviewContextManifest, string, error) {
 	var manifest ReviewContextManifest
 	if err := decodeStrictResult(data, maxReviewContextBytes, &manifest); err != nil {
@@ -210,8 +181,6 @@ func ParseTrustedReviewContextManifest(data []byte) (*ReviewContextManifest, str
 	return parsed, digest, nil
 }
 
-// ThreatModelResultEnvelope is the only accepted terminal result for the
-// threat-model agent stage.
 type ThreatModelResultEnvelope struct {
 	SchemaVersion  int                     `json:"schemaVersion"`
 	Kind           string                  `json:"kind"`
@@ -222,8 +191,6 @@ type ThreatModelResultEnvelope struct {
 	Investigations []SecurityInvestigation `json:"investigations,omitempty"`
 }
 
-// FindingsResultEnvelope is the only accepted terminal result for one review
-// slice. The context digest binds evidence to mapper-generated excerpts.
 type FindingsResultEnvelope struct {
 	SchemaVersion  int                `json:"schemaVersion"`
 	Kind           string             `json:"kind"`
@@ -235,8 +202,6 @@ type FindingsResultEnvelope struct {
 	Findings       FindingsV2Artifact `json:"findings"`
 }
 
-// ValidationResultEnvelope is the only accepted terminal result for the
-// per-finding validation stage.
 type ValidationResultEnvelope struct {
 	SchemaVersion  int                `json:"schemaVersion"`
 	Kind           string             `json:"kind"`
@@ -259,9 +224,6 @@ type ValidationResultExpectation struct {
 	Finding *store.Finding
 }
 
-// ParseThreatModelResult strictly decodes and identity-binds a terminal ACP
-// result. Markdown is kept inside JSON so unrelated assistant prose cannot be
-// mistaken for scanner output.
 func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, error) {
 	var result ThreatModelResultEnvelope
 	if err := decodeStrictResult(data, maxThreatModelResultBytes, &result); err != nil {
@@ -280,12 +242,11 @@ func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, e
 	if len(content) > maxThreatModelBytes {
 		return "", fmt.Errorf("threatModel exceeds %d bytes", maxThreatModelBytes)
 	}
-	// Validate visible markdown before redaction can hide transcript markers.
 	content = strings.TrimSpace(stripUnsafeTextRunes(content))
 	if content == "" {
 		return "", fmt.Errorf("threatModel is required")
 	}
-	if content == "# Threat Model\n\n..." || isPlaceholderResultText(content) {
+	if isPlaceholderThreatModel(content) {
 		return "", fmt.Errorf("threatModel is a prompt placeholder")
 	}
 	if !strings.HasPrefix(content, "#") {
@@ -294,8 +255,6 @@ func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, e
 	if securityResultLooksLikeToolTranscript(content) {
 		return "", fmt.Errorf("threatModel looks like a tool transcript")
 	}
-	// Incremental scans do not request investigations; keep the saved
-	// section unless the result supplies a replacement.
 	if result.Investigations != nil {
 		content = RenderThreatModelInvestigations(content, result.Investigations)
 	}
@@ -306,9 +265,6 @@ func ParseThreatModelResult(data []byte, expected AgentResultBinding) (string, e
 	return content, nil
 }
 
-// SanitizeThreatModel redacts common credential shapes in generated and edited
-// threat models. Strip invisible runes first so they cannot split a credential
-// past the redactor; preserve newlines and tabs for markdown structure.
 func SanitizeThreatModel(content string) string {
 	return redact.SensitiveText(stripUnsafeTextRunes(content))
 }
@@ -331,8 +287,6 @@ func securityResultLooksLikeToolTranscript(content string) bool {
 	return false
 }
 
-// ParseFindingsResult strictly decodes a terminal review result and requires
-// exact controller-owned repository, run, slice, policy, and context identity.
 func ParseFindingsResult(data []byte, expected FindingsResultExpectation) (*FindingsV2Artifact, error) {
 	var result FindingsResultEnvelope
 	if err := decodeStrictResult(data, maxFindingsResultBytes, &result); err != nil {
@@ -357,8 +311,6 @@ func ParseFindingsResult(data []byte, expected FindingsResultExpectation) (*Find
 	return &result.Findings, nil
 }
 
-// ParseValidationResult strictly decodes a terminal validation result and
-// restricts new evidence to the already accepted finding evidence boundary.
 func ParseValidationResult(data []byte, expected ValidationResultExpectation) (*ValidationArtifact, error) {
 	if expected.Finding == nil {
 		return nil, fmt.Errorf("expected finding is required")
@@ -432,9 +384,6 @@ func validateAgentResultBinding(repositoryScan, scanID, policyDigest, contextDig
 	return nil
 }
 
-// normalizeFindingsCoverage bounds the reviewer's coverage notes. They only
-// describe the review, so excess or unsafe entries are dropped instead of
-// rejecting the findings they accompany.
 func normalizeFindingsCoverage(scan *FindingsV2Scan) {
 	files := make([]string, 0, min(len(scan.ReviewedFiles), maxReviewedFiles))
 	seen := map[string]struct{}{}
@@ -486,23 +435,43 @@ func truncateUTF8(value string, limit int) string {
 	return value
 }
 
-// isPlaceholderResultText reports text that merely echoes the prompt's example
-// placeholder (such as "..." or "…") instead of a substantive review or verdict.
 func isPlaceholderResultText(value string) bool {
 	trimmed := strings.TrimSpace(stripUnsafeTextRunes(value))
 	return trimmed == truncationSuffix || trimmed == "…"
 }
 
-// ReviewResultIsInconclusive reports a zero-finding review result that carries
-// no substantive evidence of inspection (no reviewed files, no resolved
-// questions, and an empty or placeholder summary). Such results must be retried
-// or treated as inconclusive rather than clean.
+func isPlaceholderThreatModel(content string) bool {
+	if isPlaceholderResultText(content) {
+		return true
+	}
+	lines := strings.Split(content, "\n")
+	nonEmpty := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			nonEmpty = append(nonEmpty, trimmed)
+		}
+	}
+	if len(nonEmpty) == 2 && strings.EqualFold(nonEmpty[0], "# Threat Model") && isPlaceholderResultText(nonEmpty[1]) {
+		return true
+	}
+	return false
+}
+
 func ReviewResultIsInconclusive(artifact FindingsV2Artifact) bool {
 	if len(artifact.Findings) > 0 {
 		return false
 	}
-	if len(artifact.Scan.ReviewedFiles) > 0 || len(artifact.Scan.ResolvedQuestions) > 0 {
-		return false
+	for _, file := range artifact.Scan.ReviewedFiles {
+		if trimmed := strings.TrimSpace(file); trimmed != "" && !isPlaceholderResultText(trimmed) {
+			return false
+		}
+	}
+	for _, question := range artifact.Scan.ResolvedQuestions {
+		q := strings.TrimSpace(question.Question)
+		r := strings.TrimSpace(question.Resolution)
+		if q != "" && !isPlaceholderResultText(q) && r != "" && !isPlaceholderResultText(r) {
+			return false
+		}
 	}
 	summary := strings.TrimSpace(stripUnsafeTextRunes(artifact.Scan.Summary))
 	return summary == "" || isPlaceholderResultText(summary)
@@ -645,9 +614,6 @@ func validateValidationArtifact(artifact ValidationArtifact, finding *store.Find
 	return nil
 }
 
-// usableValidationEvidence keeps the validator's evidence that may be merged
-// into the finding. Validators trace beyond the finding's own locations, so
-// refs outside that boundary are dropped instead of discarding the verdict.
 func usableValidationEvidence(refs ValidationArtifactEvidenceRefs, accepted []store.FindingEvidenceRef) ValidationArtifactEvidenceRefs {
 	out := make(ValidationArtifactEvidenceRefs, 0, min(len(refs), maxValidationEvidenceRefs))
 	for _, ref := range refs {
@@ -716,8 +682,6 @@ func boundedString(name, value string, maxBytes int) error {
 	return nil
 }
 
-// ReviewContextDigest returns the canonical digest used to bind a review Task
-// and its result to one mapper-generated context manifest.
 func ReviewContextDigest(manifest ReviewContextManifest) (string, error) {
 	data, err := json.Marshal(manifest)
 	if err != nil {
@@ -727,11 +691,6 @@ func ReviewContextDigest(manifest ReviewContextManifest) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-// PatchResultEnvelope is the harness-v2 terminal result of a security patch
-// task. The agent applies the fix to the workspace and returns this envelope
-// as its only output; it never writes artifact files. The authoritative diff
-// is derived by the controller from the governed publication, so the envelope
-// carries only the agent's account of what it changed.
 type PatchResultEnvelope struct {
 	SchemaVersion  int            `json:"schemaVersion"`
 	Kind           string         `json:"kind"`
@@ -743,16 +702,11 @@ type PatchResultEnvelope struct {
 	Risk           string         `json:"risk"`
 }
 
-// PatchResultExpectation is the controller-owned identity a patch result must
-// match exactly.
 type PatchResultExpectation struct {
 	RepositoryScan string
 	FindingID      string
 }
 
-// ParsePatchResult strictly decodes a terminal patch result and requires the
-// exact repository scan and finding identity. It returns the bounded patch
-// summary the controller persists alongside the publication-derived diff.
 func ParsePatchResult(data []byte, expected PatchResultExpectation) (*PatchSummaryArtifact, error) {
 	var result PatchResultEnvelope
 	if err := decodeStrictResult(data, maxPatchResultBytes, &result); err != nil {
@@ -780,13 +734,6 @@ func ParsePatchResult(data []byte, expected PatchResultExpectation) (*PatchSumma
 	})
 }
 
-// NormalizePatchSummaryArtifact applies the bounded, credential-rejecting
-// validation every durable patch summary must pass, whether it arrived as a
-// harness-v2 terminal result or as a pre-existing artifact written through the
-// upload API. Summary text, changed-file paths, and test commands are
-// agent-controlled and persist in artifacts, status, and PR bodies, so a
-// credential-shaped value in any of them fails closed; the value itself is
-// deliberately kept out of the error.
 func NormalizePatchSummaryArtifact(artifact PatchSummaryArtifact) (*PatchSummaryArtifact, error) {
 	if artifact.SchemaVersion != SchemaVersionPatchSummary {
 		return nil, fmt.Errorf("unsupported patch summary schemaVersion %d", artifact.SchemaVersion)
@@ -804,10 +751,6 @@ func NormalizePatchSummaryArtifact(artifact PatchSummaryArtifact) (*PatchSummary
 	if securityResultLooksLikeToolTranscript(summary) {
 		return nil, fmt.Errorf("patch summary looks like a tool transcript")
 	}
-	// Summary and test commands are agent-controlled and become a durable
-	// artifact; a credential echoed there (for example while describing the
-	// secret a remediation removed) must never persist. The value itself is
-	// deliberately kept out of the error.
 	if LooksLikeSecret(summary) {
 		return nil, fmt.Errorf("patch summary contains a credential-shaped value")
 	}
@@ -827,8 +770,6 @@ func NormalizePatchSummaryArtifact(artifact PatchSummaryArtifact) (*PatchSummary
 		if file == "" || !SafeRepoPath(file) {
 			return nil, fmt.Errorf("patch changedFiles contains an unsafe path")
 		}
-		// Paths are agent-controlled and persist in artifacts, status, and
-		// PR bodies; a credential smuggled as a path segment must not.
 		if LooksLikeSecret(file) {
 			return nil, fmt.Errorf("patch changedFiles contains a credential-shaped path")
 		}

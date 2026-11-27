@@ -12,11 +12,8 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// DefaultClockCheckInterval is how often a ClockMonitor checks the clock of
-// each dataset.
 const DefaultClockCheckInterval = time.Minute
 
-// clockSkew is the estimated offset of one dataset's clock from Orka's.
 type clockSkew struct {
 	offset      time.Duration
 	uncertainty time.Duration
@@ -26,17 +23,11 @@ func (s clockSkew) String() string {
 	return fmt.Sprintf("%s (within %s)", s.offset, s.uncertainty)
 }
 
-// estimateClockSkew estimates how far a provider clock that read observedAt is
-// ahead of Orka's clock, from a Describe call sent at sent and answered at
-// received. The provider read its clock somewhere in between, so the estimate
-// takes the midpoint and is uncertain by half the round trip.
 func estimateClockSkew(sent, received, observedAt time.Time) clockSkew {
 	half := received.Sub(sent) / 2
 	return clockSkew{offset: observedAt.Sub(sent.Add(half)), uncertainty: half}
 }
 
-// beyond reports whether the offset exceeds limit even at the edge of its
-// uncertainty.
 func (s clockSkew) beyond(limit time.Duration) bool {
 	offset := s.offset
 	if offset < 0 {
@@ -45,23 +36,6 @@ func (s clockSkew) beyond(limit time.Duration) bool {
 	return offset-s.uncertainty > limit
 }
 
-// CheckClocks estimates how far the clock of each dataset the client writes
-// to is from Orka's clock, from the time its provider reports in Describe
-// (ProviderInfo.ObservedAt). While a dataset's clock is more than
-// storagev1.MaxClockSkew away, even allowing for the round trip, the client
-// refuses new writes to that dataset with ErrNotReady, and a later check that
-// finds the clocks back within bounds lifts the refusal. Leases are decided
-// on Orka's clock, so this bounds only the provider clock's own uses:
-// operation age, receipt retention and the times it fills in.
-//
-// A provider that does not report ObservedAt is not checked. A Describe
-// failure leaves that dataset's state as it was. The error names each
-// dataset that is out of bounds or could not be checked.
-//
-// Each provider is described on its own, at the same time, and its result is
-// applied as soon as it answers, so a provider that does not answer within
-// ctx keeps neither the other provider's check nor the lifting of its
-// refusal waiting. A provider that serves both contracts is described once.
 func (c *Client) CheckClocks(ctx context.Context) error {
 	bindings := []struct {
 		contract string
@@ -92,15 +66,11 @@ func (c *Client) CheckClocks(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// clockClaims records which datasets a clock sample has already decided in
-// one CheckClocks run, when separate bindings describe the same dataset.
 type clockClaims struct {
 	mu      sync.Mutex
 	claimed map[string]bool
 }
 
-// claim reports whether a sample with ObservedAt is the first to decide
-// datasetID, and claims it if so.
 func (c *clockClaims) claim(datasetID string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -111,10 +81,6 @@ func (c *clockClaims) claim(datasetID string) bool {
 	return true
 }
 
-// clearUnclaimed runs clear unless a sample with ObservedAt has decided
-// datasetID. A response without ObservedAt never claims the dataset, so it
-// cannot suppress another binding's reported skew, and it clears while
-// holding the lock so it cannot undo a refusal that binding sets.
 func (c *clockClaims) clearUnclaimed(datasetID string, clear func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -123,8 +89,6 @@ func (c *clockClaims) clearUnclaimed(datasetID string, clear func()) {
 	}
 }
 
-// checkClock describes one provider and applies the clock check to its
-// dataset, unless another binding's clock sample already decided it.
 func (c *Client) checkClock(ctx context.Context, contract string, provider storagev1.ProviderDescriber, claims *clockClaims) error {
 	sent := c.ops.now()
 	info, err := provider.Describe(ctx)
@@ -149,8 +113,6 @@ func (c *Client) checkClock(ctx context.Context, contract string, provider stora
 		storagev1.ErrNotReady, info.DatasetID, skew, storagev1.MaxClockSkew)
 }
 
-// setClockSkew records that a dataset's clock is out of bounds by skew, or
-// back within bounds when skew is nil, and logs a change.
 func (o *operations) setClockSkew(datasetID string, skew *clockSkew) {
 	o.mu.Lock()
 	previous, wasSkewed := o.clockSkews[datasetID]
@@ -170,8 +132,6 @@ func (o *operations) setClockSkew(datasetID string, skew *clockSkew) {
 	}
 }
 
-// requireClockAgreement refuses a new write to a dataset whose clock the last
-// check found out of bounds.
 func (o *operations) requireClockAgreement(datasetID string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -182,19 +142,13 @@ func (o *operations) requireClockAgreement(datasetID string) error {
 	return nil
 }
 
-// ClockMonitor checks the storage clocks (see Client.CheckClocks) when it
-// starts and then every Interval, or DefaultClockCheckInterval when Interval
-// is zero. It runs on the leader, the only controller that writes.
 type ClockMonitor struct {
 	Client   *Client
 	Interval time.Duration
 }
 
-// NeedLeaderElection implements the controller-runtime LeaderElectionRunnable.
 func (m *ClockMonitor) NeedLeaderElection() bool { return true }
 
-// Start checks the clocks until ctx ends. A failed check is logged and retried
-// at the next interval; it never stops the controller.
 func (m *ClockMonitor) Start(ctx context.Context) error {
 	interval := m.Interval
 	if interval <= 0 {

@@ -25,8 +25,6 @@ def constrain_agentkit_dockerfile(dockerfile):
     lines[stage + 1:stage + 1] = [f"COPY {AGENTKIT_CONSTRAINTS} /src/{AGENTKIT_CONSTRAINTS}\n",
                                   f"ARG PIP_CONSTRAINT=/src/{AGENTKIT_CONSTRAINTS}\n"]
     lines[-1] = lines[-1].rstrip("\n") + "\n"
-    # Without an index, installing the constraints as requirements succeeds only when the
-    # adapter venv already satisfies them, so the build fails if an install bypassed them.
     lines.append(f"RUN /opt/agentkit/bin/pip install --no-index --no-deps -r /src/{AGENTKIT_CONSTRAINTS}\n")
     return "".join(lines)
 

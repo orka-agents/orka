@@ -93,7 +93,6 @@ func TestAgentRuntimeReconcilerMarksStrictV2RuntimeReady(t *testing.T) {
 		t.Fatalf("Ready condition = %#v", condition)
 	}
 	counts := server.Counts()
-	// Workspace validation and running cancellation use separate sessions.
 	if counts.PromptStarts != 2 || counts.PromptCancels != 2 || counts.SessionDeletes != 2 || counts.WorkspaceDeltas != 1 {
 		t.Fatalf("hostile conformance counts = %#v", counts)
 	}
@@ -138,8 +137,6 @@ func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwne
 	assertAgentRuntimeNoCleanupFinalizer(t, rejectedContender)
 	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
 
-	// Simulate a duplicate status published by an older controller, then prove
-	// that reconciliation clears it instead of retaining its complete identity.
 	legacyDuplicate := getAgentRuntime(t, reconciler, contender)
 	legacyDuplicate.Status = readyOwner.DeepCopy().Status
 	if err := reconciler.Status().Update(t.Context(), &legacyDuplicate); err != nil {
@@ -153,8 +150,6 @@ func TestAgentRuntimeReconcilerRejectsDuplicatePoolIdentityWithoutDisruptingOwne
 	assertAgentRuntimeNoCleanupFinalizer(t, rejectedContender)
 	assertAgentRuntimeMCPPreAuth(t, reconciler, string(config.RuntimePoolUID), config.ControllerBearerToken)
 
-	// NotReady does not release a retained identity. Existing sessions continue
-	// to pre-authenticate against it, and a contender must remain blocked.
 	notReadyOwner := getAgentRuntime(t, reconciler, owner)
 	notReadyOwner.Status.Ready = false
 	if err := reconciler.Status().Update(t.Context(), &notReadyOwner); err != nil {
@@ -1693,14 +1688,10 @@ func TestAgentRuntimeReconcilerRechecksHostileCycleAfterAuthRotation(t *testing.
 	if err := reconciler.Update(t.Context(), stored); err != nil {
 		t.Fatal(err)
 	}
-	// The fake runtime still has the old key, so rotation must force a deep probe
-	// and fail closed rather than leaving the prior Ready status in place.
 	if _, err := reconciler.Reconcile(t.Context(), reconcileRequestFor(runtimeObject)); err != nil {
 		t.Fatal(err)
 	}
 	updated := getAgentRuntime(t, reconciler, runtimeObject)
-	// The rotated key now fails closed at the earliest capability-guarded
-	// surface: the status probe itself rejects the stale capability secret.
 	if updated.Status.Ready ||
 		(!strings.Contains(updated.Status.Message, "operation capability") && !strings.Contains(updated.Status.Message, "status authorization failed")) {
 		t.Fatalf("rotated mismatched capability key did not fail closed: %#v", updated.Status)
@@ -1864,7 +1855,6 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	if err := reconciler.validateAgentRuntimeEndpointPolicy(t.Context(), runtimeObject); err != nil {
 		t.Fatalf("same-namespace Service endpoint: %v", err)
 	}
-	// Dispatch pins to the verified backend Pod IP:port, not the Service.
 	pins, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject)
 	if err != nil {
 		t.Fatalf("backend pins error: %v", err)
@@ -1883,8 +1873,6 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 		expectAgentRuntimeEndpointPolicyError(t, reconciler, runtimeObject, endpoint, "non-public IP")
 	}
 	runtimeObject.Spec.Deployment.Endpoint = "http://runtime.default.svc.cluster.local:8080"
-	// A forged address that is not one of the backing Pod's IPs is rejected
-	// even though the slice claims a same-namespace Pod TargetRef.
 	forgedAddressSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default", Name: "runtime-forged",
@@ -1905,8 +1893,6 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	if err := reconciler.Delete(t.Context(), forgedAddressSlice); err != nil {
 		t.Fatal(err)
 	}
-	// A slice whose TargetRef Pod does not match the Service selector is
-	// rejected even if the address matches that Pod's real IP.
 	strayPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "stray-pod", Labels: map[string]string{"app": "other"}},
 		Status:     corev1.PodStatus{PodIP: "10.0.0.20", PodIPs: []corev1.PodIP{{IP: "10.0.0.20"}}},
@@ -1934,7 +1920,6 @@ func TestAgentRuntimeEndpointPolicy(t *testing.T) {
 	if err := reconciler.Delete(t.Context(), straySlice); err != nil {
 		t.Fatal(err)
 	}
-	// A cross-namespace TargetRef is rejected outright.
 	crossNamespaceSlice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default", Name: "runtime-mirrored",
@@ -1984,9 +1969,6 @@ func TestAgentRuntimeServiceBackendPinsFailClosedWithoutEndpoints(t *testing.T) 
 			Ports:    []corev1.ServicePort{{Port: 8080}},
 		},
 	}
-	// A selector-backed Service with no EndpointSlices (a rollout gap) must fail
-	// closed instead of yielding zero pins that degrade to an unpinned Service
-	// ClusterIP dial exempt from the public-address control.
 	reconciler := newAgentRuntimeUnitReconciler(t, runtimeObject, service)
 	if _, err := reconciler.AgentRuntimeServiceBackendPins(t.Context(), runtimeObject); err == nil ||
 		!strings.Contains(err.Error(), "no verified backend endpoint for port 8080") {
@@ -2039,9 +2021,6 @@ func TestAgentRuntimeServiceBackendPinsSelectsMatchingPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("multi-port pins error: %v", err)
 	}
-	// The endpoint URL targets ServicePort 8080 ("acp"), which maps to the
-	// EndpointSlice "acp" target 8443; the metrics listener (9090) must never be
-	// pinned or receive controller bearer/capability traffic.
 	if len(pins) != 1 || pins[0] != "10.0.0.9:8443" {
 		t.Fatalf("multi-port pins = %v, want [10.0.0.9:8443]", pins)
 	}
@@ -2088,9 +2067,6 @@ func TestAgentRuntimeServiceBackendPinsExcludesUnreadyEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mixed-readiness pins error: %v", err)
 	}
-	// Only the ready, non-terminating backend is pinned; the Pod-unready backend
-	// is excluded even though its EndpointSlice condition says Ready, and the
-	// terminating endpoint is also excluded from the round-robin pin set.
 	if len(pins) != 1 || pins[0] != "10.0.0.9:8080" {
 		t.Fatalf("mixed-readiness pins = %v, want [10.0.0.9:8080]", pins)
 	}

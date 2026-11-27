@@ -60,9 +60,6 @@ func (*idleCountingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 
 func (t *idleCountingTransport) CloseIdleConnections() { t.closed++ }
 
-// Each executor built without a client makes its own router transport, so Close
-// must drop that transport's idle connections. A caller-supplied client is
-// shared and must be left alone.
 func TestSubstrateExecutorCloseReleasesOnlyItsOwnRouterConnections(t *testing.T) {
 	cfg, _, _, _ := substrateTransportFixture(t)
 	cfg.RouterURL = "https://router.test"
@@ -88,9 +85,6 @@ func TestSubstrateExecutorCloseReleasesOnlyItsOwnRouterConnections(t *testing.T)
 	}
 }
 
-// An Actor answers daemon requests. Its redirect must not move the controller's
-// request, which carries the bootstrap bearer and the handoff token, to a host
-// the Actor chooses.
 func TestSubstrateExecutorNeverFollowsActorRedirects(t *testing.T) {
 	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
 		for _, name := range []string{"built router client", "caller-supplied client"} {
@@ -1392,7 +1386,6 @@ func TestSubstrateDescribeDerivesRetainedFromSuspendedActor(t *testing.T) {
 	if !got.Retained || got.Phase != PhaseRetained {
 		t.Fatalf("Describe() = %#v, want retained phase derived from suspended actor", got)
 	}
-	// Callers compare it with the template the name now resolves to.
 	if got.Template.UID != "template-uid" {
 		t.Fatalf("Describe() template = %#v, want the Actor's template identity", got.Template)
 	}

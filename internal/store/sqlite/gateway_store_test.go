@@ -643,9 +643,6 @@ func TestGatewayBurstRemainsBounded(t *testing.T) {
 		}
 	}
 
-	// Provider retries may arrive out of order after a response loss. Replaying the
-	// full burst in reverse must hit durable deduplication without growing either
-	// the event ledger or canonical Session transcript.
 	for i := 999; i >= 0; i-- {
 		event := testGatewayEvent(now.Add(time.Duration(i)*time.Microsecond), fmt.Sprintf("burst-%04d", i))
 		event.SessionName = fmt.Sprintf("session-%03d", i%100)
@@ -674,8 +671,6 @@ func TestGatewayBurstRemainsBounded(t *testing.T) {
 		}
 	}
 
-	// Session reservation bounds immediately claimable work to one event per
-	// active Session even though all 1,000 durable events are due.
 	claimedSessions := make(map[string]struct{}, 100)
 	for i := range 100 {
 		claimed, err := s.ClaimNextGatewayEvent(ctx, "default", fmt.Sprintf("worker-%03d", i), now.Add(time.Second), time.Minute)
@@ -792,8 +787,6 @@ func TestGatewayBackupRestoreResumesQueuedWorkWithoutReplayingTerminalDelivery(t
 		t.Fatalf("pre-backup queues = (%d events, %d deliveries), want (1, 1)", len(queuedBefore), len(pendingBefore))
 	}
 
-	// A quiesced backup may copy only the main database after checkpointing WAL.
-	// Copy through a separate backup path so the restore exercises a new file.
 	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		t.Fatal(err)
 	}
@@ -856,8 +849,6 @@ func TestGatewayBackupRestoreResumesQueuedWorkWithoutReplayingTerminalDelivery(t
 		t.Fatalf("restored pending delivery = (%+v, %v)", restoredPending, err)
 	}
 
-	// Re-projecting a terminal event after restore must preserve the delivered
-	// outbox row rather than creating a fresh provider side effect.
 	gotDelivery, created, err := restored.ProjectGatewayTerminal(ctx, store.GatewayTerminalProjection{
 		EventID: deliveredEvent.ID,
 		Message: store.SessionMessage{
@@ -1981,8 +1972,6 @@ func TestGatewayDedupUsesNormalizedMetadata(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Orka normalizes metadata above the store, so admissions go
-			// through the storage client.
 			s := orkaClient(t, setupTestStore(t))
 			ctx := context.Background()
 			now := time.Now().UTC().Truncate(time.Second)

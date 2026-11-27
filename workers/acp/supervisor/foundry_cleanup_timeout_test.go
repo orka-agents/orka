@@ -40,8 +40,6 @@ func TestSupervisorFoundryCleanupRetriesAfterRetirementDeadline(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(proof)
 	}))
-	// Keep the real ACP child alive until KILL so the first already-expired
-	// process observation cannot race a successful TERM-based exit.
 	server.cfg.Provider.Args = []string{"-test.run=^TestSupervisorFoundryCleanupTimeoutProcess$"}
 	created := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg)
 	if created.Code != http.StatusCreated {

@@ -76,9 +76,6 @@ func TestProductionACPMCPBrokerRejectsLateCustomToolDrift(t *testing.T) {
 			defer unblock()
 			executionErrors := make(chan error, 2)
 			var executions atomic.Int32
-			// Only the scheduling barrier is a test wrapper. Authentication,
-			// immutable snapshot resolution, prompt authorization, effect
-			// reservation and the actual custom Tool executor are production.
 			broker.Executor = ACPMCPToolExecutorFunc(func(ctx context.Context, call harnessv2.MCPBrokerCallRequest, descriptor harnessv2.MCPToolDescriptor) (result json.RawMessage, err error) {
 				executions.Add(1)
 				defer func() { executionErrors <- err }()
@@ -126,8 +123,6 @@ func TestProductionACPMCPBrokerRejectsLateCustomToolDrift(t *testing.T) {
 				t.Fatalf("late Tool update: status=%d old=%d new=%d executions=%d", response.Code, oldCalls.Load(), newCalls.Load(), executions.Load())
 			}
 			assertExternalPolicyEffect(t, f, request, wantState)
-			// A repeated changed request must not send to either destination.
-			// Harmless metadata changes still permit the durable replay result.
 			replay := receiveExternalPolicyMCPResponse(t, f.ctx, startExternalPolicyMCPCall(t, f, broker, request))
 			if test.drift {
 				if replay.Code != http.StatusBadGateway {

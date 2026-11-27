@@ -99,7 +99,6 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 	invalidConfig.APIInsecureSkipVerify = false
 	unauthenticatedConfig := validConfig
 	unauthenticatedConfig.APICertFile, unauthenticatedConfig.APIKeyFile = "", ""
-	// Bearer control authentication without the router pod-certificate identity.
 	bearerConfig := unauthenticatedConfig
 	bearerConfig.APIBearerTokenFile = "/var/run/substrate/token"
 
@@ -130,7 +129,6 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "native-tool", Namespace: namespace},
 		}
 		if owned {
-			// Cleanup survives a Tool changing or removing its MCP spec.
 			tool.Finalizers = []string{"orka.ai/substrate-mcp-tool-actor-cleanup"}
 		}
 		return tool
@@ -172,7 +170,6 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			config:  validConfig,
 		},
 		{
-			// Pool finalization is control-only and needs no router identity.
 			name:    "existing actor pool accepts bearer control recovery configuration",
 			objects: []client.Object{actorPool("team-a", true)},
 			config:  bearerConfig,
@@ -209,7 +206,6 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			wantError: "parse substrate recovery configuration for existing Tool",
 		},
 		{
-			// Tool finalization builds the router-capable executor.
 			name:      "dedicated MCP tool requires the router pod-certificate identity",
 			objects:   []client.Object{mcpTool("team-a", true)},
 			config:    bearerConfig,
@@ -271,14 +267,12 @@ func TestValidateSubstrateStartupConfigRejectsRemovedSettingsUnconditionally(t *
 		t.Fatalf("removed setting error = %v", removedErr)
 	}
 	var empty controller.SubstrateConfig
-	// A workspace-only deployment has MCP Tools disabled and no recovery state.
 	for _, mcpToolsEnabled := range []bool{false, true} {
 		err := validateSubstrateStartupConfig(mcpToolsEnabled, empty, removedErr)
 		if !errors.Is(err, controller.ErrRemovedSubstrateSetting) {
 			t.Fatalf("mcpToolsEnabled=%v: removed setting was not rejected: %v", mcpToolsEnabled, err)
 		}
 	}
-	// Other disabled-only configuration remains a recovery-time concern.
 	parseErr := errors.New("invalid disabled-only duration")
 	if err := validateSubstrateStartupConfig(false, empty, parseErr); err != nil {
 		t.Fatalf("disabled MCP Tools rejected an unrelated configuration error: %v", err)
@@ -857,8 +851,6 @@ func TestValidateAgentHostConfig(t *testing.T) {
 	}
 }
 
-// Labels that become selectors, such as the controller Pods a host's
-// NetworkPolicy admits, must be valid Kubernetes labels.
 func TestParseExactLabels(t *testing.T) {
 	parsed, err := parseExactLabels(" orka.ai/network-role=controller , app=orka ")
 	if err != nil || len(parsed) != 2 || parsed["orka.ai/network-role"] != "controller" || parsed["app"] != "orka" {

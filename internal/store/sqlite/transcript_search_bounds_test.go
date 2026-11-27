@@ -15,7 +15,6 @@ func TestSearchTranscriptHistoryBounds(t *testing.T) {
 		Namespace: "default", Name: "session", SessionType: "task",
 	}))
 	now := time.Now().UTC()
-	// Insertion and timestamp order deliberately differ from logical order.
 	require.NoError(t, s.AppendMessages(t.Context(), "default", "session", []store.SessionMessage{
 		{ID: "five", Order: 5, Role: "user", Content: "later nonmatching message", Timestamp: now.Add(-5 * time.Minute)},
 		{ID: "three", Order: 3, Role: "user", Content: "needle at cutoff", Timestamp: now.Add(-3 * time.Minute)},

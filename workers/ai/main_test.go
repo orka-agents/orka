@@ -63,7 +63,6 @@ func TestGetAPIKey_EnvVar(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Save and restore original env
 			original := os.Getenv(tt.envVar)
 			os.Setenv(tt.envVar, tt.envValue)    //nolint:errcheck
 			defer os.Setenv(tt.envVar, original) //nolint:errcheck
@@ -77,7 +76,6 @@ func TestGetAPIKey_EnvVar(t *testing.T) {
 }
 
 func TestGetAPIKey_NotFound(t *testing.T) {
-	// Clear environment variables
 	originalAnthropic := os.Getenv("ANTHROPIC_API_KEY")
 	originalOpenAI := os.Getenv("OPENAI_API_KEY")
 	os.Unsetenv("ANTHROPIC_API_KEY") //nolint:errcheck
@@ -98,7 +96,6 @@ func TestGetAPIKey_NotFound(t *testing.T) {
 }
 
 func TestLoadSessionContext_NoFile(t *testing.T) {
-	// When file doesn't exist, should return nil
 	messages, err := loadSessionContext(filepath.Join(t.TempDir(), "missing.jsonl"), false)
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +106,6 @@ func TestLoadSessionContext_NoFile(t *testing.T) {
 }
 
 func TestLoadSessionContext_ValidFile(t *testing.T) {
-	// Create a temp directory and file
 	tmpDir := t.TempDir()
 	sessionDir := filepath.Join(tmpDir, "session")
 	os.MkdirAll(sessionDir, 0755) //nolint:errcheck
@@ -121,9 +117,6 @@ func TestLoadSessionContext_ValidFile(t *testing.T) {
 	transcriptPath := filepath.Join(sessionDir, "transcript.jsonl")
 	os.WriteFile(transcriptPath, []byte(transcriptContent), 0644) //nolint:errcheck
 
-	// Override the transcript path temporarily
-	// Note: This test would need to mock the file path or modify the function
-	// For now, we'll just test the parsing logic directly
 	messages := []llm.Message{}
 	lines := []string{
 		`{"role":"user","content":"Hello"}`,
@@ -148,7 +141,6 @@ func TestLoadSessionContext_ValidFile(t *testing.T) {
 }
 
 func TestLoadSessionContext_MalformedJSON(t *testing.T) {
-	// Test that malformed JSON is skipped
 	lines := []string{
 		`{"role":"user","content":"Hello"}`,
 		`{invalid json}`,
@@ -218,7 +210,6 @@ func TestLoadSkillsFromVolume_FallbackSkillFiles(t *testing.T) {
 }
 
 func TestBuildLLMTools_BuiltinTools(t *testing.T) {
-	// Test with built-in tool
 	enabledTools := []string{"web_search"}
 	customTools := map[string]*corev1alpha1.Tool{}
 
@@ -321,7 +312,6 @@ func TestBuildLLMTools_NotFound(t *testing.T) {
 
 	llmTools := buildLLMTools(enabledTools, customTools)
 
-	// Tool should not be added if not found
 	if len(llmTools) != 0 {
 		t.Errorf("Expected 0 tools, got %d", len(llmTools))
 	}
@@ -611,7 +601,6 @@ func TestRun_MissingAPIKey(t *testing.T) {
 }
 
 func TestCreateK8sClient_OutsideCluster(t *testing.T) {
-	// Outside a k8s cluster, createK8sClient should fail
 	_, err := createK8sClient()
 	if err == nil {
 		t.Fatal("expected error when not running in cluster")
@@ -622,7 +611,6 @@ func TestCreateK8sClient_OutsideCluster(t *testing.T) {
 }
 
 func TestLoadCustomTools_NilClient(t *testing.T) {
-	// With nil client and no tool names, should return empty map
 	tools, _ := loadCustomTools(context.Background(), nil, "default", nil)
 	if len(tools) != 0 {
 		t.Errorf("expected empty map, got %d tools", len(tools))
@@ -630,7 +618,6 @@ func TestLoadCustomTools_NilClient(t *testing.T) {
 }
 
 func TestLoadCustomTools_BuiltinToolSkipped(t *testing.T) {
-	// Built-in tools should be skipped (no k8s lookup needed)
 	tools, _ := loadCustomTools(context.Background(), nil, "default", []string{"web_search"})
 	if len(tools) != 0 {
 		t.Errorf("expected empty map for built-in tools, got %d tools", len(tools))
@@ -638,7 +625,6 @@ func TestLoadCustomTools_BuiltinToolSkipped(t *testing.T) {
 }
 
 func TestExecuteAgentLoop_NoToolCalls(t *testing.T) {
-	// Mock provider that returns a response with no tool calls
 	provider := &mockProvider{
 		response: &llm.CompletionResponse{
 			Content:    "Task completed successfully",
@@ -667,7 +653,6 @@ func TestExecuteAgentLoop_PreservesModelSettings(t *testing.T) {
 	defer restore()
 	toolspkg.DefaultRegistry.Register(staticTestTool{name: customToolName})
 	llmTools := toolspkg.DefaultRegistry.ToLLMTools([]string{customToolName})
-	// The loop must use its explicit configuration, not re-read process settings.
 	t.Setenv(workerenv.AITemperature, "invalid-loop-temperature")
 	t.Setenv(workerenv.AIMaxTokens, "invalid-loop-max-tokens")
 
@@ -946,7 +931,6 @@ func TestAIWorkerEventCompletenessSmoke(t *testing.T) {
 	if strings.Contains(string(data), "sk-test12345678901234567890") {
 		t.Fatalf("AI worker events leaked fake API key: %s", data)
 	}
-	// The task trace reads the "provider" and "model" content keys.
 	var sawResponseTelemetry bool
 	for _, event := range recorder.Events() {
 		if event.Type != events.ExecutionEventTypeModelRequestCompleted {
@@ -1191,7 +1175,6 @@ type terminalAIEventRecorder struct {
 }
 
 func (r *terminalAIEventRecorder) Record(ctx context.Context, eventType string, _ ...common.EventOption) {
-	// Model persistence followed by cancellation before the response is read.
 	r.types = append(r.types, eventType)
 	r.cancel()
 	r.ctx = ctx
@@ -1289,7 +1272,6 @@ func TestWriteResult_Success(t *testing.T) {
 }
 
 func TestLoadSessionContext_WithTempFile(t *testing.T) {
-	// Create a temp transcript file
 	dir := t.TempDir()
 	transcriptDir := filepath.Join(dir, "session")
 	os.MkdirAll(transcriptDir, 0o755) //nolint:errcheck
@@ -1375,7 +1357,6 @@ func TestLoadPlanContext_MalformedJSON(t *testing.T) {
 	}
 }
 
-// mockProvider implements llm.Provider for testing.
 type mockProvider struct {
 	response  *llm.CompletionResponse
 	responses []*llm.CompletionResponse
@@ -1705,7 +1686,6 @@ func TestSealChildTaskViaControllerAsksTheParentEndpoint(t *testing.T) {
 	if path != wantPath || auth != "Bearer sa-token" {
 		t.Fatalf("path = %q auth = %q", path, auth)
 	}
-	// A child without a requester has nothing to seal.
 	path = ""
 	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}
 	if err := sealChildTaskViaController(context.Background(), nil, plain); err != nil || path != "" {
@@ -1713,9 +1693,6 @@ func TestSealChildTaskViaControllerAsksTheParentEndpoint(t *testing.T) {
 	}
 }
 
-// A conflict means a reconcile touched the child between the controller's
-// read and its fenced seal; the worker asks again rather than leaving the
-// child unsealed.
 func TestSealChildTaskViaControllerRetriesConflicts(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1746,7 +1723,6 @@ func TestSealChildTaskViaControllerRetriesConflicts(t *testing.T) {
 	if got := attempts.Load(); got != 3 {
 		t.Fatalf("attempts = %d, want two conflicts then success", got)
 	}
-	// A conflict that never clears stops after a bounded number of tries.
 	attempts.Store(-1000)
 	if err := sealChildTaskViaController(context.Background(), nil, child); err != nil {
 		t.Fatal(err)
@@ -1756,9 +1732,6 @@ func TestSealChildTaskViaControllerRetriesConflicts(t *testing.T) {
 	}
 }
 
-// TestSealChildTaskViaControllerRetriesTransientFailures covers a controller
-// that is briefly unavailable: a 5xx is retried like a conflict, while a
-// definitive 4xx is final.
 func TestSealChildTaskViaControllerRetriesTransientFailures(t *testing.T) {
 	var attempts atomic.Int32
 	var status atomic.Int32
@@ -1799,9 +1772,6 @@ func TestSealChildTaskViaControllerRetriesTransientFailures(t *testing.T) {
 	}
 }
 
-// TestSealHTTPClientStaysOnTheController covers the client that carries the
-// worker's ServiceAccount token to the controller: it ignores proxy settings
-// and never follows a redirect elsewhere.
 func TestSealHTTPClientStaysOnTheController(t *testing.T) {
 	client := sealHTTPClient()
 	transport, ok := client.Transport.(*http.Transport)

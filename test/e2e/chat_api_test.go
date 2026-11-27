@@ -50,8 +50,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		stopPortForward(cancelPF, portForwardCmd)
 	})
 
-	// --- Chat Config Endpoint ---
-
 	It("should return chat config from GET /api/v1/chat/config", func() {
 		req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/chat/config", nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -66,12 +64,9 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		body, err := io.ReadAll(resp.Body)
 		Expect(err).NotTo(HaveOccurred())
 		bodyStr := string(body)
-		// Chat config should contain known fields
 		Expect(bodyStr).To(ContainSubstring("enabled"))
 		Expect(bodyStr).To(ContainSubstring("maxIterations"))
 	})
-
-	// --- Chat SSE Streaming ---
 
 	It("should stream SSE events from POST /api/v1/chat", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
@@ -109,7 +104,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		events := chatSSEEventNames(sseEvents)
 
 		By("verifying expected event types were received")
-		// Should have at least a message and done event
 		Expect(events).NotTo(BeEmpty(), "Should receive SSE events")
 		Expect(events).To(ContainElement("done"), "Should receive a 'done' event")
 
@@ -123,8 +117,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 			expectMockLLMServed(marker, 30*time.Second)
 		}
 	})
-
-	// --- OpenAI-Compatible: /openai/v1/models ---
 
 	It("should list models via GET /openai/v1/models", func() {
 		req, err := http.NewRequest("GET", apiBaseURL+"/openai/v1/models", nil)
@@ -142,8 +134,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		bodyStr := string(body)
 		Expect(bodyStr).To(ContainSubstring("object"))
 	})
-
-	// --- OpenAI-Compatible: /openai/v1/chat/completions ---
 
 	It("should proxy chat completions via POST /openai/v1/chat/completions", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
@@ -214,8 +204,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		}
 	})
 
-	// --- Session Listing and Deletion ---
-
 	It("should list sessions via GET /api/v1/sessions", func() {
 		req, err := http.NewRequest("GET", apiBaseURL+"/api/v1/sessions", nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -225,7 +213,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
 
-		// Should return 200 even if empty
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))
 	})
 
@@ -259,7 +246,6 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 		resp, err := client.Do(req)
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
-		// Drain the response body
 		_, _ = io.ReadAll(resp.Body)
 
 		By("verifying the session can be retrieved")
@@ -332,13 +318,11 @@ var _ = Describe("Chat and OpenAI-Compatible API", Ordered, func() {
 	})
 })
 
-// chatSSEEvent is one server-sent event from POST /api/v1/chat.
 type chatSSEEvent struct {
 	Name string
 	Data string
 }
 
-// readChatSSEEvents reads chat SSE events up to and including "done".
 func readChatSSEEvents(body io.Reader) []chatSSEEvent {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
@@ -373,7 +357,6 @@ func chatSSEEventNames(events []chatSSEEvent) []string {
 	return names
 }
 
-// chatSSEMessageText joins the content of every "message" event.
 func chatSSEMessageText(events []chatSSEEvent) string {
 	var b strings.Builder
 	for _, event := range events {
@@ -395,7 +378,6 @@ type chatSSEUsage struct {
 	ToolCalls int `json:"toolCalls"`
 }
 
-// chatSSEDoneUsage decodes the turn usage carried by the "done" event.
 func chatSSEDoneUsage(events []chatSSEEvent) chatSSEUsage {
 	for _, event := range events {
 		if event.Name != "done" {

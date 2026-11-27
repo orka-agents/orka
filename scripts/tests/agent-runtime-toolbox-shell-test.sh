@@ -23,8 +23,6 @@ assert_equal() {
   }
 }
 
-# Source-only bootstrap libraries do not perform cluster operations. Mock the
-# kubectl executable used by live_acp_kind_run and check both commands exactly.
 (
   # shellcheck source=scripts/lib/agent-runtime-kind-bootstrap.sh
   . "${root}/scripts/lib/agent-runtime-kind-bootstrap.sh"
@@ -57,7 +55,6 @@ assert_equal() {
 )
 printf '%s\n' 'ok - toolbox enablement and rollout use the selected Helm or default controller and namespace'
 
-# Use the existing function-extraction seam, not a rewritten checksum formula.
 checksum_preflight="$(awk '
   /^toolbox_checksum_command=\(\)$/ {copy=1}
   copy && /^release_gate=0$/ {exit}
@@ -76,8 +73,6 @@ done
 # shellcheck source=scripts/lib/e2e-common.sh
 . "${root}/scripts/lib/e2e-common.sh"
 
-# Restrict PATH so no host sha256sum, Docker, or kubectl can be discovered.
-# shasum uses its native absolute Perl interpreter on macOS and Linux.
 portable_bin="${test_root}/portable-bin"
 mkdir -p "${portable_bin}"
 for command in awk cut date dirname grep jq mktemp sed sort tr; do
@@ -103,7 +98,6 @@ done
   eval "${checksum_preflight}"
   assert_equal "${toolbox_checksum_command[*]}" 'shasum -a 256'
 
-  # Mock all Task/API operations while running the complete toolbox check.
   # shellcheck disable=SC2034 # Used by the evaluated run_toolbox_check function.
   run_id=toolbox-checksum-test
   apply_toolbox_agent() { printf '%s\n' "$3" >>"${test_root}/toolbox-images"; }
@@ -128,17 +122,13 @@ done
   mapfile -t images <"${test_root}/toolbox-images"
   assert_equal "${#images[@]}" 2
   assert_equal "${images[0]}" "${ACP_E2E_TOOLBOX_IMAGE}"
-  # SHA-256 of the literal no-newline input orka-toolbox-unknown-digest-toolbox-checksum-test.
   assert_equal "${images[1]}" 'registry.example:5000/toolbox@sha256:147073788b0f333909b2193112de5d970beab147655376c8f9053da888c833b4'
-  # Run cleanup refuses Tasks without the validated label, so every checked
-  # toolbox Task must be marked.
   mapfile -t validated <"${test_root}/validated-tasks"
   assert_equal "${validated[*]}" "acp-codex-toolbox-run-${run_id} acp-codex-toolbox-unknown-run-${run_id}"
 )
 printf '%s\n' 'ok - the toolbox unknown-image case uses exact SHA-256 bytes with shasum and no GNU sha256sum'
 printf '%s\n' 'ok - run_toolbox_check marks every checked toolbox Task validated'
 
-# Both commands present: GNU sha256sum is preferred and receives no shasum flags.
 cat >"${portable_bin}/sha256sum" <<STUB
 #!${bash_bin}
 [[ \$# -eq 0 ]] || exit 91
@@ -161,8 +151,6 @@ rm "${portable_bin}/sha256sum" "${portable_bin}/shasum"
   eval "${checksum_preflight}"
   assert_equal "${#toolbox_checksum_command[@]}" 0
 )
-# Execute the real validator startup, not just the extracted selection block.
-# Missing hashing tools must fail before any mocked cluster or HTTP operation.
 export MOCK_LIVE_CALLS="${test_root}/live.calls"
 : >"${MOCK_LIVE_CALLS}"
 rc=0

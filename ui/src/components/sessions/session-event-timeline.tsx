@@ -15,30 +15,17 @@ export interface SessionEventTimelineProps {
 
 export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
   const initial = useSessionEvents(sessionId)
-  // Sessions aggregate many tasks and have no single terminal event, so default
-  // to following — the stream stays open until the session is deleted.
   const [following, setFollowing] = useState(true)
 
   const initialEvents = useMemo<ExecutionEvent[]>(
     () => initial.data?.events ?? [],
     [initial.data],
   )
-  // Seed from the highest loaded session seq, not latestSeq: the session events
-  // endpoint returns a bounded first page, so seeding from latestSeq would skip
-  // every event between the loaded tail and latestSeq. Replaying from the loaded
-  // tail fills the gap without dropping events.
   const seedSeq = maxSeq(initialEvents)
   const latestSeq = initial.data?.latestSeq ?? 0
 
-  // Track how far the live stream has replayed so the backfill gap can close once
-  // it catches up. Updated in an effect (not during render). The component is
-  // keyed by sessionId at its mount site, so this resets on session change.
   const [streamedThrough, setStreamedThrough] = useState(0)
 
-  // Backfill the tail when the server reports more events than we currently hold
-  // (the freshly-loaded page or the streamed tail), even if the user paused
-  // following, so a session with >1000 events isn't stuck on its first page. Once
-  // the stream catches up the gap closes and "Stop following" actually pauses it.
   const highestHeld = Math.max(seedSeq, streamedThrough)
   const hasBackfillGap = latestSeq > highestHeld
   const streamEnabled = (following || hasBackfillGap) && !!sessionId
@@ -50,8 +37,6 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
   })
 
   useEffect(() => {
-    // Grow-only: converges and bails out once caught up (Math.max returns the
-    // same value), so this does not cascade renders.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStreamedThrough((prev) => Math.max(prev, stream.lastSeq))
   }, [stream.lastSeq])
@@ -60,7 +45,6 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
     () => mergeEventsBySeq(initialEvents, stream.events),
     [initialEvents, stream.events],
   )
-  // Show the true latest session sequence for the resume helper.
   const lastSeq = Math.max(latestSeq, highestHeld, stream.lastSeq, maxSeq(events))
 
   const notImplemented =
@@ -73,11 +57,7 @@ export function SessionEventTimeline({ sessionId }: SessionEventTimelineProps) {
         ? stream.error
         : null
 
-  // The session stream sends a SessionDeleted stream_complete frame when the
-  // session is gone; surface that distinctly from a task's terminal completion.
   const sessionDeleted = stream.streamComplete?.type === 'SessionDeleted'
-  // Refresh the session itself so the page stops presenting the deleted
-  // session's overview and Delete action.
   const queryClient = useQueryClient()
   useEffect(() => {
     if (sessionDeleted) queryClient.invalidateQueries({ queryKey: ['session', sessionId] })

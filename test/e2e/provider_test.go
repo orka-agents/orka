@@ -48,9 +48,6 @@ var _ = Describe("Provider CRD Lifecycle", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	// expectProviderTaskResult checks the stored result through the controller
-	// API: exactly the scripted answer in mock mode, and the right number with
-	// a live key.
 	expectProviderTaskResult := func(taskName string, mocked bool) {
 		By("fetching the task result through the controller API")
 		result := strings.TrimSpace(fetchTaskResultViaAPI(apiBaseURL, token, taskName))

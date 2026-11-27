@@ -48,9 +48,6 @@ func TestEvictionSuspendWindowRequiresSubstrateActorWithDurableWorkspace(t *test
 	}
 }
 
-// An evicted supervisor closes admission through the controller's drain and
-// rejects every fresh prompt as a retryable, never-accepted request, so the
-// controller can requeue it onto the resumed instance without replaying work.
 func TestBeginEvictionDrainsAndRejectsFreshPromptsWithoutAcceptance(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
@@ -81,10 +78,6 @@ func TestBeginEvictionDrainsAndRejectsFreshPromptsWithoutAcceptance(t *testing.T
 	}
 }
 
-// A prompt sent after eviction cleanup already retired its idle session was
-// never accepted, so it is rejected as retryable rather than as a missing
-// session. A replay of a prompt the session already admitted keeps its
-// existing classification and is never offered for retry.
 func TestEvictionCleanedSessionRejectsFreshPromptAsRetryable(t *testing.T) {
 	server, cfg, profile := newTestServer(t, "immediate")
 	create := testCreateSessionRequest(t, cfg, profile)
@@ -96,8 +89,6 @@ func TestEvictionCleanedSessionRejectsFreshPromptAsRetryable(t *testing.T) {
 	}
 	awaitDeletedRuntimeSession(t, server, create.RuntimeSessionID)
 
-	// A prompt for the retired session under any other fence is stale, never
-	// retryable: Core must not retry it against the wrong instance.
 	for name, stale := range map[string]func(*harnessv2.Fence){
 		"runtime instance": func(f *harnessv2.Fence) { f.RuntimeInstanceID += "-foreign" },
 		"supervisor boot":  func(f *harnessv2.Fence) { f.SupervisorBootID += "-previous" },
@@ -127,7 +118,6 @@ func TestEvictionCleanedSessionRejectsFreshPromptAsRetryable(t *testing.T) {
 		t.Fatalf("fresh prompt after eviction cleanup rejection = %+v; want retryable rate_limited", rejection)
 	}
 
-	// The retired session had admitted this prompt before cleanup.
 	server.mu.Lock()
 	tombstone := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
 	if !tombstone.drainCleaned {
@@ -166,10 +156,6 @@ func TestBeginEvictionReleasesOnlyForControllerStopRetirement(t *testing.T) {
 	}
 }
 
-// The eviction is reported on its own whatever drain closed admission first,
-// so Core can enforce its deadline. It never replaces the existing drain
-// reason, never moves later on a repeated signal, and survives poisoning.
-// This uses a bare server so it runs without the root-only session fence.
 func TestBeginEvictionReportsEvictionIndependentlyOfTheDrainReason(t *testing.T) {
 	signalledAt := time.Date(2026, time.November, 6, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

@@ -19,8 +19,6 @@ const workspaceCheckpointProviderNameLabel = "workspace.orka.ai/provider-name"
 const workspaceCheckpointRoutingFailureAnnotation = "workspace.orka.ai/checkpoint-routing-failure"
 const workspaceCheckpointUnsupportedReason = "CheckpointUnsupported"
 
-// Core establishes checkpoint routing from the exact source workspace. The
-// selected provider owns artifact export, observed status and reference cleanup.
 type WorkspaceCheckpointRoutingReconciler struct {
 	client.Client
 	APIReader   client.Reader
@@ -38,8 +36,6 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 	if !checkpoint.DeletionTimestamp.IsZero() || checkpoint.Labels[workspaceCheckpointProviderNameLabel] != "" {
 		return ctrl.Result{}, nil
 	}
-	// Published exports and in-progress legacy references keep their prior
-	// owner even when the source is gone and no new routing is established.
 	if checkpoint.Status.Digest != "" || slices.Contains(checkpoint.Finalizers, "orka.ai/substrate-checkpoint-reference") {
 		return ctrl.Result{}, nil
 	}
@@ -63,9 +59,6 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 	if !source.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, fmt.Errorf("checkpoint source workspace has changed or is deleting")
 	}
-	// Operator access forfeits checkpoint export: a source tainted through its
-	// own marker or the marker of any Task linked to this exact incarnation is
-	// never routed to a provider, so no fork can consume its data.
 	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, source)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -74,7 +67,7 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 		return r.failRouting(ctx, checkpoint, "SourceOperatorTainted")
 	}
 	if source.Labels[workspace.ProviderControllerLabel] == acpWorkspaceControllerLabelValue {
-		return ctrl.Result{}, nil // Retained legacy checkpoints keep their original owner.
+		return ctrl.Result{}, nil
 	}
 	provider := &workspace.ExecutionWorkspaceProvider{}
 	if err := reader.Get(ctx, types.NamespacedName{Name: source.Spec.ProviderBinding.Name}, provider); err != nil {
@@ -93,8 +86,6 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, fmt.Errorf("checkpoint provider identity or Data export capability is unavailable")
 	}
 	if !slices.Contains(provider.Status.SupportedFeatures, workspace.WorkspaceFeatureCheckpoint) {
-		// Only current, authoritative provider status proves that Data export
-		// is unsupported; a provider that has not reported yet stays retryable.
 		if r.APIReader == nil || !externalProviderUsable(provider) {
 			return ctrl.Result{}, fmt.Errorf("checkpoint provider identity or Data export capability is unavailable")
 		}
@@ -112,8 +103,6 @@ func (r *WorkspaceCheckpointRoutingReconciler) Reconcile(ctx context.Context, re
 	return ctrl.Result{}, nil
 }
 
-// A routing failure is Core-owned metadata, not a provider export or cleanup
-// result. The immutable source UID cannot become available again after loss.
 func (r *WorkspaceCheckpointRoutingReconciler) failRouting(ctx context.Context, checkpoint *workspace.ExecutionWorkspaceCheckpoint, reason string) (ctrl.Result, error) {
 	before := checkpoint.DeepCopy()
 	if checkpoint.Annotations == nil {

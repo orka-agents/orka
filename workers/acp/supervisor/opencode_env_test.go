@@ -318,9 +318,6 @@ func TestOpenCodeBrokeredPermissionsUseDisjointNativeNamespace(t *testing.T) {
 	}
 }
 
-// TestOpenCodeBrokeredPermissionsSkipForwardingTools covers a forwarding Tool
-// whose name normalizes to a built-in's, such as web.fetch beside web_fetch:
-// it is hidden from the model, takes no permission, and so cannot collide.
 func TestOpenCodeBrokeredPermissionsSkipForwardingTools(t *testing.T) {
 	policy := harnessv2.MCPToolPolicy{
 		AllowedToolNames: []string{"web_fetch", "web.fetch"},
@@ -466,10 +463,6 @@ func TestOpenCodeSessionConfigRequiresProviderModel(t *testing.T) {
 }
 
 func TestOpenCodeDefaultProtocolLimitUsesRuntimeUpdateRate(t *testing.T) {
-	// A live OpenCode research prompt streamed tool output above the generic
-	// 100/s protocol default; the controller enforced the advertised limit,
-	// broke the stream at the terminal event, and a completed prompt was lost
-	// as RuntimeLost. Every built-in runtime advertises the burst ceiling.
 	if got := defaultProtocolLimits().MaxUpdateEventsPerSecond; got != runtimeMaxUpdateEventsPerSecond {
 		t.Fatalf("MaxUpdateEventsPerSecond = %d, want %d", got, runtimeMaxUpdateEventsPerSecond)
 	}

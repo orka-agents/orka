@@ -16,7 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// warmExpiryFixture is a settled warm window whose settling Task is done.
 func warmExpiryFixture(t *testing.T) (*warmSettlementFixture, time.Time) {
 	t.Helper()
 	f := newWarmSettlementFixture(t, warmTestWindow)
@@ -105,9 +104,6 @@ func TestWarmWindowExpiryDefersForLiveContinuationDemand(t *testing.T) {
 		}
 	})
 
-	// A continuation born after retention's demand scan still wins: its demand
-	// stamp makes the delayed Suspend lose its optimistic write, as an attach
-	// would.
 	t.Run("the demand stamp fences a suspension already in flight", func(t *testing.T) {
 		t.Parallel()
 		f, deadline := warmExpiryFixture(t)
@@ -166,7 +162,6 @@ func TestWarmWindowExpiryDefersForLiveContinuationDemand(t *testing.T) {
 	})
 }
 
-// The grace wait reports itself so live runs can see it work.
 func TestWarmWindowExpiryDeferralIsReported(t *testing.T) {
 	t.Parallel()
 	f, deadline := warmExpiryFixture(t)

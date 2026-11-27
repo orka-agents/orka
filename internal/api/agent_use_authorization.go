@@ -13,18 +13,10 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// agentUseVerb is the SubjectAccessReview verb that authorizes running work
-// as an Agent, as opposed to reading or editing the Agent itself.
 const agentUseVerb = "use"
 
-// agentUseAuthorization is set once from ServerConfig when the server starts.
-// It is process-wide so that every API path that creates a Task or another
-// object naming an Agent enforces it without having to thread a setting
-// through each caller.
 var agentUseAuthorization atomic.Bool
 
-// authorizeAgentUse checks that the caller may use the named Agent. It is a
-// no-op unless Agent use authorization is enabled.
 func authorizeAgentUse(
 	ctx context.Context,
 	clientset kubernetes.Interface,
@@ -68,14 +60,6 @@ func authorizeAgentUse(
 	return nil
 }
 
-// agentUseReviewSubject returns the principal an Agent use review is made for.
-// A Kubernetes-authenticated caller is reviewed exactly as the API server
-// authenticated it. An OIDC or transaction-token caller is reviewed as
-// "<issuer>#<sub>", the form kube-apiserver gives OIDC users by default, and
-// its groups carry the same prefix: the token's display claims are not unique
-// or stable, and an unprefixed name or group could match a Kubernetes user, a
-// ServiceAccount, or a system: group. Any other caller has no reviewable
-// identity.
 func agentUseReviewSubject(userInfo *UserInfo) (authorizationv1.SubjectAccessReviewSpec, bool) {
 	if userInfo == nil {
 		return authorizationv1.SubjectAccessReviewSpec{}, false
@@ -116,8 +100,6 @@ func agentUseForbidden(agentName string) error {
 	return fiber.NewError(fiber.StatusForbidden, "not authorized to use agent "+agentName)
 }
 
-// agentRefNamespace returns the namespace an AgentReference resolves in: its
-// own namespace when set, otherwise the referring object's.
 func agentRefNamespace(ref corev1alpha1.AgentReference, objectNamespace string) string {
 	if namespace := strings.TrimSpace(ref.Namespace); namespace != "" {
 		return namespace
@@ -133,9 +115,6 @@ func authorizeTaskAgentUse(ctx context.Context, clientset kubernetes.Interface, 
 		agentRefNamespace(*task.Spec.AgentRef, task.Namespace), task.Spec.AgentRef.Name, "task", task.Name)
 }
 
-// authorizeAgentRefsUse checks every Agent the object newly names. Agents the
-// previous version already named were authorized when they were added, so an
-// unrelated edit by someone without use on them still succeeds.
 func authorizeAgentRefsUse(
 	ctx context.Context,
 	clientset kubernetes.Interface,
@@ -146,9 +125,6 @@ func authorizeAgentRefsUse(
 	refs []corev1alpha1.AgentReference,
 	previous []corev1alpha1.AgentReference,
 ) error {
-	// Compare the stored names exactly, as admission does: a reference the
-	// controller cannot resolve, such as one with stray whitespace, is not the
-	// Agent its corrected name runs, so correcting it needs a new check.
 	key := func(ref corev1alpha1.AgentReference) string {
 		refNamespace := ref.Namespace
 		if refNamespace == "" {

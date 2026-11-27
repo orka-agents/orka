@@ -4,8 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package testutil provides local standards-based transaction-token fixtures.
-// It intentionally does not depend on any provider SDK.
 package testutil
 
 import (
@@ -36,13 +34,11 @@ type testingT interface {
 	Fatalf(string, ...any)
 }
 
-// Issuer is an in-memory RSA transaction-token issuer for tests.
 type Issuer struct {
 	key *rsa.PrivateKey
 	kid string
 }
 
-// NewIssuer creates a local issuer.
 func NewIssuer(t testingT) *Issuer {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -52,13 +48,10 @@ func NewIssuer(t testingT) *Issuer {
 	return &Issuer{key: key, kid: "transaction-token-test-key"}
 }
 
-// KeyID returns the fixture signing key ID.
 func (i *Issuer) KeyID() string { return i.kid }
 
-// PrivateKey returns the fixture key for tests that build their own JWTs.
 func (i *Issuer) PrivateKey() *rsa.PrivateKey { return i.key }
 
-// JWKSHandler serves the issuer public key as a JWKS.
 func (i *Issuer) JWKSHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -75,8 +68,6 @@ func (i *Issuer) JWKSHandler() http.Handler {
 	})
 }
 
-// Sign returns a strict transaction-token JWT. Missing temporal and transaction
-// identifiers are populated locally.
 func (i *Issuer) Sign(t testingT, claims transactiontoken.Claims, ttl time.Duration) string {
 	t.Helper()
 	token, err := i.SignClaims(claims, ttl)
@@ -86,7 +77,6 @@ func (i *Issuer) Sign(t testingT, claims transactiontoken.Claims, ttl time.Durat
 	return token
 }
 
-// SignClaims signs the supplied claim set.
 func (i *Issuer) SignClaims(claims transactiontoken.Claims, ttl time.Duration) (string, error) {
 	if i == nil || i.key == nil {
 		return "", errors.New("transaction-token issuer is not configured")
@@ -126,8 +116,6 @@ func (i *Issuer) SignClaims(claims transactiontoken.Claims, ttl time.Duration) (
 	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
-// Verify fetches a JWKS, verifies a strict RS256 transaction token, and checks
-// its audience and expiry. It is intentionally small and used only by tests.
 func Verify(ctx context.Context, jwksURL, audience, token string) (*transactiontoken.Claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {

@@ -31,10 +31,6 @@ const (
 
 type ClientOption func(*Client) error
 
-// Client is a strict controller-side HTTP client for orka.harness.v2. It never
-// follows redirects, never logs credentials, and never retries mutating
-// requests. The same operation identity may be resent only by its caller after
-// inspecting RequestWriteEvidence and durable attempt state.
 type Client struct {
 	baseURL    *url.URL
 	basePrefix string
@@ -53,12 +49,6 @@ type Client struct {
 	limits   ProtocolLimits
 }
 
-// WithBeforeMutation installs a fail-closed check that runs immediately before
-// every mutating request is encoded, capability-signed, and sent. The check's
-// context reserves half of the effective remaining window, bounded by both the
-// request metadata expiry and caller deadline, for the mutation itself. It is
-// intended for callers that must revalidate external authority between
-// otherwise independent mutations.
 func WithBeforeMutation(validate func(context.Context, string) error) ClientOption {
 	return func(c *Client) error {
 		if validate == nil {
@@ -75,9 +65,6 @@ func WithHTTPClient(httpClient *http.Client) ClientOption {
 			return fmt.Errorf("HTTP client is required")
 		}
 		clone := *httpClient
-		// Redirects would either leak the operation capability or silently route a
-		// fenced operation to a different instance. Return the redirect response
-		// to the caller instead.
 		clone.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		}
@@ -111,8 +98,6 @@ func WithControllerBearerToken(token string) ClientOption {
 	}
 }
 
-// WithStatusCapabilityBinding sets the profile digest the client binds into
-// every status capability. Required before Status can be called.
 func WithStatusCapabilityBinding(binding StatusCapabilityBinding) ClientOption {
 	return func(c *Client) error {
 		if strings.TrimSpace(string(binding.RuntimeProfileDigest)) == "" {
@@ -133,9 +118,6 @@ func WithOperationCapabilitySecret(secret []byte) ClientOption {
 	}
 }
 
-// WithProtocolLimits configures negotiated limits before Capabilities has been
-// called. A later successful Capabilities call atomically replaces these values
-// with the supervisor-advertised limits.
 func WithProtocolLimits(limits ProtocolLimits) ClientOption {
 	return func(c *Client) error {
 		if err := limits.Validate(); err != nil {
@@ -146,11 +128,6 @@ func WithProtocolLimits(limits ProtocolLimits) ClientOption {
 	}
 }
 
-// NewProxylessTransport returns a clone of http.DefaultTransport with
-// environment proxy resolution disabled. Supervisor control traffic targets
-// exact in-cluster Pod endpoints; routing it through an inherited HTTP(S)_PROXY
-// would either expose authenticated control headers to an intermediary or
-// leave pools unreachable when the proxy cannot reach Pod IPs.
 func NewProxylessTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -531,8 +508,6 @@ func (c *Client) mutateJSON(
 		if len(create.NativeRestore.Snapshot.Data) > limits.EffectiveMaxNativeSessionBytes() {
 			return c.validationError(operation, fmt.Errorf("native restore exceeds runtime bundle limit %d", limits.EffectiveMaxNativeSessionBytes()))
 		}
-		// Only the bundle earns the larger body allowance. All other fields
-		// remain within the negotiated ordinary request limit.
 		create.NativeRestore = nil
 		ordinary, err := json.Marshal(create)
 		if err != nil || len(ordinary) > limits.MaxRequestBytes {
@@ -760,9 +735,6 @@ func (c *Client) transportError(operation string, requestCtx context.Context, tr
 		cause = requestCtx.Err()
 	}
 	message := c.redact(cause.Error(), capability)
-	// Do not retain an arbitrary RoundTripper error that may include request
-	// headers. Preserve only context cancellation sentinels; otherwise unwrap to
-	// the stable transport sentinel.
 	if !errors.Is(cause, context.Canceled) && !errors.Is(cause, context.DeadlineExceeded) {
 		cause = ErrClientTransport
 	}
@@ -1075,25 +1047,15 @@ func newTrackedRequest(ctx context.Context, method, endpoint string, payload []b
 		return nil, fmt.Errorf("build HTTP request: %w", err)
 	}
 	request.ContentLength = int64(len(payload))
-	// A nil GetBody prevents net/http from automatically replaying an idempotent
-	// PUT/DELETE after a connection failure. Replay classification belongs to the
-	// durable controller state machine, never the transport.
 	request.GetBody = nil
-	// Trace context is transport metadata, never canonical JSON or capability claims.
-	// Deliberately exclude baggage.
 	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(request.Header))
 	return request, nil
 }
 
-// HTTPTraceDelegatingTransport is implemented by wrapping RoundTrippers that
-// pass every request context unchanged to a transport whose httptrace evidence
-// is exact, such as a wrapper that only adds a routing header.
 type HTTPTraceDelegatingTransport interface {
 	DelegatesHTTPTrace() bool
 }
 
-// TransportSupportsHTTPTrace reports whether httptrace hooks observe the real
-// connection and request writes for this RoundTripper.
 func TransportSupportsHTTPTrace(roundTripper http.RoundTripper) bool {
 	if roundTripper == nil {
 		return true

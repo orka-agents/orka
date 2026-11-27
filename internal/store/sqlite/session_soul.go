@@ -10,11 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// sessionSoulHistorySQL ignores only explicitly unbound canonical Gateway errors
-// and their exact ingress rows for identity purposes, not transcript delivery.
-// Keep the same evidence checks for reads and retention: an unbound error must
-// never become a permanent no-soul anchor. The third argument enables the
-// exception only for Gateway Sessions; ambiguous/legacy rows remain unchanged.
 const sessionSoulHistorySQL = `WITH history AS (
  SELECT id, message_id, sort_order, role, source_type, source_ref, metadata_json
  FROM session_messages WHERE namespace = ? AND session_name = ?
@@ -37,8 +32,6 @@ const sessionSoulHistorySQL = `WITH history AS (
  )
 ) `
 
-// ReadSessionSoul uses existing transcript metadata rather than introducing an
-// independent Session identity store or changing the persisted SQLite schema.
 func (s *Store) ReadSessionSoul(ctx context.Context, namespace, name, taskName, taskUID string) (store.SessionSoulState, error) {
 	var soul store.SessionSoulState
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -74,9 +67,6 @@ func readSessionSoul(ctx context.Context, q taskDataExecutor, namespace, name, t
 	if taskUID == "" || ownerName != taskName || ownerUID != taskUID {
 		return state, store.ConflictErrorf("Task no longer owns the Session prompt context")
 	}
-	// Gateway admission owns user messages before Task creation. Its first
-	// assistant result not attested as unbound pins identity. FirstMessageID skips
-	// attested failed turns, while still fencing any unrelated earlier history.
 	gateway := state.SessionType == store.SessionTypeGateway
 	var digest sql.NullString
 	err = q.QueryRowContext(ctx, sessionSoulHistorySQL+`, revision AS (
@@ -99,10 +89,6 @@ func readSessionSoul(ctx context.Context, q taskDataExecutor, namespace, name, t
 	return state, nil
 }
 
-// EnsureSessionSoulWithLock pins a non-Gateway Session before a worker starts.
-// The existing hidden anchor survives empty turns and failed transcript writes;
-// no transcript content or visible message count is created by this operation.
-// An empty digest explicitly pins absence of a soul, not an unused Session.
 func (s *Store) EnsureSessionSoulWithLock(ctx context.Context, owner store.SessionOwnerWrite, digest string) error {
 	return writeOperationErr(ctx, s, "EnsureSessionSoulWithLock", func(ctx context.Context) error {
 		return s.ensureSessionSoulWithLockWrite(ctx, owner, digest)
@@ -137,7 +123,6 @@ func (s *Store) ensureSessionSoulWithLockWrite(ctx context.Context, owner store.
 	if ownerType == gatewaySessionOwnerType || sessionType == store.SessionTypeGateway {
 		return store.ConflictErrorf("Gateway owns its canonical Session soul context")
 	}
-	// This also checks expiry and the cross-store cleanup fence.
 	if err := verifySessionWriteLockTx(ctx, tx.Tx, owner); err != nil {
 		return err
 	}
@@ -166,10 +151,6 @@ func (s *Store) ensureSessionSoulWithLockWrite(ctx context.Context, owner store.
 	return tx.Commit()
 }
 
-// retainGatewaySoulAnchorTx removes expired conversation content while keeping
-// its first instruction revision as digest-only Session metadata. It stays in
-// the existing schema, is invisible to transcript readers, and is deleted with
-// the Session rather than with an individual Gateway event.
 func retainGatewaySoulAnchorTx(ctx context.Context, tx *sql.Tx, event *store.GatewayEvent) (bool, error) {
 	var id int64
 	var messageID, sourceType, sourceRef string

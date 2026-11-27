@@ -16,23 +16,15 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// repositoryMonitorOperationUpdateReview names the GitHub review summary update.
 const repositoryMonitorOperationUpdateReview = "update_review"
 
-// repositoryMonitorUpdatedReviewNote opens a rewritten review summary.
 const repositoryMonitorUpdatedReviewNote = "_Updated after a later review of this commit. Inline comments are from the earlier review._\n\n"
 
-// updatePublishedRepositoryMonitorReview rewrites the summary of the review
-// Orka already published for record's head when record reaches a different
-// verdict, so GitHub shows the current verdict while keeping one Orka review
-// per head. It reports false when the published review needs no change.
 func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord, published *store.ReviewPublishRecord, token, owner, repository string) (bool, error) {
 	shownID, shownAt, err := r.repositoryMonitorShownReviewRecordID(ctx, monitor, item, published)
 	if err != nil {
 		return false, err
 	}
-	// An update GitHub may have applied without Orka recording it leaves the
-	// shown summary unknown, so rewrite it rather than trust the records.
 	ambiguous, err := r.repositoryMonitorReviewUpdateUnrecorded(ctx, monitor, item, published.HeadSHA, shownAt)
 	if err != nil {
 		return false, err
@@ -53,7 +45,6 @@ func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx
 	if err != nil || reviewID <= 0 {
 		return false, nil
 	}
-	// Only the summary changes; inline comments stay from the first review.
 	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
 	if err != nil {
 		return false, err
@@ -89,8 +80,6 @@ func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx
 			return false, err
 		}
 	}
-	// The original publish record keeps its review binding; this review gets
-	// its own terminal record pointing at the review it rewrote.
 	update := repositoryMonitorBasePublishRecord(monitor, item, task, record)
 	update.Phase = repositoryMonitorPublishPhaseSkipped
 	update.SkipReason = repositoryMonitorPublishSkipUpdatedPublishedReview
@@ -107,13 +96,8 @@ func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx
 	})
 }
 
-// repositoryMonitorShownReviewRecordID returns the review whose summary the
-// published review for published's head currently shows, per Orka's records:
-// the newest recorded update, or the review first published, and when it
-// was recorded.
 func (r *RepositoryMonitorReconciler) repositoryMonitorShownReviewRecordID(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, published *store.ReviewPublishRecord) (string, time.Time, error) {
 	shown, at := published.ReviewRecordID, published.CreatedAt
-	// Same-head skips accumulate with every later review, so read every page.
 	cursor := ""
 	for {
 		records, next, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
@@ -141,11 +125,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorShownReviewRecordID(ctx c
 	}
 }
 
-// repositoryMonitorReviewUpdateUnrecorded reports whether a summary update
-// for headSHA was attempted after the shown review was recorded. Its terminal
-// record is written only after GitHub answers, so such an attempt either
-// failed with an unknown outcome or succeeded without being recorded; either
-// way GitHub may show a summary Orka's records do not.
 func (r *RepositoryMonitorReconciler) repositoryMonitorReviewUpdateUnrecorded(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string, shownAt time.Time) (bool, error) {
 	cursor := ""
 	for {

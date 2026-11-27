@@ -932,8 +932,6 @@ func TestExternalToolAITaskDefaultsProviderWithoutDiscoveryPermission(t *testing
 	}
 }
 
-// Chat tools act for the person calling them: another person's AHP turns are
-// as absent to them as to the Task API.
 func TestExternalToolExecutorProtectsAHPTurns(t *testing.T) {
 	clientset, _ := externalToolReviews(t, func(authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
 		return externalToolReview(true), nil
@@ -971,8 +969,6 @@ func TestExternalToolExecutorProtectsAHPTurns(t *testing.T) {
 		`{"prompt":"repeat the conversation","namespace":"tool-target","sessionRef":"ahp-alice"}`); result.Success {
 		t.Fatal("create_ai_task continued another person's AHP session")
 	}
-	// A Task the tool creates is not private, so even the session's owner,
-	// or a ServiceAccount, cannot continue an AHP session with one.
 	for _, caller := range []*UserInfo{
 		{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice", Username: "alice", Namespace: externalToolNamespace},
 		externalToolUser(),

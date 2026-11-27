@@ -1492,8 +1492,6 @@ func TestRequestApprovalToolValidationErrorReturnsWholeBatchToModel(t *testing.T
 	}
 }
 
-// The registry rejects a wrong-typed argument before request_approval runs;
-// the model must still get the batch back to correct the call.
 func TestRequestApprovalToolArgumentTypeErrorReturnsWholeBatchToModel(t *testing.T) {
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()
@@ -2719,9 +2717,6 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 		t.Fatalf("a worker-executed tool folds policy identity into its digest: got %q err = %v", got, err)
 	}
 	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": tool}, map[string]bool{"gh_write": true})
-	// Without a frozen binding the digest carries an empty Connection
-	// identity, which the controller never matches; with one it binds the
-	// exact link the Job was dispatched under.
 	previous := connectorBindings
 	t.Cleanup(func() { connectorBindings = previous })
 	connectorBindings = map[string]corev1alpha1.ConnectionBinding{}
@@ -2746,7 +2741,6 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 	if got, err := approvalTargetSpecDigest(tool); err != nil || got != bound || got == unbound {
 		t.Fatalf("a connector-backed tool must bind the frozen Connection: got %q want %q err = %v", got, bound, err)
 	}
-	// The policy that injects the credential is part of the target too.
 	policy := corev1alpha1.OutboundAccessPolicySpec{Connection: &corev1alpha1.ConnectionOutboundAccess{
 		ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
 		Output:      &corev1alpha1.OutboundCredentialOutput{Header: "X-Token"},
@@ -2759,8 +2753,6 @@ func TestApprovalTargetSpecDigestUsesPlainSpecForConnectorBackedTools(t *testing
 	if got, err := approvalTargetSpecDigest(tool); err != nil || got != withPolicy || got == bound {
 		t.Fatalf("a connector-backed tool must bind its policy configuration: got %q want %q err = %v", got, withPolicy, err)
 	}
-	// A marker that arrived on the Tool object is not a classification: it
-	// is cleared unless routing derived it.
 	local := tool.DeepCopy()
 	local.Annotations[connectorBackedToolAnnotation] = "true"
 	markConnectorBackedTools(map[string]*corev1alpha1.Tool{"gh_write": local}, map[string]bool{})

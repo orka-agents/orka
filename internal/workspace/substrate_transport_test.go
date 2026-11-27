@@ -175,8 +175,6 @@ func TestSubstrateNativeTLSAndCertificateRotation(t *testing.T) {
 		defer cancel()
 		for {
 			actor, err := api.Control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: "tenant", Name: "same"}}, grpc.WaitForReady(true))
-			// Disconnect can race an RPC already assigned to the old transport.
-			// Retry this read only; WaitForReady does not replay in-flight RPCs.
 			if status.Code(err) == codes.Unavailable && ctx.Err() == nil {
 				time.Sleep(10 * time.Millisecond)
 				continue

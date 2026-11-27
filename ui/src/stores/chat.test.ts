@@ -31,8 +31,6 @@ describe('useChatStore', () => {
     expect(state.isStreaming).toBe(false)
     expect(state.turnEpoch).toBe(4)
 
-    // Re-selecting the active namespace and the initial activation keep the
-    // transcript.
     useChatStore.setState({ messages: [{ id: 'm2', role: 'user', content: 'again', timestamp: new Date().toISOString() }], currentSessionId: 'sess-beta' })
     useChatStore.getState().selectNamespace('beta')
     expect(useChatStore.getState().currentSessionId).toBe('sess-beta')
@@ -83,7 +81,6 @@ describe('useChatStore', () => {
     useChatStore.getState().setModel('claude-sonnet-4-20250514')
     expect(useChatStore.getState().provider).toBe('anthropic')
     expect(useChatStore.getState().model).toBe('claude-sonnet-4-20250514')
-    // A new session keeps the picker choice.
     useChatStore.getState().newSession()
     expect(useChatStore.getState().provider).toBe('anthropic')
   })

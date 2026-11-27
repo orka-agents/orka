@@ -39,14 +39,12 @@ describe('splitShellWords', () => {
   it('treats backslash-newline as a line continuation outside and inside double quotes', () => {
     expect(splitShellWords('foo\\\nbar baz')).toEqual({ words: ['foobar', 'baz'] })
     expect(splitShellWords('"foo\\\nbar"')).toEqual({ words: ['foobar'] })
-    // A single-quoted backslash-newline is literal.
     expect(splitShellWords("'foo\\\nbar'")).toEqual({ words: ['foo\\\nbar'] })
   })
 
   it('rejects a trailing unquoted backslash instead of dropping it', () => {
     expect(splitShellWords('echo foo\\')).toEqual({ error: 'Trailing backslash in command' })
     expect(splitShellWords('\\')).toEqual({ error: 'Trailing backslash in command' })
-    // Inside quotes a trailing backslash is literal; the open quote is the error.
     expect(splitShellWords('echo "foo\\')).toEqual({ error: 'Unterminated double quote in command' })
   })
 

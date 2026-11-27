@@ -17,8 +17,6 @@ import (
 )
 
 func testPinnedCodexRejectedContinuation(t *testing.T, data []byte, threadID string) {
-	// Reject the inference *after* the shell has appended to the file. Replaying
-	// the prompt or the tool cannot produce the expected single-line archive.
 	rejectSecond := func(w http.ResponseWriter, n int) bool {
 		if n != 2 {
 			return false
@@ -104,12 +102,11 @@ func testPinnedCodexInferenceFailures(t *testing.T, data []byte, threadID string
 	for _, tc := range []struct {
 		name        string
 		writeFault  func(http.ResponseWriter, int)
-		rejections  int // zero keeps rejecting indefinitely
+		rejections  int
 		terminal429 bool
 	}{
 		{"persistent_429", func(w http.ResponseWriter, _ int) { rateLimit(w, "Retry-After-Ms", "1250") }, 0, true},
 		{"remaining_budget", func(w http.ResponseWriter, n int) {
-			// Each hint fits a fresh 30s window, but their sum does not.
 			delay := "1250"
 			if n == 2 {
 				delay = "29500"
@@ -133,7 +130,6 @@ func testPinnedCodexInferenceFailures(t *testing.T, data []byte, threadID string
 			http.Error(w, "HTTP 429 in text only", http.StatusServiceUnavailable)
 		}, 1, false},
 		{"ambiguous_delivery", func(http.ResponseWriter, int) {
-			// The server has consumed the whole POST but returns no headers.
 			panic(http.ErrAbortHandler)
 		}, 1, false},
 		{"429_then_ambiguous", func(w http.ResponseWriter, n int) {
@@ -152,13 +148,12 @@ func testPinnedCodexInferenceFailures(t *testing.T, data []byte, threadID string
 			_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"committed\"}}\n\n"+
 				"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial text\"}\n\n")
 			w.(http.Flusher).Flush()
-			// EOF without response.completed is not rejection of the POST.
 		}, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream, captured := newPinnedNativeUpstream(t, fixtureCredential, "UNEXPECTED_RECOVERY", harnessv2.WorkspaceIntentRead, 1, func(w http.ResponseWriter, n int) bool {
 				if tc.rejections != 0 && n > tc.rejections {
-					return false // Any unrequested replay would succeed.
+					return false
 				}
 				tc.writeFault(w, n)
 				return true
@@ -169,7 +164,7 @@ func testPinnedCodexInferenceFailures(t *testing.T, data []byte, threadID string
 			posts := captured()
 			elapsed := time.Since(posts[0].at)
 			t.Logf("POST /v1/responses=%d; first POST to settlement=%s; terminal=%s", len(posts), elapsed, terminal.Type)
-			if elapsed > 32*time.Second { // allow final ACP event delivery outside the 30s retry window
+			if elapsed > 32*time.Second {
 				t.Errorf("did not settle within the retry budget: %s", elapsed)
 			}
 			wantPosts := tc.rejections
@@ -226,7 +221,7 @@ func testPinnedCodexStalledRetryError(t *testing.T, data []byte, threadID string
 			if err := http.NewResponseController(w).Flush(); err != nil {
 				t.Error("could not flush terminal rejection")
 			}
-			<-release // complete JSON and headers, but no HTTP EOF
+			<-release
 		} else {
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = io.WriteString(w, `{"error":{"message":"earlier rejection"}}`)
@@ -236,7 +231,6 @@ func testPinnedCodexStalledRetryError(t *testing.T, data []byte, threadID string
 	defer upstream.Close()
 	defer close(release)
 	s := preparePinnedNativeSession(t, data, threadID, credential, "", harnessv2.WorkspaceIntentRead, "gpt-5.4", "high", upstream.URL)
-	// No caller deadline, lease or authorization expires in the retry window.
 	s.prompt.Metadata.ExpiresAt = time.Now().UTC().Add(50 * time.Second)
 	s.prompt.MCPAuthorization.ExpiresAt = s.prompt.Metadata.ExpiresAt
 	sealRequest(t, &s.prompt.Metadata.RequestDigest, s.prompt)
@@ -287,7 +281,6 @@ func testPinnedCodexCancelAfterRejection(t *testing.T, data []byte, threadID str
 		t.Fatalf("prompt already settled instead of waiting for Retry-After: 2; POSTs=%d", len(captured()))
 	case <-time.After(150 * time.Millisecond):
 	}
-	// Issue a real Task timeout cancellation while the next POST is ineligible.
 	cancel := testLateCancellation(t, s.create.Metadata.Fence)
 	response := performMutation(t, s.server.Handler(), http.MethodPut, promptPath+"/cancel", cancel, s.cfg)
 	if response.Code != http.StatusOK {
@@ -300,9 +293,6 @@ func testPinnedCodexCancelAfterRejection(t *testing.T, data []byte, threadID str
 		t.Errorf("cancel receipt did not confirm the prompt's terminal event: stream=%s receipt=%s proven=%t err=%v",
 			event.Type, receipt.Settlement.TerminalEvent, receipt.SettlementProven, err)
 	}
-	// Cancellation may win, or preserve the independent HTTP failure already
-	// received. A generic transport error, a success or a second inference is
-	// not evidence of either outcome.
 	if event.Cancelled == nil {
 		f := event.Failed
 		if f == nil || f.Code != providerUpstreamErrorCode || f.StopReason != harnessv2.ACPStopReasonRefusal ||
@@ -313,8 +303,6 @@ func testPinnedCodexCancelAfterRejection(t *testing.T, data []byte, threadID str
 	if margin := time.Until(due); margin < 250*time.Millisecond {
 		t.Errorf("cancellation settled only %s before the retry was due; want at least 250ms", margin)
 	}
-	// Keep the provider reachable past the hint; a detached timer firing after
-	// settlement is a duplicate too.
 	select {
 	case <-replayed:
 		t.Fatal("sent a second provider request after cancellation")

@@ -62,14 +62,12 @@ type workerPermission struct {
 	group, resource, resourceName, url, verb string
 }
 
-// Flatten rules into individual permissions so splitting or reordering rules
-// cannot mask a missing grant (or look like a policy change).
 func workerPermissions(rules []rbacv1.PolicyRule) map[workerPermission]bool {
 	permissions := make(map[workerPermission]bool)
 	for _, rule := range rules {
 		names := rule.ResourceNames
 		if len(names) == 0 {
-			names = []string{""} // unrestricted, distinct from a named resource
+			names = []string{""}
 		}
 		for _, verb := range rule.Verbs {
 			for _, group := range rule.APIGroups {
@@ -242,7 +240,7 @@ func TestStaticChartWorkerRBACMatchesSharedManifest(t *testing.T) {
 	sharedDocs := decodeWorkerRBACDocuments(t, string(shared))
 	chartDocs := decodeWorkerRBACDocuments(t, rendered)
 
-	const namespace = "orka-test" // helmTemplateStaticChart release namespace
+	const namespace = "orka-test"
 	for _, tier := range []string{"ai", "vendor", "container"} {
 		t.Run(tier, func(t *testing.T) {
 			checkWorkerRBACParity(t, sharedDocs, chartDocs, tier, namespace)

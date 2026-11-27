@@ -31,12 +31,6 @@ import (
 	"github.com/orka-agents/orka/internal/taskwait"
 )
 
-// A write turn publishes through the dispatcher and parks. Its continuation
-// then dispatches through the same dispatcher: Session planning loads the
-// published commit as the verified baseline, and workspace preparation and
-// publication must start from it instead of failing on the parked Task's
-// pre-publication expectedRemoteSHA.
-//
 //nolint:gocyclo // One end-to-end flow: publish, park, resume, and dispatch the continuation.
 func TestParkedPublishedWriteTurnContinuationDispatchesFromTheSessionBaseline(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -204,7 +198,6 @@ func TestParkedPublishedWriteTurnContinuationDispatchesFromTheSessionBaseline(t 
 		ArtifactCapabilitySecret: []byte(strings.Repeat("d", 32)), ArtifactReservations: acceptingArtifactReservations{},
 	}
 
-	// Turn 1 publishes the branch through the dispatcher.
 	bound := prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, task, agent, images)
 	createAttempt(bound)
 	dispatchQueuedTask(ctx, t, dispatcher, bound.DeepCopy())
@@ -216,7 +209,6 @@ func TestParkedPublishedWriteTurnContinuationDispatchesFromTheSessionBaseline(t 
 		parked.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeVerifiedExact || parked.Status.Delivery.VerifiedRemoteSHA != commitOID {
 		t.Fatalf("the write turn must publish %s, got status=%#v delivery=%#v", commitOID, parked.Status, parked.Status.Delivery)
 	}
-	// The turn requested its own precondition before publishing, and parked.
 	parked.Spec.Workspace.ExpectedRemoteSHA = baselineOID
 	parked.Status.Wait = &corev1alpha1.TaskWaitStatus{
 		State: corev1alpha1.TaskWaitStateResuming, Kind: corev1alpha1.TaskWaitKindTimer,
@@ -224,7 +216,6 @@ func TestParkedPublishedWriteTurnContinuationDispatchesFromTheSessionBaseline(t 
 		ContinuationTaskName: taskwait.ContinuationTaskName(parked), Message: "The requested backoff period elapsed.",
 	}
 
-	// The continuation the wait controller creates for it, linked as resumed.
 	continuation := buildTaskContinuation(parked, parked.Status.Wait.ContinuationTaskName, 30*time.Minute, time.Now().Add(30*time.Minute))
 	continuation.UID = types.UID("14141414-1414-1414-1414-141414141414")
 	continuation.Finalizers = nil
@@ -244,7 +235,6 @@ func TestParkedPublishedWriteTurnContinuationDispatchesFromTheSessionBaseline(t 
 		t.Fatal(err)
 	}
 	continuation = created
-	// The branch now sits at the published commit.
 	resolvedOID.Store(commitOID)
 	boundContinuation := prepareBoundACPDispatcherTaskForTest(t, ctx, kubeClient, scheme, controlStore, continuation, agent, images)
 	createAttempt(boundContinuation)

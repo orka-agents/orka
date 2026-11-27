@@ -156,7 +156,6 @@ func TestCreateToolCRDTool_Execute_VerifyCreated(t *testing.T) {
 		t.Fatalf("expected success, got error: %s", res.Error)
 	}
 
-	// Verify the tool CRD was actually created
 	created := &corev1alpha1.Tool{}
 	if err := fc.Get(context.Background(), apitypes.NamespacedName{Name: testMyToolName, Namespace: defaultNamespace}, created); err != nil {
 		t.Fatalf("failed to get created tool: %v", err)

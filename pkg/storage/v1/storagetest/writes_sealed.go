@@ -8,12 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Write cases for the sealed families, Task data fences and conditional
-// commands: snapshots, native sessions, Session turn records, connector
-// custody, memory proposal application, scan ingestion and grouped execution
-// events. Their records carry opaque sealed bytes; the cases compare them
-// exactly.
-
 const (
 	sealedCaseTask       = "snapshot-task-uid"
 	sealedCaseConnection = "connection-uid"
@@ -57,7 +51,6 @@ func createBoundSession(t *testing.T, p storagev1.StateProvider, name, uid strin
 	require.NoError(t, p.BindSessionCleanupIdentity(t.Context(), "tenant", name, uid))
 }
 
-// caseTurnRequest creates the open turn of sealedCaseSession under fence.
 func caseTurnRequest(fence storagev1.ControllerEpochFence) storagev1.CreateSessionTurnRecordRequest {
 	return storagev1.CreateSessionTurnRecordRequest{
 		Namespace: "tenant", SessionName: sealedCaseSession, Fence: fence,
@@ -78,7 +71,6 @@ func caseTurnID(t *testing.T) string {
 	return id
 }
 
-// caseTurnFinalization finalizes the case turn at version 1, as created.
 func caseTurnFinalization(fence storagev1.ControllerEpochFence) storagev1.SealedSessionTurnFinalization {
 	key := caseTurnRequest(fence).Turn.Key
 	id, _ := key.CanonicalID()
@@ -136,8 +128,6 @@ func putCaseCredential(t *testing.T, p storagev1.StateProvider) {
 	require.Equal(t, caseCredentialVersion, stored.Version, "the first grant's version is fixed for the cases")
 }
 
-// caseCredentialVersion is the version a fresh dataset gives its first grant.
-// The cases check it at setup, so the expectations they send stay fixed.
 var caseCredentialVersion int64 = 1
 
 func caseConsent() storagev1.SealedConnectorConsent {
@@ -171,8 +161,6 @@ func caseScanRun(t *testing.T, p storagev1.StateProvider) storagev1.ScanRun {
 	return *run
 }
 
-// caseIngestionCommit reviews one finding against the case run as setup
-// stored it.
 func caseIngestionCommit(run storagev1.ScanRun) storagev1.ScanTaskIngestionCommit {
 	updated := run
 	updated.AcceptedFindings++
@@ -203,8 +191,6 @@ func caseEventGroup() []storagev1.ExecutionEventAppend {
 }
 
 func init() {
-	// scanRun is the case run as setup stored it, which a scan ingestion
-	// commit names as the run it read. Cases run one at a time.
 	var scanRun storagev1.ScanRun
 	stateWriteCases = append(stateWriteCases,
 		writeCase[storagev1.StateProvider]{

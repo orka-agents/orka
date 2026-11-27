@@ -325,10 +325,6 @@ func TestTaskAccessAllowsCrossNamespaceGatewayChild(t *testing.T) {
 	}
 }
 
-// TestCancelGatewayTaskChecksAccessBeforeTheConfirmedUID covers a caller who
-// may not operate the Gateway that owns a Task: a wrong confirmed UID is
-// refused as forbidden, like the right one, so the refusal says nothing
-// about the Task's identity.
 func TestCancelGatewayTaskChecksAccessBeforeTheConfirmedUID(t *testing.T) {
 	task := gatewayTaskAccessFixture()
 	task.UID = "gateway-task-uid"

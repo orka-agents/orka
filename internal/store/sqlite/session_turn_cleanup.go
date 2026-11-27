@@ -10,8 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// GetSessionTurnCleanupReceipt reads evidence only after the exact Session
-// cleanup transaction committed. It never revives an ordinary turn or outbox row.
 func (s *Store) GetSessionTurnCleanupReceipt(ctx context.Context, namespace, sessionName, promptAttemptID string) (*store.SessionTurnCleanupReceipt, error) {
 	for field, value := range map[string]string{sessionControlFieldNamespace: namespace, sessionControlFieldName: sessionName, "prompt attempt ID": promptAttemptID} {
 		if err := store.ValidateControlIdentifier(field, value); err != nil {
@@ -57,8 +55,6 @@ func (s *Store) GetSessionTurnCleanupReceipt(ctx context.Context, namespace, ses
 	return &receipt, nil
 }
 
-// ListSessionCleanupTurns returns finalized metadata only under the exact
-// durable deletion intent. It never returns user prompts or transcript content.
 func (s *Store) ListSessionCleanupTurns(ctx context.Context, intent store.SessionCleanupIntent) ([]store.SessionTurn, error) {
 	if err := normalizeSessionCleanupIntent(&intent); err != nil {
 		return nil, err

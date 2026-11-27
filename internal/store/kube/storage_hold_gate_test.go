@@ -18,8 +18,6 @@ func testStorageHold(id string) controlstore.StorageRecoveryHold {
 	}
 }
 
-// A recorded hold refuses every control-store change, also under a fence
-// the controller obtained before the hold, until the hold is released.
 func TestRecordedStorageHoldRefusesControlStoreChanges(t *testing.T) {
 	ctx := t.Context()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
@@ -50,13 +48,9 @@ func TestRecordedStorageHoldRefusesControlStoreChanges(t *testing.T) {
 	}
 }
 
-// A hold is recorded only once a control-store change in progress has
-// finished, so no change commits after the hold.
 func TestStorageHoldWaitsForAControlStoreChangeInProgress(t *testing.T) {
 	ctx := t.Context()
 	kubeStore, kubeClient, fence := newTestStoreWithEpoch(t)
-	// A distinct Store records the hold, so the durable Lease interlock,
-	// not this Store's local queue, is what makes it wait.
 	recorder, err := New(kubeClient, testControlNamespace, WithAPIReader(kubeClient))
 	if err != nil {
 		t.Fatal(err)

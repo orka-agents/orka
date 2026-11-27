@@ -8,37 +8,23 @@ export type TourPart = 'basics' | 'more'
 export interface TourStep {
   title: string
   body: string
-  /** Short statements listed under the body, for points a visitor must not miss. */
   points?: string[]
-  /** The page this step shows. The welcome, checkpoint and closing steps leave the visitor where they are. */
   route?: NavigateOptions
-  /** Which part of the tour this stop belongs to; progress counts stops within it. */
   part?: TourPart
-  /** Chat prompts the visitor can send from the step. */
   prompts?: string[]
-  /** The end of the basics, where the visitor can finish or keep going. */
   checkpoint?: boolean
-  /** The Kubernetes resource behind the page, which the visitor can show as YAML. */
   manifest?: Manifest
-  /** Where the page's data comes from, for pages not backed by a resource. */
   note?: string
-  /** The same thing from the orka CLI. Lines starting with # are comments. */
   cli?: string[]
 }
 
-/** The incident Task the tour follows; it waits on a rollback approval when the demo loads. */
 export const INCIDENT_TASK = 'checkout-latency-investigation-7k2qp'
 export const INCIDENT_APPROVAL = 'apr-rollback-checkout'
-/** The agent the incident Task runs. */
 export const TOUR_AGENT = 'incident-responder'
 export const TOUR_MONITOR = 'checkout-service'
-/** A coordinator Task that delegated two child Tasks to other agents. */
 export const RELEASE_TASK = 'release-v2-14-0-plan-r2w8z'
-/** The critical finding whose patch is pull request #1486, the one the chat stop offers to review. */
 export const TOUR_FINDING = findingID('checkout-refund-idor')
-/** The gateway that created the incident Task from a Slack message. */
 export const TOUR_GATEWAY = 'slack-northwind'
-/** The binding that sends the #incidents channel to the incident agent. */
 export const TOUR_BINDING = 'slack-incidents'
 
 const RECORD_NOTE = "comes from Orka's own record, not from a Kubernetes resource."
@@ -49,13 +35,6 @@ const incident = (tab?: string): NavigateOptions => ({
   search: tab ? { tab } : {},
 })
 
-/**
- * One story through the dashboard: an agent works an incident, its trace shows
- * what it did, a person approves the risky step, the agent definition explains
- * why it could ask, and then the ways work starts and what it costs.
- * Coordination, security, gateways and runtimes follow for visitors who keep
- * going; the rest of the sidebar is left to explore.
- */
 export const TOUR_STEPS: TourStep[] = [
   {
     title: 'Welcome to the Orka demo',
@@ -172,5 +151,4 @@ export const TOUR_STEPS: TourStep[] = [
   },
 ]
 
-/** The stops in one part of the tour, which its progress indicator counts. */
 export const stopsIn = (part: TourPart) => TOUR_STEPS.filter((step) => step.part === part)

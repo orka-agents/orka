@@ -51,8 +51,6 @@ func TestExecutionEventUsageSummarySameEvent(t *testing.T) {
 						if field == "provider" {
 							copies = providers
 						}
-						// Metadata is individually safe here; mask only the new
-						// generated summary when their combination is sensitive.
 						want := fixture.normalized
 						for _, value := range copies {
 							if value != want {
@@ -85,8 +83,6 @@ func TestExecutionEventUsageSummaryProtectsLaterText(t *testing.T) {
 				t.Run(usageSummaryTestName(terminal, contextOnly)+"/"+fixture.name, func(t *testing.T) {
 					journal, state := newProviderModelHistoryJournal(t, fixture.provider, "")
 					usage := appendUsageSummaryEvent(t, state, terminal, contextOnly, "")
-					// Terminal usage and its transcript are distinct public records
-					// even when they share the completed protocol event identity.
 					if !terminal {
 						usage = modelHistoryEvent(3)
 						usage.Type = harnessv2.EventCompleted

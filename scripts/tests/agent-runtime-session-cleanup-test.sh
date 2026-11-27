@@ -309,7 +309,7 @@ printf '%s\n' 'ok - OpenCode parks its completed read profile before policy vali
   fi
   [[ "$(wc -l <"${api_identity_inventory}" | tr -d ' ')" == 3 ]] || fail 'API setup recorded a foreign identity'
   : >"${events}"
-  setup_body="$(awk '/^# Smoke cleanup also / { copying=1 } copying && /^session_nonce=/ { exit } copying { print }' "${script}")"
+  setup_body="$(awk '/^create_api_identity$/ { copying=1 } copying && /^session_nonce=/ { exit } copying { print }' "${script}")"
   [[ -n "${setup_body}" ]] || fail 'common API setup is missing'
   create_api_identity() { printf 'identity\n' >>"${events}"; }
   start_api_forward() { printf 'forward\n' >>"${events}"; }

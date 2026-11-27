@@ -19,7 +19,6 @@ import (
 )
 
 func main() {
-	// FAKEFORGE_TOKEN_DIR holds one token-<role> file per credential role.
 	tokenDir := requiredEnv("FAKEFORGE_TOKEN_DIR")
 	tokens := map[string]string{}
 	for _, role := range fakeforge.Roles {

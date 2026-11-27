@@ -18,29 +18,19 @@ import (
 
 const checkPullRequestCIStatusNoChecks = "no_checks"
 
-// CheckPullRequestCITool checks GitHub CI status for a pull request without merging it.
 type CheckPullRequestCITool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// CheckPullRequestCIArgs are the arguments for the check_pull_request_ci tool.
 type CheckPullRequestCIArgs struct {
-	// TaskName is the child task whose workspace config has the repo and git credentials.
-	TaskName string `json:"task_name,omitempty"`
-	// RepoURL is an explicit GitHub repository URL. When provided with task context, it must match that task's repository scope.
-	RepoURL string `json:"repo_url,omitempty"`
-	// PRNumber is the GitHub PR number to inspect.
-	PRNumber int `json:"pr_number"`
-	// WaitTimeout is the optional maximum time to wait for pending checks (e.g. "30m").
-	// When empty, the tool performs one immediate status check.
-	WaitTimeout string `json:"wait_timeout,omitempty"`
-	// PollInterval is the optional delay between polls while waiting (e.g. "30s").
-	// Defaults to 30s when wait_timeout is set.
+	TaskName     string `json:"task_name,omitempty"`
+	RepoURL      string `json:"repo_url,omitempty"`
+	PRNumber     int    `json:"pr_number"`
+	WaitTimeout  string `json:"wait_timeout,omitempty"`
 	PollInterval string `json:"poll_interval,omitempty"`
 }
 
-// CheckPullRequestCIResult is the result of checking pull request CI.
 type CheckPullRequestCIResult struct {
 	Status        string `json:"status"`
 	PRNumber      int    `json:"pr_number"`
@@ -54,25 +44,21 @@ type CheckPullRequestCIResult struct {
 	Message       string `json:"message"`
 }
 
-// NewCheckPullRequestCITool creates a new check_pull_request_ci tool.
 func NewCheckPullRequestCITool(k8sClient client.Client) *CheckPullRequestCITool {
 	return &CheckPullRequestCITool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *CheckPullRequestCITool) Name() string {
 	return checkPullRequestCIToolName
 }
 
-// Description returns the tool description.
 func (t *CheckPullRequestCITool) Description() string {
 	return "Check GitHub CI status for a pull request without merging it. " +
 		"Optionally waits for pending checks with bounded polling so callers do not need to loop manually."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *CheckPullRequestCITool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Task whose workspace supplies the repository and read credentials. TokenReview API callers need a Task and its referenced credential; current Task context may supply the name."}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional GitHub repository URL within the selected Task's repository scope."}, githubPRNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub pull request number to inspect"}, "wait_timeout": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional maximum time to wait for pending checks (for example '5m'). Empty means one immediate check; longer than 10m is clamped to 10m"},
 		"poll_interval": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional delay between polls while waiting (for example '30s'). Defaults to '30s' when wait_timeout is set; never shorter than 5s"},
@@ -82,7 +68,6 @@ func (t *CheckPullRequestCITool) Parameters() json.RawMessage {
 	return data
 }
 
-// Execute checks CI status for a pull request.
 func (t *CheckPullRequestCITool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args CheckPullRequestCIArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
@@ -110,19 +95,10 @@ func (t *CheckPullRequestCITool) Execute(ctx context.Context, argsJSON json.RawM
 	return marshalCheckPullRequestCIResult(*result), nil
 }
 
-// maxPullRequestCIWait is the longest one check_pull_request_ci call may
-// keep polling; a larger wait_timeout is clamped to it.
 const maxPullRequestCIWait = 10 * time.Minute
 
-// pullRequestCIFinalCheckBudget bounds the status check that may still be
-// running when the wait deadline passes, so a whole call stays within the
-// maximum wait plus this budget, inside the catalog's polling-tool timeout.
-// It is a variable only so tests can shorten it.
 var pullRequestCIFinalCheckBudget = 45 * time.Second
 
-// minPullRequestCIPollInterval keeps a poll loop from exhausting the
-// caller's GitHub rate limit; a shorter poll_interval is raised to it. It
-// is a variable only so tests can poll a local fixture quickly.
 var minPullRequestCIPollInterval = 5 * time.Second
 
 func parsePullRequestCIWaitConfig(waitTimeoutArg, pollIntervalArg string) (time.Duration, time.Duration, error) {
@@ -165,8 +141,6 @@ func waitForPullRequestCI(
 	var lastPending *CheckPullRequestCIResult
 	var lastTransientErr error
 	deadline := time.Now().Add(waitTimeout)
-	// The whole wait, including a check still running at the deadline, is
-	// bounded: a paginated status check is several sequential requests.
 	pollCtx := ctx
 	if waitTimeout > 0 {
 		var cancel context.CancelFunc
@@ -179,8 +153,6 @@ func waitForPullRequestCI(
 		result, terminal, err := checkPullRequestCIOnce(pollCtx, token, owner, repo, prNumber, baseURL)
 		if err != nil {
 			if ctx.Err() == nil && pollCtx.Err() != nil {
-				// The wait's budget ran out mid-check: report the wait as
-				// timed out with what the earlier checks saw.
 				break
 			}
 			if waitTimeout > 0 && isTransientHTTPError(err) {
@@ -217,10 +189,6 @@ func waitForPullRequestCI(
 	if lastPending != nil {
 		lastPending.Attempts = attempts
 		lastPending.WaitTimedOut = true
-		// Preserve no_checks as terminal-after-timeout: if the PR genuinely
-		// has no GitHub Actions workflows registered after the full
-		// waitTimeout window, surface that distinctly so the coordinator
-		// can report status=no_checks rather than mis-claiming CI_PENDING.
 		if lastPending.Status == checkPullRequestCIStatusNoChecks {
 			lastPending.Message = fmt.Sprintf(
 				"no CI checks have been registered for this pull request after %s; "+
@@ -275,16 +243,6 @@ func checkPullRequestCIOnce(ctx context.Context, token, owner, repo string, prNu
 	ciResult, err := checkCIStatusDetailed(ctx, token, owner, repo, headSHA, baseURL)
 	if err != nil {
 		if errors.Is(err, errNoCIChecksConfigured) {
-			// On a freshly opened PR, GitHub Actions workflows take 10-60
-			// seconds to register check_run objects. Returning a terminal
-			// "no_checks" before that grace period makes the coordinator
-			// declare the PR "shipped with no CI configured" when in
-			// reality CI hasn't even started yet. Mark this as
-			// non-terminal so waitForPullRequestCI keeps polling until
-			// checks register OR the caller's wait_timeout elapses. If
-			// the wait_timeout elapses with no_checks still true, the
-			// final result will correctly say no_checks — but only after
-			// we've given GitHub a real chance to schedule the workflow.
 			result.Status = checkPullRequestCIStatusNoChecks
 			result.Message = "no CI checks have been registered yet for this pull request (may still be queueing)"
 			return result, false, nil

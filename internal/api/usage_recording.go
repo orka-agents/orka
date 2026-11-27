@@ -15,8 +15,6 @@ func usageRequestContext(ctx context.Context, backend any, reader client.Reader,
 	if !ok {
 		return ctx
 	}
-	// Freeze ownership before streaming can detach and outlive the namespace.
-	// Keep lookup failures too, so a later namespace cannot claim this request.
 	namespaceUID, identityErr := usage.NamespaceUID(ctx, reader, namespace)
 	return llm.WithUsageRecorder(ctx, func(ctx context.Context, observation store.UsageObservation) error {
 		if identityErr != nil {

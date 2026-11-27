@@ -20,8 +20,6 @@ function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  // Sign in with the #token=... fragment from `orka dashboard` or a deep link.
-  // captureHashToken took it out of the address bar at app start.
   useEffect(() => {
     const t = takeHashToken()
     if (!t) return
@@ -41,12 +39,6 @@ function LoginPage() {
     })
   }, [setToken])
 
-  // Authenticated and no token still being validated: return to the page that
-  // sent us here. Only while the address is still /login: the token swaps the
-  // root layout before the route match changes, so this page mounts again for
-  // a moment at the destination, where the return has already been taken.
-  // A rejected sign-in stays here with its error, even when an earlier token
-  // is still stored, instead of silently continuing as the old identity.
   useEffect(() => {
     if (token && !isValidating && !error && location.pathname === '/login') {
       navigate({ href: takeLoginReturn(location.hash) })
@@ -89,7 +81,6 @@ function LoginPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {/* The public demo never asks for a real cluster token. */}
           {import.meta.env.MODE === 'demo' ? (
             <div className="space-y-4">
               {error && (

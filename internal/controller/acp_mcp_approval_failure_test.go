@@ -111,7 +111,6 @@ func TestMCPApprovalDefiniteToolFailureSettlesFailedWithSummary(t *testing.T) {
 		t.Fatalf("failure log is not a redacted cause for the approval: %s", line)
 	}
 
-	// Redelivery after a restart replays the receipt and recovery keeps it.
 	f.reopen()
 	replay := awaitMCPApprovalResult(t, f.start(f.request))
 	if !replay.Replayed || string(replay.Result) != string(want) || f.count.Load() != 1 {
@@ -123,7 +122,6 @@ func TestMCPApprovalDefiniteToolFailureSettlesFailedWithSummary(t *testing.T) {
 		t.Fatalf("recovered outcome=%q reason=%q is not the projected %q/%q", outcome, reason, approval.ExecutionOutcome, approval.ExecutionReason)
 	}
 
-	// A waiter that settles after the failure reports it, never "not started".
 	secrets, err := f.broker.ApprovalSecrets.CoreV1().Secrets(f.request.Namespace).List(t.Context(), metav1.ListOptions{})
 	if err != nil || len(secrets.Items) != 1 {
 		t.Fatalf("approval call secrets = %v, %v", secrets, err)
@@ -209,9 +207,6 @@ func TestCustomToolNoEffectError(t *testing.T) {
 }
 
 func TestAcpApprovalFailureSummaryRedactsBeforeBounding(t *testing.T) {
-	// Cut at the bound first, the URL would lose its "@" and its credential
-	// would no longer be recognized; redacting the token first also moves the
-	// URL back inside the bound.
 	const exposed = "https://user:pa"
 	padding := strings.Repeat("x", acpPromptFailureMessageLimit-len("token=")-len(approvalFailureTestToken)-2-len(exposed))
 	summary := "token=" + approvalFailureTestToken + " " + padding + " https://user:password-value@example.com/hook"
@@ -228,8 +223,6 @@ func TestAcpApprovalFailureSummaryRedactsBeforeBounding(t *testing.T) {
 	}
 }
 
-// connectionRequiredRefusal is Orka's own refusal of a call whose requester
-// link is missing or unusable, as the registered executor returns it.
 func connectionRequiredRefusal(t *testing.T, reason string) *acpMCPRefusedWithoutEffect {
 	t.Helper()
 	result, err := json.Marshal(struct {
@@ -245,16 +238,10 @@ func connectionRequiredRefusal(t *testing.T, reason string) *acpMCPRefusedWithou
 
 const expiredLinkReason = "Azure is not linked for the person who asked. They need to run `orka connect azure -n team-a`, then run this Task again"
 
-// TestMCPApprovalExpiredLinkFailsWithoutEffect covers an approved connector
-// call whose requester link expired before it ran: Orka refuses it before any
-// request leaves, so it settles failed, not succeeded or unknown, even when
-// the prompt is cancelled at the same moment, and the agent still gets
-// connection_required and the fix it names.
 func TestMCPApprovalExpiredLinkFailsWithoutEffect(t *testing.T) {
 	f := newMCPApprovalFixture(t)
 	f.broker.Executor = ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
 		f.count.Add(1)
-		// The prompt is cancelled while the credential is resolved.
 		f.authorized.Store(false)
 		return nil, connectionRequiredRefusal(t, expiredLinkReason)
 	})
@@ -273,16 +260,12 @@ func TestMCPApprovalExpiredLinkFailsWithoutEffect(t *testing.T) {
 	if approval := f.approval(); approval.ExecutionOutcome != acpApprovalOutcomeFailed || approval.ExecutionReason != expiredLinkReason {
 		t.Fatalf("approval = %#v, want a failed execution naming the fix", approval)
 	}
-	// Recovery reads the receipt back as the same failure.
 	outcome, recovered, _ := mcpApprovalRecoveredOutcome(f.approvalEffect(), pending.ID)
 	if outcome != acpApprovalOutcomeFailed || recovered != expiredLinkReason {
 		t.Fatalf("recovered outcome = %q, %q", outcome, recovered)
 	}
 }
 
-// A sent request whose response merely looks like that refusal proves
-// nothing: an upstream service chose the body, so the call is recorded with
-// its result, never as having had no effect.
 func TestMCPApprovalResponseLookingLikeARefusalIsNoProofOfNoEffect(t *testing.T) {
 	f := newMCPApprovalFixture(t)
 	refusal := connectionRequiredRefusal(t, "Reconnect your account")
@@ -304,8 +287,6 @@ func TestMCPApprovalResponseLookingLikeARefusalIsNoProofOfNoEffect(t *testing.T)
 	}
 }
 
-// approvalFailedReceiptFaultStore fails the first attempt to settle an effect
-// as failed, as a storage blip would.
 type approvalFailedReceiptFaultStore struct {
 	store.ExternalEffectStore
 	failed *atomic.Bool
@@ -318,9 +299,6 @@ func (s approvalFailedReceiptFaultStore) TransitionExternalEffect(ctx context.Co
 	return s.ExternalEffectStore.TransitionExternalEffect(ctx, transition)
 }
 
-// When the refusal's receipt cannot be recorded, the call is settled as an
-// unknown outcome for recovery, never as succeeded, even though the storage
-// writes after it work.
 func TestMCPApprovalRefusalWhoseReceiptFailsIsNeverSucceeded(t *testing.T) {
 	f := newMCPApprovalFixture(t)
 	f.broker.Effects = approvalFailedReceiptFaultStore{ExternalEffectStore: f.broker.Effects, failed: &atomic.Bool{}}

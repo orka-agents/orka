@@ -20,11 +20,6 @@ import { SESSION_FIXTURES, sessionExecutionControl } from '../data/sessions'
 import { api, apiError, DEMO_NAMESPACE, digest, inDemoNamespace, list, noContent, notFound, NOW, query, sseFrame, taskUID, uid, isDNSLabel } from '../shared'
 import { AGENTS, REPOS, TASKS, type AgentKey, type DemoTaskSeed, type RepoKey } from '../world'
 
-// The demo's task engine. Every task is a record that plays its story (see
-// data/tasks.ts) against the wall clock: beats whose time has come are applied
-// lazily whenever the API is read, so there are no background timers. A beat
-// that opens an approval blocks the story until the visitor decides it.
-
 const TERMINAL = new Set<TaskPhase>(['Succeeded', 'Failed', 'Cancelled'])
 const NAMESPACE_UID = uid('namespace:default')
 
@@ -38,7 +33,6 @@ interface TaskRecord {
   uid: string
   type: 'ai' | 'agent' | 'container'
   agent?: AgentKey
-  /** Agent name when the task names an agent outside world.ts. */
   agentName?: string
   repo?: RepoKey
   prompt: string
@@ -47,13 +41,11 @@ interface TaskRecord {
   createdBy: string
   created: number
   start: number
-  /** A cron parent: never runs itself. */
   schedule?: { cron: string; timeZone: string }
   timeline: Scheduled[]
   cursor: number
   started: boolean
   finished: boolean
-  /** When the outcome applies; moves when an approval gate opens and closes. */
   end: number
   outcome: Outcome
   declined?: Story['declined']
@@ -66,7 +58,6 @@ interface TaskRecord {
   labels: Record<string, string>
   annotations: Record<string, string>
   ownerUID?: string
-  /** Fields from a POST /tasks body echoed back on the spec. */
   specExtras?: Partial<Task['spec']>
 }
 
@@ -90,9 +81,6 @@ const runtimeOf = (rec: TaskRecord) => {
 const writeIntent = (rec: TaskRecord) => rec.type === 'agent' && rec.agent !== 'reviewer'
 const randomSuffix = () => Math.random().toString(36).slice(2, 7).padEnd(5, 'x')
 
-// ---- scheduling --------------------------------------------------------------
-
-/** Spreads beats over [from, to] in proportion to their gaps; the last lands on `to`. */
 function spread(beats: Beat[], from: number, to: number): Scheduled[] {
   const total = beats.reduce((sum, beat) => sum + Math.max(beat.gap, 0.1), 0)
   let acc = 0
@@ -102,7 +90,6 @@ function spread(beats: Beat[], from: number, to: number): Scheduled[] {
   })
 }
 
-/** Places beats at their own gaps (seconds) after `from`. */
 function sequence(beats: Beat[], from: number): Scheduled[] {
   let at = from
   return beats.map((beat) => {
@@ -222,7 +209,6 @@ function linkParent(record: TaskRecord, parentName: string) {
   record.ownerUID = parent?.uid
 }
 
-/** Parents are created before their children; this covers catalog order. */
 function seedParent(name: string) {
   const seed = TASKS.find((task) => task.name === name)
   if (!seed) return undefined
@@ -230,8 +216,6 @@ function seedParent(name: string) {
   tasks.set(parent.name, parent)
   return parent
 }
-
-// ---- playing stories -----------------------------------------------------------
 
 function emit(rec: TaskRecord, spec: EventSpec, at: number) {
   const seq = rec.events.length + 1
@@ -273,7 +257,6 @@ function emit(rec: TaskRecord, spec: EventSpec, at: number) {
   if (rec.type === 'ai') rec.logs.push(workerLogLine(event))
 }
 
-/** The AI worker's structured log line for an event. */
 function workerLogLine(event: ExecutionEvent): string {
   const level = event.severity === 'error' ? 'ERROR' : event.severity === 'warning' ? 'WARN' : 'INFO'
   const fields: Record<string, unknown> = { task: event.taskName }
@@ -352,7 +335,6 @@ function play(rec: TaskRecord, { at, beat }: Scheduled) {
   }
 }
 
-/** Milliseconds in a simple Go-style duration such as "30m" or "1h". */
 function durationMs(duration: string) {
   const match = duration.match(/^(\d+)([smh])$/)
   if (!match) return 60 * 60_000
@@ -399,14 +381,12 @@ function advance(rec: TaskRecord, now: number) {
   if (!rec.gate && rec.cursor >= rec.timeline.length && now >= rec.end) finishTask(rec)
 }
 
-// Background work keeps arriving while the demo is open.
 let nextAmbientAt = NOW + 150_000
 let ambientCount = 0
 const AMBIENT_PERIOD_MS = 210_000
 
 function advanceAll(now = Date.now()) {
   while (now >= nextAmbientAt) {
-    // After a long idle stretch, skip the backlog instead of starting it all at once.
     if (now - nextAmbientAt < 10 * 60_000) spawnAmbient(nextAmbientAt)
     nextAmbientAt += AMBIENT_PERIOD_MS
   }
@@ -436,8 +416,6 @@ function phaseOf(rec: TaskRecord, now = Date.now()): TaskPhase {
   return now < rec.start ? 'Pending' : 'Running'
 }
 
-// ---- approvals -----------------------------------------------------------------
-
 function decide(rec: TaskRecord, approval: Approval, decision: 'approve' | 'decline', reason: string | undefined, now: number) {
   advance(rec, now)
   const approved = decision === 'approve'
@@ -456,13 +434,11 @@ function decide(rec: TaskRecord, approval: Approval, decision: 'approve' | 'decl
     rec.timeline = [...rec.timeline.slice(0, rec.cursor), ...sequence(rec.declined.beats, now)]
     rec.outcome = rec.declined.outcome
   } else {
-    // Keep the rest of the story's pacing, starting from the decision.
     rec.timeline = rec.timeline.map((item, index) => (index < rec.cursor ? item : { ...item, at: now + Math.max(item.at - gateAt, 1500) }))
   }
   rec.end = (rec.timeline[rec.timeline.length - 1]?.at ?? now) + 1500
 }
 
-/** The event that recorded the task's outcome; later events (forks) do not replace it. */
 function terminalEvent(rec: TaskRecord) {
   return [...rec.events].reverse().find((e) => e.type === 'TaskSucceeded' || e.type === 'TaskFailed' || e.type === 'TaskCancelled')
 }
@@ -470,8 +446,6 @@ function terminalEvent(rec: TaskRecord) {
 function isWaiting(rec: TaskRecord) {
   return Boolean(rec.gate) && !rec.finished
 }
-
-// ---- tasks created during the demo --------------------------------------------------
 
 interface LiveTaskInput {
   name: string
@@ -530,18 +504,11 @@ export interface DemoTaskInput {
   agent: AgentKey
   prompt: string
   repo?: RepoKey
-  /** session the task belongs to (e.g. the chat session that created it) */
   session?: string
-  /** delegating parent Task */
   parent?: string
   createdBy?: 'chat' | 'gateway' | 'monitor'
 }
 
-/**
- * Adds a new task to the in-memory store, starts its simulated lifecycle
- * (Pending -> Running -> Succeeded with events, logs, and a result), and
- * returns its name. Used by other demo domains, e.g. chat's create_task tool.
- */
 export function createDemoTask(input: DemoTaskInput): string {
   const slug = input.prompt.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').split('-').slice(0, 4).join('-') || 'task'
   let name = `${slug}-${randomSuffix()}`
@@ -559,18 +526,11 @@ export function createDemoTask(input: DemoTaskInput): string {
   return name
 }
 
-/**
- * Cancels a pending or running task now, the way a controller-side
- * cancellation (such as a repository monitor Stop command) does, together
- * with its unfinished delegated descendants. Finished and scheduled tasks
- * are left alone.
- */
 export function cancelDemoTask(name: string, reason: string) {
   const rec = tasks.get(name)
   if (rec && cancelDemoRecord(rec, reason)) cancelDemoDescendants(name, reason)
 }
 
-/** Cancels every unfinished, nonscheduled descendant, through finished ones too. */
 function cancelDemoDescendants(name: string, reason: string) {
   for (const child of children(name)) {
     if (child.schedule) continue
@@ -579,7 +539,6 @@ function cancelDemoDescendants(name: string, reason: string) {
   }
 }
 
-/** Cancels one unfinished, nonscheduled task; reports whether it did. */
 function cancelDemoRecord(rec: TaskRecord, reason: string): boolean {
   const now = Date.now()
   advance(rec, now)
@@ -597,8 +556,6 @@ function cancelDemoRecord(rec: TaskRecord, reason: string): boolean {
   finishTask(rec)
   return true
 }
-
-// ---- views ------------------------------------------------------------------------
 
 function jobName(rec: TaskRecord) {
   return `${rec.name.slice(0, 52)}-${digest(rec.uid, 5)}`
@@ -687,7 +644,6 @@ function shortResult(rec: TaskRecord): string | undefined {
     const parsed = JSON.parse(raw) as { summary?: string }
     if (parsed && typeof parsed.summary === 'string') text = parsed.summary
   } catch {
-    // Plain text result.
   }
   const line = text.split('\n').map((l) => l.replace(/^[#>*\-\s]+/, '').replace(/\*\*/g, '').trim()).find(Boolean) ?? ''
   return line.length > 120 ? `${line.slice(0, 117)}…` : line
@@ -834,7 +790,6 @@ function deliveryStatus(rec: TaskRecord, phase: TaskPhase): NonNullable<Task['st
       id: `PR_kwDO${digest(`pr:${rec.name}`, 14)}`,
       number: pr.number,
       url: `${repo?.url}/pull/${pr.number}`,
-      // The controller records the forge state as Open, Closed or Merged.
       state: pr.status[0].toUpperCase() + pr.status.slice(1),
       baseBranch: 'main',
       headBranch: pr.branch,
@@ -927,8 +882,6 @@ function buildTrace(rec: TaskRecord, now = Date.now()): TaskTrace {
   }
 }
 
-// ---- sessions ---------------------------------------------------------------------
-
 function ensureSession(name: string, agent: AgentKey | undefined, created: number) {
   if (!sessions.has(name)) sessions.set(name, { name, agent, created, messages: [] })
 }
@@ -937,7 +890,6 @@ function sessionTasks(name: string) {
   return [...tasks.values()].filter((rec) => rec.session === name)
 }
 
-/** The session's event stream: its tasks' events merged in time order. */
 function sessionEvents(name: string): ExecutionEvent[] {
   const merged = sessionTasks(name)
     .flatMap((rec) => rec.events)
@@ -972,8 +924,6 @@ function sessionListItem(rec: SessionRecord, now = Date.now()) {
   }
 }
 
-// ---- store setup ------------------------------------------------------------------
-
 function seedStore() {
   for (const seed of TASKS) {
     if (!tasks.has(seed.name)) tasks.set(seed.name, seedRecord(seed))
@@ -991,15 +941,8 @@ function seedStore() {
 
 seedStore()
 
-// ---- HTTP -------------------------------------------------------------------------
-
 const STREAM_CYCLE_MS = 30_000
 
-/**
- * A long-poll SSE stream of execution events: replays events after `after`,
- * follows new ones as the story plays, and ends with stream_complete once the
- * task is terminal (or after one cycle, after which the client reconnects).
- */
 function eventStream(signal: AbortSignal, after: number, read: () => { events: ExecutionEvent[]; complete?: { lastSeq: number; type: string } } | undefined) {
   const encoder = new TextEncoder()
   let cursor = after
@@ -1031,7 +974,6 @@ function eventStream(signal: AbortSignal, after: number, read: () => { events: E
           }
           timer = setTimeout(tick, 1000)
         } catch {
-          // The reader went away.
         }
       }
       tick()
@@ -1043,7 +985,6 @@ function eventStream(signal: AbortSignal, after: number, read: () => { events: E
   return new HttpResponse(body, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } })
 }
 
-/** The task for a request, after playing its story up to now. */
 function lookup(request: Request, name: string): TaskRecord | undefined {
   if (!inDemoNamespace(request)) return undefined
   advanceAll()
@@ -1072,9 +1013,6 @@ interface CreateTaskBody {
 const agentKeyByName = (name?: string) => (Object.keys(AGENTS) as AgentKey[]).find((key) => AGENTS[key].name === name)
 const repoKeyByUrl = (url?: string) => (Object.keys(REPOS) as RepoKey[]).find((key) => url?.replace(/\.git$/, '') === REPOS[key].url)
 
-// ---- attention read models --------------------------------------------------------
-
-/** The demo's "Needs you" ranking: pending approvals first, then recent failures. */
 function attentionItems(includeFailures: boolean, now = Date.now()): AttentionItem[] {
   const approvals: AttentionItem[] = []
   const failures: AttentionItem[] = []
@@ -1116,7 +1054,6 @@ function attentionLimit(request: Request): number {
 
 export const taskHandlers: RequestHandler[] = [
   http.get(api('/attention'), ({ request }) => {
-    // Like the task list, another namespace is simply empty.
     if (!inDemoNamespace(request)) return HttpResponse.json(attentionResponse([], 1, 'unavailable'))
     advanceAll()
     return HttpResponse.json(attentionResponse(attentionItems(true), attentionLimit(request), 'unavailable'))
@@ -1184,7 +1121,6 @@ export const taskHandlers: RequestHandler[] = [
     const name = nameParam(params)
     const rec = tasks.get(name)
     if (!rec) return notFound(`tasks.orka.ai "${name}"`)
-    // As in the API, a stale confirmation is refused before any phase check.
     const body = (await request.json().catch(() => ({}))) as { reason?: string; uid?: string }
     if (body.uid && body.uid !== rec.uid) return apiError(409, 'the task was replaced since it was confirmed; reload it')
     const now = Date.now()
@@ -1302,7 +1238,6 @@ export const taskHandlers: RequestHandler[] = [
       labels: { 'orka.ai/parent-task': source.name },
       annotations: { 'orka.ai/fork-source-task': source.name, 'orka.ai/fork-source-seq': String(afterSeq) },
       specExtras: {
-        // A fork runs the source's container, not the catalog default.
         ...(source.type === 'container' && containerSpec(source)),
         ...(body.workspace && { workspace: body.workspace as Task['spec']['workspace'] }),
       },
@@ -1389,7 +1324,6 @@ export const taskHandlers: RequestHandler[] = [
   http.get(api('/sessions/:id/stream'), ({ request, params }) => {
     const name = nameParam(params)
     if (!inDemoNamespace(request) || !sessions.has(name)) return notFound(`session "${name}"`)
-    // Session streams stay open while the session exists.
     return eventStream(request.signal, Number(query(request, 'after') ?? 0), () => (sessions.has(name) ? { events: sessionEvents(name) } : undefined))
   }),
 ]

@@ -169,8 +169,6 @@ func TestNativeRestoreConfiguredLimitBeforeMutation(t *testing.T) {
 	}
 }
 
-// The fixture is an actual synthetic paginated rollout. Only the ACP process
-// is faked; no model invocation or fabricated provider result is involved.
 func TestSupervisorNativeRestoreAboveOrdinaryLimit(t *testing.T) {
 	source, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -215,8 +213,6 @@ func TestSupervisorNativeRestoreAboveOrdinaryLimit(t *testing.T) {
 		t.Fatalf("large native restore: %d %s", response.Code, response.Body.String())
 	}
 	state := server.sessions[request.RuntimeSessionID]
-	// Check the real child ACP client's outgoing cap through its public method.
-	// Raising the native HTTP cap must not let this message onto provider stdin.
 	if err := state.runtime.Process().Client().Notify(t.Context(), "test/oversize", map[string]string{"text": strings.Repeat("x", 2<<20)}); err == nil || !strings.Contains(err.Error(), "ACP message exceeds") {
 		t.Fatalf("child ACP cap changed: %v", err)
 	}

@@ -33,13 +33,12 @@ const (
 	messageRoleUser = "user"
 )
 
-// apiMode tracks which API surface to use.
 type apiMode int32
 
 const (
-	apiModeUnknown         apiMode = iota
-	apiModeResponses               // OpenAI Responses API
-	apiModeChatCompletions         // OpenAI Chat Completions API
+	apiModeUnknown apiMode = iota
+	apiModeResponses
+	apiModeChatCompletions
 )
 
 const (
@@ -79,20 +78,16 @@ func init() {
 	})
 }
 
-// Provider implements the llm.Provider interface for OpenAI.
-// It auto-detects whether the endpoint supports the Responses API and falls
-// back to Chat Completions if not.
 type Provider struct {
 	client                              openai.Client
 	baseURL                             string
 	providerType                        string
 	azureDeploymentName                 string
-	mode                                atomic.Int32 // apiMode
+	mode                                atomic.Int32
 	allowBareResponsesForbiddenFallback bool
 	sendPromptCacheKey                  bool
 }
 
-// NewProvider creates a new OpenAI provider
 func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	if config.APIKey == "" {
 		return nil, llm.ErrAPIKeyRequired
@@ -109,9 +104,6 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		}
 		endpoint := strings.TrimRight(config.BaseURL, "/")
 		opts = append(opts, azure.WithEndpoint(endpoint, apiVersion), azure.WithAPIKey(config.APIKey))
-		// openai-go refuses Azure credentials over plaintext HTTP. Opting in for an
-		// http:// endpoint still limits it to loopback destinations, such as a
-		// local proxy or test server; any other HTTP host fails closed.
 		if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
 			opts = append(opts, azure.WithUnsafeAllowHTTP())
 		}
@@ -139,20 +131,13 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 	}, nil
 }
 
-// promptCacheKey names the conversation a request belongs to, so OpenAI routes
-// the steps of one conversation to the machine that holds its cached prefix.
-// OpenAI caches without a key, but spreads requests across machines. The key
-// hashes what every step repeats from the start: the model, the stable part of
-// the instructions and the first message, which truncation always keeps. Only OpenAI's own API
-// gets it: compatible servers and Azure API versions may refuse a field they
-// do not know.
 func (p *Provider) promptCacheKey(req *llm.CompletionRequest) string {
 	if !p.sendPromptCacheKey {
 		return ""
 	}
 	system := req.SystemPrompt
 	if stable := req.SystemPromptStable; stable > 0 && stable < len(system) {
-		system = system[:stable] // a changed catalog after it keeps the conversation's key
+		system = system[:stable]
 	}
 	h := sha256.New()
 	for _, part := range []string{req.Model, system} {
@@ -165,8 +150,6 @@ func (p *Provider) promptCacheKey(req *llm.CompletionRequest) string {
 	return "orka-" + hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-// requestModel resolves only the upstream routing identity, leaving the
-// caller's logical model intact for authorization, fallback, and telemetry.
 func (p *Provider) requestModel(model string) string {
 	if p.providerType == providerTypeAzureOpenAI && p.azureDeploymentName != "" {
 		return p.azureDeploymentName
@@ -174,9 +157,6 @@ func (p *Provider) requestModel(model string) string {
 	return model
 }
 
-// Name returns the provider name. It remains "openai" for Azure because
-// callers historically used this as the implementation family. Use
-// TelemetryProviderName for the concrete GenAI provider identity.
 func (p *Provider) Name() string {
 	return providerTypeOpenAI
 }
@@ -188,10 +168,6 @@ func (p *Provider) TelemetryProviderName() string {
 	return genai.NormalizeProviderName(p.providerType)
 }
 
-// isUnsupportedAPIError returns true when the error indicates the endpoint
-// does not support the Responses API. Some OpenAI-compatible gateways report
-// unsupported API surfaces as 403 instead of 404/405, but a plain 403 can also
-// mean auth or model entitlement failure.
 func isUnsupportedAPIError(err error) bool {
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		switch apiErr.StatusCode {
@@ -355,10 +331,6 @@ func (p *Provider) isCopilotResponsesForbiddenError(err error) bool {
 	return false
 }
 
-// -------------------------------------------------------------------------
-// Responses API helpers
-// -------------------------------------------------------------------------
-
 func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 	items := make(responses.ResponseInputParam, 0, len(messages))
 	for _, msg := range messages {
@@ -408,8 +380,6 @@ func convertInputItems(messages []llm.Message) responses.ResponseInputParam {
 	return items
 }
 
-// rawToolParameters avoids both float64 rounding and the SDK's treatment of
-// json.Number as a string. Each complete schema field is marshaled as raw JSON.
 func rawToolParameters(parameters json.RawMessage) map[string]any {
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(parameters, &fields)
@@ -515,8 +485,6 @@ func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionReq
 	return result, nil
 }
 
-// normalizeResponsesIncompleteStopReason maps output-budget exhaustion to the
-// provider-neutral token-limit reason while preserving other incomplete states.
 func normalizeResponsesIncompleteStopReason(stopReason, incompleteReason string) string {
 	if incompleteReason == incompleteReasonMaxOutputTokens &&
 		(stopReason == stopReasonIncomplete || stopReason == eventTypeResponseIncomplete) {
@@ -555,7 +523,6 @@ func normalizeResponsesStopReason(
 		return stopReasonToolCalls
 	}
 	if blankIsIncomplete {
-		// Streaming callers do not have the agent loop's tool-free final-answer retry state.
 		return stopReasonIncomplete
 	}
 	if status == stopReasonCompleted {
@@ -681,8 +648,6 @@ func (t *responseFuncCallTracker) merge(dst, src *responseFuncCallState) {
 	}
 	dst.itemDone = dst.itemDone || src.itemDone
 	if src.args.Len() > 0 && (dst.args.Len() == 0 || (t.ordered && src.args.Len() > dst.args.Len())) {
-		// In ordered mode, getChecked verified compatible prefixes. Retain
-		// the longest observed prefix, including when item metadata is late.
 		dst.args.Reset()
 		dst.args.WriteString(src.args.String())
 	}
@@ -787,8 +752,6 @@ func (t *responseFuncCallTracker) mergeItem(fc *responseFuncCallState, item resp
 }
 
 func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSender) bool {
-	// Finalized arguments do not establish that a call finished successfully.
-	// Responses callers may execute as soon as we publish the completed item.
 	if fc == nil || fc.emitted || fc.name == "" || !fc.argumentsDone || (t.ordered && (!fc.itemDone || !fc.hasOutputIndex || fc.callID == "")) {
 		return true
 	}
@@ -797,8 +760,6 @@ func (t *responseFuncCallTracker) emit(fc *responseFuncCallState, send streamSen
 		args = fc.args.String()
 	}
 	if t.ordered {
-		// Recovered calls must satisfy the same argument contract as calls
-		// supplied in a complete response, before coordinator processing.
 		var arguments map[string]any
 		if json.Unmarshal([]byte(args), &arguments) != nil || arguments == nil {
 			return failResponsesStream(send, errors.New("provider returned an invalid Responses function call"))
@@ -929,8 +890,6 @@ func handleResponsesStreamEvent(evt responses.ResponseStreamEventUnion, tracker 
 			stopReason = eventTypeResponseIncomplete
 		}
 		if tracker.ordered {
-			// Only token-budget text outcomes are supported. Decide this
-			// before message snapshots can release queued function calls.
 			hasCalls := len(tracker.byItemID) > 0 || len(tracker.byCallID) > 0 || len(tracker.byOutputIndex) > 0
 			if stopReason != stopReasonLength || hasCalls {
 				stopReason = eventTypeResponseIncomplete
@@ -981,8 +940,6 @@ func handleResponseFunctionCallArgumentsDone(evt responses.ResponseStreamEventUn
 		return failResponsesStream(send, err)
 	}
 	arguments := evt.Arguments
-	// An omitted final field may recover prior data; an explicit empty
-	// snapshot must still agree with every observed argument fragment.
 	if arguments == "" && (!tracker.ordered || evt.JSON.Arguments.Raw() == "") {
 		if tracker.ordered && fc.argumentsDone {
 			arguments = fc.arguments
@@ -1022,8 +979,6 @@ func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *r
 		if !tracker.emit(fc, send) {
 			return false
 		}
-		// A compatible upstream may supply the call ID or name only in its
-		// terminal snapshot. Keep this position open until the call is ready.
 		if tracker.ordered && !fc.emitted {
 			return true
 		}
@@ -1032,8 +987,6 @@ func handleResponseOutputItem(evt responses.ResponseStreamEventUnion, tracker *r
 		if !tracker.outputOrder.messageSnapshot(evt.Item, outputIndex, itemDone, send) {
 			return false
 		}
-		// The content is final, but an omitted status remains unresolved
-		// until the terminal outcome can supply it without rewriting SSE.
 		if itemDone && evt.Item.Status == "" {
 			return true
 		}
@@ -1112,13 +1065,6 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 	return ch
 }
 
-// -------------------------------------------------------------------------
-// Chat Completions API helpers (fallback)
-// -------------------------------------------------------------------------
-
-// groupAssistantTurns adapts ordered Responses history to Chat Completions,
-// which represents assistant text and function calls together in one turn.
-// Copy call slices so normalization never mutates the caller's history.
 func groupAssistantTurns(messages []llm.Message) []llm.Message {
 	grouped := make([]llm.Message, 0, len(messages))
 	for _, msg := range messages {
@@ -1196,7 +1142,6 @@ func convertChatTools(tools []llm.Tool) []openai.ChatCompletionToolUnionParam {
 	return cTools
 }
 
-// convertResponsesTextFormat maps an llm.ResponseFormat to the Responses API text config.
 func convertResponsesTextFormat(rf *llm.ResponseFormat) responses.ResponseTextConfigParam {
 	var cfg responses.ResponseTextConfigParam
 	switch rf.Type {
@@ -1224,7 +1169,6 @@ func convertResponsesTextFormat(rf *llm.ResponseFormat) responses.ResponseTextCo
 	return cfg
 }
 
-// convertChatResponseFormat maps an llm.ResponseFormat to the Chat Completions API response_format.
 func convertChatResponseFormat(rf *llm.ResponseFormat) openai.ChatCompletionNewParamsResponseFormatUnion {
 	switch rf.Type {
 	case "json_object":
@@ -1473,10 +1417,6 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 				return
 			}
 		}
-		// Responses publishes executable function items immediately. The SDK's
-		// JustFinishedToolCall only detects delta transitions, not a successful
-		// terminal outcome, and cannot reliably represent parallel calls. Keep
-		// the whole accumulated call set private until the stream ends cleanly.
 		var pendingCalls []llm.ToolCall
 		if req.ResponsesInput {
 			if len(acc.Choices) > 0 {
@@ -1528,8 +1468,6 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 	return ch
 }
 
-// Validate every call before releasing any: a malformed later call must not
-// leave an earlier executable call in a failed public Responses stream.
 func validateResponsesChatToolCalls(calls []llm.ToolCall) error {
 	seen := make(map[string]bool, len(calls))
 	for _, call := range calls {
@@ -1609,8 +1547,6 @@ func isUnsupportedStreamOptionsError(err error) bool {
 		strings.Contains(msg, "invalid")
 }
 
-// toProviderError wraps an error as a ProviderError, extracting the HTTP status
-// code from the OpenAI SDK error type when available.
 func toProviderError(err error) *llm.ProviderError {
 	pe := &llm.ProviderError{Provider: "openai", Message: err.Error()}
 	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
@@ -1620,10 +1556,6 @@ func toProviderError(err error) *llm.ProviderError {
 	return pe
 }
 
-// openAIErrorMessage keeps the request, status, and provider error body that
-// fallback, retry, and context-overflow classification match on. openai-go
-// reduces Error() to the status line. The URL drops userinfo, query, and
-// fragment so credentials passed there do not reach logs.
 func openAIErrorMessage(apiErr *openai.Error) string {
 	if apiErr == nil {
 		return "OpenAI API error"
@@ -1643,11 +1575,6 @@ func openAIErrorMessage(apiErr *openai.Error) string {
 	return msg
 }
 
-// -------------------------------------------------------------------------
-// Public interface — auto-detect API surface
-// -------------------------------------------------------------------------
-
-// Complete sends a completion request, auto-detecting Responses vs Chat Completions.
 func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	mode := apiMode(p.mode.Load())
 
@@ -1670,7 +1597,6 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 		return nil, err
 	}
 
-	// Unknown — probe with responses.create
 	resp, err := p.completeResponses(ctx, req)
 	if err == nil {
 		p.mode.Store(int32(apiModeResponses))
@@ -1687,7 +1613,6 @@ func (p *Provider) Complete(ctx context.Context, req *llm.CompletionRequest) (*l
 	return nil, err
 }
 
-// Stream sends a streaming completion request, auto-detecting Responses vs Chat Completions.
 func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
 	mode := apiMode(p.mode.Load())
 
@@ -1698,7 +1623,6 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 		return p.streamResponses(ctx, req), nil
 	}
 
-	// Unknown — probe with a lightweight non-streaming responses.create
 	probeReq := &llm.CompletionRequest{
 		Model:     req.Model,
 		Messages:  []llm.Message{{Role: messageRoleUser, Content: "hi"}},
@@ -1724,5 +1648,4 @@ func (p *Provider) Stream(ctx context.Context, req *llm.CompletionRequest) (<-ch
 	return nil, toProviderError(err)
 }
 
-// Ensure Provider implements llm.Provider
 var _ llm.Provider = (*Provider)(nil)

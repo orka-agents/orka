@@ -120,7 +120,6 @@ func TestRepositoryMonitorUpdateBranchRebaseStrategy(t *testing.T) {
 		t.Fatalf("unexpected signing credential ref: %+v", rebaser.got.SigningCredentialRef)
 	}
 
-	// Conflict error aborts fail-closed without retrying.
 	rebaser.err = publisher.ErrCASRejected
 	cmdConflict := &store.CommandEvent{
 		ID:      "cmd-rebase-52",

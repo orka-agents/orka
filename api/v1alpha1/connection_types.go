@@ -9,51 +9,28 @@ package v1alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 const (
-	// ConnectionConditionProviderResolved reports whether providerRef names an
-	// Accepted ConnectorProvider in the same namespace.
 	ConnectionConditionProviderResolved = "ProviderResolved"
-	// ConnectionConditionReady reports whether linked token material is held
-	// and usable by the controller. It is owned by the consent and refresh
-	// paths and records the outcome of the last consent.
-	ConnectionConditionReady = "Ready"
-	// ConnectionConditionScopesGranted reports whether the granted scopes
-	// cover the scopes the current mode requires. It is owned by the
-	// controller, so widening the mode after consent projects Pending without
-	// erasing the still-valid consent, and narrowing restores readiness.
-	ConnectionConditionScopesGranted = "ScopesGranted"
+	ConnectionConditionReady            = "Ready"
+	ConnectionConditionScopesGranted    = "ScopesGranted"
 
 	ConnectionModeReadOnly  = "readOnly"
 	ConnectionModeReadWrite = "readWrite"
 
-	// ConnectionAnnotationAgentHost set to ConnectionAgentHostDeclined keeps
-	// a link to an agent-host provider from getting a host.
 	ConnectionAnnotationAgentHost = "orka.ai/agent-host"
 	ConnectionAgentHostDeclined   = "declined"
 
-	// ConnectionStatePending means consent has not completed.
 	ConnectionStatePending = "Pending"
-	// ConnectionStateReady means token material is held and not known to be expired.
-	ConnectionStateReady = "Ready"
-	// ConnectionStateExpired means the held material expired and could not be refreshed.
+	ConnectionStateReady   = "Ready"
 	ConnectionStateExpired = "Expired"
-	// ConnectionStateRevoked means the provider rejected the material or the
-	// person disconnected.
 	ConnectionStateRevoked = "Revoked"
-	// ConnectionStateError means the Connection cannot be used, for example
-	// because its provider is missing or invalid.
-	ConnectionStateError = "Error"
+	ConnectionStateError   = "Error"
 
-	ConnectionReasonProviderResolved   = "ProviderResolved"
-	ConnectionReasonProviderMissing    = "ProviderMissing"
-	ConnectionReasonProviderInvalid    = "ProviderInvalid"
-	ConnectionReasonProviderReadFailed = "ProviderReadFailed"
-	// ConnectionReasonProviderUnavailable marks ScopesGranted as Unknown
-	// while the provider is missing, invalid, or unreadable: scopes cannot
-	// be judged against a provider that is not resolved.
+	ConnectionReasonProviderResolved    = "ProviderResolved"
+	ConnectionReasonProviderMissing     = "ProviderMissing"
+	ConnectionReasonProviderInvalid     = "ProviderInvalid"
+	ConnectionReasonProviderReadFailed  = "ProviderReadFailed"
 	ConnectionReasonProviderUnavailable = "ProviderUnavailable"
 
-	// Ready condition reasons. The reason, not status.state, is the durable
-	// record of the link, so a transient provider outage cannot erase it.
 	ConnectionReasonPendingConsent  = "PendingConsent"
 	ConnectionReasonLinked          = "Linked"
 	ConnectionReasonExpired         = "Expired"

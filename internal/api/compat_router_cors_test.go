@@ -194,8 +194,6 @@ func TestCompatRouterModelResponsesNeverEnterSharedCache(t *testing.T) {
 
 func TestCompatRouterBrowserSDKHeaders(t *testing.T) {
 	t.Setenv("ORKA_CORS_ALLOWED_ORIGINS", "https://chat.example.test")
-	// These are the TypeScript SDK's browser/platform/retry headers, including
-	// the streaming helper marker, not a copy of the production allowlist.
 	sdkHeaders := []string{
 		"anthropic-dangerous-direct-browser-access",
 		"x-stainless-lang", "x-stainless-package-version", "x-stainless-os",

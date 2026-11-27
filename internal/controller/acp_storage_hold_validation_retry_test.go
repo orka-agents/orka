@@ -11,11 +11,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// errInjectedDeliveryTransition fails one delivery transition, as a lost
-// response or a store that is briefly unavailable would.
 var errInjectedDeliveryTransition = errors.New("injected delivery transition failure")
 
-// failingDeliveryStore fails the next failures delivery transitions.
 type failingDeliveryStore struct {
 	store.DurableControlStore
 	failures int
@@ -31,9 +28,6 @@ func (s *failingDeliveryStore) TransitionPromptAttemptDelivery(
 	return s.DurableControlStore.TransitionPromptAttemptDelivery(ctx, transition)
 }
 
-// acknowledgedValidationHold holds the fixture's Task for a receipt lost after
-// workspace validation started, with its prompt accepted in the journal and
-// no terminal event, and acknowledges the hold. It returns the Task.
 func acknowledgedValidationHold(t *testing.T, fixture *recoveryFixture) *corev1alpha1.Task {
 	t.Helper()
 	task, _, _ := settlingTaskWithReceipt(t, fixture)
@@ -53,8 +47,6 @@ func acknowledgedValidationHold(t *testing.T, fixture *recoveryFixture) *corev1a
 	return task
 }
 
-// requireValidationSettledAsConflict checks that the attempt's outcome is
-// unknown, its delivery a conflict, and that the Task records both.
 func requireValidationSettledAsConflict(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) {
 	t.Helper()
 	attempt := requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
@@ -71,8 +63,6 @@ func requireValidationSettledAsConflict(t *testing.T, fixture *recoveryFixture, 
 	}
 }
 
-// journaledPromptTerminal returns the terminal event the Task's prompt journal
-// records, or nil while the journal is open.
 func journaledPromptTerminal(
 	t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task,
 ) *v2eventjournal.PromptTerminalEvidence {
@@ -94,8 +84,6 @@ func journaledPromptTerminal(
 	return evidence
 }
 
-// A pass that fails before the validation is settled leaves the journal open,
-// so the next pass settles the validation before recording the outcome.
 func TestACPDispatcherSettlesWorkspaceValidationBeforeClosingThePromptJournal(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -119,9 +107,6 @@ func TestACPDispatcherSettlesWorkspaceValidationBeforeClosingThePromptJournal(t 
 	}
 }
 
-// A terminal event an earlier recovery pass journaled before it settled the
-// validation does not leave the delivery Validating once the outcome is
-// recorded.
 func TestACPDispatcherSettlesWorkspaceValidationAfterAJournaledRecoveryTerminal(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)

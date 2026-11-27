@@ -50,8 +50,6 @@ func TestExecutionEventProviderModelPublicCopyPermutations(t *testing.T) {
 				if len(rows) != wantRows {
 					t.Fatalf("persisted rows = %d, want %d", len(rows), wantRows)
 				}
-				// Inspect the target record independently so acceptance redaction
-				// cannot hide an unsafe later lifecycle or usage projection.
 				providers, models := providerModelHistoryPublicCopies(t, rows[len(rows)-1])
 				for _, field := range []struct {
 					copies [2]string
@@ -156,7 +154,6 @@ func newProviderModelHistoryJournal(t *testing.T, provider, model string) (event
 	t.Helper()
 	journal, _ := newModelHistoryJournal(t, model)
 	journal.MapContext.Provider = provider
-	// Configure the provider before the empty journal receives its first event.
 	state, err := journal.Open(context.Background())
 	if err != nil {
 		t.Fatal(err)

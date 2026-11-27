@@ -62,7 +62,6 @@ func TestAHPWorkspaceCollectorKeepsWorkspacesInUse(t *testing.T) {
 		pod.CreationTimestamp = metav1.NewTime(old)
 		require.NoError(t, env.kube.Create(context.Background(), pod))
 	}
-	// Bob has a shell open; Alice has nothing running.
 	backend.mu.Lock()
 	backend.shells[ahpTerminalKey(bob.UserKey, "ahp-terminal:/b")] = &ahpTerminal{}
 	backend.mu.Unlock()
@@ -74,8 +73,6 @@ func TestAHPWorkspaceCollectorKeepsWorkspacesInUse(t *testing.T) {
 		"a workspace with a shell stays")
 }
 
-// Disposing of the last session keeps a workspace it cannot check: a Pod whose
-// container is restarting, or has not started, still has its files.
 func TestAHPWorkspaceDisposalKeepsAWorkspaceItCannotCheck(t *testing.T) {
 	env := newAHPTestEnv(t)
 	w := &ahpWorkspaces{b: env.backend, clientset: kubefake.NewClientset(), rest: &rest.Config{}, namespace: "orka-ahp-workspaces", image: "example.com/git@sha256:" + ahpHash("x")}
@@ -99,8 +96,6 @@ func TestAHPWorkspaceDisposalKeepsAWorkspaceItCannotCheck(t *testing.T) {
 		"no workspace is no workspace to keep")
 }
 
-// A branch's changes are found from its base, or without one, as for a
-// repository off github.com, from the default branch the clone found.
 func TestAHPBranchForkScript(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
@@ -134,9 +129,6 @@ func TestAHPBranchForkScript(t *testing.T) {
 	}
 }
 
-// The scripts run in the workspace; run them here against real repositories.
-// A checkout already at a project's path is reused only for its repository,
-// and a session's branch a disposed session left unpublished is reused.
 func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
@@ -171,7 +163,6 @@ func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	require.NoError(t, err)
 	_, err = script(ahpCloneScript, checkout, remotes["one"], clones)
 	require.NoError(t, err, "the project's own checkout is reused")
-	// A URL rewrite the person set up does not hide the checkout's origin.
 	git(checkout, "config", "url."+remotes["other"]+".insteadOf", remotes["one"])
 	_, err = script(ahpCloneScript, checkout, remotes["one"], clones)
 	require.NoError(t, err, "a rewritten origin is still the project's")
@@ -187,14 +178,11 @@ func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	git(worktree, "add", "b")
 	git(worktree, "commit", "-m", "b")
 	kept := git(worktree, "rev-parse", "HEAD")
-	// Disposing of the session removes its worktree; its branch stays.
 	git(checkout, "worktree", "remove", "--force", worktree)
 	out, err = script(ahpWorktreeScript, checkout, worktree, "feature", "main")
 	require.NoError(t, err, out)
 	require.Equal(t, kept, git(worktree, "rev-parse", "HEAD"), "the unpublished branch is reused as it was")
 
-	// Once the branch is published, a local branch with later commits only
-	// the workspace has keeps them.
 	git(worktree, "push", "--quiet", "origin", "feature")
 	git(worktree, "commit", "--quiet", "--allow-empty", "-m", "local only")
 	local := git(worktree, "rev-parse", "HEAD")
@@ -203,7 +191,6 @@ func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	require.NoError(t, err, out)
 	require.Equal(t, local, git(worktree, "rev-parse", "HEAD"), "unpublished commits on a published branch were lost")
 	require.Equal(t, "origin/feature", git(worktree, "rev-parse", "--abbrev-ref", "feature@{upstream}"))
-	// One behind what was published catches up with it.
 	git(worktree, "push", "--quiet", "origin", "feature")
 	git(worktree, "reset", "--quiet", "--hard", "HEAD~1")
 	git(checkout, "worktree", "remove", "--force", worktree)
@@ -211,13 +198,10 @@ func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	require.NoError(t, err, out)
 	require.Equal(t, local, git(worktree, "rev-parse", "HEAD"), "a branch behind what was published did not catch up")
 
-	// Removing a session's worktree keeps one with uncommitted work, and one
-	// whose detached HEAD holds commits no ref has.
 	require.NoError(t, os.WriteFile(filepath.Join(worktree, "draft.txt"), []byte("draft\n"), 0o600))
 	out, err = script(ahpWorktreeRemoveScript, checkout, worktree)
 	require.NoError(t, err, out)
 	require.FileExists(t, filepath.Join(worktree, "draft.txt"), "a worktree with an untracked file was removed")
-	// Nor does a repository setting that hides untracked files.
 	git(checkout, "config", "status.showUntrackedFiles", "no")
 	out, err = script(ahpWorktreeRemoveScript, checkout, worktree)
 	require.NoError(t, err, out)
@@ -238,12 +222,10 @@ func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	require.Equal(t, local, git(checkout, "rev-parse", "feature"), "its branch stays")
 }
 
-// The script runs in the workspace; run it here against real repositories.
 func TestAHPHoldsWorkScript(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
-	// Git reports real paths; the temporary directory may be a symlink.
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	git := func(dir string, args ...string) {
@@ -272,8 +254,6 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".home"), 0o755))
 	require.Equal(t, "done", holds(), "everything is pushed")
 
-	// A local branch with no upstream holds a commit, even when it is not
-	// checked out.
 	git(project, "switch", "--no-track", "-c", "scratch")
 	require.NoError(t, os.WriteFile(filepath.Join(project, "b"), []byte("b\n"), 0o600))
 	git(project, "add", "b")
@@ -283,20 +263,17 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	git(project, "push", "origin", "scratch")
 	require.Equal(t, "done", holds())
 
-	// An uncommitted file in a worktree, and a file outside the checkouts.
 	worktree := filepath.Join(root, "worktrees", "o", "r", "s")
 	git(project, "worktree", "add", "-b", "s", worktree, "main")
 	require.NoError(t, os.WriteFile(filepath.Join(worktree, "c"), []byte("c\n"), 0o600))
 	require.Contains(t, holds(), "changed "+worktree)
 	require.NoError(t, os.Remove(filepath.Join(worktree, "c")))
-	// Untracked files show even when the repository hides them.
 	git(project, "config", "status.showUntrackedFiles", "no")
 	require.NoError(t, os.WriteFile(filepath.Join(worktree, "d"), []byte("d\n"), 0o600))
 	require.Contains(t, holds(), "changed "+worktree)
 	require.NoError(t, os.Remove(filepath.Join(worktree, "d")))
 	require.Equal(t, "done", holds())
 
-	// A commit on a detached HEAD in a worktree.
 	detached := filepath.Join(root, "worktrees", "o", "r", "detached")
 	git(project, "worktree", "add", "--detach", detached, "main")
 	require.NoError(t, os.WriteFile(filepath.Join(detached, "e"), []byte("e\n"), 0o600))
@@ -311,7 +288,6 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.Contains(t, holds(), "other "+filepath.Join(root, ".home", "notes.txt"), "other files in HOME are kept")
 	require.NoError(t, os.Remove(filepath.Join(root, ".home", "notes.txt")))
 
-	// A directory the scan cannot read keeps the workspace.
 	locked := filepath.Join(root, "locked")
 	require.NoError(t, os.MkdirAll(locked, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(locked, "f"), []byte("f\n"), 0o600))
@@ -320,7 +296,6 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.NoError(t, os.Chmod(locked, 0o755))
 	require.NoError(t, os.RemoveAll(locked))
 
-	// A tag keeps an unpublished commit that no branch has.
 	git(project, "switch", "--detach", "main")
 	require.NoError(t, os.WriteFile(filepath.Join(project, "g"), []byte("g\n"), 0o600))
 	git(project, "add", "g")
@@ -331,12 +306,10 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	git(project, "tag", "-d", "kept")
 	require.Equal(t, "done", holds(), "commits only the reflog keeps are not kept")
 
-	// A file git was told not to check.
 	git(project, "update-index", "--assume-unchanged", "a")
 	require.Contains(t, holds(), "flagged "+project)
 	git(project, "update-index", "--no-assume-unchanged", "a")
 
-	// An unreadable directory inside a checkout.
 	hidden := filepath.Join(project, "hidden")
 	require.NoError(t, os.MkdirAll(hidden, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(hidden, "h"), []byte("h\n"), 0o600))
@@ -346,7 +319,6 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.NoError(t, os.RemoveAll(hidden))
 	require.Equal(t, "done", holds())
 
-	// Any submodule keeps the workspace.
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".git", "modules"), 0o755))
 	require.Contains(t, holds(), "submodules "+project)
 	require.NoError(t, os.RemoveAll(filepath.Join(project, ".git", "modules")))
@@ -358,14 +330,11 @@ func TestAHPHoldsWorkScript(t *testing.T) {
 	require.Equal(t, "done", holds())
 }
 
-// A restore that could not clone every project leaves the Pod unmarked, so a
-// later use restores it again; one that finished marks it.
 func TestAHPWorkspaceRestoreIsMarkedOnlyWhenComplete(t *testing.T) {
 	env := newAHPTestEnv(t)
 	ctx := ahpCtx(t)
 	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
 		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
-	// Exec reaches no API server here, so every clone fails.
 	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
 	clientset, err := kubernetes.NewForConfig(unreachable)
 	require.NoError(t, err)
@@ -384,14 +353,11 @@ func TestAHPWorkspaceRestoreIsMarkedOnlyWhenComplete(t *testing.T) {
 	require.False(t, restored("clone-fails"), "a restore whose clone failed is tried again")
 }
 
-// A terminal's directory that could not be set up is reported, so the shell
-// never opens somewhere else while the client believes it is in the project.
 func TestAHPWorkspacePrepareReportsAFailedSetup(t *testing.T) {
 	env := newAHPTestEnv(t)
 	ctx := ahpCtx(t)
 	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
 		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
-	// Exec reaches no API server here, so the clone fails.
 	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
 	clientset, err := kubernetes.NewForConfig(unreachable)
 	require.NoError(t, err)
@@ -404,12 +370,8 @@ func TestAHPWorkspacePrepareReportsAFailedSetup(t *testing.T) {
 	require.NoError(t, w.prepare(ctx, alice, pod, "/workspace"), "a directory that needs no setup")
 }
 
-// Disposing of a terminal whose shell could not be stopped fails and keeps
-// it, so disposing of it again stops the shell, even once the terminal's
-// stream has ended: closing the stream alone can leave the shell running.
 func TestAHPTerminalDisposalFailsUntilTheShellIsStopped(t *testing.T) {
 	env := newAHPTestEnv(t)
-	// Exec reaches no API server here, so stopping the shell fails.
 	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
 	clientset, err := kubernetes.NewForConfig(unreachable)
 	require.NoError(t, err)
@@ -434,20 +396,15 @@ func TestAHPTerminalDisposalFailsUntilTheShellIsStopped(t *testing.T) {
 
 	require.Error(t, env.backend.DisposeTerminal(context.Background(), alice, channel))
 	require.Same(t, term, env.backend.terminal(alice.UserKey, channel), "the terminal is kept")
-	// Its stream ended meanwhile, which forgets the terminal; the shell's
-	// session is still to stop.
 	env.backend.mu.Lock()
 	delete(env.backend.shells, key)
 	env.backend.mu.Unlock()
 	require.Error(t, env.backend.DisposeTerminal(context.Background(), alice, channel))
 
-	// A workspace that no longer runs runs no shell.
 	require.NoError(t, env.kube.Delete(context.Background(), pod))
 	require.NoError(t, env.backend.DisposeTerminal(context.Background(), alice, channel))
 }
 
-// A terminal's name is its first title, so it is bounded as titles are:
-// the stored terminal holds it.
 func TestAHPTerminalNameIsBoundedAsTitlesAre(t *testing.T) {
 	env := newAHPTestEnv(t)
 	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
@@ -464,8 +421,6 @@ func TestAHPTerminalNameIsBoundedAsTitlesAre(t *testing.T) {
 	require.Nil(t, env.backend.terminal(alice.UserKey, "ahp-terminal:/a"))
 }
 
-// A watch's include and exclude patterns are bounded in number and length:
-// every poll matches each file against every one.
 func TestAHPWatchPatternsAreBounded(t *testing.T) {
 	env := newAHPTestEnv(t)
 	unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
@@ -495,8 +450,6 @@ func TestAHPWatchPatternsAreBounded(t *testing.T) {
 	}
 }
 
-// A workspace Pod that cannot be read cannot be checked either: disposal
-// keeps it, rather than take a failed read for no Pod.
 func TestAHPWorkspaceDisposalKeepsAWorkspaceItCannotRead(t *testing.T) {
 	env := newAHPTestEnv(t)
 	w := &ahpWorkspaces{b: env.backend, clientset: kubefake.NewClientset(), rest: &rest.Config{}, namespace: "orka-ahp-workspaces", image: "example.com/git@sha256:" + ahpHash("x")}
@@ -511,7 +464,6 @@ func TestAHPWorkspaceDisposalKeepsAWorkspaceItCannotRead(t *testing.T) {
 	failRead.Store(true)
 	env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			// The first read fails; later ones answer.
 			if failRead.Swap(false) {
 				return errors.New("the API server did not answer")
 			}
@@ -544,10 +496,6 @@ func TestAHPWorkspaceUseWaitsOutACollection(t *testing.T) {
 	require.False(t, w.idle(alice.UserKey[:40], pod), "the use counts as recent")
 }
 
-// A workspace image without a command Orka's scripts run there, such as the
-// readlink file access resolves paths with or the grep the check for
-// unpublished work reads flags with, stops its container with a reason
-// rather than run while the Pod looks ready.
 func TestAHPWorkspaceKeepAliveNeedsItsCommands(t *testing.T) {
 	with := func(commands ...string) string {
 		dir := t.TempDir()
@@ -578,10 +526,6 @@ func TestAHPWorkspaceKeepAliveNeedsItsCommands(t *testing.T) {
 	}
 }
 
-// With no idle timeout, the end of a person's last shell after their last
-// session removes their workspace, as disposing of that session would have:
-// nothing else would. It does not while a shell or session remains, or when
-// the idle collector will.
 func TestAHPWorkspaceGoesWithTheLastShellWhenNoIdleTimeoutIsSet(t *testing.T) {
 	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
 	for name, tc := range map[string]struct {
@@ -624,7 +568,6 @@ func TestAHPWorkspaceGoesWithTheLastShellWhenNoIdleTimeoutIsSet(t *testing.T) {
 	}
 }
 
-// Disposing of the last terminal runs the same decision.
 func TestAHPDisposingTheLastTerminalConsidersTheWorkspace(t *testing.T) {
 	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
 	reads := func(idle time.Duration) int32 {
@@ -655,16 +598,11 @@ func TestAHPDisposingTheLastTerminalConsidersTheWorkspace(t *testing.T) {
 	require.Greater(t, reads(0), reads(time.Hour), "with no idle timeout the workspace is considered once more")
 }
 
-// Reaping the terminals an earlier process left behind runs the same decision
-// as disposing of the last terminal: with no idle timeout nothing else would
-// remove the workspace.
 func TestAHPReapingTerminalsConsidersTheWorkspace(t *testing.T) {
 	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
 	reads := func(idle time.Duration) int32 {
 		env := newAHPTestEnv(t)
 		env.backend.cfg.WorkspaceIdleTimeout = idle
-		// Exec reaches no API server here, so the workspace is never shown
-		// to hold no work and stays; only whether it was considered counts.
 		unreachable := &rest.Config{Host: "http://127.0.0.1:1"}
 		clientset, err := kubernetes.NewForConfig(unreachable)
 		require.NoError(t, err)
@@ -691,8 +629,6 @@ func TestAHPReapingTerminalsConsidersTheWorkspace(t *testing.T) {
 	require.Greater(t, reads(0), reads(time.Hour), "with no idle timeout the workspace is considered once more")
 }
 
-// A client watching the files uses the workspace: an idle collector would
-// otherwise remove it under the watch, whose files would show as they were.
 func TestAHPWorkspaceWatchCountsAsUse(t *testing.T) {
 	env := newAHPTestEnv(t)
 	backend := env.backend
@@ -732,9 +668,6 @@ func TestAHPWorkspaceWatchCountsAsUse(t *testing.T) {
 	require.NoError(t, env.kube.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}), "a watched workspace is not idle")
 }
 
-// Without an idle timeout only a session's or shell's end removes a workspace,
-// so listing agents warms one only for a person who has a session: one who
-// connects and does nothing would otherwise keep it, and its credentials.
 func TestAHPAgentsWarmNoWorkspaceForSomeoneWithoutASession(t *testing.T) {
 	env := newAHPTestEnv(t)
 	backend := env.backend

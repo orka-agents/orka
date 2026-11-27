@@ -54,8 +54,6 @@ func TestUsageDeletedTaskStopsPinningRetention(t *testing.T) {
 			historical, err := usage.Build(data, filter)
 			require.NoError(t, err)
 			require.Equal(t, string(phase), historical.Works[0].Tasks[0].Phase)
-			// Retain the cancellation for the configured window, then expire
-			// the abandoned cohort and its counts after that window elapses.
 			require.NoError(t, backend.PruneUsage(t.Context(), time.Now().Add(-90*24*time.Hour)))
 			data, err = backend.LoadUsage(t.Context(), filter)
 			require.NoError(t, err)
@@ -147,7 +145,6 @@ func TestUsageRetryPreservesPendingInterval(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), reloaded))
 	require.Equal(t, corev1alpha1.TaskPhasePending, reloaded.Status.Phase)
 	require.NoError(t, r.retainUsageTask(t.Context(), reloaded))
-	// A late monitor create snapshot must not erase the retry interval.
 	snapshot := usageTaskSnapshot(initial)
 	snapshot.WorkID = workID
 	require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
@@ -177,7 +174,6 @@ func TestUsageRetainsTheRequesterButReportsOmitIt(t *testing.T) {
 	require.True(t, snapshot.AHPTurn)
 	snapshot.NamespaceUID = "namespace-uid"
 	require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
-	// The first requester recorded stays, and a Task once private stays so.
 	snapshot.Requester = &store.UsageRequester{Issuer: "https://issuer.example", Subject: "mallory"}
 	snapshot.AHPTurn = false
 	require.NoError(t, backend.RegisterUsageTask(t.Context(), snapshot))
@@ -198,9 +194,6 @@ func TestUsageRetainsTheRequesterButReportsOmitIt(t *testing.T) {
 	require.NotContains(t, string(encoded), "ahpTurn")
 }
 
-// Only AHP usage is shown by who requested it, so an ordinary Task's
-// requester is not kept past the Task; a Task in an AHP session, or an AHP
-// turn, keeps it.
 func TestUsageRetainsTheRequesterOfAHPTasksOnly(t *testing.T) {
 	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "alice"}
 	alice := &store.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}

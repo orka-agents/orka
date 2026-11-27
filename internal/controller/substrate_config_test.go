@@ -23,7 +23,6 @@ func TestSubstrateRouterURLRejectsComponentsUnsafeForToolStatus(t *testing.T) {
 		require.NoError(t, cfg.ValidateMCPTools(), routerURL)
 	}
 
-	// Substrate v1 serves Actor traffic only over mTLS.
 	plaintext := valid
 	plaintext.RouterURL = "http://atenet-router.ate-system.svc"
 	require.ErrorContains(t, plaintext.ValidateMCPTools(), "must be an https URL")
@@ -51,8 +50,6 @@ func TestSubstrateRouterURLRejectsComponentsUnsafeForToolStatus(t *testing.T) {
 func TestSubstrateRouterRequiresPodCertificateIdentity(t *testing.T) {
 	t.Parallel()
 
-	// A bearer token authenticates control calls, but the router admits only
-	// clients presenting an allowlisted pod-certificate SPIFFE identity.
 	cfg := SubstrateConfig{APIInsecureSkipVerify: true, APIBearerTokenFile: "/var/run/substrate/token"}
 	require.ErrorContains(t, cfg.ValidateMCPTools(), "pod-certificate identity")
 }

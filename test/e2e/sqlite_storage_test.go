@@ -43,7 +43,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		dumpDebugInfo(containerTaskName, agentTaskName)
 	})
 
-	// Test 1: Verify the controller is running with SQLite storage configured
 	It("should have SQLite store configured on the controller", func() {
 		By("checking that the controller pod has --store-backend and --store-path args")
 		verifyStoreArgs := func(g Gomega) {
@@ -89,9 +88,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyStoreVolume, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 2: Verify the SQLite database is initialized and healthy
-	// Note: The controller image is distroless (no shell/ls), so we verify
-	// the database through controller logs instead of kubectl exec.
 	It("should have a SQLite database file on disk", func() {
 		By("checking the controller logs confirm SQLite DB was opened successfully")
 		verifyDBExists := func(g Gomega) {
@@ -126,7 +122,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyControllerReady, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 3: Container task lifecycle — result stored in SQLite, not ConfigMap
 	It("should complete a container task and store the result in SQLite", func() {
 		By("creating a container task that produces output")
 		taskManifest := fmt.Sprintf(`{
@@ -188,7 +183,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyNoResultConfigMap, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 4: Agent task job has the new env vars for HTTP result submission
 	It("should configure agent tasks with HTTP result endpoint env vars", func() {
 		By("creating an Agent CRD")
 		agentManifest := fmt.Sprintf(`{
@@ -251,8 +245,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		verifyNoJobForTask(agentTaskName, 5*time.Second)
 	})
 
-	// Test 5:
-	// Test 5: Verify the DB size metric is exposed via the metrics endpoint
 	It("should expose orka_store_db_size_bytes metric", func() {
 		By("checking the controller logs for SQLite store startup message")
 		verifyStoreStartup := func(g Gomega) {
@@ -273,7 +265,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyStoreStartup, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 6: Verify task deletion cleans up results from SQLite
 	It("should clean up SQLite result when task is deleted", func() {
 		By("deleting the container task")
 		cmd := exec.Command("kubectl", "delete", "task", containerTaskName, "-n", namespace, "--wait=true")
@@ -291,8 +282,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 		Eventually(verifyTaskDeleted, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	// Test 7: Verify non-AI worker RBAC - SQLite result storage should not
-	// require vendor or container workers to write ConfigMaps.
 	It("should not grant ConfigMap write permissions to non-AI workers", func() {
 		By("checking the non-AI worker ClusterRoles for ConfigMap permissions")
 		verifyWorkerRBAC := func(g Gomega) {
@@ -311,7 +300,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 
 				if strings.TrimSpace(output) == "" {
-					// Worker role might not exist in all deployments; skip
 					continue
 				}
 
@@ -334,7 +322,6 @@ var _ = Describe("SQLite Storage", Ordered, func() {
 					}
 
 					if ruleCoversConfigMaps {
-						// ConfigMap rules should only have read verbs
 						for _, verb := range rule.Verbs {
 							g.Expect(disallowedConfigMapVerbs).NotTo(ContainElement(verb),
 								"Workers should NOT have ConfigMap write permissions")

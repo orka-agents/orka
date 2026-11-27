@@ -27,7 +27,6 @@ var _ = Describe("Agent Task", Ordered, func() {
 		agentName = "e2e-test-agent"
 	)
 
-	// Clean up resources after the test
 	AfterAll(func() {
 		By("deleting the agent task")
 		cmd := exec.Command("kubectl", "delete", "task", taskName, "-n", namespace, "--ignore-not-found")
@@ -37,7 +36,6 @@ var _ = Describe("Agent Task", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "agent", agentName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
-		// Results are stored in SQLite — no ConfigMap cleanup needed
 	})
 
 	AfterEach(func() {
@@ -120,14 +118,11 @@ var _ = Describe("Agent Task", Ordered, func() {
 	})
 })
 
-// envVar is a simplified representation of a Kubernetes environment variable
-// for parsing JSON output from kubectl.
 type envVar struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
 
-// stringReader returns a strings.Reader for use as command stdin.
 func stringReader(s string) *strings.Reader {
 	return strings.NewReader(s)
 }

@@ -23,7 +23,6 @@ const (
 	testModelName = "gpt-4"
 )
 
-// New creates a new Orka API client.
 func New(baseURL, token string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
@@ -32,7 +31,6 @@ func New(baseURL, token string) *Client {
 	}
 }
 
-// CreateTask creates a new task.
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDetail, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -40,8 +38,6 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (*TaskDe
 	}
 	return c.CreateTaskRaw(ctx, body)
 }
-
-// helper to create a test server that records requests and returns a fixed response.
 
 func TestNew(t *testing.T) {
 	c := New("http://localhost:8080", "tok123")

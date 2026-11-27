@@ -42,7 +42,6 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatalf("configured issuer: %v", err)
 	}
 	for _, entra := range []EntraConfig{{TenantID: testTenant}, {BlueprintClientID: testBlueprint}, {TenantID: "tenant", BlueprintClientID: testBlueprint},
-		// The issuer sends the IDs as they are, so padding must not pass.
 		{TenantID: " " + testTenant, BlueprintClientID: testBlueprint}, {TenantID: testTenant, BlueprintClientID: testBlueprint + "\n"}} {
 		if err := (Config{Entra: &entra}).Validate(); err == nil {
 			t.Fatalf("Validate(%+v) = nil, want error", entra)

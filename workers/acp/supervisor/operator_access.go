@@ -28,8 +28,6 @@ import (
 )
 
 const (
-	// OperatorAccessCapabilityHeader opts a capabilities request into the
-	// operator access field. Older controllers decode capabilities strictly.
 	OperatorAccessCapabilityHeader = "X-Orka-Operator-Access-Capability"
 
 	maxConcurrentOperatorOperations = 4
@@ -37,32 +35,17 @@ const (
 	operatorFileStatusLineBytes     = 1024
 )
 
-// operatorFileTimeout bounds one file operation. Replaceable in tests.
 var operatorFileTimeout = 5 * time.Minute
 
-// operatorLeaderExitGrace bounds how long a killed operation's leader may take
-// to exit. A leader stuck in uninterruptible I/O never does; the handler then
-// stops waiting and its cleanup fails closed instead of blocking forever.
-// Replaceable in tests.
 var operatorLeaderExitGrace = 10 * time.Second
 
-// operatorStreamAbortGrace is how long a revoked operation's handler may take
-// to deliver its final status before its caller stream is ended. A quiesce
-// barrier with a shorter deadline uses half of it.
 var operatorStreamAbortGrace = 2 * time.Second
 
-// operatorAccessStates are the RuntimeSession states that admit operator
-// access. Every validation, publication, finalization, cancellation, and
-// deletion state is refused: the workspace is frozen or its delta is being
-// published from a captured snapshot, and creation has not finished. A
-// poisoned session is refused too: poisoning is also how unproven operator
-// cleanup fails closed.
 var operatorAccessStates = map[harnessv2.RuntimeSessionState]struct{}{
 	harnessv2.RuntimeSessionStateIdle:          {},
 	harnessv2.RuntimeSessionStatePromptRunning: {},
 }
 
-// operatorChildIdentity is the RuntimeSession's immutable child UID/GID.
 var operatorChildIdentity = func(state *sessionState) (int, int) { return state.runtime.ChildIdentity() }
 
 type operatorTarget struct {
@@ -75,22 +58,12 @@ type operatorTarget struct {
 	token     uint64
 }
 
-// operatorRegistration tracks one admitted operator operation on its
-// session from admission until its owning handler has killed and reaped every
-// process of the operation. Only that handler removes it, so the quiesce
-// barrier can never observe completion early.
 type operatorRegistration struct {
-	process operatorProcess // nil until started and bound
+	process operatorProcess
 	revoked bool
-	// stream ends the operation's caller stream on revocation, so a write
-	// blocked on a caller that stopped reading cannot hold the registration
-	// past the quiesce deadline. Nil until the stream is bound.
-	stream *operatorStreamAbort
+	stream  *operatorStreamAbort
 }
 
-// operatorStreamAbort ends one operation's caller stream. Its handler disables
-// it before releasing the registration, so a late abort never reaches a
-// connection that has moved on to another request.
 type operatorStreamAbort struct {
 	mu       sync.Mutex
 	disabled bool
@@ -116,9 +89,6 @@ func (a *operatorStreamAbort) disable() {
 	a.mu.Unlock()
 }
 
-// operatorHijackRecorder records the connection the WebSocket upgrade hijacks,
-// so revocation can end the transport under any WebSocket I/O, including a
-// close handshake.
 type operatorHijackRecorder struct {
 	http.ResponseWriter
 	mu   sync.Mutex
@@ -143,9 +113,6 @@ func (h *operatorHijackRecorder) transport() net.Conn {
 	return h.conn
 }
 
-// bindOperatorStream records the abort for an operation's caller stream. An
-// operation already revoked has had its process killed and gets the same
-// grace to deliver its final status as one revoked later.
 func (s *Server) bindOperatorStream(target operatorTarget, stream *operatorStreamAbort) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -159,9 +126,6 @@ func (s *Server) bindOperatorStream(target operatorTarget, stream *operatorStrea
 	}
 }
 
-// revokeSessionOperatorsLocked revokes every operator registration and starts
-// killing bound operations. Registrations stay until their handlers finish
-// cleanup. The caller holds s.mu.
 func revokeSessionOperatorsLocked(state *sessionState) {
 	for _, registration := range state.operators {
 		if registration.revoked {
@@ -172,17 +136,11 @@ func revokeSessionOperatorsLocked(state *sessionState) {
 			go registration.process.Kill()
 		}
 		if registration.stream != nil {
-			// Let the handler deliver the final status first; only a stream
-			// still blocked on its caller after the grace is ended.
 			time.AfterFunc(operatorStreamAbortGrace, registration.stream.abort)
 		}
 	}
 }
 
-// bindOperatorProcess atomically re-checks the session and records a
-// started process. A false result means the session left an admitting state,
-// closed admission, or was replaced while the process started; the caller
-// must kill it, and the registration remains until the caller finishes.
 func (s *Server) bindOperatorProcess(target operatorTarget, process operatorProcess) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,10 +159,6 @@ func (s *Server) bindOperatorProcess(target operatorTarget, process operatorProc
 	return true
 }
 
-// quiesceOperators is the barrier before a workspace freeze or session
-// deletion: it closes operator admission, revokes every operation, kills bound
-// ones, and returns only when every handler has finished its proven cleanup.
-// An unproven kill or a timeout returns an error; the caller fails closed.
 func (s *Server) quiesceOperators(state *sessionState, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	abortStreamsAt := time.Now().Add(min(operatorStreamAbortGrace, timeout/2))
@@ -229,9 +183,6 @@ func (s *Server) quiesceOperators(state *sessionState, timeout time.Duration) er
 				return fmt.Errorf("operator process termination could not be proven")
 			}
 		}
-		// A handler blocked writing to a caller that stopped reading would
-		// otherwise keep its registration until its write timeout. Handlers
-		// first get a grace to deliver their final status.
 		if !time.Now().Before(abortStreamsAt) {
 			for _, stream := range streams {
 				stream.abort()
@@ -247,16 +198,10 @@ func (s *Server) quiesceOperators(state *sessionState, timeout time.Duration) er
 	}
 }
 
-// quiesceOperatorsBeforeTeardown is the barrier every runtime teardown path
-// applies before it accepts termination proofs: drain cleanup, supervisor
-// shutdown, native capture, and explicit deletion. An admitted launch could
-// otherwise start after descendant cleanup was proven, while session files
-// are removed or captured.
 func (s *Server) quiesceOperatorsBeforeTeardown(state *sessionState) error {
 	return s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
 }
 
-// operatorLease owns everything one operator operation holds.
 type operatorLease struct {
 	target      operatorTarget
 	tag         int
@@ -264,14 +209,8 @@ type operatorLease struct {
 	process     operatorProcess
 }
 
-// finishOperation kills and reaps the operation, then releases its tag,
-// registration, and concurrency slot. If termination cannot be proven it
-// fails closed: the session and pool are poisoned and the registration, tag,
-// and slot stay held so no barrier, tag reuse, or new operation can proceed.
 func (s *Server) finishOperation(lease *operatorLease) {
 	if lease.process != nil {
-		// Retire fences off late Kill calls (for example from the input
-		// relay) before the tag is released for reuse below.
 		proven := lease.process.Retire()
 		if !proven {
 			slog.Error("operator process termination could not be proven; failing the runtime closed",
@@ -280,8 +219,6 @@ func (s *Server) finishOperation(lease *operatorLease) {
 				s.poisonSession(lease.target.state, "operator process termination could not be proven")
 			}
 			s.poisonPool("operator_cleanup_unproven")
-			// The leader may never exit (uninterruptible I/O), so it is
-			// reaped in the background; everything else stays held.
 			go func() { _, _, _ = lease.process.Wait() }()
 			closeOperatorStreams(lease.process)
 			return
@@ -310,7 +247,6 @@ func closeOperatorStreams(process operatorProcess) {
 	}
 }
 
-// operatorLaunch is one operator process request.
 type operatorLaunch struct {
 	UID   int
 	GID   int
@@ -324,7 +260,6 @@ type operatorLaunch struct {
 	Stdin bool
 }
 
-// operatorProcess is a started operator command.
 type operatorProcess interface {
 	Stdin() io.WriteCloser
 	Stdout() io.ReadCloser
@@ -332,32 +267,22 @@ type operatorProcess interface {
 	Resize(rows, cols uint16) error
 	Signal(name string) error
 	Wait() (exitCode int, signaled bool, err error)
-	// Kill terminates the whole operation and reports whether no process of
-	// it remains. It is safe to call repeatedly and concurrently.
 	Kill() bool
-	// Retire performs the final Kill, waiting for any in-flight one, and
-	// turns every later Kill into a no-op, so a late caller cannot act on the
-	// operation's tag group after it is released for reuse.
 	Retire() bool
 }
 
 type operatorStarter func(operatorLaunch) (operatorProcess, error)
 
 type operatorAccessState struct {
-	once    sync.Once
-	slots   chan struct{}
-	starter operatorStarter
-	// used makes every signed operator capability single-use within its
-	// validity window, so a captured request cannot be replayed.
-	usedMu sync.Mutex
-	used   map[harnessv2.OperationID]time.Time
-	// runtimeExecutable is the absolute orka-acp-runtime binary that hosts the
-	// file helper.
+	once              sync.Once
+	slots             chan struct{}
+	starter           operatorStarter
+	usedMu            sync.Mutex
+	used              map[harnessv2.OperationID]time.Time
 	runtimeExecutable string
-	// tags are the operator tag groups held by live operations.
-	tagMu   sync.Mutex
-	tags    map[int]struct{}
-	nextTag int
+	tagMu             sync.Mutex
+	tags              map[int]struct{}
+	nextTag           int
 }
 
 func (s *Server) operatorState() *operatorAccessState {
@@ -377,10 +302,8 @@ func (s *Server) operatorState() *operatorAccessState {
 	return &s.operator
 }
 
-// operatorTagInUse is replaceable in tests.
 var operatorTagInUse = acp.OperatorTagInUse
 
-// allocateTag reserves a tag group that no live process carries.
 func (o *operatorAccessState) allocateTag() (int, bool) {
 	o.tagMu.Lock()
 	defer o.tagMu.Unlock()
@@ -425,7 +348,6 @@ func writeOperatorError(w http.ResponseWriter, status int, message string) {
 	writeError(w, status, code, message, nil, false)
 }
 
-// operatorTargetFor resolves the exact live session under the request's fence.
 func (s *Server) operatorTargetFor(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata) (operatorTarget, int, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -433,8 +355,6 @@ func (s *Server) operatorTargetFor(sessionID harnessv2.RuntimeSessionID, metadat
 	if state == nil || state.runtime == nil {
 		return operatorTarget{}, http.StatusNotFound, "runtime session not found"
 	}
-	// Close quiesces each session once; a later return to an admitting
-	// session state must not reopen operator access during teardown.
 	if s.lifecycle == harnessv2.SupervisorLifecycleTerminating {
 		return operatorTarget{}, http.StatusConflict, "runtime supervisor is terminating"
 	}
@@ -465,8 +385,6 @@ func (s *Server) operatorTargetFor(sessionID harnessv2.RuntimeSessionID, metadat
 	}, 0, ""
 }
 
-// authorizeOperatorRequest authenticates the bearer on headers alone, then
-// decodes, validates, and capability-verifies the signed request header.
 func (s *Server) authorizeOperatorRequest(w http.ResponseWriter, r *http.Request, target interface {
 	ValidateAt(time.Time) error
 }, metadata func() harnessv2.MutationMetadata) bool {
@@ -485,9 +403,6 @@ func (s *Server) authorizeOperatorRequest(w http.ResponseWriter, r *http.Request
 		writeOperatorError(w, http.StatusBadRequest, "invalid operator request: "+err.Error())
 		return false
 	}
-	// Operator access always requires the signed operation capability,
-	// regardless of RequireCapabilities: only the controller-side API holds
-	// the pool capability secret.
 	if len(s.cfg.CapabilitySecret) < harnessv2.MinCapabilitySecretBytes ||
 		harnessv2.VerifyOperationCapability(s.cfg.CapabilitySecret, r.Header.Get(OperationCapabilityHeader), metadata(), true, time.Now().UTC()) != nil {
 		writeOperatorError(w, http.StatusForbidden, "operation capability authorization failed")
@@ -530,8 +445,6 @@ func (s *Server) acquireOperatorSlot(w http.ResponseWriter) (func(), bool) {
 	}
 }
 
-// resolveOperatorCommand never echoes argv0 in its errors: they are relayed
-// into orka-api audit records and Task Events, which must not carry raw argv.
 func resolveOperatorCommand(argv0, childPath string) (string, error) {
 	if filepath.IsAbs(argv0) {
 		info, err := os.Stat(argv0)
@@ -605,29 +518,20 @@ func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
 	}
 	lease.process = process
 	if !s.bindOperatorProcess(target, process) {
-		// finishOperation kills and reaps it before the registration goes.
 		writeOperatorError(w, http.StatusConflict, "runtime session left an operator-admitting state")
 		return
 	}
-	// The listener's whole-request read deadline protects small control
-	// requests; an authenticated interactive stream lives until its own
-	// operation timeout instead.
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Time{})
 	_ = controller.SetWriteDeadline(time.Time{})
 	hijacked := &operatorHijackRecorder{ResponseWriter: w}
 	conn, err := websocket.Accept(hijacked, r, &websocket.AcceptOptions{
-		Subprotocols: []string{operatoraccess.WebSocketSubprotocol},
-		// The caller is the authenticated controller-side API, never a
-		// browser; there is no ambient cookie authority to protect.
+		Subprotocols:       []string{operatoraccess.WebSocketSubprotocol},
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		return
 	}
-	// Close the transport itself: the WebSocket's own CloseNow waits for a
-	// close handshake already in progress, which a caller that stopped
-	// reading never acknowledges.
 	stream := newOperatorStreamAbort(func() {
 		if transport := hijacked.transport(); transport != nil {
 			_ = transport.Close()
@@ -652,13 +556,7 @@ func (b *operatorOutputBudget) take(n int) bool {
 	return b.used.Add(int64(n)) <= b.limit
 }
 
-// runOperatorExec relays one operator process over the WebSocket until the
-// process exits, its timeout or output limit is reached, or the caller
-// disconnects. It always kills the process group before returning.
 func runOperatorExec(parent context.Context, conn *websocket.Conn, process operatorProcess, options operatoraccess.ExecOptions) operatoraccess.Status {
-	// The stream context outlives the command deadline so the final status
-	// can still be delivered: the WebSocket library closes the connection
-	// when an I/O context is cancelled.
 	streamCtx, streamCancel := context.WithCancel(context.WithoutCancel(parent))
 	defer streamCancel()
 	ctx, cancel := context.WithTimeout(streamCtx, time.Duration(options.TimeoutSeconds)*time.Second)
@@ -680,8 +578,6 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 		}
 		reasonMu.Unlock()
 		process.Kill()
-		// End the command wait too, so a leader stuck after the kill is
-		// bounded by operatorLeaderExitGrace rather than the command timeout.
 		cancel()
 	}
 
@@ -732,14 +628,9 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 		select {
 		case <-waited:
 		case <-time.After(operatorLeaderExitGrace):
-			// The killed leader did not exit; finishOperation fails the
-			// runtime closed and keeps the operation's resources held.
 			exited = false
 		}
 	}
-	// Reap the process group, then give the output pumps a bounded grace to
-	// flush. Readers are closed afterwards so a descendant that escaped the
-	// group and still holds the pipe cannot pin the stream open.
 	process.Kill()
 	drained := make(chan struct{})
 	go func() { copiers.Wait(); close(drained) }()
@@ -749,8 +640,6 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 	}
 	for _, closer := range []io.Closer{process.Stdin(), process.Stdout(), process.Stderr()} {
 		if closer != nil {
-			// Closing also interrupts a stdin write blocked on a command that
-			// never read its input.
 			_ = closer.Close()
 		}
 	}
@@ -760,7 +649,6 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 	if exited {
 		final = operatorFinalStatus(exitCode, signaled, waitErr, reason)
 	} else {
-		// The Wait goroutine still owns the exit fields.
 		final = operatorFinalStatus(-1, false, nil, reason)
 		final.Message = "operator process termination could not be proven"
 	}
@@ -793,12 +681,8 @@ func operatorFinalStatus(exitCode int, signaled bool, waitErr error, reason stri
 	return final
 }
 
-// maxOperatorStdinBuffered bounds stdin accepted ahead of a command that is
-// not reading it. The WebSocket reader never blocks on the child's stdin, so
-// disconnects and control frames are always observed.
 const maxOperatorStdinBuffered = 8 << 20
 
-// relayOperatorInput forwards stdin and control frames until the stream ends.
 func relayOperatorInput(
 	streamCtx context.Context, conn *websocket.Conn, process operatorProcess,
 	options operatoraccess.ExecOptions, setReason func(string),
@@ -814,7 +698,7 @@ func relayOperatorInput(
 		}()
 		for chunk := range queue {
 			if chunk == nil {
-				return // ordered EOF
+				return
 			}
 			buffered.Add(-int64(len(chunk)))
 			if stdin == nil {
@@ -869,8 +753,6 @@ func relayOperatorInput(
 					select {
 					case queue <- nil:
 					default:
-						// eof stays false so the deferred close ends the
-						// writer once stdin unblocks.
 						setReason(operatoraccess.ExitReasonStdinOverflow)
 						return
 					}
@@ -884,7 +766,6 @@ func relayOperatorInput(
 	}
 }
 
-// applyOperatorControl applies an allowed resize or signal request.
 func applyOperatorControl(process operatorProcess, options operatoraccess.ExecOptions, control operatoraccess.Control) {
 	switch control.Type {
 	case operatoraccess.ControlResize:
@@ -899,8 +780,6 @@ func applyOperatorControl(process operatorProcess, options operatoraccess.ExecOp
 	}
 }
 
-// handleOperatorFiles copies one regular file out of (GET) or into (PUT) the
-// session workspace through a helper running as the session child identity.
 func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	var request harnessv2.OperatorFileRequest
 	if !s.authorizeOperatorRequest(w, r, &request, func() harnessv2.MutationMetadata { return request.Metadata }) {
@@ -932,8 +811,6 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	if request.Write {
 		mode = OperatorFileHelperWrite
 	}
-	// The recorded numbers name the workspace only while the supervisor still
-	// holds that directory open; see acp.SessionPaths.
 	workspaceDevice, workspaceInode, err := target.paths.PinnedWorkspaceIdentity()
 	if err != nil {
 		writeOperatorError(w, http.StatusConflict, "runtime session workspace identity is unavailable")
@@ -969,9 +846,6 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	stop := context.AfterFunc(ctx, func() {
 		process.Kill()
-		// A helper stuck in uninterruptible I/O keeps its stdout open even
-		// when the kill is unproven; closing the read end unblocks the
-		// handler so finishOperation can fail the runtime closed.
 		if stdout := process.Stdout(); stdout != nil {
 			_ = stdout.Close()
 		}
@@ -980,8 +854,6 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(operatorFileTimeout))
 	_ = controller.SetWriteDeadline(time.Now().Add(operatorFileTimeout))
-	// Revocation ends a transfer blocked on the caller at once; the helper
-	// itself is killed by the revocation.
 	stream := newOperatorStreamAbort(func() {
 		now := time.Now()
 		_ = controller.SetReadDeadline(now)
@@ -991,9 +863,6 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	s.bindOperatorStream(target, stream)
 
 	if request.Write {
-		// The helper commits only after reading exactly request.Size bytes
-		// followed by EOF, so a truncated or oversized upload never replaces
-		// the target. One extra byte is forwarded to prove oversize.
 		body := http.MaxBytesReader(w, r.Body, request.Size+1)
 		stdin := process.Stdin()
 		copied := make(chan struct{})
@@ -1005,9 +874,6 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.Copy(stdin, body)
 			_ = stdin.Close()
 		}()
-		// The handler must not return while the copy still reads r.Body or
-		// uses w through MaxBytesReader: a helper that fails before reading
-		// its stdin would otherwise leave it blocked on the client.
 		defer func() {
 			select {
 			case <-copied:
@@ -1050,8 +916,6 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(result.Size, 10))
 	w.WriteHeader(http.StatusOK)
 	if copied, err := io.CopyN(w, stdout, result.Size); err != nil || copied != result.Size {
-		// The declared length cannot be met; abort so the caller observes a
-		// truncated transfer instead of a short file.
 		panic(http.ErrAbortHandler)
 	}
 }
@@ -1063,12 +927,8 @@ func operatorFileHelperBound(request harnessv2.OperatorFileRequest) int64 {
 	return request.MaxBytes
 }
 
-// operatorUploadCopyStarted is a test hook run when an upload body copy
-// starts.
 var operatorUploadCopyStarted func()
 
-// OperatorFileHelperSubcommand is the hidden orka-acp-runtime subcommand that
-// implements operator file copies as the session child identity.
 const (
 	OperatorFileHelperSubcommand = "__orka_operator_file"
 	OperatorFileHelperRead       = "read"
@@ -1128,32 +988,23 @@ func readOperatorFileStatus(reader io.Reader) (operatorFileStatus, bool) {
 	return operatorFileStatus{}, false
 }
 
-// realOperatorProcess runs through the ACP exec helper.
 type realOperatorProcess struct {
-	waitOnce sync.Once
-	exitCode int
-	signaled bool
-	waitErr  error
-	uid      int
-	tag      int
-	// reapMu fences process-group signals against reaping the leader: the
-	// group ID is the leader's PID, which stays allocated (alive or zombie)
-	// until it is reaped, so a signal sent under reapMu before reaped is set
-	// can only reach this operation's group. That holds only if nothing else
-	// reaps the leader, so it is withheld from the session-wide reaper until
-	// releaseLeader is called, after wait has reaped it.
+	waitOnce      sync.Once
+	exitCode      int
+	signaled      bool
+	waitErr       error
+	uid           int
+	tag           int
 	reapMu        sync.Mutex
 	reaped        bool
 	releaseLeader func()
-	// killMu serializes kills; once retired, the tag group may be reused by
-	// a later operation, so later Kill calls must not scan for it.
-	killMu  sync.Mutex
-	retired bool
-	cmd     *exec.Cmd
-	master  *os.File
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	stderr  io.ReadCloser
+	killMu        sync.Mutex
+	retired       bool
+	cmd           *exec.Cmd
+	master        *os.File
+	stdin         io.WriteCloser
+	stdout        io.ReadCloser
+	stderr        io.ReadCloser
 }
 
 func startOperatorProcess(launch operatorLaunch) (operatorProcess, error) {
@@ -1230,8 +1081,6 @@ func (p *realOperatorProcess) Stdin() io.WriteCloser {
 		return nil
 	}
 	if p.master != nil {
-		// Closing the terminal master would hang up the session; EOF on a
-		// terminal is the operator's own ^D.
 		return nopWriteCloser{p.master}
 	}
 	return p.stdin
@@ -1246,7 +1095,6 @@ func (p *realOperatorProcess) Resize(rows, cols uint16) error {
 	return acp.ResizeOperatorPTY(p.master, rows, cols)
 }
 
-// Replaceable in tests.
 var (
 	startOperatorCommand     = acp.StartOperatorCommand
 	signalOperatorGroup      = acp.SignalOperatorCommand
@@ -1256,7 +1104,6 @@ var (
 
 func (p *realOperatorProcess) Signal(name string) error {
 	if name == "KILL" {
-		// Kill the whole tagged operation, not just the process group.
 		p.Kill()
 		return nil
 	}
@@ -1267,8 +1114,6 @@ func (p *realOperatorProcess) Signal(name string) error {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
 	if p.reaped {
-		// The leader's PID, and with it the group ID, may already belong to
-		// an unrelated process group.
 		return nil
 	}
 	return signalOperatorGroup(p.cmd, signal)
@@ -1280,8 +1125,6 @@ func (p *realOperatorProcess) Wait() (int, bool, error) {
 }
 
 func (p *realOperatorProcess) wait() (int, bool, error) {
-	// Wait for the leader to exit without reaping it, then reap only while
-	// no group signal is in flight; see reapMu.
 	if p.cmd.Process != nil {
 		waitOperatorLeaderExit(p.cmd.Process.Pid)
 	}
@@ -1289,8 +1132,6 @@ func (p *realOperatorProcess) wait() (int, bool, error) {
 	p.reaped = true
 	err := p.cmd.Wait()
 	p.reapMu.Unlock()
-	// Only now may the session-wide reaper see this PID again: it is reaped,
-	// and no signal can be sent to its group any more.
 	if p.releaseLeader != nil {
 		p.releaseLeader()
 	}
@@ -1326,8 +1167,6 @@ func (p *realOperatorProcess) Retire() bool {
 	proven := p.killLocked()
 	p.retired = true
 	if proven && p.cmd != nil && p.cmd.Process != nil {
-		// Reap the operation's orphaned descendants while the tag still
-		// names only them; the held leader is left to wait.
 		reapOperatorTagProcesses(p.uid, p.tag)
 	}
 	return proven
@@ -1337,8 +1176,6 @@ func (p *realOperatorProcess) killLocked() bool {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return true
 	}
-	// The tag reaches every descendant, wherever it moved; killing the
-	// leader directly also unblocks Wait if it left its own group.
 	proven := killOperatorTagProcesses(p.uid, p.tag)
 	_ = p.cmd.Process.Kill()
 	return proven

@@ -37,7 +37,6 @@ func realModel(t *testing.T) *model {
 	return m
 }
 
-// currentRevision returns the wire package's ProtocolRevision.
 func currentRevision(t *testing.T) int {
 	t.Helper()
 	revision, err := loadProtocolRevision(filepath.Join(testWireDir, "protocol.go"))
@@ -47,7 +46,6 @@ func currentRevision(t *testing.T) int {
 	return revision
 }
 
-// The committed generated files match what the generator writes now.
 func TestGeneratedFilesAreCurrent(t *testing.T) {
 	revision := currentRevision(t)
 	contract, err := loadContract(testContractDir)
@@ -73,14 +71,11 @@ func TestGeneratedFilesAreCurrent(t *testing.T) {
 	}
 }
 
-// expectProblem builds the model and requires a failure naming want.
 func expectProblem(t *testing.T, contractDir string, files []protoreflect.FileDescriptor, want ...string) {
 	t.Helper()
 	expectCatalogProblem(t, contractDir, storagev1.LookupMethod, files, want...)
 }
 
-// expectCatalogProblem builds the model against catalog and requires a
-// failure naming want.
 func expectCatalogProblem(t *testing.T, contractDir string, catalog lookupMethod, files []protoreflect.FileDescriptor, want ...string) {
 	t.Helper()
 	contract, err := loadContract(contractDir)
@@ -98,8 +93,6 @@ func expectCatalogProblem(t *testing.T, contractDir string, catalog lookupMethod
 	}
 }
 
-// editedContract copies the contract sources and replaces old with new in
-// the file that contains old.
 func editedContract(t *testing.T, old, replacement string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -129,7 +122,6 @@ func editedContract(t *testing.T, old, replacement string) string {
 	return dir
 }
 
-// editedWire rebuilds the wire descriptors after edit changes them.
 func editedWire(t *testing.T, edit func(map[string]*descriptorpb.FileDescriptorProto)) []protoreflect.FileDescriptor {
 	t.Helper()
 	protos := map[string]*descriptorpb.FileDescriptorProto{}
@@ -175,10 +167,8 @@ func message(t *testing.T, protos map[string]*descriptorpb.FileDescriptorProto, 
 	return nil
 }
 
-// A persisted field tagged json:"-" is an ordinary wire field: leaving it
-// out of the wire fails generation.
 func TestGenerationFailsWhenAHiddenGoFieldHasNoWireField(t *testing.T) {
-	contract := editedContract(t, "\tGoalComplete bool ", "\tReviewerNote string `json:\"-\"`\n\tGoalComplete bool ")
+	contract := editedContract(t, "\tGoalComplete bool\n", "\tReviewerNote string `json:\"-\"`\n\tGoalComplete bool\n")
 	expectProblem(t, contract, wireFiles(), `PlanState.ReviewerNote (json "-") has no field in wire message PlanState`)
 }
 
@@ -217,8 +207,6 @@ func TestGenerationFailsWhenAnRPCHasNoMethod(t *testing.T) {
 	expectProblem(t, testContractDir, files, "RPC orka.storage.v1.Results.ArchivePlan has no method")
 }
 
-// Parameters map by name, so renaming one in Go fails generation until the
-// wire changes; swapping two string parameters cannot go unnoticed.
 func TestGenerationFailsWhenAParameterIsRenamed(t *testing.T) {
 	contract := editedContract(t, "DeletePlan(ctx context.Context, namespace, taskName string) error",
 		"DeletePlan(ctx context.Context, namespace, task string) error")
@@ -266,9 +254,6 @@ func TestGenerationFailsOnInconsistentRevisions(t *testing.T) {
 		"orka.storage.v1.Messages.SendMessage declares no kind")
 }
 
-// A request field newer than its RPC is refused against an older server
-// rather than dropped. A write cannot have one: its request digest covers
-// every parameter, so an older server could not recompute it.
 func TestNewerRequestFields(t *testing.T) {
 	newer := func(messages ...string) []protoreflect.FileDescriptor {
 		return editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
@@ -312,15 +297,12 @@ func TestNewerRequestFields(t *testing.T) {
 	}
 }
 
-// Two Go fields that map to one wire field would lose a value on encode.
 func TestGenerationFailsWhenTwoFieldsClaimOneWireField(t *testing.T) {
-	contract := editedContract(t, "\tGoalComplete bool ", "\tSUMMARY string\n\tGoalComplete bool ")
+	contract := editedContract(t, "\tGoalComplete bool\n", "\tSUMMARY string\n\tGoalComplete bool\n")
 	expectProblem(t, contract, wireFiles(),
 		"field PlanState.SUMMARY maps to wire field orka.storage.v1.PlanState.summary, which another field already carries")
 }
 
-// An RPC's kind decides whether it carries a write envelope and how a
-// transport failure is classified, so it must be the catalog's kind.
 func TestGenerationFailsWhenAKindDiffersFromTheMethodCatalog(t *testing.T) {
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
 		for _, method := range protos["orka/storage/v1/results.proto"].GetService()[0].GetMethod() {
@@ -349,7 +331,6 @@ func TestGenerationFailsWhenTheCatalogDisagrees(t *testing.T) {
 		`the method catalog gives SavePlan contract part "artifacts.v1", but service Results serves "state.v1"`)
 }
 
-// A write_back field must carry back a record parameter of the same name.
 func TestGenerationFailsOnAMisplacedWriteBack(t *testing.T) {
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
 		for _, field := range message(t, protos, "results.proto", "GetPlanResponse").GetField() {
@@ -371,8 +352,6 @@ func TestGenerationFailsOnAMisplacedWriteBack(t *testing.T) {
 		"response field orka.storage.v1.DeletePlanResponse.namespace writes back parameter namespace of DeletePlan, which is not a pointer")
 }
 
-// SendMessage writes the assigned ID back into its argument, so its response
-// cannot leave the record out.
 func TestGenerationFailsWithoutAWriteBack(t *testing.T) {
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
 		for _, field := range message(t, protos, "messages.proto", "SendMessageResponse").GetField() {
@@ -401,8 +380,6 @@ func TestSnakeCaseMatchesWireNames(t *testing.T) {
 	}
 }
 
-// goCamelCase must name exactly the fields protoc-gen-go generated, or the
-// generated mapping would not compile.
 func TestGoCamelCaseMatchesProtocGenGo(t *testing.T) {
 	checked := 0
 	for _, file := range wireFiles() {
@@ -495,18 +472,12 @@ func setBlob(field *descriptorpb.FieldDescriptorProto, blob bool) {
 	proto.SetExtension(field.Options, storagepb.E_Blob, blob)
 }
 
-// A streaming RPC streams exactly one blob in its direction, and the stream
-// direction matches its kind.
 func TestGenerationFailsOnInconsistentStreams(t *testing.T) {
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
-		// A unary RPC with a blob.
 		setBlob(field(t, message(t, protos, "messages.proto", "Message"), "content"), true)
-		// A streaming read without its blob.
 		setBlob(field(t, message(t, protos, "results.proto", "GetResultResponse"), "data"), false)
-		// A streaming write declared as a read.
 		proto.SetExtension(methodProto(t, protos, "artifacts.proto", "SaveArtifact").GetOptions(), storagepb.E_Kind,
 			storagepb.MethodKind_METHOD_KIND_READ)
-		// A stream in both directions.
 		methodProto(t, protos, "results.proto", "GetPromptResultReceipt").ClientStreaming = new(true)
 	})
 	expectProblem(t, testContractDir, files,
@@ -523,14 +494,10 @@ func setList(field *descriptorpb.FieldDescriptorProto) {
 	proto.SetExtension(field.Options, storagepb.E_List, true)
 }
 
-// A list stream marks exactly one repeated message field of its response as
-// the list, and no other RPC or request marks one.
 func TestGenerationFailsOnInconsistentLists(t *testing.T) {
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
-		// A unary RPC with a list, and a request field marked as one.
 		methodProto(t, protos, "artifacts.proto", "ListArtifacts").ServerStreaming = new(false)
 		setList(field(t, message(t, protos, "artifacts.proto", "ListArtifactsRequest"), "owner"))
-		// A list that is not a repeated message field, on a blob stream.
 		setList(field(t, message(t, protos, "artifacts.proto", "GetArtifactResponse"), "content_type"))
 	})
 	expectProblem(t, testContractDir, files,
@@ -541,7 +508,6 @@ func TestGenerationFailsOnInconsistentLists(t *testing.T) {
 		"orka.storage.v1.Artifacts.GetArtifact has 0 blob fields in its request and 1 in its response")
 }
 
-// A blob field must be the blob of a streaming RPC.
 func TestGenerationFailsOnABlobOutsideAStream(t *testing.T) {
 	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
 		setBlob(field(t, message(t, protos, "common.proto", "WriteEnvelope"), "request_digest"), true)
@@ -550,8 +516,6 @@ func TestGenerationFailsOnABlobOutsideAStream(t *testing.T) {
 		"blob field orka.storage.v1.WriteEnvelope.request_digest is not the blob of a streaming RPC")
 }
 
-// SaveArtifact takes the record named SaveArtifactRequest, whose message is
-// the RPC's request; renaming the record breaks the pairing.
 func TestGenerationMapsAnInlineRecordToTheRequest(t *testing.T) {
 	m := realModel(t)
 	var inline *rpcMethod

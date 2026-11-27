@@ -32,10 +32,6 @@ type canonicalParser struct {
 	maxItems int
 }
 
-// CanonicalJSON parses JSON with duplicate-key rejection and emits the stable
-// v2 canonical form. Object keys are sorted by UTF-8 byte order, insignificant
-// whitespace is removed, strings use encoding/json escaping, and numerically
-// equivalent finite JSON numbers use the same non-exponent decimal spelling.
 func CanonicalJSON(raw []byte) ([]byte, error) {
 	return canonicalJSONWithLimits(raw, MaxCanonicalJSONBytes, maxCanonicalJSONItems)
 }
@@ -52,7 +48,6 @@ func canonicalJSONWithLimits(raw []byte, maxBytes, maxItems int) ([]byte, error)
 	return out.Bytes(), nil
 }
 
-// CanonicalValue marshals a Go value and returns its canonical JSON form.
 func CanonicalValue(value any) ([]byte, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -61,10 +56,6 @@ func CanonicalValue(value any) ([]byte, error) {
 	return CanonicalJSON(raw)
 }
 
-// CanonicalValueWithLimits is CanonicalValue for a locally built value that
-// never crosses the v2 wire, such as a workspace manifest digest input. The
-// caller derives both bounds from its own configured limits; the output is
-// byte-identical to CanonicalValue whenever both would succeed.
 func CanonicalValueWithLimits(value any, maxBytes, maxItems int) ([]byte, error) {
 	if maxBytes < 1 || maxItems < 1 {
 		return nil, fmt.Errorf("canonical JSON limits must be positive")
@@ -76,9 +67,6 @@ func CanonicalValueWithLimits(value any, maxBytes, maxItems int) ([]byte, error)
 	return canonicalJSONWithLimits(raw, maxBytes, maxItems)
 }
 
-// CanonicalRequestDigest hashes the canonical request after removing the sole
-// metadata.requestDigest field. The domain separator and schema version prevent
-// the digest from being reused as another kind of content digest.
 func CanonicalRequestDigest(request any) (RequestDigest, error) {
 	raw, err := json.Marshal(request)
 	if err != nil {
@@ -93,8 +81,6 @@ func CanonicalRequestDigest(request any) (RequestDigest, error) {
 		native = typed
 	}
 	if native != nil && native.NativeRestore != nil {
-		// Only bundle bytes receive the larger digest budget; all other
-		// control metadata retains the ordinary canonical JSON bound.
 		ordinary := *native
 		restore := *native.NativeRestore
 		restore.Snapshot.Data = nil
@@ -110,8 +96,6 @@ func CanonicalRequestDigest(request any) (RequestDigest, error) {
 	return canonicalRequestDigestJSON(raw, limit)
 }
 
-// CanonicalRequestDigestJSON is the raw JSON variant of
-// CanonicalRequestDigest. It rejects duplicate keys before digesting.
 func CanonicalRequestDigestJSON(raw []byte) (RequestDigest, error) {
 	return canonicalRequestDigestJSON(raw, MaxCanonicalJSONBytes)
 }
@@ -137,10 +121,6 @@ func canonicalRequestDigestJSON(raw []byte, limit int) (RequestDigest, error) {
 		return "", fmt.Errorf("metadata.requestDigest must be a string")
 	}
 	delete(metadata, "requestDigest")
-	// agentConfiguration was added after the v1 request-digest contract. Its
-	// canonical digest is already bound by profile.agentConfigurationDigest, so
-	// exclude the raw expansion to keep old/new controller-supervisor pairs
-	// wire-compatible during a rolling upgrade.
 	delete(root, "agentConfiguration")
 	var canonical bytes.Buffer
 	if err := appendCanonicalJSON(&canonical, root); err != nil {
@@ -149,8 +129,6 @@ func canonicalRequestDigestJSON(raw []byte, limit int) (RequestDigest, error) {
 	return RequestDigest(hashCanonical(RequestDigestDomain, canonical.Bytes())), nil
 }
 
-// CanonicalProfileDigest returns a domain-separated digest for an immutable
-// runtime profile.
 func CanonicalProfileDigest(profile any) (ProfileDigest, error) {
 	canonical, err := CanonicalValue(profile)
 	if err != nil {
@@ -159,8 +137,6 @@ func CanonicalProfileDigest(profile any) (ProfileDigest, error) {
 	return ProfileDigest(hashCanonical(ProfileDigestDomain, canonical)), nil
 }
 
-// CanonicalAgentConfigurationDigest returns the domain-separated digest of one
-// validated, resolved Agent session configuration.
 func CanonicalLegacyAgentConfigurationDigest(configuration AgentSessionConfiguration, allowBash bool) (string, error) {
 	if err := configuration.Validate(); err != nil {
 		return "", err
@@ -453,8 +429,6 @@ func normalizeJSONNumber(raw string) (string, error) {
 	return sign + out, nil
 }
 
-// CanonicalPromptSettlementDigest binds workspace validation to one exact
-// terminal prompt settlement without reusing the request/profile digest domains.
 func CanonicalPromptSettlementDigest(settlement PromptSettlement) (string, error) {
 	if err := settlement.Validate(); err != nil {
 		return "", err

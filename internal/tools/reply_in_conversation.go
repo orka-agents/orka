@@ -12,9 +12,6 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
 
-// GatewayReplySender is bound to an authenticated Task by its execution host.
-// Budget is only a replay-aware snapshot, never an admission grant. Enqueue must
-// independently authorize and enforce the durable lifetime quota atomically.
 type GatewayReplySender interface {
 	Budget(context.Context, string) (GatewayReplyBudget, error)
 	Enqueue(context.Context, string, string) (GatewayReplyReceipt, error)
@@ -32,8 +29,6 @@ type GatewayReplyReceipt struct {
 	Created    bool   `json:"created"`
 }
 
-// Keep typed host failures (notably ambiguous outcomes) inspectable while the
-// model and tracing receive only the safe message, never backend diagnostics.
 type gatewayReplyError struct {
 	message string
 	cause   error
@@ -86,8 +81,6 @@ func replyContent(args json.RawMessage) (string, error) {
 	if len(args) > 6*protocol.MaxInterimTextBytes+1024 || !protocol.ValidJSONUnicode(args) {
 		return "", invalid
 	}
-	// Tokens enforce exact field spelling and reject duplicate keys, unlike struct
-	// decoding (case-insensitive) or map decoding (last duplicate wins).
 	d := json.NewDecoder(bytes.NewReader(args))
 	token, err := d.Token()
 	if err != nil || token != json.Delim('{') {

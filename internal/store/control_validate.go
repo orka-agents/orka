@@ -5,17 +5,14 @@ import (
 	"strings"
 )
 
-// IsKnownBranchClaimAvailability reports whether value is a supported branch claim availability.
 func IsKnownBranchClaimAvailability(value BranchClaimAvailability) bool {
 	return value == BranchClaimAvailable || value == BranchClaimReconciliationBlocked
 }
 
-// BranchClaimReclamationIdentityReplaced reports whether request replaces the identity recorded on claim.
 func BranchClaimReclamationIdentityReplaced(claim BranchClaim, request ReclaimBranchClaimRequest) bool {
 	return claim.OwnerKind != request.ExpectedOwnerKind || claim.OwnerUID != request.ExpectedOwnerUID || claim.RequestDigest != request.ExpectedRequestDigest
 }
 
-// BranchClaimMatchesReclamation reports whether claim already reflects request.
 func BranchClaimMatchesReclamation(claim BranchClaim, request ReclaimBranchClaimRequest) bool {
 	return claim.ID == request.ID && claim.RepositoryID == request.ExpectedRepositoryID && claim.Ref == request.ExpectedRef &&
 		claim.OwnerKind == request.ExpectedOwnerKind && claim.OwnerUID == request.ExpectedOwnerUID &&
@@ -24,7 +21,6 @@ func BranchClaimMatchesReclamation(claim BranchClaim, request ReclaimBranchClaim
 		claim.RequestDigest == request.ExpectedRequestDigest && claim.Version == request.ExpectedVersion
 }
 
-// IsKnownExternalEffectState reports whether state is a supported external effect state.
 func IsKnownExternalEffectState(state ExternalEffectState) bool {
 	switch state {
 	case ExternalEffectPending, ExternalEffectInFlight, ExternalEffectSucceeded,
@@ -35,7 +31,6 @@ func IsKnownExternalEffectState(state ExternalEffectState) bool {
 	}
 }
 
-// ValidExternalEffectTransition reports whether an external effect may move from one state to another.
 func ValidExternalEffectTransition(from, to ExternalEffectState) bool {
 	switch from {
 	case ExternalEffectPending:
@@ -49,7 +44,6 @@ func ValidExternalEffectTransition(from, to ExternalEffectState) bool {
 	}
 }
 
-// ValidatePullRequestIntent validates a pull request intent against the publication generation.
 func ValidatePullRequestIntent(intent PullRequestIntent, generation int64) error {
 	for field, value := range map[string]string{
 		"PR base repository ID": intent.BaseRepositoryID,
@@ -71,7 +65,6 @@ func ValidatePullRequestIntent(intent PullRequestIntent, generation int64) error
 	return ValidateGitObjectID("PR expected head SHA", intent.ExpectedHeadSHA)
 }
 
-// ValidatePullRequestReceipt validates a pull request operation receipt.
 func ValidatePullRequestReceipt(receipt PullRequestOperationReceipt) error {
 	for field, value := range map[string]string{
 		"PR receipt operation ID": receipt.OperationID, "PR receipt intent key": receipt.IntentKey,
@@ -93,8 +86,6 @@ func ValidatePullRequestReceipt(receipt PullRequestOperationReceipt) error {
 	return nil
 }
 
-// ValidatePublicationTransitionReceipts validates the receipts carried by a publication transition.
-//
 //nolint:gocyclo // Each destination state has intentionally distinct exact-receipt invariants.
 func ValidatePublicationTransitionReceipts(publication Publication, transition PublicationTransition) error {
 	var receiptErr error
@@ -151,7 +142,6 @@ func ValidatePublicationTransitionReceipts(publication Publication, transition P
 	return nil
 }
 
-// ValidatePreparedReceipt validates a prepared publication receipt.
 func ValidatePreparedReceipt(receipt PreparedPublicationReceipt) error {
 	if err := ValidateControlIdentifier("prepared operation ID", receipt.OperationID); err != nil {
 		return err
@@ -187,7 +177,6 @@ func ValidatePreparedReceipt(receipt PreparedPublicationReceipt) error {
 	return nil
 }
 
-// ValidatePublishReceipt validates a publish operation receipt against the publication and transition.
 func ValidatePublishReceipt(publication Publication, transition PublicationTransition, receipt PublishOperationReceipt) error {
 	if publication.PreparedReceipt == nil {
 		return ValidationErrorf("publication must have a durable prepared receipt before publishing")
@@ -210,7 +199,6 @@ func ValidatePublishReceipt(publication Publication, transition PublicationTrans
 	return nil
 }
 
-// ValidateVerificationReceipt validates a publication verification receipt against the publication and transition.
 func ValidateVerificationReceipt(publication Publication, transition PublicationTransition, receipt PublicationVerificationReceipt) error {
 	if publication.PreparedReceipt == nil || publication.PublishReceipt == nil {
 		return ValidationErrorf("publication must have prepare and publish receipts before verification")
@@ -259,7 +247,6 @@ func ValidateVerificationReceipt(publication Publication, transition Publication
 	return nil
 }
 
-// ValidateVerifiedBaseline validates a verified branch baseline. Repository ID and ref are trimmed before validation; the SHA is validated as given.
 func ValidateVerifiedBaseline(baseline VerifiedBranchBaseline) error {
 	if err := ValidateControlIdentifier("verified repository ID", strings.TrimSpace(baseline.RepositoryID)); err != nil {
 		return err
@@ -270,7 +257,6 @@ func ValidateVerifiedBaseline(baseline VerifiedBranchBaseline) error {
 	return ValidateGitObjectID("verified branch SHA", baseline.SHA)
 }
 
-// PublicationTransitionReceiptsMatch reports whether publication already carries the receipts in transition.
 func PublicationTransitionReceiptsMatch(publication Publication, transition PublicationTransition) bool {
 	if transition.PreparedReceipt != nil && !EqualPreparedReceipt(publication.PreparedReceipt, transition.PreparedReceipt) {
 		return false
@@ -284,7 +270,6 @@ func PublicationTransitionReceiptsMatch(publication Publication, transition Publ
 	return true
 }
 
-// EqualPreparedReceipt reports whether two prepared receipts are equal.
 func EqualPreparedReceipt(a, b *PreparedPublicationReceipt) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -295,7 +280,6 @@ func EqualPreparedReceipt(a, b *PreparedPublicationReceipt) bool {
 		a.BundleMediaType == b.BundleMediaType && a.BundleRef == b.BundleRef && a.PreparedAt.Equal(b.PreparedAt)
 }
 
-// EqualPublishReceipt reports whether two publish receipts are equal.
 func EqualPublishReceipt(a, b *PublishOperationReceipt) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -306,7 +290,6 @@ func EqualPublishReceipt(a, b *PublishOperationReceipt) bool {
 		a.AcknowledgementUnknown == b.AcknowledgementUnknown && a.PublishedAt.Equal(b.PublishedAt)
 }
 
-// EqualVerificationReceipt reports whether two verification receipts are equal.
 func EqualVerificationReceipt(a, b *PublicationVerificationReceipt) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
@@ -316,7 +299,6 @@ func EqualVerificationReceipt(a, b *PublicationVerificationReceipt) bool {
 		a.DescendantProofDigest == b.DescendantProofDigest && a.VerifiedAt.Equal(b.VerifiedAt)
 }
 
-// SamePublicationCreation reports whether b is an idempotent replay of a.
 func SamePublicationCreation(a, b Publication) bool {
 	prIntentMatches := b.PRIntent == nil || reflect.DeepEqual(a.PRIntent, b.PRIntent)
 	return a.ID == b.ID && a.Namespace == b.Namespace && a.Generation == b.Generation &&
@@ -331,8 +313,6 @@ func SamePublicationCreation(a, b Publication) bool {
 		prIntentMatches && a.RequestDigest == b.RequestDigest
 }
 
-// SameSessionTurnCreation reports whether two SessionTurns share the immutable
-// creation identity, so a repeated create is idempotent rather than a conflict.
 func SameSessionTurnCreation(a, b SessionTurn) bool {
 	return a.ID == b.ID && a.Key == b.Key && a.PromptAttemptID == b.PromptAttemptID &&
 		a.RequestDigest == b.RequestDigest && a.UserPrompt == b.UserPrompt

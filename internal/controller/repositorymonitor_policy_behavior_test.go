@@ -18,10 +18,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// These tests pin how the repository monitor enforces its repair budgets,
-// patch path limits and agent configuration today, and which records each
-// refusal leaves behind.
-
 func newRepositoryMonitorPolicyReconciler(t *testing.T, name string, githubAPI http.Handler, mutate func(*corev1alpha1.RepositoryMonitor)) (*corev1alpha1.RepositoryMonitor, *RepositoryMonitorReconciler, store.RepositoryMonitorStore) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -44,7 +40,6 @@ func newRepositoryMonitorPolicyReconciler(t *testing.T, name string, githubAPI h
 	monitorStore := setupControllerSQLiteStore(t)
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore}
 	if githubAPI == nil {
-		// Paths that must not call GitHub fail on any request.
 		githubAPI = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			t.Errorf("unexpected GitHub request: %s %s", req.Method, req.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
@@ -83,18 +78,12 @@ func repositoryMonitorTestCommands(t *testing.T, monitorStore store.RepositoryMo
 	return commands
 }
 
-// An automatic repair refused by a spent budget starts no work and is kept as
-// one repair_refused event per head and reason, however often the pull request
-// is polled. A new head gets its own refusal or, when only the per-head budget
-// was spent, a new repair.
 func TestRepositoryMonitorRepairBudgetRefusalIsRecordedOncePerHead(t *testing.T) {
 	tests := []struct {
-		name string
-		// spent lists the heads of earlier repairs that consume budget.
-		spent   []string
-		mutate  func(*corev1alpha1.RepositoryMonitor)
-		wantWhy string
-		// newHeadRepairs reports whether a new head is repaired again.
+		name           string
+		spent          []string
+		mutate         func(*corev1alpha1.RepositoryMonitor)
+		wantWhy        string
 		newHeadRepairs bool
 	}{
 		{
@@ -150,7 +139,6 @@ func TestRepositoryMonitorRepairBudgetRefusalIsRecordedOncePerHead(t *testing.T)
 				t.Fatalf("refused repair created %d Tasks", tasks)
 			}
 
-			// A pushed head is a new attempt: it is evaluated against the budget again.
 			pr.HeadSHA = "head32"
 			item = repositoryMonitorItemFromPullRequest(monitor, pr, item)
 			for range 2 {
@@ -183,9 +171,6 @@ func TestRepositoryMonitorRepairBudgetRefusalIsRecordedOncePerHead(t *testing.T)
 	}
 }
 
-// GitHub's update-branch is an automatic repair of a behind pull request. Its
-// durable mutation consumes the same repair budget, so once the budget is
-// spent a behind head is refused instead of updated again.
 func TestRepositoryMonitorUpdateBranchConsumesRepairBudget(t *testing.T) {
 	ctx := context.Background()
 	monitor, reconciler, monitorStore := newRepositoryMonitorPolicyReconciler(t, "update-branch-budget", nil, func(m *corev1alpha1.RepositoryMonitor) {
@@ -203,8 +188,6 @@ func TestRepositoryMonitorUpdateBranchConsumesRepairBudget(t *testing.T) {
 		t.Fatalf("commands = %+v, want one update_branch command", commands)
 	}
 
-	// The update ran (the mutation is the durable record of the attempt) and
-	// the base moved again, leaving a new head behind.
 	if err := monitorStore.CreateGitHubMutationRecord(ctx, &store.GitHubMutationRecord{ID: repositoryMonitorUpdateBranchMutationID(commands[0].ID), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: commands[0].ID, Operation: repositoryMonitorUpdateBranchOperation, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, TargetSHA: "head31", Status: repositoryMonitorRunPhaseSucceeded, CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -227,9 +210,6 @@ func TestRepositoryMonitorUpdateBranchConsumesRepairBudget(t *testing.T) {
 		t.Fatalf("refusals = %+v, want one for head32", refusals)
 	}
 
-	// Isolate the mutation's contribution to the budget: a fresh monitor with
-	// only the succeeded update-branch mutation (and no prior CommandEvent)
-	// still exhausts the PR repair budget.
 	isoMonitor, isoReconciler, isoStore := newRepositoryMonitorPolicyReconciler(t, "update-branch-budget-mutation-only", nil, func(m *corev1alpha1.RepositoryMonitor) {
 		m.Spec.Repair.MaxRepairsPerPR = new(int32(1))
 	})
@@ -249,9 +229,6 @@ func TestRepositoryMonitorUpdateBranchConsumesRepairBudget(t *testing.T) {
 	}
 }
 
-// The controller validates an implementation patch against the same path
-// policy the runtime applies to repairs: the repository control paths are
-// always denied, and allowedPaths, when set, bounds everything else.
 func TestRepositoryMonitorIssuePatchValidationAppliesAllowedPaths(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -282,9 +259,6 @@ func TestRepositoryMonitorIssuePatchValidationAppliesAllowedPaths(t *testing.T) 
 	}
 }
 
-// A fix command on a monitor with no repairer is blocked at run time: the
-// item and work action carry missing_repairer_agent, a repair_blocked event
-// names it, and no Task is created.
 func TestRepositoryMonitorFixCommandWithoutRepairerIsBlocked(t *testing.T) {
 	ctx := context.Background()
 	monitor, reconciler, monitorStore := newRepositoryMonitorPolicyReconciler(t, "missing-repairer-command", nil, func(m *corev1alpha1.RepositoryMonitor) {
@@ -317,10 +291,6 @@ func TestRepositoryMonitorFixCommandWithoutRepairerIsBlocked(t *testing.T) {
 	}
 }
 
-// Issue commands whose agent is not configured are blocked at run time and
-// create no Task. A missing planner is also reported as an
-// issue_action_blocked event; a missing implementer is recorded on the item
-// and work action.
 func TestRepositoryMonitorIssueCommandWithoutAgentIsBlocked(t *testing.T) {
 	tests := []struct {
 		name        string

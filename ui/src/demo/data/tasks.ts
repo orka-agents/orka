@@ -3,12 +3,6 @@ import { currentRuntimePool } from './runtimes'
 import { digest } from '../shared'
 import { AGENTS, REPOS, type AgentKey, type PEOPLE, type RepoKey } from '../world'
 
-// Scripted histories for the demo's tasks. Each task plays a story: a list of
-// beats (execution events, log lines, approvals, artifacts) spread over the
-// task's run time, then an outcome. The engine in handlers/tasks.ts places the
-// beats on the clock, so finished tasks show a complete history at page load
-// and running tasks keep progressing while the page is open.
-
 export type Severity = 'debug' | 'info' | 'warning' | 'error'
 
 export interface EventSpec {
@@ -37,7 +31,6 @@ export interface ApprovalSpec {
   targetArgsPreview?: unknown
   toolCallID?: string
   timeout?: string
-  /** A decision already taken (history). Without one the approval is pending and blocks the story. */
   decision?: { status: 'approved' | 'declined'; actor: string; reason?: string; afterSec: number }
 }
 
@@ -48,7 +41,6 @@ export interface ArtifactSpec {
 }
 
 export interface Beat {
-  /** Gap before this beat, in seconds (scaled to fit the task's run time). */
   gap: number
   events?: EventSpec[]
   logs?: string[]
@@ -59,26 +51,20 @@ export interface Beat {
 export interface Outcome {
   phase: 'Succeeded' | 'Failed' | 'Cancelled'
   message?: string
-  /** Plain text/markdown, or a JSON string for the structured result view. */
   result?: string
   pr?: { number: number; status: 'open' | 'merged' | 'closed'; branch: string }
 }
 
 export type StoryTiming =
-  /** Running at page load: the first `played` beats are history, the rest play over `remainingSec`. */
   | { kind: 'running'; played: number; remainingSec: number }
-  /** Pending at page load: starts after `startInSec` and runs for `runSec`. */
   | { kind: 'pending'; startInSec: number; runSec: number }
 
 export interface Story {
   beats: Beat[]
   outcome: Outcome
-  /** Path taken when the story's pending approval is declined. */
   declined?: { beats: Beat[]; outcome: Outcome }
   timing?: StoryTiming
 }
-
-// ---- builders ---------------------------------------------------------------
 
 const CONTEXT_WINDOWS: Record<string, number> = {
   'claude-sonnet-4-5': 200_000,
@@ -101,7 +87,6 @@ export function modelOf(agent: AgentKey): ModelContext {
 let callCounter = 0
 const callId = () => `call_${digest(`tool-call-${callCounter++}`, 12)}`
 
-/** A model request: started, then completed (optionally with the model's message). */
 export function llm(m: ModelContext, input: number, output: number, opts: { stop?: string; message?: string; secs?: number; cached?: number } = {}): Beat[] {
   const stop = opts.stop ?? (opts.message ? 'end_turn' : 'tool_use')
   const completed: EventSpec = {
@@ -127,7 +112,6 @@ export function llm(m: ModelContext, input: number, output: number, opts: { stop
   ]
 }
 
-/** A tool call: started with its arguments, then completed (or failed) with its result. */
 export function tool(name: string, args: unknown, result: unknown, opts: { summary: string; done?: string; secs?: number; failed?: string; logs?: string[] }): Beat[] {
   const id = callId()
   const finished: EventSpec = opts.failed
@@ -139,7 +123,6 @@ export function tool(name: string, args: unknown, result: unknown, opts: { summa
   ]
 }
 
-/** A single beat holding one event. */
 export const ev = (gap: number, type: string, summary: string, extra: Partial<EventSpec> = {}): Beat => ({
   gap,
   events: [{ type, summary, ...extra }],
@@ -148,7 +131,6 @@ export const ev = (gap: number, type: string, summary: string, extra: Partial<Ev
 export const plan = (gap: number, iteration: number, progressPct: number, summary: string, document: string, goalComplete = false): Beat =>
   ev(gap, 'PlanUpdated', summary, { content: { iteration, progressPct, goalComplete }, contentText: document })
 
-/** Clone and check out the task's repository in its workspace. */
 export function workspace(repo: RepoKey, ref: string, intent: 'read' | 'write', files: number): Beat[] {
   const sha = digest(`${repo}:${ref}`, 7)
   return [
@@ -157,7 +139,6 @@ export function workspace(repo: RepoKey, ref: string, intent: 'read' | 'write', 
   ]
 }
 
-/** An ACP runtime session start and prompt submission. */
 export function acpStart(runtime: string, promptBytes: number): Beat[] {
   const pool = currentRuntimePool(runtime).metadata.name
   return [
@@ -166,7 +147,6 @@ export function acpStart(runtime: string, promptBytes: number): Beat[] {
   ]
 }
 
-/** A historical approval that was already decided. */
 export function decidedApproval(spec: Omit<ApprovalSpec, 'decision'>, decision: NonNullable<ApprovalSpec['decision']>): Beat[] {
   return [
     { gap: 1, approval: { ...spec, decision }, events: [{ type: 'ApprovalRequested', severity: 'warning', summary: `Approval requested: ${spec.action}`, toolName: spec.targetTool, toolCallID: spec.toolCallID, content: { approvalID: spec.id } }] },
@@ -187,8 +167,6 @@ const workerStarted = (m: ModelContext, maxIterations = 20) =>
 const resultSubmitted = (bytes: number) => ev(1, 'ResultSubmitted', `Result stored (${(bytes / 1024).toFixed(1)} KB)`)
 const workerCompleted = ev(1, 'WorkerCompleted', 'AI worker exited cleanly')
 const acpCompleted = (turns: number) => ev(1, 'AgentRuntimeCompleted', `Prompt completed after ${turns} turns`)
-
-// ---- stories ------------------------------------------------------------------
 
 const incident = modelOf('incident')
 const coordinator = modelOf('coordinator')
@@ -271,7 +249,6 @@ const latencyInvestigation: Story = {
     ...tool('datadog_query', { query: 'p99:trace.http.request{service:checkout-service,env:prod}', from: 'now-10m' }, { now: '205ms', trend: 'recovering' }, { summary: 'datadog_query p99 after rollback', done: 'p99 back to 205 ms three minutes after the rollout', secs: 12 }),
     ...llm(incident, 19800, 1180, { message: LATENCY_RESULT }),
     ...tool('slack_post', { channel: '#incidents', thread: 'INC-518', text: 'Rolled back to v3.18.2; p99 is 205 ms. Summary and follow-ups posted to INC-518.' }, { ok: true }, { summary: 'slack_post resolution to #incidents', done: 'Posted resolution to the incident thread' }),
-    // Autonomous coordination: marking the goal complete ends the loop.
     plan(1, 1, 100, 'Incident mitigated: rolled back to v3.18.2', LATENCY_PLAN_DOC, true),
     resultSubmitted(LATENCY_RESULT.length),
     workerCompleted,
@@ -394,7 +371,6 @@ const releasePlan: Story = {
     ...tool('delegate_task', { agent: AGENTS.docs.name, prompt: 'Draft release notes for web-storefront v2.14.0 from the merged PR list.' }, { task: 'release-v2-14-0-notes-h4t6n' }, { summary: 'delegate_task to docs-writer: draft release notes', done: 'Created child task release-v2-14-0-notes-h4t6n' }),
     ev(1, 'ToolCallStarted', 'wait_for_tasks: 2 child tasks', { toolName: 'wait_for_tasks', toolCallID: 'call_wait_release_children', content: { arguments: { tasks: ['release-v2-14-0-blockers-p3c5v', 'release-v2-14-0-notes-h4t6n'] } } }),
     plan(4, 2, 45, 'Blockers checked: none open', RELEASE_PLAN_DOC),
-    // Live from here: the notes child finishes, then the coordinator wraps up.
     ev(60, 'ToolCallCompleted', 'wait_for_tasks: both child tasks succeeded', { toolName: 'wait_for_tasks', toolCallID: 'call_wait_release_children', content: { result: { succeeded: 2, failed: 0 } } }),
     plan(2, 3, 80, 'Release notes drafted in #881', RELEASE_PLAN_DOC.replace('3. [ ]', '3. [x]')),
     ...llm(coordinator, 24800, 1450, { message: RELEASE_RESULT }),
@@ -836,7 +812,6 @@ const outboxExplain: Story = {
     ...llm(coordinator, 5200, 260),
     ...tool('github_search', { repo: REPOS.checkout.slug, query: 'path:internal/events outbox relay' }, { files: ['internal/events/outbox.go', 'internal/events/relay.go'] }, { summary: 'github_search outbox code in checkout-service', done: 'Found outbox.go and relay.go' }),
     ...llm(coordinator, 16300, 1640, { message: OUTBOX_RESULT }),
-    // release-captain is an autonomous coordinator: marking the goal complete ends the loop.
     plan(1, 1, 100, 'Explained the outbox relay', '# Explain the outbox relay\n\n1. [x] Read internal/events/outbox.go and relay.go\n2. [x] Answer in chat', true),
     resultSubmitted(OUTBOX_RESULT.length),
     workerCompleted,
@@ -844,7 +819,6 @@ const outboxExplain: Story = {
   outcome: { phase: 'Succeeded', result: OUTBOX_RESULT },
 }
 
-/** Stories for the world.ts task catalog, by task name. */
 export const STORIES: Record<string, Story> = {
   'checkout-latency-investigation-7k2qp': latencyInvestigation,
   'fix-cart-rounding-bug-x9m4d': cartFix,
@@ -869,24 +843,16 @@ export const STORIES: Record<string, Story> = {
   'chat-explain-outbox-d4k8m': outboxExplain,
 }
 
-/** Container spec for the catalog's container tasks. */
 export const CONTAINERS: Record<string, { image: string; command: string[]; args?: string[] }> = {
   'terraform-drift-check-u5r1a': { image: 'hashicorp/terraform:1.9.8', command: ['terraform', 'plan'], args: ['-detailed-exitcode', '-input=false', '-lock=false'] },
   'db-migrate-orders-v42-e2l9o': { image: 'ghcr.io/northwind-labs/checkout-migrate:v42', command: ['migrate', 'up'], args: ['--env', 'staging', '--to', '42'] },
 }
 
-/** Sessions the catalog's tasks append to, beyond the ones world.ts names on the seeds. */
 export const EXTRA_SESSION_LINKS: Record<string, string> = {
   'review-pr-1479-b7n2k': 'github-pr-1479-a3e8d2',
   'release-v2-14-0-plan-r2w8z': 'chat-release-v2-14-4d77aa',
 }
 
-// ---- tasks created while the demo is open -------------------------------------
-
-/**
- * A short story for a task created during the demo (form, chat, fork). No
- * model is called, so the result says so plainly.
- */
 export function liveStory(type: 'ai' | 'agent' | 'container', opts: { agent?: AgentKey; prompt: string; image?: string; repo?: RepoKey }): Story {
   if (type === 'container') {
     const image = opts.image || 'busybox:1.36'
@@ -911,7 +877,6 @@ export function liveStory(type: 'ai' | 'agent' | 'container', opts: { agent?: Ag
         ...llm(m, 3800, 240, { secs: 5 }),
         ...tool('web_search', { query: opts.prompt.slice(0, 80) }, { results: 5 }, { summary: 'web_search for context', done: '5 results', secs: 4 }),
         ...llm(m, 7600, 720, { message: note, secs: 8 }),
-        // An autonomous coordinator's Task ends only once its plan marks the goal complete.
         ...(isAutonomousAgent(agent) ? [plan(1, 1, 100, 'Answered the request', '# Request\n\n1. [x] Answer it', true)] : []),
         resultSubmitted(note.length),
         workerCompleted,
@@ -937,7 +902,6 @@ export function liveStory(type: 'ai' | 'agent' | 'container', opts: { agent?: Ag
 const demoResult = (agentName: string, prompt: string) =>
   `This is the Orka demo, so no model was called and nothing ran in a cluster.\n\nIn a live installation, ${agentName} would work on:\n\n> ${prompt.trim().split('\n').join('\n> ')}\n\nand its answer would appear here. The Runtime, Timeline, and Trace tabs show the shape of a real run.`
 
-/** Recurring background work, so the dashboard keeps moving while the demo is open. */
 export interface AmbientTemplate {
   prefix: string
   agent?: AgentKey

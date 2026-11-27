@@ -8,8 +8,6 @@ import { builtinTools, customTools, toolListItem } from '../data/tools'
 import { api, apiError, digest, DEMO_NAMESPACE, inDemoNamespace, list, noContent, notFound, now, sseFrame, isDNSLabel } from '../shared'
 import { PROVIDERS } from '../world'
 
-// Chat turns (scripted, streamed), agents, tools, and the ACP runtime fabric.
-
 let agents: Agent[] = seedAgents()
 
 const sleep = (ms: number, signal: AbortSignal) =>
@@ -19,10 +17,8 @@ const sleep = (ms: number, signal: AbortSignal) =>
     signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
   })
 
-/** A little jitter so scripted turns don't feel mechanical. */
 const jitter = (base: number) => base + Math.round(Math.random() * base * 0.5)
 
-/** Turns in flight, by chat session, so DELETE /chat/{sessionId} can stop them. */
 const activeTurns = new Map<string, AbortController>()
 
 function chatTurn(body: ChatRequest): Response {
@@ -73,13 +69,10 @@ function chatTurn(body: ChatRequest): Response {
         }
         controller.close()
       } catch (err) {
-        // A failed step ends the turn with an error frame; when the reader
-        // went away (navigation or abort) the stream is already closed.
         try {
           send('error', { error: err instanceof Error ? err.message : 'chat turn failed' })
           controller.close()
         } catch {
-          // Already closed or cancelled.
         }
       } finally {
         if (activeTurns.get(sessionId) === turn) activeTurns.delete(sessionId)
@@ -94,7 +87,6 @@ function findAgent(name: string) {
 }
 
 export const chatHandlers: RequestHandler[] = [
-  // Chat
   http.post(api('/chat'), async ({ request }) => {
     const body = (await request.json()) as ChatRequest
     if (!body?.message?.trim()) return apiError(400, 'message is required')
@@ -105,7 +97,6 @@ export const chatHandlers: RequestHandler[] = [
     return noContent()
   }),
 
-  // Agents
   http.get(api('/agents'), ({ request }) => list(inDemoNamespace(request) ? agents : [])),
   http.get(api('/agents/:name'), ({ request, params }) => {
     const agent = inDemoNamespace(request) ? findAgent(String(params.name)) : undefined
@@ -141,7 +132,6 @@ export const chatHandlers: RequestHandler[] = [
     return noContent()
   }),
 
-  // Tools: built-ins are listed in every namespace, custom Tool CRs only in the demo one.
   http.get(api('/tools'), ({ request }) =>
     list([...builtinTools, ...(inDemoNamespace(request) ? customTools.map(toolListItem) : [])]),
   ),
@@ -153,7 +143,6 @@ export const chatHandlers: RequestHandler[] = [
     return custom ? HttpResponse.json(custom) : notFound(`tool "${name}"`)
   }),
 
-  // ACP runtime fabric
   http.get(api('/runtime-pools'), ({ request }) => list(inDemoNamespace(request) ? runtimePools : [])),
   http.get(api('/agent-runtimes'), ({ request }) => list(inDemoNamespace(request) ? agentRuntimes : [])),
   http.get(api('/agent-runtimes/:name'), ({ request, params }) => {

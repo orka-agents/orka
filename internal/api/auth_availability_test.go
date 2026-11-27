@@ -36,7 +36,6 @@ func TestNewAuthMiddlewareTokenReviewUnavailableOptIn(t *testing.T) {
 		{name: "opt-in invalid token", optIn: true, status: 401},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			// Capture the actual middleware logger, not only the returned HTTP body.
 			var logs bytes.Buffer
 			previousLog := log
 			log = zap.New(zap.WriteTo(&logs))
@@ -69,7 +68,6 @@ func TestNewAuthMiddlewareTokenReviewUnavailableOptIn(t *testing.T) {
 			})
 			app.Use(NewAuthMiddleware(kube, AuthConfig{ReportTokenReviewUnavailable: test.optIn}))
 			app.Get("/private", func(c fiber.Ctx) error { handled.Store(true); return c.SendStatus(200) })
-			// None of these failures may cache an identity, including across repeats.
 			token := t.Name()
 			_, cached := tokenCache.Load(getTokenHash(token))
 			require.False(t, cached)

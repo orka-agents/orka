@@ -26,10 +26,8 @@ const (
 type MapperOptions struct {
 	RepositoryScan string
 	SubPath        string
-	// Investigations become cross-component review slices.
 	Investigations []security.SecurityInvestigation
-	// BaselineAudit adds one independent repository-wide review slice.
-	BaselineAudit bool
+	BaselineAudit  bool
 }
 
 const (
@@ -58,7 +56,6 @@ const (
 	maxReviewSliceTests       = 24
 )
 
-// MapRepository returns deterministic review slices for a repository checkout.
 func MapRepository(root string, opts MapperOptions) ([]store.ReviewSlice, error) {
 	files, err := collectFiles(root)
 	if err != nil {
@@ -138,8 +135,6 @@ func shouldSkipDir(rel string, entry fs.DirEntry) bool {
 		"__pycache__", ".pytest_cache", "dist", "coverage", ".next":
 		return true
 	case "build", "target", "bin":
-		// These are build output at the repository root, but nested ones,
-		// such as pkg/target or cmd/build, are usually source.
 		return !strings.Contains(rel, "/")
 	default:
 		return false
@@ -237,7 +232,6 @@ func (b *sliceBuilder) add(slice store.ReviewSlice) {
 		slice.Status = "pending"
 	}
 	normalizeSliceFiles(&slice)
-	// A package's tests are its context; no fallback slice reviews them.
 	for _, test := range slice.Tests {
 		b.claimed[test.Path] = struct{}{}
 	}
@@ -443,8 +437,6 @@ func addNodeSlices(builder *sliceBuilder, root string, files []repoFile) {
 			}
 		}
 		for _, candidate := range nodeFiles {
-			// Tests are context, as for Go packages: they get excerpts only
-			// after the package's own source.
 			if isTestFile(candidate) {
 				tests = append(tests, store.ReviewSliceTest{Path: candidate.Path, Command: testCommand})
 				continue

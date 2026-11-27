@@ -81,8 +81,6 @@ func TestGitHubWebhookPausePersistsUntilFreshInventory(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// A stale removal delivery must not clear a later addition. Inventory
-	// confirms the live label state before a paused workflow can resume.
 	for _, action := range []string{"labeled", "unlabeled"} {
 		body := fmt.Appendf(nil, `{"action":%q,"label":{"name":"orka:pause"},"repository":{"full_name":"sozercan/vekil"},"issue":{"number":12,"state":"open","labels":[]},"sender":{"login":"octocat"}}`, action)
 		resp := performSignedGitHubWebhook(t, server, githubEventIssues, "pause-"+action, secret, body)

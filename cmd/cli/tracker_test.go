@@ -91,7 +91,6 @@ func TestAddAgent(t *testing.T) {
 		t.Errorf("status = %q, want %q", agent.status, statusStarting)
 	}
 
-	// Non-TTY should write a static line
 	output := buf.String()
 	if !strings.Contains(output, "code-reviewer") {
 		t.Errorf("expected output to contain agent name, got %q", output)
@@ -136,7 +135,7 @@ func TestAddAgentLongPromptTruncated(t *testing.T) {
 
 	tr.addAgent(data)
 
-	if len(tr.agents[0].prompt) != 83 { // 80 + "..."
+	if len(tr.agents[0].prompt) != 83 {
 		t.Errorf("prompt length = %d, want 83", len(tr.agents[0].prompt))
 	}
 }
@@ -188,7 +187,6 @@ func TestUpdateAgentStatusNoMatch(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"agent": "worker", "name": "task-1"})
 	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
 
-	// Different task name
 	statusArgs, _ := json.Marshal(map[string]any{"name": "task-2"})
 	tr.updateAgentStatus(client.SSEEventData{Args: statusArgs}, statusChecking)
 
@@ -213,9 +211,8 @@ func TestUpdateAgentFromProgress(t *testing.T) {
 		t.Error("should not be done while Running")
 	}
 
-	// Test Succeeded
 	result2, _ := json.Marshal(map[string]any{"phase": "Succeeded", "name": "task-1"})
-	tr.agents[0].done = false // reset for test
+	tr.agents[0].done = false
 	tr.updateAgentFromProgress(client.SSEEventData{Result: result2})
 	if !tr.agents[0].done {
 		t.Error("expected done on Succeeded")
@@ -258,22 +255,17 @@ func TestUpdateAgentFromProgressCancelledIsNotSuccess(t *testing.T) {
 		t.Error("expected no success on Cancelled")
 	}
 
-	// Stream completion must not later relabel the cancelled task as successful.
 	tr.completeAgents(client.SSEEventData{})
 	tr.stop()
 	if tr.agents[0].success {
 		t.Error("cancelled agent was reported as successful after stream completion")
 	}
-	// Non-TTY output must show the terminal outcome exactly once.
 	if out := buf.String(); strings.Count(out, "✗ worker") != 1 || strings.Contains(out, "✓") {
 		t.Errorf("non-TTY output = %q, want one failure line and no success line", out)
 	}
 }
 
 func TestTrackerAppliesWrappedToolResultPhases(t *testing.T) {
-	// Results use the shapes the chat API streams: check_task_progress and
-	// wait_for_task wrap their payload in the chat tool envelope, while
-	// wait_for_tasks returns a results list.
 	for _, test := range []struct {
 		name   string
 		tool   string
@@ -309,8 +301,6 @@ func TestTrackerAppliesWrappedToolResultPhases(t *testing.T) {
 }
 
 func TestTrackerMatchesGeneratedTaskNames(t *testing.T) {
-	// delegate_task has no name argument; the server generates the child name
-	// and returns it, and later results must still reach the right agent.
 	for _, withIDs := range []bool{true, false} {
 		t.Run(fmt.Sprintf("tool-call-ids=%v", withIDs), func(t *testing.T) {
 			var buf bytes.Buffer
@@ -354,19 +344,16 @@ func TestTrackerWaitResultsKeepUnfinishedAgentsPending(t *testing.T) {
 		tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
 	}
 
-	// A timed-out wait reports a running phase; neither agent is finished.
 	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
 		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Running","message":"Task is still running."}}`)}))
 	if tr.agents[0].done || tr.agents[1].done {
 		t.Fatal("a timed-out wait marked an agent finished")
 	}
-	// Waiting on task-1 alone must not finish task-2.
 	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
 		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Succeeded"}}`)}))
 	if !tr.agents[0].done || !tr.agents[0].success || tr.agents[1].done {
 		t.Fatal("waiting on task-1 did not finish only task-1")
 	}
-	// task-2's later cancellation is still recorded.
 	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolCheckTaskProgress,
 		Result: json.RawMessage(`{"success":true,"data":{"name":"task-2","phase":"Cancelled"}}`)}))
 	tr.stop()
@@ -384,8 +371,6 @@ func TestTrackerFailedWaitResultFinishesNothing(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"agent": "worker", "name": "task-1"})
 	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
 
-	// The payload a kind cluster returned for a wait_for_task with a rejected
-	// timeout argument.
 	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
 		Result: json.RawMessage(`{"success":false,"error":"invalid arguments: timeout must be a whole number, got a non-numeric string","errorType":"invalid_arguments","suggestion":"Resend the call with timeout as a whole number"}`)}))
 	if tr.agents[0].done {
@@ -440,14 +425,12 @@ func TestHandleEventToolCallCheckProgress(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
 
-	// First add an agent
 	addArgs, _ := json.Marshal(map[string]any{"agent": "worker", "name": "t1"})
 	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
 		Name: "delegate_task",
 		Args: addArgs,
 	}))
 
-	// Check progress event
 	checkArgs, _ := json.Marshal(map[string]any{"name": "t1"})
 	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
 		Name: toolCheckTaskProgress,
@@ -463,14 +446,12 @@ func TestHandleEventToolResult(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
 
-	// Add an agent
 	addArgs, _ := json.Marshal(map[string]any{"agent": "worker", "name": "t1"})
 	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
 		Name: "delegate_task",
 		Args: addArgs,
 	}))
 
-	// Wait for task result
 	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{
 		Name: toolWaitForTask,
 	}))
@@ -484,7 +465,6 @@ func TestHandleEventInvalidJSON(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
 
-	// Invalid JSON should not panic
 	evt := client.SSEEvent{Event: "tool_call", Data: "not-json"}
 	tr.handleEvent(evt)
 
@@ -497,7 +477,6 @@ func TestRenderNonTTY(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
 
-	// render with no agents should be no-op
 	tr.render()
 	if buf.Len() != 0 {
 		t.Error("render with no agents should produce no output")
@@ -570,7 +549,6 @@ func TestIsTTYCheckWithDevNull(t *testing.T) {
 	}
 	defer f.Close() //nolint:errcheck
 
-	// /dev/null is not a char device on all platforms, but should not panic
 	_ = isTTYCheck(f)
 }
 
@@ -593,7 +571,6 @@ func TestTrackerStop(t *testing.T) {
 		t.Error("expected agent to be marked success on stop")
 	}
 
-	// Double stop should not panic
 	tr.stop()
 }
 
@@ -619,14 +596,12 @@ func TestHandleEventToolResultVerbose(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityVV, false)
 
-	// Add agent first
 	addArgs, _ := json.Marshal(map[string]any{"agent": "worker", "name": "t1"})
 	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
 		Name: "delegate_task",
 		Args: addArgs,
 	}))
 
-	// Long result to test truncation
 	longResult := strings.Repeat("x", 300)
 	result, _ := json.Marshal(map[string]any{"output": longResult})
 	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{
@@ -647,11 +622,9 @@ func TestStartSpinner_NonTTY(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
 
-	// Non-TTY: startSpinner should be a no-op
 	tr.startSpinner()
 	defer tr.stop()
 
-	// No goroutine should be running, so this should be safe
 	if tr.stopped {
 		t.Error("tracker should not be stopped yet")
 	}
@@ -661,14 +634,11 @@ func TestStartSpinner_TTY(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, true)
 
-	// TTY: startSpinner should start the goroutine
 	tr.startSpinner()
 
-	// Add an agent to trigger rendering
 	args, _ := json.Marshal(map[string]any{"agent": "spinner-test"})
 	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
 
-	// Wait for at least one tick
 	time.Sleep(200 * time.Millisecond)
 
 	tr.stop()
@@ -683,7 +653,6 @@ func TestStartSpinner_NoActiveAgents(t *testing.T) { //nolint:unparam
 	tr := newTracker(&buf, VerbosityDefault, true)
 
 	tr.startSpinner()
-	// No agents — spinner should not render anything
 	time.Sleep(200 * time.Millisecond)
 	tr.stop()
 }
@@ -695,7 +664,6 @@ func TestRenderTTY_ActiveAgent(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"agent": "render-test", "name": "t1", "prompt": "do something"})
 	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
 
-	// Render with an active (not done) agent
 	tr.mu.Lock()
 	tr.spinIdx = 0
 	tr.render()
@@ -802,14 +770,12 @@ func TestHandleEventWaitForTasks(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
 
-	// Add agent
 	addArgs, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
 	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
 		Name: "delegate_task",
 		Args: addArgs,
 	}))
 
-	// "wait_for_tasks" result should complete agents
 	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{
 		Name: "wait_for_tasks",
 	}))
@@ -850,7 +816,6 @@ func TestHandleEventWaitForTask(t *testing.T) {
 		Args: addArgs,
 	}))
 
-	// "wait_for_task" as a tool_call
 	checkArgs, _ := json.Marshal(map[string]any{"name": "t1"})
 	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{
 		Name: toolWaitForTask,
@@ -875,7 +840,6 @@ func TestCompleteAgentsTTY(t *testing.T) {
 	if !tr.agents[0].done {
 		t.Error("expected agent done")
 	}
-	// TTY output should include agent name in renderFinal
 	output := buf.String()
 	if !strings.Contains(output, "tty-agent") {
 		t.Errorf("expected agent name in TTY output, got %q", output)
@@ -889,7 +853,6 @@ func TestUpdateAgentFromProgressNoPhase(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
 	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
 
-	// Result without phase — should not change status
 	result, _ := json.Marshal(map[string]any{"name": "t1"})
 	tr.updateAgentFromProgress(client.SSEEventData{Result: result})
 
@@ -905,7 +868,6 @@ func TestUpdateAgentStatusEmptyTaskName(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{"agent": "w", "name": "t1"})
 	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
 
-	// Empty task name matches any
 	statusArgs, _ := json.Marshal(map[string]any{})
 	tr.updateAgentStatus(client.SSEEventData{Args: statusArgs}, "polling")
 

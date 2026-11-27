@@ -19,18 +19,10 @@ const (
 
 const DefaultMaxMessageBytes = 8 << 20
 
-// DefaultMaxConcurrentRequests bounds concurrently handled adapter-initiated
-// requests per connection. Legitimate adapters issue at most a handful of
-// concurrent permission or filesystem requests; the bound exists to stop an
-// untrusted child from pinning unbounded blocked handler goroutines.
 const DefaultMaxConcurrentRequests = 32
 
 var ErrClosed = errors.New("ACP connection closed")
 
-// ErrPromptEventBufferOverflow fails a prompt whose buffered, unconsumed
-// events exceeded the advertised per-prompt limit before the controller-facing
-// stream drained them. It is a supervisor-side condition (a slow consumer),
-// not an agent or provider error, so callers classify it distinctly.
 var ErrPromptEventBufferOverflow = errors.New("ACP prompt event buffer overflowed")
 
 type RPCError struct {
@@ -61,11 +53,7 @@ type RequestHandler func(context.Context, IncomingRequest) (any, *RPCError)
 type NotificationHandler func(context.Context, IncomingNotification)
 
 type Options struct {
-	MaxMessageBytes int
-	// MaxConcurrentRequests bounds concurrently handled adapter-initiated
-	// requests. Handlers can block on permission resolution, so an unbounded
-	// flood from an untrusted child would pin one goroutine per message and
-	// exhaust supervisor memory. Defaults to DefaultMaxConcurrentRequests.
+	MaxMessageBytes       int
 	MaxConcurrentRequests int
 	RequestHandler        RequestHandler
 	NotificationHandler   NotificationHandler
@@ -145,10 +133,6 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 	return c.call(ctx, method, params, result, nil)
 }
 
-// CallWithWritten is Call with a non-blocking callback invoked after the complete
-// JSON-RPC request has been written to the adapter transport. The callback is the
-// caller's durable ambiguity boundary: after it fires, loss of the response must
-// not be treated as proof that the operation was never accepted.
 func (c *Client) CallWithWritten(ctx context.Context, method string, params, result any, onWritten func()) error {
 	return c.call(ctx, method, params, result, onWritten)
 }
@@ -176,11 +160,6 @@ func (c *Client) call(ctx context.Context, method string, params, result any, on
 	c.pendingMu.Unlock()
 
 	request := rpcMessage{JSONRPC: jsonRPCVersion, ID: idRaw, Method: method, Params: paramsRaw}
-	// The request write blocks indefinitely when the adapter stops reading
-	// stdin, so it must honor cancellation like the response wait below: run
-	// it in a goroutine and abandon it on ctx expiry. If the abandoned write
-	// completes later, a courtesy cancel follows it on the same ordered pipe
-	// so the adapter does not keep executing a request whose caller gave up.
 	writeDone := make(chan error, 1)
 	go func() { writeDone <- c.writeMessage(request) }()
 	select {
@@ -219,9 +198,6 @@ func (c *Client) call(ctx context.Context, method string, params, result any, on
 		return nil
 	case <-ctx.Done():
 		c.removePending(key)
-		// Best-effort courtesy cancel: it must not block the caller past its
-		// already-expired deadline when the adapter stopped reading stdin, so
-		// it is dispatched asynchronously; adapter exit unblocks the write.
 		go func() {
 			_ = c.Notify(context.Background(), MethodCancelRequest, CancelRequestNotification{RequestID: idRaw})
 		}()
@@ -245,10 +221,6 @@ func (c *Client) Notify(ctx context.Context, method string, params any) error {
 	if err != nil {
 		return fmt.Errorf("marshal ACP %s notification: %w", method, err)
 	}
-	// The transport write blocks indefinitely when the adapter stops reading
-	// stdin, so it must honor cancellation: run it in a goroutine and abandon
-	// it when ctx expires. An abandoned write holds writeMu until adapter
-	// exit closes the pipe, which unblocks the write and ends the goroutine.
 	written := make(chan error, 1)
 	go func() {
 		written <- c.writeMessage(rpcMessage{JSONRPC: jsonRPCVersion, Method: method, Params: paramsRaw})
@@ -296,7 +268,6 @@ func (c *Client) NewSession(ctx context.Context, request NewSessionRequest) (New
 	return response, nil
 }
 
-// ResumeSession requires the caller to check the advertised resume capability.
 func (c *Client) ResumeSession(ctx context.Context, request ResumeSessionRequest) (ResumeSessionResponse, error) {
 	if request.SessionID == "" {
 		return ResumeSessionResponse{}, fmt.Errorf("ACP session/resume requires sessionId")
@@ -311,8 +282,6 @@ func (c *Client) ResumeSession(ctx context.Context, request ResumeSessionRequest
 	return response, nil
 }
 
-// CloseSession asks the agent to end a provider session gracefully. Callers
-// must first check AgentCapabilities.SessionCapability(SessionCapabilityClose).
 func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
 	if sessionID == "" {
 		return fmt.Errorf("ACP session ID is required")
@@ -412,12 +381,6 @@ func (c *Client) deliverResponse(message rpcMessage) {
 	responseCh <- rpcResponse{result: cloneRaw(message.Result)}
 }
 
-// dispatchRequest bounds concurrently handled adapter-initiated requests.
-// Handlers can block until permission resolution or prompt settlement, so
-// excess requests are rejected with a JSON-RPC error through a second bounded
-// lane instead of spawning more blocked handler goroutines; when even the
-// rejection lane is saturated the request is dropped, because a peer flooding
-// both lanes is not reading responses anyway.
 func (c *Client) dispatchRequest(message rpcMessage) {
 	select {
 	case c.requestGate <- struct{}{}:

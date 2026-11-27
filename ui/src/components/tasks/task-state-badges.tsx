@@ -3,10 +3,6 @@ import { cn } from '@/lib/utils'
 import type { Task } from '@/schemas/task'
 import { isScheduleSuspended, isTaskDeleting, isWaitingForApproval } from './task-state'
 
-/**
- * Compact state flags shown next to a task's phase wherever tasks are
- * listed: Deleting, Waiting for approval, and Suspended (schedule).
- */
 export function TaskStateBadges({ task, className }: { task: Task; className?: string }) {
   const deleting = isTaskDeleting(task)
   const waiting = isWaitingForApproval(task)

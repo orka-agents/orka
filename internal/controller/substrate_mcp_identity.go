@@ -27,14 +27,12 @@ func (r *ToolReconciler) substrateMCPFinalizerMigrationContext(
 	}
 	poolName, poolNamespace := substrateActorPoolReference(tool.Spec.MCP.SubstrateActor.PoolRef, tool.Namespace)
 	if poolName == "" {
-		// The dedicated Actor name hashes this complete binding. An edited
-		// template cannot qualify an Actor belonging to the previous spec.
 		return request, nil, nil
 	}
 	pool := &corev1alpha1.SubstrateActorPool{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: poolNamespace, Name: poolName}, pool); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, nil, nil // recorded status may still supply provenance
+			return nil, nil, nil
 		}
 		return nil, nil, err
 	}
@@ -45,16 +43,9 @@ func (r *ToolReconciler) substrateMCPFinalizerMigrationContext(
 	if atespace != request.TemplateNamespace || strings.TrimSpace(pool.Spec.TemplateRef.Name) != request.TemplateName {
 		return nil, nil, nil
 	}
-	// Pool Atespace is immutable. Cleanup can use this binding even while the
-	// pool is deleting or its native template is gone; admission is unnecessary.
 	return request, pool, nil
 }
 
-// migrateSubstrateMCPIdentities qualifies legacy IDs using recorded template
-// provenance or the validated current binding. It never deletes/recreates an
-// Actor or transfers a lease. Status, leases and annotations converge through
-// separate optimistic writes, so interruption cannot turn the same Actor into
-// its own replacement cleanup target.
 func (r *ToolReconciler) migrateSubstrateMCPIdentities(
 	ctx context.Context, tool *corev1alpha1.Tool, request *ExecutionWorkspaceRequest, pool *corev1alpha1.SubstrateActorPool,
 ) (bool, error) {
@@ -148,8 +139,6 @@ func substrateMCPLegacyIdentityQualifier(
 		if pool == nil {
 			remember(deterministicSubstrateToolActorID(tool.Namespace, tool.Name, request.TemplateNamespace, request.TemplateName), request.TemplateNamespace)
 		} else {
-			// Pool Atespaces are immutable, and the caller has validated this
-			// pool against the requested template before reaching migration.
 			poolPrefix = deterministicSubstratePoolActorPrefix(pool.Namespace, pool.Name)
 		}
 	}
@@ -166,8 +155,6 @@ func substrateMCPLegacyIdentityQualifier(
 				return workspace.SubstrateActorKey(request.TemplateNamespace, actorID)
 			}
 		}
-		// Do not guess an Atespace for historical cleanup without provenance.
-		// The native client will continue to reject an unqualified operation.
 		return actorID
 	}
 	return qualify

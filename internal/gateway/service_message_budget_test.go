@@ -96,7 +96,6 @@ func TestGatewayReplyEligibilityPendingLinkThenBound(t *testing.T) {
 	updateMessageGateway(t, s, func(g *gatewayv1alpha1.Gateway) {
 		g.Status.ObservedCapabilities = &gatewayv1alpha1.GatewayObservedCapabilities{ContractVersion: "orka.gateway.v1", Capabilities: gatewayv1alpha1.GatewayCapabilities{InterimDelivery: true}}
 	})
-	// Observe the actual create-before-link dispatch window, not a simulated label grant.
 	var task *corev1alpha1.Task
 	s.Client = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 		err := c.Create(ctx, obj, opts...)

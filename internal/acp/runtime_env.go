@@ -17,8 +17,6 @@ import (
 const (
 	DefaultChildPath = "/usr/local/bin:/usr/bin:/bin"
 
-	// Linux process credentials are uint32 values, with all-bits-one reserved
-	// as the no-change sentinel by ownership syscalls.
 	maxRuntimeCredentialID int64 = (1 << 32) - 2
 )
 
@@ -32,49 +30,29 @@ var (
 	environmentNameRE      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
-// IsValidSessionPathComponent reports whether value is safe as one session
-// directory component.
 func IsValidSessionPathComponent(value string) bool {
 	return sessionPathComponentRE.MatchString(value)
 }
 
 type SessionPaths struct {
-	Root      string
-	Home      string
-	Temp      string
-	Workspace string
-	Config    string
-	Cache     string
-	Data      string
-	State     string
-	// WorkspaceDevice and WorkspaceInode identify the workspace directory as
-	// recorded by RecordWorkspaceIdentity before the session child starts.
-	// The child may own the session root and rename entries in it, so code
-	// that reopens Workspace by path later verifies this identity.
+	Root            string
+	Home            string
+	Temp            string
+	Workspace       string
+	Config          string
+	Cache           string
+	Data            string
+	State           string
 	WorkspaceDevice uint64
 	WorkspaceInode  uint64
-	// workspacePin holds the recorded directory open. A device and inode pair
-	// names a directory only while that inode stays allocated: once the child
-	// deletes its workspace, a directory it creates next can be given the same
-	// inode number. The open descriptor keeps the inode allocated, so no other
-	// directory can carry the recorded identity until the pin is released.
-	// Copies of SessionPaths share the pin.
-	workspacePin *os.File
+	workspacePin    *os.File
 }
 
-// RecordWorkspaceIdentity records the workspace directory's device and inode
-// and holds the directory open so that identity cannot be reused. Call it only
-// while the supervisor still exclusively controls the tree, that is before the
-// session child starts, and release it with ReleaseWorkspaceIdentity when the
-// session ends. Platforms without Unix inode identity return an error, which
-// callers must treat as a refusal.
 func RecordWorkspaceIdentity(paths *SessionPaths) error {
 	pin, err := openWorkspaceDirectory(paths.Workspace)
 	if err != nil {
 		return fmt.Errorf("inspect session workspace: %w", err)
 	}
-	// The identity comes from the held descriptor, not from a second lookup
-	// of the path.
 	info, err := pin.Stat()
 	if err != nil {
 		_ = pin.Close()
@@ -94,10 +72,6 @@ func RecordWorkspaceIdentity(paths *SessionPaths) error {
 	return nil
 }
 
-// PinnedWorkspaceIdentity returns the recorded workspace identity while the
-// directory is still held open. Without a live pin the recorded numbers prove
-// nothing, so a session that was never pinned, or whose pin was released,
-// gets an error that callers must treat as a refusal.
 func (p SessionPaths) PinnedWorkspaceIdentity() (uint64, uint64, error) {
 	if p.workspacePin == nil || p.WorkspaceInode == 0 {
 		return 0, 0, errors.New("session workspace identity is not pinned")
@@ -116,9 +90,6 @@ func (p SessionPaths) PinnedWorkspaceIdentity() (uint64, uint64, error) {
 	return dev, ino, nil
 }
 
-// ReleaseWorkspaceIdentity closes the descriptor that holds the workspace
-// directory. Call it only once the session child is proven stopped; every
-// copy of these paths then refuses PinnedWorkspaceIdentity.
 func (p SessionPaths) ReleaseWorkspaceIdentity() {
 	if p.workspacePin != nil {
 		_ = p.workspacePin.Close()
@@ -194,10 +165,6 @@ func ensureRealDirectory(path string, mode os.FileMode) error {
 	if !opened.IsDir() || !os.SameFile(info, opened) {
 		return fmt.Errorf("session base directory changed while opening")
 	}
-	// MkdirAll applies the supervisor's private umask. Identity-state setup
-	// may also have created this directory with the masked mode already.
-	// Child UIDs need traversal to their own private trees, without being
-	// able to list or write the parent. Chmod the verified directory handle.
 	if err := directory.Chmod(mode); err != nil {
 		return fmt.Errorf("chmod session base directory: %w", err)
 	}
@@ -274,8 +241,6 @@ type UIDAllocator struct {
 	persist   func(int) error
 }
 
-// NewUIDAllocator creates a never-reusing paired UID/GID allocator. firstGID
-// is the first primary GID in a range with the same capacity as the UID range.
 func NewUIDAllocator(firstUID, lastUID, firstGID int) (*UIDAllocator, error) {
 	if firstUID <= 0 || lastUID < firstUID || firstGID <= 0 {
 		return nil, fmt.Errorf("invalid UID allocator range %d-%d gid %d", firstUID, lastUID, firstGID)
@@ -296,10 +261,6 @@ func NewUIDAllocator(firstUID, lastUID, firstGID int) (*UIDAllocator, error) {
 	}, nil
 }
 
-// AllocateAboveReserve returns the next never-reused UID/GID pair only when
-// doing so leaves at least reserve pairs unused. The check and allocation use a
-// single shared offset in one critical section, so UID and primary GID cannot be
-// reused or paired with different sessions under concurrent creation.
 func (a *UIDAllocator) AllocateAboveReserve(reserve int) (uid, gid int, err error) {
 	if a == nil {
 		return 0, 0, fmt.Errorf("UID allocator is required")
@@ -327,9 +288,6 @@ func (a *UIDAllocator) AllocateAboveReserve(reserve int) (uid, gid int, err erro
 	return a.firstUID + offset, a.firstGID + offset, nil
 }
 
-// ConfigurePersistence restores a previously committed allocation count and
-// installs the fail-closed callback that must durably commit each future count
-// before an identity is returned to a session.
 func (a *UIDAllocator) ConfigurePersistence(allocated int, persist func(int) error) error {
 	if a == nil {
 		return fmt.Errorf("UID allocator is required")
@@ -357,9 +315,6 @@ func (a *UIDAllocator) Capacity() int {
 	return a.capacity
 }
 
-// Range returns the immutable paired UID/GID range represented by the
-// allocator. Callers use it to bind durable high-water state to one exact
-// identity configuration.
 func (a *UIDAllocator) Range() (firstUID, lastUID, firstGID, lastGID int) {
 	if a == nil {
 		return 0, 0, 0, 0
@@ -378,37 +333,15 @@ func (a *UIDAllocator) Remaining() int {
 	return a.capacity - a.allocated
 }
 
-// DurableWorkspaceBinding is the committed identity of a durable session
-// workspace. It pins the repository binding of the first materialization so a
-// later cold resume can never silently continue against different source
-// content. It never carries credentials or provider-native identifiers.
 type DurableWorkspaceBinding struct {
-	RepositoryIdentity string `json:"repositoryIdentity"`
-	Revision           string `json:"revision"`
-	// SessionIdentityHighWater records the allocator count that was durable
-	// before this checkpoint's child identity was admitted. A cold boot rejects
-	// an allocator state below this floor so a partial restore cannot reuse a
-	// UID/GID already represented by surviving workspace data.
-	SessionIdentityHighWater int `json:"sessionIdentityHighWater"`
-	// SessionGeneration records the monotonic RuntimeSession generation that
-	// committed this checkpoint. A provider restoring an OLDER data snapshot
-	// of the same repository presents a valid identity with an earlier
-	// generation; the resume assertion compares it against the controller's
-	// persisted floor so stale restores fail closed instead of silently
-	// dropping checkpoint-only edits from the next publication.
-	SessionGeneration uint64 `json:"sessionGeneration,omitempty"`
+	RepositoryIdentity       string `json:"repositoryIdentity"`
+	Revision                 string `json:"revision"`
+	SessionIdentityHighWater int    `json:"sessionIdentityHighWater"`
+	SessionGeneration        uint64 `json:"sessionGeneration,omitempty"`
 }
 
-// ErrDurableWorkspaceCheckpointUnusable marks a committed durable checkpoint
-// whose marker and workspace tree cannot form a valid resumable pair.
 var ErrDurableWorkspaceCheckpointUnusable = errors.New("durable workspace checkpoint is unusable")
 
-// StableDurableWorkspaceIdentity reduces a protocol workspace baseline to the
-// session-stable repository identity durable continuity is judged on. Empty
-// (no-repository) workspaces carry a Task-scoped protocol identity by design,
-// so every such baseline reduces to the bare no-workspace revision; repository
-// workspaces are identified by the repository identity alone because the
-// controller verifies revision continuity before requesting the session.
 func StableDurableWorkspaceIdentity(repositoryIdentity, revision string) string {
 	if revision == taskterminal.NoWorkspaceRevision {
 		return taskterminal.NoWorkspaceRevision
@@ -416,11 +349,6 @@ func StableDurableWorkspaceIdentity(repositoryIdentity, revision string) string 
 	return repositoryIdentity
 }
 
-// SameDurableWorkspaceIdentity reports whether two session-stable workspace
-// identities (StableDurableWorkspaceIdentity outputs) identify the same
-// repository. It mirrors the controller's repository-identity equivalence:
-// GitHub identities are case-insensitive, so a continuation that changes only
-// capitalization must resume the preserved tree instead of wiping it.
 func SameDurableWorkspaceIdentity(first, second string) bool {
 	first = strings.TrimSpace(first)
 	second = strings.TrimSpace(second)
@@ -432,12 +360,6 @@ func SameDurableWorkspaceIdentity(first, second string) bool {
 		strings.EqualFold(first, second)
 }
 
-// PrepareDurableSessionWorkspace prepares the durable workspace directory for
-// one logical session under the provider-owned durable root. Committed content
-// (a marker plus the workspace directory) reports resume=true with the
-// recorded binding. Fresh content is covered by a pending marker carrying the
-// allocator high-water before its tree is created, so a restart can verify the
-// non-reuse fence and the next preparation can wipe the partial materialization.
 func PrepareDurableSessionWorkspace(
 	durableRoot, sessionUID string,
 	sessionIdentityHighWater int,
@@ -459,19 +381,10 @@ func PrepareDurableSessionWorkspace(
 	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
 	if _, pendingErr := os.Lstat(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); pendingErr == nil {
 		if _, markerErr := os.Lstat(markerPath); markerErr == nil {
-			// The committed marker is renamed into place BEFORE the pending
-			// marker is removed, and a resume moves (never copies) the
-			// committed marker aside — so their coexistence proves a commit
-			// completed and only its pending-retirement was interrupted.
-			// Retire the stale pending marker instead of wiping the
-			// successfully committed tree.
 			if err := os.Remove(durableWorkspacePendingMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
 				return "", nil, fmt.Errorf("retire stale durable workspace pending marker: %w", err)
 			}
 		} else if os.IsNotExist(markerErr) {
-			// A resume marked its tree pending and never recommitted: a later
-			// creation stage failed after the provider process may have
-			// modified the repository, so the tree is wiped instead of reused.
 			if err := WipeDurableSessionWorkspace(durableRoot, sessionUID); err != nil {
 				return "", nil, err
 			}
@@ -497,10 +410,6 @@ func PrepareDurableSessionWorkspace(
 		if !info.IsDir() {
 			return "", nil, fmt.Errorf("%w: marker workspace path is not a directory", ErrDurableWorkspaceCheckpointUnusable)
 		}
-		// A transition record can survive a successful commit when its
-		// post-commit cleanup was interrupted. Retire it before starting a
-		// new child; a failure here is safely retryable because the committed
-		// checkpoint remains intact and no session has been initialized.
 		if err := os.Remove(durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID)); err != nil && !os.IsNotExist(err) {
 			return "", nil, fmt.Errorf("retire stale durable workspace transition record: %w", err)
 		}
@@ -526,9 +435,6 @@ func PrepareDurableSessionWorkspace(
 	return workspaceDir, nil, nil
 }
 
-// stageDurableWorkspaceFreshPending publishes the cleanup record before a
-// fresh tree exists. A crash can therefore leave either no tree or a tree whose
-// identity floor is recoverable; it cannot create markerless durable history.
 func stageDurableWorkspaceFreshPending(
 	durableRoot, sessionUID string,
 	sessionIdentityHighWater int,
@@ -565,10 +471,6 @@ func stageDurableWorkspaceFreshPending(
 	return nil
 }
 
-// CommitDurableSessionWorkspace records the repository binding of a freshly
-// materialized durable workspace. The marker write is atomic: content covered
-// only by the pending marker is treated as uncommitted and wiped by the next
-// preparation.
 func CommitDurableSessionWorkspace(durableRoot, sessionUID string, binding DurableWorkspaceBinding) error {
 	return commitDurableSessionWorkspace(
 		durableRoot, sessionUID, binding,
@@ -611,17 +513,8 @@ func commitDurableSessionWorkspace(
 	if err := os.Rename(stagedName, markerPath); err != nil {
 		return fmt.Errorf("commit durable workspace marker: %w", err)
 	}
-	// Publish the committed marker durably before retiring the pending records.
-	// Once this sync succeeds, the commit is complete. Cleanup failures cannot
-	// be returned to the caller: doing so would tear down an initialized child
-	// while leaving its tree durably resumable. Prepare and the next commit both
-	// retry stale-record retirement.
 	if err := syncRoot(durableRoot); err != nil {
 		syncErr := fmt.Errorf("sync durable workspace marker commit: %w", err)
-		// The rename is already visible even though its durability barrier
-		// failed. Restore pending-only state before returning so a retry wipes
-		// the initialized child's possibly modified tree instead of mistaking
-		// both markers for interrupted post-commit cleanup.
 		if rollbackErr := remove(markerPath); rollbackErr != nil && !os.IsNotExist(rollbackErr) {
 			return errors.Join(syncErr, fmt.Errorf("roll back durable workspace marker commit: %w", rollbackErr))
 		}
@@ -635,12 +528,6 @@ func commitDurableSessionWorkspace(
 	return nil
 }
 
-// MarkDurableSessionWorkspaceResumePending invalidates the committed marker of
-// a resumed tree before session initialization runs: the marker moves aside
-// atomically, so a creation that fails after the provider process may have
-// modified the repository leaves a pending record and the next preparation
-// wipes the tree instead of reusing partial state. A successful creation
-// recommits the marker, which retires the pending record.
 func MarkDurableSessionWorkspaceResumePending(durableRoot, sessionUID string) error {
 	return markDurableSessionWorkspaceResumePending(durableRoot, sessionUID, syncDurableWorkspaceRoot)
 }
@@ -674,11 +561,6 @@ func markDurableSessionWorkspaceResumePending(
 	return nil
 }
 
-// WipeDurableSessionWorkspace removes one logical session's durable tree and
-// both of its markers, so the next preparation materializes fresh. A committed
-// binding is moved to the pending path, or an existing pending binding is kept,
-// until tree removal is durable so a crash always leaves a recognizable cleanup
-// record beside any surviving workspace history.
 func WipeDurableSessionWorkspace(durableRoot, sessionUID string) error {
 	return wipeDurableSessionWorkspace(durableRoot, sessionUID, syncDurableWorkspaceRoot)
 }
@@ -694,9 +576,6 @@ func wipeDurableSessionWorkspace(
 	markerPath := durableWorkspaceMarkerPath(durableRoot, sessionUID)
 	pendingPath := durableWorkspacePendingMarkerPath(durableRoot, sessionUID)
 	if _, err := os.Lstat(markerPath); err == nil {
-		// Prefer the newest committed binding as the cleanup record. Removing
-		// an older pending record first is safe because the committed marker
-		// still covers the tree until the atomic rename succeeds.
 		if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("replace durable workspace pending marker: %w", err)
 		}
@@ -706,17 +585,10 @@ func wipeDurableSessionWorkspace(
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect durable workspace marker: %w", err)
 	}
-	// Make the committed-marker retirement durable before deleting workspace
-	// data. The pending binding or an authorized transition record covers a
-	// crash after this barrier, while a resurrected committed marker beside a
-	// deleted tree cannot.
 	if err := syncRoot(durableRoot); err != nil {
 		return fmt.Errorf("sync durable workspace cleanup marker: %w", err)
 	}
 	workspaceDir := filepath.Join(durableRoot, "ws-"+sessionUID)
-	// The tree may still carry the previous session child's ownership and
-	// 0700 modes; the supervisor holds CHOWN but not DAC_OVERRIDE, so it must
-	// reclaim the tree before it can traverse and remove it.
 	if err := reclaimDurableWorkspaceTree(workspaceDir); err != nil {
 		return err
 	}
@@ -735,9 +607,6 @@ func wipeDurableSessionWorkspace(
 	return nil
 }
 
-// reclaimDurableWorkspaceTree returns a durable workspace tree that may still
-// be owned by a prior session child to the supervisor identity, tolerating an
-// absent tree.
 func reclaimDurableWorkspaceTree(path string) error {
 	if _, err := os.Lstat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -760,12 +629,6 @@ func durableWorkspaceTransitionMarkerPath(durableRoot, sessionUID string) string
 	return filepath.Join(durableRoot, "ws-"+sessionUID+".transition.json")
 }
 
-// MarkDurableWorkspaceTransitionAuthorized durably records, BEFORE the old
-// checkpoint is wiped, that the controller authorized a repository-identity
-// transition to the given target. A creation retry that finds no committed
-// marker but a matching transition record may materialize fresh instead of
-// failing closed - without it, a transient failure after the wipe would
-// strand the lineage permanently. The record is retired by the next commit.
 func MarkDurableWorkspaceTransitionAuthorized(durableRoot, sessionUID string, target DurableWorkspaceBinding) error {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
@@ -813,8 +676,6 @@ func syncDurableWorkspaceRoot(durableRoot string) error {
 	return nil
 }
 
-// DurableWorkspaceTransitionTarget reads a previously authorized transition
-// record, or nil when none exists.
 func DurableWorkspaceTransitionTarget(durableRoot, sessionUID string) (*DurableWorkspaceBinding, error) {
 	durableRoot = filepath.Clean(strings.TrimSpace(durableRoot))
 	if durableRoot == "." || !filepath.IsAbs(durableRoot) || !IsValidSessionPathComponent(sessionUID) {
@@ -834,9 +695,6 @@ func DurableWorkspaceTransitionTarget(durableRoot, sessionUID string) (*DurableW
 	return target, nil
 }
 
-// FinalizeSessionOwnership assigns the prepared session tree to its unique child
-// identity without following symlinks. It must run before the provider process is
-// started and after the trusted workspace artifact has been materialized.
 func FinalizeSessionOwnership(root string, uid, gid int) error {
 	root = filepath.Clean(strings.TrimSpace(root))
 	if root == "." || !filepath.IsAbs(root) || uid <= 0 || gid <= 0 {
@@ -855,19 +713,6 @@ func FinalizeSessionOwnership(root string, uid, gid int) error {
 	return assignSessionOwnership(entries, uid, gid, os.Chmod, os.Lchown)
 }
 
-// ProtectReadOnlySessionWorkspace removes the child's write access to a
-// read-intent workspace. It runs after FinalizeSessionOwnership: the supervisor
-// takes back the workspace tree and, when the workspace lives inside the
-// session root, the root itself, so the child can neither modify the tree nor
-// rename it aside. The child's unique group keeps read and search access, which
-// no other child identity shares. Directory modes need no baseline preparation:
-// ownership reclaim resets them to 0700 before every validation.
-//
-// Like FinalizeSessionOwnership, it is a no-op for a non-root supervisor whose
-// child runs under the supervisor's own identity. That development and test
-// mode has no filesystem isolation to establish: the child could restore any
-// permission the supervisor removed. Read-intent delta validation remains its
-// enforcement. Managed runtime Pods always run the supervisor as root.
 func ProtectReadOnlySessionWorkspace(paths SessionPaths, uid, gid int) error {
 	root := filepath.Clean(strings.TrimSpace(paths.Root))
 	workspace := filepath.Clean(strings.TrimSpace(paths.Workspace))
@@ -890,8 +735,6 @@ func protectReadOnlySessionWorkspace(
 	chmod func(string, os.FileMode) error,
 ) error {
 	if strings.HasPrefix(workspace, root+string(filepath.Separator)) {
-		// The child owns every other entry under the root, but must not own the
-		// workspace's parent: that would let it rename the workspace aside.
 		if err := lchown(root, supervisorUID, gid); err != nil {
 			return fmt.Errorf("protect session root: %w", err)
 		}
@@ -899,7 +742,6 @@ func protectReadOnlySessionWorkspace(
 			return fmt.Errorf("chmod protected session root: %w", err)
 		}
 	}
-	// Parents are protected before WalkDir descends into the child-owned tree.
 	return filepath.WalkDir(workspace, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -913,19 +755,12 @@ func protectReadOnlySessionWorkspace(
 				return fmt.Errorf("chmod protected workspace directory: %w", err)
 			}
 		case entry.Type().IsRegular():
-			// Normally a no-op after PrepareReadOnlyWorkspaceModes; any file it
-			// still changes differs from the baseline and fails validation.
 			return applyReadOnlyWorkspaceFileMode(path, entry, chmod)
 		}
 		return nil
 	})
 }
 
-// PrepareReadOnlyWorkspaceModes applies the read-only file modes to a
-// supervisor-owned workspace before its baseline is captured. Workspace
-// validation compares exact modes for protected paths and ownership reclaim
-// does not restore file modes, so the baseline must already record the modes
-// ProtectReadOnlySessionWorkspace leaves behind.
 func PrepareReadOnlyWorkspaceModes(workspace string) error {
 	workspace = filepath.Clean(strings.TrimSpace(workspace))
 	if !filepath.IsAbs(workspace) {
@@ -952,8 +787,6 @@ func applyReadOnlyWorkspaceFileMode(path string, entry os.DirEntry, chmod func(s
 	return nil
 }
 
-// readOnlyWorkspaceFileMode grants the child's group read access, and execute
-// access for owner-executable files, and drops every group and other write bit.
 func readOnlyWorkspaceFileMode(perm os.FileMode) os.FileMode {
 	mode := perm&^0o022 | 0o040
 	if perm&0o100 != 0 {
@@ -962,9 +795,6 @@ func readOnlyWorkspaceFileMode(perm os.FileMode) os.FileMode {
 	return mode
 }
 
-// ReclaimSessionOwnership returns a frozen session tree to the supervisor so it
-// can validate workspace state without requiring DAC_OVERRIDE. Parent
-// directories are reclaimed before WalkDir descends into their children.
 func ReclaimSessionOwnership(root string) error {
 	root = filepath.Clean(strings.TrimSpace(root))
 	if root == "." || !filepath.IsAbs(root) {

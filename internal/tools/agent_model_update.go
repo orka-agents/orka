@@ -191,8 +191,6 @@ func applyOpenCodeModelUpdate(model *corev1alpha1.ModelConfig, update agentModel
 	model.Name = modelName
 	model.Provider = provider
 	if nameWasQualified {
-		// Preserve every qualified OpenCode ID through final validation so nested
-		// model paths are not reinterpreted as a conflicting provider hint.
 		model.Provider = ""
 		if provider != "" {
 			model.Name = provider + "/" + modelName

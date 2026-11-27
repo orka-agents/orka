@@ -10,10 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// TestExecutionEventObservationRefusesMalformedUsageInAnyCase requires a
-// malformed worker usage report from an attributed writer to be refused
-// whatever the letter case of its "usage" key, since encoding/json matches the
-// key case-insensitively; without attribution it is not a usage report.
 func TestExecutionEventObservationRefusesMalformedUsageInAnyCase(t *testing.T) {
 	attributed := store.UsageAttribution{TaskUID: "task-uid"}
 	for _, content := range []string{`{"usage":"not an object"}`, `{"USAGE":"not an object"}`, `{"Usage":7}`} {

@@ -5,35 +5,22 @@ import { StatusDot } from '@/components/ui/status-dot'
 import { useTaskChildren } from '@/hooks/use-tasks'
 import type { Task, TaskPhase, TaskType, ExecutionEvent } from '@/schemas/task'
 
-/** A node in the delegation graph. */
 interface GraphNode {
   name: string
-  /** Agent that owns/handles this node (root may be undefined). */
   agent?: string
   phase?: TaskPhase | string
   type?: TaskType | string
   children: GraphNode[]
   telemetry?: string
-  /** Child result summary, if any. */
   result?: string
 }
 
-/**
- * Build a graph from a parent task plus its (currently flat) `childTasks`.
- *
- * The Orka API exposes one delegation level (`status.childTasks[]`), so v1 is a
- * root with a single tier of children. The shape is recursive (`children[]`)
- * so this can upgrade to a true multi-level DAG later without changing the
- * component API.
- */
 function buildGraph(task: Task, events: ExecutionEvent[] = [], childTasks: Task[] = []): GraphNode {
   const childMessages = new Map(childTasks.map((child) => [child.metadata.name, child.status?.message]))
   const children = (task.status?.childTasks ?? []).map((c) => ({
     name: c.name,
     agent: c.agent,
     phase: c.phase,
-    // A child that failed before reporting a result keeps its failure reason
-    // in its own status message.
     result: c.result || (c.phase === 'Failed' ? childMessages.get(c.name) : undefined),
     children: [] as GraphNode[],
   }))
@@ -64,8 +51,6 @@ function TreeNode({
   onNavigate: (name: string) => void
 }) {
   const phase = phaseStyle(node.phase)
-  // Preserve the literal phase string for display/AT (matching StatusDot's
-  // contract); only the *styling* falls back to Pending for unknown phases.
   const phaseLabel =
     typeof node.phase === 'string' && node.phase ? node.phase : phase.label
   const type = node.type ? typeStyle(node.type) : undefined
@@ -95,7 +80,6 @@ function TreeNode({
             aria-hidden="true"
           />
         )}
-        {/* Each truncated label carries its full text as a tooltip. */}
         <span className="truncate font-mono text-xs font-medium" title={node.name}>
           {node.name}
         </span>
@@ -110,8 +94,6 @@ function TreeNode({
           </span>
         )}
         {node.result && (
-          // A failed child's recorded output is its failure reason; tone the
-          // chip by phase so it never reads as a success.
           <span
             className={cn(
               'truncate rounded-full px-2 py-0.5 text-[10px]',
@@ -153,23 +135,11 @@ function TreeNode({
 
 interface ExecutionGraphProps {
   task: Task
-  /** Optional navigation override (defaults to TanStack router). */
   onSelect?: (taskName: string) => void
   className?: string
   events?: ExecutionEvent[]
 }
 
-/**
- * Live delegation graph for a task and its child tasks.
- *
- * v1 is an indented tree with phase-colored connector rails (no graph-layout
- * dependency), structured so it can upgrade to a true DAG later. Nodes are
- * colored by phase (shared status module), tagged with the task-type icon, and
- * named in monospace; running nodes pulse via the shared <StatusDot>. Clicking
- * a node routes to that task.
- *
- * Degrades gracefully: a task with no children renders just the root node.
- */
 export function ExecutionGraph({
   task,
   onSelect,
@@ -177,8 +147,6 @@ export function ExecutionGraph({
   events = [],
 }: ExecutionGraphProps) {
   const navigate = useNavigate()
-  // status.childTasks has no result for a child that failed early, so read
-  // the children list for their messages, and only when such a child exists.
   const needsChildReasons = (task.status?.childTasks ?? []).some((c) => c.phase === 'Failed' && !c.result)
   const { data: childList } = useTaskChildren(task.metadata.name, needsChildReasons, task.metadata.uid)
   const root = buildGraph(task, events, needsChildReasons ? childList?.items : undefined)

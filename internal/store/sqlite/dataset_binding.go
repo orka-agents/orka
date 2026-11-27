@@ -12,16 +12,12 @@ import (
 
 var _ storagev1.DatasetBindingStore = (*Store)(nil)
 
-// Binding states stored in store_dataset.binding_state. An empty state means
-// BindDataset has not bound the dataset: it belongs to no installation, or to
-// the one a controller epoch advance recorded in installation_id.
 const (
 	bindingStateNone     = ""
 	bindingStateBound    = string(storagev1.DatasetBound)
 	bindingStateDetached = string(storagev1.DatasetDetached)
 )
 
-// datasetBinding is the installation binding the dataset row holds.
 type datasetBinding struct {
 	installation   string
 	recordUID      string
@@ -31,9 +27,6 @@ type datasetBinding struct {
 	boundAtNanos   int64
 }
 
-// readDatasetBinding reads and checks the dataset's installation binding. A
-// row whose binding columns contradict one another is refused, never
-// repaired.
 func readDatasetBinding(ctx context.Context, q controlQueryRower) (datasetBinding, error) {
 	var binding datasetBinding
 	if err := q.QueryRowContext(ctx,
@@ -80,8 +73,6 @@ func (b datasetBinding) validate() error {
 	return nil
 }
 
-// public returns the binding as the contract reports it, or nil when the
-// dataset belongs to no installation.
 func (b datasetBinding) public() *storagev1.DatasetBinding {
 	if b.installation == "" {
 		return nil
@@ -102,14 +93,10 @@ func (b datasetBinding) public() *storagev1.DatasetBinding {
 	return binding
 }
 
-// unclaimedFor reports whether installation may bind the dataset as a new
-// binding: it belongs to no installation, or only a controller epoch advance
-// recorded installation.
 func (b datasetBinding) unclaimedFor(installation string) bool {
 	return b.installation == "" || (b.installation == installation && b.state == bindingStateNone)
 }
 
-// requireNotDetached refuses a write on a detached dataset.
 func requireNotDetached(ctx context.Context, q controlQueryRower) error {
 	binding, err := readDatasetBinding(ctx, q)
 	if err != nil {
@@ -118,7 +105,6 @@ func requireNotDetached(ctx context.Context, q controlQueryRower) error {
 	return binding.refuseDetached()
 }
 
-// refuseDetached returns ErrDatasetDetached for a detached dataset.
 func (b datasetBinding) refuseDetached() error {
 	if b.state != bindingStateDetached {
 		return nil
@@ -127,9 +113,6 @@ func (b datasetBinding) refuseDetached() error {
 		storagev1.ErrDatasetDetached, b.installation, b.generation)
 }
 
-// BindDataset implements storagev1.DatasetBindingStore. The store has one
-// connection and reserves SQLite's writer before reading the binding, so the
-// check and the bind are one step with respect to every other call.
 func (s *Store) BindDataset(ctx context.Context, request storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
 	if err := request.Validate(); err != nil {
 		return storagev1.DatasetBinding{}, err
@@ -163,8 +146,6 @@ func (s *Store) BindDataset(ctx context.Context, request storagev1.BindDatasetRe
 		})
 }
 
-// checkBindMode checks the mode's precondition against a dataset that belongs
-// to the request's installation or to none.
 func (s *Store) checkBindMode(
 	ctx context.Context, tx *sql.Tx, request storagev1.BindDatasetRequest, stored datasetBinding,
 ) error {
@@ -197,7 +178,6 @@ func (s *Store) checkBindMode(
 			return bindingConflict(request.DatasetID, stored, "an embedded binding needs an unclaimed dataset")
 		}
 	case storagev1.BindMigrated:
-		// SQLite creates or adopts its dataset; it never imports one.
 		return bindingConflict(request.DatasetID, stored, "the dataset was not imported from another provider")
 	case storagev1.BindAdopt:
 		if !unclaimed && (stored.state != bindingStateDetached || !higher) {
@@ -215,7 +195,6 @@ func (s *Store) checkBindMode(
 	return nil
 }
 
-// GetDatasetBinding implements storagev1.DatasetBindingStore.
 func (s *Store) GetDatasetBinding(ctx context.Context, datasetID string) (storagev1.DatasetBinding, error) {
 	if err := storagev1.ValidateControlIdentifier("dataset binding dataset ID", datasetID); err != nil {
 		return storagev1.DatasetBinding{}, err
@@ -244,7 +223,6 @@ func (s *Store) GetDatasetBinding(ctx context.Context, datasetID string) (storag
 	return *binding, nil
 }
 
-// DetachDatasetBinding implements storagev1.DatasetBindingStore.
 func (s *Store) DetachDatasetBinding(ctx context.Context, request storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
 	if err := request.Validate(); err != nil {
 		return storagev1.DatasetBinding{}, err
@@ -275,7 +253,6 @@ func (s *Store) DetachDatasetBinding(ctx context.Context, request storagev1.Deta
 		})
 }
 
-// UpdateBindingKeyFingerprint implements storagev1.DatasetBindingStore.
 func (s *Store) UpdateBindingKeyFingerprint(
 	ctx context.Context, request storagev1.UpdateBindingKeyRequest,
 ) (storagev1.DatasetBinding, error) {
@@ -304,13 +281,6 @@ func (s *Store) UpdateBindingKeyFingerprint(
 		})
 }
 
-// CompleteDatasetBootstrap implements storagev1.DatasetBindingStore: it
-// records successful key activation before controller consumers can start.
-// Startup calls it only after the storage client has activated the snapshot
-// key, which authenticates retained sealed records and enforces the permitted
-// key rotation. It synchronizes the WAL before returning, so the flag survives
-// a host failure. A synchronization that fails after the commit returns
-// ErrOutcomeUnknown; repeating the call synchronizes again.
 func (s *Store) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
 	if err := storagev1.ValidateControlIdentifier("complete dataset bootstrap dataset ID", datasetID); err != nil {
 		return err
@@ -334,11 +304,6 @@ func (s *Store) CompleteDatasetBootstrap(ctx context.Context, datasetID string) 
 	return synchronizeCommittedDataset(s.db, "CompleteDatasetBootstrap")
 }
 
-// synchronizeCommittedDataset checkpoints the WAL after a dataset metadata
-// change committed. A failure leaves the change committed but not yet synced
-// to the main database file, so it is reported as ErrOutcomeUnknown: the caller
-// repeats the identical request, which replays the change and synchronizes
-// again, rather than treating it as refused.
 func synchronizeCommittedDataset(db *sql.DB, method string) error {
 	if err := synchronizeDatasetMetadata(db); err != nil {
 		return fmt.Errorf("%w: %s committed, but its durable synchronization failed: %w",
@@ -347,11 +312,6 @@ func synchronizeCommittedDataset(db *sql.DB, method string) error {
 	return nil
 }
 
-// changeDatasetBinding runs change against the stored binding in one write
-// transaction and stores what it returns. It refuses to run inside another
-// transaction, and synchronizes the WAL after every successful call, including
-// one that changed nothing, so a retry after a failed synchronization still
-// makes the binding durable before it returns.
 func (s *Store) changeDatasetBinding(
 	ctx context.Context,
 	method string,

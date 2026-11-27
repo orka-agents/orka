@@ -62,10 +62,6 @@ func (r *RuntimePoolReconciler) persistRuntimePoolBootRetirement(ctx context.Con
 	return persistAgentRuntimeRecoveryEffect(ctx, r.ControlStore, fence, w.identity(runtimePoolBootRetirementKind), digest, proof)
 }
 
-// verifiedNativeRuntimePoolRetirement is a READ-ONLY gate for the dispatcher.
-// Missing evidence returns false, never an absence-based cleanup receipt. The
-// caller must retain its existing frozen-turn checks and epoch-guarded writes.
-// It works after the pool/Pod is gone and never consults a replacement instance.
 func verifiedNativeRuntimePoolRetirement(ctx context.Context, effects store.ExternalEffectStore, task *corev1alpha1.Task, taskUID types.UID) (bool, error) {
 	if task == nil || task.Status.Execution == nil || task.Status.Execution.RuntimePoolUID == "" ||
 		task.Status.Execution.AgentRuntimeUID != "" || task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil {
@@ -86,12 +82,6 @@ func verifiedNativeRuntimePoolRetirement(ctx context.Context, effects store.Exte
 	return loadRuntimePoolBootRetirement(ctx, effects, w)
 }
 
-// recordRetiredRuntimePoolTasks writes cleanup receipts for Tasks that ran on
-// retired boots. One cached Task list per call only selects candidates: each
-// receipt is still written after an authoritative read under the epoch guard,
-// and a candidate the cache misses is replayed by a later reconciliation.
-// Receipted Tasks are skipped, so retained history costs one in-memory scan
-// instead of an uncached namespace list per retired boot.
 func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Context, retired []runtimePoolBootWitness, fence store.ControllerEpochFence) error {
 	if len(retired) == 0 {
 		return nil
@@ -119,8 +109,6 @@ func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Contex
 		if runtimeSessionCleanupCompleteForUID(task, uid) {
 			continue
 		}
-		// Keep each epoch interlock short. A namespace's historical Task list
-		// must not turn a single mutation guard into an unbounded cleanup loop.
 		if err := agentRuntimeRecoveryGuard(ctx, r.ControlStore, fence, func(writeCtx context.Context) error {
 			retired, err := loadRuntimePoolBootRetirement(writeCtx, r.ControlStore, w)
 			if err != nil || !retired {
@@ -133,8 +121,6 @@ func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Contex
 			if err := runtimePoolTaskWitnessMatches(latest, uid, w); err != nil {
 				return err
 			}
-			// The cached candidate only selected this Task; write the receipt
-			// for the authoritative execution identity the witness matched.
 			le := latest.Status.Execution
 			return persistTaskScopedRuntimeSessionCleanupReceipt(writeCtx, r.Client, latest, uid, le.RuntimeInstanceID, le.RuntimeSessionUID, le.RuntimeSessionGeneration)
 		}); err != nil {
@@ -144,9 +130,6 @@ func (r *RuntimePoolReconciler) recordRetiredRuntimePoolTasks(ctx context.Contex
 	return nil
 }
 
-// recordNativeRuntimePoolDrain adds durable boot evidence only for enrolled
-// native instances. The legacy/provider authenticated receipt path is unchanged,
-// and a marked boot that never retained its Pod or committed a witness also uses it.
 func (r *RuntimePoolReconciler) recordNativeRuntimePoolDrain(ctx context.Context, pool *corev1alpha1.RuntimePool, active *corev1alpha1.RuntimePoolActiveInstanceStatus, status harnessv2.StatusResponse) error {
 	if pool.Spec.ExecutionWorkspace != nil {
 		return r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, status)
@@ -174,12 +157,6 @@ func (r *RuntimePoolReconciler) recordNativeRuntimePoolDrain(ctx context.Context
 	}
 	w, err := loadRuntimePoolBootWitness(ctx, r.ControlStore, agentRuntimeRecoveryIdentity(runtimePoolBootWitnessKind, pool.UID, pool.Namespace, active.RuntimeInstanceID))
 	if errors.Is(err, store.ErrNotFound) && !controllerutil.ContainsFinalizer(pod, runtimePoolBootPodFinalizer) && pod.Annotations[runtimePoolBootRetentionAnnotation] == "" {
-		// Admission requires a committed witness, which is written only after
-		// the Pod is retained, and retention is released only after retirement
-		// proof. A marked boot with no witness and no retention barrier therefore
-		// never admitted work, for example when its Pod became Ready only after
-		// scale-down began. Its exact authenticated quiescent drain is sufficient
-		// proof, as it is for unmarked Pods.
 		return r.recordDrainedRuntimePoolTaskCleanup(ctx, pool, active, status)
 	}
 	if err != nil {
@@ -198,7 +175,6 @@ func (r *RuntimePoolReconciler) recordNativeRuntimePoolDrain(ctx context.Context
 			return err
 		}
 	}
-	// Retain only structured proof, not status reason/message payloads.
 	safeStatus := harnessv2.StatusResponse{Protocol: status.Protocol, Fence: status.Fence, Lifecycle: status.Lifecycle,
 		Drain: harnessv2.DrainStatus{Requested: true, AcceptingNewSessions: false}}
 	if err := r.persistRuntimePoolBootRetirement(ctx, w, agentRuntimeBootRetirement{Kind: runtimePoolBootDrainedProof, DrainedStatus: &safeStatus}, fence); err != nil {
@@ -237,7 +213,6 @@ func (r *RuntimePoolReconciler) reconcileNativeRuntimePoolRetirement(ctx context
 		if err := r.resumeRuntimePoolBootPreparations(ctx, pool, preparations, fence); err != nil {
 			return err
 		}
-		// Resumed preparations can commit new witnesses.
 		witnesses, err = r.runtimePoolBootRecords(ctx, pool, runtimePoolBootWitnessKind)
 		if err != nil {
 			return err
@@ -264,7 +239,6 @@ func (r *RuntimePoolReconciler) reconcileNativeRuntimePoolRetirement(ctx context
 			if terminal == nil {
 				continue
 			}
-			// Kubernetes termination Message/Reason may contain application text.
 			safeTerminal := &corev1.ContainerStateTerminated{ContainerID: terminal.ContainerID, StartedAt: terminal.StartedAt, FinishedAt: terminal.FinishedAt}
 			if err := r.persistRuntimePoolBootRetirement(ctx, w, agentRuntimeBootRetirement{Kind: runtimePoolBootTerminatedProof, ContainerTermination: safeTerminal}, fence); err != nil {
 				return err
@@ -328,7 +302,7 @@ func (r *RuntimePoolReconciler) releaseRuntimePoolBootPod(ctx context.Context, w
 		err := r.APIReader.Get(writeCtx, client.ObjectKey{Namespace: w.PodNamespace, Name: w.PodName}, pod)
 		if apierrors.IsNotFound(err) {
 			return nil
-		} // Positive proof was verified above.
+		}
 		if err != nil {
 			return err
 		}
@@ -347,8 +321,6 @@ func (r *RuntimePoolReconciler) releaseRuntimePoolBootPod(ctx context.Context, w
 			return err
 		}
 		if owner != digest {
-			// This historical boot already released retention. A later committed
-			// boot may own the same Pod; only its own replay may release it.
 			for _, other := range witnesses {
 				if other.PodUID != pod.UID || other.PodNamespace != pod.Namespace || other.PodName != pod.Name {
 					continue
@@ -381,8 +353,6 @@ func (r *RuntimePoolReconciler) releaseRuntimePoolBootPod(ctx context.Context, w
 	})
 }
 
-// Guard only new enrolled native owners; provider and legacy finalization keep
-// their existing path. The optimistic owner PATCH fences delayed enrollment.
 func (r *RuntimePoolReconciler) removeRuntimePoolFinalizer(ctx context.Context, pool *corev1alpha1.RuntimePool) error {
 	remove := func(writeCtx context.Context) error {
 		base := pool.DeepCopy()

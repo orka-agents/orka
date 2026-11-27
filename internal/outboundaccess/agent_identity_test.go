@@ -20,9 +20,7 @@ type fakeAgentIdentitySource struct {
 	token   string
 	err     error
 	request AgentIdentityTokenRequest
-	// during runs while the token is issued, as a slow exchange would let
-	// other writes land.
-	during func()
+	during  func()
 }
 
 func (f *fakeAgentIdentitySource) AgentIdentityToken(_ context.Context, req AgentIdentityTokenRequest) (string, error) {
@@ -33,15 +31,12 @@ func (f *fakeAgentIdentitySource) AgentIdentityToken(_ context.Context, req Agen
 	return f.token, f.err
 }
 
-// resolveOnlyConnectionSource cannot re-check a Connection.
 type resolveOnlyConnectionSource struct{ source *fakeConnectionSource }
 
 func (f resolveOnlyConnectionSource) ResolveConnectionCredential(ctx context.Context, req ConnectionCredentialRequest) (ConnectionCredential, error) {
 	return f.source.ResolveConnectionCredential(ctx, req)
 }
 
-// endingConnectionSource ends the delegation while it refreshes the
-// requester's token, as cancelling a parent Task during a slow refresh does.
 type endingConnectionSource struct {
 	*fakeConnectionSource
 	end func()
@@ -170,31 +165,23 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 			agent.Status.IdentityClaim.Releasing = true
 			return agent
 		}(),
-		// The claim is marked releasing only when the Agent next
-		// reconciles; the edit alone must stop the calls.
 		"identity removed, claim not yet released": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			agent.Spec.Identity = nil
 			return agent
 		}(),
-		// The claim was granted again after the Task was created, so the
-		// Task's creation was never checked against this grant.
 		"claim granted again after the Task was created": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			regranted := metav1.NewTime(testClaimGrantedAt.Add(time.Hour))
 			agent.Status.IdentityClaim.GrantedAt = &regranted
 			return agent
 		}(),
-		// Times have one-second precision, so a Task from the grant's own
-		// second may predate the grant.
 		"Task created in the grant's second": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			sameSecond := metav1.NewTime(testClaimGrantedAt.Add(time.Minute))
 			agent.Status.IdentityClaim.GrantedAt = &sameSecond
 			return agent
 		}(),
-		// A finalizer keeps a deleted Agent readable; deletion still stops
-		// its Tasks' calls.
 		"Agent being deleted": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			deleting := metav1.Now()
@@ -202,8 +189,6 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 			agent.Finalizers = []string{"example.com/hold"}
 			return agent
 		}(),
-		// A definitive refusal at the last verification, such as a disabled
-		// identity, stops calls even while a policy token is still cached.
 		"issuer refused the identity": func() *corev1alpha1.Agent {
 			return withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionFalse, AgentReasonIdentityVerificationFailed)
 		}(),
@@ -227,9 +212,6 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 		})
 	}
 
-	// The claim is granted again only when the Agent reconciles. Until then a
-	// Task from before the current enforcement period, which may have been
-	// created while the check was off, is still refused.
 	taskCreated := agentIdentityRequest().AgentIdentity.TaskCreated
 	for name, tc := range map[string]struct {
 		since   time.Time
@@ -259,8 +241,6 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 		})
 	}
 
-	// The issuer's own answer decides calls while it is unreachable or the
-	// identity is not verified yet.
 	for name, agent := range map[string]*corev1alpha1.Agent{
 		"issuer unavailable":   withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionUnknown, "IssuerUnavailable"),
 		"not verified yet":     withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionFalse, "Declared"),
@@ -363,9 +343,6 @@ func TestValidateSpecDelegatedAgentIdentity(t *testing.T) {
 	}
 }
 
-// TestKubernetesResolverDelegatedRechecksTheRequesterLink covers a requester
-// who unlinks, or whose link is re-consented or stops being Ready, while the
-// on-behalf-of exchange runs: the issued credential is never returned.
 func TestKubernetesResolverDelegatedRechecksTheRequesterLink(t *testing.T) {
 	scheme := resolverScheme(t)
 	now := time.Now()
@@ -482,8 +459,6 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 		r.DelegationLive = func(context.Context, AgentIdentityBinding) error { return nil }
 		start := now.Add(-time.Hour + time.Second)
 		calls := 0
-		// The first clock reading is before the exchange; the second, after
-		// it, is past the policy's one-hour maxDelegationAge.
 		r.Now = func() time.Time {
 			if calls++; calls > 1 {
 				return start.Add(time.Hour + time.Second)
@@ -584,9 +559,6 @@ func TestEffectiveMaxDelegationAge(t *testing.T) {
 	}
 }
 
-// TestKubernetesResolverRechecksTheAgentBeforeReleasingAnIdentityCredential
-// covers an Agent that loses its identity, or is deleted, while the issuer
-// answers: the credential it issued is not released.
 func TestKubernetesResolverRechecksTheAgentBeforeReleasingAnIdentityCredential(t *testing.T) {
 	scheme := resolverScheme(t)
 	for name, change := range map[string]func(context.Context, ctrlclient.Client, *corev1alpha1.Agent) error{
@@ -619,9 +591,6 @@ func TestKubernetesResolverRechecksTheAgentBeforeReleasingAnIdentityCredential(t
 	}
 }
 
-// TestKubernetesResolverRechecksThePolicyBeforeReleasingAnIdentityCredential
-// covers an outbound access policy revoked or edited while the issuer
-// answers: the credential is released only under the policy as it now is.
 func TestKubernetesResolverRechecksThePolicyBeforeReleasingAnIdentityCredential(t *testing.T) {
 	scheme := resolverScheme(t)
 	for name, change := range map[string]func(context.Context, ctrlclient.Client, *corev1alpha1.OutboundAccessPolicy) error{
@@ -661,7 +630,6 @@ func TestKubernetesResolverRechecksThePolicyBeforeReleasingAnIdentityCredential(
 			}
 		})
 	}
-	// An unchanged policy still releases it.
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(readyPolicy("agent", agentIdentityPolicySpec()), identityHolder("agent-uid", true)).
 		WithStatusSubresource(&corev1alpha1.Agent{}, &corev1alpha1.OutboundAccessPolicy{}).Build()

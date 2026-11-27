@@ -51,8 +51,6 @@ func TestMCPProxyBrokerUsesAdmittedPromptTrace(t *testing.T) {
 		{"noop missing", "", noop.NewTracerProvider().Tracer("test")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Reuse one RuntimeSession across prompts, including an untraced
-			// continuation after a traced prompt. No previous gate may survive.
 			now := time.Now().UTC()
 			authorization, lease := testMCPAuthorization(t, session.fence, now, false)
 			authorization.PromptID = harnessv2.PromptID(fmt.Sprintf("prompt-%d", index))
@@ -93,7 +91,6 @@ func TestMCPProxyBrokerUsesAdmittedPromptTrace(t *testing.T) {
 				baggage.FromContext(gate).Len() != 0 || trace.SpanFromContext(gate).IsRecording() {
 				t.Fatal("prompt gate retained more than the span context")
 			}
-			// Renewal must retain the initial prompt parent and cancellable gate.
 			lease.Generation++
 			authorization.LeaseGeneration = lease.Generation
 			if err := session.renew(authorization, lease, now); err != nil {

@@ -22,7 +22,6 @@ func TestComposeSoulNoSoulPreservesBytes(t *testing.T) {
 	}
 }
 
-// These assertions pin prompt guidance and literal delivery, not model obedience.
 func TestComposeSoulPrecedence(t *testing.T) {
 	const heading = `## Agent persona (SOUL.md)
 
@@ -55,7 +54,6 @@ Apply the persona wherever it is compatible with runtime policies, role instruct
 			{"with role", " \nComplete the user's task in the requested language and output format.\n"},
 		} {
 			t.Run(persona.name+"/"+role.name, func(t *testing.T) {
-				// Independently pin the digest to the source, not the rendered envelope.
 				expectedDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(persona.text)))
 				agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
 					Soul: &corev1alpha1.SoulSource{Inline: persona.text, Digest: expectedDigest},

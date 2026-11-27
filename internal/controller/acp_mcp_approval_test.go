@@ -126,8 +126,6 @@ func newMCPApprovalFixture(t *testing.T) *mcpApprovalFixture {
 	return f
 }
 
-// approvalStorageClient is the storage client production code reaches the
-// approval event store through; projections need its fenced task data access.
 func approvalStorageClient(t *testing.T, db *storesqlite.Store) *storageclient.Client {
 	t.Helper()
 	return storageclienttest.NewEmbedded(t, db)
@@ -216,7 +214,6 @@ func TestMCPApprovalPersistsExactCallAndReplaysOnlyItsRealResult(t *testing.T) {
 	if result.IsError || result.Replayed || string(result.Result) != `{"workOrder":"simulated-1"}` || f.count.Load() != 1 {
 		t.Fatalf("approved result=%s replayed=%t executions=%d", result.Result, result.Replayed, f.count.Load())
 	}
-	// Reopen SQLite and reconstruct the handler without any in-memory receipt.
 	f.reopen()
 	replay := awaitMCPApprovalResult(t, f.start(f.request))
 	if !replay.Replayed || string(replay.Result) != string(result.Result) || f.count.Load() != 1 {
@@ -399,7 +396,6 @@ func TestMCPApprovalPendingRecoveryAndIndependentSessionProgress(t *testing.T) {
 	f := newMCPApprovalFixture(t)
 	done := f.start(f.request)
 	pending := f.pending()
-	// The approval waiter holds no global broker or controller epoch lock.
 	other := f.request
 	other.Call.CallID = "unrelated-read"
 	other.Metadata.OperationID = "unrelated-operation"
@@ -418,8 +414,6 @@ func TestMCPApprovalPendingRecoveryAndIndependentSessionProgress(t *testing.T) {
 	if response.Code != http.StatusOK || f.count.Load() != 1 {
 		t.Fatal("unrelated session could not progress during approval wait")
 	}
-	// Simulate exact redelivery while the original waiter still exists. Either
-	// caller may claim, but neither may execute the other's in-flight action.
 	recovered := f.start(f.request)
 	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 	awaitMCPApprovalResult(t, done)
@@ -457,8 +451,6 @@ func TestMCPApprovalConcurrentDeliveryJoinsInFlightExecution(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("approved action did not start")
 	}
-	// The executor is blocked before its receipt is saved. Discard reads from
-	// the original approval wait, then prove the duplicate polls that live lease.
 	select {
 	case <-reads:
 	default:
@@ -509,7 +501,6 @@ func TestMCPApprovalTransportRecoveryPreservesPendingAndRenewedLease(t *testing.
 	if recovered := f.pending(); recovered.ID != pending.ID || f.count.Load() != 0 {
 		t.Fatal("transport recovery lost the pending approval or executed it")
 	}
-	// The transport lease can renew without changing the stored operation.
 	renewed := f.request
 	renewed.Lease.Generation++
 	renewed.Authorization.LeaseGeneration = renewed.Lease.Generation
@@ -561,7 +552,6 @@ func TestMCPApprovalExpiredInFlightLeaseCannotBeReclaimed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Model a crash after the action reached the simulator but before a receipt.
 	f.count.Store(1)
 	f.reopen()
 	result := awaitMCPApprovalResult(t, f.start(f.request))
@@ -660,8 +650,6 @@ func TestMCPApprovalPendingPollsDeferFullRevalidationUntilDecision(t *testing.T)
 	if got := resolutions.Load(); got != 1 {
 		t.Fatalf("pending approval resolved credentials %d times, want only initial authentication", got)
 	}
-	// A pending review does not authorize execution. The full check must still
-	// reject authority changed during the wait before any tool can start.
 	f.authorized.Store(false)
 	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
 	result := awaitMCPApprovalResult(t, done)
@@ -699,8 +687,6 @@ type approvalCancelDuringRevocationStore struct {
 
 func (s *approvalCancelDuringRevocationStore) AppendExecutionEventIfAbsent(ctx context.Context, event *store.ExecutionEvent, key string) (*store.ExecutionEvent, bool, error) {
 	if event.Type == events.ExecutionEventTypeApprovalCancelled {
-		// The prompt-authority watcher can cancel the original call after
-		// revalidation rejects it but before the denial evidence is saved.
 		s.cancelled.Store(true)
 		s.cancel()
 	}

@@ -63,20 +63,17 @@ func runAuthSessions(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Nil(t, next.RevokedAt)
 
-		// A revoked session renews no more, and its successor is not stored.
 		err = p.RenewAuthSession(ctx, "sess-1", testAuthSession("sess-3", "hash-3", later), later)
 		require.ErrorIs(t, err, storagev1.ErrConflict)
 		_, err = p.GetAuthSessionByHash(ctx, "hash-3")
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 
-		// Nor does an expired one.
 		expired := later.Add(13 * time.Hour)
 		err = p.RenewAuthSession(ctx, "sess-2", testAuthSession("sess-4", "hash-4", expired), expired)
 		require.ErrorIs(t, err, storagev1.ErrConflict)
 		_, err = p.GetAuthSessionByHash(ctx, "hash-4")
 		require.ErrorIs(t, err, storagev1.ErrNotFound)
 
-		// Nor an unknown one.
 		require.ErrorIs(t, p.RenewAuthSession(ctx, "missing", testAuthSession("sess-5", "hash-5", later), later),
 			storagev1.ErrConflict)
 	})
@@ -95,7 +92,6 @@ func runAuthSessions(t *testing.T, newProvider StateFactory) {
 		p, ctx := newProvider(t), t.Context()
 		require.NoError(t, p.CreateAuthSession(ctx, testAuthSession("ended", "hash-ended", now)))
 		require.NoError(t, p.CreateAuthSession(ctx, testAuthSession("live", "hash-live", now)))
-		// Revoking prunes nothing, so the ended session is still stored.
 		require.NoError(t, p.RevokeAuthSession(ctx, "ended", now))
 		later := now.Add(time.Minute)
 
@@ -133,7 +129,6 @@ func runAuthSessions(t *testing.T, newProvider StateFactory) {
 		_, err := p.GetAuthSessionByHash(ctx, "hash-11")
 		require.NoError(t, err, "another person's sign-in ends none of alice's sessions")
 
-		// The next write drops every session that ended: revoked or expired.
 		require.NoError(t, p.RevokeAuthSession(ctx, "sess-2", now))
 		later := now.Add(13 * time.Hour)
 		require.NoError(t, p.CreateAuthSession(ctx, testAuthSession("sess-new", "hash-new", later)))

@@ -85,8 +85,6 @@ func TestWorkspaceUsePoliciesMatchSharedAdmission(t *testing.T) {
 	}
 }
 
-// Helm installs must enforce the same dedicated operator-access verb as the
-// Kustomize installer, or a class editor could opt a class into operator access.
 func TestOperatorAccessPolicyMatchesSharedAdmission(t *testing.T) {
 	shared, err := os.ReadFile(filepath.Join(
 		"..", "..", "..", "config", "policy", "workspace_class_operator_access_policy.yaml"))
@@ -158,8 +156,6 @@ func TestStaticChartGrantsGenericWorkspaceCheckpointAndObservationRBAC(t *testin
 		}
 	}
 
-	// Provider finalization scans checkpoint references outside the controller
-	// namespace. Both production installers must grant only the cluster list.
 	kustomize, err := os.ReadFile(filepath.Join(
 		"..", "..", "..", "config", "acp-workload", "v2_controller_cluster_role.yaml"))
 	if err != nil {

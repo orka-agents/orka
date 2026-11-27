@@ -83,7 +83,6 @@ func TestJournalRejectsCacheCountsExceedingInput(t *testing.T) {
 			require.Equal(t, int64(0), report.Summary.TotalTokens)
 			require.False(t, report.Summary.CachedUsageReported)
 
-			// Rejecting invalid telemetry must leave its identity available for a valid replay.
 			snapshot.InputTokens = 100
 			_, added, err = appendSnapshot(snapshot)
 			require.NoError(t, err)

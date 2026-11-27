@@ -84,7 +84,7 @@ func TestProviderAuthProxyDoesNotReplayAmbiguousPOST(t *testing.T) {
 				if posts.Add(1) == 1 {
 					reused.Store(warmAddr.Load() == r.RemoteAddr)
 					_, _ = io.Copy(io.Discard, r.Body)
-					panic(http.ErrAbortHandler) // consumed the POST; no response headers
+					panic(http.ErrAbortHandler)
 				}
 				w.WriteHeader(http.StatusOK)
 			}))
@@ -248,8 +248,6 @@ func TestProviderAuthProxyFlushesStreamedResponseChunks(t *testing.T) {
 	proxy := newTestProxy(t, upstream.URL, testSharedProviderToken)
 	proxyServer := httptest.NewServer(proxy)
 	t.Cleanup(proxyServer.Close)
-	// Cleanups run in LIFO order. Release the upstream handler before either
-	// server waits for active connections to close.
 	t.Cleanup(release)
 	request, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/v1/responses", strings.NewReader(`{"model":"test"}`))
 	if err != nil {

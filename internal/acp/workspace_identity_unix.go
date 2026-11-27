@@ -8,7 +8,6 @@ import (
 	"syscall"
 )
 
-// directoryIdentity returns the device and inode behind info.
 func directoryIdentity(info os.FileInfo) (uint64, uint64, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Ino == 0 {

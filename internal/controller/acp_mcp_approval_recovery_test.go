@@ -124,7 +124,6 @@ func (f *mcpApprovalRecoveryFixture) restart(t *testing.T) {
 	f.fence, err = epochs.CurrentFence(f.ctx)
 	require.NoError(t, err)
 	require.Greater(t, uint64(f.fence.Epoch), f.request.Metadata.Fence.ControllerEpoch)
-	// Recovery has no executable Secret client and no remembered prompt lease.
 	f.broker.ApprovalSecrets = nil
 	f.broker.Prompts = DurableACPMCPPromptAuthorizer{Attempts: f.control, PromptLeases: &ACPMCPPromptLeaseRegistry{}}
 }
@@ -199,7 +198,6 @@ func (f *mcpApprovalRecoveryFixture) approval(t *testing.T) (approvals.Approval,
 	t.Helper()
 	listed, err := approvals.ListEvents(f.ctx, f.events, f.task.Namespace, f.task.Name)
 	require.NoError(t, err)
-	// This is the same Task-UID-filtered derivation used by ListTaskApprovals.
 	listed = approvals.FilterEventsForTaskUID(listed, string(f.task.UID))
 	values := approvals.Derive(listed, time.Time{})
 	require.Len(t, values, 1)
@@ -228,8 +226,6 @@ func TestMCPApprovalRecoveryProjectsPersistedExecutionAfterRestart(t *testing.T)
 			call, effect := f.seed(t, tc.state, tc.prior, tc.executed, tc.result)
 			f.restart(t)
 			count := f.count.Load()
-			// Real stale-epoch credential resolution and empty local lease state
-			// both reject redelivery before it can replay the persisted receipt.
 			resolver := KubernetesACPMCPBrokerCredentialResolver{Reader: f.kube, Epochs: f.dispatcher.Epochs}
 			_, err := resolver.ResolveACPMCPBrokerCredentials(f.ctx, f.request)
 			require.EqualError(t, err, "MCP request uses a stale controller epoch")
@@ -326,8 +322,6 @@ func TestMCPApprovalRecoveryValidatesPersistedCallBinding(t *testing.T) {
 		{name: "missing_operation_digest", mutate: func(b *approvals.CallBinding) { b.OperationIDDigest = "" }},
 		{name: "malformed_operation_digest", mutate: func(b *approvals.CallBinding) { b.OperationIDDigest = "sha256:abc" }},
 		{name: "different_operation_digest", mutate: func(b *approvals.CallBinding) { b.OperationIDDigest = testControllerMCPDigest("different operation") }},
-		// Runtime digests gate new decisions, not projection of an already
-		// committed receipt matched by exact effect identity and request digest.
 		{name: "without_runtime_digests", mutate: func(b *approvals.CallBinding) {
 			b.RuntimeInstanceIDDigest, b.SupervisorBootIDDigest = "", ""
 		}, recover: true},
@@ -337,8 +331,6 @@ func TestMCPApprovalRecoveryValidatesPersistedCallBinding(t *testing.T) {
 			call, _ := f.seed(t, store.ExternalEffectSucceeded, "running", true, json.RawMessage(`{"workOrder":"simulated-1"}`))
 			_, listed := f.approval(t)
 			approvalID := call.ID
-			// Rebuild the saved history to model damaged event bindings.
-			// The completed effect and its immutable request digest stay intact.
 			require.NoError(t, f.events.DeleteExecutionEvents(f.ctx, f.task.Namespace, events.ExecutionEventStreamTypeTask, f.task.Name))
 			for _, event := range listed {
 				var payload map[string]json.RawMessage
@@ -455,8 +447,6 @@ type approvalCancelDuringEffectReadStore struct {
 
 func (s *approvalCancelDuringEffectReadStore) GetExternalEffect(ctx context.Context, id string) (*store.ExternalEffect, error) {
 	if !s.interrupted.Swap(true) {
-		// The first broker effect read follows its pending decision poll.
-		// Cancel at that storage boundary, before it has a replacement value.
 		s.cancel()
 		return nil, ctx.Err()
 	}
@@ -515,8 +505,6 @@ type approvalRecoveryEventStore struct {
 func (s *approvalRecoveryEventStore) WithTaskDataAccess(ctx context.Context, namespace, taskName string, access func(context.Context) error) error {
 	err := s.TaskDataAccessStore.WithTaskDataAccess(ctx, namespace, taskName, access)
 	if err == nil && s.afterCommit != nil {
-		// A late broker writer is independent of recovery's fenced access.
-		// Inject it only after recovery's projection has committed.
 		s.afterCommit()
 	}
 	return err
@@ -557,8 +545,6 @@ func TestMCPApprovalRecoveryOnlyReadsOwningTaskAndSkipsUnchangedHistory(t *testi
 		other.Name, other.UID, other.ResourceVersion = fmt.Sprintf("other-task-%d", i), types.UID(fmt.Sprintf("other-uid-%d", i)), ""
 		require.NoError(t, f.kube.Create(f.ctx, other))
 	}
-	// Automatic calls retain the same execution identity kind but have no
-	// approval discovery hint, even after a terminal receipt has been saved.
 	_, err := runExternalEffect(f.ctx, f.control, f.fence, store.ExternalEffectIdentity{
 		Kind: acpMCPToolEffectKind, Namespace: f.request.Namespace,
 		AggregateID: effect.Identity.AggregateID, OperationID: "automatic-operation",
@@ -575,8 +561,6 @@ func TestMCPApprovalRecoveryOnlyReadsOwningTaskAndSkipsUnchangedHistory(t *testi
 	require.EqualValues(t, 1, observed.sequenceStreams.Load(), "only the owning Task belongs in the sequence batch")
 	require.EqualValues(t, 2, observed.lists.Load(), "read the owning history once and recheck it under the epoch guard")
 	require.EqualValues(t, 1, observed.appends.Load())
-	// The first follow-up observes recovery's own append. Later scans must
-	// skip full histories while the receipt and event sequence stay unchanged.
 	require.NoError(t, f.reconcile(t))
 	lists, exactReads := observed.lists.Load(), f.exactReads.Load()
 	for range 3 {
@@ -619,8 +603,6 @@ func TestMCPApprovalRecoveryBatchesHistoricalTaskSequences(t *testing.T) {
 		var err error
 		retained.ID, err = retained.Identity.CanonicalID()
 		require.NoError(t, err)
-		// A crash before ApprovalRequested can leave a retained denial without
-		// a review event. These owners must not cause individual sequence reads.
 		retained.State = store.ExternalEffectFailed
 		retained.Response = acpMCPAbandonedPendingReceipt(&retained)
 		retained.ResponseDigest = store.CanonicalBytesDigest(retained.Response)
@@ -635,8 +617,6 @@ func TestMCPApprovalRecoveryBatchesHistoricalTaskSequences(t *testing.T) {
 	reconcile()
 	require.EqualValues(t, 2, observed.sequenceBatches.Load(), "one batch per namespace, independent of Task count")
 	require.EqualValues(t, len(tasks), observed.sequenceStreams.Load())
-	// Observe the first projection's append, then verify unchanged histories
-	// stay cached while every scan checks late events in namespace batches.
 	reconcile()
 	lists := observed.lists.Load()
 	for range 3 {
@@ -716,8 +696,6 @@ func TestMCPApprovalRecoveryRetriesFailedAndSupersededProjection(t *testing.T) {
 	require.NoError(t, f.reconcile(t))
 	require.EqualValues(t, 2, observed.appends.Load())
 
-	// Model a delayed start-event append from before the crash. The same
-	// effect version must still be able to repair this newer stale projection.
 	require.NoError(t, f.broker.approvalOutcome(f.ctx, call, "running", "Approved action started", nil))
 	late, _ := f.approval(t)
 	require.Equal(t, "running", late.ExecutionOutcome)
@@ -831,8 +809,6 @@ func TestMCPApprovalReceiptOutcomeValidatesDenialAndCompletedReceipts(t *testing
 			require.JSONEq(t, string(response), string(result))
 			_, _, _, err = acpMCPApprovalReceiptOutcome(effect, "another-approval")
 			require.Error(t, err)
-			// A tool may itself return an error with a denial-shaped code. Its
-			// Succeeded ledger state proves execution, not a broker denial.
 			effect.State = store.ExternalEffectSucceeded
 			outcome, _, _, err = acpMCPApprovalReceiptOutcome(effect, approvalID)
 			require.NoError(t, err)
@@ -856,8 +832,6 @@ func TestMCPApprovalReceiptOutcomeCanonicalizesStoredJSON(t *testing.T) {
 		require.Equal(t, canonical, result)
 	}
 
-	// A digest for a different JSON value never validates just because both
-	// encodings are well formed or have the same fields.
 	changed := &store.ExternalEffect{
 		State: store.ExternalEffectSucceeded, Response: json.RawMessage(`{"a":[1,100,9007199254740992],"isError":false,"z":1e-7}`),
 		ResponseDigest: store.CanonicalBytesDigest(canonical),

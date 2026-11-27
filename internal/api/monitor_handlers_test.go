@@ -667,8 +667,6 @@ func TestCreateRepositoryMonitor_AllowsCodexReviewer(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
-	// Codex reviewers run in the native read-only agent mode, so admission
-	// accepts them for the reviewer role.
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 }
 
@@ -1159,7 +1157,6 @@ func TestCreateRepositoryMonitorCommandEventAcceptsSameHeadFixCIRequests(t *test
 			require.Equal(t, first.ID, actions[0].CommandEventID)
 			require.Equal(t, "queued", actions[0].Status)
 			if tt.priorRunPhase != "" {
-				// Model controller completion so an intentional retry is not active-work coalescing.
 				completedAt := time.Now()
 				first.Status = "processed"
 				require.NoError(t, handlers.repositoryMonitorStore.UpdateCommandEvent(t.Context(), &first))

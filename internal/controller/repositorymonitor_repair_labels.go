@@ -14,53 +14,30 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// repositoryMonitorRepairSkipLabelActorNotPermitted records that the account
-// that added a repair label lacks the permission label commands require.
 const repositoryMonitorRepairSkipLabelActorNotPermitted = "repair_label_actor_not_permitted"
 
-// repositoryMonitorRepairSkipScopeWithdrawn records that a queued policy
-// repair lost its repair scope, such as a removed repair label, before it ran.
 const repositoryMonitorRepairSkipScopeWithdrawn = "repair_scope_withdrawn"
 
-// repositoryMonitorRepairSkipNoIntroducedCIFailure records that a queued
-// policy CI repair found no failing check the pull request introduced.
 const repositoryMonitorRepairSkipNoIntroducedCIFailure = "no_introduced_ci_failure"
 
-// repositoryMonitorIssueEventPageLimit bounds the issue event scan. A pull
-// request with a longer history fails closed rather than trusting a partial log.
 const repositoryMonitorIssueEventPageLimit = 10
 
-// repositoryMonitorPullRequestBrokeCI reports whether a failing CI check on
-// the pull request head is the pull request's own. A check that also fails on
-// the base commit was already broken and is left alone; with no base result
-// to compare, every failure counts.
 func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestBrokeCI(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (bool, error) {
 	failures, err := r.repositoryMonitorPullRequestCIFailures(ctx, monitor, pr)
 	return failures.broke, err
 }
 
-// repositoryMonitorCIFailures splits the failing checks on a pull request
-// head into those the pull request introduced and those also failing on its
-// base commit.
 type repositoryMonitorCIFailures struct {
-	broke bool
-	// incomplete means GitHub returned partial CI results for the head or
-	// its base, so the failures cannot be classified yet.
-	incomplete bool
-	introduced []repositoryMonitorCIFailure
-	inherited  []repositoryMonitorCIFailure
-	// pending lists head check runs that had not completed.
-	pending []repositoryMonitorCIFailure
-	// headIncomplete means the failing head result came from partial check
-	// runs or statuses, so introduced may not list every failure.
+	broke          bool
+	incomplete     bool
+	introduced     []repositoryMonitorCIFailure
+	inherited      []repositoryMonitorCIFailure
+	pending        []repositoryMonitorCIFailure
 	headIncomplete bool
 }
 
-// errRepositoryMonitorCIIncomplete defers work that needs complete CI results.
 var errRepositoryMonitorCIIncomplete = errors.New("CI results for the pull request head or its base are incomplete")
 
-// repositoryMonitorBaseCICacheKey scopes base-commit CI results to one
-// inventory run.
 type repositoryMonitorBaseCICacheKey struct{}
 
 type repositoryMonitorBaseCICache struct {
@@ -68,9 +45,6 @@ type repositoryMonitorBaseCICache struct {
 	results map[string]repositoryMonitorCIResult
 }
 
-// withRepositoryMonitorBaseCICache lets every pull request in one inventory
-// run share the CI result of a base commit. Base results only classify head
-// failures as introduced or inherited; head results are never cached.
 func withRepositoryMonitorBaseCICache(ctx context.Context) context.Context {
 	if _, ok := ctx.Value(repositoryMonitorBaseCICacheKey{}).(*repositoryMonitorBaseCICache); ok {
 		return ctx
@@ -98,9 +72,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorBaseCI(ctx context.Contex
 	return result, err
 }
 
-// repositoryMonitorCIFailureNames names failures for a repair prompt. A name
-// that a failure in other also carries is qualified with its source, so a
-// check run and a status context sharing a name stay distinguishable.
 func repositoryMonitorCIFailureNames(failures, other []repositoryMonitorCIFailure) []string {
 	otherNames := make(map[string]struct{}, len(other))
 	for _, failure := range other {
@@ -147,8 +118,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 	if err != nil {
 		return repositoryMonitorCIFailures{}, err
 	}
-	// A partial base result could hide a failure the head inherits, which
-	// would then count as introduced; wait for complete results.
 	if base.reason == repositoryMonitorCIChecksIncomplete || base.incomplete {
 		return repositoryMonitorCIFailures{incomplete: true}, nil
 	}
@@ -168,10 +137,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 	return failures, nil
 }
 
-// repositoryMonitorRepairLabelActorPermitted reports whether an account that
-// added one of labels to pr has the permission label commands require.
-// Inventory sees labels but not who added them, so the issue event log names
-// the account behind each current label. An unresolved account is refused.
 func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorPermitted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repo string, pr repositoryMonitorPullRequest, labels []string) (bool, error) {
 	present := map[string]struct{}{}
 	for _, label := range pr.Labels {
@@ -190,7 +155,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorPermitted
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
 	}
-	// Events are oldest first, so the last labeled event added the current label.
 	actors := map[string]string{}
 	complete := false
 	for page := 1; page <= repositoryMonitorIssueEventPageLimit; page++ {
@@ -212,8 +176,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorPermitted
 			if _, ok := present[name]; !ok {
 				continue
 			}
-			// A removal seen after the snapshot revokes the earlier labeller,
-			// so a label removed since the snapshot fails closed.
 			switch event.Event {
 			case "labeled":
 				actors[name] = strings.TrimSpace(event.Actor.Login)
@@ -244,8 +206,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorPermitted
 	return false, nil
 }
 
-// repositoryMonitorCollaboratorPermission returns actor's repository role, or
-// "" when actor is not a collaborator.
 func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ctx context.Context, baseURL, owner, repo, token, actor string) (string, error) {
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/collaborators/%s/permission", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(actor))
 	var response struct {
@@ -259,7 +219,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ct
 		}
 		return "", err
 	}
-	// Custom roles report their base permission in permission.
 	switch role := strings.ToLower(strings.TrimSpace(response.RoleName)); role {
 	case "read", "triage", "write", githubPermissionMaintain, githubPermissionAdmin:
 		return role, nil
@@ -267,8 +226,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCollaboratorPermission(ct
 	return strings.ToLower(strings.TrimSpace(response.Permission)), nil
 }
 
-// repositoryMonitorRepairActorPermissionAllowed mirrors the permission check
-// for GitHub label commands.
 func repositoryMonitorRepairActorPermissionAllowed(spec corev1alpha1.RepositoryMonitorSpec, permission string) bool {
 	allowed := []string{"write", githubPermissionMaintain, githubPermissionAdmin}
 	switch strings.ToLower(strings.TrimSpace(spec.Triggers.GitHub.Labels.RequireActorPermission)) {
@@ -290,12 +247,6 @@ func repositoryMonitorPermissionListed(permissions []string, permission string) 
 	})
 }
 
-// repositoryMonitorPolicyRepairWithdrawnReason rechecks a queued controller
-// policy repair before it creates a Task or updates the branch, since its
-// grant can change after acceptance: the repair scope must still cover the
-// intent, the account behind the current repair label must still be
-// permitted, and a CI fix must still have a failure the pull request
-// introduced. Explicit commands keep their own authorization.
 func (r *RepositoryMonitorReconciler) repositoryMonitorPolicyRepairWithdrawnReason(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, owner, repo string, pr repositoryMonitorPullRequest) (string, error) {
 	if command == nil || command.Source != repositoryMonitorControllerPolicySource {
 		return "", nil
@@ -314,8 +265,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPolicyRepairWithdrawnReas
 		}
 	}
 	if command.Intent == repositoryMonitorCommandIntentFixCI {
-		// A lookup error or partial results defer the command rather than
-		// repairing blind or dropping it.
 		failures, err := r.repositoryMonitorPullRequestCIFailures(ctx, monitor, pr)
 		if err != nil {
 			return "", err

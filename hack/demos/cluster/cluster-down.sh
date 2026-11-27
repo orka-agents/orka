@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Tear down the kind cluster used for Orka demos.
 
 set -Eeuo pipefail
 

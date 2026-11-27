@@ -16,7 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// workspaceSpecWrites records every spec write of the fixture's workspace.
 type workspaceSpecWrites struct {
 	mu     sync.Mutex
 	writes []workspacev1alpha1.ExecutionWorkspaceSpec
@@ -34,8 +33,6 @@ func (w *workspaceSpecWrites) all() []workspacev1alpha1.ExecutionWorkspaceSpec {
 	return append([]workspacev1alpha1.ExecutionWorkspaceSpec(nil), w.writes...)
 }
 
-// recordWorkspaceSpecWrites wraps the RuntimePool controller's client so the
-// test sees each workspace write it issues.
 func (f *externalRuntimePoolFixture) recordWorkspaceSpecWrites() *workspaceSpecWrites {
 	recorded := &workspaceSpecWrites{}
 	f.r.Client = interceptor.NewClient(f.r.Client.(client.WithWatch), interceptor.Funcs{
@@ -49,8 +46,6 @@ func (f *externalRuntimePoolFixture) recordWorkspaceSpecWrites() *workspaceSpecW
 	return recorded
 }
 
-// stageRequesterAttachment stages the requester's attachment exactly as its
-// Task does before the publication, and records the start, demand, and intent.
 func (f *externalRuntimePoolFixture) stageRequesterAttachment(t *testing.T, resume bool) *corev1alpha1.Task {
 	t.Helper()
 	ctx := context.Background()
@@ -85,8 +80,6 @@ func (f *externalRuntimePoolFixture) stageRequesterAttachment(t *testing.T, resu
 	return requester
 }
 
-// suspendServedInstance drives the served first instance through a DataOnly
-// suspension that the provider reports settled with retained data.
 func (f *externalRuntimePoolFixture) suspendServedInstance(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -120,9 +113,6 @@ func (f *externalRuntimePoolFixture) suspendServedInstance(t *testing.T) {
 	}
 }
 
-// ADR 0057: the RuntimePool flips a pending speculative resume back to Ready,
-// publishes the next request, and installs the requester's staged attachment
-// in one write, so the provider observes all three together.
 func TestRuntimePoolFlipsPublishesAndAttachesASpeculativeResumeInOneWrite(t *testing.T) {
 	ctx := context.Background()
 	f := newExternalRuntimePoolFixture(t)
@@ -166,9 +156,6 @@ func TestRuntimePoolFlipsPublishesAndAttachesASpeculativeResumeInOneWrite(t *tes
 	}
 }
 
-// A spare-like runtime that finishes booting right after the publication is
-// admitted exactly once: the attachment arrived in the same generation, so no
-// later attach invalidates the provider's observation.
 func TestSpeculativeFastBootIsAdmittedOnce(t *testing.T) {
 	ctx := context.Background()
 	f := newExternalRuntimePoolFixture(t)
@@ -187,8 +174,6 @@ func TestSpeculativeFastBootIsAdmittedOnce(t *testing.T) {
 		}
 	}
 	generation := published.Generation
-	// The provider observes the single write: it acknowledges the epoch and
-	// the spare runtime is Ready at once.
 	materialized, pod := f.materialize(t)
 	workspace := f.currentWorkspace(t)
 	workspace.Status = materialized.Status

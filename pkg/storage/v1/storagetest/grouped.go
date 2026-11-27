@@ -9,10 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runGroupedWrites checks that a grouped write whose last part fails leaves
-// no part visible. Each case makes the part a provider would naturally write
-// last collide with a stored record, so a provider that writes the group in
-// order and does not roll back the earlier parts fails the case.
 func runGroupedWrites(t *testing.T, newProvider StateFactory) {
 	t.Run("an event and plan whose usage observation conflicts leave nothing", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
@@ -54,7 +50,6 @@ func runGroupedWrites(t *testing.T, newProvider StateFactory) {
 		stored := observations()
 		require.Len(t, stored, 1)
 		require.EqualValues(t, 5, *stored[0].InputTokens, "the observation was changed")
-		// The dedupe key was not consumed either.
 		_, appended, err := p.AppendExecutionEventIfAbsent(ctx, taskEvent(eventsTenant, task, storagev1.ExecutionEventTypePlanUpdated), "grouped-1")
 		require.NoError(t, err)
 		require.True(t, appended, "the failed group kept its dedupe key")
@@ -72,9 +67,6 @@ func runGroupedWrites(t *testing.T, newProvider StateFactory) {
 		before, err := p.GetSession(ctx, "tenant", "chat")
 		require.NoError(t, err)
 
-		// m1 is stored with other content, so the commit reuses an
-		// identifier and must be refused, whichever message a provider
-		// writes first.
 		err = p.CommitSessionTurn(ctx, turnCommit(chatSession(), "turn-2", 1, []storagev1.SessionMessage{
 			{ID: "m2", Role: "user", Content: "again"}, {ID: "m1", Role: "user", Content: "a different message"},
 		}, 5, 6))
@@ -91,9 +83,6 @@ func runGroupedWrites(t *testing.T, newProvider StateFactory) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Second)
-	// collidingDelivery stores a delivery for event under id whose text
-	// differs from the one gatewayDelivery builds, as another operation that
-	// reused the ID would.
 	collidingDelivery := func(t *testing.T, p storagev1.StateProvider, event storagev1.GatewayEvent, id, kind string) storagev1.GatewayDelivery {
 		t.Helper()
 		other := gatewayDelivery(event, id, kind, now)
@@ -109,7 +98,6 @@ func runGroupedWrites(t *testing.T, newProvider StateFactory) {
 		require.True(t, errors.Is(err, storagev1.ErrDuplicateMismatch) || errors.Is(err, storagev1.ErrConflict),
 			"a reused delivery ID: %v", err)
 	}
-	// gatewayBefore reads the event and its Session before the grouped write.
 	gatewayBefore := func(t *testing.T, p storagev1.StateProvider, event storagev1.GatewayEvent) (*storagev1.GatewayEvent, *storagev1.SessionRecord) {
 		t.Helper()
 		stored, err := p.GetGatewayEvent(t.Context(), event.Namespace, event.ID)

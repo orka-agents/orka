@@ -86,9 +86,7 @@ func repositoryScanTaskWorkspaceAtCommit(scan *corev1alpha1.RepositoryScan, inte
 		ref = candidate
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{
-		Intent: intent,
-		// The ACP workspace preflight admits only credential-free HTTPS URLs,
-		// so accepted GitHub-style SSH roots are canonicalized here.
+		Intent:            intent,
 		GitRepo:           security.CanonicalRepositoryCloneURL(scan.Spec.RepoURL),
 		Branch:            security.EffectiveWorkspaceBranch(scan),
 		Ref:               ref,
@@ -96,8 +94,6 @@ func repositoryScanTaskWorkspaceAtCommit(scan *corev1alpha1.RepositoryScan, inte
 		SubPath:           scan.Spec.SubPath,
 	}
 	if intent == corev1alpha1.WorkspaceIntentWrite {
-		// prBaseBranch is a publication field: the ACP workspace preflight
-		// rejects it on non-write intents.
 		workspace.PRBaseBranch = scan.Spec.PRBaseBranch
 		workspace.PublicationGitRepo = security.CanonicalRepositoryCloneURL(scan.Spec.ForkRepo)
 		if workspace.PublicationGitRepo == "" {
@@ -118,11 +114,6 @@ func repositoryScanPatchTaskWorkspace(scan *corev1alpha1.RepositoryScan, branch 
 	workspace := repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentWrite)
 	if workspace != nil {
 		workspace.PushBranch = strings.TrimSpace(branch)
-		// The supervisor's delta check inspects the changed files' new
-		// content, so a remediation that removes a hardcoded credential
-		// still publishes (the secret is gone from the new content) while a
-		// delta that introduces one fails closed — same policy the monitor
-		// implementation tasks use.
 		workspace.RejectSecretLikeContent = true
 	}
 	return workspace

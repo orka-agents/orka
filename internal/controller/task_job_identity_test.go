@@ -259,7 +259,6 @@ func TestRejectedTaskJobRetirementRetriesWithoutReplay(t *testing.T) {
 				require.Zero(t, deletes, "rejection must be durable before deletion")
 			}
 
-			// Resume from persisted state, as a restarted controller would.
 			blocked = false
 			_, err = r.createTaskJob(t.Context(), current, nil, nil)
 			require.NoError(t, err)
@@ -268,7 +267,7 @@ func TestRejectedTaskJobRetirementRetriesWithoutReplay(t *testing.T) {
 			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(job), &batchv1.Job{})))
 			wantCreates := 1
 			if stage == "record rejection" {
-				wantCreates = 2 // Both requests encounter the original Job.
+				wantCreates = 2
 			}
 			require.Equal(t, wantCreates, creates, "a persisted rejection must never recreate execution")
 		})
@@ -293,8 +292,6 @@ func TestRejectedTaskJobRetirementPreservesReplacement(t *testing.T) {
 				replaced = true
 				require.NoError(t, c.Delete(ctx, job))
 				require.NoError(t, c.Create(ctx, replacement))
-				// The fake checks resourceVersion but not UID preconditions.
-				// Give the replacement a distinct version to exercise conflict handling.
 				replacement.Annotations = map[string]string{"test.orka.ai/replacement": "true"}
 				require.NoError(t, c.Update(ctx, replacement))
 			}

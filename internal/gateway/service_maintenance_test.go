@@ -16,8 +16,6 @@ import (
 )
 
 func TestServiceStartDispatchesAndDeliversDuringBlockedMaintenance(t *testing.T) {
-	// Keep the fixture's real HTTP listener outside the synctest bubble. The
-	// delivery request still runs through the adapter's handler without a socket.
 	service, db, adapter := newGatewayServiceFixture(t)
 	handler := adapter.Handler()
 	service.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -213,8 +211,6 @@ func (b *gatewayMaintenanceBlocker) ReclaimGatewaySession(ctx context.Context, _
 	if first {
 		close(b.canceled)
 	}
-	// Model a bounded runtime mutation which must finish after cancellation
-	// before the service can relinquish its lifecycle.
 	<-b.exit
 	return ctx.Err()
 }

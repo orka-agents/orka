@@ -1,21 +1,13 @@
 import { cn } from '@/lib/utils'
 
 interface SparklineProps {
-  /** Numeric series to plot, oldest→newest. */
   data: number[]
   width?: number
   height?: number
-  /** Stroke color (defaults to currentColor so callers set it via text-*). */
   className?: string
   'aria-label'?: string
 }
 
-/**
- * Minimal dependency-free sparkline (inline SVG polyline).
- *
- * Renders a numeric series as a small trend line. Empty or single-point series
- * degrade gracefully to an empty (but valid) SVG rather than throwing.
- */
 export function Sparkline({
   data,
   width = 96,
@@ -26,7 +18,6 @@ export function Sparkline({
   const points = (() => {
     if (!data || data.length === 0) return ''
     if (data.length === 1) {
-      // A single point: draw a flat midline so the component still renders.
       const y = height / 2
       return `0,${y} ${width},${y}`
     }

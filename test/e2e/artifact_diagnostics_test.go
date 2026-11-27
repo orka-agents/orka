@@ -26,13 +26,10 @@ func artifactTaskFailureDiagnostics(taskNamespace, taskName string, secrets ...s
 	return collectArtifactTaskDiagnostics(func(ctx context.Context, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, "kubectl", args...)
 		cmd.WaitDelay = time.Second
-		// Never include unrestricted kubectl stderr in a test failure.
 		return cmd.Output()
 	}, taskNamespace, taskName, secrets...)
 }
 
-// collectArtifactTaskDiagnostics reads only this fixture's resources before its
-// cleanup deletes them. The output excludes specs, annotations, results and logs.
 func collectArtifactTaskDiagnostics(run artifactDiagnosticCommand, taskNamespace, taskName string, secrets ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -48,8 +45,6 @@ func collectArtifactTaskDiagnostics(run artifactDiagnosticCommand, taskNamespace
 				return object
 			}
 		}
-		// Errors and malformed responses may contain credentials. Report only
-		// which resource could not be read, then continue with the other reads.
 		unavailable = append(unavailable, resource)
 		return nil
 	}
@@ -79,7 +74,6 @@ func collectArtifactTaskDiagnostics(run artifactDiagnosticCommand, taskNamespace
 		}
 		list := read("events", "--field-selector=involvedObject.uid="+uid, "--sort-by=.lastTimestamp")
 		items := artifactDiagnosticItems(list)
-		// Retain the latest events for each exact object identity.
 		for _, event := range items[max(0, len(items)-15):] {
 			summary := artifactDiagnosticFields(event, "type", "reason", "message", "count", "firstTimestamp", "lastTimestamp", "eventTime")
 			involved, _ := event["involvedObject"].(map[string]any)
@@ -149,8 +143,6 @@ func artifactDiagnosticFields(object map[string]any, fields ...string) map[strin
 	selected := map[string]any{}
 	for _, field := range fields {
 		if value, ok := object[field]; ok {
-			// Every selected leaf is scalar. Do not accept a nested object in a
-			// malformed response where one of those fields should have been.
 			switch value.(type) {
 			case string, float64, bool, nil:
 				selected[field] = value

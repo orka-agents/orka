@@ -42,29 +42,17 @@ const (
 	operatorAccessCapabilityHeader    = "X-Orka-Operator-Access-Capability"
 )
 
-// Replaceable in tests.
 var (
 	operatorExecOptionsReadTimeout = 30 * time.Second
-	// operatorFileTransferTimeout bounds a whole supervisor file transfer,
-	// including its bodies. The supervisor bounds the operation itself at
-	// five minutes.
-	operatorFileTransferTimeout = 6 * time.Minute
+	operatorFileTransferTimeout    = 6 * time.Minute
 )
 
-// OperatorAccessConfig enables `orka task exec` / `orka task cp`. It is
-// disabled unless the controller runs with --operator-workspace-access-enabled.
 type OperatorAccessConfig struct {
-	Enabled bool
-	// HTTPClient reaches runtime supervisors. Nil uses a dedicated client
-	// that never consults proxy environment variables.
+	Enabled    bool
 	HTTPClient *http.Client
-	// Audit receives every operator access record. Nil logs and emits a
-	// Kubernetes Event on the Task.
-	Audit OperatorAuditSink
+	Audit      OperatorAuditSink
 }
 
-// OperatorAuditRecord is one audit record. It never carries raw argv, file
-// content, credentials, or tokens.
 type OperatorAuditRecord struct {
 	AuditID                  string                   `json:"auditID"`
 	Phase                    string                   `json:"phase"`
@@ -90,17 +78,14 @@ type OperatorAuditRecord struct {
 	FinishedAt               *time.Time               `json:"finishedAt,omitempty"`
 }
 
-// Audit phases.
 const (
 	OperatorAuditStarted  = "started"
 	OperatorAuditFinished = "finished"
 	OperatorAuditDenied   = "denied"
 )
 
-// operatorOutcomeFailed is the audit outcome for an unclassified failure.
 const operatorOutcomeFailed = "failed"
 
-// OperatorAuditSink receives operator access audit records.
 type OperatorAuditSink interface {
 	Record(ctx context.Context, record OperatorAuditRecord)
 }
@@ -145,13 +130,6 @@ const (
 	maxOperatorAuditOutcomeChars = 512
 )
 
-// sanitizeOperatorAuditRecord is the single choke point between operator
-// access and every audit sink, log line, and Task Event. Records never carry
-// raw argv, environment, file content, or upload bodies; the remaining
-// free-text fields (the command basename, the copy path, caller-supplied names
-// recorded before a Task is read, and relayed error outcomes) are redacted
-// with the shared rules, replaced outright when they still look like a
-// credential, and bounded.
 func sanitizeOperatorAuditRecord(record OperatorAuditRecord) OperatorAuditRecord {
 	record.Namespace = sanitizeOperatorAuditText(record.Namespace, maxOperatorAuditNameChars)
 	record.Task = sanitizeOperatorAuditText(record.Task, maxOperatorAuditNameChars)
@@ -236,22 +214,13 @@ func newOperatorAuditID() string {
 	return "op-" + hex.EncodeToString(raw)
 }
 
-// operatorAuditEnvelopeKey stores the request's audit envelope in fiber
-// Locals so the route middleware and the handler share one audit ID.
 const operatorAuditEnvelopeKey = "orka.operatorAuditEnvelope"
 
-// operatorAuditEnvelope carries the safe actor/target identity of one
-// operator request from before route authorization until a handler takes
-// over its started/finished lifecycle. Any refusal before that point is
-// recorded exactly once as denied.
 type operatorAuditEnvelope struct {
 	record   OperatorAuditRecord
 	recorded bool
 }
 
-// operatorRequestAudit returns the request's audit envelope, creating it from
-// the authenticated identity and the requested namespace and Task name. The
-// Task UID stays empty until the Task has actually been read.
 func operatorRequestAudit(c fiber.Ctx, operation operatoraccess.Operation) *operatorAuditEnvelope {
 	if envelope, ok := c.Locals(operatorAuditEnvelopeKey).(*operatorAuditEnvelope); ok && envelope != nil {
 		return envelope
@@ -265,8 +234,6 @@ func operatorRequestAudit(c fiber.Ctx, operation operatoraccess.Operation) *oper
 	return envelope
 }
 
-// auditOperatorRefusal records err as a denied attempt unless a record for
-// this request was already written.
 func (s *Server) auditOperatorRefusal(c fiber.Ctx, envelope *operatorAuditEnvelope, err error) {
 	if err == nil || envelope == nil || envelope.recorded {
 		return
@@ -278,8 +245,6 @@ func (s *Server) auditOperatorRefusal(c fiber.Ctx, envelope *operatorAuditEnvelo
 	s.operatorAudit(c.Context(), record)
 }
 
-// operatorRouteAudit runs before route authorization, so dedicated
-// permission denials are audited like every later refusal.
 func (s *Server) operatorRouteAudit(operation operatoraccess.Operation) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		envelope := operatorRequestAudit(c, operation)
@@ -300,12 +265,6 @@ func operatorScopeFor(operation operatoraccess.Operation) string {
 	}
 }
 
-// authorizeOperatorCaller enforces the caller-type rules on top of the route
-// policy. TokenReview identities passed the dedicated SubjectAccessReview in
-// the route policy. Context-token callers need the explicit operator scope and
-// a namespace-bound transaction context, regardless of the context-token
-// authorization mode. Every other identity type (OIDC, unauthenticated) is
-// refused because it has no Kubernetes identity to review.
 func authorizeOperatorCaller(ui *UserInfo, operation operatoraccess.Operation, namespace string) error {
 	if ui == nil {
 		return fiber.NewError(fiber.StatusUnauthorized, "authentication is required")
@@ -343,15 +302,8 @@ func operatorConflict(message string) error {
 	return fiber.NewError(fiber.StatusConflict, message)
 }
 
-// resolveOperatorTarget authorizes the caller and resolves the exact live
-// RuntimeSession that belongs to the requested Task, failing closed at every
-// identity link: Task -> linked ExecutionWorkspace incarnation -> class
-// opt-in -> RuntimePool -> active Pod -> supervisor capability.
-//
 //nolint:gocyclo // Every link of the identity chain is verified in one auditable place.
 func (s *Server) resolveOperatorTarget(c fiber.Ctx, operation operatoraccess.Operation) (*operatorTarget, error) {
-	// Every refusal below is audited as denied by the caller with whatever
-	// identity was established; the Task UID is recorded only once read.
 	envelope := operatorRequestAudit(c, operation)
 	target := &operatorTarget{record: envelope.record}
 	defer func() { envelope.record = target.record }()
@@ -513,10 +465,6 @@ func (s *Server) resolveOperatorTarget(c fiber.Ctx, operation operatoraccess.Ope
 	return target, nil
 }
 
-// operatorWorkspaceOwnedByTask accepts the Task that holds the attachment, or
-// the Task that held the most recent attachment of a detached (retained)
-// workspace. A workspace attached to, or since attached by, another Task is
-// never reachable through an older Task.
 func operatorWorkspaceOwnedByTask(workspace *workspacev1alpha1.ExecutionWorkspace, task *corev1alpha1.Task) bool {
 	if attachment := workspace.Spec.Attachment; attachment != nil {
 		return attachment.TaskRef.UID == task.UID
@@ -525,11 +473,6 @@ func operatorWorkspaceOwnedByTask(workspace *workspacev1alpha1.ExecutionWorkspac
 	return err == nil && epoch > 0 && epoch == workspace.Spec.AttachmentEpoch
 }
 
-// operatorWorkspaceStillTargeted reports whether workspace is still the exact
-// incarnation, attachment, and attachment epoch the request was authorized
-// against. A handoff to a continuation advances the attachment epoch, so a
-// request authorized for the old Task can never act on its successor's
-// workspace even when the successor reuses the same RuntimeSession.
 func operatorWorkspaceStillTargeted(workspace *workspacev1alpha1.ExecutionWorkspace, target *operatorTarget) error {
 	switch {
 	case workspace.UID != target.workspace.UID || !workspace.DeletionTimestamp.IsZero():
@@ -542,11 +485,6 @@ func operatorWorkspaceStillTargeted(workspace *workspacev1alpha1.ExecutionWorksp
 	return nil
 }
 
-// revalidateOperatorTarget re-reads the Task, its workspace attachment, and
-// the class opt-in immediately before anything is forwarded to the runtime.
-// The target was resolved before the exec request arrived, which a client
-// may delay; the class opt-in may have been withdrawn or the workspace handed
-// to a continuation in the meantime.
 func (s *Server) revalidateOperatorTarget(ctx context.Context, target *operatorTarget, operation operatoraccess.Operation) error {
 	reader := s.authorizationReader()
 	task := &corev1alpha1.Task{}
@@ -630,9 +568,6 @@ func (target *operatorTarget) metadata(operation operatoraccess.Operation) harne
 	}
 }
 
-// taintOperatorTarget durably marks the exact workspace incarnation and the
-// Task before any write-capable operation starts. Failure refuses the
-// operation. The workspace patch is UID- and resourceVersion-preconditioned.
 func (s *Server) taintOperatorTarget(ctx context.Context, target *operatorTarget) error {
 	value := operatoraccess.EncodeTaint(operatoraccess.Taint{
 		At: time.Now().UTC(), Operation: target.record.Operation, AuditID: target.record.AuditID, TaskUID: string(target.task.UID),
@@ -642,10 +577,6 @@ func (s *Server) taintOperatorTarget(ctx context.Context, target *operatorTarget
 		if err := s.authorizationReader().Get(ctx, client.ObjectKeyFromObject(target.workspace), workspace); err != nil {
 			return fmt.Errorf("read execution workspace: %w", err)
 		}
-		// The ownership check and the taint write are one optimistic-lock
-		// step: an attachment handoff either lands first and refuses the
-		// taint, or the taint lands first and the attachment manager, which
-		// revalidates every attempt, refuses to hand a tainted workspace on.
 		if err := operatorWorkspaceStillTargeted(workspace, target); err != nil {
 			return err
 		}

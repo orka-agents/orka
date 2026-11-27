@@ -198,7 +198,6 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 		HeadRepo:   "orka-agents/orka",
 	}
 
-	// 1. Trust gating: only allowlisted bot and write-permission human are admitted.
 	threads, err := r.fetchRepositoryMonitorExternalReviewThreads(ctx, monitor, "orka-agents", "orka", pr)
 	if err != nil {
 		t.Fatalf("fetchRepositoryMonitorExternalReviewThreads: %v", err)
@@ -213,14 +212,12 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 		t.Fatalf("unexpected human thread: %+v", threads[1])
 	}
 
-	// 2. Automatic repair intent triggers "fix" even without Orka review findings.
 	item := &store.MonitorItem{Number: 42, HeadSHA: pr.HeadSHA}
 	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, "orka-agents", "orka", pr, item, true, false, false)
 	if err != nil || intent != repositoryMonitorCommandIntentFix {
 		t.Fatalf("automatic repair intent = (%q, %v), want %q", intent, err, repositoryMonitorCommandIntentFix)
 	}
 
-	// 3. Prompt embeds externalReviewThreads and passes instruction verification.
 	prompt, err := r.buildRepositoryMonitorRepairPromptWithCI(ctx, monitor, repositoryMonitorCommandIntentFix, "orka-agents/orka", pr, item, nil)
 	if err != nil {
 		t.Fatalf("buildRepositoryMonitorRepairPromptWithCI: %v", err)
@@ -232,8 +229,6 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 		t.Fatalf("prompt with externalReviewThreads failed instructions match check")
 	}
 
-	// 4. After VerifiedExact push, replies are posted to both threads, bot thread
-	// is resolved (resolveBots=true), human thread is NOT resolved (resolveOnFix=false).
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: monitor.Namespace, Name: "repair-task-42"},
 		Spec:       corev1alpha1.TaskSpec{Prompt: prompt},
@@ -273,7 +268,6 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 		t.Fatalf("resolved threads = %v, want [PRRT_bot_1]", gotResolved)
 	}
 
-	// 5. Idempotency: re-running after mutation records exist must not post duplicate replies.
 	r.replyExternalReviewThreadsAfterRepairBestEffort(ctx, monitor, job, task)
 	mu.Lock()
 	afterRetryReplies := len(replies)
@@ -283,8 +277,6 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 		t.Fatalf("retry duplicated mutations: replies=%d resolved=%d", afterRetryReplies, afterRetryResolved)
 	}
 
-	// 5b. Cross-head suppression: after the push to bbb..., unchanged unresolved
-	// threads must not be re-selected as fresh work.
 	pushedPR := pr
 	pushedPR.HeadSHA = job.PushedSHA
 	remaining, err := r.fetchRepositoryMonitorExternalReviewThreads(ctx, monitor, "orka-agents", "orka", pushedPR)
@@ -295,13 +287,11 @@ func TestRepositoryMonitorExternalReviewCommentsTrustGatingAndRepairLoop(t *test
 		t.Fatalf("expected 0 remaining threads on pushed head for unchanged revisions, got %+v", remaining)
 	}
 
-	// 5c. Partially malformed JSON must be discarded rather than returning half-populated entries.
 	malformed := parseRepositoryMonitorRepairExternalResult([]byte(`{"addressedThreads":[{"threadId":"PRRT_bot_1","status":"fixed","note":42}]}`))
 	if len(malformed.AddressedThreads) != 0 {
 		t.Fatalf("expected malformed JSON to be discarded, got %+v", malformed)
 	}
 
-	// 6. Missing structured addressedThreads must NOT fabricate replies or resolve threads.
 	taskNoResult := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: monitor.Namespace, Name: "repair-task-42-no-result"},
 		Spec:       corev1alpha1.TaskSpec{Prompt: prompt},

@@ -27,33 +27,18 @@ import { actionErrorMessage } from './action-error'
 import { isTaskDeleting } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
 
-// Rows revealed per "Show more". Sorting and filtering see the whole loaded
-// list; only rendering is incremental.
 const rowsPerReveal = 25
 
 export function TaskList() {
-  // The API pages in name order, so sorting one page at a time kept a new
-  // task whose name sorts late off the first screen. Walk every page up to
-  // the shared summary cap instead; this is the Board's query, so the two
-  // views share one cache entry.
   const { data, isLoading, error: listError } = useTaskListAll('100', 10000)
-  // A 403 always replaces the list; any other failure only blocks a list that
-  // never loaded, so a failed background refresh keeps the rows.
   const error = listError && (isForbiddenError(listError) || !data) ? listError : null
   const deleteTask = useDeleteTask()
   const navigate = useNavigate()
   const [filter, setFilter] = useState('')
   const [shownCount, setShownCount] = useState(rowsPerReveal)
-  // The task whose delete is awaiting confirmation. The dialog lives outside
-  // the table so its clicks never bubble into a row's navigate handler.
   const [pendingDelete, setPendingDelete] = useState<Task | null>(null)
-  // isPending lands a render later, so a fast double click needs a
-  // synchronous guard to send a single DELETE.
   const deletingRef = useRef(false)
 
-  // An errored list must not keep rendering a previous token's or
-  // namespace's rows; the access panel replaces it. The items array is the
-  // shared cache's, so it is copied before sorting.
   const tasks = useMemo(
     () => (error ? [] : [...(data?.items ?? [])].sort(compareTasksNewestFirst)),
     [data, error],
@@ -116,9 +101,6 @@ export function TaskList() {
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              {/* Type, Namespace, and Age give way on narrow screens so Name,
-                  Phase, and Delete fit without sideways scrolling; the list is
-                  namespace-scoped and newest first anyway. */}
               <TableHead className="hidden sm:table-cell">Type</TableHead>
               <TableHead>Phase</TableHead>
               <TableHead className="hidden md:table-cell">Namespace</TableHead>
@@ -158,18 +140,11 @@ export function TaskList() {
                 <TableRow
                   key={task.metadata.uid || task.metadata.name}
                   className="cursor-pointer"
-                  // The name link is the keyboard and assistive-technology
-                  // path; the row click is a pointer convenience that leaves
-                  // the row's own links and buttons alone.
                   onClick={(e) => {
                     if ((e.target as HTMLElement).closest('a, button')) return
                     navigate({ to: '/tasks/$taskId', params: { taskId: task.metadata.name } })
                   }}
                 >
-                  {/* At every width the name takes only the width the other
-                      columns leave and truncates, so a long generated name
-                      (scan runs are ~60 characters) never pushes Phase or
-                      Delete out of view; the full name is in its title. */}
                   <TableCell className="w-full max-w-0">
                     <Link
                       to="/tasks/$taskId"
@@ -182,9 +157,6 @@ export function TaskList() {
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">{taskTypeLabel(task.spec.type)}</TableCell>
                   <TableCell>
-                    {/* The name column takes the spare width, so the phase
-                        badges stack when narrow but stay on one line once
-                        there is room for them. */}
                     <span className="flex flex-wrap items-center gap-1 lg:flex-nowrap">
                       <TaskStatusBadge phase={task.status?.phase} />
                       <TaskStateBadges task={task} />

@@ -15,7 +15,6 @@ describe('matchesTaskFilter', () => {
   const ai = task('summarize', 'ai', 'Succeeded')
 
   it('matches type and phase as words, not inside other words', () => {
-    // "container" contains "ai"; that must not make every Container match.
     expect(matchesTaskFilter(container, 'ai')).toBe(false)
     expect(matchesTaskFilter(ai, 'ai')).toBe(true)
     expect(matchesTaskFilter(ai, 'AI')).toBe(true)

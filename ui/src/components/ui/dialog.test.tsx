@@ -6,8 +6,6 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from './dialog'
 
 describe('DialogContent', () => {
   it('leaves focus restoration to Radix when nothing had focus at open', async () => {
-    // Opening with nothing focused, as after a Safari click (which does not
-    // focus the button): Radix must still return focus to its trigger.
     render(
       <Dialog defaultOpen>
         <DialogPrimitive.Trigger>Open</DialogPrimitive.Trigger>

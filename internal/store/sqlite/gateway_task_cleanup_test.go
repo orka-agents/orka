@@ -55,7 +55,6 @@ func TestGatewayTaskCleanupReceiptRequiresRetentionCompaction(t *testing.T) {
 	event := admitGatewayTaskCleanupTestEvent(t, s, gatewayTaskCleanupTestEvent(now.Add(-2*time.Hour), "retention-receipt"))
 	cutoff := now.Add(-time.Hour)
 
-	// A linked Task alone is not retention evidence, even when it is old.
 	result, err := s.MaintainGatewayRecords(ctx, event.Namespace, now, cutoff)
 	require.NoError(t, err)
 	require.Zero(t, result.DeletedEvents)
@@ -164,8 +163,6 @@ func TestGatewayTaskCleanupReceiptSurvivesTombstoneExpiryAndReopen(t *testing.T)
 	s = NewStore(reopened, s.dbPath)
 	require.Equal(t, originalReceipt, requireGatewayTaskCleanupReceipt(t, s, event, now))
 
-	// A later admission deliberately reuses the external ID and Task name,
-	// but its distinct Task UID must retain separate cleanup evidence.
 	fresh := gatewayTaskCleanupTestEvent(afterExpiry, "persistent-receipt")
 	fresh.TaskUID = "replacement-task-uid"
 	fresh = admitGatewayTaskCleanupTestEvent(t, s, fresh)
@@ -184,8 +181,6 @@ func TestGatewayTaskCleanupReceiptSurvivesTombstoneExpiryAndReopen(t *testing.T)
 	require.NoError(t, s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM gateway_task_cleanup_receipts`).Scan(&receipts))
 	require.Equal(t, 2, receipts)
 
-	// Once the original Task is gone, removing its exact receipt must preserve
-	// the replacement's authority and both Sessions' independent completions.
 	for _, identity := range [][3]string{
 		{"other", event.TaskName, event.TaskUID},
 		{event.Namespace, "other-task", event.TaskUID},
@@ -281,8 +276,6 @@ func TestGatewayTaskCleanupReceiptRefusesContradictoryOwnership(t *testing.T) {
 			require.NoError(t, err)
 			original := requireGatewayTaskCleanupReceipt(t, s, event, now)
 
-			// Exercise an exact retry and a contradictory writer inside the same
-			// transaction boundary used by maintenance. Neither may rewrite evidence.
 			tx, err := s.db.BeginTx(ctx, nil)
 			require.NoError(t, err)
 			require.NoError(t, archiveGatewayTaskCleanupReceiptTx(ctx, tx, &event, now.Add(time.Hour)))

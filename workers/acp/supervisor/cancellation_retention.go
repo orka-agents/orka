@@ -7,9 +7,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// cancelRetiredPromptLocked returns recorded proof after automatic cleanup has
-// overtaken a controller cancellation. Authentication and canonical request
-// validation have already run. It always releases s.mu before returning.
 func (s *Server) cancelRetiredPromptLocked(w http.ResponseWriter, r *http.Request, request harnessv2.CancelPromptRequest, now time.Time) {
 	s.pruneTombstonesLocked(now)
 	tombstone, ok := s.tombstones[request.Metadata.Fence.RuntimeSessionUID]
@@ -56,8 +53,6 @@ func (s *Server) cancelRetiredPromptLocked(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "runtime session operation journal is full", nil, false)
 		return
 	}
-	// Cleanup proves that the child is gone; only the retained settlement
-	// proves its outcome. In particular, OutcomeUnknown stays unproven.
 	response := cancellationResponse(harnessv2.Classification{Class: harnessv2.RequestClassificationFresh}, tombstone.prompt.settlement, 0, false)
 	tombstone.cancellationOperations[request.Metadata.OperationID] = operationRecord(
 		request.Metadata, harnessv2.OperationPhaseSettled, response.Settlement.TerminalEvent, now,

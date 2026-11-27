@@ -18,9 +18,6 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			path, db := historicalSchemaDB(t, revision)
 			seedMigrationRecords(t, db, path)
 			old := NewStore(db, path)
-			// The storage client seals with the record formats earlier
-			// releases used; historical layouts cannot activate a key, so a
-			// scratch client seals for them.
 			sealer := newScratchSealer(t)
 			body := []byte(`{"prompt":"synthetic retained snapshot"}`)
 			key := store.AgentExecutionSnapshotKey{TaskUID: "historical-task", Digest: store.CanonicalAgentExecutionSnapshotDigest(body)}
@@ -36,8 +33,6 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			if revision == "abd2c040" || revision == "fdb64ecd" {
 				sealer.stageNativeImport(t, old, nativeImportFixture(t, "native", "retained native history"))
 			}
-			// The upgrade gives existing results and artifacts the write stamp
-			// (0, 0) and changes no other value.
 			before := runTableApplicationRows(consolidatedApplicationRows(t, stampedApplicationRows(t, applicationRows(t, db))))
 			require.NoError(t, db.Close())
 			s, err := OpenLockedStore(path)
@@ -139,8 +134,6 @@ func TestDatasetFreshCreationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
-	// Versions 1 and 2 are earlier releases' markers, which only their exact
-	// layouts may carry; SchemaVersion is this release's and the next is newer.
 	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
 		for marker := 1; marker <= SchemaVersion+1; marker++ {
 			t.Run(fmt.Sprintf("%s/version-%d", revision, marker), func(t *testing.T) {

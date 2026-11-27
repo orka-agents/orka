@@ -10,7 +10,6 @@ describe('connectors helpers', () => {
     expect(readCompletionToken()).toBe('tok+1')
     clearConsentCallback()
     expect(window.location.hash).toBe('')
-    // The callback keys go with the token; unrelated query state stays.
     expect(window.location.search).toBe('?other=1')
     expect(readCompletionToken()).toBeNull()
   })

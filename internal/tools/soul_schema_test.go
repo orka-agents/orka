@@ -79,7 +79,6 @@ func TestSoulRuntimeValidationRejectsMixedSources(t *testing.T) {
 
 func TestSoulSchemasEnforceNonWhitespace(t *testing.T) {
 	values := []string{"", " \t\n\v\f\r", "persona", "\tpersona\u3000", "\u200b", "\ufeff", "\u180e", "\x1c"}
-	// Enumerate Go's whitespace set rather than duplicating the schema's class.
 	for r := rune(0); r <= unicode.MaxRune; r++ {
 		if unicode.IsSpace(r) {
 			values = append(values, string(r))
@@ -183,8 +182,6 @@ func TestSoulSchemasUTF8ByteLimit(t *testing.T) {
 			for _, tc := range cases {
 				t.Run(tc.name, func(t *testing.T) {
 					value := map[string]any{"inline": tc.text}
-					// Standard maxLength counts Unicode characters, so multibyte
-					// overflow can pass the schema while runtime validation rejects it.
 					if err := resolved.Validate(value); (err == nil) != tc.schemaValid {
 						t.Errorf("schema valid=%v, error=%v", tc.schemaValid, err)
 					}

@@ -39,7 +39,6 @@ func TestInit(t *testing.T) {
 			if shutdown == nil {
 				t.Fatal("Init() returned nil shutdown")
 			}
-			// Shutdown should not error, even when no local collector is running.
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			if err := shutdown(shutdownCtx); err != nil {
@@ -187,8 +186,6 @@ func TestTracerProviderDoesNotRecordPanicText(t *testing.T) {
 func TestSDKSamplerEnvironmentAlwaysOffDropsSpans(t *testing.T) {
 	t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
 	recorder := tracetest.NewSpanRecorder()
-	// Intentionally omit WithSampler: the Go SDK provider reads OTEL_TRACES_SAMPLER
-	// from the environment when no explicit sampler option is supplied.
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	defer provider.Shutdown(context.Background()) //nolint:errcheck
 	_, span := provider.Tracer("test").Start(context.Background(), "dropped")
@@ -201,7 +198,6 @@ func TestSDKSamplerEnvironmentAlwaysOffDropsSpans(t *testing.T) {
 func TestSDKSamplerEnvironmentParentBasedPreservesSampledRemoteParent(t *testing.T) {
 	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_always_off")
 	recorder := tracetest.NewSpanRecorder()
-	// Intentionally omit WithSampler so this covers SDK environment sampler wiring.
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	defer provider.Shutdown(context.Background()) //nolint:errcheck
 	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")

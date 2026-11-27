@@ -16,11 +16,8 @@ func TestSSETerminalErrorScannerDetectsInStreamFailures(t *testing.T) {
 		"data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.failed\"}",
 		"data: {\"padding\":\"" + strings.Repeat("x", 2048) + "\",\"type\":\"response.failed\"}\n\n",
 	}
-	// One failure stream deliberately ends without a trailing newline:
-	// the flush at end-of-stream must scan the residual line.
 	for _, stream := range failures {
 		scanner := &sseTerminalErrorScanner{}
-		// Feed byte-by-byte to prove chunk boundaries cannot hide a marker.
 		for i := 0; i < len(stream); i++ {
 			if _, err := scanner.Write([]byte{stream[i]}); err != nil {
 				t.Fatal(err)
@@ -111,8 +108,6 @@ func TestSSETerminalErrorScannerCapturesFullErrorDetail(t *testing.T) {
 	}
 }
 
-// testAllocateInferenceSeq mirrors admission-time sequence allocation for
-// fixtures that record outcomes without an HTTP request.
 func testAllocateInferenceSeq(s *providerProxySession) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -131,8 +126,6 @@ func TestSanitizeProviderUpstreamDetailReassemblesWrappedCredential(t *testing.T
 
 func TestSanitizeProviderUpstreamDetailWithholdsPolicyMatchedCredentials(t *testing.T) {
 	t.Parallel()
-	// Not a real key: a bare AWS access-key ID shape the redactor does not
-	// recognize but the secret policy does.
 	const awsKeyShaped = "AKIA" + "IOSFODNN7EXAMPLE"
 	got := sanitizeProviderUpstreamDetail("invalid credentials for access key " + awsKeyShaped)
 	if strings.Contains(got, awsKeyShaped) {

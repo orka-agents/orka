@@ -23,11 +23,6 @@ import (
 	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
-// HandleOperatorExec upgrades GET /api/v1/tasks/:id/exec to a WebSocket and
-// relays one operator command to the Task's RuntimeSession supervisor. All
-// identity, policy, and class opt-in checks complete before the upgrade, so
-// refusals are ordinary HTTP errors. The command arrives as the first stream
-// message, keeping argv out of URLs and request headers (and access logs).
 func (s *Server) HandleOperatorExec(c fiber.Ctx) error {
 	envelope := operatorRequestAudit(c, operatoraccess.OperationExec)
 	err := s.handleOperatorExec(c, envelope)
@@ -43,8 +38,6 @@ func (s *Server) handleOperatorExec(c fiber.Ctx, envelope *operatorAuditEnvelope
 	if err != nil {
 		return err
 	}
-	// The hijack callback owns every later record of this request: the relay
-	// records the outcome, and a refused handshake is recorded as denied.
 	envelope.recorded = true
 	return hijackWebSocket(c, func(conn *websocket.Conn) {
 		s.relayOperatorExec(conn, target)
@@ -71,10 +64,6 @@ func headerHasToken(value, token string) bool {
 	return false
 }
 
-// hijackWebSocket completes the WebSocket handshake on the raw connection
-// after fasthttp hands it over. Authentication and authorization already ran
-// in the route middleware and the handler. refused runs when the handshake
-// itself is rejected.
 func hijackWebSocket(c fiber.Ctx, run func(*websocket.Conn), refused func()) error {
 	header := http.Header{}
 	for key, value := range c.Request().Header.All() {
@@ -91,9 +80,7 @@ func hijackWebSocket(c fiber.Ctx, run func(*websocket.Conn), refused func()) err
 		conn := closableHijackedConn{Conn: hijacked}
 		writer := newHijackResponseWriter(conn)
 		ws, err := websocket.Accept(writer, request.WithContext(context.Background()), &websocket.AcceptOptions{
-			Subprotocols: []string{operatoraccess.WebSocketSubprotocol},
-			// Operator streams authenticate with bearer credentials, never
-			// ambient browser cookies, so cross-origin checks add nothing.
+			Subprotocols:       []string{operatoraccess.WebSocketSubprotocol},
 			InsecureSkipVerify: true,
 		})
 		if err != nil {
@@ -109,13 +96,6 @@ func hijackWebSocket(c fiber.Ctx, run func(*websocket.Conn), refused func()) err
 	return nil
 }
 
-// closableHijackedConn makes Close effective on a hijacked fasthttp
-// connection. Without KeepHijackedConns fasthttp's Close is a no-op and the
-// socket is closed only after the hijack handler returns, so the WebSocket
-// library's close on a cancelled read or write would leave the blocked I/O,
-// and with it the handler, pinned until the peer acts. An expired deadline
-// interrupts that I/O; fasthttp then closes the socket when the handler
-// returns.
 type closableHijackedConn struct{ net.Conn }
 
 func (c closableHijackedConn) Close() error {
@@ -123,8 +103,6 @@ func (c closableHijackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-// hijackResponseWriter adapts a hijacked fasthttp connection to the
-// net/http handshake API used by the WebSocket library.
 type hijackResponseWriter struct {
 	conn        net.Conn
 	rw          *bufio.ReadWriter
@@ -231,14 +209,10 @@ func (s *Server) relayOperatorExec(client *websocket.Conn, target *operatorTarge
 		s.operatorAudit(ctx, denied)
 		sendOperatorStatus(ctx, client, operatoraccess.Status{ExitCode: -1, Reason: operatoraccess.ExitReasonError, Message: denied.Outcome})
 	}
-	// The client chose when to send argv; the authorization it was resolved
-	// under must still hold now.
 	if err := s.revalidateOperatorTarget(ctx, target, operatoraccess.OperationExec); err != nil {
 		refuse(err)
 		return
 	}
-	// Sign before tainting: a valid argv can still encode past the request
-	// header bound, and that refusal must not forfeit the workspace.
 	request := harnessv2.OperatorExecRequest{
 		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationExec),
 		AuditID: record.AuditID, Exec: options,
@@ -295,8 +269,6 @@ func (s *Server) relayOperatorExec(client *websocket.Conn, target *operatorTarge
 	s.operatorAudit(ctx, operatorFinishRecord(target.record, outcome, exitCode, 0))
 }
 
-// relayOperatorFrames copies validated frames in both directions until the
-// supervisor sends the final status or either side disconnects.
 func relayOperatorFrames(parent context.Context, client, upstream *websocket.Conn, bound time.Duration) (operatoraccess.Status, bool) {
 	ctx, cancel := context.WithTimeout(parent, bound)
 	defer cancel()
@@ -361,8 +333,6 @@ func relayOperatorFrames(parent context.Context, client, upstream *websocket.Con
 	return final, gotFinal.Load()
 }
 
-// HandleOperatorFileDownload streams one regular workspace file out of the
-// Task's RuntimeSession. Read-only copies never taint the session.
 func (s *Server) HandleOperatorFileDownload(c fiber.Ctx) error {
 	envelope := operatorRequestAudit(c, operatoraccess.OperationCopyOut)
 	err := s.handleOperatorFileDownload(c, envelope)
@@ -426,8 +396,6 @@ func (s *Server) handleOperatorFileDownload(c fiber.Ctx, envelope *operatorAudit
 	return nil
 }
 
-// HandleOperatorFileUpload writes one regular file into the Task's
-// RuntimeSession workspace. The session is tainted before the upload starts.
 func (s *Server) HandleOperatorFileUpload(c fiber.Ctx) error {
 	envelope := operatorRequestAudit(c, operatoraccess.OperationCopyIn)
 	err := s.handleOperatorFileUpload(c, envelope)
@@ -450,17 +418,12 @@ func (s *Server) handleOperatorFileUpload(c fiber.Ctx, envelope *operatorAuditEn
 	if err != nil || size < 0 || size > operatoraccess.MaxFileBytes {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("size must be between 0 and %d bytes", operatoraccess.MaxFileBytes))
 	}
-	// The body is forwarded through a reader bounded to size, which would hide
-	// any excess of a chunked or unframed upload from the helper's exact-size
-	// check. Only an upload whose framing proves exactly size bytes is accepted.
 	if length := c.Request().Header.ContentLength(); length < 0 || int64(length) != size {
 		return fiber.NewError(fiber.StatusLengthRequired, "a Content-Length equal to the declared size is required")
 	}
 	if err := s.revalidateOperatorTarget(c.Context(), target, operatoraccess.OperationCopyIn); err != nil {
 		return err
 	}
-	// Sign before tainting: a valid path can still encode past the request
-	// header bound, and that refusal must not forfeit the workspace.
 	request := harnessv2.OperatorFileRequest{
 		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationCopyIn),
 		AuditID: target.record.AuditID, Path: cleaned, Write: true, MaxBytes: max(size, 1), Size: size,
@@ -521,8 +484,6 @@ func parseOperatorBytes(raw string) (int64, error) {
 	return value, nil
 }
 
-// sealedOperatorRequest is a signed operator request header and its
-// single-use capability.
 type sealedOperatorRequest struct {
 	header     string
 	capability string
@@ -544,9 +505,6 @@ func (s *Server) sendOperatorFileRequest(
 	if err != nil {
 		return nil, fiber.NewError(fiber.StatusConflict, "runtime session identity is invalid")
 	}
-	// The transfer outlives the caller's request context, so it carries its
-	// own deadline, held until the response body is closed: the transport's
-	// header timeout covers neither the upload body nor the download body.
 	transferCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), operatorFileTransferTimeout)
 	httpRequest, err := http.NewRequestWithContext(transferCtx, method, target.endpoint+path, body)
 	if err != nil {
@@ -577,7 +535,6 @@ func (s *Server) sendOperatorFileRequest(
 	return response, nil
 }
 
-// cancelOnCloseBody releases a transfer's deadline once its body is closed.
 type cancelOnCloseBody struct {
 	io.ReadCloser
 	cancel context.CancelFunc

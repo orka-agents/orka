@@ -38,7 +38,6 @@ const (
 	StagePatch       = "patch"
 )
 
-// ValidationArtifact captures the per-finding validator/repro payload.
 type ValidationArtifact struct {
 	Version            int                            `json:"version"`
 	FindingID          string                         `json:"finding_id"`
@@ -53,16 +52,12 @@ type ValidationArtifact struct {
 	Controls           []string                       `json:"controls,omitempty"`
 	Blindspots         []string                       `json:"blindspots,omitempty"`
 	Evidence           ValidationArtifactEvidenceRefs `json:"evidence,omitempty"`
-	// Severity and Confidence are the validator's calibrated ratings.
-	Severity   string `json:"severity,omitempty"`
-	Confidence string `json:"confidence,omitempty"`
+	Severity           string                         `json:"severity,omitempty"`
+	Confidence         string                         `json:"confidence,omitempty"`
 }
 
-// validationStatusValidated is the verdict of a confirmed finding.
 const validationStatusValidated = "validated"
 
-// CalibratedRatings returns the severity and confidence the validator
-// assigned to a finding it validated, each empty unless a known rating.
 func (a ValidationArtifact) CalibratedRatings() (severity, confidence string) {
 	if strings.TrimSpace(a.Status) != validationStatusValidated {
 		return "", ""
@@ -72,9 +67,6 @@ func (a ValidationArtifact) CalibratedRatings() (severity, confidence string) {
 	return severity, confidence
 }
 
-// UnmarshalJSON reads a validation artifact leniently: unknown keys are
-// ignored and list fields given as a single string become one entry. The
-// version, finding identity, status, and evidence are still validated.
 func (a *ValidationArtifact) UnmarshalJSON(data []byte) error {
 	type plain ValidationArtifact
 	var raw struct {
@@ -105,9 +97,6 @@ func (a *ValidationArtifact) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// FlexibleText is narrative text that agents sometimes return as structured
-// JSON, such as reproduction steps as an object or array. Structured values
-// are kept as compact JSON text rather than failing the whole result.
 type FlexibleText string
 
 func (t *FlexibleText) UnmarshalJSON(data []byte) error {
@@ -128,8 +117,6 @@ func (t *FlexibleText) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ValidationArtifactEvidenceRefs accepts the structured validation evidence
-// array and the existing shorthand forms used by validation agents.
 type ValidationArtifactEvidenceRefs []store.FindingEvidenceRef
 
 func (e *ValidationArtifactEvidenceRefs) UnmarshalJSON(data []byte) error {
@@ -200,7 +187,6 @@ func validationArtifactEvidenceRefFromJSON(data []byte) (store.FindingEvidenceRe
 	}
 }
 
-// ParseRepositoryURL extracts owner and repo name from GitHub URLs.
 func ParseRepositoryURL(repoURL string) (owner string, repository string) {
 	if trimmed, ok := strings.CutPrefix(repoURL, "git@"); ok {
 		parts := strings.SplitN(trimmed, ":", 2)
@@ -225,8 +211,6 @@ func ParseRepositoryURL(repoURL string) (owner string, repository string) {
 	return segments[0], strings.TrimSuffix(segments[1], ".git")
 }
 
-// ParseGitHubRepositoryURL validates a credential-free GitHub repository URL
-// and returns its owner and repository name.
 func ParseGitHubRepositoryURL(repoURL string) (owner string, repository string, err error) {
 	value := strings.TrimSpace(repoURL)
 	if value == "" {
@@ -254,12 +238,6 @@ func ParseGitHubRepositoryURL(repoURL string) (owner string, repository string, 
 	return githubOwnerRepoFromPath(parsed.Path)
 }
 
-// CanonicalRepositoryCloneURL returns the canonical credential-free HTTPS
-// clone URL for GitHub repository URLs accepted by ParseGitHubRepositoryURL,
-// converting SSH roots (git@github.com:owner/repo[.git]) and normalizing HTTPS
-// forms to https://github.com/owner/repo. This is the only repository form the
-// ACP workspace preflight and the general worker's header-credential clone
-// support. Non-GitHub URLs are returned trimmed and unchanged.
 func CanonicalRepositoryCloneURL(repoURL string) string {
 	trimmed := strings.TrimSpace(repoURL)
 	owner, repository, err := ParseGitHubRepositoryURL(trimmed)
@@ -269,16 +247,6 @@ func CanonicalRepositoryCloneURL(repoURL string) string {
 	return "https://github.com/" + owner + "/" + repository
 }
 
-// CanonicalWorkspaceRepositoryCloneURL canonicalizes a workspace repository
-// URL to the only form the controller's workspace preflight accepts: a
-// credential-free HTTPS URL without query or fragment. GitHub-style SSH roots
-// (git@github.com:owner/repo[.git]) are first converted with
-// CanonicalRepositoryCloneURL. The reject conditions mirror the RULE enforced
-// by the controller's canonicalWorkspaceRepositoryURL — keep them in exact
-// behavior parity (not stricter and not looser) so an accepted URL never
-// fails the controller preflight after a Task is created. Empty input is
-// allowed and returns an empty URL; error text describes only the failed
-// condition so callers can prefix their own field name.
 func CanonicalWorkspaceRepositoryCloneURL(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -307,11 +275,6 @@ func CanonicalWorkspaceRepositoryCloneURL(raw string) (string, error) {
 	return canonical, nil
 }
 
-// WorkspaceRepositoryURLIdentity derives the canonical repository identity for
-// a clone URL that already passed CanonicalWorkspaceRepositoryCloneURL,
-// mirroring the controller's canonicalWorkspaceRepositoryURL derivation:
-// lower-cased host plus the cleaned path with any .git suffix removed, with
-// the path additionally lower-cased for github.com.
 func WorkspaceRepositoryURLIdentity(canonicalURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(canonicalURL))
 	if err != nil {
@@ -328,9 +291,6 @@ func WorkspaceRepositoryURLIdentity(canonicalURL string) (string, error) {
 	return host + "/" + cleaned, nil
 }
 
-// SameWorkspaceRepositoryIdentity mirrors the controller's identity
-// comparison: exact match, or case-insensitive match for github.com
-// identities.
 func SameWorkspaceRepositoryIdentity(first, second string) bool {
 	first = strings.TrimSpace(first)
 	second = strings.TrimSpace(second)
@@ -396,22 +356,18 @@ func sanitizeName(value string) string {
 	return result
 }
 
-// FindingID returns a stable finding identifier derived from its fingerprint.
 func FindingID(fingerprint string) string {
 	return "fnd_" + shortHash(fingerprint)
 }
 
-// ScanRunID returns a scan run ID derived from task identity.
 func ScanRunID(taskName string) string {
 	return "scan_" + shortHash(taskName)
 }
 
-// PatchProposalID returns a stable patch proposal ID for a task.
 func PatchProposalID(taskName string) string {
 	return "patch_" + shortHash(taskName)
 }
 
-// ScanStageTaskName returns a task name for a specific scan stage and optional scope.
 func ScanStageTaskName(repositoryScanName, mode, stage, scope string) string {
 	parts := []string{sanitizeName(repositoryScanName), sanitizeName(mode), sanitizeName(stage)}
 	if strings.TrimSpace(scope) != "" {
@@ -421,8 +377,6 @@ func ScanStageTaskName(repositoryScanName, mode, stage, scope string) string {
 	return boundedTaskName(parts...)
 }
 
-// ScanStageRetryTaskName returns a deterministic task name for one bounded
-// retry of a specific stage within an existing scan run.
 func ScanStageRetryTaskName(repositoryScanName, scanRunID, stage, scope string, attempt int) string {
 	parts := []string{sanitizeName(repositoryScanName), sanitizeName(stage)}
 	if strings.TrimSpace(scope) != "" {
@@ -432,8 +386,6 @@ func ScanStageRetryTaskName(repositoryScanName, scanRunID, stage, scope string, 
 	return boundedTaskName(parts...)
 }
 
-// AutoValidationTaskName binds automatic validation to one finding occurrence
-// so a delayed retry cannot create another Task after a lost creation response.
 func AutoValidationTaskName(repositoryScanName, findingID, scanRunID string) string {
 	return boundedTaskName(
 		sanitizeName(repositoryScanName),
@@ -443,8 +395,6 @@ func AutoValidationTaskName(repositoryScanName, findingID, scanRunID string) str
 	)
 }
 
-// PatchTaskName returns a task name for a patch proposal bound to one finding
-// occurrence.
 func PatchTaskName(repositoryScanName, findingID, scanRunID string) string {
 	return boundedTaskName(
 		sanitizeName(repositoryScanName),
@@ -455,7 +405,6 @@ func PatchTaskName(repositoryScanName, findingID, scanRunID string) string {
 	)
 }
 
-// PatchBranch returns the default branch name for a security patch proposal.
 func PatchBranch(findingID, taskName string) string {
 	return fmt.Sprintf("orka/security/%s-%s", sanitizeName(findingID), shortHash(taskName))
 }
@@ -483,7 +432,6 @@ func boundedTaskName(parts ...string) string {
 	return visible + "-" + hash
 }
 
-// EffectiveValidationMode returns the configured validation mode or the default.
 func EffectiveValidationMode(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.ValidationMode != "" {
 		return scan.Spec.ValidationMode
@@ -491,17 +439,13 @@ func EffectiveValidationMode(scan *corev1alpha1.RepositoryScan) string {
 	return "light"
 }
 
-// EffectiveValidationMaxFindingsPerRun returns the automatic validation cap for light mode.
 func EffectiveValidationMaxFindingsPerRun(scan *corev1alpha1.RepositoryScan) int32 {
 	if scan.Spec.ValidationMaxFindingsPerRun != nil && *scan.Spec.ValidationMaxFindingsPerRun >= 0 {
 		return *scan.Spec.ValidationMaxFindingsPerRun
 	}
-	// Source validation is cheap next to review, so light mode checks every
-	// finding the default run cap can keep.
 	return defaultMaxFindingsPerRun
 }
 
-// EffectiveValidationMinSeverity returns the minimum severity eligible for automatic validation.
 func EffectiveValidationMinSeverity(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.ValidationMinSeverity != "" {
 		return strings.ToLower(strings.TrimSpace(scan.Spec.ValidationMinSeverity))
@@ -509,7 +453,6 @@ func EffectiveValidationMinSeverity(scan *corev1alpha1.RepositoryScan) string {
 	return findingLevelMedium
 }
 
-// EffectiveValidationMinConfidence returns the minimum confidence eligible for automatic validation.
 func EffectiveValidationMinConfidence(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.ValidationMinConfidence != "" {
 		return strings.ToLower(strings.TrimSpace(scan.Spec.ValidationMinConfidence))
@@ -553,7 +496,6 @@ func confidenceRank(value string) int {
 	}
 }
 
-// EffectiveHistoryDays returns the configured history window or a conservative default.
 func EffectiveHistoryDays(scan *corev1alpha1.RepositoryScan) int32 {
 	if scan.Spec.HistoryDays != nil && *scan.Spec.HistoryDays > 0 {
 		return *scan.Spec.HistoryDays
@@ -561,7 +503,6 @@ func EffectiveHistoryDays(scan *corev1alpha1.RepositoryScan) int32 {
 	return 30
 }
 
-// EffectiveMaxFindingsPerRun returns the configured cap or a conservative default.
 func EffectiveMaxFindingsPerRun(scan *corev1alpha1.RepositoryScan) int32 {
 	if scan.Spec.MaxFindingsPerRun != nil && *scan.Spec.MaxFindingsPerRun > 0 {
 		return *scan.Spec.MaxFindingsPerRun
@@ -569,12 +510,8 @@ func EffectiveMaxFindingsPerRun(scan *corev1alpha1.RepositoryScan) int32 {
 	return defaultMaxFindingsPerRun
 }
 
-// defaultMaxFindingsPerRun is the accepted-finding cap when a scan sets none.
-// A full-repository review with cross-component slices routinely keeps more
-// than ten real findings.
 const defaultMaxFindingsPerRun = 25
 
-// EffectiveBranch returns the configured branch or the standard default.
 func EffectiveBranch(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.Branch != "" {
 		return scan.Spec.Branch
@@ -582,13 +519,10 @@ func EffectiveBranch(scan *corev1alpha1.RepositoryScan) string {
 	return "main"
 }
 
-// EffectiveRef returns the configured checkout ref, if any.
 func EffectiveRef(scan *corev1alpha1.RepositoryScan) string {
 	return strings.TrimSpace(scan.Spec.Ref)
 }
 
-// EffectiveWorkspaceBranch returns the branch to pass to git clone for scan workspaces.
-// Ref-only scans must not force the default branch before the worker can check out the ref.
 func EffectiveWorkspaceBranch(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.Branch != "" {
 		return scan.Spec.Branch
@@ -599,9 +533,6 @@ func EffectiveWorkspaceBranch(scan *corev1alpha1.RepositoryScan) string {
 	return EffectiveBranch(scan)
 }
 
-// ValidateRepositoryScanSource rejects a repository URL the scan's provider
-// cannot clone, so an unusable RepositoryScan never admits scan Tasks.
-// GitHub is the only supported provider; an empty provider defaults to it.
 func ValidateRepositoryScanSource(spec corev1alpha1.RepositoryScanSpec) error {
 	if provider := strings.TrimSpace(spec.Provider); provider != "" && provider != "github" {
 		return fmt.Errorf("spec.provider %q is not supported; use github", spec.Provider)
@@ -612,13 +543,10 @@ func ValidateRepositoryScanSource(spec corev1alpha1.RepositoryScanSpec) error {
 	return nil
 }
 
-// IsSuspended returns whether scheduled scans are paused.
 func IsSuspended(scan *corev1alpha1.RepositoryScan) bool {
 	return scan.Spec.Suspend != nil && *scan.Spec.Suspend
 }
 
-// BuildThreatModelResultPrompt returns the harness-v2 prompt whose only output
-// is a bounded, identity-bound terminal result.
 func BuildThreatModelResultPrompt(scan *corev1alpha1.RepositoryScan, mode, baseCommit, headCommit, threatModel string, binding AgentResultBinding, policies ...PromptPolicy) string {
 	var prompt strings.Builder
 	hasExistingThreatModel := strings.TrimSpace(threatModel) != ""
@@ -687,8 +615,6 @@ func BuildThreatModelResultPrompt(scan *corev1alpha1.RepositoryScan, mode, baseC
 	return prompt.String()
 }
 
-// BuildReviewResultPrompt returns the harness-v2 prompt with mapper-owned
-// bounded context and an identity-bound findings result contract.
 func BuildReviewResultPrompt(
 	scan *corev1alpha1.RepositoryScan,
 	mode, baseCommit, headCommit, threatModel string,
@@ -699,9 +625,6 @@ func BuildReviewResultPrompt(
 	policies ...PromptPolicy,
 ) string {
 	var prompt strings.Builder
-	// Only the immutable slice identity goes into the prompt: store
-	// bookkeeping (status, timestamps, last run) changes while the scan runs,
-	// and the controller rebuilds this prompt to recognise its own retry Task.
 	sliceJSON, err := json.MarshalIndent(newReviewSlicePromptMetadata(slice), "", "  ")
 	if err != nil {
 		sliceJSON = []byte("{}")
@@ -783,8 +706,6 @@ func BuildReviewResultPrompt(
 	return prompt.String()
 }
 
-// BuildValidationResultPrompt returns the harness-v2 validation prompt whose
-// terminal result is bound to the finding and scanner policy.
 func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, binding AgentResultBinding, policies ...PromptPolicy) string {
 	var prompt strings.Builder
 
@@ -849,10 +770,6 @@ func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *sto
 	return prompt.String()
 }
 
-// BuildPatchPrompt returns the harness-v2 prompt for patch proposal tasks:
-// the agent edits the workspace and returns an identity-bound patch result
-// envelope; Orka publishes the delta and derives the reviewable diff from the
-// published commit.
 func BuildPatchPrompt(scan *corev1alpha1.RepositoryScan, finding *store.Finding, patchBranch string) string {
 	var prompt strings.Builder
 	fmt.Fprintf(&prompt, "Generate a minimal security patch for repository %s on branch %s.\n", scan.Spec.RepoURL, EffectiveBranch(scan))
@@ -905,8 +822,6 @@ const (
 	maxRemediationBodySectionBytes    = 4 << 10
 )
 
-// stripUnsafeTextRunes removes invalid UTF-8 and control or format runes that
-// could hide content when agent-produced text is validated or persisted.
 func stripUnsafeTextRunes(value string) string {
 	if printableASCIIText(value) {
 		return value
@@ -922,9 +837,6 @@ func stripUnsafeTextRunes(value string) string {
 	}, strings.ToValidUTF8(value, ""))
 }
 
-// printableASCIIText reports whether value consists only of printable ASCII,
-// newlines, and tabs, which stripUnsafeTextRunes leaves unchanged; the byte
-// scan avoids decoding every rune of a large workspace file.
 func printableASCIIText(value string) bool {
 	for i := 0; i < len(value); i++ {
 		c := value[i]
@@ -935,20 +847,9 @@ func printableASCIIText(value string) bool {
 	return true
 }
 
-// neutralizePublishedText prepares agent-produced text for publication in
-// GitHub Markdown (remediation PR titles and bodies): invalid UTF-8 and
-// control/format runes are stripped so nothing invisible survives, credential
-// shapes are redacted, and active constructs are defanged — @mentions and
-// HTML comment markers gain a zero-width break, and lines that would read as
-// slash-commands are prefixed with one — so a repository cannot prompt-inject
-// pings or bot commands through a scanner result.
 func neutralizePublishedText(value string) string {
 	stripped := stripUnsafeTextRunes(value)
 	stripped = redact.SensitiveText(stripped)
-	// Markdown keeps its newlines and tabs, so a credential wrapped across a
-	// line break could evade the in-place redaction above. Detect on a
-	// separator-joined shadow copy; if a credential is still recoverable by
-	// joining lines, withhold the whole field rather than publish it.
 	shadow := strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\t' {
 			return -1
@@ -983,9 +884,6 @@ func neutralizePublishedText(value string) string {
 	return strings.Join(lines, "\n")
 }
 
-// truncateOnRuneBoundary bounds text to at most limit bytes without splitting
-// a multibyte character; a byte-index cut would leave invalid UTF-8 that
-// json.Marshal replaces with U+FFFD.
 func truncateOnRuneBoundary(text string, limit int) string {
 	if len(text) <= limit {
 		return text
@@ -997,8 +895,6 @@ func truncateOnRuneBoundary(text string, limit int) string {
 	return strings.TrimSpace(text[:cut])
 }
 
-// RemediationPullRequestTitle renders the reviewer-facing title of a
-// remediation pull request from the finding.
 func RemediationPullRequestTitle(finding *store.Finding) string {
 	title := ""
 	if finding != nil {
@@ -1011,11 +907,6 @@ func RemediationPullRequestTitle(finding *store.Finding) string {
 	return remediationPullRequestTitlePrefix + title
 }
 
-// RemediationPullRequestBody renders the reviewer-facing body of a remediation
-// pull request: the finding's summary, root cause, and remediation guidance,
-// plus the patch agent's own account of the change. The caller appends the
-// publisher's intent marker so the clean-room publisher still recognizes the
-// pull request as its own.
 func RemediationPullRequestBody(finding *store.Finding, summary *PatchSummaryArtifact) string {
 	var body strings.Builder
 	section := func(heading, text string) {
@@ -1078,9 +969,6 @@ func RemediationPullRequestBody(finding *store.Finding, summary *PatchSummaryArt
 	return body.String()
 }
 
-// reviewSlicePromptMetadata is the deterministic projection of a review slice
-// that is safe to embed in a prompt: identity and scope only, no mutable
-// store bookkeeping such as status, timestamps, or the last scan run.
 type reviewSlicePromptMetadata struct {
 	SchemaVersion     int                      `json:"schemaVersion"`
 	ID                string                   `json:"id"`

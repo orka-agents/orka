@@ -1,10 +1,5 @@
 import { z } from 'zod'
 
-/**
- * GET /api/v1/providers returns full Provider CRDs for ServiceAccount/OIDC
- * callers and a flat {name, namespace, type, defaultModel, ready} projection
- * for transaction-token callers. Normalize both into one list item.
- */
 export const providerListItemSchema = z
   .object({
     name: z.string().optional(),
@@ -22,8 +17,6 @@ export const providerListItemSchema = z
     namespace: item.namespace ?? item.metadata?.namespace,
     type: item.type ?? item.spec?.type ?? '',
     defaultModel: item.defaultModel ?? item.spec?.defaultModel ?? '',
-    // Full CRDs serialize status.ready with omitempty, so a missing value on a
-    // CRD-shaped item means false; only the flat projection may leave it unknown.
     ready: item.ready ?? (item.metadata ? item.status?.ready ?? false : undefined),
   }))
   .refine((item) => item.name.length > 0, { message: 'provider name is required' })
