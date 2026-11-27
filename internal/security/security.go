@@ -956,10 +956,18 @@ func RemediationPullRequestBody(finding *store.Finding, summary *PatchSummaryArt
 		}
 		if len(summary.TestsRun) > 0 {
 			var tests strings.Builder
+			allPassed := true
 			for _, test := range summary.TestsRun {
+				if test.ExitCode != 0 {
+					allPassed = false
+				}
 				fmt.Fprintf(&tests, "- `%s` (exit %d)\n", test.Command, test.ExitCode)
 			}
-			section("**Verification status:**", "Published diff verified against `changedFiles`. Agent-reported tests passed (not independently executed by Orka; CI and human review required).")
+			if allPassed {
+				section("**Verification status:**", "Published diff verified against `changedFiles`. Agent-reported tests passed (not independently executed by Orka; CI and human review required).")
+			} else {
+				section("**Verification status:**", "Published diff verified against `changedFiles`. One or more agent-reported tests failed; fix behavior is unverified and requires CI and human review.")
+			}
 			section("**Agent-reported tests run:**", tests.String())
 		} else {
 			section("**Verification status:**", "Published diff verified against `changedFiles` only. No regression tests were reported; fix behavior is unverified and requires CI and human review.")
