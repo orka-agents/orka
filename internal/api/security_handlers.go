@@ -494,7 +494,11 @@ func (h *Handlers) createSecurityValidationTask(ctx context.Context, ui *UserInf
 		}
 	}
 	if pinnedCommit != "" && strings.TrimSpace(finding.TargetKey) != "" {
-		currentTargetKey := security.FindingV2TargetKey(scan.Spec.RepoURL, security.EffectiveBranch(scan), scan.Spec.SubPath)
+		logicalBranch := security.EffectiveBranch(scan)
+		if ref := security.EffectiveRef(scan); ref != "" {
+			logicalBranch = "ref:" + ref
+		}
+		currentTargetKey := security.FindingV2TargetKey(scan.Spec.RepoURL, logicalBranch, scan.Spec.SubPath)
 		if strings.TrimSpace(finding.TargetKey) != currentTargetKey {
 			return fiber.NewError(fiber.StatusConflict, "finding belongs to a different scan target than the current RepositoryScan")
 		}
