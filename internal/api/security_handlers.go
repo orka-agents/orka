@@ -1125,6 +1125,24 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 			[]corev1alpha1.AgentReference{validationAgentRef}, nil); err != nil {
 			return err
 		}
+		if token := contextTokenFromUserInfo(GetUserInfo(c)); h.contextTokenAuthorization.Enabled() && token != nil {
+			validationProbeTask := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: scan.Namespace,
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:      corev1alpha1.TaskTypeAgent,
+					AgentRef:  &validationAgentRef,
+					Workspace: repositoryScanTaskWorkspace(scan, corev1alpha1.WorkspaceIntentRead),
+				},
+			}
+			if err := agentruntimepolicy.ResolveAndMaterializeTaskRuntimeRefAllowedTools(c.Context(), h.uncachedReader(), validationProbeTask); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid validation AgentRuntime policy: %v", err))
+			}
+			if err := authorizeContextTokenTaskContextObject(c.Context(), h.uncachedReader(), token, h.contextTokenAuthorization, "createManualSecurityScanValidation", validationProbeTask); err != nil {
+				return err
+			}
+		}
 	}
 	if err := security.ValidateRepositoryScanSource(scan.Spec); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
