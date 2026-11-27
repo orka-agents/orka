@@ -562,6 +562,7 @@ Usage:
 
 Available Commands:
   login       Sign in to Orka with OIDC (device-code flow)
+  token       Print the bearer token the CLI sends to the Orka server
   validate    Validate current credentials
   whoami      Show sanitized authenticated identity
 
@@ -595,6 +596,32 @@ Flags:
       --no-open            Print the verification URL without opening a browser
       --scope string       Space-separated OAuth scopes to request
       --timeout duration   Maximum time to wait for device-code approval (default 15m0s)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace, or set ORKA_NAMESPACE (default: from config, else the namespace the Orka server watches)
+  -s, --server string           Orka server URL, or set ORKA_SERVER (default: the Orka Service reached through kubeconfig, else "http://localhost:8080")
+  -t, --token string            Bearer token for authentication (prefer --token-file or ORKA_TOKEN, which keep it out of process arguments)
+      --token-file string       Path to file containing the bearer token (use - for stdin)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka auth token`
+
+```text
+Print the bearer token the CLI sends to the configured Orka server, so another client, such as an MCP client or a script, can authenticate as you. The token comes from --token, --token-file, ORKA_TOKEN or your Orka config, in that order. A token saved by 'orka auth login' is refreshed first when it is near expiry, and the command fails instead of printing a token that has expired. It never prints a session saved by 'orka login', and never prints a kubeconfig credential: a server must be named with --server, ORKA_SERVER or the config. The output is a credential; do not log or share it.
+
+Usage:
+  orka auth token [flags]
+
+Examples:
+  orka auth token
+  orka auth token --format header-json
+
+Flags:
+      --format string   Output format: token prints the bare token; header-json prints {"Authorization":"Bearer <token>"} (default "token")
+  -h, --help            help for token
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

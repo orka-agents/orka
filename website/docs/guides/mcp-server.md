@@ -136,6 +136,43 @@ In `.vscode/mcp.json`. VS Code prompts for the token once and stores it securely
 To use a transaction token instead, send `"Txn-Token": "<token>"` in `headers` and
 omit `Authorization`.
 
+### Use your Orka sign-in
+
+If you signed in with `orka auth login`, `orka auth token` prints your current token,
+refreshing it first when it is near expiry; see the
+[CLI reference](../reference/cli.md#sign-in-with-oidc). Claude Code can run it whenever it
+connects, so the header doesn't go stale:
+
+```json
+{
+  "mcpServers": {
+    "orka": {
+      "type": "http",
+      "url": "https://orka.example.com/mcp",
+      "headersHelper": "env -u ORKA_TOKEN orka auth token --server https://orka.example.com --format header-json"
+    }
+  }
+}
+```
+
+Name the same server the client connects to with `--server`: a sign-in saved for any
+other server is then refused, even after you later sign in elsewhere. Claude Code runs a
+project's `headersHelper` only once you trust the workspace and times out the helper after
+10 seconds, while Orka allows up to 30 seconds for an OIDC token refresh (including
+config-lock waits). If a refresh exceeds Claude Code's timeout, refresh the saved token
+outside Claude Code first and reconnect once it succeeds:
+
+```bash
+env -u ORKA_TOKEN orka auth token --server https://orka.example.com >/dev/null
+```
+
+For a client that reads the header from the environment, scope `ORKA_TOKEN` to that
+client's invocation rather than leaving it exported in your shell:
+`token="$(env -u ORKA_TOKEN orka auth token --server https://orka.example.com)" && ORKA_TOKEN="$token" <client>`.
+That copy doesn't refresh, and if `ORKA_TOKEN` stays exported in the shell, `orka auth token` prints
+it instead of your saved sign-in and bypasses its `--server` check; unset it before
+switching servers or when it expires.
+
 ## Tools
 
 Every tool takes an optional `namespace`. Namespace resolution, `--watch-namespace`,

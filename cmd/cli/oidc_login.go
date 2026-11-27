@@ -499,23 +499,28 @@ func pollOIDCDeviceFlow(ctx context.Context, tokenEndpoint, clientID string, dev
 }
 
 func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) string {
+	token, _ := configuredOIDCTokenWithExpiry(cmd, server, cfg)
+	return token
+}
+
+func configuredOIDCTokenWithExpiry(cmd *cobra.Command, server string, cfg orkaConfig) (string, *time.Time) {
 	if server == "" {
 		server = cfg.Server
 	}
 	if cfg.Token == "" || strings.TrimRight(server, "/") != cfg.SessionServer || sessionServerAllowed(cfg.SessionServer) != nil {
-		return ""
+		return "", nil
 	}
 	if !oidcTokenNeedsRefresh(cfg) {
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 	if cfg.OIDCRefreshToken == "" || cfg.OIDCTokenEndpoint == "" || cfg.OIDCClientID == "" {
 		if cfg.TokenExpiresAt != nil && time.Until(*cfg.TokenExpiresAt) <= 0 {
 			fmt.Fprintln(cmd.ErrOrStderr(), "Your OIDC token expired; run 'orka auth login'.") //nolint:errcheck
 		}
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 	if err := oidcEndpointAllowed(cfg.OIDCTokenEndpoint); err != nil {
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), sessionRenewTimeout)
@@ -523,17 +528,17 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 	unlock, err := lockConfig(ctx)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not refresh your OIDC token (%v).\n", err) //nolint:errcheck
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 	defer unlock()
 
 	saved := loadConfig()
 	if !holdsOIDCSession(saved, cfg) {
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 	cfg = saved
 	if !oidcTokenNeedsRefresh(cfg) {
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 
 	form := url.Values{
@@ -552,7 +557,7 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 			_ = saveConfig(cfg)
 		}
 		fmt.Fprintln(cmd.ErrOrStderr(), "Could not refresh your OIDC token; run 'orka auth login'.") //nolint:errcheck
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 
 	audience := cfg.OIDCAudience
@@ -566,7 +571,7 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 			_ = saveConfig(cfg)
 		}
 		fmt.Fprintln(cmd.ErrOrStderr(), "Could not refresh your OIDC token; run 'orka auth login'.") //nolint:errcheck
-		return cfg.Token
+		return cfg.Token, cfg.TokenExpiresAt
 	}
 
 	cfg.Token = newToken
@@ -582,7 +587,7 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 	if err := saveConfig(cfg); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Could not save the refreshed OIDC token: %v\n", err) //nolint:errcheck
 	}
-	return newToken
+	return newToken, cfg.TokenExpiresAt
 }
 
 func oidcTokenNeedsRefresh(cfg orkaConfig) bool {
