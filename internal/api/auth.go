@@ -92,6 +92,7 @@ type OIDCConfig struct {
 	JWKSURL         string
 	AllowedSubjects []string
 	Namespace       string
+	Scopes          []string
 }
 
 func (c OIDCConfig) Enabled() bool {

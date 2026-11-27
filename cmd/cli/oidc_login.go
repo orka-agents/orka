@@ -99,12 +99,14 @@ type oidcLoginTargets struct {
 	issuer   string
 	audience string
 	clientID string
+	scope    string
 }
 
 func resolveOIDCLoginTargets(ctx context.Context, server, issuer, clientID string) (oidcLoginTargets, error) {
 	issuer = strings.TrimSpace(issuer)
 	clientID = strings.TrimSpace(clientID)
 	audience := ""
+	scope := ""
 
 	var options authConfigView
 	if err := plainJSON(ctx, http.MethodGet, server+"/api/v1/auth/config", "", nil, &options); err != nil {
@@ -117,8 +119,9 @@ func resolveOIDCLoginTargets(ctx context.Context, server, issuer, clientID strin
 		}
 		if options.OIDCConfig != nil {
 			audience = strings.TrimSpace(options.OIDCConfig.Audience)
-			if issuer == "" {
-				issuer = strings.TrimSpace(options.OIDCConfig.Issuer)
+			if advertised := strings.TrimSpace(options.OIDCConfig.Issuer); issuer == "" || issuer == advertised {
+				issuer = advertised
+				scope = strings.TrimSpace(strings.Join(options.OIDCConfig.Scopes, " "))
 			}
 			if clientID == "" {
 				clientID = audience
@@ -137,7 +140,7 @@ func resolveOIDCLoginTargets(ctx context.Context, server, issuer, clientID strin
 	if err := oidcEndpointAllowed(issuer); err != nil {
 		return oidcLoginTargets{}, err
 	}
-	return oidcLoginTargets{issuer: issuer, audience: audience, clientID: clientID}, nil
+	return oidcLoginTargets{issuer: issuer, audience: audience, clientID: clientID, scope: scope}, nil
 }
 
 func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
@@ -171,6 +174,9 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 	}
 
 	scope := strings.TrimSpace(opts.scope)
+	if scope == "" {
+		scope = targets.scope
+	}
 	if scope == "" {
 		scope = defaultOIDCLoginScope(targets.issuer, targets.audience)
 	}

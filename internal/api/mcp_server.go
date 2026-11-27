@@ -81,6 +81,7 @@ const mcpServerInstructions = "Orka runs Tasks on Kubernetes-hosted Agents. Use 
 type MCPServerConfig struct {
 	Enabled       bool
 	MaxConcurrent int
+	ResourceURL   string
 }
 
 type mcpServer struct {

@@ -120,11 +120,12 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0039](0039-agent-identities.md) | Give Agents an external identity, starting with Microsoft Entra | Proposed |
 | [0040](0040-forwarded-cli-requests.md) | Let command-line clients reach services through forwarding Tools, starting with the Azure CLI | Proposed |
 | [0042](0042-signed-durable-task-webhooks.md) | Sign Task webhooks and deliver them from durable Task status | Accepted, partly superseded by 0054 |
-| [0043](0043-control-plane-mcp-server.md) | Serve a control-plane MCP server by replaying REST routes | Accepted |
+| [0043](0043-control-plane-mcp-server.md) | Serve a control-plane MCP server by replaying REST routes | Accepted, partly superseded by 0055 |
 | [0048](0048-agent-runtime-ceilings.md) | Agent runtime ceilings bound what Tasks may request | Accepted |
 | [0051](0051-offline-memory-consolidation.md) | Consolidate memory offline into reviewed proposals | Accepted, landing in stages |
 | [0053](0053-approval-webhook-events.md) | Opt-in signed approval webhook events from durable approval transitions | Accepted, partly superseded by 0054 |
 | [0054](0054-task-webhook-delivery-workers.md) | Deliver Task webhooks from a worker pool, not the Task reconcile | Accepted |
+| [0055](0055-mcp-oauth-protected-resource-metadata.md) | Serve OAuth protected-resource metadata for the MCP server | Accepted |
 
 ### Agent hosts and the Agent Host Protocol
 

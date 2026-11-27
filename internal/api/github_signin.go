@@ -87,8 +87,9 @@ type AuthConfigResponse struct {
 }
 
 type OIDCAuthConfigOption struct {
-	Issuer   string `json:"issuer"`
-	Audience string `json:"audience"`
+	Issuer   string   `json:"issuer"`
+	Audience string   `json:"audience"`
+	Scopes   []string `json:"scopes,omitempty"`
 }
 
 type GitHubAuthConfigOption struct {
@@ -127,6 +128,7 @@ func (h *Handlers) GetAuthConfig(c fiber.Ctx) error {
 		response.OIDCConfig = &OIDCAuthConfigOption{
 			Issuer:   h.oidcIssuer,
 			Audience: h.oidcAudience,
+			Scopes:   h.oidcScopes,
 		}
 	}
 	if cfg := h.githubSignIn; cfg.Enabled {

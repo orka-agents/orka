@@ -204,6 +204,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		OIDCEnabled:               config.OIDC.Enabled(),
 		OIDCIssuer:                config.OIDC.Issuer,
 		OIDCAudience:              config.OIDC.Audience,
+		OIDCScopes:                config.OIDC.Scopes,
 		AHP:                       config.AHP,
 		SubstrateMCPProxy:         config.SubstrateMCPProxy,
 		AgentIdentityAudit:        config.AgentIdentityAudit,
@@ -344,10 +345,15 @@ func (s *Server) setupMiddleware() {
 	if s.config.MCP.Enabled {
 		allowHeaders = append(allowHeaders, mcpCORSHeaders...)
 	}
+	var exposeHeaders []string
+	if _, _, mcpOAuth := mcpOAuthMetadata(s.config.MCP, s.config.OIDC); mcpOAuth {
+		exposeHeaders = []string{fiber.HeaderWWWAuthenticate}
+	}
 	s.app.Use(cors.New(cors.Config{
-		AllowOrigins: origins,
-		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: allowHeaders,
+		AllowOrigins:  origins,
+		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowHeaders:  allowHeaders,
+		ExposeHeaders: exposeHeaders,
 	}))
 
 	s.app.Use(NewLoggingMiddleware())
@@ -388,6 +394,10 @@ func (s *Server) setupRoutes() {
 
 	s.app.Get(TaskWebhookJWKSPath, s.taskWebhookJWKS)
 
+	mcpMetadata, mcpChallenge, mcpOAuth := mcpOAuthMetadata(s.config.MCP, s.config.OIDC)
+	if mcpOAuth {
+		s.app.Get(mcpProtectedResourceMetadataPath, serveMCPProtectedResourceMetadata(mcpMetadata))
+	}
 	s.app.Post("/api/v1/gateways/:namespace/:name/events", s.handlers.HandleGatewayEvent)
 
 	s.app.Post("/webhooks/github", s.handlers.HandleGitHubWebhook)
@@ -604,7 +614,7 @@ func (s *Server) setupRoutes() {
 		app := s.app
 		s.mcpServer = newMCPServer(func(ctx *fasthttp.RequestCtx) { app.Server().Handler(ctx) }, s.config.MCP)
 		s.mcpServer.replayHeaders = mcpReplayHeaders(s.config.ContextTokens)
-		mcp := s.externalAPIGroup(mcpEndpointPath, externalAuth)
+		mcp := s.externalAPIGroup(mcpEndpointPath, withMCPBearerChallenge(externalAuth, mcpChallenge))
 		mcp.Post("", s.mcpServer.Handle)
 	}
 

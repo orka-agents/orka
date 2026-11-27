@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -328,6 +329,95 @@ func TestResolveOIDCLoginTargetsRejectsExplicitOIDCDisabledEvenWithFlags(t *test
 	_, err := resolveOIDCLoginTargets(t.Context(), orka.URL, "https://issuer.example", "orka-client")
 	if err == nil || !strings.Contains(err.Error(), "does not have OIDC authentication enabled") {
 		t.Fatalf("expected OIDC disabled error even with manual flags, got %v", err)
+	}
+}
+
+func TestAuthLoginRequestsAdvertisedScopesForAdvertisedIssuer(t *testing.T) {
+	prevPoll := oidcPollFloor
+	oidcPollFloor = time.Millisecond
+	t.Cleanup(func() { oidcPollFloor = prevPoll })
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+
+	var (
+		scopeMu  sync.Mutex
+		gotScope string
+	)
+	var idp *httptest.Server
+	idp = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var reply map[string]any
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			reply = map[string]any{"issuer": idp.URL, "device_authorization_endpoint": idp.URL + "/devicecode", "token_endpoint": idp.URL + "/token"}
+		case "/devicecode":
+			if err := r.ParseForm(); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			scopeMu.Lock()
+			gotScope = r.Form.Get("scope")
+			scopeMu.Unlock()
+			reply = map[string]any{"device_code": "dev", "user_code": "CODE", "verification_uri": "https://idp.example/device", "expires_in": 60, "interval": 1}
+		case "/token":
+			reply = map[string]any{"access_token": testCompactJWT(t, idp.URL, "orka-client-id", time.Now().Add(time.Hour).Unix()), "expires_in": 3600}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(reply); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	defer idp.Close()
+	orka := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"oidc":       true,
+			"oidcConfig": map[string]any{"issuer": idp.URL, "audience": "orka-client-id", "scopes": []string{"openid", "groups", "offline_access"}},
+		}); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	defer orka.Close()
+
+	for name, tc := range map[string]struct {
+		args      []string
+		wantScope string
+	}{
+		"advertised issuer": {nil, "openid groups offline_access"},
+		"same issuer flag":  {[]string{"--issuer", idp.URL}, "openid groups offline_access"},
+		"explicit scope":    {[]string{"--scope", "openid email"}, "openid email"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			scopeMu.Lock()
+			gotScope = ""
+			scopeMu.Unlock()
+			var out bytes.Buffer
+			root := newRootCmd()
+			root.SetOut(&out)
+			root.SetErr(&out)
+			root.SetArgs(append([]string{"auth", "login", "--server", orka.URL, "--timeout", "10s"}, tc.args...))
+			if err := root.Execute(); err != nil {
+				t.Fatalf("auth login: %v\n%s", err, out.String())
+			}
+			scopeMu.Lock()
+			capturedScope := gotScope
+			scopeMu.Unlock()
+			if capturedScope != tc.wantScope {
+				t.Fatalf("device-code scope = %q, want %q", capturedScope, tc.wantScope)
+			}
+		})
+	}
+
+	targets, err := resolveOIDCLoginTargets(t.Context(), orka.URL, "https://other-issuer.example", "orka-client-id")
+	if err != nil {
+		t.Fatalf("resolveOIDCLoginTargets: %v", err)
+	}
+	if targets.scope != "" {
+		t.Fatalf("scope for another issuer = %q, want none: the server's scopes are for its own issuer", targets.scope)
 	}
 }
 
