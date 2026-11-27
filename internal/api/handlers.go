@@ -1016,8 +1016,11 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 	if tailLines <= 0 {
 		tailLines = defaultTaskLogTailLines
 	}
+	if tailLines > maxTaskLogTailLines {
+		tailLines = maxTaskLogTailLines
+	}
 	br := bufio.NewReaderSize(r, 32*1024)
-	ring := make([]string, 0, min(tailLines, 1024))
+	ring := make([]string, tailLines)
 	var head int64
 	var count int64
 	var retainedBytes int64
@@ -1026,18 +1029,8 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 		if int64(len(line)) > maxBytes {
 			line = line[int64(len(line))-maxBytes:]
 		}
-		if int64(len(ring)) < tailLines {
-			if count == int64(len(ring)) {
-				ring = append(ring, line)
-			} else {
-				idx := (head + count) % int64(len(ring))
-				ring[idx] = line
-			}
-			count++
-			retainedBytes += int64(len(line))
-		} else if count < tailLines {
-			idx := (head + count) % tailLines
-			ring[idx] = line
+		if count < tailLines {
+			ring[(head+count)%tailLines] = line
 			count++
 			retainedBytes += int64(len(line))
 		} else {
@@ -1046,11 +1039,10 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 			retainedBytes += int64(len(line))
 			head = (head + 1) % tailLines
 		}
-		ringLen := int64(len(ring))
 		for retainedBytes > maxBytes && count > 1 {
 			retainedBytes -= int64(len(ring[head]))
 			ring[head] = ""
-			head = (head + 1) % ringLen
+			head = (head + 1) % tailLines
 			count--
 		}
 	}
@@ -1080,9 +1072,8 @@ func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, er
 	}
 	var out strings.Builder
 	out.Grow(int(retainedBytes))
-	ringLen := int64(len(ring))
 	for i := range count {
-		out.WriteString(ring[(head+i)%ringLen])
+		out.WriteString(ring[(head+i)%tailLines])
 	}
 	return out.String(), nil
 }

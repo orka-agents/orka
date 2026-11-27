@@ -60,4 +60,8 @@ func TestReadBoundedTailLogLines(t *testing.T) {
 	if err != nil || got != "xxxxxtail\n" {
 		t.Fatalf("readBoundedTailLogLines long line = (%q, %v), want (%q, nil)", got, err, "xxxxxtail\n")
 	}
+	got, err = readBoundedTailLogLines(strings.NewReader("aaaa\nbbbb\nc\nd\ne\n"), 5, 10)
+	if err != nil || got != "c\nd\ne\n" {
+		t.Fatalf("readBoundedTailLogLines eviction ordering = (%q, %v), want (%q, nil)", got, err, "c\nd\ne\n")
+	}
 }
