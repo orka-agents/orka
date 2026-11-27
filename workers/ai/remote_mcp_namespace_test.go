@@ -23,7 +23,6 @@ func (c *nativeAgentReadClient) Get(
 	if _, agent := object.(*corev1alpha1.Agent); agent && key.Namespace != "team" {
 		c.foreignAgentReads++
 	}
-	// The underlying fake permits foreign Agent reads, unlike the worker RBAC.
 	return c.Client.Get(ctx, key, object, options...)
 }
 

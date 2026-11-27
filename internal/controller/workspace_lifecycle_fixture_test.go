@@ -266,8 +266,6 @@ func substrateWorkspaceDaemonListenEnvForTest() map[string]any {
 	}
 }
 
-// testExternalPoolWorkspaceSpec pins the generic logical pool request. Its
-// physical workload is published separately after the pool receives its UID.
 func testExternalPoolWorkspaceSpec(binding *ACPRuntimeWorkspaceBinding, name string, uid types.UID) *corev1alpha1.RuntimePoolExecutionWorkspaceSpec {
 	return &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
 		Provider: binding.Provider, BindingDigest: binding.BindingDigest,

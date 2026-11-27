@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// observed returns value, or a stable name for err, so observations of a
-// missing record compare equal.
 func observed(t *testing.T, value any, err error) any {
 	t.Helper()
 	if errors.Is(err, storagev1.ErrNotFound) {
@@ -19,7 +17,6 @@ func observed(t *testing.T, value any, err error) any {
 	return value
 }
 
-// fixed returns args that do not depend on the fence.
 func fixed(args ...any) func(storagev1.ControllerEpochFence) []any {
 	return func(storagev1.ControllerEpochFence) []any { return args }
 }

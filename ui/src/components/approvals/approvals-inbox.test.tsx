@@ -75,7 +75,6 @@ describe('ApprovalsInbox', () => {
     const rows = within(list).getAllByRole('listitem')
     expect(rows).toHaveLength(3)
 
-    // Approving opens the Task's Approvals tab rather than deciding inline.
     const review = within(rows[0]).getByRole('link', { name: 'Review to approve' })
     expect(review).toHaveAttribute('href', '/tasks/both')
     expect(review).toHaveAttribute('data-search', JSON.stringify({ tab: 'approvals' }))

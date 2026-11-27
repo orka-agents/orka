@@ -9,7 +9,6 @@ import type { UseExecutionEventStreamResult } from '@/hooks/use-execution-event-
 
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
 
-// Render Link as a plain anchor so we can assert hrefs without a router.
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
@@ -42,7 +41,6 @@ import { useSession } from '@/hooks/use-sessions'
 
 const API = '/api/v1'
 
-// A session event carries the originating task identity.
 function sessionEvent(seq: number, taskName: string, type: string, summary?: string) {
   return makeEvent({
     seq,
@@ -82,7 +80,6 @@ describe('SessionEventTimeline', () => {
     render(<SessionEventTimeline sessionId="sess" />)
     await waitFor(() => expect(screen.getByText('a started')).toBeInTheDocument())
     expect(screen.getAllByTestId('event-row')).toHaveLength(3)
-    // Both task identities are shown.
     expect(screen.getAllByText('task-a').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('task-b')).toBeInTheDocument()
   })
@@ -114,7 +111,6 @@ describe('SessionEventTimeline', () => {
         }),
       ),
     )
-    // Stream replays session seq 2 and adds seq 3.
     streamState.current = {
       events: [
         sessionEvent(2, 'task-b', 'TaskStarted', 'b started'),
@@ -141,7 +137,6 @@ describe('SessionEventTimeline', () => {
         }),
       ),
     )
-    // Stream is still live even though task-a finished.
     streamState.current = { events: [], lastSeq: 2, status: 'streaming' }
     render(<SessionEventTimeline sessionId="sess" />)
     await waitFor(() => expect(screen.getByText('a done')).toBeInTheDocument())
@@ -180,7 +175,6 @@ describe('SessionEventTimeline', () => {
         ? HttpResponse.json({ error: { code: 404, message: 'not found' } }, { status: 404 })
         : HttpResponse.json({ name: 'sess', namespace: 'default', messageCount: '2' })),
     )
-    // Polling is off, so only the SessionDeleted frame can refresh the session.
     function Page() {
       const session = useSession('sess', false)
       const [, rerender] = useReducer((n: number) => n + 1, 0)

@@ -29,7 +29,6 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-// executeAgentLoop runs the agent loop with tool execution
 func executeAgentLoop(
 	ctx context.Context,
 	provider llm.Provider,
@@ -56,7 +55,6 @@ func executeAgentLoop(
 
 const testSessionDir = "/session"
 
-// sequenceProvider returns different responses on successive calls.
 type sequenceProvider struct {
 	responses []*llm.CompletionResponse
 	errors    []error
@@ -81,15 +79,10 @@ func (s *sequenceProvider) Stream(_ context.Context, _ *llm.CompletionRequest) (
 
 func (s *sequenceProvider) Name() string { return "sequence-mock" }
 
-// --- run() tests ---
-
 func TestRun_InvalidProviderType(t *testing.T) {
 	t.Setenv("ORKA_AI_PROVIDER", "nonexistent-provider")
 	t.Setenv("ORKA_AI_MODEL", "test-model")
 	t.Setenv("ORKA_AI_PROMPT", "hello")
-	// Set a generic API key env var that won't match any provider switch case
-	// but will be found via secret file. Since no secret files exist, API key check
-	// will fail first for an unknown provider.
 
 	err := run("")
 	if err == nil {
@@ -106,7 +99,6 @@ func TestRun_ValidProviderHitsK8sError(t *testing.T) {
 	t.Setenv("ORKA_AI_PROMPT", "hello")
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("ORKA_AI_BASE_URL", "http://localhost:9999")
-	// Clear fallback vars
 	t.Setenv("ORKA_AI_FALLBACK_COUNT", "")
 
 	err := run("")
@@ -129,7 +121,6 @@ func TestRun_WithFallbackCountZero(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error (no k8s)")
 	}
-	// Should get past fallback setup and fail at k8s client
 	if !strings.Contains(err.Error(), "k8s client") {
 		t.Errorf("error = %q, want mention of k8s client", err)
 	}
@@ -141,7 +132,6 @@ func TestRun_WithFallbackMissingProviderKey(t *testing.T) {
 	t.Setenv("ORKA_AI_PROMPT", "hello")
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("ORKA_AI_FALLBACK_COUNT", "1")
-	// Fallback 0 missing provider/api-key
 	t.Setenv("ORKA_AI_FALLBACK_0_PROVIDER", "")
 	t.Setenv("ORKA_AI_FALLBACK_0_API_KEY", "")
 
@@ -149,7 +139,6 @@ func TestRun_WithFallbackMissingProviderKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// Should skip the fallback and continue to k8s client error
 	if !strings.Contains(err.Error(), "k8s client") {
 		t.Errorf("error = %q, want mention of k8s client", err)
 	}
@@ -168,7 +157,6 @@ func TestRun_WithFallbackInvalidProviderType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// Invalid fallback provider is skipped with warning, then hits k8s client error
 	if !strings.Contains(err.Error(), "k8s client") {
 		t.Errorf("error = %q, want mention of k8s client", err)
 	}
@@ -191,7 +179,6 @@ func TestRun_WithValidFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// Valid fallback is created, then hits k8s client error
 	if !strings.Contains(err.Error(), "k8s client") {
 		t.Errorf("error = %q, want mention of k8s client", err)
 	}
@@ -243,13 +230,10 @@ func TestRun_FallbackCountNonNumeric(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// Non-numeric fallback count parses to 0, so no fallbacks configured, hits k8s error
 	if !strings.Contains(err.Error(), "k8s client") {
 		t.Errorf("error = %q, want k8s client error", err)
 	}
 }
-
-// --- getAPIKey tests ---
 
 func TestGetAPIKey_AzureOpenAI(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "azure-key-123")
@@ -260,19 +244,14 @@ func TestGetAPIKey_AzureOpenAI(t *testing.T) {
 }
 
 func TestGetAPIKey_SecretFile(t *testing.T) {
-	// Clear env vars so it falls through to file-based lookup
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
 
-	// Create temp secret dirs (can't write to /secrets/ without root,
-	// so this verifies the fallback returns empty when no files exist)
 	key := getAPIKey("anthropic")
 	if key != "" {
 		t.Errorf("expected empty key when no env or secret files, got %q", key)
 	}
 }
-
-// --- loadCustomTools tests ---
 
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
@@ -336,7 +315,6 @@ func TestLoadCustomTools_MixedBuiltinAndCustom(t *testing.T) {
 		WithObjects(tool).
 		Build()
 
-	// web_search is built-in and should be skipped; my-tool is custom
 	result, _ := loadCustomTools(context.Background(), fakeClient, "test-ns", []string{"web_search", "my-tool"})
 	if len(result) != 1 {
 		t.Fatalf("expected 1 custom tool (builtin skipped), got %d", len(result))
@@ -345,8 +323,6 @@ func TestLoadCustomTools_MixedBuiltinAndCustom(t *testing.T) {
 		t.Error("expected my-tool in result")
 	}
 }
-
-// --- buildLLMTools tests ---
 
 func TestBuildLLMTools_CustomToolWithParameters(t *testing.T) {
 	params := apiextensionsv1.JSON{Raw: []byte(`{"type":"object","properties":{"query":{"type":"string"}}}`)}
@@ -369,10 +345,6 @@ func TestBuildLLMTools_CustomToolWithParameters(t *testing.T) {
 	}
 }
 
-// TestBuildLLMTools_HidesForwardingTools covers a native worker enabling both
-// a forwarding Tool, which serves a command-line client in an ACP runtime,
-// and an ordinary custom Tool: only the ordinary one is advertised as a
-// function.
 func TestBuildLLMTools_HidesForwardingTools(t *testing.T) {
 	customTools := map[string]*corev1alpha1.Tool{
 		"arm": {Spec: corev1alpha1.ToolSpec{
@@ -399,10 +371,7 @@ func TestBuildLLMTools_HidesForwardingTools(t *testing.T) {
 	}
 }
 
-// --- executeAgentLoop tests ---
-
 func TestExecuteAgentLoop_WithToolCalls(t *testing.T) {
-	// First call returns tool calls, second call returns final response
 	provider := &sequenceProvider{
 		responses: []*llm.CompletionResponse{
 			{
@@ -439,7 +408,6 @@ func TestExecuteAgentLoop_WithToolCalls(t *testing.T) {
 }
 
 func TestExecuteAgentLoop_MaxIterationsReached(t *testing.T) {
-	// Provider always returns tool calls - should hit max iterations
 	provider := &mockProvider{
 		response: &llm.CompletionResponse{
 			Content: "",
@@ -467,7 +435,6 @@ func TestExecuteAgentLoop_MaxIterationsReached(t *testing.T) {
 }
 
 func TestExecuteAgentLoop_ContextTooLongRetry(t *testing.T) {
-	// First call returns context-too-long error, retry succeeds
 	provider := &sequenceProvider{
 		responses: []*llm.CompletionResponse{
 			nil,
@@ -479,7 +446,6 @@ func TestExecuteAgentLoop_ContextTooLongRetry(t *testing.T) {
 		},
 	}
 
-	// Create messages with enough content to be truncatable
 	messages := []llm.Message{
 		{Role: "user", Content: strings.Repeat("hello world ", 100)},
 		{Role: "assistant", Content: strings.Repeat("response ", 100)},
@@ -499,7 +465,6 @@ func TestExecuteAgentLoop_ContextTooLongRetry(t *testing.T) {
 }
 
 func TestExecuteAgentLoop_ContextTooLongRetryStillFails(t *testing.T) {
-	// Both calls return context-too-long error
 	ctxErr := &llm.ProviderError{StatusCode: 400, Message: "maximum token limit"}
 	provider := &sequenceProvider{
 		errors: []error{ctxErr, ctxErr},
@@ -570,7 +535,6 @@ func TestExecuteAgentLoop_AutonomousMode(t *testing.T) {
 }
 
 func TestExecuteAgentLoop_StopReasonStop(t *testing.T) {
-	// Test "stop" stop reason (vs "end_turn")
 	provider := &sequenceProvider{
 		responses: []*llm.CompletionResponse{
 			{
@@ -592,12 +556,10 @@ func TestExecuteAgentLoop_StopReasonStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// When stop reason is "stop" and there are tool calls, the loop executes tools then returns
 	_ = result
 }
 
 func TestExecuteAgentLoop_CustomToolExecution(t *testing.T) {
-	// Set up a mock HTTP server for the custom tool
 	toolServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"result": "custom tool output"}`) //nolint:errcheck
@@ -651,7 +613,6 @@ func TestExecuteAgentLoop_CustomToolExecution(t *testing.T) {
 }
 
 func TestExecuteAgentLoop_ToolExecutionError(t *testing.T) {
-	// Test with a built-in tool that returns an error (unknown tool name)
 	provider := &sequenceProvider{
 		responses: []*llm.CompletionResponse{
 			{
@@ -683,15 +644,10 @@ func TestExecuteAgentLoop_ToolExecutionError(t *testing.T) {
 	}
 }
 
-// --- loadSessionContext tests ---
-
 func TestLoadSessionContext_CreatedFile(t *testing.T) {
-	// This test passes /session/transcript.jsonl to the path-parameterized loader.
-	// Exercise parsing if that directory is writable; otherwise skip.
 	sessionDir := testSessionDir
 	transcriptPath := filepath.Join(sessionDir, "transcript.jsonl")
 
-	// Try to create the directory (may fail without root)
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Skip("cannot create /session directory, skipping file-based test")
 	}
@@ -769,8 +725,6 @@ func TestLoadSessionContext_OnlyInvalidJSON(t *testing.T) {
 	}
 }
 
-// --- loadPlanContext tests ---
-
 func TestLoadPlanContext_WithAuthHeader(t *testing.T) {
 	var receivedAuth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -790,7 +744,6 @@ func TestLoadPlanContext_WithAuthHeader(t *testing.T) {
 	t.Setenv("ORKA_TASK_NAME", "t1")
 	t.Setenv("ORKA_TASK_NAMESPACE", "ns1")
 
-	// Create SA token file if possible
 	saDir := "/var/run/secrets/kubernetes.io/serviceaccount"
 	tokenPath := filepath.Join(saDir, "token")
 	if err := os.MkdirAll(saDir, 0o755); err == nil {
@@ -811,7 +764,6 @@ func TestLoadPlanContext_WithAuthHeader(t *testing.T) {
 		t.Errorf("result missing plan document: %s", result)
 	}
 
-	// If SA token was written, verify auth header
 	if _, err := os.Stat(tokenPath); err == nil {
 		if receivedAuth != "Bearer test-sa-token" {
 			t.Errorf("auth header = %q, want %q", receivedAuth, "Bearer test-sa-token")
@@ -883,8 +835,6 @@ func TestLoadPlanContext_RequestPathFormat(t *testing.T) {
 	}
 }
 
-// --- writeResult tests ---
-
 func TestWriteResult_PermanentHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -898,8 +848,6 @@ func TestWriteResult_PermanentHTTPError(t *testing.T) {
 		t.Fatalf("writeResult() error = %v, want HTTP 401", err)
 	}
 }
-
-// --- Autonomous mode in run() ---
 
 func TestRun_AutonomousModeEnvParsing(t *testing.T) {
 	t.Setenv("ORKA_AI_PROVIDER", "openai")
@@ -917,7 +865,6 @@ func TestRun_AutonomousModeEnvParsing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// Should get through autonomous mode setup and fail at k8s client
 	if !strings.Contains(err.Error(), "k8s client") {
 		t.Errorf("error = %q, want k8s client error", err)
 	}
@@ -990,7 +937,6 @@ func TestRun_AutonomousModeWithPlanContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// Exercises the planContext != "" branch and prompt augmentation
 	if !strings.Contains(err.Error(), "k8s client") {
 		t.Errorf("error = %q, want k8s client error", err)
 	}

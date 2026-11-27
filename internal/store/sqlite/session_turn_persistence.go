@@ -16,8 +16,6 @@ var _ storagev1.SessionTurnRecordStore = (*Store)(nil)
 
 var deferredSessionTurnProjectionTime = time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
 
-// CreateSessionTurnRecord persists only the SQLite-owned open turn after the
-// Kubernetes store has validated SessionControl and PromptAttempt fences.
 func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.CreateSessionTurnRecordRequest) (*store.SessionTurn, error) {
 	return writeOperation(ctx, s, "CreateSessionTurnRecord", &request.Fence, func(ctx context.Context) (*store.SessionTurn, error) {
 		return s.createSessionTurnRecordWrite(ctx, request)
@@ -88,9 +86,6 @@ func (s *Store) createSessionTurnRecordWrite(ctx context.Context, request store.
 	return &normalized, nil
 }
 
-// ReadSessionTurnFinalizationBasis implements storagev1.SessionTurnRecordStore.
-// The turn, the transcript boundary and the stored native record are read
-// from one transaction snapshot.
 func (s *Store) ReadSessionTurnFinalizationBasis(ctx context.Context, turnID, namespace, sessionName string) (*storagev1.SessionTurnFinalizationBasis, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -119,8 +114,6 @@ func readSessionTurnFinalizationBasisTx(ctx context.Context, tx *sql.Tx, turnID,
 	return basis, nil
 }
 
-// sessionTranscriptBoundaryTx returns the Session's transcript message count
-// and the ID of its last message.
 func sessionTranscriptBoundaryTx(ctx context.Context, tx *sql.Tx, namespace, sessionName string) (int, string, error) {
 	var count int
 	err := tx.QueryRowContext(ctx, `SELECT message_count FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName).Scan(&count)
@@ -137,11 +130,6 @@ func sessionTranscriptBoundaryTx(ctx context.Context, tx *sql.Tx, namespace, ses
 	return count, lastID, nil
 }
 
-// CommitSealedSessionTurnFinalization implements
-// storagev1.SessionTurnRecordStore. It atomically persists optional transcript
-// entries with the IDs Orka assigned, optional sealed native state, the
-// finalized turn receipt, and a deliberately deferred terminal projection. It
-// never reads or mutates SQLite control-plane mirror tables.
 func (s *Store) CommitSealedSessionTurnFinalization(ctx context.Context, finalization storagev1.SealedSessionTurnFinalization) (*store.SessionTurn, error) {
 	return writeOperation(ctx, s, "CommitSealedSessionTurnFinalization", &finalization.Fence, func(ctx context.Context) (*store.SessionTurn, error) {
 		return s.commitSealedSessionTurnFinalizationWrite(ctx, finalization)
@@ -278,9 +266,6 @@ func finalizeSessionTranscriptTx(
 	messageCountDelta int, inputTokens, outputTokens int64, finalizedAt time.Time,
 ) error {
 	taskUID := key.TaskUID
-	// A turn is finalized exactly once, so the usage Orka attributed to its
-	// prompt attempt is added to the Session's cumulative counters once; an
-	// earlier attempt of the same Task was counted by its own turn.
 	result, err := tx.ExecContext(ctx,
 		`UPDATE sessions SET message_count = message_count + ?, input_tokens = input_tokens + ?,
 		     output_tokens = output_tokens + ?, updated_at = ?
@@ -293,9 +278,6 @@ func finalizeSessionTranscriptTx(
 	if err := rowsAffectedExactlyOne(result, "session transcript finalization"); err != nil {
 		return err
 	}
-	// Gateway projection owns the canonical transcript and releases its Task
-	// lock atomically with the terminal message. Ordinary finalization releases
-	// only this Task UID, including the legacy UID-in-active_task representation.
 	_, err = tx.ExecContext(ctx,
 		`UPDATE sessions SET active_task = '', active_task_uid = '', active_task_expires_at = NULL
 		 WHERE namespace = ? AND name = ? AND session_type <> ? AND owner_type <> ?
@@ -305,8 +287,6 @@ func finalizeSessionTranscriptTx(
 	return err
 }
 
-// ActivateSessionTurnProjection makes the deferred terminal projection
-// claimable only after Kubernetes control finalization has committed.
 func (s *Store) ActivateSessionTurnProjection(ctx context.Context, request store.ActivateSessionTurnProjectionRequest) (*store.OutboxProjection, error) {
 	return writeOperation(ctx, s, "ActivateSessionTurnProjection", &request.Fence, func(ctx context.Context) (*store.OutboxProjection, error) {
 		return s.activateSessionTurnProjectionWrite(ctx, request)
@@ -348,9 +328,6 @@ func (s *Store) activateSessionTurnProjectionWrite(ctx context.Context, request 
 		return &projection, nil
 	}
 	if projection.InitialAvailableAt.Equal(normalized.AvailableAt) && !projection.AvailableAt.Equal(deferredSessionTurnProjectionTime) {
-		// Once the deferred timestamp is released, later outbox claim/retry/
-		// delivery transitions own AvailableAt and LastOperationID. Finalization
-		// retries must not rewind or reject that delivery state.
 		return &projection, nil
 	}
 	if projection.State != store.OutboxProjectionPending || projection.Attempts != 0 || projection.LeaseOwner != "" || projection.LeaseExpiresAt != nil {
@@ -455,8 +432,6 @@ func normalizeSealedSessionTurnFinalization(request storagev1.SealedSessionTurnF
 	return request, projection, nil
 }
 
-// appendSessionTurnTranscript appends the user prompt, unless userMessageID
-// is empty, and the terminal message with the given IDs.
 func appendSessionTurnTranscript(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -493,8 +468,6 @@ func appendSessionTurnTranscript(
 	return messageCount + 1, nil
 }
 
-// validateFinalizationMessageIDs requires an ID for each message a
-// finalization appends and none for a message it leaves out.
 func validateFinalizationMessageIDs(skipTranscript, skipUserPrompt bool, userMessageID, terminalMessageID string) error {
 	if skipTranscript {
 		if userMessageID != "" || terminalMessageID != "" {
@@ -520,10 +493,6 @@ func validateFinalizationMessageIDs(skipTranscript, skipUserPrompt bool, userMes
 	return nil
 }
 
-// validateSealedNativeFinalization admits sealed native state on exactly two
-// terminal shapes: a fresh capture committed with a canonical assistant
-// result, or the Session's existing checkpoint carried across a non-success
-// outcome marker.
 func validateSealedNativeFinalization(request storagev1.SealedSessionTurnFinalization) error {
 	native := request.NativeSession
 	if native == nil {
@@ -546,8 +515,6 @@ func validateSealedNativeFinalization(request storagev1.SealedSessionTurnFinaliz
 			return err
 		}
 	}
-	// A message stored before transcript messages carried IDs has none, so
-	// a nonempty transcript may end without a last message ID.
 	if native.ExpectedMessageCount < 0 || (native.ExpectedMessageCount == 0 && native.ExpectedLastMessageID != "") {
 		return store.ValidationErrorf("expected transcript boundary is incomplete")
 	}

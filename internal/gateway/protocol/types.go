@@ -4,33 +4,23 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package protocol defines the provider-neutral orka.gateway.v1 HTTP contract.
 package protocol
 
 import "time"
 
 const (
-	// Version is the frozen gateway adapter contract version.
 	Version = "orka.gateway.v1"
 
-	// EventTypeText carries no delegated tool authority.
-	EventTypeText = "text"
-	// EventTypeDelegatedText requires a generation-bound nonsecret grant reference.
+	EventTypeText          = "text"
 	EventTypeDelegatedText = "delegatedText"
 	GatewayGrantRefKey     = "gatewayGrantRef"
 
-	// DeliveryKindFinal is a successful terminal assistant reply.
-	DeliveryKindFinal = "final"
-	// DeliveryKindError is a sanitized terminal or denial reply.
-	DeliveryKindError = "error"
-	// DeliveryKindMessage is a capability-gated nonterminal assistant message.
+	DeliveryKindFinal   = "final"
+	DeliveryKindError   = "error"
 	DeliveryKindMessage = "message"
 
-	// DeliveryStatusDelivered indicates that the provider accepted a delivery.
-	DeliveryStatusDelivered = "delivered"
-	// DeliveryStatusRetryableError indicates that the same delivery ID should be retried.
-	DeliveryStatusRetryableError = "retryableError"
-	// DeliveryStatusNonRetryableError indicates a permanent adapter rejection.
+	DeliveryStatusDelivered         = "delivered"
+	DeliveryStatusRetryableError    = "retryableError"
 	DeliveryStatusNonRetryableError = "nonRetryableError"
 
 	MaxHTTPBodyBytes        = 256 << 10
@@ -43,13 +33,11 @@ const (
 	MaxAdapterResponseBytes = 64 << 10
 )
 
-// Sender identifies a stable external principal without provider credentials.
 type Sender struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName,omitempty"`
 }
 
-// EventEnvelope is the normalized inbound adapter payload.
 type EventEnvelope struct {
 	ProtocolVersion string            `json:"protocolVersion"`
 	ExternalEventID string            `json:"externalEventId"`
@@ -65,7 +53,6 @@ type EventEnvelope struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 }
 
-// IngressResponse acknowledges durable admission without waiting for execution.
 type IngressResponse struct {
 	Status  string `json:"status"`
 	EventID string `json:"eventId"`
@@ -73,7 +60,6 @@ type IngressResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-// CapabilitiesResponse is returned by GET /v1/capabilities.
 type CapabilitiesResponse struct {
 	ProtocolVersion string       `json:"protocolVersion"`
 	AdapterName     string       `json:"adapterName"`
@@ -81,7 +67,6 @@ type CapabilitiesResponse struct {
 	Capabilities    Capabilities `json:"capabilities"`
 }
 
-// Capabilities are provider-neutral adapter behaviors.
 type Capabilities struct {
 	InboundText        bool `json:"inboundText"`
 	OutboundText       bool `json:"outboundText"`
@@ -92,18 +77,15 @@ type Capabilities struct {
 	InterimDelivery    bool `json:"interimDelivery,omitempty"`
 }
 
-// HealthResponse is returned by GET /v1/health.
 type HealthResponse struct {
 	Status string `json:"status"`
 }
 
-// ResourceReference identifies an Orka object without embedding it.
 type ResourceReference struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 }
 
-// DeliveryRequest is sent by Orka to POST /v1/deliveries.
 type DeliveryRequest struct {
 	ProtocolVersion  string             `json:"protocolVersion"`
 	DeliveryID       string             `json:"deliveryId"`
@@ -120,7 +102,6 @@ type DeliveryRequest struct {
 	Metadata         map[string]string  `json:"metadata,omitempty"`
 }
 
-// DeliveryResponse is the synchronous terminal adapter response.
 type DeliveryResponse struct {
 	Status            string `json:"status"`
 	ProviderMessageID string `json:"providerMessageId,omitempty"`

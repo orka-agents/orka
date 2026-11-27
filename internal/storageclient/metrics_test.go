@@ -21,8 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/storetest"
 )
 
-// storeMetricNames are the execution-event store metrics recorded below the
-// API: appends, store-scope lists, redactions and truncations.
 var storeMetricNames = map[string]bool{
 	"orka_execution_events_appended_total":         true,
 	"orka_execution_event_append_failures_total":   true,
@@ -33,9 +31,6 @@ var storeMetricNames = map[string]bool{
 	"orka_execution_event_truncations_total":       true,
 }
 
-// gatherStoreMetrics reads the store metrics from Orka's registry, the one the
-// controller serves on its metrics endpoint. A counter maps to its value and
-// a histogram to its sample count.
 func gatherStoreMetrics(t *testing.T) map[string]float64 {
 	t.Helper()
 	families, err := ctrlmetrics.Registry.Gather()
@@ -67,7 +62,6 @@ func metricLabels(pairs []*dto.LabelPair) string {
 	return "{" + strings.Join(labels, ",") + "}"
 }
 
-// storeMetricDelta runs fn and returns every store metric series it changed.
 func storeMetricDelta(t *testing.T, fn func()) map[string]float64 {
 	t.Helper()
 	before := gatherStoreMetrics(t)
@@ -86,10 +80,6 @@ func workloadEvent(streamID, eventType string) *store.ExecutionEvent {
 		TaskName: streamID, SessionName: "session", Type: eventType, ContentText: "hello"}
 }
 
-// runStoreMetricWorkload sends appends and lists through every path that
-// records a store metric: each append method, deduplicated replays, appends
-// and lists inside Task data access, refusals by the client and by the
-// provider, argument errors, and successful and failed lists.
 func runStoreMetricWorkload(t *testing.T, client *storageclient.Client) {
 	t.Helper()
 	ctx := t.Context()
@@ -115,7 +105,6 @@ func runStoreMetricWorkload(t *testing.T, client *storageclient.Client) {
 		return err
 	}))
 
-	// The provider refuses these.
 	missingNamespace := workloadEvent("e", events.ExecutionEventTypeModelMessage)
 	missingNamespace.Namespace = ""
 	unknownType := workloadEvent("e", "NotAnEventType")
@@ -133,7 +122,6 @@ func runStoreMetricWorkload(t *testing.T, client *storageclient.Client) {
 	_, err = client.AppendExecutionEvent(canceled, workloadEvent("e", events.ExecutionEventTypeTaskFailed))
 	require.ErrorIs(t, err, context.Canceled)
 
-	// The client refuses these before calling the provider.
 	_, err = client.AppendExecutionEvent(ctx, nil)
 	require.ErrorIs(t, err, store.ErrValidation)
 	report, err := json.Marshal(map[string]any{"usage": map[string]any{"id": "bad", "counterID": "c", "status": "unknown"}})
@@ -143,7 +131,6 @@ func runStoreMetricWorkload(t *testing.T, client *storageclient.Client) {
 	_, err = client.AppendExecutionEvent(store.WithUsageAttribution(ctx, store.UsageAttribution{TaskUID: "task-uid"}), invalidReport)
 	require.ErrorIs(t, err, store.ErrValidation)
 
-	// Argument errors are not append attempts and are not counted.
 	_, _, err = client.AppendExecutionEventIfAbsent(ctx, workloadEvent("e", events.ExecutionEventTypeModelMessage), " ")
 	require.ErrorIs(t, err, store.ErrValidation)
 	_, _, err = client.AppendExecutionEventWithPlanIfAbsent(ctx, workloadEvent("e", events.ExecutionEventTypePlanUpdated), "key", nil)
@@ -165,10 +152,6 @@ func runStoreMetricWorkload(t *testing.T, client *storageclient.Client) {
 	require.Error(t, err)
 }
 
-// storeMetricsGolden is what the workload recorded before the store metrics
-// moved into the client, when the SQLite provider recorded appends and store
-// reads and the client recorded only its own refusals, redactions and
-// truncations. Histograms map to their sample counts.
 var storeMetricsGolden = map[string]float64{
 	`orka_execution_event_append_duration_seconds{event_type="ModelMessage",result="error",stream_type="task"}`:        1,
 	`orka_execution_event_append_duration_seconds{event_type="ModelMessage",result="error",stream_type="unknown"}`:     1,
@@ -204,17 +187,12 @@ var storeMetricsGolden = map[string]float64{
 	`orka_execution_events_appended_total{event_type="ToolCallCompleted",stream_type="task"}`:                          2,
 }
 
-// TestClientRecordsTheStoreMetricsSQLiteRecorded runs the workload through
-// the client over SQLite, as production does, and requires exactly the series
-// and counts the SQLite provider recorded before the move.
 func TestClientRecordsTheStoreMetricsSQLiteRecorded(t *testing.T) {
 	client := newEmbeddedClient(t)
 	delta := storeMetricDelta(t, func() { runStoreMetricWorkload(t, client) })
 	require.Equal(t, storeMetricsGolden, delta)
 }
 
-// TestProvidersRecordNoStoreMetrics calls SQLite and the test fake directly:
-// neither records a store metric, so the client's series are not counted twice.
 func TestProvidersRecordNoStoreMetrics(t *testing.T) {
 	ctx := t.Context()
 	secret := func(streamID string) *store.ExecutionEvent {
@@ -254,9 +232,6 @@ func TestProvidersRecordNoStoreMetrics(t *testing.T) {
 	}
 }
 
-// unavailableEventProvider stands in for a provider in another process whose
-// execution-event calls fail. It embeds SQLite only to serve the rest of the
-// client's provider interfaces.
 type unavailableEventProvider struct {
 	*sqlite.Store
 }
@@ -287,10 +262,6 @@ func (unavailableEventProvider) ListSessionExecutionEvents(
 	return nil, 0, store.ErrUnavailable
 }
 
-// TestClientRecordsStoreMetricsForAnyProvider checks that a provider that
-// records nothing in Orka's registry still reports appends and store reads,
-// here as failures during an outage. The client retries an unavailable write
-// until its deadline, so the calls get a short one.
 func TestClientRecordsStoreMetricsForAnyProvider(t *testing.T) {
 	client := storageclienttest.NewEmbedded(t, unavailableEventProvider{Store: openSQLite(t)})
 	delta := storeMetricDelta(t, func() {
@@ -309,8 +280,6 @@ func TestClientRecordsStoreMetricsForAnyProvider(t *testing.T) {
 				return err
 			},
 		} {
-			// Each unavailable write can exhaust its deadline. A later call
-			// needs its own context to reach the provider and record its error.
 			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 			err := write(ctx)
 			cancel()
@@ -335,10 +304,6 @@ func TestClientRecordsStoreMetricsForAnyProvider(t *testing.T) {
 	}, delta)
 }
 
-// TestClientCountsAlreadySanitizedPayloadsOnce covers payloads sanitized
-// before they reach the client: a worker that already redacted its payload,
-// and Orka code that sanitized an event before appending it. Each persisted
-// event counts once; a clean payload counts nothing.
 func TestClientCountsAlreadySanitizedPayloadsOnce(t *testing.T) {
 	client := newEmbeddedClient(t)
 	redactions := `orka_execution_event_redactions_total{event_type="ModelMessage",stream_type="task"}`
@@ -366,12 +331,6 @@ func TestClientCountsAlreadySanitizedPayloadsOnce(t *testing.T) {
 	}
 }
 
-// TestClientRecordsOneAppendAttemptPerGroupedEvent requires a grouped append
-// to record each of its events as one append attempt with the group's
-// outcome: an appended group counts every event as appended, and a group the
-// client or the provider refuses counts every event as failed, because the
-// provider commits a group in one transaction or not at all. A deduplicated
-// replay counts as appended, and an invalid deduplication key is not counted.
 func TestClientRecordsOneAppendAttemptPerGroupedEvent(t *testing.T) {
 	client := newEmbeddedClient(t)
 	ctx := t.Context()

@@ -1,5 +1,3 @@
-// Response shapes of GET /api/v1/attention and GET /api/v1/approvals. Items are
-// short safe summaries; approval detail stays on the per-Task approvals API.
 
 export type AttentionKind = 'approval' | 'outcomeUnknown' | 'failed' | 'podWaiting' | 'monitorBlocked'
 
@@ -19,7 +17,6 @@ export interface AttentionApproval {
   targetTool?: string
   severity?: string
   expiresAt?: string
-  /** Hint only: true or false when settled, null when unknown. The decision POST enforces. */
   canApprove: boolean | null
   canDecline: boolean | null
 }
@@ -46,10 +43,6 @@ export interface AttentionItem {
   monitor?: AttentionMonitor
 }
 
-/**
- * Whether an optional source was read. partial (approvals only) means some
- * Tasks that may be waiting for approval could not be read by the caller.
- */
 export type AttentionSourceState = 'included' | 'partial' | 'forbidden' | 'unavailable' | 'notRequested'
 
 export interface AttentionResponse {

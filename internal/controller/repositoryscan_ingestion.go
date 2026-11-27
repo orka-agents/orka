@@ -41,8 +41,6 @@ func (r *RepositoryScanReconciler) validateScanRunIngestionIdentity(ctx context.
 
 func (r *RepositoryScanReconciler) cancelScanRunAfterIdentityConflict(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun, err error) error {
 	if errors.Is(err, errScanRunLiveIdentityChanged) {
-		// This runs after the ingestion transaction has rolled back, so the
-		// cancellation survives without preserving any stale result writes.
 		return errors.Join(err, security.CancelScanRun(ctx, r.SecurityStore, r.Client, r.APIReader, scan, run,
 			"repository scan identity changed during ingestion"))
 	}
@@ -110,8 +108,6 @@ func (r *RepositoryScanReconciler) applyScanTaskIngestion(
 	return r.refreshScanRunStatus(ctx, scan, run, run.ID, false)
 }
 
-// SQLite results commit before Kubernetes validation Tasks or diagnostic
-// artifacts are published. A pending receipt retries only that follow-up work.
 func (r *RepositoryScanReconciler) finishScanTaskIngestion(ctx context.Context, scan *corev1alpha1.RepositoryScan, ingestion *store.ScanTaskIngestion) error {
 	if ingestion.Completed {
 		return nil
@@ -130,7 +126,6 @@ func (r *RepositoryScanReconciler) finishScanTaskIngestion(ctx context.Context, 
 		if err != nil {
 			return err
 		}
-		// A later scan may already have observed this canonical finding.
 		if finding.RepositoryScan == ingestion.RepositoryScan && finding.ScanRunID == ingestion.ScanRunID {
 			finding.ScanTaskName = ingestion.TaskName
 			findings = append(findings, finding)

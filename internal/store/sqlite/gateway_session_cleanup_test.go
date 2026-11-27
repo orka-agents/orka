@@ -81,7 +81,6 @@ func TestGatewayRetentionArchivesTurnsAfterEventCompaction(t *testing.T) {
 	s, intent, event, turn := gatewayCleanupFixture(t)
 	ctx := context.Background()
 	compactGatewayCleanupFixture(t, s, intent)
-	// A second maintenance pass has no event left to identify the Session.
 	if _, err := s.MaintainGatewayRecords(ctx, intent.Namespace, intent.PreparedAt.Add(time.Minute), intent.Gateway.TerminalCutoff); err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +137,6 @@ func TestGatewayRetentionReservesTranscriptOnlySessionName(t *testing.T) {
 		t.Fatal(err)
 	}
 	operationID, operationDigest := store.GatewaySessionCleanupOperation(event.Namespace, event.SessionName, "", event.GatewayUID, event.BindingUID)
-	// Maintenance also runs without an ACP coordinator. Its transcript-only
-	// path must atomically record the completion before releasing the name.
 	completion, err := s.GetSessionCleanupCompletion(ctx, event.Namespace, event.SessionName)
 	if err != nil || completion.SessionUID != "" || completion.OperationID != operationID || completion.OperationDigest != operationDigest {
 		t.Fatalf("transcript-only completion = %+v, %v", completion, err)
@@ -287,7 +284,6 @@ func TestGatewayCleanupKeepsPendingEventsAndReplies(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			// Isolate the event/reply guard from history and timestamp guards.
 			if _, err := s.db.ExecContext(ctx, `DELETE FROM session_messages`); err != nil {
 				t.Fatal(err)
 			}
@@ -346,8 +342,6 @@ func TestGatewayCleanupMixedAgeTurnsAndAtomicReceiptArchive(t *testing.T) {
 	if _, err := s.PrepareSessionCleanup(ctx, intent); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("newer turn in a mixed-age Session must retain all turns: %v", err)
 	}
-	// Once both turns pass retention, an error on the second receipt must also
-	// roll back the first receipt, leaving the original intent and both turns.
 	intent.Gateway.TerminalCutoff = intent.PreparedAt.Add(-time.Minute)
 	if _, err := s.PrepareSessionCleanup(ctx, intent); err != nil {
 		t.Fatal(err)
@@ -415,8 +409,6 @@ func TestGatewayCleanupCandidatePagesAcrossNamespaces(t *testing.T) {
 		}
 		filter.AfterNamespace, filter.AfterSessionName = page.NextNamespace, page.NextSessionName
 		if step == 0 {
-			// Removing the first page, including its cursor row, must not shift
-			// the next page past Sessions in the following namespace.
 			if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE namespace = 'team-a'`); err != nil {
 				t.Fatal(err)
 			}

@@ -13,10 +13,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// settlingTaskInWorkspaceValidation settles the fixture's attempt as the live
-// path does up to workspace validation: the receipt and the attempt's move to
-// Settling, the result, the journaled completion, and the delivery moved to
-// Validating, which records a later operation on the attempt.
 func settlingTaskInWorkspaceValidation(t *testing.T, fixture *recoveryFixture) *corev1alpha1.Task {
 	t.Helper()
 	task, _, _ := settlingTaskWithReceipt(t, fixture)
@@ -36,10 +32,6 @@ func settlingTaskInWorkspaceValidation(t *testing.T, fixture *recoveryFixture) *
 	return task
 }
 
-// Workspace validation records a later operation on the settling attempt, so
-// the attempt no longer names its settling operation. The receipt is still
-// required: when it is lost, even a result and a journaled completion that
-// survived do not settle the Task.
 func TestACPDispatcherHoldsTaskWhoseReceiptIsLostDuringWorkspaceValidation(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -73,8 +65,6 @@ func TestACPDispatcherHoldsTaskWhoseReceiptIsLostDuringWorkspaceValidation(t *te
 	}
 }
 
-// With its receipt, an attempt in workspace validation recovers as it did
-// before record holds: the receipt checks against its own settling operation.
 func TestACPDispatcherRecoversWorkspaceValidationWithItsReceipt(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -87,8 +77,6 @@ func TestACPDispatcherRecoversWorkspaceValidationWithItsReceipt(t *testing.T) {
 	requireNoTaskStorageHold(t, fixture, task)
 }
 
-// A receipt whose own settling operation does not match its data conflicts,
-// also once the attempt records a later operation.
 func TestACPDispatcherHoldsWorkspaceValidationWithAConflictingReceipt(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
@@ -114,10 +102,6 @@ func TestACPDispatcherHoldsWorkspaceValidationWithAConflictingReceipt(t *testing
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, corev1alpha1.StorageRecoveryConflictingRecordReason)
 }
 
-// Once the attempt records a later operation, a receipt is checked against
-// the settling operation it names. That operation must come from an earlier
-// attempt version: a receipt naming the attempt's current or a later version,
-// or no valid version, conflicts even when its digest matches its own data.
 func TestACPDispatcherHoldsWorkspaceValidationWithAReceiptNamingNoEarlierVersion(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -158,9 +142,6 @@ func TestACPDispatcherHoldsWorkspaceValidationWithAReceiptNamingNoEarlierVersion
 	}
 }
 
-// A restore that changed the Task's UID, with the prompt's completion
-// journaled and its receipt lost, holds the restored Task too; acknowledging
-// the hold records the outcome as unknown.
 func TestACPDispatcherHoldsRestoredJournaledCompletionWhoseReceiptIsMissing(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)

@@ -21,15 +21,8 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// errInjectedProjectionEnqueue fails a terminal projection enqueue.
 var errInjectedProjectionEnqueue = errors.New("injected terminal projection enqueue failure")
 
-// settlingValidationStore adds to validationRecoveryStore the attempt
-// transitions and terminal projections a recovery pass that records an
-// unknown outcome writes. It fails the next enqueueFailures enqueues, as a
-// store that is briefly unavailable would, or, with lostEnqueueResponse,
-// stores the projection and still reports the failure, as a lost response
-// would.
 type settlingValidationStore struct {
 	*validationRecoveryStore
 	projections         map[string]*store.OutboxProjection
@@ -101,15 +94,6 @@ func (s *residentValidatingSupervisor) deletedSession() bool {
 	return s.deleted
 }
 
-// When the terminal projection cannot be enqueued after recovery recorded a
-// standalone Task's validation conflict and unknown outcome on its attempt,
-// the Task records the conflict but not the unknown outcome. A later pass
-// records the outcome from the attempt before runtime cleanup, keeping the
-// Task's runtime identity, so cleanup finishes the validation the runtime
-// still holds and the Task moves to the recovering epoch, whether the runtime
-// still runs under the replaced controller's epoch or was adopted by the
-// recovering one. A projection whose enqueue response was lost is left to the
-// outbox projector, and cleanup waits for it.
 func TestRecoveryRecordsTheValidationOutcomeBeforeCleanupAfterAFailedEnqueue(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -125,14 +109,6 @@ func TestRecoveryRecordsTheValidationOutcomeBeforeCleanupAfterAFailedEnqueue(t *
 	}
 }
 
-// The runtime starts validating when the prompt completes, before the
-// controller records it, so it can hold a validation of an attempt whose
-// delivery is still NotRequested when recovery records the unknown outcome,
-// whether that pass found the prompt lost or continued after an operator
-// acknowledged a hold for its lost result receipt. When the terminal
-// projection cannot be enqueued, a later pass records the outcome on the Task
-// from the attempt before runtime cleanup here too, so cleanup finishes that
-// validation and the Task moves to the recovering epoch.
 func TestRecoveryRecordsAnOutcomeBeforeValidationAndCleanupAfterAFailedEnqueue(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -149,24 +125,13 @@ func TestRecoveryRecordsAnOutcomeBeforeValidationAndCleanupAfterAFailedEnqueue(t
 	}
 }
 
-// failedEnqueueRecovery selects how testRecoveredValidationOutcomeAfterFailedEnqueue
-// reaches the failed terminal projection enqueue.
 type failedEnqueueRecovery struct {
-	// adopted runs the runtime under the recovering controller's epoch.
-	adopted bool
-	// lostResponse stores the projection whose enqueue reports a failure.
-	lostResponse bool
-	// beforeValidation records the unknown outcome for a prompt found lost
-	// while it was running, before the controller saw it complete.
+	adopted          bool
+	lostResponse     bool
 	beforeValidation bool
-	// acknowledged instead records it after an operator acknowledged a hold
-	// for the lost result receipt of a settling attempt whose validation had
-	// not started. Both leave the delivery NotRequested; otherwise the
-	// attempt is in workspace validation.
-	acknowledged bool
+	acknowledged     bool
 }
 
-// appendAcceptedPrompt journals the acceptance of the Task's prompt.
 func appendAcceptedPrompt(t *testing.T, events store.ExecutionEventStore, task *corev1alpha1.Task) {
 	t.Helper()
 	execution := task.Status.Execution
@@ -217,11 +182,7 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario fai
 	control.attempt.SessionUID = ""
 	control.attempt.SessionLeaseGeneration = 0
 	control.attempt.ExecutionState = store.PromptExecutionSettling
-	// unsettled is the Task's execution state until recovery records the
-	// unknown outcome on it.
 	unsettled := corev1alpha1.TaskExecutionStateSettling
-	// wantAttemptDelivery and wantDelivery are the deliveries the attempt
-	// and the Task record once recovery settled the attempt as unknown.
 	wantAttemptDelivery := store.PromptDeliveryConflict
 	wantDelivery := recoveredValidationConflict
 	var hold taskStorageRecordHold
@@ -243,8 +204,6 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario fai
 			control.attempt.ExecutionState = store.PromptExecutionRunning
 			break
 		}
-		// The settling transition recorded the receipt at version 1, which
-		// the store lost with the result.
 		control.attempt.Version = 2
 		control.attempt.LastOperationID = acpSettlingOperationID(1)
 		digest, err := acpSettlingTransitionDigest(control.attempt.ID, 1, []byte("the result the store lost"))
@@ -342,8 +301,6 @@ func testRecoveredValidationOutcomeAfterFailedEnqueue(t *testing.T, scenario fai
 			latest.Status.Execution.State, latest.Status.Delivery)
 	}
 	if lostResponse {
-		// The stored projection is the Task's record; until the projector
-		// delivers it, cleanup waits and sends the runtime nothing.
 		for range 2 {
 			if err := d.recoverStaleTask(ctx, read(), fence); err != nil {
 				t.Fatalf("recovery before the projection is delivered: %v", err)

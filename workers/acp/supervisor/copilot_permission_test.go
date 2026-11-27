@@ -9,8 +9,6 @@ import (
 )
 
 func TestCopilotNativeShellPermissionIdentity(t *testing.T) {
-	// This is the permission envelope emitted by the pinned CLI during live
-	// execution. Its human-readable title is not a tool name.
 	const observed = `{"toolCallId":"call_shell","title":"Run requested read-only command","kind":"execute","status":"pending","rawInput":{"command":"uname -s","commands":["uname -s"]}}`
 	for _, test := range []struct {
 		name, provider, toolCall, want string

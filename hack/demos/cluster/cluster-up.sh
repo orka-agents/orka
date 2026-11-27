@@ -1,24 +1,13 @@
 #!/usr/bin/env bash
-# Bootstrap a kind cluster for the Orka demo set.
-#
-# Idempotent — if the cluster already exists, only Orka images get rebuilt
-#
-# Requires: kind, docker, kubectl, helm (or `kustomize` + `kubectl apply`).
 
 set -Eeuo pipefail
 
 cluster_name="${ORKA_DEMO_CLUSTER:-orka-demo}"
 img="${ORKA_DEMO_IMAGE:-orka-demo:dev}"
 publisher_img="${ORKA_DEMO_PUBLISHER_IMAGE:-orka-workspace-publisher:demo}"
-# Built-in agent runtimes only run from digest-pinned images the controller was
-# deployed with, so the demo builds the immutable Codex ACP runtime and pins it
-# through the kind registry. Set ORKA_DEMO_BUILD_ACP_CODEX=0 to skip (agent
-# Tasks then fail closed until the operator supplies the image).
 build_acp_codex="${ORKA_DEMO_BUILD_ACP_CODEX:-1}"
 acp_codex_img="${ORKA_DEMO_ACP_CODEX_IMAGE:-orka-acp-codex-runtime:demo}"
 namespace="${ORKA_NAMESPACE:-orka-system}"
-# Demo resources live in the controller's single watched namespace; see
-# demo-env.sh.
 demo_namespace="${DEMO_NAMESPACE:-orka-system}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,11 +58,7 @@ if [[ "${build_acp_codex}" == "1" ]]; then
 fi
 
 log "Ensuring namespaces ${namespace}, ${demo_namespace}, and vekil-system"
-# make deploy adopts the controller namespace only when it already carries the
-# static harness-v2 identity label, so create it through the same helper.
 bash "${repo_root}/scripts/lib/ensure-static-mode-namespace.sh" kubectl "${namespace}" harness-v2
-# The fail-closed admission webhook needs its serving certificate before
-# make deploy applies the production ACP topology.
 log "Ensuring the admission webhook TLS secret in ${namespace}"
 orka_e2e_bootstrap_admission_tls kubectl "${namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f -

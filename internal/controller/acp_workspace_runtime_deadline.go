@@ -11,10 +11,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// newWorkspaceRuntimeContext applies the concrete workspace's frozen lifetime
-// to active prompt execution. Deleting its RuntimePool closes admission but
-// waits for controller work to settle; the prompt must therefore enter the
-// normal deadline cancellation path before that pool drain can complete.
 func (d *ACPDispatcher) newWorkspaceRuntimeContext(ctx context.Context, pool *corev1alpha1.RuntimePool) (context.Context, context.CancelFunc, error) {
 	unchanged := func() (context.Context, context.CancelFunc, error) {
 		return ctx, func() {}, nil

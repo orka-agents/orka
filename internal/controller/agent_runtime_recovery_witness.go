@@ -38,9 +38,6 @@ const (
 	agentRuntimeBootEnvironment         = "ORKA_ACP_SUPERVISOR_BOOT_ID"
 )
 
-// agentRuntimeBootWitness is an immutable observation made before runtime
-// admission. The authenticated boot and Kubernetes container are observed in
-// one bracketed read. Later endpoint or Pod absence cannot replace this proof.
 type agentRuntimeBootWitness struct {
 	SchemaVersion         int                                   `json:"schemaVersion"`
 	Namespace             string                                `json:"namespace"`
@@ -187,9 +184,6 @@ func validateAgentRuntimeKubernetesRecoverySpec(runtime *corev1alpha1.AgentRunti
 	return nil
 }
 
-// recoveryTemplateDigest excludes only the controller-owned epoch value.
-// Any image, command, volume, auth source, selector or security change remains
-// a distinct physical authority and cannot be silently adopted during recovery.
 func recoveryTemplateDigest(template corev1.PodTemplateSpec, containerName string) (string, uint64, error) {
 	copy := template.DeepCopy()
 	var epoch uint64
@@ -217,9 +211,6 @@ func recoveryTemplateDigest(template corev1.PodTemplateSpec, containerName strin
 	return digest, epoch, err
 }
 
-// validateRecoveryPodTemplate verifies the execution configuration as well as
-// the owner chain. Kubernetes may assign scheduling fields and default the
-// ServiceAccount name; it must not inject or replace executable configuration.
 func validateRecoveryPodTemplate(deployment *appsv1.Deployment, rs *appsv1.ReplicaSet, pod *corev1.Pod) error {
 	actualTemplate := rs.Spec.Template.DeepCopy()
 	delete(actualTemplate.Labels, appsv1.DefaultDeploymentUniqueLabelKey)
@@ -295,8 +286,6 @@ func (r *AgentRuntimeReconciler) recoveryBackend(ctx context.Context, runtime *c
 	if err != nil {
 		return nil, err
 	}
-	// Recovery witnesses retain one dial address. Reject unsupported address
-	// sets before committing a witness that cannot be read or retired later.
 	if state.endpointCount != 1 || len(state.pins) != 1 || service.UID == "" {
 		return nil, errors.New("runtime recovery requires one exact Service backend address")
 	}
@@ -351,7 +340,6 @@ func (r *AgentRuntimeReconciler) recoveryBackend(ctx context.Context, runtime *c
 	if err != nil || !selector.Matches(labels.Set(selected.Labels)) {
 		return nil, errors.New("runtime recovery Pod selector changed")
 	}
-	// EndpointSlice UID binding is stricter than the portable dialing policy.
 	var endpointSlices discoveryv1.EndpointSliceList
 	if err := r.endpointReader().List(ctx, &endpointSlices, client.InNamespace(namespace), client.MatchingLabels{discoveryv1.LabelServiceName: serviceName}); err != nil {
 		return nil, err
@@ -466,9 +454,6 @@ func (r *AgentRuntimeReconciler) writeRecoveryPodRetention(ctx context.Context, 
 		pod.Annotations[agentRuntimePreparedOwnerAnnotation] == string(runtime.UID) {
 		return nil
 	}
-	// A timed-out owner-removal PATCH may still be in flight after its epoch
-	// guard returns. Change the owner's resourceVersion before retaining the
-	// Pod, so either this write or that original removal must conflict.
 	if err := r.fenceRecoveryPodRetention(ctx, current); err != nil {
 		return err
 	}

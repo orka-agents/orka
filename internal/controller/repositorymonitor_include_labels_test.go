@@ -79,7 +79,6 @@ func TestRepositoryMonitorInventoryScopesPullRequestsByIncludeLabels(t *testing.
 	t.Cleanup(server.Close)
 	monitor, secret := repositoryMonitorInventoryTestObjects("include-labels")
 	monitor.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
-	// PR #2's repair was still running when its include label was removed.
 	repair := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "repair-2", Namespace: "default", Labels: map[string]string{
 		labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
 		labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
@@ -91,8 +90,6 @@ func TestRepositoryMonitorInventoryScopesPullRequestsByIncludeLabels(t *testing.
 		WithObjects(append(repositoryMonitorControllerObjects(monitor, secret), repair)...).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
-	// PRs #2 and #3 were tracked before their include labels were removed;
-	// #3 had been stopped by a command.
 	for _, item := range []*store.MonitorItem{
 		{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "2", Number: 2, State: repositoryMonitorItemStateOpen, HeadSHA: "sha2"},
 		{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "3", Number: 3, State: repositoryMonitorItemStateOpen, HeadSHA: "sha3", SkipReason: repositoryMonitorIssueSkipStoppedByCommand},
@@ -259,8 +256,6 @@ func TestRepositoryMonitorIncludeLabelsScopeReadinessStatuses(t *testing.T) {
 	if latest["head1"].State != repositoryMonitorStatusSuccess || writes["head2"] != 0 {
 		t.Fatalf("statuses = %+v writes = %v, want success on the labelled head only", latest, writes)
 	}
-	// The label-removal webhook queues a targeted run, which never reaches
-	// missing-item cleanup; it must still revoke readiness and settle work.
 	action := &store.WorkAction{ID: "wa-include-ready-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 1, TargetSHA: "head1", Intent: "review", DesiredAction: "pr_review", Status: "running"}
 	if err := db.CreateWorkAction(ctx, action); err != nil {
 		t.Fatal(err)
@@ -299,7 +294,6 @@ func TestRepositoryMonitorCommandBlockedWhenIncludeLabelLeavesDuringRun(t *testi
 		path := req.URL.Path
 		switch {
 		case req.Method == http.MethodGet && path == "/repos/orka-agents/orka/pulls/31":
-			// The label is removed after the command's first read.
 			reads++
 			if reads == 1 {
 				_, _ = w.Write([]byte(prBody(`[{"name":"orka:review"}]`)))
@@ -355,7 +349,6 @@ func TestRepositoryMonitorPublicationRetrySkipsRetiredItems(t *testing.T) {
 	if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "7", Number: 7, State: repositoryMonitorItemStateOutOfScope, SkipReason: repositoryMonitorSkipReasonNotIncluded, HeadSHA: "head7", LastReviewID: review, LastReviewedHeadSHA: "head7", LastVerdict: repositoryMonitorVerdictSkipped}); err != nil {
 		t.Fatal(err)
 	}
-	// No client or GitHub: a retired item must not reach the publish attempt.
 	published, err := (&RepositoryMonitorReconciler{Store: db}).publishPendingRepositoryMonitorReviewRecords(ctx, monitor)
 	if err != nil || published {
 		t.Fatalf("publishPendingRepositoryMonitorReviewRecords() = %t, %v; want a retired item skipped", published, err)
@@ -561,7 +554,6 @@ func TestRepositoryMonitorRefreshedPullRequestWithoutIncludeLabelIsRetired(t *te
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls"):
-			// The list still shows the label the detail read no longer has.
 			_ = json.NewEncoder(w).Encode([]any{pr("orka:review")})
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/1"):
 			_ = json.NewEncoder(w).Encode(pr())

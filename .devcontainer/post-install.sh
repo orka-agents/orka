@@ -5,10 +5,8 @@ echo "Installing Kubebuilder development tools..."
 
 ARCH=$(go env GOARCH)
 
-# Install Bun (pinned to the version used by the UI test job)
 PINNED_BUN_VERSION="1.3.13"
 if [ ! -x /usr/local/bin/bun ] || [ "$(/usr/local/bin/bun --version)" != "${PINNED_BUN_VERSION}" ]; then
-  # Digests from the pinned release's SHASUMS256.txt.
   case "${ARCH}" in
     amd64)
       BUN_ARCH=x64
@@ -48,21 +46,18 @@ if ! command -v bun &> /dev/null || [ "$(bun --version)" != "${PINNED_BUN_VERSIO
   exit 1
 fi
 
-# Install kind
 if ! command -v kind &> /dev/null; then
   curl -Lo ./kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-${ARCH}"
   chmod +x ./kind
   mv ./kind /usr/local/bin/kind
 fi
 
-# Install kubebuilder
 if ! command -v kubebuilder &> /dev/null; then
   curl -L -o kubebuilder "https://go.kubebuilder.io/dl/latest/linux/${ARCH}"
   chmod +x kubebuilder
   mv kubebuilder /usr/local/bin/
 fi
 
-# Install kubectl
 if ! command -v kubectl &> /dev/null; then
   KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
   curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
@@ -70,7 +65,6 @@ if ! command -v kubectl &> /dev/null; then
   mv kubectl /usr/local/bin/kubectl
 fi
 
-# Wait for Docker to be ready
 for i in {1..30}; do
   if docker info >/dev/null 2>&1; then
     break
@@ -81,10 +75,8 @@ for i in {1..30}; do
   sleep 1
 done
 
-# Create kind network, ignore errors if exists or conflicts
 docker network inspect kind >/dev/null 2>&1 || docker network create kind || true
 
-# Verify installations
 echo "Installed versions:"
 bun --version
 kind version

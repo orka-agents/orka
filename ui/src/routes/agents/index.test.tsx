@@ -74,7 +74,6 @@ describe('agents routes', () => {
     it('renders AgentDetail with agentId param', () => {
       const Component = AgentDetailRoute.component!
       render(<Component />)
-      // In loading state, shows skeleton
       expect(document.querySelector('.animate-pulse')).toBeInTheDocument()
     })
   })

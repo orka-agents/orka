@@ -44,7 +44,6 @@ describe('RunTimeline', () => {
     })
     render(<RunTimeline task={task} plan={{ summary: 'do the thing' }} />)
     const labels = screen.getAllByRole('listitem').map((li) => li.textContent)
-    // Created (00:00) → Scheduled (00:00:30) → Started (00:01) → PlanReady (00:02) → Iteration 1
     const text = labels.join('|')
     expect(text).toMatch(/Created/)
     const createdIdx = labels.findIndex((l) => l?.includes('Created'))
@@ -92,7 +91,6 @@ describe('RunTimeline', () => {
     const task = makeTask({ status: { phase: 'Running', iteration: 3 } })
     render(<RunTimeline task={task} plan={{ progressPct: 60 }} />)
     const bar = screen.getByRole('progressbar')
-    // iteration-1 tick marks => 2 ticks (the fill div + 2 ticks = 3 child divs/spans)
     const ticks = bar.querySelectorAll('span[aria-hidden="true"]')
     expect(ticks.length).toBe(2)
   })
@@ -114,7 +112,6 @@ describe('RunTimeline', () => {
     render(<RunTimeline task={task} />)
     expect(screen.getByText('Scheduled')).toBeInTheDocument()
     expect(screen.getByText('Iteration 1')).toBeInTheDocument()
-    // No progressbar when there is no progressPct.
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
   })
 
@@ -144,9 +141,7 @@ describe('RunTimeline', () => {
     )
     const cancelled = screen.getByText('Cancelled')
     expect(cancelled).toBeInTheDocument()
-    // Neutral (not failed/success) styling for a user-stopped run.
     expect(cancelled.className).toContain('text-muted-foreground')
-    // The current iteration must NOT remain active/pulsing on a terminal run.
     expect(container.querySelector('[class*="animate-pulse-live"]')).toBeNull()
   })
 
@@ -160,14 +155,11 @@ describe('RunTimeline', () => {
     })
     render(<RunTimeline task={task} plan={{ summary: 's' }} />)
     const failedLabel = screen.getByText('Failed')
-    // Label carries the failed token color, not success.
     expect(failedLabel.className).toContain('text-status-failed')
     expect(failedLabel.className).not.toContain('text-status-succeeded')
   })
 
   it('keeps the terminal event last even when it has a completionTime and the iteration does not', () => {
-    // Regression: a timestamped terminal event must not sort ahead of the
-    // undated synthetic "Iteration N" event.
     const task = makeTask({
       status: {
         phase: 'Succeeded',
@@ -191,7 +183,6 @@ describe('RunTimeline', () => {
     const terminalIdx = labels.findIndex((l) => l.includes('Succeeded'))
     expect(iterationIdx).toBeGreaterThanOrEqual(0)
     expect(terminalIdx).toBeGreaterThan(iterationIdx)
-    // Terminal is the final event.
     expect(terminalIdx).toBe(labels.length - 1)
   })
 })

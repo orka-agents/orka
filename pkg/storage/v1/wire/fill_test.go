@@ -12,8 +12,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// recordCodec is one generated record conversion, listed by
-// zz_generated.codecs_test.go.
 type recordCodec struct {
 	name     string
 	goType   reflect.Type
@@ -29,22 +27,15 @@ var (
 	anyMapType     = reflect.TypeFor[map[string]any]()
 )
 
-// filler sets every field of a value, recursively, to a distinct non-zero
-// value. With a random source it fills randomly for fuzzing.
 type filler struct {
 	random *rand.Rand
 	next   int64
 }
 
-// FillValue returns a value of t with every field set. It is exported to the
-// external tests.
 func FillValue(t reflect.Type, path string) reflect.Value {
 	return (&filler{}).fill(t, path)
 }
 
-// NormalizeValue returns value in the form the wire preserves: times in UTC,
-// nil and empty lists and maps equal, and dynamic values as their JSON
-// decoding.
 func NormalizeValue(value any) any {
 	if value == nil {
 		return nil
@@ -88,9 +79,6 @@ func (f *filler) time() time.Time {
 		f.next++
 		return time.Date(2026, 10, 21, 13, 14, 15, int(123456789+f.next), zone)
 	}
-	// Mostly in the Timestamp range, years 1 to 9999, so records with several
-	// times still round-trip; one time in eight is outside it, which the
-	// conversion refuses.
 	const first, last = -62135596800, 253402300799
 	seconds := first + f.random.Int64N(last-first+1)
 	if f.random.IntN(8) == 0 {
@@ -252,8 +240,6 @@ func jsonRoundTrip(value any) any {
 	return decoded
 }
 
-// zeroFields lists the paths of fields left at their zero value, so a test
-// can prove its fill reached every field.
 func zeroFields(value reflect.Value, path string) []string {
 	if value.IsZero() {
 		return []string{path}

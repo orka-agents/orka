@@ -74,12 +74,10 @@ func freezeFixtures(ready bool) (runtime.Object, runtime.Object, runtime.Object,
 	return tool, policy, connection, task
 }
 
-// freezeProvider is the accepted provider the freeze fixtures link through.
 func freezeProvider() *corev1alpha1.ConnectorProvider {
 	return acceptedBuiltinProvider("github")
 }
 
-// testRequesterStampKey is the stamp key the freeze fixtures verify under.
 var testRequesterStampKey = []byte("0123456789abcdef0123456789abcdef")
 
 func brokeredConfiguration(names ...string) harnessv2.MCPPolicyConfiguration {
@@ -102,9 +100,6 @@ func TestFreezeRequesterConnections(t *testing.T) {
 		t.Fatalf("frozen = %+v", frozen)
 	}
 
-	// Not Ready or no requester: the connection-mode policy is still frozen
-	// (so a later retargeting to a service credential is refused) but no
-	// Connection fills the entry, and the call fails closed.
 	_, _, unready, _ := freezeFixtures(false)
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, unready).Build()
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search")); err != nil ||
@@ -118,9 +113,6 @@ func TestFreezeRequesterConnections(t *testing.T) {
 		len(frozen) != 1 || frozen[0].UID != "" {
 		t.Fatalf("anonymous: frozen = %+v err = %v, want the policy frozen without a Connection", frozen, err)
 	}
-	// A non-connection policy freezes nothing. A brokered Tool that vanished
-	// between descriptor building and the freeze makes binding retry: a Tool
-	// recreated under a policy in another mode must never run unfrozen.
 	direct := policy.(*corev1alpha1.OutboundAccessPolicy).DeepCopy()
 	direct.Spec = corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{}}
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, direct, connection).Build()
@@ -131,7 +123,6 @@ func TestFreezeRequesterConnections(t *testing.T) {
 		t.Fatalf("missing tool: err = %v, want a retry", err)
 	}
 
-	// Read failures propagate so binding retries.
 	failing := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, connection).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
 			if _, isConnection := obj.(*corev1alpha1.Connection); isConnection {
@@ -185,7 +176,6 @@ func TestBindFrozenConnections(t *testing.T) {
 		t.Fatalf("frozen = %+v", frozen)
 	}
 
-	// No snapshot store or missing snapshot: requester set, nothing frozen.
 	executor = workerexecutor.NewToolExecutorForNamespace("tenant", nil, nil)
 	if err := bindFrozenConnections(context.Background(), nil, nil, task, executor); err != nil {
 		t.Fatal(err)
@@ -208,9 +198,6 @@ func TestBindFrozenConnections(t *testing.T) {
 	_ = types.UID("")
 }
 
-// TestFreezeRequiresVerifiedRequesterProvenance covers a compromised trusted
-// worker creating a Task that copies another person's requester identity:
-// without the API stamp or a matching verified parent chain, nothing freezes.
 func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	tool, policy, connection, stamped := freezeFixtures(true)
@@ -223,9 +210,6 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, stamped, brokeredConfiguration("gh_search")); err != nil || len(frozen) != 1 {
 		t.Fatalf("api-stamped task: frozen = %+v err = %v", frozen, err)
 	}
-	// Admission is not retroactive: a Task planted with the source
-	// annotation while admission was disabled carries no stamp the API
-	// sealed, and a stamp copied from another Task does not match this UID.
 	planted := stamped.DeepCopy()
 	planted.Name, planted.UID = "planted", "planted-uid"
 	planted.Annotations = map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI}
@@ -238,16 +222,11 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 			t.Fatalf("%s task: frozen = %+v err = %v, want no Connection without a stamp sealed for this UID", task.Name, frozen, err)
 		}
 	}
-	// A Task the API just created is waiting for its seal (a second write
-	// after the create): dispatch retries instead of committing a write-once
-	// binding with no Connections. Past the grace window it is unverified.
 	fresh := planted.DeepCopy()
 	fresh.Name, fresh.UID, fresh.CreationTimestamp = "fresh", "fresh-uid", metav1.Now()
 	if _, err := freezeRequesterConnections(context.Background(), reader, nil, fresh, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
 		t.Fatalf("fresh unsealed task: err = %v, want ErrRequesterStampPending", err)
 	}
-	// A Task that reaches no connection-mode policy is not held for a seal
-	// it has no use for.
 	plain := &corev1alpha1.Tool{
 		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "tenant"},
 		Spec:       corev1alpha1.ToolSpec{Description: "plain", HTTP: &corev1alpha1.HTTPExecution{URL: "https://api.example.test/x"}},
@@ -260,8 +239,6 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, fresh, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
 		t.Fatalf("stale unsealed task: frozen = %+v err = %v, want unverified", frozen, err)
 	}
-	// Without a configured key nothing is ever verified, and nothing waits
-	// for a seal that cannot arrive: dispatch proceeds without Connections.
 	SetRequesterStampKey(nil)
 	t.Cleanup(func() { SetRequesterStampKey(testRequesterStampKey) })
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, stamped, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
@@ -273,10 +250,6 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	}
 	SetRequesterStampKey(testRequesterStampKey)
 
-	// A coordination child is trusted only once the controller sealed a stamp
-	// for the child's own UID (on its parent's worker's authenticated
-	// request); an owner reference to a stamped parent proves nothing by
-	// itself, since a Task writer can plant one while admission is off.
 	controller := true
 	child := forged.DeepCopy()
 	child.Name, child.UID = "child", "child-uid"
@@ -296,9 +269,6 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, child, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
 		t.Fatalf("owner reference alone: frozen = %+v err = %v, want nothing without the child's own seal", frozen, err)
 	}
-	// A child a worker just created is waiting for its parent's worker to
-	// have it sealed: dispatch retries instead of committing a write-once
-	// binding with no Connections. Past the grace window it is unverified.
 	freshChild := child.DeepCopy()
 	freshChild.Name, freshChild.UID, freshChild.CreationTimestamp = "fresh-child", "fresh-child-uid", metav1.Now()
 	if _, err := freezeRequesterConnections(context.Background(), reader, nil, freshChild, brokeredConfiguration("gh_search")); !errors.Is(err, ErrRequesterStampPending) {
@@ -308,8 +278,6 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, freshChild, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
 		t.Fatalf("stale unsealed child: frozen = %+v err = %v, want unverified", frozen, err)
 	}
-	// A fresh Task that is neither API-stamped nor a coordination child
-	// waits for nothing.
 	loose := freshChild.DeepCopy()
 	loose.Name, loose.UID, loose.CreationTimestamp, loose.OwnerReferences = "loose", "loose-uid", metav1.Now(), nil
 	if frozen, err := freezeRequesterConnections(context.Background(), reader, nil, loose, brokeredConfiguration("gh_search")); err != nil || !frozenWithoutConnection(frozen) {
@@ -323,10 +291,6 @@ func TestFreezeRequiresVerifiedRequesterProvenance(t *testing.T) {
 	}
 }
 
-// The broker seals the children it creates for an authenticated ACP Task
-// directly: the parent must carry a valid stamp, the child must be
-// controller-owned by it with the same requester, and a concurrent write
-// that fences the patch is retried against the re-read child.
 func TestACPChildTaskSealerSealsOwnedChildren(t *testing.T) {
 	SetRequesterStampKey(testRequesterStampKey)
 	t.Cleanup(func() { SetRequesterStampKey(nil) })
@@ -392,8 +356,6 @@ func TestACPChildTaskSealerSealsOwnedChildren(t *testing.T) {
 			t.Fatalf("%s must stay unsealed: %v %v", task.Name, unsealed.Annotations, err)
 		}
 	}
-	// A parent whose identity changed, or one without a verified stamp,
-	// seals nothing.
 	if err := ACPChildTaskSealer(c, parent.Namespace, parent.Name, "other-uid")(ctx, c, child.DeepCopy()); !errors.Is(err, ErrChildSealRefused) {
 		t.Fatalf("changed parent identity err = %v", err)
 	}
@@ -407,10 +369,6 @@ func TestACPChildTaskSealerSealsOwnedChildren(t *testing.T) {
 	}
 }
 
-// TestACPChildTaskSealerSkipsWhatItCannotSeal covers a seal requested
-// while stamps are disabled, or for a child without a requester: there is
-// nothing to seal, so the hook returns at once without reading the parent
-// or retrying.
 func TestACPChildTaskSealerSkipsWhatItCannotSeal(t *testing.T) {
 	var reads atomic.Int32
 	c := ctrlfake.NewClientBuilder().WithScheme(newTestScheme()).
@@ -441,11 +399,6 @@ func TestACPChildTaskSealerSkipsWhatItCannotSeal(t *testing.T) {
 	}
 }
 
-// TestHandleScheduledSealsRunsOfAVerifiedRequester covers a scheduled Task
-// the API sealed for a person: each run acts for the same person, so the
-// controller seals it against the scheduled Task right after creating it,
-// and the run's binding neither waits out the grace window nor loses the
-// person's Connections.
 func TestHandleScheduledSealsRunsOfAVerifiedRequester(t *testing.T) {
 	SetRequesterStampKey(testRequesterStampKey)
 	t.Cleanup(func() { SetRequesterStampKey(nil) })
@@ -468,7 +421,6 @@ func TestHandleScheduledSealsRunsOfAVerifiedRequester(t *testing.T) {
 	}
 	ctx := context.Background()
 	r := newUnitReconciler(newTestScheme(), scheduled)
-	// The API server assigns UIDs; the fake client does not.
 	r.Client = interceptor.NewClient(r.Client.(ctrlclient.WithWatch), interceptor.Funcs{
 		Create: func(ctx context.Context, cl ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.CreateOption) error {
 			if obj.GetUID() == "" {
@@ -492,31 +444,22 @@ func TestHandleScheduledSealsRunsOfAVerifiedRequester(t *testing.T) {
 	}
 }
 
-// frozenWithoutConnection reports a snapshot that froze exactly the
-// connection-mode policy but bound no Connection to it.
 func frozenWithoutConnection(frozen []agentExecutionSnapshotConnection) bool {
 	return len(frozen) == 1 && frozen[0].PolicyName == "github-conn" && frozen[0].UID == "" && frozen[0].GrantSequence == 0
 }
 
-// TestFreezeRequesterConnectionsRequiresOneOwnedLink freezes a Connection
-// only when the requester holds exactly one link to the provider, whatever
-// its name, matching the live resolver and list_connections.
 func TestFreezeRequesterConnectionsRequiresOneOwnedLink(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	tool, policy, canonical, task := freezeFixtures(true)
 	adopted := canonical.(*corev1alpha1.Connection).DeepCopy()
 	adopted.Name, adopted.UID = "github-adopted", "adopted-uid"
 
-	// A Ready canonical link and an adopted duplicate: ambiguous, so the
-	// policy is frozen without a Connection and the call fails closed.
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(freezeProvider(), tool, policy, canonical, adopted).Build()
 	frozen, err := freezeRequesterConnections(context.Background(), reader, nil, task, brokeredConfiguration("gh_search"))
 	if err != nil || len(frozen) != 1 || frozen[0].PolicyName != "github-conn" || frozen[0].UID != "" {
 		t.Fatalf("duplicate links: frozen = %+v err = %v, want the policy frozen without a Connection", frozen, err)
 	}
 
-	// Another person's object under the canonical name does not hide the
-	// requester's one adopted link.
 	foreign := canonical.(*corev1alpha1.Connection).DeepCopy()
 	foreign.UID = "foreign-uid"
 	foreign.Spec.Subject.Subject = "mallory"
@@ -527,9 +470,6 @@ func TestFreezeRequesterConnectionsRequiresOneOwnedLink(t *testing.T) {
 	}
 }
 
-// TestACPChildTaskSealerRetriesTransientFailures covers a brokered child
-// whose seal first fails on a transient parent read: nothing repairs a seal
-// later, so the sealer retries and the child ends up sealed.
 func TestACPChildTaskSealerRetriesTransientFailures(t *testing.T) {
 	SetRequesterStampKey(testRequesterStampKey)
 	t.Cleanup(func() { SetRequesterStampKey(nil) })
@@ -570,10 +510,6 @@ func TestACPChildTaskSealerRetriesTransientFailures(t *testing.T) {
 	}
 }
 
-// TestConnectorToolsForWaitsForAMissingPolicy covers a Tool whose policy is
-// absent while a binding is made: it cannot be classified, so the binding
-// retries instead of treating the Tool as plain and later running it under a
-// policy recreated in another mode.
 func TestConnectorToolsForWaitsForAMissingPolicy(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	tool, _, _, _ := freezeFixtures(true)
@@ -581,7 +517,6 @@ func TestConnectorToolsForWaitsForAMissingPolicy(t *testing.T) {
 	if _, err := classifyConnectorTools(context.Background(), reader, nil, "tenant", []string{"gh_search"}, connectorScope{strictPolicies: true}); err == nil {
 		t.Fatal("a Tool whose policy is missing must not be classified as a plain Tool")
 	}
-	// A Tool without any policy is plain, and an unknown Tool is skipped.
 	plain := tool.(*corev1alpha1.Tool).DeepCopy()
 	plain.Spec.HTTP.OutboundAccessPolicyRef = nil
 	reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(plain).Build()
@@ -590,10 +525,6 @@ func TestConnectorToolsForWaitsForAMissingPolicy(t *testing.T) {
 	}
 }
 
-// TestBrokeredCustomCandidatesFollowDescriptorPrecedence covers a Tool CR
-// that shares a name with a registered built-in or a provider-native tool:
-// those take precedence and the CR is never exposed, so it cannot make the
-// Task connector-backed.
 func TestBrokeredCustomCandidatesFollowDescriptorPrecedence(t *testing.T) {
 	native := acp.BuiltInRuntimeNativeToolNames("codex")
 	if len(native) == 0 {

@@ -140,18 +140,6 @@ the list, and exits 0. It exits non-zero if the task finishes first
 	return cmd
 }
 
-// watchForApproval polls the task's approvals until one is pending, then
-// prints the list once. A task that finishes first is an error, because no
-// request is coming; a --timeout deadline that elapses before the list is
-// printed is an error too. An interrupt is not. The task's phase is checked
-// on every poll, before a pending request is accepted: the server keeps
-// reporting a request as pending after the task finishes, but refuses
-// decisions on it, so it is not actionable. The same goes for a task that
-// is being deleted while its phase is not yet terminal. The phase and the
-// deleting state come from the approvals response itself, the same Task
-// read that filtered the list, so a Task recreated under the same name
-// between two calls cannot pair an old request with a new Task's phase. A
-// server that predates those fields falls back to a separate Task read.
 func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client, task, path, format string, wide bool, interval time.Duration) error {
 	waiting := false
 	done, err := watchLoop(ctx, cmd.OutOrStdout(), interval, format, func(ctx context.Context) (watchFrame, error) {
@@ -195,16 +183,11 @@ func watchForApproval(ctx context.Context, cmd *cobra.Command, c *client.Client,
 	return nil
 }
 
-// taskApprovalState is what decides whether a pending request can still be
-// acted on: the Task's phase and whether it is being deleted.
 type taskApprovalState struct {
 	phase    string
 	deleting bool
 }
 
-// approvalsTaskState returns the state of the Task an approvals response was
-// filtered against, reading the Task separately only when the server did
-// not include it.
 func approvalsTaskState(ctx context.Context, c *client.Client, task string, result any) (taskApprovalState, error) {
 	m, _ := result.(map[string]any)
 	if phase := firstString(m, "taskPhase"); phase != "" {
@@ -221,8 +204,6 @@ func approvalsTaskState(ctx context.Context, c *client.Client, task string, resu
 	}, nil
 }
 
-// hasPendingApproval reports whether any request in an approvals response is
-// still waiting for a decision.
 func hasPendingApproval(value any) bool {
 	m, _ := value.(map[string]any)
 	for _, item := range anySliceToMaps(m["approvals"]) {
@@ -250,10 +231,6 @@ request. The full ID is sent to the server.`,
 					"/approvals/" + url.PathEscape(approvalID) + "/decision"
 				return c.DoJSON(context.Background(), http.MethodPost, path, nil, body)
 			}
-			// A full ID goes straight to the decision endpoint, so a caller
-			// whose permissions cover decisions but not reading the task keeps
-			// working. Only an unknown ID is treated as a prefix and resolved
-			// against the task's approval list.
 			result, err := decide(args[1])
 			if err != nil && strings.Contains(err.Error(), "HTTP 404") {
 				approvalID, resolveErr := resolveApprovalID(context.Background(), c, args[0], args[1])
@@ -275,8 +252,6 @@ request. The full ID is sent to the server.`,
 	return cmd
 }
 
-// shortApprovalID is the first 12 characters after the last ":" in an
-// approval ID (digest-style IDs), or the first 12 characters otherwise.
 func shortApprovalID(id string) string {
 	id = strings.TrimSpace(id)
 	if colon := strings.LastIndex(id, ":"); colon >= 0 {
@@ -288,9 +263,6 @@ func shortApprovalID(id string) string {
 	return id
 }
 
-// resolveApproval finds the one approval whose full ID, short ID, or a
-// prefix of either matches the argument. An exact full-ID match wins
-// outright; otherwise exactly one prefix match is required.
 func resolveApproval(list any, arg string) (map[string]any, error) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
@@ -324,8 +296,6 @@ func resolveApproval(list any, arg string) (map[string]any, error) {
 	return nil, fmt.Errorf("%q matches %d approvals; use a longer prefix:\n%s", arg, len(matches), strings.Join(lines, "\n"))
 }
 
-// resolveApprovalID lists a task's approvals and returns the full ID for a
-// possibly abbreviated argument.
 func resolveApprovalID(ctx context.Context, c *client.Client, task, arg string) (string, error) {
 	path := "/api/v1/tasks/" + url.PathEscape(task) + "/approvals"
 	result, err := c.DoJSON(ctx, http.MethodGet, path, nil, nil)
@@ -348,10 +318,6 @@ func newTaskForkCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bodyMap := map[string]any{}
-			// Forward an explicitly-set --after (including negatives) so the
-			// server can validate it. Distinguishing "flag set" from the
-			// default sentinel ensures `--after -5` returns a 400 instead of
-			// being silently dropped and forking from latest.
 			if cmd.Flags().Changed("after") {
 				bodyMap["afterSeq"] = after
 			}
@@ -466,8 +432,6 @@ the filters, so "what did the agent say last?" is:
 	return cmd
 }
 
-// canonicalEventTypes maps case-insensitive --type values to their exact
-// event type names and rejects unknown ones with the list of valid names.
 func canonicalEventTypes(values []string) ([]string, error) {
 	out := make([]string, 0, len(values))
 	for _, value := range values {
@@ -485,9 +449,6 @@ func canonicalEventTypes(values []string) ([]string, error) {
 
 const eventsTailPageSize = 500
 
-// fetchEventsTail reads the stream to its latest sequence in pages and keeps
-// the last n matching events. The response keeps the list shape so json
-// output is the same as an untailed page.
 func fetchEventsTail(ctx context.Context, c *client.Client, path string, after int64, eventTypes []string, n int) (any, error) {
 	var last map[string]any
 	var kept []any
@@ -520,7 +481,6 @@ func fetchEventsTail(ctx context.Context, c *client.Client, path string, after i
 	if kept == nil {
 		kept = []any{}
 	}
-	// The envelope describes the caller's request, not the last page read.
 	last["afterSeq"] = after
 	last["events"] = kept
 	return last, nil
@@ -618,16 +578,10 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 		fmt.Fprintln(cmd.OutOrStdout(), "No events found.") //nolint:errcheck
 		return nil
 	}
-	// Reserve the width of the other columns so the summary column is the
-	// only one cut and every event stays on one line.
 	headers := []string{columnSeq, columnType, columnSeverity}
 	if !includeTask {
 		headers = []string{columnSeq, "TASK", "TASKSEQ", columnType, columnSeverity}
 	}
-	// The task column is capped from the terminal budget too, so one long
-	// Task name cannot push a row past the terminal on its own: whatever the
-	// other fixed columns leave, minus the summary minimum, goes to the task
-	// column, within [8, 32] runes.
 	taskCap := eventTaskColumnMaxWidth
 	if !includeTask && !wide {
 		otherRows := make([][]string, 0, len(items))
@@ -655,9 +609,6 @@ func printExecutionEventsTable(cmd *cobra.Command, value any, includeTask, wide 
 		}
 	}
 	summaryWidth := max(terminalWidth()-fixedColumnsWidth(headers, fixedRows), eventSummaryMinWidth)
-	// A model message carries what the agent said in contentText; its
-	// summary is often just "model returned message". Show the content when
-	// there is any, cut to the terminal unless --wide.
 	summary := func(event map[string]any) string {
 		text := firstNonEmpty(anyString(event["contentText"]), anyString(event["summary"]))
 		if wide {
@@ -718,14 +669,10 @@ func printTraceSummary(cmd *cobra.Command, value any) error {
 
 const approvalArgsMinWidth = 24
 
-// printApprovalsTable shows what each request asks for: the tool, its
-// arguments cut to the terminal width, and the time left on a pending
-// request. --wide adds severity, the risk summary, and the decision.
 func printApprovalsTable(cmd *cobra.Command, value any, wide bool, now time.Time) error {
 	return renderApprovalsTable(cmd.OutOrStdout(), value, wide, now)
 }
 
-// renderApprovalsTable writes the approvals table to out.
 func renderApprovalsTable(out io.Writer, value any, wide bool, now time.Time) error {
 	m, _ := value.(map[string]any)
 	items := anySliceToMaps(m["approvals"])
@@ -785,8 +732,6 @@ func renderApprovalsTable(out io.Writer, value any, wide bool, now time.Time) er
 	return w.Flush()
 }
 
-// approvalTool is the tool a request wants to run, or its action when the
-// request is not for a tool.
 func approvalTool(item map[string]any) string {
 	return dash(firstString(item, "targetTool", "action"))
 }

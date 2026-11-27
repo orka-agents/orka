@@ -372,7 +372,6 @@ func TestParsePromptUsageIsTelemetryOnly(t *testing.T) {
 			t.Errorf("ParsePromptUsage(%s) = %#v, want nil", raw, got)
 		}
 	}
-	// A JSON null count is unreported, not an explicit zero.
 	if got := ParsePromptUsage(json.RawMessage(`{"inputTokens":null,"outputTokens":null,"cachedReadTokens":null,"cachedWriteTokens":null}`)); got != nil {
 		t.Errorf("ParsePromptUsage(all null counts) = %#v, want nil", got)
 	}
@@ -380,7 +379,6 @@ func TestParsePromptUsageIsTelemetryOnly(t *testing.T) {
 	if usage == nil || usage.InputTokens != nil || usage.OutputTokens == nil || *usage.OutputTokens != 0 {
 		t.Fatalf("usage with null input and zero output = %#v", usage)
 	}
-	// A malformed usage report never fails the prompt response.
 	var response PromptResponse
 	if err := json.Unmarshal([]byte(`{"stopReason":"end_turn","usage":{"inputTokens":"bad"}}`), &response); err != nil || response.StopReason != StopReasonEndTurn {
 		t.Fatalf("prompt response with malformed usage = %v, %v", response, err)

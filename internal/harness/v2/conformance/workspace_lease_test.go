@@ -101,8 +101,6 @@ func (f *workspaceLeaseTransport) RoundTrip(r *http.Request) (*http.Response, er
 			return nil, r.Context().Err()
 		}
 		if f.fault == "ambiguous" {
-			// Apply first, then lose the ACK. The client may not infer it failed
-			// or repeat this request under a new operation identity.
 			f.lease = request.Lease
 			return nil, io.ErrUnexpectedEOF
 		}
@@ -302,9 +300,6 @@ func TestWorkspaceConformanceRenewalRemainsBoundedByProbeContext(t *testing.T) {
 		_, _, err := state.probeCompletedPromptLifecycle(ctx, "workspace-renewal")
 		synctest.Wait()
 		deadline, _ := ctx.Deadline()
-		// The lease terminal and caller deadline become ready at the same
-		// instant. Either may win, but only the original expiry at that exact
-		// deadline may substitute for context.DeadlineExceeded.
 		leaseExpiredAtDeadline := err != nil && err.Error() == "workspace probe prompt did not complete successfully" &&
 			transport.terminal.TerminalEvent == harnessv2.EventFailed && transport.terminal.SettledAt.Equal(deadline) &&
 			state.lease.ExpiresAt.Equal(deadline)

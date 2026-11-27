@@ -22,8 +22,6 @@ vi.mock('@tanstack/react-router', async () => {
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
-// The session timeline tab opens a live SSE stream; stub the stream hook so this
-// suite stays focused on the detail layout and tab wiring.
 vi.mock('@/hooks/use-execution-event-stream', () => ({
   useExecutionEventStream: () => ({
     events: [],
@@ -84,7 +82,6 @@ describe('SessionDetail', () => {
 
   it('shows a load error, not "Session not found", for other failures', async () => {
     server.use(
-      // A client error, so useSession does not retry it.
       http.get('/api/v1/sessions/:id', () =>
         HttpResponse.json({ error: { code: 400, message: 'invalid session name' } }, { status: 400 }),
       ),
@@ -291,7 +288,6 @@ describe('SessionDetail', () => {
     button.focus()
     await user.keyboard('{Enter}')
 
-    // Pending: marked unavailable but never disabled, so focus stays put.
     await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'))
     expect(button).not.toBeDisabled()
     expect(button).toHaveFocus()

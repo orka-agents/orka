@@ -87,16 +87,10 @@ func acpTaskHasRestoredSourceIdentityBinding(task *corev1alpha1.Task) bool {
 	return binding != nil && binding.Task.UID != "" && binding.Task.UID != task.UID
 }
 
-// acpTaskRecoveryErrors identifies failures isolated to surviving Tasks. Store
-// initialization, epoch acquisition, and listing failures remain startup errors.
 type acpTaskRecoveryErrors struct{ error }
 
 func (e *acpTaskRecoveryErrors) Unwrap() error { return e.error }
 
-// recoverStaleAttempts classifies every old-epoch ACP attempt before the new
-// leader admits work. It resumes only states that provably crossed no prompt
-// request-write boundary and makes all potentially accepted prompts terminally
-// OutcomeUnknown without allocating a replacement attempt.
 func (d *ACPDispatcher) recoverStaleAttempts(ctx context.Context) error {
 	fence, err := d.Epochs.CurrentFence(ctx)
 	if err != nil {
@@ -124,9 +118,6 @@ func (d *ACPDispatcher) recoverStaleAttempts(ctx context.Context) error {
 	return nil
 }
 
-// scheduleStaleAttemptRecoveries retries the whole stale batch on one worker.
-// Its bounded runtime/network waits never occupy prompt admission slots, and
-// the existing active-Task map still excludes simultaneous recovery owners.
 func (d *ACPDispatcher) scheduleStaleAttemptRecoveries(ctx context.Context, tasks []corev1alpha1.Task, fence store.ControllerEpochFence) {
 	stale := make([]*corev1alpha1.Task, 0)
 	for i := range tasks {
@@ -152,8 +143,6 @@ func (d *ACPDispatcher) scheduleStaleAttemptRecoveries(ctx context.Context, task
 			err := d.recoverStaleCandidate(recoveryCtx, task, fence)
 			cancel()
 			d.unmarkActive(task.UID)
-			// A held Task stays blocked until its hold is released, and the hold
-			// logs once when it changes, so each pass does not log it again.
 			if _, held := errors.AsType[*taskStorageRecordHoldError](err); err != nil && !held && !errors.Is(err, context.Canceled) {
 				logf.FromContext(ctx).Error(err, "ACP Task remains blocked on epoch recovery", "namespace", task.Namespace, "task", task.Name)
 			}
@@ -197,11 +186,6 @@ func (d *ACPDispatcher) recoverStaleCandidate(ctx context.Context, candidate *co
 	return nil
 }
 
-// recoverRestoredTaskIncarnation settles a Task whose Kubernetes UID changed
-// during a clean-cluster restore. Kubernetes UIDs are incarnation fences, not
-// portable logical identifiers: all durable source records remain keyed by the
-// UID frozen in AgentExecutionBinding and are never rewritten or replayed under
-// the restored Task UID.
 func (d *ACPDispatcher) recoverRestoredTaskIncarnation(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -526,9 +510,6 @@ func (d *ACPDispatcher) settleRestoredTerminalDelivery(
 			case store.IsTerminalPromptDeliveryState(attempt.DeliveryState):
 				return attempt, nil
 			case attempt.DeliveryState == store.PromptDeliveryValidating:
-				// Publication creation precedes the Validating -> Preparing
-				// transition. A restored Validating attempt may therefore have no
-				// Publication, and can settle fail-closed without inventing one.
 			default:
 				return nil, err
 			}
@@ -683,25 +664,6 @@ func (d *ACPDispatcher) readRecoverableTask(
 	return latest, true, nil
 }
 
-// deletingTaskRecoverable reports whether stale recovery may re-fence a
-// deleting Task. Deleting prompts are never replayed, and recovery must not
-// drop runtime cleanup authority the Task finalizer still waits on. Three cases
-// qualify:
-//   - The attempt and the Task's own execution status are still before prompt
-//     submission, and the attempt holds no RuntimeSession binding. Recovery
-//     only moves the Task to the current epoch, where admission settlement
-//     cancels the deleting Task before any runtime contact.
-//   - A standalone attempt already settled. Recovery may still need to finish
-//     its terminal projection, for example after publication failed.
-//   - The attempt of a Task that recovery held for a storage record, while it
-//     is Settling and after recovery settled it. Only recovery can release
-//     that hold, from the restored receipt or the operator's acknowledgement,
-//     and finish a pass that stopped after the attempt left Settling; the
-//     finalizer waits on the terminal Task and runtime cleanup it leaves. Such
-//     a Task recovers exactly as one that is not being deleted: recovery never
-//     replays the prompt, its writes carry the current fence, and the Task's
-//     terminal projection keeps the frozen runtime identity, so runtime
-//     cleanup keeps its authority even when it has not finished yet.
 func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 {
 		return false, nil
@@ -755,11 +717,6 @@ func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev
 		store.IsTerminalPromptDeliveryState(attempt.DeliveryState), nil
 }
 
-// handOffSettledDeletingTask moves a deleting Task whose attempt recovery just
-// settled to the current epoch. Stale recovery passes over a deleting Task
-// once its attempt is terminal, and the current epoch's terminal recovery owns
-// its pending runtime cleanup, which the terminal projection's frozen runtime
-// identity still authorizes, as after a restored receipt.
 func (d *ACPDispatcher) handOffSettledDeletingTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
 	if task.DeletionTimestamp.IsZero() {
 		return nil
@@ -767,9 +724,6 @@ func (d *ACPDispatcher) handOffSettledDeletingTask(ctx context.Context, task *co
 	return d.patchRecoveredTerminalEpoch(ctx, task, fence.Epoch)
 }
 
-// acpTaskExecutionBeforeSubmission reports whether a Task's own execution
-// status is still before prompt submission. Re-fencing rewrites that state, so
-// a Task that already records a terminal or later state must keep it.
 func acpTaskExecutionBeforeSubmission(state corev1alpha1.TaskExecutionState) bool {
 	switch state {
 	case corev1alpha1.TaskExecutionStateQueued, corev1alpha1.TaskExecutionStateReserved,
@@ -798,9 +752,6 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		return err
 	}
 	continuitySession := task.Spec.SessionRef != nil && sessionBound
-	// If the unknown-create marker could not be persisted, authenticated
-	// resident status still fences a native installation before stale-epoch
-	// pre-submission recovery can re-admit or rotate this exact Task.
 	if continuitySession && task.Status.Execution != nil && task.Status.Execution.RuntimeSessionRecreationPending &&
 		(attempt.ExecutionState == store.PromptExecutionSessionStarting || attempt.ExecutionState == store.PromptExecutionPlanned) {
 		control, err := d.Store.GetSessionControl(ctx, task.Namespace, task.Spec.SessionRef.Name)
@@ -874,14 +825,9 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		const reason = "RuntimeLost"
 		message := "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
 		if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
-			// A recorded cancel request does not prove the prompt stopped
-			// before leadership changed, so the outcome stays unknown; the
-			// request is carried in the message so it is not lost.
 			message = requested + "; " + message
 		}
 		recoveredAt := time.Now().UTC()
-		// Settle the validation before the journal records a terminal event: a
-		// retry that finds that event takes the journaled path below.
 		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
 			return err
 		}
@@ -916,10 +862,6 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 	}
 }
 
-// recoverArchivedTerminalSession recognizes completed Session deletion without
-// recreating its control, transcript, turn, or outbox rows. Only the Task's epoch
-// may advance after its immutable delivered projection and runtime retirement
-// proof both validate. Legacy deletions without that evidence remain blocked.
 func (d *ACPDispatcher) recoverArchivedTerminalSession(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1093,7 +1035,6 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 	switch evidence.TerminalEvent {
 	case harnessv2.EventCompleted:
 		if journaled {
-			// A journaled completion does not replace the settling receipt.
 			receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
 			if err != nil {
 				return nil, err
@@ -1144,8 +1085,6 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 			return nil, err
 		}
 	default:
-		// Keep the same fixed status classification as the live path. Runtime
-		// diagnostics remain in their canonical journal event.
 		if err := d.transitionAttemptToFailed(
 			ctx, attempt.ID, fence, "recover-restored-journal-terminal-failed", acpPromptFailedReason, acpPromptFailedMessage,
 		); err != nil {
@@ -1190,8 +1129,6 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		}
 	}
 	if evidence.TerminalEvent != harnessv2.EventCompleted {
-		// A terminal event an earlier recovery pass journaled can precede the
-		// settlement of a workspace validation that pass did not finish.
 		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
 			return true, err
 		}
@@ -1207,7 +1144,6 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		return true, d.handOffSettledDeletingTask(ctx, task, fence)
 	}
 	if journaled {
-		// A journaled completion does not replace the settling receipt.
 		receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
 		if err != nil || receiptState == settlingReceiptLossAcknowledged {
 			return false, err
@@ -1262,27 +1198,14 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 	return true, d.patchRecoveredTerminalEpoch(ctx, task, fence.Epoch)
 }
 
-// settlingReceiptState says what verifySettlingResultReceipt found.
 type settlingReceiptState int
 
 const (
-	// settlingWithoutReceipt: the attempt is not Settling, or reached
-	// Settling without the settling transition, which records no receipt.
 	settlingWithoutReceipt settlingReceiptState = iota
-	// settlingReceiptVerified: the receipt matches the attempt, and the Task
-	// result holds its data.
 	settlingReceiptVerified
-	// settlingReceiptLossAcknowledged: the receipt is missing or conflicts,
-	// and an operator acknowledged that hold, so recovery records the
-	// outcome as unknown.
 	settlingReceiptLossAcknowledged
 )
 
-// verifySettlingResultReceipt checks the result receipt of an attempt the
-// settling transition moved to Settling (P5). That transition stores the
-// receipt first, so the store must still hold it: a matching receipt repairs
-// the Task result, and a missing receipt with no result that matches the
-// recorded digest, or a receipt that differs from it, holds the Task.
 func (d *ACPDispatcher) verifySettlingResultReceipt(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -1294,11 +1217,6 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 	}
 	receiptVersion := attempt.Version - 1
 	settledLast := attempt.LastOperationID == acpSettlingOperationID(receiptVersion)
-	// The live path starts workspace validation while the attempt is still
-	// Settling, which records a later operation on it. Only an attempt the
-	// settling transition moved to Settling gets that far, so its receipt is
-	// still required. The attempt no longer holds the settling digest; the
-	// receipt's own operation names the version it was stored at.
 	validating := !settledLast && attempt.DeliveryState != store.PromptDeliveryNotRequested
 	if !settledLast && !validating {
 		return settlingWithoutReceipt, nil
@@ -1364,11 +1282,6 @@ func (d *ACPDispatcher) verifyPresentSettlingResultReceipt(
 		return state, true, err
 	}
 	if validating {
-		// When workspace validation already replaced the attempt's settling
-		// operation, the attempt no longer carries the settling digest to
-		// cross-check the receipt. Keep an existing Task result intact if
-		// one is already present rather than overwriting it with an
-		// unverified receipt; only repair when the result is missing.
 		existing, getErr := d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
 		if getErr != nil && !errors.Is(getErr, store.ErrNotFound) {
 			return settlingWithoutReceipt, true, getErr
@@ -1412,8 +1325,6 @@ func (d *ACPDispatcher) verifyMissingSettlingResultReceipt(
 		}
 	}
 	if !matched {
-		// The result the receipt protected cannot stand in for it; once
-		// the attempt records a later operation, nothing can check it.
 		hold.reason = corev1alpha1.StorageRecoveryMissingRecordReason
 		state, err := d.settleSettlingReceiptHold(ctx, task, observed, hold)
 		return state, true, err
@@ -1421,14 +1332,10 @@ func (d *ACPDispatcher) verifyMissingSettlingResultReceipt(
 	return settlingWithoutReceipt, false, nil
 }
 
-// acpSettlingOperationID is the operation the settling transition records at
-// an attempt version, and that its result receipt carries.
 func acpSettlingOperationID(version int64) string {
 	return acpSettlingOperation + "-" + strconv.FormatInt(version, 10)
 }
 
-// acpSettlingOperationVersion returns the attempt version a settling
-// operation ID names.
 func acpSettlingOperationVersion(operationID string) (int64, bool) {
 	suffix, found := strings.CutPrefix(operationID, acpSettlingOperation+"-")
 	if !found {
@@ -1462,9 +1369,6 @@ func (d *ACPDispatcher) recoverSettlingResultTerminal(
 		return nil, err
 	}
 	if attempt.LastOperationID != acpSettlingOperationID(attempt.Version-1) {
-		// The attempt moved on to workspace validation, whose outcome the
-		// journal no longer shows, so the prompt's completion is not
-		// synthesized from the receipt.
 		return nil, nil
 	}
 	if attempt.UpdatedAt.IsZero() {
@@ -1523,9 +1427,6 @@ func taskScopedRuntimeSessionCleanupCompleteForUID(task *corev1alpha1.Task, task
 		task.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown &&
 		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
 		task.Annotations[nativeCaptureIntentAnnotation] == "" && !task.Status.Execution.RuntimeSessionRecreationPending {
-		// A live read Session retains its conversation process between Tasks.
-		// Deleting Tasks must keep their frozen authority until Session cleanup
-		// has recorded an exact runtime cleanup receipt.
 		return true
 	}
 	return runtimeSessionCleanupCompleteForUID(task, taskUID)
@@ -1753,10 +1654,6 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 	return body.ExternalRuntime, plan.Profile, mcpConfiguration, nil
 }
 
-// externalRuntimeRotatedEndpointCleanupClient reconstructs cleanup authority
-// from the immutable binding when the live AgentRuntime now points elsewhere.
-// The frozen endpoint must authenticate the exact resident runtime fence; the
-// live object remains authoritative only for the AgentRuntime UID.
 func (d *ACPDispatcher) externalRuntimeRotatedEndpointCleanupClient(
 	ctx context.Context,
 	current *corev1alpha1.AgentRuntime,
@@ -1997,8 +1894,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		return false, retirementErr
 	}
 	if retired {
-		// Session deletion persists the per-turn receipt under a separate
-		// authoritative mutation guard after this read-only retirement gate.
 		if !deleteAfterSettlement || sessionCleanup != nil {
 			return true, nil
 		}
@@ -2055,11 +1950,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			}
 			return true, nil
 		}
-		// Unknown terminal recovery on a native pool uses exact cleanup authority
-		// for every mutation (including deletion after validation), even before
-		// an epoch changes. Retained boots never get admission authority. That
-		// authority is native-only: a workspace pool keeps its current-epoch,
-		// backend-aware client and waits for a new epoch's owner otherwise.
 		retainedCleanup := pool.Spec.ExecutionWorkspace == nil && (sessionDeletion || abandonedValidationRecoveryTask(task))
 		if active.ControllerEpoch != currentFence.Epoch && !retainedCleanup {
 			return false, nil
@@ -2090,8 +1980,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 				return false, fmt.Errorf("%w: Session AgentRuntime cleanup identity changed", store.ErrConflict)
 			}
 			if !deleteAfterSettlement {
-				// Durable terminal settlement can proceed without contacting the
-				// replacement. Runtime retirement still requires its own proof.
 				return true, nil
 			}
 			return false, fmt.Errorf("%w: external AgentRuntime cleanup identity changed", store.ErrConflict)
@@ -2105,8 +1993,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		externalEndpointRotated = endpointRotated
 		observed := runtime.Status.ObservedCapabilities
 		if !endpointRotated && !agentRuntimeObservedStatusIdentityComplete(observed) {
-			// The same runtime may still own the session. Wait for a complete
-			// authenticated status identity before deciding it was replaced.
 			return false, nil
 		}
 		if !endpointRotated && (observed == nil ||
@@ -2115,9 +2001,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			if !deleteAfterSettlement {
 				return true, nil
 			}
-			// A different boot on the same AgentRuntime object cannot prove that
-			// the frozen boot deleted its RuntimeSession. Wait for exact cleanup
-			// proof instead of minting a generic receipt from identity drift.
 			return false, nil
 		}
 		currentFence, err := d.Epochs.CurrentFence(ctx)
@@ -2215,18 +2098,12 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	}
 	switch observed.State {
 	case harnessv2.RuntimeSessionStateValidating:
-		// Session deletion itself is deliberately delete-only. Normal Task
-		// recovery must first finish its abandoned local validation barrier.
-		// That recovery uses native-only retained cleanup authority, so other
-		// backends keep waiting as they did before it existed.
 		if sessionDeletion || target.pool == nil || target.pool.Spec.ExecutionWorkspace != nil {
 			return false, nil
 		}
 		if err := d.recoverAbandonedWorkspaceValidation(ctx, task, taskUID, target.pool); err != nil {
 			return false, err
 		}
-		// Re-observe the exact runtime after validation/finalization. Never
-		// treat a validation response as a runtime retirement receipt.
 		return false, nil
 	case harnessv2.RuntimeSessionStatePublicationPrepared:
 		if task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
@@ -2235,9 +2112,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		deltaID := harnessv2.WorkspaceDeltaID("delta-" + execution.PromptID)
 		finalization, finalizationErr := d.runtimeSessionPublicationFinalization(ctx, publicationIDForTaskUID(task, taskUID), deltaID)
 		if errors.Is(finalizationErr, store.ErrNotFound) && abandonedValidationRecoveryTask(task) {
-			// A validation response can be lost after a delta was prepared.
-			// Resume the same canonical no-publication receipt, not a different
-			// abandonment identity derived from the Task's empty delivery.
 			finalization, finalizationErr = abandonedValidationFinalization(task, taskUID, deltaID)
 		} else if errors.Is(finalizationErr, store.ErrNotFound) && task.Status.Delivery != nil &&
 			task.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeNoChange {
@@ -2252,7 +2126,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			return false, fmt.Errorf("recover task-scoped RuntimeSession publication finalization: %w", err)
 		}
 	case harnessv2.RuntimeSessionStateFinalizing, harnessv2.RuntimeSessionStateIdle, harnessv2.RuntimeSessionStatePoisoned:
-		// Ready for exact deletion.
 	case harnessv2.RuntimeSessionStateDeleting:
 		return false, nil
 	default:
@@ -2284,8 +2157,6 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 	reason := "terminal_recovery"
 	if sessionDeletion {
 		reason = "session_deleted"
-		// Status can outlive controller leadership. Pool clients do not have
-		// the external-runtime mutation hook, so recheck before exact deletion.
 		if _, err := d.externalRuntimeCleanupEpoch(ctx, sessionCleanup); err != nil {
 			return false, err
 		}
@@ -2453,15 +2324,6 @@ func (d *ACPDispatcher) validateExistingStandaloneTaskProjection(
 	return true, nil
 }
 
-// validateExistingSessionTaskProjection is the Session counterpart of the
-// standalone check: a session-bound attempt's terminal record is the
-// projection its finalized SessionTurn carries, which the settlement that
-// finalized the turn also projects onto the Task. A recovery pass that finds
-// it must keep that settlement rather than rewrite the Task's message and
-// transition times as if the live settlement had been interrupted. Only a
-// Succeeded attempt is kept so: a Failed or Cancelled one still takes its
-// reason from the attempt. A projection whose states differ from the
-// attempt's is not taken as the settlement, and recovery rebuilds it.
 func (d *ACPDispatcher) validateExistingSessionTaskProjection(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -2476,7 +2338,6 @@ func (d *ACPDispatcher) validateExistingSessionTaskProjection(
 	}
 	turnID, err := key.CanonicalID()
 	if err != nil {
-		// No turn can be found for an attempt without a complete turn key.
 		return false, nil
 	}
 	turn, err := d.Store.GetSessionTurn(ctx, turnID)
@@ -2518,9 +2379,6 @@ func (d *ACPDispatcher) validateExistingSessionTaskProjection(
 	if string(payload.Execution.State) != string(attempt.ExecutionState) || projectedDelivery != attempt.DeliveryState {
 		return false, nil
 	}
-	// The settlement is kept only once the Task shows it. A Task the
-	// projection has not reached yet is settled from the attempt record, as
-	// before, rather than left waiting on the outbox.
 	latest := &corev1alpha1.Task{}
 	if err := d.Client.Get(ctx, clientObjectKey(task), latest); err != nil {
 		return false, client.IgnoreNotFound(err)
@@ -2549,21 +2407,12 @@ func (d *ACPDispatcher) patchRecoveredTerminalEpoch(ctx context.Context, task *c
 			return d.Client.Status().Update(ctx, latest)
 		}
 		if released {
-			// Releasing a hold is admitted like every other record hold
-			// condition write, so an installation hold raised during this
-			// pass keeps it until that hold clears.
 			return d.Epochs.AdmitWork(ctx, update)
 		}
 		return update(ctx)
 	})
 }
 
-// patchRecoveredTaskReserved returns a recovered Task to admission on the new
-// epoch. attempt is the PromptAttempt as recovery found it. The Task's
-// RuntimeSession binding is cleared, except for a task-scoped RuntimeSession
-// that the attempt had already released without a cleanup receipt, as after a
-// rate-limited prompt whose session delete failed: the Task is then the only
-// record of that cleanup obligation, and the next dispatch retires it first.
 func (d *ACPDispatcher) patchRecoveredTaskReserved(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, epoch int64, keepQueued bool) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -2685,11 +2534,6 @@ func (d *ACPDispatcher) recoveredTaskSession(ctx context.Context, task *corev1al
 	}, nil
 }
 
-// recoveredRuntimeSessionBinding rebuilds the RuntimeSession binding of a
-// recovered Task from its durable execution status so recovery-owned
-// settlement carries the same generation and digests the live path recorded.
-// A Task whose status never bound a RuntimeSession yields the identity-only
-// binding, which callers must not treat as a reusable live binding.
 func recoveredRuntimeSessionBinding(task *corev1alpha1.Task, sessionUID string) ACPRuntimeSessionBinding {
 	if binding, err := runtimeSessionBindingFromTaskStatus(task, sessionUID, "", "", ""); err == nil && binding != nil && binding.Generation > 0 {
 		return *binding
@@ -2789,21 +2633,12 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 	return finalizeErr
 }
 
-// A workspace validation that recovery cannot finish fails closed: the
-// runtime workspace it validated is gone, so delivery ends as a conflict.
 const (
 	acpRecoveredWorkspaceLostOperation = "controller-restart-workspace-lost"
 	acpRecoveredWorkspaceLostMessage   = "runtime workspace was lost before durable validation completed"
 	acpRecoveredWorkspaceLostReason    = corev1alpha1.TaskDeliveryReason("RuntimeWorkspaceLost")
 )
 
-// settleRecoveredWorkspaceValidation ends a workspace validation that recovery
-// cannot finish before it records the prompt's outcome as unknown. Session
-// turn finalization and Task reclamation both need a terminal delivery, so a
-// Validating delivery fails closed as DeliveryConflict, as it does for a
-// succeeded attempt, and the Task records that delivery so its terminal
-// projection carries it. A later pass finds the delivery settled and only
-// completes the Task's record of it.
 func (d *ACPDispatcher) settleRecoveredWorkspaceValidation(
 	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence,
 ) error {
@@ -2836,22 +2671,6 @@ func (d *ACPDispatcher) settleRecoveredWorkspaceValidation(
 	return nil
 }
 
-// recordRecoveredValidationOutcome records the unknown outcome on a Task
-// without a bound Session whose attempt recovery settled as OutcomeUnknown
-// while the runtime may still hold a workspace validation, when the pass that
-// settled it stopped before the Task's terminal record, for example because
-// the terminal projection could not be enqueued. The attempt and the Task
-// record either the recovered validation conflict or no delivery
-// (abandonedValidationDelivery): the runtime starts validating when the prompt
-// completes, before the controller records it, and an acknowledged hold for a
-// result receipt lost before validation started records the outcome with no
-// delivery. Runtime cleanup abandons a validation the runtime still holds only
-// for a Task that records the unknown outcome, so a later pass would otherwise
-// stop at cleanup and never reach that record. The record is written from the
-// attempt in the order the settling pass uses, the projection and then the
-// Task's execution state, which keeps the Task's runtime identity; an enqueued
-// projection is left to the outbox projector. task is refreshed with the
-// result.
 func (d *ACPDispatcher) recordRecoveredValidationOutcome(
 	ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt,
 ) error {
@@ -2980,9 +2799,6 @@ func (d *ACPDispatcher) recoveredTerminalDeliveryStatus(
 
 func (d *ACPDispatcher) patchRecoveredTerminalExecution(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, epoch int64) error {
 	if attempt.ExecutionState == store.PromptExecutionSucceeded {
-		// The live settlement may have committed its projection before the
-		// terminal Task status reached this recovery pass. Preserve that record's
-		// message and delivery evidence instead of rebuilding a different payload.
 		if exists, err := d.validateExistingStandaloneTaskProjection(ctx, task, attempt); err != nil || exists {
 			return err
 		}
@@ -2995,14 +2811,8 @@ func (d *ACPDispatcher) patchRecoveredTerminalExecution(ctx context.Context, tas
 			store.PromptDeliveryVerifiedExact, store.PromptDeliveryDeliveredSuperseded:
 			return d.completeSuccessWithDelivery(ctx, task, *status, "ACP task settled from the durable attempt record after the live settlement was interrupted")
 		case store.PromptDeliveryCancelledBeforePublish:
-			// Match the live settlement and restoredTaskPhase: a publication
-			// cancelled before push settles the Task as Cancelled, not Failed.
 			return d.cancelTaskAfterExecution(ctx, task, *status, "publication cancelled before push during recovery")
 		default:
-			// The authoritative attempt settles the Task; it may reach this
-			// path after a controller restart or when the live settlement
-			// was interrupted, so the message must not claim a restart and
-			// should carry the delivery failure the user needs to act on.
 			message := "ACP delivery failed"
 			if detail := strings.TrimSpace(status.Message); detail != "" {
 				message += ": " + detail

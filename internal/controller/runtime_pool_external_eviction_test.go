@@ -36,8 +36,6 @@ func suspendableNativeWorkspace(t *testing.T) func(*externalRuntimePoolFixture) 
 	}
 }
 
-// terminateNativeWorker models the kubelet's graceful termination of the
-// exact worker: a finalizer keeps the Pod observable with its deletion time.
 func terminateNativeWorker(t *testing.T, f *externalRuntimePoolFixture, worker corev1.Pod) {
 	t.Helper()
 	current := &corev1.Pod{}
@@ -75,7 +73,6 @@ func quiescentEvictionProbe(f *externalRuntimePoolFixture, pod *corev1.Pod, reas
 	return probe
 }
 
-// withActivePrompt models one accepted prompt still running on the supervisor.
 func withActivePrompt(probe RuntimePoolProbeResult) RuntimePoolProbeResult {
 	const sessionUID = harnessv2.RuntimeSessionUID("evicted-session-uid")
 	probe.Status.Sessions = []harnessv2.RuntimeSessionStatus{{RuntimeSessionID: "evicted-session", RuntimeSessionUID: sessionUID, Generation: 1,
@@ -91,7 +88,7 @@ func withActivePrompt(probe RuntimePoolProbeResult) RuntimePoolProbeResult {
 
 func TestExternalNativeWorkerTerminationDrainsBeforeSuspendOnly(t *testing.T) {
 	f, w, pod, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
-	if !externalWorkspaceSuspendable(w) {
+	if !externalWorkspaceSuspendable(w, false) {
 		t.Fatal("fixture workspace is not data-only suspendable")
 	}
 	terminateNativeWorker(t, f, worker)
@@ -113,8 +110,6 @@ func TestExternalNativeWorkerTerminationDrainsBeforeSuspendOnly(t *testing.T) {
 		t.Fatalf("eviction condition = %#v", condition)
 	}
 
-	// The supervisor has not drained yet: Core requests a drain that announces
-	// the planned Suspend, and authorizes nothing.
 	for range 3 {
 		runtimePoolReconcile(t, f.r, f.pool)
 	}
@@ -125,8 +120,6 @@ func TestExternalNativeWorkerTerminationDrainsBeforeSuspendOnly(t *testing.T) {
 		t.Fatalf("retirement authorized before drain settlement: %#v", retirement)
 	}
 
-	// An accepted prompt is still running: it must settle, never be replayed
-	// or captured mid-flight.
 	f.supervisor.probe = withActivePrompt(quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkerEviction))
 	runtimePoolReconcile(t, f.r, f.pool)
 	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement != nil {
@@ -146,7 +139,6 @@ func TestExternalNativeWorkerTerminationDrainsBeforeSuspendOnly(t *testing.T) {
 	if current.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady {
 		t.Fatal("eviction changed the workspace's desired state")
 	}
-	// Core cannot withdraw the authorization, so it expires at the deadline.
 	if want := metav1.NewTime(evictionRecord(t, f).Deadline.Truncate(time.Second)); retirement.NotAfter == nil || !retirement.NotAfter.Equal(&want) {
 		t.Fatalf("eviction Suspend notAfter = %v, want the eviction deadline %v", retirement.NotAfter, want)
 	}
@@ -172,8 +164,6 @@ func TestExternalNativeEvictionNeverAuthorizesSuspendAfterDeadline(t *testing.T)
 		t.Fatalf("deadline condition = %#v", condition)
 	}
 
-	// The provider later reports the killed instance as failed: Core retires
-	// it with Stop, never Suspend, and the failure is terminal.
 	w := f.currentWorkspace(t)
 	w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
 	if err := f.r.Status().Update(t.Context(), w); err != nil {
@@ -224,7 +214,6 @@ func TestExternalNativeSupervisorEvictionSignalStartsEviction(t *testing.T) {
 		t.Fatal("supervisor eviction did not request exact retirement")
 	}
 
-	// A supervisor clock ahead of Core never extends the window.
 	f2, _, pod2, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	future := runtimePoolValidProbe(f2.pool, &pod2, "native-recycle-boot", true)
 	future.Status.Drain.Reason = harnessv2.DrainReasonWorkerEviction
@@ -236,10 +225,6 @@ func TestExternalNativeSupervisorEvictionSignalStartsEviction(t *testing.T) {
 	}
 }
 
-// A SIGTERM that arrives during a capacity drain keeps that drain's reason.
-// The supervisor reports the eviction separately, and Core starts the
-// deadline-bound retirement even though identity rotation would otherwise
-// keep handling the drain.
 func TestExternalNativeSupervisorEvictionDuringCapacityDrainStartsEviction(t *testing.T) {
 	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	probe := runtimePoolValidProbe(f.pool, &pod, "native-recycle-boot", true)
@@ -262,9 +247,6 @@ func TestExternalNativeSupervisorEvictionDuringCapacityDrainStartsEviction(t *te
 	}
 }
 
-// A SIGTERM that arrives during Core's own suspension drain keeps the
-// workspace_suspend reason. Its separately reported time still bounds the
-// window, so a probe past that cutoff never earns Suspend.
 func TestExternalSupervisorEvictionDuringSuspendDrainIsGatedByItsDeadline(t *testing.T) {
 	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	startRetirementDrain(t, f)
@@ -344,7 +326,6 @@ func TestExternalWorkerEvictionSignal(t *testing.T) {
 	if _, _, evicting := externalWorkerEvictionSignal(&corev1.Pod{}, now); evicting {
 		t.Fatal("a running worker was reported as evicting")
 	}
-	// A node or API server clock ahead of Core never extends the window.
 	future := metav1.NewTime(now.Add(10 * time.Minute))
 	pod = &corev1.Pod{Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: podConditionDisruptionTarget, Status: corev1.ConditionTrue, LastTransitionTime: future}}}}
 	if signaledAt, deadline, evicting := externalWorkerEvictionSignal(pod, now); !evicting || !signaledAt.Equal(now) || deadline.After(now.Add(harnessv2.WorkerEvictionSuspendWindow)) {
@@ -357,14 +338,11 @@ func TestExternalWorkerEvictionSignal(t *testing.T) {
 	}
 }
 
-// A Pod first seen with a disruption and a later deletion keeps the window the
-// disruption started: the deletion's own grace must not move the cutoff later.
 func TestExternalWorkerEvictionSignalKeepsEarliestSignalAndDeadline(t *testing.T) {
 	now := runtimePoolTestNow
 	disrupted := now.Add(-20 * time.Minute)
 	disruption := corev1.PodCondition{Type: podConditionDisruptionTarget, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(disrupted)}
 
-	// Deleted ten minutes after the disruption with an hour of grace.
 	deleting := metav1.NewTime(disrupted.Add(10*time.Minute + time.Hour))
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &deleting, DeletionGracePeriodSeconds: ptr.To[int64](3600)},
@@ -376,8 +354,6 @@ func TestExternalWorkerEvictionSignalKeepsEarliestSignalAndDeadline(t *testing.T
 			signaledAt, deadline, evicting, disrupted, disrupted.Add(harnessv2.WorkerEvictionSuspendWindow))
 	}
 
-	// A deletion with a short grace still ends the window at the Pod's own
-	// deadline, while the signal stays at the earlier disruption.
 	short := metav1.NewTime(disrupted.Add(10*time.Minute + 15*time.Second))
 	pod.DeletionTimestamp, pod.DeletionGracePeriodSeconds = &short, ptr.To[int64](15)
 	signaledAt, deadline, evicting = externalWorkerEvictionSignal(pod, now)
@@ -385,7 +361,6 @@ func TestExternalWorkerEvictionSignalKeepsEarliestSignalAndDeadline(t *testing.T
 		t.Fatalf("signal = %s, %s, %t; want %s to the Pod deadline %s", signaledAt, deadline, evicting, disrupted, short.Time)
 	}
 
-	// A condition that is not True is no signal: the deletion alone decides.
 	pod.Status.Conditions[0].Status = corev1.ConditionFalse
 	pod.DeletionTimestamp, pod.DeletionGracePeriodSeconds = &deleting, ptr.To[int64](3600)
 	deleted := disrupted.Add(10 * time.Minute)
@@ -395,8 +370,6 @@ func TestExternalWorkerEvictionSignalKeepsEarliestSignalAndDeadline(t *testing.T
 	}
 }
 
-// A DisruptionTarget dated in Core's future starts the window at Core's now,
-// so a drain probe that straddles the real shutdown cutoff never earns Suspend.
 func TestExternalEvictionFromFutureDisruptionTargetNeverExtendsTheWindow(t *testing.T) {
 	f, _, pod, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	now := f.r.now()
@@ -433,8 +406,6 @@ func TestExternalEvictionFromFutureDisruptionTargetNeverExtendsTheWindow(t *test
 	}
 }
 
-// Admission never reaches a terminating worker; settlement of accepted work
-// and exact retirement still can.
 func TestExternalTerminatingWorkerIsReachableOnlyForCleanup(t *testing.T) {
 	f, w, _, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	terminateNativeWorker(t, f, worker)
@@ -485,7 +456,6 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 				w.Status.State = workspacev1alpha1.ExecutionWorkspaceStateFailed
 			}
 			if test.lateAuthorization {
-				// The provider's breach report wins even over retained data.
 				meta.SetStatusCondition(&w.Status.Conditions, metav1.Condition{Type: string(workspacev1alpha1.ConditionWorkspaceDataPlaneReady), Status: metav1.ConditionFalse,
 					Reason: string(workspacev1alpha1.ReasonSuspendDeadlineExceeded), Message: workspaceprovider.SuspendDeadlineExceededMessage, ObservedGeneration: w.Generation})
 				if test.staleReport {
@@ -496,8 +466,6 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 			if _, err := f.r.externalPoolStopped(t.Context(), &pool, w); err != nil {
 				t.Fatal(err)
 			}
-			// The outcome is recorded while the markers still hold the pool in
-			// retirement; only a later pass that observes it clears them.
 			pool = runtimePoolTestGetPool(t, f.r, f.pool)
 			if pool.Annotations[externalRuntimeEvictionAnnotation] == "" || externalEvictionSettlementPending(&pool, w) {
 				t.Fatal("eviction markers were removed before its outcome was recorded")
@@ -517,9 +485,6 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 	}
 }
 
-// A Suspend authorized outside an eviction never expires. Once an eviction of
-// the exact instance is recorded, Core bounds the existing authorization by
-// its deadline, and a shorter window moves the bound earlier, never later.
 func TestExternalSuspendAuthorizationIsBoundedByTheEvictionDeadline(t *testing.T) {
 	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	startRetirementDrain(t, f)
@@ -542,7 +507,6 @@ func TestExternalSuspendAuthorizationIsBoundedByTheEvictionDeadline(t *testing.T
 		if retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend || retirement.NotAfter == nil || !retirement.NotAfter.Equal(&want) {
 			t.Fatalf("Suspend notAfter = %#v, want %v", retirement, want)
 		}
-		// The stored bound is stable: later passes do not rewrite it.
 		runtimePoolReconcile(t, f.r, f.pool)
 		if current := f.currentWorkspace(t); current.ResourceVersion != written.ResourceVersion {
 			t.Fatalf("stored notAfter was rewritten: resourceVersion %s -> %s", written.ResourceVersion, current.ResourceVersion)
@@ -550,7 +514,6 @@ func TestExternalSuspendAuthorizationIsBoundedByTheEvictionDeadline(t *testing.T
 	}
 	bound(runtimePoolTestNow.Add(10*time.Minute + 500*time.Millisecond))
 	bound(runtimePoolTestNow.Add(5 * time.Minute))
-	// A later signal with a longer window never extends the bound.
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
 	if _, err := f.r.recordExternalRuntimeEviction(t.Context(), &pool, f.currentWorkspace(t), externalEvictionSourceSupervisor, runtimePoolTestNow, runtimePoolTestNow.Add(time.Hour), false); err != nil {
 		t.Fatal(err)
@@ -563,7 +526,6 @@ func TestExternalSuspendAuthorizationIsBoundedByTheEvictionDeadline(t *testing.T
 	if want := metav1.NewTime(runtimePoolTestNow.Add(5 * time.Minute)); after.Spec.Retirement.NotAfter == nil || !after.Spec.Retirement.NotAfter.Equal(&want) || after.ResourceVersion != before.ResourceVersion {
 		t.Fatalf("a settled bound was rewritten or extended: %v (resourceVersion %s -> %s)", after.Spec.Retirement.NotAfter, before.ResourceVersion, after.ResourceVersion)
 	}
-	// Without the eviction record, the written bound still stands.
 	pool = runtimePoolTestGetPool(t, f.r, f.pool)
 	delete(pool.Annotations, externalRuntimeEvictionAnnotation)
 	if err := f.r.Update(t.Context(), &pool); err != nil {
@@ -575,9 +537,6 @@ func TestExternalSuspendAuthorizationIsBoundedByTheEvictionDeadline(t *testing.T
 	}
 }
 
-// Worker termination that begins after an unbounded Suspend was authorized,
-// before the provider started it, still bounds the authorization by the
-// worker's eviction deadline.
 func TestExternalWorkerEvictionAfterSuspendAuthorizationBoundsIt(t *testing.T) {
 	f, _, pod, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	startRetirementDrain(t, f)
@@ -602,8 +561,6 @@ func TestExternalWorkerEvictionAfterSuspendAuthorizationBoundsIt(t *testing.T) {
 	}
 }
 
-// startRetirementDrain begins an exact retirement for a reason other than
-// eviction and returns once Core has requested the authenticated drain.
 func startRetirementDrain(t *testing.T, f *externalRuntimePoolFixture) {
 	t.Helper()
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
@@ -619,8 +576,6 @@ func startRetirementDrain(t *testing.T, f *externalRuntimePoolFixture) {
 	}
 }
 
-// Termination that begins while a retirement drain is already running still
-// records its window, and Suspend is refused once that window has passed.
 func TestExternalEvictionDuringRetirementDrainIsRecordedAndGated(t *testing.T) {
 	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	startRetirementDrain(t, f)
@@ -646,8 +601,6 @@ func TestExternalEvictionDuringRetirementDrainIsRecordedAndGated(t *testing.T) {
 	}
 }
 
-// The authenticated probe can outlast a short window; the deadline is
-// rechecked immediately before Suspend is authorized.
 func TestExternalEvictionDeadlineIsRecheckedAfterTheDrainProbe(t *testing.T) {
 	f, w, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
@@ -669,9 +622,6 @@ func TestExternalEvictionDeadlineIsRecheckedAfterTheDrainProbe(t *testing.T) {
 	}
 }
 
-// Termination first observed during a retirement drain that will suspend is
-// reported as draining, replacing an earlier instance's settled result, so the
-// suspension it ends in is reported as EvictionSuspended.
 func TestExternalEvictionDuringSuspendRetirementReportsDrainingAndSettles(t *testing.T) {
 	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
@@ -713,8 +663,6 @@ func TestExternalEvictionDuringSuspendRetirementReportsDrainingAndSettles(t *tes
 	}
 }
 
-// runtimePoolStatusConflictClient fails the next RuntimePool status patch
-// with a conflict once armed, as a concurrent status writer would.
 type runtimePoolStatusConflictClient struct {
 	client.Client
 	armed *bool
@@ -737,10 +685,6 @@ func (w runtimePoolStatusConflictWriter) Patch(ctx context.Context, obj client.O
 	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
 }
 
-// An evicted instance that stopped with retained data has its outcome
-// recorded before the pool can cold-boot a replacement, even when the status
-// write conflicts or the controller restarts after the retirement markers
-// were removed.
 func TestExternalEvictionOutcomeIsRecordedBeforeColdBoot(t *testing.T) {
 	for _, interruption := range []string{"status conflict", "restart after marker removal"} {
 		t.Run(interruption, func(t *testing.T) {
@@ -802,10 +746,6 @@ func TestExternalEvictionOutcomeIsRecordedBeforeColdBoot(t *testing.T) {
 	}
 }
 
-// A provider that observed the eviction-bounded Suspend only after its
-// deadline stops the instance without data. Core records the lost eviction and
-// keeps the stopped instance terminal, as for an instance the worker killed:
-// it never publishes a successor that a data-only class would reject.
 func TestExternalSuspendDeadlineBreachIsTerminal(t *testing.T) {
 	f, w, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	sequence := w.Spec.Workload.Sequence
@@ -846,12 +786,6 @@ func TestExternalSuspendDeadlineBreachIsTerminal(t *testing.T) {
 	}
 }
 
-// The pool's first eviction report can be lost to a status conflict, after
-// which the provider may report the instance Failed and then Stopped before any
-// drain probe republishes it. The persisted exact-instance record must still
-// hold the markers until this instance's outcome is recorded, whether the
-// condition was absent or still showed an earlier instance's outcome, including
-// one with the same reason as this instance's.
 func TestExternalEvictionOutcomeIsRecordedWhenItsDrainingReportWasLost(t *testing.T) {
 	const previousMessage = "an earlier instance's outcome"
 	for _, previous := range []struct {
@@ -895,9 +829,6 @@ func TestExternalEvictionOutcomeIsRecordedWhenItsDrainingReportWasLost(t *testin
 				t.Fatal("the injected conflict did not drop the draining report")
 			}
 
-			// The lost native process answers no drain probe, so nothing
-			// republishes the eviction before the provider reports the
-			// instance Failed and then Stopped.
 			f.supervisor.probeErr = errors.New("lost native process cannot answer")
 			failExternalNativeInstance(t, f, nil)
 			for range 4 {
@@ -939,7 +870,6 @@ func TestExternalEvictionOutcomeIsRecordedWhenItsDrainingReportWasLost(t *testin
 	}
 }
 
-// A record left by an earlier instance never holds a later instance's stop.
 func TestExternalEvictionRecordOfAnotherInstanceIsNotPending(t *testing.T) {
 	f, w, _, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)

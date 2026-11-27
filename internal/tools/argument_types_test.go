@@ -97,8 +97,6 @@ func TestNormalizeArgTypes(t *testing.T) {
 	}
 }
 
-// Integral values are rewritten to the plain integer spelling Go integer
-// decoders accept.
 func TestNormalizeArgTypesCanonicalizesIntegers(t *testing.T) {
 	tool := &mockTool{name: "typed", parameters: json.RawMessage(`{"type":"object","properties":{"count":{"type":"integer"}}}`)}
 	for args, want := range map[string]string{
@@ -157,8 +155,6 @@ func TestRegistryExecuteRejectsWrongArgumentTypesBeforeTheTool(t *testing.T) {
 	}
 }
 
-// A null name used to reach the tool as the literal string "<nil>" and create
-// an Agent with that name.
 func TestRegistryExecuteTreatsNullArgumentsAsOmitted(t *testing.T) {
 	fc := newFakeClient()
 	r := NewRegistry()
@@ -179,8 +175,6 @@ func TestRegistryExecuteTreatsNullArgumentsAsOmitted(t *testing.T) {
 	}
 }
 
-// Decoding stringified objects keeps only the last of duplicate keys, so the
-// duplicate check must see the arguments as sent.
 func TestRegistryExecuteRejectsDuplicateStringifiedObjects(t *testing.T) {
 	called := false
 	r := NewRegistry()
@@ -530,8 +524,6 @@ func TestNormalizeToolArgumentsPreservesRecursiveValues(t *testing.T) {
 			assertNormalizedArgJSON(t, got, tt.want)
 		})
 	}
-	// Approval-bound callers must still distinguish numbers that float64
-	// decoding would collapse to the same value.
 	for _, tt := range []struct {
 		field, first, second string
 	}{

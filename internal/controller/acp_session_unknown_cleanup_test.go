@@ -100,8 +100,6 @@ func TestSessionRuntimeCleanupRetiresFinalizedOutcomeUnknown(t *testing.T) {
 
 func assertUnknownCleanupRequiresOriginalRuntime(t *testing.T, fixture *externalACPDispatchFixture, manager *SessionManager, tasks []*corev1alpha1.Task) {
 	t.Helper()
-	// A replacement boot cannot certify the old boot's retirement,
-	// even after the canonical conversation has continued.
 	deletesBefore := fixture.deleteCalls.Load()
 	runtime := fixture.runtime.DeepCopy()
 	runtime.Status.ObservedCapabilities.SupervisorBootID = "replacement-boot"

@@ -80,8 +80,6 @@ describe('displayedTaskResource', () => {
     expect(JSON.stringify(shown)).not.toMatch(/ghs_abc123|token=abc123|sig=abc|frag/)
   })
 
-  // Finding where a secret ends inside prose is not reliable, so text that
-  // shows any credential sign is hidden whole rather than cut.
   it.each([
     ['userinfo in a URL', 'clone of https://alice:pa@ssword@example.com/repo failed'],
     ['an apostrophe in URL userinfo', "clone of https://alice:pa'ss@example.test/repo failed"],
@@ -120,7 +118,6 @@ describe('displayedTaskResource', () => {
     for (const text of ['1-'.repeat(100_000) + ': x', 'a.'.repeat(100_000) + 'x', '?' + 'a-'.repeat(100_000) + '=', '?' + 'token-'.repeat(30_000) + 'x', 'x'.repeat(200_000)]) {
       messageShown(text)
     }
-    // Quadratic matching takes minutes here; linear takes milliseconds.
     expect(performance.now() - started).toBeLessThan(2000)
   })
 
@@ -142,7 +139,6 @@ describe('displayedTaskResource', () => {
         'orka.ai/note': HIDDEN_VALUE,
         'example.com/config': HIDDEN_VALUE,
         'example.com/blob': HIDDEN_VALUE,
-        // A Slack webhook carries its secret in the path.
         'example.com/hook': HIDDEN_VALUE,
       },
     })

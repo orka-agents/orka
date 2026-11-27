@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// samples counts the observations vec holds for method.
 func samples(t *testing.T, vec *prometheus.HistogramVec, method string) uint64 {
 	t.Helper()
 	var metric dto.Metric
@@ -21,9 +20,6 @@ func samples(t *testing.T, vec *prometheus.HistogramVec, method string) uint64 {
 	return metric.GetHistogram().GetSampleCount()
 }
 
-// A write operation records how long it waited for the connection and how
-// long it then held it, under its method, so a pool wait can be told from a
-// slow transaction.
 func TestWriteOperationRecordsItsWaitAndHold(t *testing.T) {
 	s := setupTestStore(t)
 	dataset := advanceTestEpoch(t, s, testWriteFence)
@@ -40,8 +36,6 @@ func TestWriteOperationRecordsItsWaitAndHold(t *testing.T) {
 	require.Equal(t, holds+1, samples(t, writeHoldSeconds, method))
 }
 
-// Receipt pruning runs outside a write transaction and records its wait and
-// hold as one does.
 func TestReceiptPruningRecordsItsWaitAndHold(t *testing.T) {
 	s := setupTestStore(t)
 	const method = "PruneOperationReceipts"
@@ -52,8 +46,6 @@ func TestReceiptPruningRecordsItsWaitAndHold(t *testing.T) {
 	require.Equal(t, holds+1, samples(t, writeHoldSeconds, method))
 }
 
-// The store the controller opens exports its connection pool statistics
-// while it is open.
 func TestLockedStoreExportsPoolStatsWhileOpen(t *testing.T) {
 	poolStatsExported := func() bool {
 		families, err := metrics.Registry.Gather()

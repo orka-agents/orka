@@ -10,9 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/usage"
 )
 
-// TaskTokenUsage returns the input and output tokens a Task consumed, exactly
-// as the usage report attributes them. The provider returns the Task's
-// counter observations; Orka applies the attribution rules.
 func (c *Client) TaskTokenUsage(ctx context.Context, namespace, taskUID string) (int64, int64, error) {
 	observations, err := c.ListTaskCounterObservations(ctx, namespace, taskUID)
 	if err != nil {
@@ -21,11 +18,6 @@ func (c *Client) TaskTokenUsage(ctx context.Context, namespace, taskUID string) 
 	return usage.TaskTokens(observations, namespace, taskUID, "", time.Now())
 }
 
-// CommitSessionTurnFinalization attributes the turn's prompt attempt usage
-// before the provider commits the finalization, which adds it to the
-// Session's token counters the first time the turn is finalized. Totals
-// beyond the exact reporting range stay out of the counters rather than block
-// finalization. Native state is sealed before the provider sees it.
 func (c *Client) CommitSessionTurnFinalization(
 	ctx context.Context, request store.CommitSessionTurnFinalizationRequest,
 ) (*store.SessionTurn, error) {
@@ -43,10 +35,6 @@ func (c *Client) CommitSessionTurnFinalization(
 	return c.commitSessionTurnFinalization(ctx, request)
 }
 
-// deriveExecutionEventUsage attaches the usage observation Orka derives from
-// a sanitized event and the caller's attribution, so the provider records it
-// atomically with the event. An observation Orka code already attached is
-// kept. Either way its provider and model names are redacted.
 func deriveExecutionEventUsage(ctx context.Context, event *store.ExecutionEvent) error {
 	if event.Usage == nil {
 		derived, err := usage.ExecutionEventObservation(*event, store.UsageAttributionFrom(ctx))

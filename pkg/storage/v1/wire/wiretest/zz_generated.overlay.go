@@ -20,11 +20,31 @@ type stateOverlay struct {
 var overlayMethods = []string{
 	"Describe",
 	"HealthCheck",
+	"AppendExecutionEvent",
+	"AppendExecutionEventIfAbsent",
+	"AppendExecutionEventWithPlanIfAbsent",
+	"AppendExecutionEventsIfAbsent",
+	"DeleteExecutionEvents",
+	"GetLatestExecutionEventSeq",
+	"GetLatestExecutionEventSeqs",
+	"ListExecutionEvents",
+	"ListSessionExecutionEvents",
 	"ConsumeMessages",
 	"DeleteParentMessages",
 	"DeleteTaskMessages",
 	"ListUnreadMessages",
 	"SendMessage",
+	"AdvanceControllerEpoch",
+	"AdvanceWriteWatermark",
+	"BindDataset",
+	"CompleteDatasetBootstrap",
+	"DetachDatasetBinding",
+	"GetControllerEpochMirror",
+	"GetDatasetBinding",
+	"GetWriteWatermark",
+	"PruneOperationReceipts",
+	"ResolveOperation",
+	"UpdateBindingKeyFingerprint",
 	"DeletePlan",
 	"DeleteResult",
 	"GetPlan",
@@ -41,6 +61,42 @@ func (overlay stateOverlay) Describe(ctx context.Context) (storagev1.ProviderInf
 
 func (overlay stateOverlay) HealthCheck(ctx context.Context) error {
 	return overlay.client.HealthCheck(ctx)
+}
+
+func (overlay stateOverlay) AppendExecutionEvent(ctx context.Context, event *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
+	return overlay.client.AppendExecutionEvent(ctx, event)
+}
+
+func (overlay stateOverlay) AppendExecutionEventIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string) (*storagev1.ExecutionEvent, bool, error) {
+	return overlay.client.AppendExecutionEventIfAbsent(ctx, event, dedupeKey)
+}
+
+func (overlay stateOverlay) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string, plan *storagev1.PlanState) (*storagev1.ExecutionEvent, bool, error) {
+	return overlay.client.AppendExecutionEventWithPlanIfAbsent(ctx, event, dedupeKey, plan)
+}
+
+func (overlay stateOverlay) AppendExecutionEventsIfAbsent(ctx context.Context, appends []storagev1.ExecutionEventAppend) ([]storagev1.ExecutionEventAppendResult, error) {
+	return overlay.client.AppendExecutionEventsIfAbsent(ctx, appends)
+}
+
+func (overlay stateOverlay) DeleteExecutionEvents(ctx context.Context, namespace string, streamType string, streamID string) error {
+	return overlay.client.DeleteExecutionEvents(ctx, namespace, streamType, streamID)
+}
+
+func (overlay stateOverlay) GetLatestExecutionEventSeq(ctx context.Context, namespace string, streamType string, streamID string) (int64, error) {
+	return overlay.client.GetLatestExecutionEventSeq(ctx, namespace, streamType, streamID)
+}
+
+func (overlay stateOverlay) GetLatestExecutionEventSeqs(ctx context.Context, namespace string, streamType string, streamIDs []string) (map[string]int64, error) {
+	return overlay.client.GetLatestExecutionEventSeqs(ctx, namespace, streamType, streamIDs)
+}
+
+func (overlay stateOverlay) ListExecutionEvents(ctx context.Context, filter storagev1.ExecutionEventFilter) ([]storagev1.ExecutionEvent, error) {
+	return overlay.client.ListExecutionEvents(ctx, filter)
+}
+
+func (overlay stateOverlay) ListSessionExecutionEvents(ctx context.Context, filter storagev1.SessionExecutionEventFilter) ([]storagev1.SessionExecutionEvent, int64, error) {
+	return overlay.client.ListSessionExecutionEvents(ctx, filter)
 }
 
 func (overlay stateOverlay) ConsumeMessages(ctx context.Context, request storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {
@@ -61,6 +117,50 @@ func (overlay stateOverlay) ListUnreadMessages(ctx context.Context, namespace st
 
 func (overlay stateOverlay) SendMessage(ctx context.Context, msg *storagev1.Message) error {
 	return overlay.client.SendMessage(ctx, msg)
+}
+
+func (overlay stateOverlay) AdvanceControllerEpoch(ctx context.Context, request storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	return overlay.client.AdvanceControllerEpoch(ctx, request)
+}
+
+func (overlay stateOverlay) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	return overlay.client.AdvanceWriteWatermark(ctx)
+}
+
+func (overlay stateOverlay) BindDataset(ctx context.Context, request storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	return overlay.client.BindDataset(ctx, request)
+}
+
+func (overlay stateOverlay) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
+	return overlay.client.CompleteDatasetBootstrap(ctx, datasetID)
+}
+
+func (overlay stateOverlay) DetachDatasetBinding(ctx context.Context, request storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	return overlay.client.DetachDatasetBinding(ctx, request)
+}
+
+func (overlay stateOverlay) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	return overlay.client.GetControllerEpochMirror(ctx, name)
+}
+
+func (overlay stateOverlay) GetDatasetBinding(ctx context.Context, datasetID string) (storagev1.DatasetBinding, error) {
+	return overlay.client.GetDatasetBinding(ctx, datasetID)
+}
+
+func (overlay stateOverlay) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	return overlay.client.GetWriteWatermark(ctx)
+}
+
+func (overlay stateOverlay) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
+	return overlay.client.PruneOperationReceipts(ctx, limit)
+}
+
+func (overlay stateOverlay) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	return overlay.client.ResolveOperation(ctx, request)
+}
+
+func (overlay stateOverlay) UpdateBindingKeyFingerprint(ctx context.Context, request storagev1.UpdateBindingKeyRequest) (storagev1.DatasetBinding, error) {
+	return overlay.client.UpdateBindingKeyFingerprint(ctx, request)
 }
 
 func (overlay stateOverlay) DeletePlan(ctx context.Context, namespace string, taskName string) error {
@@ -111,6 +211,17 @@ var artifactsOverlayMethods = []string{
 	"SaveArtifact",
 	"Describe",
 	"HealthCheck",
+	"AdvanceControllerEpoch",
+	"AdvanceWriteWatermark",
+	"BindDataset",
+	"CompleteDatasetBootstrap",
+	"DetachDatasetBinding",
+	"GetControllerEpochMirror",
+	"GetDatasetBinding",
+	"GetWriteWatermark",
+	"PruneOperationReceipts",
+	"ResolveOperation",
+	"UpdateBindingKeyFingerprint",
 }
 
 func (overlay artifactsOverlay) DeleteArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) error {
@@ -135,4 +246,48 @@ func (overlay artifactsOverlay) Describe(ctx context.Context) (storagev1.Provide
 
 func (overlay artifactsOverlay) HealthCheck(ctx context.Context) error {
 	return overlay.client.HealthCheck(ctx)
+}
+
+func (overlay artifactsOverlay) AdvanceControllerEpoch(ctx context.Context, request storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	return overlay.client.AdvanceControllerEpoch(ctx, request)
+}
+
+func (overlay artifactsOverlay) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	return overlay.client.AdvanceWriteWatermark(ctx)
+}
+
+func (overlay artifactsOverlay) BindDataset(ctx context.Context, request storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	return overlay.client.BindDataset(ctx, request)
+}
+
+func (overlay artifactsOverlay) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
+	return overlay.client.CompleteDatasetBootstrap(ctx, datasetID)
+}
+
+func (overlay artifactsOverlay) DetachDatasetBinding(ctx context.Context, request storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	return overlay.client.DetachDatasetBinding(ctx, request)
+}
+
+func (overlay artifactsOverlay) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	return overlay.client.GetControllerEpochMirror(ctx, name)
+}
+
+func (overlay artifactsOverlay) GetDatasetBinding(ctx context.Context, datasetID string) (storagev1.DatasetBinding, error) {
+	return overlay.client.GetDatasetBinding(ctx, datasetID)
+}
+
+func (overlay artifactsOverlay) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	return overlay.client.GetWriteWatermark(ctx)
+}
+
+func (overlay artifactsOverlay) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
+	return overlay.client.PruneOperationReceipts(ctx, limit)
+}
+
+func (overlay artifactsOverlay) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	return overlay.client.ResolveOperation(ctx, request)
+}
+
+func (overlay artifactsOverlay) UpdateBindingKeyFingerprint(ctx context.Context, request storagev1.UpdateBindingKeyRequest) (storagev1.DatasetBinding, error) {
+	return overlay.client.UpdateBindingKeyFingerprint(ctx, request)
 }

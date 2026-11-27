@@ -38,9 +38,7 @@ type ExecutionSpec struct {
 type WorkspaceReusePolicy string
 
 const (
-	// WorkspaceReusePolicyNone creates a fresh workspace per task.
-	WorkspaceReusePolicyNone WorkspaceReusePolicy = "none"
-	// WorkspaceReusePolicySession reuses a workspace for tasks in the same session.
+	WorkspaceReusePolicyNone    WorkspaceReusePolicy = "none"
 	WorkspaceReusePolicySession WorkspaceReusePolicy = "session"
 )
 
@@ -49,9 +47,7 @@ const (
 type WorkspaceCleanupPolicy string
 
 const (
-	// WorkspaceCleanupPolicyDelete deletes the workspace after task completion.
 	WorkspaceCleanupPolicyDelete WorkspaceCleanupPolicy = "delete"
-	// WorkspaceCleanupPolicyRetain retains the workspace after task completion.
 	WorkspaceCleanupPolicyRetain WorkspaceCleanupPolicy = "retain"
 )
 
@@ -62,10 +58,8 @@ const (
 type WorkspaceProvider string
 
 const (
-	// WorkspaceProviderAgentSandbox is the legacy snapshot identity; new bindings use registered controller names.
 	WorkspaceProviderAgentSandbox WorkspaceProvider = "agent-sandbox"
-	// WorkspaceProviderSubstrate identifies retained Substrate MCP Tools and legacy snapshots.
-	WorkspaceProviderSubstrate WorkspaceProvider = "substrate"
+	WorkspaceProviderSubstrate    WorkspaceProvider = "substrate"
 )
 
 // ExecutionWorkspacePhase is Orka's provider-neutral workspace lifecycle phase.

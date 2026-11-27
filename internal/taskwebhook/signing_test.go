@@ -78,8 +78,6 @@ func TestSignVerifyBindsTaskEventDeliveryAndPayload(t *testing.T) {
 	}
 }
 
-// TestSignedTokenVerifiesWithIndependentJOSELibrary checks interoperability:
-// a stock JOSE implementation verifies the token against the published JWKS.
 func TestSignedTokenVerifiesWithIndependentJOSELibrary(t *testing.T) {
 	t.Parallel()
 	key := newTestSigningKey(t)
@@ -142,7 +140,6 @@ func TestVerifyRejectsTampering(t *testing.T) {
 		t.Fatalf("unknown key error = %v, want ErrUnknownKey", err)
 	}
 
-	// A JWKS entry that claims the right kid but holds another key fails.
 	impostor := PublicJWK(newTestSigningKey(t).PublicKey())
 	impostor.KeyID = key.KeyID
 	if _, err := Verify(token, JWKS{Keys: []JWK{impostor}}, options); !errors.Is(err, ErrInvalidSignature) {
@@ -205,7 +202,6 @@ func TestPrivateKeyPEMRoundTripAndKeyID(t *testing.T) {
 		t.Fatal("round-tripped key does not match")
 	}
 
-	// RFC 8037 Appendix A.3 thumbprint of the Appendix A.1 key.
 	x, _ := base64.RawURLEncoding.DecodeString("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo")
 	if got := KeyID(x); got != "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k" {
 		t.Fatalf("KeyID() = %q, want RFC 8037 thumbprint", got)

@@ -17,7 +17,6 @@ import (
 
 const requestApprovalToolName = "request_approval"
 
-// RequestApprovalTool records human approval requests for consequential worker actions.
 type RequestApprovalTool struct{}
 
 func NewRequestApprovalTool() *RequestApprovalTool { return &RequestApprovalTool{} }

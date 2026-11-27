@@ -7,7 +7,6 @@ import (
 	"time"
 )
 
-// retryMockProvider is a test helper that returns configured responses.
 type retryMockProvider struct {
 	name            string
 	completeResults []completeResult
@@ -145,7 +144,7 @@ func TestRetryProvider_Complete_ExceedsMaxRetries(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
-	if mock.callCount != 4 { // 1 initial + 3 retries
+	if mock.callCount != 4 {
 		t.Errorf("expected 4 calls, got %d", mock.callCount)
 	}
 }
@@ -160,7 +159,7 @@ func TestRetryProvider_Complete_ContextCancelled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	rp := NewRetryProvider(mock)
-	rp.baseDelay = 5 * time.Second // long enough to cancel during sleep
+	rp.baseDelay = 5 * time.Second
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
@@ -267,19 +266,16 @@ func TestRetryProvider_Name(t *testing.T) {
 func TestRetryProvider_Backoff(t *testing.T) {
 	rp := NewRetryProvider(&retryMockProvider{name: "test"})
 
-	// Attempt 0: ~1s base
 	d0 := rp.backoff(0)
 	if d0 < 900*time.Millisecond || d0 > 1100*time.Millisecond {
 		t.Errorf("attempt 0 backoff expected ~1s, got %v", d0)
 	}
 
-	// Attempt 1: ~2s
 	d1 := rp.backoff(1)
 	if d1 < 1800*time.Millisecond || d1 > 2200*time.Millisecond {
 		t.Errorf("attempt 1 backoff expected ~2s, got %v", d1)
 	}
 
-	// Attempt 2: ~4s
 	d2 := rp.backoff(2)
 	if d2 < 3600*time.Millisecond || d2 > 4400*time.Millisecond {
 		t.Errorf("attempt 2 backoff expected ~4s, got %v", d2)
@@ -290,7 +286,6 @@ func TestRetryProvider_Backoff_CappedAtMaxDelay(t *testing.T) {
 	rp := NewRetryProvider(&retryMockProvider{name: "test"})
 	rp.maxDelay = 5 * time.Second
 
-	// High attempt should be capped
 	d := rp.backoff(100)
 	if d > 6*time.Second {
 		t.Errorf("backoff should be capped at maxDelay, got %v", d)
@@ -300,7 +295,7 @@ func TestRetryProvider_Backoff_CappedAtMaxDelay(t *testing.T) {
 func TestRetryProvider_Stream_EmptyChannel(t *testing.T) {
 	mock := &retryMockProvider{
 		name:          "test",
-		streamResults: [][]StreamChunk{{}}, // empty stream
+		streamResults: [][]StreamChunk{{}},
 	}
 	rp := NewRetryProvider(mock)
 	rp.maxRetries = 1

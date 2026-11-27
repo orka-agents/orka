@@ -23,22 +23,11 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// The control-plane MCP server lets IDE agents delegate Tasks to Orka Agents.
-// It is a stateless Streamable HTTP endpoint that answers every request with
-// a single JSON body: it keeps no MCP session, sends no server-initiated
-// requests, and opens no SSE stream. Every tool call is executed by replaying
-// the equivalent public REST request in process with the caller's own
-// credentials, so authentication, route policies, SubjectAccessReviews,
-// context-token scopes, namespace isolation, and handler checks are exactly
-// those of the REST route. See website/docs/guides/mcp-server.md.
-
 const (
 	mcpEndpointPath   = "/mcp"
 	mcpServerName     = "orka"
 	mcpJSONRPCVersion = "2.0"
 
-	// mcpProtocolVersionSessionless is the first protocol revision whose
-	// requests carry their own version and client capabilities in _meta.
 	mcpProtocolVersionSessionless = "2026-07-28"
 	mcpLatestLegacyVersion        = "2025-11-25"
 
@@ -52,27 +41,17 @@ const (
 	mcpNameHeader             = "Mcp-Name"
 	mcpMethodToolsCall        = "tools/call"
 
-	// DefaultMCPMaxConcurrent bounds concurrent MCP requests per API replica,
-	// like --chat-max-concurrent bounds chat requests.
 	DefaultMCPMaxConcurrent = 16
-	// mcpMaxRequestBytes bounds one JSON-RPC message. Prompts are bounded
-	// separately; nothing an MCP client sends legitimately approaches this.
-	mcpMaxRequestBytes = 1 << 20
-	// mcpRequestReadTimeout bounds reading one MCP request, body included.
-	mcpRequestReadTimeout = 30 * time.Second
+	mcpMaxRequestBytes      = 1 << 20
+	mcpRequestReadTimeout   = 30 * time.Second
 )
 
-// mcpCORSHeaders are the Streamable HTTP request headers a browser client
-// sends; the CORS allow-list carries them when the endpoint is enabled.
 var mcpCORSHeaders = []string{mcpProtocolVersionHeader, mcpMethodHeader, mcpNameHeader}
 
-// isMCPEndpointPath matches the MCP route as Fiber routes it: case-insensitive
-// and with an optional trailing slash.
 func isMCPEndpointPath(path string) bool {
 	return strings.EqualFold(strings.TrimRight(path, "/"), mcpEndpointPath)
 }
 
-// JSON-RPC and MCP error codes.
 const (
 	mcpCodeParseError          = -32700
 	mcpCodeInvalidRequest      = -32600
@@ -82,16 +61,10 @@ const (
 	mcpCodeHeaderMismatch      = -32020
 	mcpCodeMissingCapabilities = -32021
 	mcpCodeUnsupportedVersion  = -32022
-	// mcpCodeServerBusy is in the implementation-defined server error range.
-	mcpCodeServerBusy = -32000
-	// mcpCodeForbidden reports an authorization or authentication refusal of
-	// the replayed REST request.
-	mcpCodeForbidden = -32001
+	mcpCodeServerBusy          = -32000
+	mcpCodeForbidden           = -32001
 )
 
-// mcpSupportedProtocolVersions lists only revisions this server fully
-// implements. 2025-03-26 is absent: it requires receiving JSON-RPC batches,
-// which every later revision removed and this server refuses.
 var mcpSupportedProtocolVersions = []string{
 	mcpProtocolVersionSessionless,
 	"2025-11-25",
@@ -105,26 +78,18 @@ const mcpServerInstructions = "Orka runs Tasks on Kubernetes-hosted Agents. Use 
 	"Fetch output with get_task_result and list_task_artifacts. Every tool runs with the caller's own " +
 	"Orka permissions, exactly like the REST API."
 
-// MCPServerConfig configures the control-plane MCP endpoint.
 type MCPServerConfig struct {
-	// Enabled serves POST /mcp on the API port.
-	Enabled bool
-	// MaxConcurrent bounds concurrent MCP requests. Zero uses
-	// DefaultMCPMaxConcurrent.
+	Enabled       bool
 	MaxConcurrent int
 }
 
 type mcpServer struct {
-	handler        fasthttp.RequestHandler
-	slots          chan struct{}
-	waitSlots      chan struct{}
-	allowedOrigins []string
-	// replayHeaders is the caller-header allow-list of REST replays.
-	replayHeaders []string
-	// resultWait bounds how long tasks/result waits for a Task to finish.
-	resultWait time.Duration
-	// createdTaskWait bounds how long a task handle is withheld while the
-	// Task it names is not yet readable.
+	handler         fasthttp.RequestHandler
+	slots           chan struct{}
+	waitSlots       chan struct{}
+	allowedOrigins  []string
+	replayHeaders   []string
+	resultWait      time.Duration
 	createdTaskWait time.Duration
 }
 
@@ -154,35 +119,21 @@ func newMCPError(code int, message string) *mcpError {
 	return &mcpError{Code: code, Message: message}
 }
 
-// mcpCall is one JSON-RPC request with the request-scoped protocol facts.
 type mcpCall struct {
-	c      fiber.Ctx
-	method string
-	params json.RawMessage
-	// sessionless is true when the request carries the 2026-07-28 _meta.
-	sessionless bool
-	// metaVersion is the _meta protocol version, when the request has one.
-	metaVersion string
-	// tasksExtension is true when the request's client capabilities declare
-	// the MCP Tasks extension.
+	c              fiber.Ctx
+	method         string
+	params         json.RawMessage
+	sessionless    bool
+	metaVersion    string
 	tasksExtension bool
-	// permit is the request's admission.
-	permit *mcpPermit
+	permit         *mcpPermit
 }
 
-// mcpPermit is the admission one request holds until it ends: a request
-// permit, or, once the request starts a long poll, a wait permit in its
-// place. Waits therefore never occupy request permits, so short requests,
-// including the decisions and cancellations that end a wait, stay admitted
-// while every wait permit is in use. Waits beyond the wait permits are
-// refused, never queued.
 type mcpPermit struct {
 	server  *mcpServer
 	waiting bool
 }
 
-// enterWait trades the request permit for a wait permit. It reports false,
-// keeping the request permit, when every wait permit is in use.
 func (p *mcpPermit) enterWait() bool {
 	if p.waiting {
 		return true
@@ -230,9 +181,6 @@ func mcpAllowedOrigins(raw string) []string {
 	return origins
 }
 
-// originAllowed implements the Streamable HTTP DNS-rebinding defense with the
-// same allow-list as the API's CORS policy. Requests without Origin are not
-// browser requests.
 func (m *mcpServer) originAllowed(origin string) bool {
 	if origin == "" {
 		return true
@@ -251,17 +199,12 @@ func tryAcquire(slots chan struct{}) bool {
 	}
 }
 
-// Handle serves POST /mcp. The external auth middleware and the identity-only
-// route policy have already authenticated the caller.
 func (m *mcpServer) Handle(c fiber.Ctx) error {
 	c.Set(fiber.HeaderCacheControl, "no-store")
 	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 	if !m.originAllowed(c.Get(fiber.HeaderOrigin)) {
 		return m.writeError(c, fiber.StatusForbidden, nil, newMCPError(mcpCodeInvalidRequest, "origin not allowed"))
 	}
-	// Read the whole raw body before taking a permit, so a stalled upload
-	// cannot hold one. The MCP request config bounds the read in size and
-	// time. Decoding a Content-Encoding waits for the permit.
 	if c.Request().Header.ContentLength() > mcpMaxRequestBytes {
 		c.RequestCtx().SetConnectionClose()
 		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
@@ -298,8 +241,6 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 	if header := strings.TrimSpace(c.Get(mcpMethodHeader)); header != "" && header != request.Method {
 		return m.writeError(c, fiber.StatusBadRequest, request.ID, newMCPError(mcpCodeHeaderMismatch, "Mcp-Method header does not match the request method"))
 	}
-	// Notifications and client responses need no answer. This server sends
-	// no requests, so a response can only be stray.
 	if len(request.ID) == 0 || string(request.ID) == responsesJSONNull || request.Method == "" {
 		return c.Status(fiber.StatusAccepted).Send(nil)
 	}
@@ -326,17 +267,10 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 	return m.writeResult(c, request.ID, result)
 }
 
-// readMCPRawBody buffers the raw request body, reading at most one byte past
-// mcpMaxRequestBytes: fasthttp does not bound a streamed chunked body. It
-// reports false when the body is too large or cannot be read.
 func readMCPRawBody(c fiber.Ctx) bool {
 	return readBoundedRawBody(c, mcpMaxRequestBytes)
 }
 
-// readBoundedRawBody buffers the raw request body, reading at most one byte
-// past limit, and reports false when the body is larger or cannot be read.
-// fasthttp streams a body larger than the route's MaxRequestBodySize rather
-// than refusing it, so the bound must be applied here.
 func readBoundedRawBody(c fiber.Ctx, limit int) bool {
 	request := c.Request()
 	stream := request.BodyStream()
@@ -347,19 +281,12 @@ func readBoundedRawBody(c fiber.Ctx, limit int) bool {
 	if err != nil || len(data) > limit {
 		return false
 	}
-	// Replace the consumed stream, so decoding reads the buffered bytes.
 	request.SetBodyRaw(data)
 	return true
 }
 
-// mcpMaxContentCodings bounds how many codings one request body may stack.
 const mcpMaxContentCodings = 3
 
-// decodeMCPBody returns the buffered request body with its Content-Encoding
-// removed, or the HTTP status to refuse the request with. Each coding is
-// decoded through a limit of mcpMaxRequestBytes, so a small compressed body
-// cannot expand past the size a plain one is held to. Fiber's Body() bounds
-// the expansion only by the API-wide body limit, which is far larger.
 func decodeMCPBody(c fiber.Ctx) ([]byte, int) {
 	request := c.Request()
 	body := request.Body()
@@ -374,7 +301,6 @@ func decodeMCPBody(c fiber.Ctx) ([]byte, int) {
 	if len(codings) > mcpMaxContentCodings {
 		return nil, fiber.StatusUnsupportedMediaType
 	}
-	// Codings are listed in the order they were applied.
 	for _, coding := range slices.Backward(codings) {
 		var encoded fasthttp.Request
 		encoded.SetBodyRaw(body)
@@ -426,10 +352,6 @@ func decodeMCPRequest(body []byte) (mcpRequest, *mcpError) {
 	return request, nil
 }
 
-// readMeta reads the request-scoped protocol version and client capabilities
-// that sessionless (2026-07-28) clients send with every request. Older
-// clients negotiate in initialize, which this stateless server does not
-// remember, so their requests use the legacy shapes.
 func (call *mcpCall) readMeta() *mcpError {
 	if len(call.params) == 0 {
 		return nil
@@ -475,10 +397,6 @@ func mcpHeaderMismatch(message string) *mcpError {
 	return newMCPError(mcpCodeHeaderMismatch, "header mismatch: "+message)
 }
 
-// errorStatus is the HTTP status of a JSON-RPC error. Header, version, and
-// capability failures are 400, and a sessionless request for a method this
-// server does not implement is 404, as the 2026-07-28 transport requires.
-// Other errors keep 200, as the earlier revisions answer them.
 func (call *mcpCall) errorStatus(rpcErr *mcpError) int {
 	switch rpcErr.Code {
 	case mcpCodeHeaderMismatch, mcpCodeUnsupportedVersion:
@@ -495,20 +413,10 @@ func (call *mcpCall) errorStatus(rpcErr *mcpError) int {
 	return fiber.StatusOK
 }
 
-// mcpNamedMethods carry the Mcp-Name header, mirroring params.name or
-// params.uri.
 var mcpNamedMethods = []string{mcpMethodToolsCall, "resources/read", "prompts/get"}
 
-// mcpTaskNamedMethods are the io.modelcontextprotocol/tasks methods whose
-// Mcp-Name header mirrors params.taskId, so an intermediary can route every
-// request for one task to the same place.
 var mcpTaskNamedMethods = []string{"tasks/get", "tasks/update", "tasks/cancel"}
 
-// validateHeaders enforces the Streamable HTTP request metadata rules: every
-// mirrored header must match the JSON-RPC body, and a sessionless request
-// must carry MCP-Protocol-Version, Mcp-Method, and, where it applies,
-// Mcp-Name. The server acts only on the body; the headers are validated so an
-// intermediary routing on them cannot be shown different values.
 func (call *mcpCall) validateHeaders() *mcpError {
 	request := &call.c.Request().Header
 	value := func(name string) (string, bool, *mcpError) {
@@ -566,8 +474,6 @@ func (call *mcpCall) validateHeaders() *mcpError {
 	return nil
 }
 
-// mirroredName is the body value the Mcp-Name header mirrors, nil when the
-// body carries none, and whether the method requires the header.
 func (call *mcpCall) mirroredName() (*string, bool) {
 	var params struct {
 		Name   *string `json:"name"`
@@ -578,8 +484,6 @@ func (call *mcpCall) mirroredName() (*string, bool) {
 		_ = json.Unmarshal(call.params, &params)
 	}
 	if slices.Contains(mcpTaskNamedMethods, call.method) {
-		// The Tasks extension is what requires the header on these methods;
-		// a request that does not declare it is answered as before.
 		return params.TaskID, call.tasksExtension
 	}
 	bodyName := params.Name
@@ -589,8 +493,6 @@ func (call *mcpCall) mirroredName() (*string, bool) {
 	return bodyName, slices.Contains(mcpNamedMethods, call.method)
 }
 
-// decodeMCPHeaderValue decodes the "=?base64?...?=" sentinel encoding of a
-// mirrored header value; any other value is literal.
 func decodeMCPHeaderValue(value string) (string, bool) {
 	encoded, ok := strings.CutPrefix(value, "=?base64?")
 	if !ok {
@@ -650,7 +552,6 @@ func mcpServerInfo() map[string]any {
 func mcpServerCapabilities() map[string]any {
 	return map[string]any{
 		mcpFieldTools: map[string]any{"listChanged": false},
-		// 2025-11-25 task-augmented tools/call.
 		"tasks": map[string]any{
 			"cancel":   map[string]any{},
 			"requests": map[string]any{mcpFieldTools: map[string]any{"call": map[string]any{}}},
@@ -681,8 +582,6 @@ func (m *mcpServer) initialize(raw json.RawMessage) (any, error) {
 	}, nil
 }
 
-// withResultType adds the sessionless resultType discriminator to a result
-// object that does not already carry one.
 func withResultType(result any, resultType string) any {
 	data, err := json.Marshal(result)
 	if err != nil {

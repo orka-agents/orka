@@ -17,8 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// sessionTurnLookupStore serves exactly the GetSessionTurn lookup the
-// turn-aware recovery decision performs.
 const acpTestTurnRecoverySessionUID = "session-uid-1"
 
 const acpTestTurnRecoveryPromptID = "prompt-1"
@@ -62,11 +60,6 @@ func (s *sessionTurnLookupStore) GetSessionTurn(_ context.Context, id string) (*
 	return turn, nil
 }
 
-// A Finalizing Task whose succeeded, delivery-terminal attempt still has an
-// open SessionTurn must be picked up for terminal recovery; inline settle
-// finalization can silently skip, and without this check artifact retirement
-// blocks on "SessionTurn is not finalized" until the deadline fails the Task.
-//
 //nolint:gocyclo // The regression keeps the cross-store recovery state matrix visible in one test.
 func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	t.Parallel()
@@ -101,9 +94,6 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	}
 
 	openStore.turns[turnID].State = store.SessionTurnFinalized
-	// Finalized proves only the durable turn commit: a Task still Finalizing
-	// after its turn finalized is exactly the failed-activation-tail window
-	// ResumeSessionTurnFinalization exists for, so recovery is scheduled.
 	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, attempt); err != nil || !needs {
 		t.Fatalf("finalized turn on a Finalizing Task = (%v, %v), want tail recovery", needs, err)
 	}
@@ -115,9 +105,6 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 	if openStore.lookups != lookupsBeforeProof {
 		t.Fatalf("proven Finalizing turn triggered %d extra durable lookups", openStore.lookups-lookupsBeforeProof)
 	}
-	// A settled terminal phase is not proof that the cross-store activation
-	// tail ran: the Task controller can terminalize independently after the
-	// durable turn commit. Every uncached finalized turn resumes its tail.
 	d = &ACPDispatcher{Store: openStore}
 	lookupsBeforeSettled := openStore.lookups
 	for _, phase := range []corev1alpha1.TaskPhase{
@@ -133,9 +120,6 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 		t.Fatalf("finalized settled turns triggered %d durable lookups, want 3", got)
 	}
 
-	// Explicit Session deletion removes its settled SessionTurns. A retained
-	// terminal Task is still proof that the finalization tail completed, so a
-	// missing turn is cached instead of reread on every dispatcher scan.
 	missingStore := &sessionTurnLookupStore{turns: map[string]*store.SessionTurn{}}
 	d = &ACPDispatcher{Store: missingStore}
 	settledAfterSessionDelete := task.DeepCopy()
@@ -156,9 +140,6 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 
 	openStore.turns[turnID].State = store.SessionTurnOpen
 	d = &ACPDispatcher{Store: openStore}
-	// A settled terminal phase with an open turn also recovers: a finalizer
-	// that silently skipped its missing in-memory turn still terminalizes
-	// the Task, so the settled phase is never proof of a finalized turn.
 	for _, phase := range []corev1alpha1.TaskPhase{
 		corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled,
 	} {
@@ -202,9 +183,6 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 		t.Fatalf("malformed session turn key = (%v, %v), want validation error", needs, err)
 	}
 
-	// Every non-success terminal state with an open turn also recovers: their
-	// finalizers can equally lose the in-memory turn, and delivery is not a
-	// prerequisite for Failed, Cancelled, or OutcomeUnknown attempts.
 	for _, state := range []store.PromptExecutionState{
 		store.PromptExecutionFailed, store.PromptExecutionCancelled, store.PromptExecutionOutcomeUnknown,
 	} {
@@ -216,15 +194,12 @@ func TestSessionTurnRequiresTerminalRecovery(t *testing.T) {
 		}
 	}
 
-	// A succeeded attempt without terminal delivery still belongs to
-	// publication recovery, never to turn recovery.
 	undelivered := *attempt
 	undelivered.DeliveryState = store.PromptDeliveryPublishing
 	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &undelivered); err != nil || needs {
 		t.Fatalf("undelivered succeeded attempt = (%v, %v), want publication recovery to own it", needs, err)
 	}
 
-	// A non-terminal execution state never triggers turn recovery.
 	running := *attempt
 	running.ExecutionState = store.PromptExecutionRunning
 	if needs, err := d.sessionTurnRequiresTerminalRecovery(ctx, task, &running); err != nil || needs {

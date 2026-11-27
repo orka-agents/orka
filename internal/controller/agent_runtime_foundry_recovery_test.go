@@ -31,8 +31,6 @@ import (
 func TestAgentRuntimeFoundryRecoveryRequiresBrokerWitnessBeforeAdmission(t *testing.T) {
 	f := newRuntimeRecoveryFixture(t)
 	configureFoundryRuntimeRecoveryFixture(t, f)
-	// Advertise qualified recovery while removing only the fixture status
-	// proxy that supplies the required authenticated broker observation.
 	capabilities := newExternalRuntimeCapabilitiesProxy(t, f.server.URL(), func(response *harnessv2.CapabilitiesResponse) {
 		response.SupportsFoundryRecovery = true
 	})
@@ -178,8 +176,6 @@ func rolloutFoundryRecoverySupervisor(t *testing.T, f *runtimeRecoveryFixture) {
 	brokerStatus := *f.pod.Status.ContainerStatuses[1].DeepCopy()
 	brokerStatus.ContainerID = "containerd://broker-2"
 	brokerStatus.State.Running.StartedAt = metav1.NewTime(witness.StartedAt.Add(45 * time.Second))
-	// Retain the exact original Pod and termination while the Service selects
-	// a new Pod and ReplicaSet from the same opted-in Deployment.
 	f.pod.Status.ContainerStatuses[0] = corev1.ContainerStatus{
 		Name: witness.ContainerName, ContainerID: witness.ContainerID, ImageID: witness.ImageID,
 		RestartCount: witness.RestartCount, State: corev1.ContainerState{Terminated: recoveryTerminal(witness)},
@@ -285,7 +281,6 @@ func TestAgentRuntimeFoundryRecoveryCleansOnlyExposedTaskAndPreservesUnknownOutc
 			}
 		})
 	}
-	// Controller takeover changes ownership, not the admitted Task or boot.
 	f.advanceEpoch(t)
 	task.Status.Execution.ControllerEpoch = f.fence.Epoch
 	if err := f.r.Status().Update(t.Context(), task); err != nil {
@@ -593,8 +588,6 @@ func TestAgentRuntimeFoundryRecoveryRetriesOnlyMonotonicRetirement(t *testing.T)
 		t.Fatalf("response loss minted a proof: retired=%t calls=%d err=%v", retired, relay.calls.Load(), err)
 	}
 	assertFoundryRecoveryUnproven(t, f, witness, before)
-	// A new controller can use the original immutable witness and the same
-	// permanent broker seal. It never retries a prompt or adopts old execution.
 	f.advanceEpoch(t)
 	if retired, err := f.r.observeContainerRetirement(t.Context(), witness, f.fence); err != nil || !retired || relay.calls.Load() != 2 {
 		t.Fatalf("retirement did not recover after response loss/takeover: retired=%t calls=%d err=%v", retired, relay.calls.Load(), err)
@@ -615,8 +608,6 @@ func TestAgentRuntimeFoundryRetirementProofOutlivesTransportExpiry(t *testing.T)
 		t.Fatalf("retirement: %t %v", retired, err)
 	}
 	proof := readFoundryRetirementProof(t, f, witness)
-	// Keep every identity and digest check, shifting this complete saved proof
-	// into the past to exercise validation after its capability has expired.
 	witness.StartedAt = metav1.NewTime(time.Now().UTC().Add(-3 * time.Hour))
 	proof.ContainerTermination = recoveryTerminal(witness)
 	retirement := proof.FoundryRetirement
@@ -686,8 +677,6 @@ func installFoundryRetirementRelay(t *testing.T, f *runtimeRecoveryFixture, opti
 	relay := &foundryRetirementRelay{requests: make(chan harnessv2.FoundryBootRetirementRequest, 8)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != harnessv2.FoundryBootRetirementPath {
-			// Preserve the original prompt stream while the upstream transport
-			// completes its final read of the shared request body.
 			if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
 				t.Errorf("enable full-duplex retirement proxy: %v", err)
 				return

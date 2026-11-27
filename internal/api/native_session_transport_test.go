@@ -56,7 +56,6 @@ func TestNativeSessionProductionServerChunkedImport(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, snapshot.Data, checkpoint.Snapshot.Data)
 
-	// An adjacent ordinary API write must still require a declared length.
 	request, err = http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/api/v1/tasks", io.NopCloser(strings.NewReader(`{}`)))
 	require.NoError(t, err)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -65,8 +64,6 @@ func TestNativeSessionProductionServerChunkedImport(t *testing.T) {
 	require.Equal(t, http.StatusLengthRequired, response.StatusCode)
 	require.NoError(t, response.Body.Close())
 
-	// A peer that announces a huge chunk but never completes it is rejected at
-	// the native route's limit, without waiting for the rest of that chunk.
 	connection, err := net.Dial("tcp4", listener.Addr().String())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })

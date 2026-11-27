@@ -2,9 +2,6 @@ import type { AgentRuntime, RuntimePool } from '@/schemas/runtime'
 import { ago, DEMO_NAMESPACE, digest, uid } from '../shared'
 import { AGENTS } from '../world'
 
-// ACP runtime fabric: controller-owned, digest-pinned RuntimePools for the
-// built-in coding-agent runtimes, plus external AgentRuntime registrations.
-
 const RUNTIME_NAMESPACE = 'orka-runtimes'
 const sha = (seed: string) => `sha256:${digest(seed, 64)}`
 
@@ -19,7 +16,6 @@ interface PoolSeed {
   runtime: 'claude' | 'codex' | 'copilot' | 'opencode'
   model: string
   intent: 'read' | 'write'
-  /** distinguishes an older profile of the same runtime */
   revision?: string
   createdAgo: number
   lifecycle: NonNullable<RuntimePool['status']>['lifecycle']
@@ -134,7 +130,6 @@ function runtimePool(seed: PoolSeed, index: number): RuntimePool {
 
 export const runtimePools: RuntimePool[] = poolSeeds.map(runtimePool)
 
-/** The current (non-draining) pool for a built-in runtime, which task status names. */
 export function currentRuntimePool(runtime: string): RuntimePool {
   const index = poolSeeds.findIndex((seed) => seed.runtime === runtime && !seed.revision)
   return runtimePools[index === -1 ? 0 : index]

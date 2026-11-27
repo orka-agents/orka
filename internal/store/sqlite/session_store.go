@@ -19,7 +19,6 @@ var (
 	_ store.SessionTurnCommitter = (*Store)(nil)
 )
 
-// CreateSession inserts a new session record.
 func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord) error {
 	return writeOperationErr(ctx, s, "CreateSession", func(ctx context.Context) error {
 		return s.createSessionWrite(ctx, session)
@@ -35,8 +34,6 @@ func (s *Store) createSessionWrite(ctx context.Context, session *store.SessionRe
 	if err := ensureNativeSessionNameAvailableTx(ctx, tx.Tx, session.Namespace, session.Name); err != nil {
 		return err
 	}
-	// Non-Gateway transcript-only completions permit deliberate name reuse.
-	// Kubernetes identities and Gateway continuation chains remain reserved.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM session_cleanup_completions
 		 WHERE namespace = ? AND session_name = ? AND session_uid = ''
@@ -74,7 +71,6 @@ func (s *Store) createSessionWrite(ctx context.Context, session *store.SessionRe
 	return tx.Commit()
 }
 
-// GetSession loads a session with all its messages.
 func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
 	var session *store.SessionRecord
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -97,8 +93,6 @@ func (s *Store) getSessionUnfenced(ctx context.Context, namespace, name string) 
 	return session, nil
 }
 
-// getSession reads a Session and its transcript through q, which must be one
-// snapshot so the message count matches the messages returned.
 func getSession(ctx context.Context, q taskDataExecutor, namespace, name string) (*store.SessionRecord, error) {
 	session := &store.SessionRecord{}
 	err := q.QueryRowContext(ctx,
@@ -126,7 +120,6 @@ func getSession(ctx context.Context, q taskDataExecutor, namespace, name string)
 	return session, nil
 }
 
-// GetSessionType returns the stored Session type without loading transcript messages.
 func (s *Store) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
 	var sessionType string
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -149,8 +142,6 @@ func (s *Store) getSessionTypeUnfenced(ctx context.Context, namespace, name stri
 	return sessionType, err
 }
 
-// GetSessionCreatedAt returns when the Session record was created without
-// loading transcript messages.
 func (s *Store) GetSessionCreatedAt(ctx context.Context, namespace, name string) (time.Time, error) {
 	var createdAt time.Time
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
@@ -163,7 +154,6 @@ func (s *Store) GetSessionCreatedAt(ctx context.Context, namespace, name string)
 	return createdAt, err
 }
 
-// ListSessions returns metadata for all sessions in a namespace.
 func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT name, session_type, message_count, input_tokens, output_tokens, created_at, updated_at, active_task, active_task_uid
@@ -186,13 +176,10 @@ func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.Ses
 	return sessions, rows.Err()
 }
 
-// ListSessionsPage pushes the cursor, type filter, ordering, and LIMIT
-// into SQL so a continuation request reads only its own page.
 func (s *Store) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
 	if limit <= 0 {
 		return nil, false, nil
 	}
-	// Session timestamps are written in UTC, so their text sorts in time order.
 	hasCursor, afterCreatedAt, afterName := after != nil, time.Time{}, ""
 	if hasCursor {
 		afterCreatedAt, afterName = utcTime(after.CreatedAt), after.Name
@@ -229,10 +216,6 @@ func (s *Store) ListSessionsPage(ctx context.Context, namespace string, after *s
 	return sessions, more, nil
 }
 
-// DeleteSession removes a quiescent session, its settled durable turn state,
-// its messages (via CASCADE), and its session-scoped execution event read
-// model. Open turns, active mutation leases, reconciliation-blocked controls,
-// and undelivered projections keep the session durable for recovery.
 func (s *Store) DeleteSession(ctx context.Context, namespace, name string, now time.Time) error {
 	return writeOperationErr(ctx, s, "DeleteSession", func(ctx context.Context) error {
 		return s.deleteSessionWrite(ctx, namespace, name, now)
@@ -309,9 +292,6 @@ func (s *Store) deleteSessionWrite(ctx context.Context, namespace, name string, 
 		return err
 	}
 	if publicationBackedTurns > 0 {
-		// A publication-backed Session may still own its continuation
-		// BranchClaim in the Kubernetes control store. Generic transcript
-		// deletion cannot safely reclaim that cross-store ownership fence.
 		return store.ErrConflict
 	}
 	var unsettledProjections int
@@ -375,9 +355,6 @@ func (s *Store) deleteSessionWrite(ctx context.Context, namespace, name string, 
 	return tx.Commit()
 }
 
-// ensureSessionLockQuiescentTx refuses a Session that a chat turn reservation
-// or a Task lock holds at now, the time of the request, and reclaims a
-// transient Task lock that has expired at now.
 func ensureSessionLockQuiescentTx(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -393,7 +370,6 @@ func ensureSessionLockQuiescentTx(
 	).Scan(&chatTurnID, &chatTurnExpiresAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	// Abandoned turns must not prevent cleanup after their reservation expires.
 	if chatTurnID != "" && chatTurnExpiresAt.Valid && chatTurnExpiresAt.Time.After(now) {
 		return store.ErrConflict
 	}
@@ -436,9 +412,6 @@ func ensureNoSessionCleanupIntentTx(ctx context.Context, tx *sql.Tx, namespace, 
 	return nil
 }
 
-// AcquireLock atomically sets a durable Task lock for a session. A transient
-// lock or chat turn reservation that has expired at now is reclaimed.
-// Returns store.ErrNotFound if the session does not exist, or an error if already locked.
 func (s *Store) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string, now time.Time) error {
 	return writeOperationErr(ctx, s, "AcquireLock", func(ctx context.Context) error {
 		return s.acquireLockWrite(ctx, namespace, name, taskName, taskUID, now)
@@ -449,8 +422,6 @@ func (s *Store) acquireLockWrite(ctx context.Context, namespace, name, taskName,
 	return s.acquireLock(ctx, namespace, name, taskName, taskUID, nil, now)
 }
 
-// AcquireLockUntil atomically sets a crash-recoverable transient lock that
-// expires at expiresAt. now is the time of the request.
 func (s *Store) AcquireLockUntil(ctx context.Context, namespace, name, ownerName, ownerUID string, now, expiresAt time.Time) error {
 	expiresAt = expiresAt.UTC()
 	if !expiresAt.After(now) {
@@ -459,8 +430,6 @@ func (s *Store) AcquireLockUntil(ctx context.Context, namespace, name, ownerName
 	return s.acquireLock(ctx, namespace, name, ownerName, ownerUID, &expiresAt, now)
 }
 
-// requireRequestTime refuses a lease decision without the time of the request.
-// A provider never judges a lease on its own clock.
 func requireRequestTime(what string, now time.Time) error {
 	if now.IsZero() {
 		return store.ValidationErrorf("%s requires the request time", what)
@@ -468,7 +437,6 @@ func requireRequestTime(what string, now time.Time) error {
 	return nil
 }
 
-// Legacy locks and transcript writes cannot update native checkpoint boundaries.
 func rejectLegacyNativeSession(ctx context.Context, q controlQueryRower, namespace, name string) error {
 	var count int
 	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM native_session_snapshots WHERE namespace=? AND session_name=?`, namespace, name).Scan(&count); err != nil {
@@ -485,16 +453,11 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		return err
 	}
 	now = now.UTC()
-	// The checks and the update share one transaction, so a Session deleted
-	// between them is reported as not found rather than as locked, and the
-	// update never acts on a gateway ownership check that no longer holds.
 	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
 		return acquireSessionLock(ctx, q, namespace, name, taskName, taskUID, expiresAt, now)
 	})
 }
 
-// acquireSessionLock sets the lock in q. It judges an existing transient lock
-// or chat turn reservation at now, the time of the request.
 func acquireSessionLock(
 	ctx context.Context,
 	q taskDataExecutor,
@@ -505,7 +468,6 @@ func acquireSessionLock(
 	if err := rejectLegacyNativeSession(ctx, q, namespace, name); err != nil {
 		return err
 	}
-	// Check if session exists
 	var count int
 	err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`,
@@ -553,8 +515,6 @@ func acquireSessionLock(
 		}
 	}
 
-	// Exact owner identities fence Task locks. Expired transient and chat leases
-	// are reclaimable, but a live chat turn excludes all Task lock acquisition.
 	var expiresValue any
 	if expiresAt != nil {
 		expiresValue = *expiresAt
@@ -594,9 +554,6 @@ func acquireSessionLock(
 	return nil
 }
 
-// AcquireChatTurn creates a chat Session when needed and reserves its current
-// transcript revision for one turn. Expired reservations may be reclaimed, but
-// Task locks and Gateway-owned Sessions are never taken over by chat.
 func (s *Store) AcquireChatTurn(ctx context.Context, request store.AcquireChatTurnRequest) (bool, error) {
 	return writeOperation(ctx, s, "AcquireChatTurn", nil, func(ctx context.Context) (bool, error) {
 		return s.acquireChatTurnWrite(ctx, request)
@@ -647,8 +604,6 @@ func (s *Store) acquireChatTurnWrite(ctx context.Context, request store.AcquireC
 	if err := ensureNoSessionCleanupIntentTx(ctx, tx.Tx, session.Namespace, session.Name); err != nil {
 		return false, err
 	}
-	// Only non-Gateway transcript-only receipts permit name reuse. Gateway
-	// completions also retain the route to the next Session incarnation.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM session_cleanup_completions
 		 WHERE namespace = ? AND session_name = ? AND session_uid = ''
@@ -731,10 +686,6 @@ func (s *Store) acquireChatTurnWrite(ctx context.Context, request store.AcquireC
 	return created, nil
 }
 
-// ReleaseChatTurn clears a reservation only when it is still owned by turnID.
-// If this reservation created the Session, failed turns remove that row only
-// while it is still empty and otherwise untouched. Bound Kubernetes identities
-// must remain for coordinated cleanup.
 func (s *Store) ReleaseChatTurn(
 	ctx context.Context,
 	namespace, name, turnID string,
@@ -789,9 +740,6 @@ func (s *Store) releaseChatTurnWrite(
 	return err
 }
 
-// CommitSessionTurn atomically appends one chat turn's messages and token
-// usage. The reservation owner, lease, and observed message count fence the
-// commit against concurrent or recovered turns.
 func (s *Store) CommitSessionTurn(ctx context.Context, request store.CommitSessionTurnRequest) error {
 	return writeOperationErr(ctx, s, "CommitSessionTurn", func(ctx context.Context) error {
 		return s.commitSessionTurnWrite(ctx, request)
@@ -890,7 +838,6 @@ func (s *Store) commitSessionTurnWrite(ctx context.Context, request store.Commit
 	return tx.Commit()
 }
 
-// ReleaseLock clears the lock only for the exact Task incarnation.
 func (s *Store) ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	return writeOperationErr(ctx, s, "ReleaseLock", func(ctx context.Context) error {
 		return s.releaseLockWrite(ctx, namespace, name, taskName, taskUID)
@@ -907,8 +854,6 @@ func (s *Store) releaseLockWrite(ctx context.Context, namespace, name, taskName,
 	return err
 }
 
-// IsLocked returns true if the session is locked by another Task incarnation,
-// or reserved by a chat turn, at now.
 func (s *Store) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string, now time.Time) (bool, error) {
 	return writeOperation(ctx, s, "IsLocked", nil, func(ctx context.Context) (bool, error) {
 		return s.isLockedWrite(ctx, namespace, name, currentTask, currentTaskUID, now)
@@ -959,13 +904,9 @@ func (s *Store) isLockedWrite(ctx context.Context, namespace, name, currentTask,
 			return false, nil
 		}
 	}
-	// Rapid lock churn is conservatively reported as locked.
 	return true, nil
 }
 
-// AppendMessages inserts messages into a session's logical transcript and updates session metadata.
-// Stable message IDs make retries idempotent; even-numbered logical orders leave a gap for
-// gateway terminal projections that arrive after later user messages were durably admitted.
 func (s *Store) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
 	return writeOperationErr(ctx, s, "AppendMessages", func(ctx context.Context) error {
 		return s.appendMessagesWrite(ctx, namespace, name, messages)
@@ -976,8 +917,6 @@ func (s *Store) appendMessagesWrite(ctx context.Context, namespace, name string,
 	return s.appendMessages(ctx, namespace, name, nil, messages)
 }
 
-// AppendMessagesWithLock requires the exact active lock owner through the
-// whole transaction, preventing writes after lease expiry and takeover.
 func (s *Store) AppendMessagesWithLock(ctx context.Context, owner store.SessionOwnerWrite, messages []store.SessionMessage) error {
 	return writeOperationErr(ctx, s, "AppendMessagesWithLock", func(ctx context.Context) error {
 		return s.appendMessagesWithLockWrite(ctx, owner, messages)
@@ -988,8 +927,6 @@ func (s *Store) appendMessagesWithLockWrite(ctx context.Context, owner store.Ses
 	return s.appendMessages(ctx, owner.Namespace, owner.Name, &owner, messages)
 }
 
-// appendMessages appends messages to a Session, while owner holds its lock
-// when owner is set.
 func (s *Store) appendMessages(
 	ctx context.Context,
 	namespace, name string,
@@ -1121,8 +1058,6 @@ func insertSessionMessagesTx(
 	return inserted, nil
 }
 
-// verifySessionWriteLockTx requires owner to hold the Session's lock at
-// owner.Now and the Session not to be pending cleanup.
 func verifySessionWriteLockTx(ctx context.Context, tx *sql.Tx, owner store.SessionOwnerWrite) error {
 	namespace, name := owner.Namespace, owner.Name
 	result, err := tx.ExecContext(ctx,
@@ -1148,7 +1083,6 @@ func verifySessionWriteLockTx(ctx context.Context, tx *sql.Tx, owner store.Sessi
 	return nil
 }
 
-// LoadTranscript retrieves messages in logical conversation order.
 func (s *Store) LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]store.SessionMessage, error) {
 	var messages []store.SessionMessage
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
@@ -1163,7 +1097,6 @@ func (s *Store) loadTranscriptUnfenced(ctx context.Context, namespace, name stri
 	return s.loadTranscript(ctx, namespace, name, 0, maxMessages)
 }
 
-// LoadTranscriptThrough retrieves logical history through one stable message ID.
 func (s *Store) LoadTranscriptThrough(
 	ctx context.Context,
 	namespace, name, throughMessageID string,
@@ -1372,7 +1305,6 @@ func nextSessionMessageOrderTx(ctx context.Context, tx *sql.Tx, namespace, name 
 	return current + 2, nil
 }
 
-// UpdateTokenCounts atomically increments the token counters for a session.
 func (s *Store) UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error {
 	return writeOperationErr(ctx, s, "UpdateTokenCounts", func(ctx context.Context) error {
 		return s.updateTokenCountsWrite(ctx, namespace, name, inputTokens, outputTokens)
@@ -1386,7 +1318,6 @@ func (s *Store) updateTokenCountsWrite(ctx context.Context, namespace, name stri
 	return err
 }
 
-// UpdateTokenCountsWithLock requires the exact active transient lock owner.
 func (s *Store) UpdateTokenCountsWithLock(ctx context.Context, owner store.SessionOwnerWrite, inputTokens, outputTokens int) error {
 	return writeOperationErr(ctx, s, "UpdateTokenCountsWithLock", func(ctx context.Context) error {
 		return s.updateTokenCountsWithLockWrite(ctx, owner, inputTokens, outputTokens)
@@ -1423,10 +1354,6 @@ func (s *Store) updateTokenCountsWithLockWrite(ctx context.Context, owner store.
 	return nil
 }
 
-// ReleaseLockWithTokenUsage releases the owner's lock and, while that lock is
-// still current and the session is not being cleaned up, adds the owner's
-// token usage in the same statement. A replay after the lock was released
-// matches no row and counts nothing.
 func (s *Store) ReleaseLockWithTokenUsage(ctx context.Context, owner store.SessionOwnerWrite, inputTokens, outputTokens int) error {
 	return writeOperationErr(ctx, s, "ReleaseLockWithTokenUsage", func(ctx context.Context) error {
 		return s.releaseLockWithTokenUsageWrite(ctx, owner, inputTokens, outputTokens)
@@ -1439,8 +1366,6 @@ func (s *Store) releaseLockWithTokenUsageWrite(ctx context.Context, owner store.
 	}
 	namespace, name, ownerName, ownerUID := owner.Namespace, owner.Name, owner.OwnerName, owner.OwnerUID
 	now := owner.Now.UTC()
-	// SET expressions see the row as it was before this UPDATE, so the lock
-	// expiry test reads the lock being released.
 	counted := `(active_task_expires_at IS NULL OR active_task_expires_at > ?)
 		AND NOT EXISTS (SELECT 1 FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?)`
 	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
@@ -1457,7 +1382,6 @@ func (s *Store) releaseLockWithTokenUsageWrite(ctx context.Context, owner store.
 	return err
 }
 
-// nilIfEmpty returns nil if s is empty, otherwise returns a pointer to s.
 func nilIfEmpty(s string) *string {
 	if s == "" {
 		return nil

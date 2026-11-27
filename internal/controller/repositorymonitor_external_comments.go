@@ -32,8 +32,6 @@ const (
 	githubPermissionWrite                      = "write"
 )
 
-// repositoryMonitorExternalReviewThread is one trust-gated, sanitized, bounded
-// unresolved pull request review thread carried in repair prompts.
 type repositoryMonitorExternalReviewThread struct {
 	ThreadID string                                   `json:"threadId"`
 	Path     string                                   `json:"path,omitempty"`
@@ -49,8 +47,6 @@ type repositoryMonitorExternalReviewComment struct {
 	Body   string `json:"body"`
 }
 
-// repositoryMonitorRepairExternalResult is the optional structured summary a
-// repair agent returns in its task result when addressing external review threads.
 type repositoryMonitorRepairExternalResult struct {
 	AddressedThreads []repositoryMonitorAddressedThread `json:"addressedThreads"`
 }
@@ -177,12 +173,9 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorExternalReviewThread
 	if raw.IsResolved || raw.IsOutdated || strings.TrimSpace(raw.ID) == "" || len(raw.Comments) == 0 {
 		return repositoryMonitorExternalReviewThread{}, 0, false, nil
 	}
-	// Skip Orka's own inline review threads.
 	if repositoryMonitorInlineFindingMarker.MatchString(raw.Comments[0].Body) {
 		return repositoryMonitorExternalReviewThread{}, 0, false, nil
 	}
-	// Trust-gate on the thread's opening author; subsequent comments in the
-	// thread are included only if their author is also trusted.
 	rootAuthor := strings.TrimSpace(raw.Comments[0].Author)
 	rootBotActor := strings.EqualFold(strings.TrimSpace(raw.Comments[0].AuthorType), "Bot")
 	rootAllowed, rootIsBot, err := r.repositoryMonitorExternalCommentAuthorAllowed(ctx, monitor, baseURL, owner, repository, token, rootAuthor, rootBotActor, permCache)
@@ -190,8 +183,6 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorExternalReviewThread
 		return repositoryMonitorExternalReviewThread{}, 0, false, err
 	}
 
-	// Collect all trusted comments for revision calculation first (independent
-	// of the prompt comment/rune budget), excluding durably owned Orka replies.
 	type trustedComment struct {
 		author string
 		body   string
@@ -230,14 +221,10 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorExternalReviewThread
 		revParts = append(revParts, tc.revKey)
 	}
 	revision := repositoryMonitorShortHash(strings.Join(revParts, "\n"))
-	// Check acknowledgement before charging the global rune budget so already
-	// handled unresolved threads never starve later unacknowledged threads.
 	if r.isRepositoryMonitorExternalThreadAcknowledged(ctx, monitor, pr, raw.ID, revision) {
 		return repositoryMonitorExternalReviewThread{}, 0, false, nil
 	}
 
-	// Keep the root comment plus the most recent trusted follow-ups within the
-	// per-thread comment cap and remaining global rune budget.
 	selected := trusted
 	if len(selected) > repositoryMonitorMaxCommentsPerThread {
 		tailCount := repositoryMonitorMaxCommentsPerThread - 1
@@ -470,11 +457,9 @@ func parseRepositoryMonitorRepairExternalResult(raw []byte) repositoryMonitorRep
 	if len(raw) == 0 {
 		return parsed
 	}
-	// Try direct JSON first.
 	if err := json.Unmarshal(raw, &parsed); err == nil && len(parsed.AddressedThreads) > 0 {
 		return parsed
 	}
-	// Fallback: extract embedded JSON object (e.g., inside a markdown fenced block or prose).
 	text := string(raw)
 	for start := strings.IndexByte(text, '{'); start >= 0; {
 		dec := json.NewDecoder(strings.NewReader(text[start:]))
@@ -539,16 +524,12 @@ func (r *RepositoryMonitorReconciler) replyExternalReviewThreadsAfterRepair(
 			addressed = parseRepositoryMonitorRepairExternalResult(raw).AddressedThreads
 		}
 	}
-	// Fail closed: if the repair agent did not return explicit structured
-	// addressedThreads confirmation (or the result store is unavailable), do
-	// not fabricate "fixed" replies or resolve any review threads.
 	if len(addressed) == 0 {
 		return nil
 	}
 
 	token, err := r.repositoryMonitorForgeToken(ctx, monitor)
 	if err != nil {
-		// Fall back to read token only when tests omit ForgeCredentialRef.
 		token, err = r.repositoryMonitorGitHubToken(ctx, monitor)
 		if err != nil {
 			return err
@@ -561,8 +542,6 @@ func (r *RepositoryMonitorReconciler) replyExternalReviewThreadsAfterRepair(
 	marker := fmt.Sprintf("<!-- orka:repo-monitor-reply head=%s -->", strings.ToLower(strings.TrimSpace(job.HeadSHA)))
 	seen := map[string]bool{}
 
-	// Before resolving any thread, fail closed unless a live PR read confirms
-	// the current head SHA still matches the repair's pushed SHA.
 	headStillMatchesPushed := false
 	if spec.ResolveBots || spec.ResolveOnFix {
 		if owner, repo, ownerErr := repositoryMonitorOwnerRepository(monitor); ownerErr == nil {
@@ -585,7 +564,6 @@ func (r *RepositoryMonitorReconciler) replyExternalReviewThreadsAfterRepair(
 		switch status {
 		case repositoryMonitorExternalThreadStatusFixed, repositoryMonitorExternalThreadStatusWont, repositoryMonitorExternalThreadStatusHuman:
 		default:
-			// Unrecognized status must never be promoted to "fixed" or resolve a thread.
 			status = repositoryMonitorExternalThreadStatusHuman
 		}
 		note := sanitizeRepositoryMonitorReviewText(entry.Note, repositoryMonitorMaxExternalReplyNoteRunes)
@@ -600,9 +578,6 @@ func (r *RepositoryMonitorReconciler) replyExternalReviewThreadsAfterRepair(
 			}
 		}
 
-		// Record the handled thread revision so unchanged unresolved threads
-		// are not re-queued on the pushed head, while new trusted comments on
-		// the same thread produce a different revision and remain eligible.
 		if thread.Revision != "" {
 			if err := r.recordRepositoryMonitorExternalThreadAck(ctx, monitor, job, threadID, thread.Revision); err != nil {
 				errs = append(errs, err)

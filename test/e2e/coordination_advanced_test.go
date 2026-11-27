@@ -45,8 +45,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		createProviderCRD(coordAdvProvider, "openai", "e2e-openai-secret", "api-key", e2eOpenAIBaseURL, model)
 
 		By("creating a shared worker agent")
-		// The scripted cancel child sleeps in code_exec so it is still running
-		// when its coordinator cancels it.
 		workerTools := ""
 		if e2eMockOpenAI {
 			workerTools = `, "tools": [{"name": "code_exec"}]`
@@ -77,8 +75,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "provider", coordAdvProvider, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 	})
-
-	// ── Test 1: cancel_task tool ──
 
 	It("should cancel a delegated task using cancel_task", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
@@ -185,8 +181,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		}
 	})
 
-	// ── Test 2: send_message + check_messages ──
-
 	It("should enable inter-agent messaging with send_message and check_messages", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -254,8 +248,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 
 		var sender, reader string
 		if e2eMockOpenAI {
-			// The script delegates the reader only after the sender finishes, so
-			// the reader's check_messages always sees the broadcast.
 			By("scripting the coordinator to wait for the sender, then the reader")
 			sender = waitForCoordinationChild(taskName, "[e2e:coord-adv-sender]", 3*time.Minute)
 			injectMockLLMFixtures(coordinationMockToolCall(marker, "e2e-coord-adv-msg-hold",
@@ -297,8 +289,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 			expectCoordinationToolResult("[e2e:coord-adv-reader]", "check_messages", `"fromTask":"`+sender+`"`, time.Minute)
 		}
 	})
-
-	// ── Test 3: auto-retry (self-healing delegation) ──
 
 	It("should auto-retry a failed delegated task", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
@@ -366,9 +356,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		if e2eMockOpenAI {
-			// wait_for_tasks reports retry metadata for auto_retry children and
-			// leaves the retry decision to the coordinator, so the script
-			// re-delegates once the first child fails.
 			By("scripting the coordinator to collect the failure and retry")
 			failed := waitForCoordinationChild(taskName, "[e2e:coord-adv-flaky]", 3*time.Minute)
 			injectMockLLMFixtures(coordinationMockToolCall(marker, "e2e-coord-adv-retry-hold",
@@ -400,7 +387,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 				"-n", namespace)
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
-			// At least one task should have the retried-from annotation set
 			fields := strings.Fields(strings.TrimSpace(output))
 			g.Expect(len(fields)).To(BeNumerically(">=", 1),
 				"At least one retry task should have orka.ai/retried-from annotation")
@@ -410,8 +396,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		phase := waitForTaskCompletion(taskName, 12*time.Minute)
 		Expect(phase).To(BeElementOf("Succeeded", "Failed"))
 	})
-
-	// ── Test 4: create_agent + delete_agent tools ──
 
 	It("should dynamically create and delete an agent via coordination tools", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
@@ -439,9 +423,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		By("creating a coordinator agent with dynamic agent in allowedAgents")
 		allowedAgents := fmt.Sprintf(`, "allowedAgents": [{"name": "%s"}, {"name": "%s"}]`, coordAdvWorker, dynamicAgent)
 		if e2eMockOpenAI {
-			// create_agent names agents <task>-<role>-<hash>, so only a
-			// coordinator without an allowlist can delegate to the agent the
-			// script creates.
 			allowedAgents = ""
 		}
 		coordManifest := fmt.Sprintf(`{
@@ -541,12 +522,7 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 		}
 	})
 
-	// ── Test 5: Internal messaging API (structural – no LLM) ──
-
 	It("should send and receive messages via internal messaging API", func() {
-		// The internal messaging API accepts only the calling Task's own worker
-		// Pod, so this controller-token call between nonexistent Tasks cannot
-		// pass. The send_message/check_messages spec covers it end to end.
 		Skip("internal messaging requires the calling Task's worker identity")
 		var (
 			apiBaseURL     string
@@ -617,7 +593,6 @@ var _ = Describe("Advanced Coordination Tools", Ordered, func() {
 	})
 })
 
-// waitForCreatedAgent returns the Agent that parent's create_agent call made.
 func waitForCreatedAgent(parent string, timeout time.Duration) string {
 	var name string
 	EventuallyWithOffset(1, func(g Gomega) {

@@ -19,8 +19,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// realTempDir resolves the temporary directory so no symlink (such as macOS
-// /var -> /private/var) sits in the source chain.
 func realTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -356,8 +354,6 @@ func TestCopyChecksArchitecture(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(source, "bin"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		// In the Pod the source path is the mount path itself, so absolute
-		// link text under it stays inside the tree.
 		if err := os.Symlink(filepath.Join(source, "libexec", "real"), filepath.Join(source, "bin", "absolute")); err != nil {
 			t.Fatal(err)
 		}
@@ -680,8 +676,6 @@ func TestToolboxSkipsNonExecutablePATHData(t *testing.T) {
 	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); err != nil {
 		t.Fatalf("unreadable non-executable PATH data must be skipped: %v", err)
 	}
-	// Dot-only suffixes still name a directory and need no content check.
-	// A child or ".." suffix must traverse it, so read denial stays fatal.
 	for _, target := range []string{"data/./tool", "data/../tool", "data/./../tool"} {
 		link := filepath.Join(mount, "bin", "needs-traversal")
 		if err := os.Symlink(target, link); err != nil {
@@ -711,8 +705,6 @@ func TestToolboxSkipsNonExecutablePATHData(t *testing.T) {
 func TestCopyRecoversFromInterruptedRun(t *testing.T) {
 	source, destination := newLayout(t)
 	mustWrite(t, filepath.Join(source, "bin", "tool"), elfFor(runtime.GOARCH), 0o755)
-	// Simulate a crash mid-copy: a partial staging tree and a published root
-	// without its completion marker.
 	mustWrite(t, filepath.Join(destination, stagingName, "junk"), []byte("partial"), 0o644)
 	mustWrite(t, filepath.Join(destination, OutputRootName, "stale"), []byte("stale"), 0o644)
 	summary, err := Copy(copyOptions(source, destination, "bin"))
@@ -807,7 +799,6 @@ func TestMountedToolboxMustBeWorldAccessible(t *testing.T) {
 	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); err != nil {
 		t.Fatal(err)
 	}
-	// Executable scripts need the same bits; plain data files do not.
 	mustWrite(t, filepath.Join(mount, "bin", "script"), []byte("#!/bin/sh\n"), 0o744)
 	if err := CheckMounted(mount, []string{"bin"}, runtime.GOARCH); failureReason(t, err) != ReasonPermissionDenied {
 		t.Fatalf("a 0744 script must fail: %v", err)
@@ -900,10 +891,6 @@ func TestRunSubcommands(t *testing.T) {
 	}
 }
 
-// TestRunWithholdsSecretShapedCopyDiagnostics drives the copy subcommand the
-// skill-copy init container runs: a copier failure quoting a credential-shaped
-// file name must not reach stderr (and so the termination log), while the
-// stable reason survives.
 func TestRunWithholdsSecretShapedCopyDiagnostics(t *testing.T) {
 	token := "gh" + "p_0123456789abcdefghijABCDEFGHIJ012345"
 	cases := map[string]struct {
@@ -937,7 +924,6 @@ func TestRunWithholdsSecretShapedCopyDiagnostics(t *testing.T) {
 			}
 		})
 	}
-	// Ordinary diagnostics keep their detail.
 	line := FormatFailureLine(&Failure{Reason: ReasonFileTooLarge, Message: "bin/tool is larger than 16 bytes"})
 	if line != "FAIL reason=TOOLBOX_FILE_TOO_LARGE msg=bin/tool is larger than 16 bytes" {
 		t.Fatalf("benign line = %q", line)
@@ -958,10 +944,6 @@ func TestParseFailureLine(t *testing.T) {
 	}
 }
 
-// FuzzCopyTree builds a pseudo-random tree from the fuzz input and checks the
-// copier's invariants: it never fails on a tree made only of folders, regular
-// files, and symlinks, every copied file has a sanitized mode, and the entry
-// count matches the source.
 func FuzzCopyTree(f *testing.F) {
 	f.Add([]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	f.Add([]byte{0})
@@ -1043,7 +1025,6 @@ func runToolboxDataCheckUnprivileged(t *testing.T) bool {
 	if os.Geteuid() != 0 {
 		return false
 	}
-	// Exercise real read denial even when the package suite runs as root.
 	dir, err := os.MkdirTemp("/tmp", "toolbox-unprivileged-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1083,8 +1064,6 @@ func TestToolboxRejectsAmbiguousAbsoluteParentPrefix(t *testing.T) {
 			if err := os.Symlink("../current/bin/tool", filepath.Join(source, "bin", "tool")); err != nil {
 				t.Fatal(err)
 			}
-			// The prefix leaves a real ancestor and comes back into the same
-			// toolbox. It cannot safely be treated as a proven outside target.
 			parent := filepath.Dir(source)
 			target := parent + "/../" + filepath.Base(parent) + "/" + filepath.Base(source) + "/releases/v1"
 			if err := os.Symlink(target, filepath.Join(source, "current")); err != nil {

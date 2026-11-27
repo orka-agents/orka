@@ -9,8 +9,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// A frozen connector definition drifting to remote must never discover in the
-// worker. Classification is an upper bound on controller-owned custody.
 func TestNativeRemoteMCPRejectsConnectorOverlapBeforeDiscovery(t *testing.T) {
 	for _, source := range []string{"frozen dispatch", "live connection policy"} {
 		t.Run(source, func(t *testing.T) {

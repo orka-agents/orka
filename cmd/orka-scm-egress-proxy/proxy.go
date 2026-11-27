@@ -213,8 +213,6 @@ func (p *scmEgressProxy) copyTunnel(client, upstream net.Conn, clientBudget int6
 			clientBudget,
 		)
 		if err == nil {
-			// The client finished sending cleanly; propagate the half-close so
-			// the upstream response direction can keep streaming.
 			closeWriteSide(upstream)
 		}
 		results <- err
@@ -232,9 +230,6 @@ func (p *scmEgressProxy) copyTunnel(client, upstream net.Conn, clientBudget int6
 	}()
 	timer := time.NewTimer(p.config.TunnelTimeout)
 	defer timer.Stop()
-	// A clean EOF in one direction must not tear down an active transfer in
-	// the other, so wait for both directions unless one fails or the overall
-	// tunnel budget expires.
 	for range 2 {
 		select {
 		case err := <-results:
@@ -255,9 +250,6 @@ func boundedTunnelCopy(destination io.Writer, source io.Reader, limit int64) err
 	return err
 }
 
-// tunnelActivity tracks the last byte movement across both tunnel directions
-// so idle enforcement applies to the tunnel as a whole: a quiet request
-// direction must not time out an active response direction.
 type tunnelActivity struct {
 	lastNanos atomic.Int64
 }

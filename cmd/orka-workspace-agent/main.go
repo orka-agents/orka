@@ -82,8 +82,6 @@ const (
 
 var allowedRoots = []string{applicationRoot, defaultWorkspaceRoot, "/home/worker", temporaryRoot, "/dev/shm"}
 
-// commandWritableRoots is the complete write allowlist applied to secured v1
-// command processes. Every root is also cleared by reset before rebinding.
 var commandWritableRoots = []string{defaultWorkspaceRoot, "/home/worker", temporaryRoot, "/dev/shm"}
 
 var (
@@ -96,7 +94,6 @@ var (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == commandConfinementWrapperArg {
-		// A successful exec replaces this process; any return is a launch failure.
 		err := runWriteConfinedCommand(os.Args[2:])
 		_, _ = fmt.Fprintln(os.Stderr, "workspace command confinement failed:", err)
 		os.Exit(126)
@@ -1104,7 +1101,6 @@ func (s *workspaceAgentServer) handleExec(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Legacy callers without operation IDs retain synchronous behavior during migration.
 	writeJSON(w, s.runExec(r.Context(), req, normalized))
 }
 

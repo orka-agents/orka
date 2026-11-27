@@ -26,9 +26,8 @@ import (
 )
 
 type ahpRecordingEmitter struct {
-	mu   sync.Mutex
-	data []string
-	// refuse fails every emit while set, as a journal that cannot be written.
+	mu     sync.Mutex
+	data   []string
 	refuse bool
 }
 
@@ -46,8 +45,6 @@ func (e *ahpRecordingEmitter) Emit(_ context.Context, _ string, actions ...ahpty
 	return nil
 }
 
-// Output the journal could not take is kept and sent once it can, in order,
-// instead of being dropped after the shell was told it was written.
 func TestAHPTerminalOutputKeepsWhatTheJournalRefused(t *testing.T) {
 	emit := &ahpRecordingEmitter{refuse: true}
 	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", nil)
@@ -68,8 +65,6 @@ func TestAHPTerminalOutputKeepsWhatTheJournalRefused(t *testing.T) {
 	}, time.Second, 5*time.Millisecond, "the refused output arrives once the journal takes it")
 }
 
-// A terminal's last output the journal refuses as it ends is tried again
-// before the terminal is reported exited, instead of being dropped.
 func TestAHPTerminalOutputRetriesItsLastFlush(t *testing.T) {
 	emit := &ahpRecordingEmitter{refuse: true}
 	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", nil)
@@ -87,8 +82,6 @@ func TestAHPTerminalOutputRetriesItsLastFlush(t *testing.T) {
 	require.Equal(t, "last words", strings.Join(emit.data, ""))
 }
 
-// Past the hold bound the shell's output waits for the journal, and the wait
-// ends with the terminal.
 func TestAHPTerminalOutputHoldsOnlySoMuch(t *testing.T) {
 	emit := &ahpRecordingEmitter{refuse: true}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,9 +108,8 @@ func TestAHPTerminalOutputHoldsOnlySoMuch(t *testing.T) {
 func TestAHPTerminalOutputNeverSplitsACharacter(t *testing.T) {
 	emit := &ahpRecordingEmitter{}
 	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", nil)
-	text := strings.Repeat("héllo wörld ✓ ", 5000) // larger than one chunk
+	text := strings.Repeat("héllo wörld ✓ ", 5000)
 	raw := []byte(text)
-	// Write in awkward pieces that cut characters in half.
 	for i := 0; i < len(raw); i += 7 {
 		_, err := out.Write(raw[i:min(i+7, len(raw))])
 		require.NoError(t, err)
@@ -145,8 +137,6 @@ func TestAHPTerminalOutputFlushesQuietOutput(t *testing.T) {
 	}, time.Second, 5*time.Millisecond, "a prompt without a newline still reaches the client")
 }
 
-// Terminal data is journaled, so the workspace's git token never leaves in it,
-// however its output is split, delayed, or cut short.
 func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
 	for name, tc := range map[string]struct {
@@ -198,7 +188,6 @@ func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 			}
 			for _, write := range tc.writes {
 				_, _ = out.Write([]byte(write))
-				// Longer than a flush, so each write is emitted on its own.
 				time.Sleep(10 * ahpTerminalFlushEvery)
 				require.NotContains(t, joined(), token[4:14], "part of the token's secret was emitted")
 			}
@@ -211,8 +200,6 @@ func TestAHPTerminalOutputRedactsTheWorkspaceToken(t *testing.T) {
 	}
 }
 
-// However output is cut into writes, the journal never carries the start of a
-// token's secret, whether the token is whole or cut short.
 func TestAHPTerminalOutputRedactsAtEveryCut(t *testing.T) {
 	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
 	for _, text := range []string{
@@ -261,7 +248,6 @@ func TestAHPValidBranch(t *testing.T) {
 	for _, good := range []string{"main", "octocat-quiet-meadow", "orka/session-1a2b", "feature/x.y_z", "a./b"} {
 		require.True(t, ahpValidBranch(good), good)
 		if gitErr == nil {
-			// Every name accepted is one git can create.
 			require.NoError(t, exec.Command("git", "check-ref-format", "--branch", good).Run(), good)
 		}
 	}
@@ -290,7 +276,6 @@ func TestAHPTerminalsAreTheirOwnersOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, listed)
 
-	// Without a workspace image there are no terminals.
 	_, err = env.backend.CreateTerminal(context.Background(), alice, ahptypes.CreateTerminalParams{Channel: "ahp-terminal:/b"}, nil)
 	require.Error(t, err)
 }
@@ -300,7 +285,7 @@ func TestAHPTerminalOutputPassesMalformedBytesOn(t *testing.T) {
 	out := newAHPTerminalOutput(context.Background(), emit, "ahp-terminal:/t", nil)
 	garbage := make([]byte, 2*ahpTerminalChunkMax+5)
 	for i := range garbage {
-		garbage[i] = 0x80 // continuation bytes with no start byte
+		garbage[i] = 0x80
 	}
 	_, err := out.Write(garbage)
 	require.NoError(t, err)
@@ -344,8 +329,6 @@ func TestAHPTerminalRefusesInputItCannotQueue(t *testing.T) {
 		require.NoError(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
 		env.backend.HandleClientAction(context.Background(), alice, term.channel, input, nil)
 	}
-	// The shell reads nothing, so the next input is refused, not dropped,
-	// and refusals reserve nothing.
 	for range 3 {
 		require.Error(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
 	}
@@ -354,8 +337,6 @@ func TestAHPTerminalRefusesInputItCannotQueue(t *testing.T) {
 	require.EqualValues(t, ahpTerminalInputQueue, term.pendingBytes.Load())
 }
 
-// Input the host admitted but could not apply gives its room back, so a
-// storage outage cannot leave the terminal refusing all input.
 func TestAHPTerminalReleasesInputTheHostCouldNotApply(t *testing.T) {
 	env := newAHPTestEnv(t)
 	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
@@ -376,8 +357,6 @@ func TestAHPTerminalReleasesInputTheHostCouldNotApply(t *testing.T) {
 	require.Empty(t, term.input)
 }
 
-// A shell that reads nothing holds at most ahpTerminalInputQueueBytes of
-// input, however few inputs that takes.
 func TestAHPTerminalBoundsQueuedInputByBytes(t *testing.T) {
 	env := newAHPTestEnv(t)
 	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
@@ -401,7 +380,6 @@ func TestAHPTerminalBoundsQueuedInputByBytes(t *testing.T) {
 	require.EqualValues(t, fits, term.pending.Load())
 }
 
-// The retired URIs stay bounded however fast a client churns terminals.
 func TestAHPRetiredTerminalURIsStayBounded(t *testing.T) {
 	env := newAHPTestEnv(t)
 	start := time.Now()
@@ -431,7 +409,6 @@ func TestAHPTerminalURIsAreNotReused(t *testing.T) {
 	input := ahptypes.StateAction{Value: &ahptypes.TerminalInputAction{Type: ahptypes.ActionTypeTerminalInput, Data: "rm -rf old\n"}}
 	require.NoError(t, env.backend.AuthorizeClientAction(context.Background(), alice, term.channel, input))
 	require.NoError(t, env.backend.DisposeTerminal(context.Background(), alice, term.channel))
-	// Queued input for the ended terminal finds nothing to reach.
 	env.backend.HandleClientAction(context.Background(), alice, term.channel, input, nil)
 	require.Empty(t, term.input)
 	env.backend.mu.Lock()
@@ -480,8 +457,6 @@ func TestAHPWorkspaceGitChangesFinishAndTakeTurns(t *testing.T) {
 	}
 }
 
-// A session's old worktree stays while the user has a terminal open, which
-// may be in it, and goes once none is.
 func TestAHPOldWorktreeStaysWhileATerminalRuns(t *testing.T) {
 	env := newAHPTestEnv(t)
 	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}

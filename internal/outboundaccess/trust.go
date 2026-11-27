@@ -16,23 +16,14 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// TrustedServiceReferences contains exact namespace/name/port tuples. Wildcards
-// are intentionally unsupported.
 type TrustedServiceReferences map[string]struct{}
 
-// TrustConfig separates gateway and token-endpoint trust domains.
 type TrustConfig struct {
-	Gateways       TrustedServiceReferences
-	TokenEndpoints TrustedServiceReferences
-	// PlatformServiceAccounts lists Orka's own ServiceAccounts as
-	// namespace/name. They are refused as token sources even without the
-	// platform label, for example an externally managed controller account.
+	Gateways                TrustedServiceReferences
+	TokenEndpoints          TrustedServiceReferences
 	PlatformServiceAccounts map[string]struct{}
 }
 
-// PlatformServiceAccountSet builds TrustConfig.PlatformServiceAccounts from
-// ServiceAccount usernames (system:serviceaccount:<namespace>:<name>) and from
-// names in namespace. Other usernames are ignored.
 func PlatformServiceAccountSet(usernames []string, namespace string, names ...string) map[string]struct{} {
 	set := make(map[string]struct{})
 	for _, username := range usernames {
@@ -54,8 +45,6 @@ func (c TrustConfig) platformServiceAccount(namespace, name string) bool {
 	return ok
 }
 
-// ParseTrustedServiceReferences parses comma-separated namespace/name:port
-// tuples. Empty input produces an empty allowlist.
 func ParseTrustedServiceReferences(value string) (TrustedServiceReferences, error) {
 	refs := make(TrustedServiceReferences)
 	for raw := range strings.SplitSeq(value, ",") {

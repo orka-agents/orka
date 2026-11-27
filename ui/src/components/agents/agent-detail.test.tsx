@@ -150,7 +150,6 @@ describe('AgentDetail', () => {
       expect(screen.getByText('Status')).toBeInTheDocument()
     })
     expect(screen.getAllByText('2').length).toBeGreaterThanOrEqual(1)
-    // Readiness badge plus the Ready condition row.
     expect(screen.getAllByText('Ready')).toHaveLength(2)
   })
 
@@ -322,7 +321,6 @@ describe('AgentDetail', () => {
     button.focus()
     await user.keyboard('{Enter}')
 
-    // Pending: marked unavailable but never disabled, so focus stays put.
     await waitFor(() => expect(button).toHaveAttribute('aria-disabled', 'true'))
     expect(button).not.toBeDisabled()
     expect(button).toHaveFocus()

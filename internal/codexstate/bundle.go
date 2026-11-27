@@ -1,5 +1,3 @@
-// Package codexstate carries the supported SessionKit bundle between Orka and
-// local Codex homes. Provider configuration and credentials belong to the caller.
 package codexstate
 
 import (
@@ -23,12 +21,8 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// MaxBundleBytes is an Orka transport limit, not SessionKit's storage limit.
 const MaxBundleBytes = harnessv2.DefaultMaxNativeSessionBytes
 
-// ErrUnsupported identifies an otherwise stopped conversation outside this
-// consumer's supported format or transport bounds. I/O and uncertain outcomes
-// are deliberately separate.
 var ErrUnsupported = errors.New("native session format or transport is unsupported")
 
 const bundleFormat = "sessionkit/codex-paginated-v1"
@@ -81,8 +75,6 @@ func privateTemp() (string, error) {
 	return real, nil
 }
 
-// Capture requires a stopped source writer. It retains only manifest and
-// rollout bytes, never authentication, configuration, or native databases.
 func Capture(ctx context.Context, home, threadID string, maxBytes ...int) ([]byte, error) {
 	limit, err := bundleLimit(maxBytes...)
 	if err != nil {
@@ -127,10 +119,6 @@ func Capture(ctx context.Context, home, threadID string, maxBytes ...int) ([]byt
 	return data, nil
 }
 
-// captureSourceUnavailable reports a session whose state cannot be read: no
-// rollout carries the thread, or its home or file is absent or unreadable.
-// Capture runs only once the writer and its descendants are stopped, so a
-// retry cannot change the answer; a timeout or other I/O failure still can.
 func captureSourceUnavailable(err error) bool {
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
 		return true
@@ -147,8 +135,6 @@ func captureSourceUnavailable(err error) bool {
 	return true
 }
 
-// SessionKit rejects encrypted content before producing an inspection manifest.
-// Only this known format rejection is eligible for optional transcript fallback.
 func classifyNativeFormatError(err error) error {
 	rejected, ok := errors.AsType[*sessionkit.RejectionError](err)
 	if !ok || len(rejected.Rejections) == 0 {
@@ -333,7 +319,6 @@ func ensureBundle(data []byte, journalDir string, maxBytes ...int) (string, erro
 	return dir, nil
 }
 
-// Inspect verifies the complete bundle without activating a native client.
 func Inspect(ctx context.Context, data []byte, maxBytes ...int) (Summary, error) {
 	limit, err := bundleLimit(maxBytes...)
 	if err != nil {
@@ -388,9 +373,6 @@ func atomicJSON(dir, name string, value any) error {
 	return syncDir(dir)
 }
 
-// within reports whether name is root or lies under it. Existing paths compare
-// by identity so aliases such as symlinked parents cannot hide an overlap; a
-// root that does not exist yet falls back to the cleaned lexical ancestry.
 func within(root, name string) bool {
 	root, name = filepath.Clean(root), filepath.Clean(name)
 	rootInfo, err := os.Stat(root)
@@ -409,8 +391,6 @@ func within(root, name string) bool {
 	}
 }
 
-// Install records one immutable plan before publication and reconciles that
-// same plan on retries. journalDir must be private and outside the Codex home.
 func Install(ctx context.Context, data []byte, home, cwd, journalDir string, maxBytes ...int) (sessionkit.Receipt, error) {
 	var receipt sessionkit.Receipt
 	limit, err := bundleLimit(maxBytes...)

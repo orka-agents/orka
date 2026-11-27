@@ -17,7 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
-// CreateAITaskTool creates an AI-type Task CR.
 type CreateAITaskTool struct{}
 
 func (t *CreateAITaskTool) Name() string { return createAITaskToolName }

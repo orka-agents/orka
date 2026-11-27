@@ -28,8 +28,6 @@ type nativeRemoteTools struct {
 	tools    map[string]*corev1alpha1.Tool
 }
 
-// prepareNativeRemoteTools is a fail-closed phase before any model exposure.
-// Its separate executor leaves legacy backend authority/defaults untouched.
 func prepareNativeRemoteTools(
 	ctx context.Context,
 	reader client.Client,
@@ -55,8 +53,6 @@ func prepareNativeRemoteTools(
 		}
 		live := &corev1alpha1.Tool{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, live); err != nil {
-			// Only known remote definitions make rereads mandatory. Built-in
-			// collision checks and unresolved legacy selections remain best-effort.
 			if !knownRemote {
 				continue
 			}
@@ -107,9 +103,6 @@ func prepareNativeRemoteTools(
 	}
 	state.task = task.DeepCopy()
 	state.agent = agent.DeepCopy()
-	// Kubernetes UID/resource versions cannot revert to a bound version after
-	// mutation. Recheck after resolution, while the actual transport is frozen,
-	// so discovery cannot send credentials through a newly resolved binding.
 	executor.SetRemoteMCPPreparationFence(func(ctx context.Context, tool *corev1alpha1.Tool) error {
 		return state.validate(ctx, reader, tool)
 	})
@@ -119,8 +112,6 @@ func prepareNativeRemoteTools(
 		}
 	}
 	ctx = context.WithValue(ctx, nativeRemoteToolsKey{}, state)
-	// Recheck after network discovery: a concurrent edit must not become the
-	// meaning of the already prepared model definition.
 	for _, tool := range state.tools {
 		toolCtx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
 		err := state.validate(toolCtx, reader, tool)
@@ -135,7 +126,6 @@ func prepareNativeRemoteTools(
 	return ctx, nil
 }
 
-// prepareTool gives dependency reads and discovery one shared per-Tool budget.
 func (s *nativeRemoteTools) prepareTool(ctx context.Context, reader client.Client, tool *corev1alpha1.Tool) error {
 	ctx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
 	defer cancel()
@@ -150,8 +140,6 @@ func (s *nativeRemoteTools) prepareTool(ctx context.Context, reader client.Clien
 	return err
 }
 
-// A frozen connector must not escape controller custody if its live Tool
-// drifts to remote. Reject the whole selection before any discovery sends.
 func validateNativeRemoteConnectorOverlap(enabled []string, loaded map[string]*corev1alpha1.Tool) error {
 	frozenConnector := frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests))
 	for _, name := range enabled {
@@ -329,7 +317,6 @@ func executeNativeRemoteTool(
 func validateNativeRemoteTool(
 	ctx context.Context, toolContext *tools.ToolContext, tool *corev1alpha1.Tool,
 ) (*nativeRemoteTools, error) {
-	// Approval refresh also calls this directly, without an execution deadline.
 	ctx, cancel := context.WithTimeout(ctx, worker.RemoteMCPTimeout(tool))
 	defer cancel()
 	state, _ := ctx.Value(nativeRemoteToolsKey{}).(*nativeRemoteTools)

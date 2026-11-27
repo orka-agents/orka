@@ -10,9 +10,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The cases in this file hold providers to memory generations and to the
-// consolidation proposals that pin them: merge, supersede and retire.
-
 func consolidationMemory(t *testing.T, p storagev1.StateProvider, id string, at time.Time) {
 	t.Helper()
 	memory := &storagev1.Memory{ID: id, Namespace: conditionalNamespace, Content: "content of " + id, CreatedAt: at, UpdatedAt: at}
@@ -40,8 +37,6 @@ func acceptedConsolidationProposal(t *testing.T, p storagev1.StateProvider, prop
 	return proposal
 }
 
-// applyConsolidation resolves and commits a consolidation proposal once, as
-// Orka does after authorizing it.
 func applyConsolidation(ctx context.Context, p storagev1.StateProvider, proposal *storagev1.MemoryProposal, at time.Time) (storagev1.MemoryProposalApplyTarget, *storagev1.Memory, error) {
 	target, err := p.ResolveMemoryProposalApplication(ctx, proposal.Namespace, proposal.ID)
 	if err != nil {
@@ -186,7 +181,6 @@ func runMemoryConsolidation(t *testing.T, newProvider StateFactory) {
 			t.Run(name, func(t *testing.T) {
 				p, ctx := newProvider(t), t.Context()
 				const proposalID = "mprop-linked-merge"
-				// Anyone who can create a memory can name a proposal as its source.
 				require.NoError(t, p.CreateMemory(ctx, &storagev1.Memory{ID: linkedID, Namespace: conditionalNamespace,
 					Source: storagev1.MemorySourceProposal, SourceProposalID: proposalID, Content: "content nobody reviewed",
 					CreatedAt: at, UpdatedAt: at}))

@@ -20,7 +20,6 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// writeForwardingTool is the descriptor test Tool with writes allowed.
 func writeForwardingTool(approval corev1alpha1.HTTPForwardWriteApproval) *corev1alpha1.Tool {
 	tool := forwardingDescriptorTool()
 	tool.Spec.HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{Approval: approval}
@@ -40,10 +39,6 @@ func forwardingWriteTask() *corev1alpha1.Task {
 	return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "work", Namespace: "tenant"}}
 }
 
-// TestForwardingWritesJoinThePlanningInputs covers a forwarding Tool that
-// allows writes: its write tool joins the allowed tools, and is
-// approval-required unless the Tool waives approval. A Tool without writes
-// adds nothing, and naming a write tool directly is refused.
 func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 	write := harnessv2.MCPForwardWriteToolName("azure-arm")
 	for name, tc := range map[string]struct {
@@ -82,7 +77,6 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 			t.Errorf("a Task that denies %q still got the write tool", denied)
 		}
 	}
-	// A Tool named after a provider-native tool is shadowed by it.
 	native := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	native.Name = "read"
 	nativeAgent := forwardingWriteAgent()
@@ -92,7 +86,6 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 		slices.ContainsFunc(effectiveACPAllowedTools(task, agent), func(name string) bool { return strings.HasSuffix(name, ":write") }) {
 		t.Fatalf("a native tool name brought a write tool: %v", err)
 	}
-	// A write tool name must fit the tool name limit.
 	long := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	long.Name = strings.Repeat("a", harnessv2.MaxMCPToolNameBytes-2)
 	longAgent := forwardingWriteAgent()
@@ -102,8 +95,6 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("an overlong write tool name: %v", err)
 	}
-	// The write tool counts toward the tool limit: a Task already at it
-	// fails for good instead of retrying a policy that can never be built.
 	full := forwardingWriteAgent()
 	for i := 0; len(full.Spec.Runtime.DefaultAllowedTools) < harnessv2.MaxMCPTools; i++ {
 		full.Spec.Runtime.DefaultAllowedTools = append(full.Spec.Runtime.DefaultAllowedTools, fmt.Sprintf("filler%03d", i))
@@ -122,9 +113,6 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 	}
 }
 
-// TestForwardingWriteDescriptorIsConsequential covers the derived write tool:
-// named after its Tool, consequential, with the write schema, and refused for
-// a Tool that does not allow writes.
 func TestForwardingWriteDescriptorIsConsequential(t *testing.T) {
 	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	read, err := customACPMCPToolDescriptor(tool)
@@ -149,10 +137,6 @@ func TestForwardingWriteDescriptorIsConsequential(t *testing.T) {
 	}
 }
 
-// TestForwardingWriteToolIsCheckedAgainstItsTool covers the broker's drift
-// check before an approval is spent: the write tool is held to its
-// forwarding Tool, so it passes while the Tool still allows writes and fails
-// once they are withdrawn.
 func TestForwardingWriteToolIsCheckedAgainstItsTool(t *testing.T) {
 	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	read, err := customACPMCPToolDescriptor(tool)
@@ -179,9 +163,6 @@ func TestForwardingWriteToolIsCheckedAgainstItsTool(t *testing.T) {
 	}
 }
 
-// TestConnectionFreezeSkipsForwardingWriteTools covers binding a Task whose
-// policy carries a write tool: the freeze covers the forwarding Tool and
-// does not look for a Tool named after the write tool.
 func TestConnectionFreezeSkipsForwardingWriteTools(t *testing.T) {
 	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	read, err := customACPMCPToolDescriptor(tool)
@@ -207,10 +188,6 @@ func TestConnectionFreezeSkipsForwardingWriteTools(t *testing.T) {
 	}
 }
 
-// TestForwardingWritesPlanOnABuiltInRuntime covers the planning path a Codex
-// Task with a write-enabled forwarding Tool takes: the adjusted inputs plan,
-// build a policy whose only approval-required tool is the write tool, and
-// freeze without looking for a Tool named after it.
 func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	policy := &corev1alpha1.OutboundAccessPolicy{
@@ -245,10 +222,6 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	if _, _, _, err := freezeRequesterConnectionsClassified(context.Background(), reader, nil, task, configuration); err != nil {
 		t.Fatalf("freeze: %v", err)
 	}
-	// A Task that denies only the write tool plans on codex, which enforces
-	// its built-in tools all or nothing: the deny names no built-in tool. It
-	// keeps the Tool's reads and gets no write tool, however the deny is
-	// spelled.
 	for _, deny := range []string{"azure-arm:write", " azure-arm:write "} {
 		readOnly := forwardingWriteTask()
 		readOnly.UID = "read-only-uid"
@@ -277,8 +250,6 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 			t.Fatalf("deny %q: the Tool's reads must stay: %#v", deny, read)
 		}
 	}
-	// A policy that drops the write tool's approval, as a registered
-	// external runtime's could, is refused while the Tool requires it.
 	unapproved := agent.DeepCopy()
 	unapproved.Spec.Coordination = nil
 	plan, err = PlanACPRuntime(task, unapproved, ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)})
@@ -291,16 +262,10 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	}
 }
 
-// TestForwardingWritesNeedAReadWriteLink covers a forwarding Tool behind
-// the requester's linked account: its write tool is offered only with a
-// readWrite link, as write-class connector Tools are, and hidden with a
-// readOnly link or none rather than left to fail after an approval.
 func TestForwardingWritesNeedAReadWriteLink(t *testing.T) {
 	_, _, linked, task := freezeFixtures(true)
 	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	classification := map[string]connectorToolInfo{"azure-arm": {PolicyName: "azure", Provider: "github", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}}
-	// provider declares the forwarding tool, granting writes or not, and
-	// returns a link of mode consented to that declaration.
 	provider := func(writes bool, mode string) (*corev1alpha1.ConnectorProvider, *corev1alpha1.Connection) {
 		declared := freezeProvider()
 		forward := &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager}
@@ -338,9 +303,6 @@ func TestForwardingWritesNeedAReadWriteLink(t *testing.T) {
 	}
 }
 
-// TestForwardingWritePreparationFailuresHaveNoEffect covers a forwarded
-// write refused while it is prepared, here because its Tool no longer
-// allows writes: nothing was sent, so the failure is a no-effect refusal.
 func TestForwardingWritePreparationFailuresHaveNoEffect(t *testing.T) {
 	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalNone)
 	read, err := customACPMCPToolDescriptor(tool)

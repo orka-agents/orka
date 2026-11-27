@@ -6,14 +6,6 @@ MIT License - see LICENSE file for details.
 
 package tools
 
-// Model-free evals for the contract between tool schemas, which models read,
-// and tool implementations, which must not trust them. They run every chat and
-// worker tool against arguments a model can plausibly produce.
-//
-// A case with knownDefect documents a check that fails on current code. It
-// passes while the defect reproduces and fails once the defect is fixed, so the
-// fix also removes the knownDefect marker.
-
 import (
 	"bytes"
 	"context"
@@ -52,8 +44,6 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// evalToolRegistries returns the tools a model can be offered. Chat and worker
-// tools are separate implementations that can share a name.
 func evalToolRegistries(fc client.Client) map[string]*Registry {
 	chat := NewRegistry()
 	RegisterChatTools(chat)
@@ -71,9 +61,6 @@ func evalToolRegistries(fc client.Client) map[string]*Registry {
 	} {
 		worker.Register(tool)
 	}
-	// The ACP broker builds its own registry. Sweep the tools only it offers,
-	// such as run_validation, and those whose schema differs from the worker
-	// tool of the same name; the rest are covered.
 	brokeredAll := NewRegistry()
 	_ = RegisterBrokeredCoordinationTools(brokeredAll, fc)
 	_ = RegisterBrokeredWebTools(brokeredAll)
@@ -88,9 +75,6 @@ func evalToolRegistries(fc client.Client) map[string]*Registry {
 	return map[string]*Registry{"chat": chat, "worker": worker, "brokered": brokered}
 }
 
-// evalGuardWebClients gives the web tools a client that uses
-// http.DefaultTransport, which evalToolSandbox guards. Their own clients dial
-// public endpoints directly and would bypass the guard.
 func evalGuardWebClients(registries ...*Registry) {
 	for _, registry := range registries {
 		for _, name := range registry.Names() {
@@ -105,11 +89,6 @@ func evalGuardWebClients(registries ...*Registry) {
 	}
 }
 
-// evalToolSandbox clears forge credentials and replaces http.DefaultTransport
-// with a clone that dials only loopback addresses, where test servers listen,
-// so a tool that gets past validation cannot reach a real service. Every tool
-// in evalToolRegistries sends HTTP through http.DefaultTransport (see
-// evalGuardWebClients). The test fails if any dial was blocked.
 func evalToolSandbox(t *testing.T) {
 	t.Helper()
 	t.Setenv("GITHUB_TOKEN", "")
@@ -142,9 +121,6 @@ func evalToolSandbox(t *testing.T) {
 	})
 }
 
-// evalToolClusters gives each call a fresh cluster: an empty one, where create
-// paths can succeed, and one holding objects named "eval", where update and
-// lookup paths can reach validation.
 var evalToolClusters = map[string]func() client.Client{
 	"empty": func() client.Client { return newFakeClient() },
 	"seeded": func() client.Client {
@@ -160,9 +136,6 @@ var evalToolClusters = map[string]func() client.Client{
 
 const evalPlaceholder = "eval"
 
-// evalToolContextFor gives each tool the context its caller builds, so each
-// takes its real path: chat tools the chat executor's, worker tools a
-// worker's narrower one, and brokered tools the ACP broker's authenticated one.
 func evalToolContextFor(label string, fc client.Client) context.Context {
 	switch label {
 	case "worker":
@@ -173,16 +146,12 @@ func evalToolContextFor(label string, fc client.Client) context.Context {
 	return evalToolContext(fc)
 }
 
-// evalRegistryExecute runs a tool through Registry.Execute, the path chat,
-// worker, and broker calls take, converting a panic into a reported failure.
 func evalRegistryExecute(ctx context.Context, registry *Registry, name, args string) (result string, panicked any, err error) {
 	defer func() { panicked = recover() }()
 	result, err = registry.Execute(ctx, name, json.RawMessage(args))
 	return result, nil, err
 }
 
-// evalToolContext is the chat tool context, with the execution mode a real
-// installation selects so runtime Agents can be created.
 func evalToolContext(fc client.Client) context.Context {
 	ctx := newCreateAgentTaskToolCtx(fc)
 	GetToolContext(ctx).ExecutionMode = executionmode.HarnessV2
@@ -198,13 +167,8 @@ func evalToolSchema(t *testing.T, tool Tool) map[string]any {
 	return schema
 }
 
-// evalPanics counts the panics evalToolExecute recovers, so a check that
-// reports failure cannot pass a panic off as a known defect.
 var evalPanics atomic.Int64
 
-// evalToolExecute uses the production registry entrypoint, converting a panic
-// into a reported failure. Register the fixture instance so its local clients
-// and recording executor are preserved.
 func evalToolExecute(ctx context.Context, tool Tool, args string) (result string, panicked any, err error) {
 	defer func() {
 		if panicked = recover(); panicked != nil {
@@ -217,8 +181,6 @@ func evalToolExecute(ctx context.Context, tool Tool, args string) (result string
 	return result, nil, err
 }
 
-// evalToolFailure reports whether a tool call failed and the message the model
-// would receive for it.
 func evalToolFailure(result string, err error) (bool, string) {
 	if err != nil {
 		return true, err.Error()
@@ -299,25 +261,12 @@ func TestToolEvalRegistriesCoverKnownTools(t *testing.T) {
 	}
 }
 
-// TestToolEvalMalformedArguments sends each tool arguments a model gets wrong:
-// non-object JSON, omitted required fields, and nested objects encoded as
-// strings. RequiredFields isolates required fields; TopLevelArgumentTypes and
-// NestedArgumentTypes probe types with executable controls. A tool must never
-// panic, accept a non-null non-object root, or accept missing required fields.
-// Object strings must be rejected or decoded equivalently, and every failure
-// must have a diagnostic. Chat tools return structured results or typed
-// ToolArgumentError values that the chat executor turns into structured errors;
-// other Go errors are failures.
 func TestToolEvalMalformedArguments(t *testing.T) {
 	evalToolSandbox(t)
-	// Worker tools resolve their parent Task from the environment; the seeded
-	// cluster holds it.
 	t.Setenv(envOrkaTaskName, evalPlaceholder)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
 	knownDefects := map[string]string{}
 	violations := map[string]string{}
-	// Panics, Go errors from chat tools, and failures without a message are
-	// never accepted as known defects.
 	var fatal, inconclusive []string
 	for label, registry := range evalToolRegistries(newFakeClient()) {
 		names := registry.Names()
@@ -387,12 +336,6 @@ const (
 	evalGoError      = "returned Go error"
 )
 
-// evalObjectStringHandling runs a tool three ways: with a nested object built
-// from its schema, with the same object encoded as a JSON string, and with the
-// field omitted. A tool may reject the string or treat it like the object; it
-// must not drop it or store it differently. It returns "" when handling is
-// correct, evalInconclusive when the object itself changes nothing observable,
-// and a violation otherwise.
 func evalObjectStringHandling(label, name string, required []any, properties map[string]any, prop string) string {
 	propSchema, _ := properties[prop].(map[string]any)
 	payload := evalObjectPayload(prop, propSchema)
@@ -440,21 +383,15 @@ func evalObjectStringHandling(label, name string, required []any, properties map
 	return verdict
 }
 
-// evalPayloadOverrides supplies valid values for nested fields whose schema
-// has no enum or format to derive one from.
 var evalPayloadOverrides = map[string]any{
 	"runtime.type":       "codex",
 	"resources.requests": map[string]any{"cpu": "100m"},
 }
 
-// evalPayloadSiblings adds the other arguments a nested object needs to take
-// effect, keyed by "tool.property".
 var evalPayloadSiblings = map[string]map[string]any{
 	"create_agent.runtime": {"model": map[string]any{"name": "eval-model"}},
 }
 
-// evalObjectPayload builds an object that should change what a tool does:
-// booleans true, numbers at their minimum or 1, strings from their enum.
 func evalObjectPayload(prop string, schema map[string]any) map[string]any {
 	properties, _ := schema["properties"].(map[string]any)
 	if len(properties) == 0 {
@@ -491,9 +428,6 @@ func evalObjectPayload(prop string, schema map[string]any) map[string]any {
 	return payload
 }
 
-// evalClusterSnapshot compares effective specs, not generated names or other
-// per-call metadata. Sorting retains object kind and multiplicity without
-// depending on the order the client returns objects.
 func evalClusterSnapshot(fc client.Client) string {
 	var agents corev1alpha1.AgentList
 	var tasks corev1alpha1.TaskList
@@ -544,7 +478,6 @@ func TestToolEvalClusterSnapshotIgnoresGeneratedMetadata(t *testing.T) {
 	}
 }
 
-// evalToolReportViolations applies the knownDefect contract to a sweep.
 func evalToolReportViolations(t *testing.T, violations, knownDefects map[string]string) {
 	t.Helper()
 	keys := make([]string, 0, len(violations))
@@ -566,8 +499,6 @@ func evalToolReportViolations(t *testing.T, violations, knownDefects map[string]
 	}
 }
 
-// evalToolRequiredArgs builds schema-typed placeholders. Executable controls
-// must also use evalArgumentControl for semantic values and dependencies.
 func evalToolRequiredArgs(required []any, properties map[string]any) map[string]any {
 	args := map[string]any{}
 	for _, raw := range required {
@@ -589,14 +520,6 @@ func evalToolRequiredArgs(required []any, properties map[string]any) map[string]
 	return args
 }
 
-// evalToolLimits lists every limit (minimum, maximum, enum, length, pattern,
-// and closed-object constraints)
-// that a tool schema declares with its value, keyed like
-// "chat/create_agent_task.maxTurns maximum=100", so changing a schema value
-// also requires updating the case that probes it. It also lists every required
-// field of a nested object, keyed like
-// "chat/create_agent.coordination.allowedAgents[].name required".
-// TestToolEvalMalformedArguments covers top-level required fields.
 func evalToolLimits(t *testing.T) []string {
 	t.Helper()
 	var limits []string
@@ -610,8 +533,6 @@ func evalToolLimits(t *testing.T) []string {
 	return limits
 }
 
-// evalSchemaLimits follows the same properties, items, and typed-map surfaces
-// as the malformed-argument sweep. Map entries use {*} in both inventories.
 func evalSchemaLimits(prefix string, schema map[string]any, nested bool) []string {
 	var limits []string
 	for _, keyword := range []string{"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "enum", "minLength", "maxLength", "minItems", "maxItems", "pattern"} {
@@ -683,8 +604,6 @@ func TestToolEvalLimitsIncludeTypedMapValues(t *testing.T) {
 	}
 }
 
-// evalLimitValue formats a schema keyword's value for a limit key: a number in
-// plain notation, or enum values joined with "|".
 func evalLimitValue(value any) string {
 	switch v := value.(type) {
 	case float64:
@@ -699,17 +618,10 @@ func evalLimitValue(value any) string {
 	return fmt.Sprint(value)
 }
 
-// evalBaselineFailures counts calls that a check expected to succeed but that
-// failed, so a case whose valid call breaks cannot pass or be excused as a
-// known defect.
 var evalBaselineFailures atomic.Int64
 
-// evalCall returns a fresh tool and context for one call, so one call's side
-// effects cannot cause another call's failure.
 type evalCall func() (Tool, context.Context)
 
-// evalSucceeds runs a call that must succeed, counting a failure in
-// evalBaselineFailures.
 func evalSucceeds(call evalCall, args string) (bool, string) {
 	tool, ctx := call()
 	result, panicked, err := evalToolExecute(ctx, tool, args)
@@ -723,9 +635,6 @@ func evalSucceeds(call evalCall, args string) (bool, string) {
 	return true, ""
 }
 
-// evalRejectsChange checks one change to a valid call: the valid call must
-// succeed, and the same call with one field changed must fail with a message
-// naming that field.
 func evalRejectsChange(call evalCall, valid, invalid, field string) (bool, string) {
 	if ok, detail := evalSucceeds(call, valid); !ok {
 		return false, detail
@@ -734,10 +643,6 @@ func evalRejectsChange(call evalCall, valid, invalid, field string) (bool, strin
 	return evalRejects(ctx, tool, invalid, field)
 }
 
-// evalRejects reports whether a tool call failed with a message naming the
-// limited field, so a rejection for an unrelated reason does not count. Use it
-// directly only where no call can succeed in the eval, such as tools that need
-// a real network or gateway; otherwise use evalRejectsChange.
 func evalRejects(ctx context.Context, tool Tool, args, field string) (bool, string) {
 	result, panicked, err := evalToolExecute(ctx, tool, args)
 	if panicked != nil {
@@ -753,8 +658,6 @@ func evalRejects(ctx context.Context, tool Tool, args, field string) (bool, stri
 	return true, ""
 }
 
-// evalWebFetchURLLimit changes only URL length, keeping max_chars valid. The
-// control is exactly at the advertised character limit, not just a short URL.
 func evalWebFetchURLLimit(call evalCall) (bool, string) {
 	const prefix = "https://1.1.1.1/"
 	maxLength := brokeredWebFetchMaxURLBytes / utf8.UTFMax
@@ -810,8 +713,6 @@ func TestToolEvalWebFetchURLLimit(t *testing.T) {
 	}
 }
 
-// evalEnumEnforced checks that every declared value succeeds and that a value
-// outside the enum fails with a message naming the field.
 func evalEnumEnforced(call evalCall, args func(value string) string, field, invalid string, declared ...string) (bool, string) {
 	for _, value := range declared {
 		if ok, detail := evalSucceeds(call, args(value)); !ok {
@@ -822,8 +723,6 @@ func evalEnumEnforced(call evalCall, args func(value string) string, field, inva
 	return evalRejects(ctx, tool, args(invalid), field)
 }
 
-// evalRecordingCodeExec returns a code_exec tool whose sandbox only records the
-// request, so no code runs.
 func evalRecordingCodeExec(t *testing.T) (*CodeExecTool, *recordingCodeExecutor) {
 	t.Helper()
 	sandbox := &recordingCodeExecutor{result: CodeExecResult{Output: "ok"}}
@@ -838,8 +737,6 @@ func evalRecordingCodeExec(t *testing.T) (*CodeExecTool, *recordingCodeExecutor)
 	}, sandbox
 }
 
-// evalCodeExecMinimumTimeout accepts a timeout-specific rejection or a clamp
-// observed in the invalid call's own executor request, never the valid control's.
 func evalCodeExecMinimumTimeout(tool Tool, sandbox *recordingCodeExecutor) (bool, string) {
 	call := func() (Tool, context.Context) { return tool, context.Background() }
 	timeout := func(v int) string { return fmt.Sprintf(`{"language":"bash","code":"echo test","timeout":%d}`, v) }
@@ -921,8 +818,6 @@ func evalAll(checks ...func() (bool, string)) (bool, string) {
 	return true, ""
 }
 
-// evalHTTPStub records requests. It answers the GitHub calls tools make with an
-// open PR whose checks pass, and anything else with an empty JSON list.
 type evalHTTPStub struct {
 	*httptest.Server
 	mu       sync.Mutex
@@ -959,7 +854,6 @@ func newEvalHTTPStub(t *testing.T) *evalHTTPStub {
 	return stub
 }
 
-// perPage returns the per_page values the stub received.
 func (s *evalHTTPStub) perPage() []int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -982,8 +876,6 @@ func (s *evalHTTPStub) sent(fragment string) bool {
 	return slices.ContainsFunc(s.requests, func(request string) bool { return strings.Contains(request, fragment) })
 }
 
-// evalMonitorPagesEnforced accepts a per_page-specific rejection or verifies
-// the actual list_pull_requests command in the generated monitor Task.
 func evalMonitorPagesEnforced(fc client.Client, tool Tool, ctx context.Context, args string, perPage int) (bool, string) {
 	result, panicked, err := evalToolExecute(ctx, tool, args)
 	if panicked != nil {
@@ -1016,8 +908,6 @@ func evalMonitorPagesEnforced(fc client.Client, tool Tool, ctx context.Context, 
 	return true, ""
 }
 
-// evalCRDModelField returns the generated Agent CRD schema for spec.model.<field>,
-// which the Kubernetes API enforces when a tool writes the Agent.
 func evalCRDModelField(t *testing.T, field string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases", "core.orka.ai_agents.yaml"))
@@ -1049,10 +939,6 @@ func evalCRDModelField(t *testing.T, field string) map[string]any {
 	return crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Spec.Properties.Model.Properties[field]
 }
 
-// TestToolEvalSchemaLimitsEnforced requires every limit a tool schema declares
-// to be enforced: the tool rejects or clamps an out-of-range value, or the
-// Kubernetes API rejects it when the tool writes the object. Models treat the
-// schema as advice, so a limit nothing enforces is only a suggestion.
 func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 	evalToolSandbox(t)
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
@@ -1087,8 +973,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					}
 					return chatTool("wait_for_task", newFakeClient(task))
 				}
-				// The actual maximum wait is pinned with virtual time by
-				// TestWaitForTaskTool_Execute_TimeoutClampsToMax.
 				return evalRejectsChange(call, `{"name":"eval","timeout":1}`, `{"name":"eval","timeout":0}`, "timeout")
 			},
 		},
@@ -1141,7 +1025,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "chat create_agent model temperature",
 			limits: []string{"chat/create_agent.model.temperature maximum=2", "chat/create_agent.model.temperature minimum=0"},
 			check: func(t *testing.T) (bool, string) {
-				// The tool stores temperature as given; the Agent CRD rejects it on create.
 				limits := evalCRDModelField(t, "temperature")
 				ok := limits["minimum"] == float64(0) && limits["maximum"] == float64(2)
 				return ok, fmt.Sprintf("Agent CRD temperature limits = %v", limits)
@@ -1295,8 +1178,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker code_exec language and maximum timeout",
 			limits: []string{"worker/code_exec.language enum=python|python3|javascript|node|bash|sh", "worker/code_exec.timeout maximum=60"},
 			check: func(t *testing.T) (bool, string) {
-				// Clamping an over-maximum timeout is pinned by
-				// TestCodeExecTool_Execute_TimeoutClampsToMax.
 				tool, _ := evalRecordingCodeExec(t)
 				call := func() (Tool, context.Context) { return tool, context.Background() }
 				language := func(v string) string { return `{"language":"` + v + `","code":"echo test"}` }
@@ -1307,7 +1188,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker code_exec minimum timeout",
 			limits: []string{"worker/code_exec.timeout minimum=1"},
 			check: func(t *testing.T) (bool, string) {
-				// Zero is the value just below the minimum.
 				tool, sandbox := evalRecordingCodeExec(t)
 				return evalCodeExecMinimumTimeout(tool, sandbox)
 			},
@@ -1316,7 +1196,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "brokered web_search",
 			limits: []string{"brokered/web_search.limit maximum=10", "brokered/web_search.query maxLength=4096"},
 			check: func(t *testing.T) (bool, string) {
-				// Both limits are checked before any request.
 				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_search")
 				ctx := context.Background()
 				return evalAll(
@@ -1329,8 +1208,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "brokered web_fetch max_chars",
 			limits: []string{"brokered/web_fetch.max_chars maximum=50000"},
 			check: func(t *testing.T) (bool, string) {
-				// A public IP literal needs no DNS lookup, and max_chars is
-				// checked before any request.
 				tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
 				return evalRejects(context.Background(), tool, `{"url":"https://1.1.1.1/","max_chars":50001}`, "max_chars")
 			},
@@ -1341,8 +1218,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			check: func(t *testing.T) (bool, string) {
 				return evalWebFetchURLLimit(func() (Tool, context.Context) {
 					tool, _ := evalToolRegistries(newFakeClient())["brokered"].Get("web_fetch")
-					// A stubbed transport lets the boundary control succeed and
-					// an accepted overlong URL expose the defect without dialing.
 					tool.(*WebFetchTool).client = evalWebClient()
 					return tool, context.Background()
 				})
@@ -1352,7 +1227,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker create_agent model contextWindow",
 			limits: []string{"worker/create_agent.model.contextWindow minimum=1"},
 			check: func(t *testing.T) (bool, string) {
-				// The tool stores contextWindow as given; the Agent CRD rejects it on create.
 				limits := evalCRDModelField(t, "contextWindow")
 				return limits["minimum"] == float64(1), fmt.Sprintf("Agent CRD contextWindow limits = %v", limits)
 			},
@@ -1515,8 +1389,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			name:   "worker reply_in_conversation additionalProperties",
 			limits: []string{"worker/reply_in_conversation additionalProperties=false"},
 			check: func(t *testing.T) (bool, string) {
-				// The generic invalid-request diagnostic names content, not
-				// the unknown key. Only the extra field changes from the control.
 				return evalRejectsChange(replyCall, `{"content":"hello"}`, `{"content":"hello","target":"other-room"}`, "content")
 			},
 		},
@@ -1540,8 +1412,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			knownDefect: "reply_in_conversation advertises a 16384-character maximum but rejects schema-valid multibyte content above 16384 UTF-8 bytes",
 			check: func(t *testing.T) (bool, string) {
 				args := func(content string) string { return `{"content":"` + content + `"}` }
-				// Prove authenticated multibyte replies work up to the byte
-				// boundary before probing schema-valid strings beyond it.
 				for _, content := range []string{strings.Repeat("é", 8192), strings.Repeat("界", 5461)} {
 					if ok, detail := evalSucceeds(replyCall, args(content)); !ok {
 						return false, detail
@@ -1731,7 +1601,6 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 	evalRunLimitCases(t, cases)
 }
 
-// evalLimitCase checks that one or more declared schema limits are enforced.
 type evalLimitCase struct {
 	name        string
 	limits      []string
@@ -1739,8 +1608,6 @@ type evalLimitCase struct {
 	knownDefect string
 }
 
-// evalRunLimitCases runs each case and requires the cases to cover exactly the
-// limits the tool schemas declare.
 func evalRunLimitCases(t *testing.T, cases []evalLimitCase) {
 	t.Helper()
 	covered := map[string]bool{}
@@ -1781,8 +1648,6 @@ func evalRunLimitCases(t *testing.T, cases []evalLimitCase) {
 	}
 }
 
-// evalMergeMethodEnforced checks that a merge tool rejects an unsupported
-// merge_method, reporting whether the value reached the GitHub stub.
 func evalMergeMethodEnforced(build func(client.Client, string) Tool) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
@@ -1800,8 +1665,6 @@ func evalMergeMethodEnforced(build func(client.Client, string) Tool) func(*testi
 	}
 }
 
-// evalWorkspaceIntent builds a workspace with the given intent; write intent
-// also names the publication credential it requires.
 func evalWorkspaceIntent(base string) func(string) string {
 	return func(v string) string {
 		if v == "write" {
@@ -1811,7 +1674,6 @@ func evalWorkspaceIntent(base string) func(string) string {
 	}
 }
 
-// evalRuntimeAgentCluster holds a runtime Agent named "a" for create_agent_task.
 func evalRuntimeAgentCluster() client.Client {
 	return newFakeClient(&corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: defaultNamespace},
@@ -1819,13 +1681,10 @@ func evalRuntimeAgentCluster() client.Client {
 	})
 }
 
-// evalParentTaskCluster holds the parent Task worker tools resolve from
-// ORKA_TASK_NAME=parent.
 func evalParentTaskCluster() client.Client {
 	return newFakeClient(&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: defaultNamespace}})
 }
 
-// evalDelegateCluster holds a runtime Agent named "coder" for delegate_task.
 func evalDelegateCluster() client.Client {
 	return newFakeClient(&corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: defaultNamespace},
@@ -1833,10 +1692,6 @@ func evalDelegateCluster() client.Client {
 	})
 }
 
-// evalAllowedAgentNameRequired checks that create_agent, given its required
-// fields, rejects missing, empty, or whitespace-only allowed agent names
-// instead of dropping or storing them. The worker tool resolves its parent
-// Task from the environment.
 func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context.Context), required string) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		t.Setenv(envOrkaTaskName, "parent")
@@ -1858,7 +1713,6 @@ func evalAllowedAgentNameRequired(get func(string, client.Client) (Tool, context
 	}
 }
 
-// evalSoulLimits lists the limits soulParameterSchema declares for one tool.
 func evalSoulLimits(tool string) []string {
 	return []string{
 		tool + ".soul.inline minLength=1",
@@ -1874,9 +1728,6 @@ func evalSoulLimits(tool string) []string {
 	}
 }
 
-// evalSoulEnforced checks that an Agent tool, given its required fields,
-// rejects empty, whitespace-only, or oversized inline souls, incomplete
-// ConfigMap references, and malformed digests instead of storing them.
 func evalSoulEnforced(get func(string, client.Client) (Tool, context.Context), name, required string, cluster func() client.Client) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		t.Setenv(envOrkaTaskName, "parent")
@@ -1908,9 +1759,6 @@ func evalSoulEnforced(get func(string, client.Client) (Tool, context.Context), n
 	}
 }
 
-// evalReviewCommentFieldRequired checks that post_review_comment rejects a line
-// comment missing a required field, reporting whether it reached the GitHub
-// stub.
 func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
@@ -1932,8 +1780,6 @@ func evalReviewCommentFieldRequired(field string) func(*testing.T) (bool, string
 	}
 }
 
-// evalReviewCommentText checks that post_review_comment rejects a line comment
-// whose path or body is the given text.
 func evalReviewCommentText(t *testing.T, field, text string) (bool, string) {
 	task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
 	stub := newEvalHTTPStub(t)
@@ -1949,8 +1795,6 @@ func evalReviewCommentText(t *testing.T, field, text string) (bool, string) {
 	return evalRejectsChange(call, review(map[string]string{"path": "main.go", "body": "nit"}[field]), review(text), field)
 }
 
-// evalReviewCommentLine checks that post_review_comment rejects a line comment
-// with an out-of-range line, reporting whether it reached the GitHub stub.
 func evalReviewCommentLine(line int) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		task, secret := githubRepoTaskWithSecret(testOrgTestRepoURL)
@@ -1970,8 +1814,6 @@ func evalReviewCommentLine(line int) func(*testing.T) (bool, string) {
 	}
 }
 
-// evalProgressEnforced checks that update_plan rejects an out-of-range
-// progress_pct, reporting whether the value reached the controller stub.
 func evalProgressEnforced(valid, progress int) func(*testing.T) (bool, string) {
 	return func(t *testing.T) (bool, string) {
 		controller := newEvalHTTPStub(t)
@@ -1989,9 +1831,6 @@ func evalProgressEnforced(valid, progress int) func(*testing.T) (bool, string) {
 	}
 }
 
-// evalArgumentControl supplies executable controls, not just schema-typed
-// placeholders. Each call gets fresh resources so an earlier create/delete
-// cannot invalidate the next control. HTTP, stores, and code execution stay local.
 func evalArgumentControl(t *testing.T, label, name string, schema map[string]any) (evalCall, map[string]any) {
 	t.Helper()
 	required, _ := schema["required"].([]any)
@@ -2039,8 +1878,6 @@ func evalArgumentControl(t *testing.T, label, name string, schema map[string]any
 		tool, _ := evalToolRegistries(fc)[label].Get(name)
 		ctx := evalToolContextFor(label, fc)
 		if label == "worker" {
-			// Worker contexts have no chat hooks; in particular container
-			// creation must take its coordination path, not the chat path.
 			ctx = WithToolContext(context.Background(), &ToolContext{Client: fc, Namespace: defaultNamespace, ExecutionMode: executionmode.HarnessV2})
 		}
 		tc := GetToolContext(ctx)
@@ -2111,8 +1948,6 @@ func evalArgumentControl(t *testing.T, label, name string, schema map[string]any
 	return call, args
 }
 
-// evalArgumentSemanticValues supplies valid values that schema types alone
-// cannot describe, including local paths and tool-specific enum choices.
 func evalArgumentSemanticValues(label, name, localURL string) map[string]any {
 	switch name {
 	case "create_pr_monitor":
@@ -2194,9 +2029,6 @@ func TestToolEvalRequiredFields(t *testing.T) {
 	evalToolReportExecutedViolations(t, violations, knownDefects, declared, executed)
 }
 
-// evalNestedTypeProbes visits properties, array items, and typed map entries.
-// Each probe includes a valid enclosing object/item; sending only the leaf
-// would test missing siblings instead of that leaf's declared type.
 func evalNestedTypeProbes(schema map[string]any, visit func([]string, map[string]any)) {
 	var walk func([]string, map[string]any)
 	walk = func(path []string, node map[string]any) {
@@ -2233,7 +2065,7 @@ func evalArgumentValue(path []string, schema map[string]any) any {
 	case "coordination":
 		return map[string]any{"enabled": true}
 	case "workspace.intent":
-		return "write" // The enclosing workspace includes publication credentials.
+		return "write"
 	case "workspace.gitRepo", "workspace.publicationGitRepo":
 		return testOrgTestRepoURL
 	case "model":
@@ -2253,7 +2085,6 @@ func evalArgumentValue(path []string, schema map[string]any) any {
 	case "roles.[]":
 		return "assistant"
 	case "soul":
-		// The ConfigMap form is the only valid soul with nested fields.
 		return map[string]any{"configMapRef": map[string]any{"name": evalPlaceholder, "key": evalPlaceholder}, "digest": agentcontext.Digest(evalPlaceholder)}
 	case "soul.digest":
 		return agentcontext.Digest(evalPlaceholder)
@@ -2278,8 +2109,6 @@ func evalArgumentValue(path []string, schema map[string]any) any {
 	}
 }
 
-// evalSetArgumentPath copies the enclosing containers rather than mutating a
-// shared control. "[]" uses the first item; "*" uses a valid resource-map key.
 func evalSetArgumentPath(value any, schema map[string]any, path, prefix []string, leaf any) any {
 	if len(path) == 0 {
 		return leaf
@@ -2316,8 +2145,6 @@ func evalSetArgumentPath(value any, schema map[string]any, path, prefix []string
 	return object
 }
 
-// Explicit null is distinct from an omitted property for legacy map parsers.
-// Probe required leaves inside valid parents, including array/map entries.
 func TestToolEvalNullRequiredFields(t *testing.T) {
 	evalToolSandbox(t)
 	knownDefects := map[string]string{
@@ -2387,11 +2214,6 @@ func evalRequiredNullProbes(node map[string]any, path []string, visit func([]str
 	}
 }
 
-// Top-level wrong types need executable siblings: a missing required field
-// must not mask acceptance of the mutated property. JSON-encoded objects are
-// checked separately by evalObjectStringHandling, which permits equivalent
-// decoding as well as rejection. Unparseable numeric/boolean strings and
-// object/array mismatches avoid intentional string and comma-list coercions.
 func TestToolEvalTopLevelArgumentTypes(t *testing.T) {
 	evalToolSandbox(t)
 	wrong := map[string]any{"string": map[string]any{"k": "v"}, "integer": "many", "number": "many", "boolean": "yes", "array": map[string]any{"k": "v"}, "object": []any{}}
@@ -2462,7 +2284,6 @@ func TestToolEvalNestedArgumentTypes(t *testing.T) {
 						args["model"] = map[string]any{"name": "eval-model"}
 					}
 					if strings.Join(path, ".") == "soul.inline" {
-						// An inline soul excludes the default ConfigMap-backed soul.
 						args["soul"] = map[string]any{}
 					}
 					valid := evalSetArgumentPath(args, schema, path, nil, evalArgumentValue(path, node))
@@ -2477,8 +2298,6 @@ func TestToolEvalNestedArgumentTypes(t *testing.T) {
 					if !failed {
 						violations[key] = "accepted " + string(invalidRaw)
 					} else if !evalFieldMentioned(message, path[0]) && !strings.Contains(message, "json: cannot unmarshal") {
-						// Custom array decoding can name only its item index, not
-						// its parent. Its type error still proves this one mutation.
 						t.Errorf("wrong type rejected for another reason: %s", message)
 					}
 				})
@@ -2488,8 +2307,6 @@ func TestToolEvalNestedArgumentTypes(t *testing.T) {
 	evalToolReportExecutedViolations(t, violations, knownDefects, declared, executed)
 }
 
-// evalArgumentFailure keeps panic, chat Go-error, and diagnostic checks outside
-// knownDefect accounting; a different failure must never satisfy a marker.
 func evalArgumentFailure(t *testing.T, label string, ctx context.Context, tool Tool, args string) (bool, string) {
 	t.Helper()
 	result, panicked, err := evalToolExecute(ctx, tool, args)
@@ -2511,9 +2328,6 @@ func evalFieldMentioned(message, field string) bool {
 	return strings.Contains(normalize(message), normalize(field))
 }
 
-// Filtered subtest runs cannot prove that a skipped defect was fixed. Schema
-// removals are still checked against the complete inventory, even in a focused
-// run, so obsolete markers do not silently survive changes to the contract.
 func evalToolReportExecutedViolations(t *testing.T, violations, knownDefects map[string]string, declared, executed map[string]bool) {
 	t.Helper()
 	selected := map[string]string{}
@@ -2527,7 +2341,6 @@ func evalToolReportExecutedViolations(t *testing.T, violations, knownDefects map
 	evalToolReportViolations(t, violations, selected)
 }
 
-// evalTaskListBound keeps the declared list_tasks maximum paired with a valid control.
 func evalTaskListBound(t *testing.T) (bool, string) {
 	objects := make([]client.Object, 0, maxListTasksLimit+1)
 	for i := 0; i <= maxListTasksLimit; i++ {

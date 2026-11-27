@@ -10,12 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// ValidateSessionCleanupProjection normally applies the strict finalized-turn
-// contract. Older publication recovery could instead pin the initial empty
-// NotRequested delivery after the Publication had become VerifiedExact. Only
-// cleanup may recover that classification from the same turn's immutable
-// publication receipt. The original payload is never changed or re-enqueued;
-// the returned delivery classification is not a replacement Task status.
 func ValidateSessionCleanupProjection(
 	payload []byte,
 	task *corev1alpha1.Task,
@@ -40,8 +34,6 @@ func ValidateSessionCleanupProjection(
 	if err := validateFinalizedSessionTurn(payload, task, sourceTaskUID, attempt, turn); err != nil {
 		return nil, err
 	}
-	// Do not combine this compatibility case with omitted execution identity
-	// or restored Task incarnations. Runtime deletion still needs every fence.
 	execution := projection.Execution
 	if execution.RuntimeInstanceID == "" || execution.RuntimeInstanceID != attempt.RuntimeInstanceID ||
 		execution.ControllerEpoch < 1 || execution.RuntimeSessionUID == "" ||
@@ -55,9 +47,6 @@ func ValidateSessionCleanupProjection(
 	if err := validateCleanupPublicationReceipt(turn, attempt); err != nil {
 		return nil, err
 	}
-	// The placeholder carries no publication evidence to reconcile with mutable
-	// Task status. Validate all remaining payload/attempt/runtime fields exactly,
-	// taking only the terminal classification from the immutable receipt above.
 	projection.Delivery = projection.Delivery.DeepCopy()
 	projection.Delivery.State = corev1alpha1.TaskDeliveryStateVerifiedExact
 	projection.Delivery.Outcome = corev1alpha1.TaskDeliveryOutcomeVerifiedExact

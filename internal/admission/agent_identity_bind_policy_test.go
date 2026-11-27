@@ -18,7 +18,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// identityBindGrants allows `bind` only on the listed Entra identity IDs.
 type identityBindGrants struct {
 	allowed map[string]bool
 	checked []string

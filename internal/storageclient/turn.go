@@ -11,15 +11,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Turn finalization reads, decides and seals in the client, then commits
-// conditionally in the provider. The client assigns the IDs of the
-// transcript messages the finalization appends, so it knows the transcript
-// boundary the finalization produces and can seal native state against it.
-// The provider commits only if the transcript and stored native record still
-// match what the client read.
-
-// newTranscriptMessageID returns a transcript message ID in the format the
-// embedded store has always used for messages it appends itself.
 func newTranscriptMessageID() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -28,9 +19,6 @@ func newTranscriptMessageID() (string, error) {
 	return "local:" + hex.EncodeToString(value[:]), nil
 }
 
-// validateNativeFinalization admits native state on exactly two terminal
-// shapes: a fresh capture committed with a canonical assistant result, or the
-// Session's existing checkpoint carried across a non-success outcome marker.
 func validateNativeFinalization(request store.CommitSessionTurnFinalizationRequest) error {
 	native, carried := request.NativeSession, request.NativeSessionCarried
 	if native == nil {
@@ -51,8 +39,6 @@ func validateNativeFinalization(request store.CommitSessionTurnFinalizationReque
 	return nil
 }
 
-// commitSessionTurnFinalization assigns transcript message IDs, seals any
-// native state against the boundary the finalization produces, and commits.
 func (c *Client) commitSessionTurnFinalization(
 	ctx context.Context, request store.CommitSessionTurnFinalizationRequest,
 ) (*store.SessionTurn, error) {
@@ -102,11 +88,6 @@ func (c *Client) commitSessionTurnFinalization(
 	return c.CommitSealedSessionTurnFinalization(ctx, finalization)
 }
 
-// sealTurnNativeSession reads the turn, the Session's transcript boundary and
-// its stored native record, then seals the finalization's native state
-// against the boundary after the appended messages. It returns nil when the
-// turn is already finalized: the provider then only compares the recorded
-// finalization, as it would for a repeated request.
 func (c *Client) sealTurnNativeSession(
 	ctx context.Context, request store.CommitSessionTurnFinalizationRequest, appended int, terminalMessageID string,
 ) (*storagev1.SealedNativeSessionFinalization, error) {

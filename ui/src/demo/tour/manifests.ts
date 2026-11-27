@@ -4,10 +4,6 @@ import { gatewayBindings } from '../data/gateways'
 import { monitors } from '../data/monitors'
 import { AGENTS, TASKS } from '../world'
 
-/**
- * A resource trimmed to the fields a tour stop talks about. Each is cut from
- * the same sample object the page shows, so the two cannot disagree.
- */
 export interface Manifest {
   apiVersion: string
   kind: string
@@ -64,7 +60,6 @@ export function monitorManifest(name: string): Manifest {
       repoURL: spec.repoURL,
       schedule: spec.schedule,
       agents: spec.agents && { reviewer: spec.agents.reviewer, implementer: spec.agents.implementer, repairer: spec.agents.repairer },
-      // Issue labels default to orka:implement and the other orka:* labels.
       triggers: labels && { github: { labels: { enabled: labels.enabled } } },
       repair: spec.repair && { enabled: spec.repair.enabled },
     },
@@ -81,6 +76,4 @@ export function bindingManifest(name: string): Manifest {
   }
 }
 
-// The tour panel fits about 40 characters, so long values fold onto
-// continuation lines. The writer can run a first line past lineWidth, hence 38.
 export const toYaml = (value: object) => stringify(value, { lineWidth: 38 }).trimEnd()

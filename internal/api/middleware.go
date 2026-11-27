@@ -23,18 +23,14 @@ import (
 	"github.com/orka-agents/orka/internal/tracing"
 )
 
-// NewLoggingMiddleware creates a logging middleware
 func NewLoggingMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		start := time.Now()
 
-		// Get request ID from middleware
 		reqID := requestid.FromContext(c)
 
-		// Process request
 		err := c.Next()
 
-		// Log the request
 		duration := time.Since(start)
 		status := effectiveStatusCode(c, err)
 
@@ -51,28 +47,23 @@ func NewLoggingMiddleware() fiber.Handler {
 	}
 }
 
-// NewMetricsMiddleware creates a metrics middleware
 func NewMetricsMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		start := time.Now()
 
-		// Process request
 		err := c.Next()
 
-		// Record metrics
 		duration := time.Since(start)
 		status := effectiveStatusCode(c, err)
 		method := c.Method()
 		path := c.Route().Path
 
-		// Record in Prometheus metrics
 		metrics.RecordAPIRequest(path, method, status, duration.Seconds())
 
 		return err
 	}
 }
 
-// NewTracingMiddleware creates an OpenTelemetry tracing middleware.
 func NewTracingMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		tracer := tracing.Tracer("orka.api")
@@ -87,11 +78,9 @@ func NewTracingMiddleware() fiber.Handler {
 		)
 		defer span.End()
 
-		// Make the extracted server span context visible to downstream handlers.
 		c.SetContext(ctx)
 
 		if reqID := requestid.FromContext(c); reqID != "" {
-			// Incoming request IDs borrow Fiber's buffer, but export can be delayed.
 			span.SetAttributes(attribute.String("http.request_id", strings.Clone(reqID)))
 		}
 
@@ -112,13 +101,6 @@ func NewTracingMiddleware() fiber.Handler {
 	}
 }
 
-// effectiveStatusCode resolves the status a client will actually receive.
-// Handler errors are mapped by the app error handler only after middleware
-// unwinds, so the response still carries the default 200 here. When the app
-// serves the dashboard, a 404 on a non-API path is served as the SPA index
-// page with 200 by that same error handler, so it is reported as a success
-// rather than a failure, and a 404 for
-// a deliberately unsupported compatibility route is rewritten there to 501.
 func effectiveStatusCode(c fiber.Ctx, err error) int {
 	status := c.Response().StatusCode()
 	if err != nil && status < fiber.StatusBadRequest {
@@ -149,7 +131,6 @@ func (c fiberHeaderCarrier) Get(key string) string {
 	if c.c == nil {
 		return ""
 	}
-	// Propagators may retain substrings after Fiber reuses the request buffer.
 	return strings.Clone(c.c.Get(key))
 }
 

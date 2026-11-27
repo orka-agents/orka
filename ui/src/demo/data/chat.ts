@@ -6,13 +6,6 @@ import { DEMO_NAMESPACE } from '../shared'
 import { AGENTS, REPOS, TASKS, type AgentKey, type RepoKey } from '../world'
 import { builtinTools, customTools } from './tools'
 
-// The demo chat is scripted, not a model: each user message is matched to a
-// scenario by keywords, and the scenario plays back tool calls against the
-// demo data followed by an assistant message. Tool names and the
-// {success, data} result envelope match the real meta agent. Task state is
-// read live through the task domain's API, so answers track the simulation.
-
-/** One step of a scripted turn. Tool `run` and message `content` are evaluated when the step plays. */
 export type ChatStep =
   | { kind: 'tool'; name: string; args: Record<string, unknown>; run: () => ToolResult | Promise<ToolResult> }
   | { kind: 'message'; content: () => string }
@@ -26,7 +19,6 @@ export interface ToolResult {
 export interface ChatTurnContext {
   sessionId: string
   namespace: string
-  /** Current agents, including any created or deleted during the demo. */
   agents: () => Agent[]
 }
 
@@ -34,7 +26,6 @@ const ok = (data: unknown): ToolResult => ({ success: true, data })
 
 const AGENT_BY_NAME = Object.fromEntries((Object.keys(AGENTS) as AgentKey[]).map((key) => [AGENTS[key].name, key]))
 
-/** Reads the demo task API (the same handlers the dashboard calls). */
 async function taskApi<T>(path: string): Promise<T | undefined> {
   const response = await getResponse(taskHandlers, new Request(`http://demo.local/api/v1${path}`))
   return response?.ok ? ((await response.json()) as T) : undefined
@@ -393,7 +384,6 @@ function statusTurn(): ChatStep[] {
         const active = tasks.filter(isActive)
         const today = tasks.filter((task) => Date.parse(task.metadata.creationTimestamp ?? '') >= dayAgo())
         const counts = today.reduce<Record<string, number>>((acc, task) => ({ ...acc, [phaseOf(task)]: (acc[phaseOf(task)] ?? 0) + 1 }), {})
-        // Token totals come from the seeded catalog; the Usage page has the exact numbers.
         const tokens = TASKS.filter((seed) => seed.createdAgo < 24 * 60).reduce((sum, seed) => sum + (seed.inputTokens ?? 0) + (seed.outputTokens ?? 0), 0)
         return [
           active.length === 0 ? 'Nothing is running right now.' : `${active.length} ${active.length === 1 ? 'task is' : 'tasks are'} active right now:`,
@@ -406,7 +396,6 @@ function statusTurn(): ChatStep[] {
   ]
 }
 
-/** Picks and builds the scripted turn for a user message. */
 export function scriptChatTurn(message: string, context: ChatTurnContext): ChatStep[] {
   const text = message.toLowerCase()
   if (context.namespace !== DEMO_NAMESPACE) {

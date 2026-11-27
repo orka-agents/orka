@@ -75,8 +75,6 @@ func serveDeferredResultLogs(t *testing.T, r *TaskReconciler, logs string) *atom
 	return reads
 }
 
-// Model background garbage collection, which the fake client does not perform:
-// after cascading deletion there is no Pod from which a retry can read output.
 func cascadeDeferredJobPod(t *testing.T, r *TaskReconciler, pod *corev1.Pod) {
 	t.Helper()
 	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
@@ -105,7 +103,6 @@ func TestCancellationPreservesPodOutputAcrossStorageOutageAndRestart(t *testing.
 			}
 			t.Run(name, func(t *testing.T) {
 				task, job, pod, namespace := deferredFinalizationFixture()
-				// Exceed one Secret's capacity to exercise durable chunking.
 				want := bytes.Repeat([]byte("synthetic-output\n"), 80000)
 				logs := string(want)
 				if stdout {
@@ -145,8 +142,6 @@ func TestCancellationPreservesPodOutputAcrossStorageOutageAndRestart(t *testing.
 					}
 				}
 
-				// A fresh reconciler has no in-memory output. Recovery first refuses
-				// SaveResult, so both the intent and every output chunk must survive.
 				restarted := newUnitReconciler(newTestScheme())
 				restarted.Client = r.Client
 				restarted.KubeClient = r.KubeClient
@@ -225,7 +220,6 @@ func TestDeferredFinalizationRejectsForeignSecretsAndTaskNameReuse(t *testing.T)
 
 	secret := &corev1.Secret{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: task.Namespace, Name: deferredFinalizationName(task)}, secret))
-	// Model a same-name foreign object at the deterministic intent name.
 	require.NoError(t, r.Delete(t.Context(), secret))
 	secret.ResourceVersion, secret.UID = "", ""
 	secret.OwnerReferences[0].UID = "foreign-task-uid"
@@ -308,7 +302,7 @@ func TestDeferredFinalizationWithoutStartedPodNeedsNoLogsAfterRecovery(t *testin
 
 func TestDeferredFailureStopsJobAfterRestartDuringUsageStorageOutage(t *testing.T) {
 	task, job, pod, namespace := deferredFinalizationFixture()
-	task.Annotations = nil // The saved failure must work without a cancellation request.
+	task.Annotations = nil
 	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
 	results := r.ResultStore
 	reads := serveDeferredResultLogs(t, r, "preserved failure output")
@@ -316,7 +310,6 @@ func TestDeferredFailureStopsJobAfterRestartDuringUsageStorageOutage(t *testing.
 		Phase: corev1alpha1.TaskPhaseFailed, OutcomePhase: corev1alpha1.TaskPhaseFailed,
 		Message: "pod never became ready", RecordOutcome: true,
 	}
-	// Model a crash immediately after publication, before the Job delete.
 	require.NoError(t, r.stageDeferredTaskFinalization(t.Context(), task, intent))
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(job), &batchv1.Job{}))
 	cascadeDeferredJobPod(t, r, pod)
@@ -360,7 +353,7 @@ func TestDeferredCancellationStopsJobDuringValidationClassificationOutage(t *tes
 		}
 		t.Run(name, func(t *testing.T) {
 			task, job, pod, namespace := deferredFinalizationFixture()
-			task.Name += "-validation" // No metadata proves whether output is safe.
+			task.Name += "-validation"
 			r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
 			backend := r.ResultStore.(*sqlite.Store)
 			r.RepositoryValidationBindings = repositoryMonitorValidationBindingErrorStore{err: store.ErrUnavailable}
@@ -389,7 +382,6 @@ func TestDeferredCancellationStopsJobDuringValidationClassificationOutage(t *tes
 			require.NoError(t, r.Get(t.Context(), request.NamespacedName, current))
 			require.Equal(t, corev1alpha1.TaskPhaseRunning, current.Status.Phase)
 			require.Nil(t, current.Status.CompletionTime)
-			// Usage storage recovery alone cannot bypass output classification.
 			r.ResultStore, r.ExecutionEventStore = backend, backend
 			r.MessageStore, r.PlanStore = backend, backend
 			_, err = r.Reconcile(t.Context(), request)
@@ -407,9 +399,6 @@ func TestDeferredCancellationStopsJobDuringValidationClassificationOutage(t *tes
 	}
 }
 
-// Output above the result limit can never be stored, so it is not staged:
-// cancellation still stops the work during a storage outage, and recovery ends
-// the Task with the reason and releases the staging instead of retrying.
 func TestDeferredStdoutResultAboveTheLimitFinalizesWithoutIt(t *testing.T) {
 	task, job, pod, namespace := deferredFinalizationFixture()
 	task.Spec.Type = corev1alpha1.TaskTypeAI
@@ -452,8 +441,6 @@ func TestDeferredStdoutResultAboveTheLimitFinalizesWithoutIt(t *testing.T) {
 	require.Empty(t, secrets.Items, "terminal cleanup releases the staging")
 }
 
-// A stdout log longer than its read limit is refused, even when the result
-// behind it is small, and the Task says the log, not the result, was too long.
 func TestDeferredStdoutResultLogAboveTheReadLimitFinalizesWithoutIt(t *testing.T) {
 	task, job, pod, namespace := deferredFinalizationFixture()
 	task.Spec.Type = corev1alpha1.TaskTypeAI
@@ -485,8 +472,6 @@ func TestDeferredStdoutResultLogAboveTheReadLimitFinalizesWithoutIt(t *testing.T
 	require.Nil(t, current.Status.ResultRef)
 }
 
-// A refused stdout log is a refused result, so the narrower flag needs the
-// broader one.
 func TestDeferredFinalizationRejectsALogRefusalWithoutAResultRefusal(t *testing.T) {
 	task, job, pod, namespace := deferredFinalizationFixture()
 	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
@@ -500,7 +485,6 @@ func TestDeferredFinalizationRejectsALogRefusalWithoutAResultRefusal(t *testing.
 	require.ErrorContains(t, err, "intent is invalid")
 }
 
-// An intent that records refused output stages none of it.
 func TestDeferredFinalizationRejectsARefusedResultWithStagedOutput(t *testing.T) {
 	task, job, pod, namespace := deferredFinalizationFixture()
 	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace)
@@ -514,9 +498,6 @@ func TestDeferredFinalizationRejectsARefusedResultWithStagedOutput(t *testing.T)
 	require.ErrorContains(t, err, "intent is invalid")
 }
 
-// TestDeferredFinalizationStopsTheJobBeforeItsChildren covers a stop already
-// decided whose Job delete failed: once storage recovers, the reconcile that
-// records it deletes the Job before it cancels the Task's children.
 func TestDeferredFinalizationStopsTheJobBeforeItsChildren(t *testing.T) {
 	task, job, pod, namespace := deferredFinalizationFixture()
 	controller := true
@@ -534,7 +515,6 @@ func TestDeferredFinalizationStopsTheJobBeforeItsChildren(t *testing.T) {
 	}
 	r := newUnitReconciler(newTestScheme(), task, job, pod, namespace, child)
 	serveDeferredResultLogs(t, r, "output")
-	// The stop was decided and saved, but its Job delete never happened.
 	require.NoError(t, r.stageDeferredTaskFinalization(t.Context(), task, deferredTaskFinalization{
 		Phase: corev1alpha1.TaskPhaseCancelled, OutcomePhase: corev1alpha1.TaskPhaseCancelled, Message: "stop",
 	}))

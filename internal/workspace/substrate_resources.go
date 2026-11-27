@@ -7,8 +7,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-// SubstrateNativeClient uses the same authenticated connection as workspace
-// execution for native Atespaces, immutable templates, Actors and Tags.
 type SubstrateNativeClient struct {
 	Control ateapipb.ControlClient
 	conn    *grpc.ClientConn

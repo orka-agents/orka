@@ -8,9 +8,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// The workspace probe must finish one original prompt even when provisioning
-// takes longer than its initial lease. This loop alone owns the confirmed lease;
-// renewal is never concurrent with cancellation, finalization, or cleanup.
 func (s *lifecycleProbeState) consumeWorkspacePrompt(
 	ctx context.Context,
 	probeID string,
@@ -42,7 +39,6 @@ func (s *lifecycleProbeState) consumeWorkspacePrompt(
 		case <-renewAt:
 			observation := stream.Summary()
 			if observation.Terminal != nil {
-				// Still require clean EOF, but a terminal prompt needs no lease.
 				renewAt = nil
 				continue
 			}
@@ -76,8 +72,6 @@ func (s *lifecycleProbeState) renewWorkspacePrompt(
 	minimum := time.Duration(s.target.Limits.MinPromptLeaseMillis) * time.Millisecond
 	maximum := time.Duration(s.target.Limits.MaxPromptLeaseMillis) * time.Millisecond
 	if !expiresAt.After(s.lease.ExpiresAt) || expiresAt.Sub(now) < minimum {
-		// The remaining probe window cannot admit a valid extension. Keep the
-		// original lease and wait for its stream or the bounded caller context.
 		return false, nil
 	}
 	lease := harnessv2.PromptLease{Generation: s.lease.Generation + 1, IssuedAt: now, ExpiresAt: expiresAt}
@@ -97,8 +91,6 @@ func (s *lifecycleProbeState) renewWorkspacePrompt(
 	if err := setRequestDigest(&request, &request.Metadata); err != nil {
 		return false, fmt.Errorf("build workspace prompt lease renewal: %w", err)
 	}
-	// An unacknowledged renewal cannot authorize work beyond the last confirmed
-	// lease. Bound this single attempt by that expiry and never retry it.
 	renewCtx, cancel := context.WithDeadline(ctx, s.lease.ExpiresAt)
 	defer cancel()
 	response, err := s.client.RenewPromptLease(renewCtx, s.sessionID, request)
@@ -111,7 +103,6 @@ func (s *lifecycleProbeState) renewWorkspacePrompt(
 	if response.Classification.Class != harnessv2.RequestClassificationFresh {
 		return false, fmt.Errorf("renew workspace prompt lease was not classified fresh")
 	}
-	// The v2 client validates the complete returned lease against the request.
 	s.lease = response.Lease
 	return true, nil
 }

@@ -22,8 +22,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A nil-returning provider is deliberately substituted at its interface. The
-// route, middleware, authentication and response serialization remain real.
 func TestResponsesProductionNilCompletion(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
 		t.Run(fmt.Sprint(disabled), func(t *testing.T) {
@@ -84,7 +82,6 @@ func TestResponsesProductionTerminalMessages(t *testing.T) {
 					}
 				case "contradictory-done":
 					events = completeEvents[:len(completeEvents)-1]
-					// Copy through JSON so terminal mutation cannot change earlier events.
 					encoded, err := json.Marshal(response)
 					require.NoError(t, err)
 					require.NoError(t, json.Unmarshal(encoded, &response))

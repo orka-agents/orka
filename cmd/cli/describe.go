@@ -21,7 +21,6 @@ import (
 	"golang.org/x/term"
 )
 
-// Labels shared by the readable views.
 const (
 	labelName              = "Name"
 	labelNamespace         = "Namespace"
@@ -54,10 +53,6 @@ const (
 	labelGateway           = "Gateway"
 )
 
-// describeRow is one "Label: value" line in a readable single-object view.
-// A row with an empty Value and no Children is omitted, so callers can list
-// every field they care about without checking each one for emptiness.
-// Children render as an indented section under the label.
 type describeRow struct {
 	Label    string
 	Value    string
@@ -70,9 +65,6 @@ const (
 	describeIndent       = 2
 )
 
-// terminalWidth returns the usable width for table cells and wrapped text.
-// COLUMNS wins when set (tests and CI pipelines have no tty), then the real
-// terminal size, then an 80-column default.
 func terminalWidth() int {
 	if raw := strings.TrimSpace(os.Getenv("COLUMNS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
@@ -85,9 +77,6 @@ func terminalWidth() int {
 	return defaultTerminalWidth
 }
 
-// printDescribe renders rows as an aligned "Label: value" list. Long values
-// wrap at the terminal width; multi-line values keep their line breaks and
-// continue under the value column.
 func printDescribe(cmd *cobra.Command, rows []describeRow) error {
 	rows = compactDescribeRows(rows)
 	if len(rows) == 0 {
@@ -111,8 +100,6 @@ func compactDescribeRows(rows []describeRow) []describeRow {
 }
 
 func writeDescribeRows(w io.Writer, rows []describeRow, indent, width int) {
-	// Labels can come from untrusted data too (approval argument names,
-	// JSON keys), so they are sanitized like values.
 	labels := make([]string, len(rows))
 	labelWidth := 0
 	for i, row := range rows {
@@ -134,7 +121,6 @@ func writeDescribeRows(w io.Writer, rows []describeRow, indent, width int) {
 			case i == 0:
 				fmt.Fprintf(w, "%s%-*s %s\n", pad, labelWidth, label, line) //nolint:errcheck
 			case line == "":
-				// Blank lines in a value stay blank rather than indented.
 				fmt.Fprintln(w) //nolint:errcheck
 			default:
 				fmt.Fprintf(w, "%s%s\n", strings.Repeat(" ", valueIndent), line) //nolint:errcheck
@@ -143,9 +129,6 @@ func writeDescribeRows(w io.Writer, rows []describeRow, indent, width int) {
 	}
 }
 
-// wrapText breaks text into lines no longer than width runes, keeping the
-// original line breaks and breaking long paragraphs at spaces. A single
-// token longer than the width is kept whole on its own line.
 func wrapText(text string, width int) []string {
 	if width <= 0 {
 		width = defaultTerminalWidth
@@ -160,9 +143,6 @@ func wrapText(text string, width int) []string {
 		}
 		line := ""
 		for word := range strings.FieldsSeq(paragraph) {
-			// A single token longer than the width (an ID, a URL, a
-			// digest) stays whole on its own line: cutting it would break
-			// copy and paste.
 			switch {
 			case line == "":
 				line = word
@@ -183,9 +163,6 @@ func wrapText(text string, width int) []string {
 	return out
 }
 
-// fixedColumnsWidth returns the terminal width taken by the columns that
-// are never cut: the widest cell of each (header included) plus the
-// tabwriter padding after each column.
 func fixedColumnsWidth(headers []string, rows [][]string) int {
 	widths := make([]int, len(headers))
 	for i, header := range headers {
@@ -205,8 +182,6 @@ func fixedColumnsWidth(headers []string, rows [][]string) int {
 	return total
 }
 
-// sanitizeTerminalTextKeepNewlines strips control runes from a text block
-// while keeping its line and tab structure.
 func sanitizeTerminalTextKeepNewlines(value string) string {
 	var b strings.Builder
 	for _, r := range value {
@@ -219,9 +194,6 @@ func sanitizeTerminalTextKeepNewlines(value string) string {
 	return b.String()
 }
 
-// truncateToWidth shortens a single-line cell to width runes, ending with an
-// ellipsis when anything was cut. Control characters are stripped first so
-// forge- or model-supplied text cannot carry escapes into the terminal.
 func truncateToWidth(value string, width int) string {
 	value = oneLine(value)
 	if width <= 0 || utf8.RuneCountInString(value) <= width {
@@ -234,8 +206,6 @@ func truncateToWidth(value string, width int) string {
 	return strings.TrimRight(string(runes[:width-1]), " ") + "…"
 }
 
-// oneLine flattens a multi-line value into one sanitized line for a table
-// cell.
 func oneLine(value string) string {
 	value = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(value)
 	value = sanitizeTerminalText(value)
@@ -243,8 +213,6 @@ func oneLine(value string) string {
 	return value
 }
 
-// firstLines keeps the first n non-empty lines of a text block for a
-// summary view, marking that more follows.
 func firstLines(text string, n int) string {
 	lines := make([]string, 0, n)
 	total := 0
@@ -263,8 +231,6 @@ func firstLines(text string, n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// formatTimestamp renders an RFC3339 timestamp as "<date> (<age> ago)". Other
-// values pass through unchanged.
 func formatTimestamp(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -277,8 +243,6 @@ func formatTimestamp(value string) string {
 	return fmt.Sprintf("%s (%s ago)", t.Local().Format("2006-01-02 15:04:05"), formatAge(value))
 }
 
-// formatUntil renders the time remaining until an RFC3339 timestamp as
-// "in 9m", or "expired" once it has passed.
 func formatUntil(value string, now time.Time) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -308,7 +272,6 @@ func formatDurationShort(d time.Duration) string {
 	}
 }
 
-// joinStrings renders a JSON string array as a comma-separated list.
 func joinStrings(value any) string {
 	switch list := value.(type) {
 	case []string:
@@ -326,7 +289,6 @@ func joinStrings(value any) string {
 	}
 }
 
-// nameList renders a list of {name: ...} objects as their names.
 func nameList(value any) string {
 	list, ok := value.([]any)
 	if !ok {
@@ -343,9 +305,6 @@ func nameList(value any) string {
 	return strings.Join(names, ", ")
 }
 
-// keyValuePairs renders a JSON object as space-separated key=value pairs in
-// key order, quoting values that contain spaces. Nested values are rendered
-// as compact JSON.
 func keyValuePairs(value any) string {
 	m, ok := value.(map[string]any)
 	if !ok || len(m) == 0 {
@@ -361,8 +320,6 @@ func keyValuePairs(value any) string {
 		value := m[key]
 		switch value.(type) {
 		case map[string]any, []any:
-			// Nested values stay compact JSON; quoting them would double
-			// every quote inside.
 			parts = append(parts, key+"="+scalarOrJSON(value))
 		default:
 			parts = append(parts, key+"="+quoteIfNeeded(scalarOrJSON(value)))
@@ -378,8 +335,6 @@ func quoteIfNeeded(value string) string {
 	return value
 }
 
-// genericDescribeRows is the fallback readable view for a resource without
-// a field list: name, namespace, status or phase, and age.
 func genericDescribeRows(item map[string]any) []describeRow {
 	return []describeRow{
 		{Label: labelName, Value: genericRowName(item)},
@@ -389,8 +344,6 @@ func genericDescribeRows(item map[string]any) []describeRow {
 	}
 }
 
-// toGenericMap converts a typed client response to its JSON map shape so
-// describe views can read it with the same helpers as raw API responses.
 func toGenericMap(value any) map[string]any {
 	if m, ok := value.(map[string]any); ok {
 		return m
@@ -398,7 +351,6 @@ func toGenericMap(value any) map[string]any {
 	return jsonRoundTrip(value)
 }
 
-// scalarOrJSON renders a scalar as text and anything else as compact JSON.
 func scalarOrJSON(value any) string {
 	switch v := value.(type) {
 	case nil:
@@ -416,8 +368,6 @@ func scalarOrJSON(value any) string {
 	}
 }
 
-// jsonRoundTrip renders any value through its JSON encoding into the generic
-// map shape.
 func jsonRoundTrip(value any) map[string]any {
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -430,8 +380,6 @@ func jsonRoundTrip(value any) map[string]any {
 	return generic
 }
 
-// ageOrEmpty is formatAge without the "<unknown>" placeholder, for views
-// that omit empty fields.
 func ageOrEmpty(timestamp string) string {
 	if strings.TrimSpace(timestamp) == "" {
 		return ""

@@ -24,9 +24,6 @@ const (
 	agentRuntimeBootPreparationKind        = "agent-runtime-boot-preparation"
 )
 
-// preparedRecoveryPodWitness reads only an observation whose exact digest was
-// reserved before its atomic Pod retention patch. Pod metadata alone cannot
-// create a recovery owner or alter the authenticated observation.
 func (r *AgentRuntimeReconciler) preparedRecoveryPodWitness(ctx context.Context, runtime *corev1alpha1.AgentRuntime, pod *corev1.Pod) (agentRuntimeBootWitness, error) {
 	var witness agentRuntimeBootWitness
 	body := []byte(pod.Annotations[agentRuntimePreparedWitnessAnnotation])
@@ -51,7 +48,6 @@ func (r *AgentRuntimeReconciler) preparedRecoveryPodWitness(ctx context.Context,
 	preparationIdentity.Kind = agentRuntimeBootPreparationKind
 	effect, err := readAgentRuntimeRecoveryEffect(ctx, r.ControlStore, preparationIdentity, &prepared)
 	if errors.Is(err, store.ErrNotFound) {
-		// Legacy witness-first enrollment has no preparation record.
 		effect, err = readAgentRuntimeRecoveryEffect(ctx, r.ControlStore, identity, &prepared)
 	}
 	if err != nil {
@@ -81,7 +77,6 @@ func (r *AgentRuntimeReconciler) preparedRecoveryBoots(ctx context.Context, runt
 		observation, err := readAgentRuntimeRecoveryEffect(ctx, r.ControlStore,
 			agentRuntimeRecoveryIdentity(agentRuntimeBootPreparationKind, runtime.UID, runtime.Namespace, effect.Spec.OperationID), &prepared)
 		if errors.Is(err, store.ErrNotReady) {
-			// Pod retention starts only after preparation publication succeeds.
 			continue
 		}
 		if err != nil {
@@ -100,8 +95,6 @@ func (r *AgentRuntimeReconciler) originalPreparedRecoveryPod(ctx context.Context
 	pod := &corev1.Pod{}
 	err := r.endpointReader().Get(ctx, client.ObjectKey{Namespace: witness.Namespace, Name: witness.PodName}, pod)
 	if apierrors.IsNotFound(err) || err == nil && pod.UID != witness.PodUID {
-		// This only discharges an unpublished preparation. A committed boot
-		// still needs its independent positive retirement proof.
 		return nil, nil
 	}
 	if err != nil {
@@ -113,10 +106,6 @@ func (r *AgentRuntimeReconciler) originalPreparedRecoveryPod(ctx context.Context
 	return pod, nil
 }
 
-// requireLegacyRecoveryPodRetention permits an interrupted rollover to fill
-// annotations that the witness-first implementation never wrote. An exact
-// retired witness without any preparation distinguishes that legacy format
-// from missing metadata on a newly retained Pod.
 func (r *AgentRuntimeReconciler) requireLegacyRecoveryPodRetention(ctx context.Context, runtime *corev1alpha1.AgentRuntime, pod *corev1.Pod) error {
 	witnesses, err := r.recoveryWitnesses(ctx, runtime)
 	if err != nil {
@@ -146,8 +135,6 @@ func (r *AgentRuntimeReconciler) requireLegacyRecoveryPodRetention(ctx context.C
 	return errors.New("retained Pod has no exact retired legacy witness")
 }
 
-// resumePreparedRecoveryPods discovers exact original Pods from durable
-// preparation, including missing metadata and writes that completed late.
 func (r *AgentRuntimeReconciler) resumePreparedRecoveryPods(ctx context.Context, runtime *corev1alpha1.AgentRuntime, fence store.ControllerEpochFence) error {
 	preparations, err := r.preparedRecoveryBoots(ctx, runtime)
 	if err != nil {
@@ -208,9 +195,6 @@ func (r *AgentRuntimeReconciler) resumePreparedRecoveryPods(ctx context.Context,
 	return nil
 }
 
-// requireSettledRecoveryPreparations is read-only and runs inside the final
-// runtime-owner removal guard. A preparation added after the earlier scan must
-// not leave a late Pod PATCH able to install an orphaned finalizer.
 func (r *AgentRuntimeReconciler) requireSettledRecoveryPreparations(ctx context.Context, runtime *corev1alpha1.AgentRuntime) error {
 	preparations, err := r.preparedRecoveryBoots(ctx, runtime)
 	if err != nil {
@@ -229,9 +213,6 @@ func (r *AgentRuntimeReconciler) requireSettledRecoveryPreparations(ctx context.
 			return witnessErr
 		}
 		if witnessErr != nil && !controllerutil.ContainsFinalizer(runtime, agentRuntimeFinalizer) {
-			// Owner removal may have won before a delayed preparation was
-			// published. It fences every new retention write. Only a still
-			// unretained, unpublished preparation can be abandoned here.
 			if err := r.requireUnretainedRecoveryPreparation(ctx, witness); err != nil {
 				return err
 			}

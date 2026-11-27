@@ -15,22 +15,13 @@ import (
 )
 
 const (
-	// toolboxCheckUID is the fixed unprivileged identity for the image-volume
-	// architecture check. It differs from the session identity range and from
-	// the init-container identities.
 	toolboxCheckUID               = 64022
 	toolboxMountMethodImageVolume = "imageVolume"
 	toolboxMountMethodCopy        = "copy"
 )
 
-// toolboxCheckCommand is replaced in tests so the unprivileged child can run
-// without a real runtime image.
 var toolboxCheckCommand = toolbox.SupervisorBinaryPath
 
-// VerifyToolboxes runs the supervisor's startup toolbox checks before it
-// serves: every mount path and path entry must exist as a real folder (lstat
-// only, nothing is opened or run by root), and with image volumes an
-// unprivileged child verifies the ELF architecture of the tool folders.
 func VerifyToolboxes(cfg Config) error {
 	if len(cfg.Toolboxes) == 0 {
 		return nil
@@ -40,9 +31,6 @@ func VerifyToolboxes(cfg Config) error {
 			return err
 		}
 	}
-	// This is a trust boundary: only the two documented methods are known,
-	// and anything else fails closed instead of skipping the unprivileged
-	// check that unsanitized image-volume contents require.
 	switch method := strings.TrimSpace(cfg.ToolboxMountMethod); method {
 	case toolboxMountMethodCopy:
 		return nil
@@ -77,8 +65,6 @@ func runUnprivilegedToolboxCheck(cfg Config) error {
 	return nil
 }
 
-// ReportToolboxFailure writes the stable FAIL line to the termination log and
-// stderr so the controller can classify the failed start.
 func ReportToolboxFailure(err error) {
 	var failure *toolbox.Failure
 	if !errors.As(err, &failure) {
@@ -92,12 +78,6 @@ func ReportToolboxFailure(err error) {
 	}
 }
 
-// writeToolboxLoginProfile writes ~/.profile into a fresh session home so
-// login shells keep the toolbox folders on PATH. Codex runs commands through
-// `bash -lc`, and Debian's /etc/profile resets PATH for non-root users before
-// ~/.profile runs, which would silently drop every toolbox folder. The file
-// only appends folders that come from the frozen profile; it never names
-// files inside a toolbox. Ownership is finalized by the caller.
 func writeToolboxLoginProfile(home string, toolboxes []harnessv2.RuntimeToolbox) error {
 	if len(toolboxes) == 0 {
 		return nil

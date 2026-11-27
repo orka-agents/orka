@@ -20,8 +20,6 @@ import (
 
 var _ store.AHPStore = (*Store)(nil)
 
-// ahpSchemaStatements defines Agent Host Protocol tokens, client records and
-// each user's sequence, replay journal, channel states and session catalog.
 func ahpSchemaStatements() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS ahp_tokens (
@@ -89,7 +87,6 @@ func ahpSchemaStatements() []string {
 	}
 }
 
-// CreateAHPToken stores a new token. Its ID and hash must be unique.
 func (s *Store) CreateAHPToken(ctx context.Context, token store.AHPToken) error {
 	if strings.TrimSpace(token.ID) == "" || strings.TrimSpace(token.TokenHash) == "" || strings.TrimSpace(token.UserKey) == "" {
 		return fmt.Errorf("%w: AHP token id, hash and user are required", store.ErrValidation)
@@ -108,7 +105,6 @@ func (s *Store) createAHPToken(ctx context.Context, token store.AHPToken) error 
 	if err != nil {
 		return fmt.Errorf("create AHP token: %w", uniqueConflict(err))
 	}
-	// Only the newest of the user's ended tokens stay listed.
 	ended := `user_key = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)`
 	if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM ahp_tokens WHERE `+ended+` AND id NOT IN (
 			SELECT id FROM ahp_tokens WHERE `+ended+` ORDER BY created_at DESC, id DESC LIMIT ?)`,
@@ -135,7 +131,6 @@ func scanAHPToken(row interface{ Scan(...any) error }) (store.AHPToken, error) {
 	return token, nil
 }
 
-// GetAHPTokenByHash returns the token with the given secret hash.
 func (s *Store) GetAHPTokenByHash(ctx context.Context, tokenHash string) (store.AHPToken, error) {
 	token, err := scanAHPToken(s.db.QueryRowContext(ctx,
 		`SELECT `+ahpTokenColumns+` FROM ahp_tokens WHERE token_hash = ?`, tokenHash))
@@ -148,7 +143,6 @@ func (s *Store) GetAHPTokenByHash(ctx context.Context, tokenHash string) (store.
 	return token, nil
 }
 
-// ListAHPTokens returns a user's tokens, newest first.
 func (s *Store) ListAHPTokens(ctx context.Context, userKey string) ([]store.AHPToken, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+ahpTokenColumns+` FROM ahp_tokens WHERE user_key = ? ORDER BY created_at DESC, id`, userKey)
@@ -167,8 +161,6 @@ func (s *Store) ListAHPTokens(ctx context.Context, userKey string) ([]store.AHPT
 	return tokens, rows.Err()
 }
 
-// RevokeAHPToken marks one of the user's tokens revoked. Revoking twice keeps
-// the first time.
 func (s *Store) RevokeAHPToken(ctx context.Context, userKey, id string, at time.Time) error {
 	return writeOperationErr(ctx, s, "RevokeAHPToken", func(ctx context.Context) error {
 		return s.revokeAHPToken(ctx, userKey, id, at)
@@ -190,7 +182,6 @@ func (s *Store) revokeAHPToken(ctx context.Context, userKey, id string, at time.
 	return nil
 }
 
-// GetAHPClient returns a client record.
 func (s *Store) GetAHPClient(ctx context.Context, clientID string) (store.AHPClient, error) {
 	var client store.AHPClient
 	err := s.db.QueryRowContext(ctx, `SELECT client_id, user_key, protocol_version, dialect, created_at, updated_at
@@ -205,8 +196,6 @@ func (s *Store) GetAHPClient(ctx context.Context, clientID string) (store.AHPCli
 	return client, nil
 }
 
-// PutAHPClient records a client for its user, or updates what it negotiated.
-// A clientId stays bound to the first user that used it.
 func (s *Store) PutAHPClient(ctx context.Context, client store.AHPClient) error {
 	if strings.TrimSpace(client.ClientID) == "" || strings.TrimSpace(client.UserKey) == "" {
 		return fmt.Errorf("%w: AHP client id and user are required", store.ErrValidation)
@@ -232,8 +221,6 @@ func (s *Store) putAHPClient(ctx context.Context, client store.AHPClient) error 
 	} else if n == 0 {
 		return store.ErrConflict
 	}
-	// A user who keeps connecting with new clientIds keeps only the most
-	// recently used.
 	if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM ahp_clients
 		WHERE user_key = ? AND client_id NOT IN (
 			SELECT client_id FROM ahp_clients WHERE user_key = ?
@@ -244,7 +231,6 @@ func (s *Store) putAHPClient(ctx context.Context, client store.AHPClient) error 
 	return nil
 }
 
-// GetAHPServerSeq returns the user's last assigned sequence number.
 func (s *Store) GetAHPServerSeq(ctx context.Context, userKey string) (int64, error) {
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `SELECT server_seq FROM ahp_users WHERE user_key = ?`, userKey).Scan(&seq)
@@ -257,8 +243,6 @@ func (s *Store) GetAHPServerSeq(ctx context.Context, userKey string) (int64, err
 	return seq, nil
 }
 
-// AppendAHPJournal appends numbered entries, stores channel states and prunes
-// the journal in one transaction.
 func (s *Store) AppendAHPJournal(
 	ctx context.Context,
 	userKey string,
@@ -325,8 +309,6 @@ func (s *Store) appendAHPJournal(
 	return tx.Commit()
 }
 
-// pruneAHPJournal keeps at most MaxEntries of the newest entries whose sizes
-// total no more than MaxBytes.
 func pruneAHPJournal(ctx context.Context, tx taskDataExecutor, userKey string, limits store.AHPJournalLimits) error {
 	if limits.MaxEntries > 0 {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM ahp_journal WHERE user_key = ? AND seq <= (
@@ -352,8 +334,6 @@ func pruneAHPJournal(ctx context.Context, tx taskDataExecutor, userKey string, l
 	return nil
 }
 
-// ReadAHPJournal returns the entries after afterSeq, and whether none of them
-// was pruned.
 func (s *Store) ReadAHPJournal(ctx context.Context, userKey string, afterSeq int64) ([]store.AHPJournalEntry, bool, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -389,7 +369,6 @@ func (s *Store) ReadAHPJournal(ctx context.Context, userKey string, afterSeq int
 	return entries, int64(len(entries)) == want && (len(entries) == 0 || entries[0].Seq == afterSeq+1), nil
 }
 
-// GetAHPChannelState returns the user's state for one channel.
 func (s *Store) GetAHPChannelState(ctx context.Context, userKey, channel string) (store.AHPChannelState, error) {
 	state := store.AHPChannelState{Channel: channel}
 	err := s.db.QueryRowContext(ctx, `SELECT state, from_seq FROM ahp_channel_states WHERE user_key = ? AND channel = ?`,
@@ -403,7 +382,6 @@ func (s *Store) GetAHPChannelState(ctx context.Context, userKey, channel string)
 	return state, nil
 }
 
-// DeleteAHPChannelStates removes the user's states for the given channels.
 func (s *Store) DeleteAHPChannelStates(ctx context.Context, userKey string, channels []string) error {
 	return writeOperationErr(ctx, s, "DeleteAHPChannelStates", func(ctx context.Context) error {
 		tx, err := s.beginTx(ctx)
@@ -421,7 +399,6 @@ func (s *Store) DeleteAHPChannelStates(ctx context.Context, userKey string, chan
 	})
 }
 
-// ListAHPChannels returns the user's channels with state whose URI starts with prefix.
 func (s *Store) ListAHPChannels(ctx context.Context, userKey, prefix string) ([]string, error) {
 	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
 	rows, err := s.db.QueryContext(ctx, `SELECT channel FROM ahp_channel_states WHERE user_key = ? AND channel LIKE ? ESCAPE '\' ORDER BY channel`,
@@ -441,7 +418,6 @@ func (s *Store) ListAHPChannels(ctx context.Context, userKey, prefix string) ([]
 	return channels, rows.Err()
 }
 
-// PutAHPSession records or updates one entry in a user's session catalog.
 func (s *Store) PutAHPSession(ctx context.Context, session store.AHPSession) error {
 	if strings.TrimSpace(session.UserKey) == "" || strings.TrimSpace(session.Session) == "" {
 		return fmt.Errorf("%w: AHP session user and URI are required", store.ErrValidation)
@@ -462,7 +438,6 @@ func (s *Store) putAHPSession(ctx context.Context, session store.AHPSession) err
 	return nil
 }
 
-// GetAHPSession returns one of the user's sessions.
 func (s *Store) GetAHPSession(ctx context.Context, userKey, session string) (store.AHPSession, error) {
 	record := store.AHPSession{UserKey: userKey, Session: session}
 	err := s.db.QueryRowContext(ctx, `SELECT backend, summary, created_at, modified_at FROM ahp_sessions
@@ -477,7 +452,6 @@ func (s *Store) GetAHPSession(ctx context.Context, userKey, session string) (sto
 	return record, nil
 }
 
-// ListAHPSessions returns the user's sessions, most recently modified first.
 func (s *Store) ListAHPSessions(ctx context.Context, userKey string) ([]store.AHPSession, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT session, backend, summary, created_at, modified_at FROM ahp_sessions
 		WHERE user_key = ? ORDER BY modified_at DESC, session`, userKey)
@@ -496,7 +470,6 @@ func (s *Store) ListAHPSessions(ctx context.Context, userKey string) ([]store.AH
 	return sessions, rows.Err()
 }
 
-// DeleteAHPSession removes one of the user's sessions from the catalog.
 func (s *Store) DeleteAHPSession(ctx context.Context, userKey, session string) error {
 	return writeOperationErr(ctx, s, "DeleteAHPSession", func(ctx context.Context) error {
 		if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM ahp_sessions WHERE user_key = ? AND session = ?`,
@@ -507,7 +480,6 @@ func (s *Store) DeleteAHPSession(ctx context.Context, userKey, session string) e
 	})
 }
 
-// PutAHPRecord stores one of a session backend's records for a user.
 func (s *Store) PutAHPRecord(ctx context.Context, record store.AHPRecord) error {
 	if strings.TrimSpace(record.UserKey) == "" || strings.TrimSpace(record.Kind) == "" || strings.TrimSpace(record.Key) == "" {
 		return fmt.Errorf("%w: AHP record user, kind and key are required", store.ErrValidation)
@@ -528,7 +500,6 @@ func (s *Store) putAHPRecord(ctx context.Context, record store.AHPRecord) error 
 	return nil
 }
 
-// GetAHPRecord returns one record, or ErrNotFound.
 func (s *Store) GetAHPRecord(ctx context.Context, userKey, kind, key string) (store.AHPRecord, error) {
 	record := store.AHPRecord{UserKey: userKey, Kind: kind, Key: key}
 	err := s.db.QueryRowContext(ctx, `SELECT value, updated_at FROM ahp_records
@@ -542,7 +513,6 @@ func (s *Store) GetAHPRecord(ctx context.Context, userKey, kind, key string) (st
 	return record, nil
 }
 
-// ListAHPRecords returns a user's records of one kind, ordered by key.
 func (s *Store) ListAHPRecords(ctx context.Context, userKey, kind string) ([]store.AHPRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT key, value, updated_at FROM ahp_records
 		WHERE user_key = ? AND kind = ? ORDER BY key`, userKey, kind)
@@ -561,7 +531,6 @@ func (s *Store) ListAHPRecords(ctx context.Context, userKey, kind string) ([]sto
 	return records, rows.Err()
 }
 
-// DeleteAHPRecords removes a user's records of one kind whose key starts with prefix.
 func (s *Store) DeleteAHPRecords(ctx context.Context, userKey, kind, prefix string) error {
 	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
 	return writeOperationErr(ctx, s, "DeleteAHPRecords", func(ctx context.Context) error {
@@ -573,7 +542,6 @@ func (s *Store) DeleteAHPRecords(ctx context.Context, userKey, kind, prefix stri
 	})
 }
 
-// DeleteAHPRecord removes one of a user's records.
 func (s *Store) DeleteAHPRecord(ctx context.Context, userKey, kind, key string) error {
 	return writeOperationErr(ctx, s, "DeleteAHPRecord", func(ctx context.Context) error {
 		if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM ahp_records WHERE user_key = ? AND kind = ? AND key = ?`,

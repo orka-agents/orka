@@ -63,8 +63,6 @@ func TestCanonicalValueWithLimitsMatchesCanonicalValueAndHonorsBounds(t *testing
 		t.Fatalf("CanonicalValueWithLimits() = %q, %v; want %q", got, err, want)
 	}
 
-	// One item more than the v2 wire cap: CanonicalValue rejects it, an
-	// explicit larger item bound accepts it with the same encoding rules.
 	large := make([]int, maxCanonicalJSONItems)
 	if _, err := CanonicalValue(large); err == nil || !strings.Contains(err.Error(), "maximum item count") {
 		t.Fatalf("CanonicalValue(large) error = %v, want item-count rejection", err)

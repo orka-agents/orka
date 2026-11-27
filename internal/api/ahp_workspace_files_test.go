@@ -38,9 +38,6 @@ func TestAHPWorkspacePath(t *testing.T) {
 	}
 }
 
-// A workspace path can be a symlink out of the workspace, such as one a cloned
-// repository carries to the workspace's git token: reads refuse it as not
-// found, and still follow links that stay inside.
 func TestAHPWorkspaceReadsStayInTheWorkspace(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
@@ -77,7 +74,6 @@ func TestAHPMatchAny(t *testing.T) {
 	require.True(t, ahpMatchAny([]string{"**/*.go"}, "pkg/sub/a.go"))
 	require.False(t, ahpMatchAny([]string{"**/*.md"}, "pkg/sub/a.go"))
 	require.False(t, ahpMatchAny(nil, "a"))
-	// A ** segment matches any number of directories wherever it is.
 	for pattern, rel := range map[string]string{
 		"src/**/*.go": "src/a/b/c.go", "src/**/x.go": "src/x.go", "**/test/**": "a/test/b/c", "a/**/b/**/c": "a/x/b/y/z/c",
 	} {
@@ -88,7 +84,6 @@ func TestAHPMatchAny(t *testing.T) {
 	} {
 		require.False(t, ahpMatchAny([]string{pattern}, rel), "%s %s", pattern, rel)
 	}
-	// Many ** segments against a deep path stay cheap.
 	deep := strings.Repeat("d/", 63) + "e"
 	require.False(t, ahpMatchAny([]string{strings.Repeat("**/", 80) + "f"}, deep))
 }
@@ -113,8 +108,6 @@ func TestAHPResolveSessionConfig(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A changeset whose files together exceed one read shows the rest as too
-// large instead of failing.
 func TestAHPSelectBlobsBoundsTheTotalRead(t *testing.T) {
 	objects := make([]string, 0, 62)
 	objects = append(objects, "huge", "missing")
@@ -136,9 +129,6 @@ func TestAHPSelectBlobsBoundsTheTotalRead(t *testing.T) {
 	require.Len(t, large, len(objects)-1-len(small))
 }
 
-// Watch stamps keep stat's sub-second modification time, so a file rewritten
-// at the same size within a second still changes; names keep their spaces
-// and slashes.
 func TestAHPParseStamps(t *testing.T) {
 	raw := strings.Join([]string{
 		"12/2026-10-28 12:00:00.123456789 +0000//workspace/src/a b.go",
@@ -154,8 +144,6 @@ func TestAHPParseStamps(t *testing.T) {
 	}, ahpParseStamps([]byte(raw)))
 }
 
-// Where stat takes -c, as in workspace images, a same-size rewrite within one
-// second changes the file's stamp.
 func TestAHPStampsSeeASameSecondRewrite(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "a b.txt")
 	stamp := func() string {
@@ -176,9 +164,6 @@ func TestAHPStampsSeeASameSecondRewrite(t *testing.T) {
 	require.NotEqual(t, first, stamp())
 }
 
-// A watched symlink inside the workspace is followed to its checked target,
-// and its files are named under the watched path; a symlink below it that
-// leaves the workspace is not followed.
 func TestAHPStampsFollowAWatchedSymlink(t *testing.T) {
 	if _, err := exec.LookPath("find"); err != nil {
 		t.Skip("find is not installed")
@@ -202,8 +187,6 @@ func TestAHPStampsFollowAWatchedSymlink(t *testing.T) {
 	require.Len(t, stamps, 1, "only the watched target's own file: %s", out)
 }
 
-// A watch scan that find could not finish fails, so its unread files are not
-// reported deleted; one stopped at the file limit does not.
 func TestAHPStampsFailAnIncompleteScan(t *testing.T) {
 	if _, err := exec.LookPath("find"); err != nil {
 		t.Skip("find is not installed")
@@ -234,9 +217,6 @@ func TestAHPStampsFailAnIncompleteScan(t *testing.T) {
 	require.Error(t, err, "a scan below an unreadable directory fails: %s", out)
 }
 
-// A file read from the workspace is redacted for the person's git tokens as
-// terminal output is, to its very end: a shell could otherwise copy a token
-// into a file and read it back here.
 func TestAHPRedactWholeTokens(t *testing.T) {
 	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
 	tokens := []string{"ghu_olderolderolderolder", token}
@@ -247,9 +227,8 @@ func TestAHPRedactWholeTokens(t *testing.T) {
 		"secret alone":      {data: token[4:], want: "[REDACTED]"},
 		"cut short in file": {data: "x " + token[:20] + " y", want: "x [REDACTED] y"},
 		"cut short at end":  {data: "x " + token[:12], want: "x ghu_[REDACTED]"},
-		// Fewer bytes than are redacted anywhere else stay, at the end too.
-		"few bytes at end": {data: "x ghu_0123", want: "x ghu_0123"},
-		"ends like one":    {data: "ab0123", want: "ab0123"},
+		"few bytes at end":  {data: "x ghu_0123", want: "x ghu_0123"},
+		"ends like one":     {data: "ab0123", want: "ab0123"},
 	} {
 		require.Equal(t, tc.want, string(ahpRedactWholeTokens([]byte(tc.data), tokens)), name)
 	}
@@ -258,7 +237,6 @@ func TestAHPRedactWholeTokens(t *testing.T) {
 	require.NotContains(t, string(ahpRedactWholeTokens(binary, tokens)), token[4:], "a binary file is redacted too")
 }
 
-// A branch's committed files, which the changeset shows, are redacted too.
 func TestAHPRedactGitChanges(t *testing.T) {
 	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
 	before, after := "old\n", "t="+token+"\n"

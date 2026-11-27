@@ -95,12 +95,6 @@ func kubernetesClientsetIsNil(clientset kubernetes.Interface) bool {
 	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
-// authorizeCoreResourceAction enforces Kubernetes RBAC for orka.ai core-group
-// resource reads and writes (RuntimePool, AgentRuntime, Session, Provider): a
-// TokenReview-authenticated identity must pass a SubjectAccessReview for the
-// exact verb, resource, and name before the controller client acts on its
-// behalf. It is a no-op for non-TokenReview auth (context tokens carry their
-// own scope checks).
 func (h *Handlers) authorizeCoreResourceAction(c fiber.Ctx, verb, resource, namespace, name string) error {
 	return authorizeKubernetesResourceAction(
 		c.Context(), h.clientset, GetUserInfo(c), namespace, verb, corev1alpha1.GroupVersion.Group, resource, name,
@@ -120,14 +114,8 @@ func authorizeKubernetesResourceAction(
 	return nil
 }
 
-// errKubernetesAccessReviewUnavailable reports a SubjectAccessReview that did
-// not return a usable answer, as opposed to an explicit denial.
 var errKubernetesAccessReviewUnavailable = errors.New("kubernetes access review is unavailable")
 
-// kubernetesResourceActionAllowed is authorizeKubernetesResourceAction's
-// three-way form for read-side hints: it reports allowed, denied, or (with an
-// error) that the review gave no usable answer. Callers that enforce access
-// must use authorizeKubernetesResourceAction, which refuses in both cases.
 func kubernetesResourceActionAllowed(
 	ctx context.Context,
 	clientset kubernetes.Interface,
@@ -165,13 +153,8 @@ func kubernetesResourceActionAllowed(
 	return review.Status.Allowed, nil
 }
 
-// workerServiceAccountNames are the ServiceAccount names worker Pods run as
-// (--ai-worker-service-account-name and --vendor-worker-service-account-name),
-// the same names Task provenance admission trusts as workers.
 var workerServiceAccountNames = []string{"orka-ai-worker", "orka-vendor-worker"}
 
-// SetWorkerServiceAccountNames records the worker ServiceAccount names the
-// controller runs worker Pods as. An empty list keeps the defaults.
 func SetWorkerServiceAccountNames(names []string) {
 	var kept []string
 	for _, name := range names {
@@ -184,11 +167,6 @@ func SetWorkerServiceAccountNames(names []string) {
 	}
 }
 
-// refuseWorkerRootTaskForIdentityAgent applies Task provenance admission's
-// worker rule to API callers: the API writes Tasks as the controller, which
-// admission trusts, so a worker posting a Task here would otherwise bind an
-// identity-bound Agent as a root Task. Workers hold Agent use broadly; they
-// reach such an Agent only as a delegated child of their own Task.
 func refuseWorkerRootTaskForIdentityAgent(ctx context.Context, reader client.Reader, userInfo *UserInfo, task *corev1alpha1.Task) error {
 	if task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" || !isWorkerServiceAccount(userInfo) {
 		return nil
@@ -213,10 +191,6 @@ func refuseWorkerRootTaskForIdentityAgent(ctx context.Context, reader client.Rea
 	return nil
 }
 
-// isWorkerServiceAccount reports a caller authenticated as a worker
-// ServiceAccount. Only a TokenReview caller can be one: the Agent use check
-// judges OIDC and context-token callers by issuer and subject, so their
-// display name, whatever it looks like, carries no worker's broad use grant.
 func isWorkerServiceAccount(userInfo *UserInfo) bool {
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview || parseServiceAccountNamespace(userInfo.Username) == "" {
 		return false
@@ -225,17 +199,10 @@ func isWorkerServiceAccount(userInfo *UserInfo) bool {
 	return slices.Contains(workerServiceAccountNames, name)
 }
 
-// memoriesResource is the Kubernetes resource name of durable memories.
 const memoriesResource = "memories"
 
 const memoryProposalsResource = "memoryproposals"
 
-// authorizeTaskMemoryConsolidation checks, as the original caller, the grants
-// a memory consolidation run needs: it reads every user's Sessions and the
-// namespace's memories, and in Propose mode creates memory proposals. The API
-// creates Tasks with its own identity, so the admission policy alone would
-// check the controller rather than the caller. It fails closed for any caller
-// it cannot review.
 func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.Interface, userInfo *UserInfo, task *corev1alpha1.Task) error {
 	if task == nil || task.Spec.AI == nil || task.Spec.AI.MemoryConsolidation == nil {
 		return nil
@@ -243,10 +210,6 @@ func authorizeTaskMemoryConsolidation(ctx context.Context, clientset kubernetes.
 	denied := fiber.NewError(fiber.StatusForbidden,
 		"not authorized to create a memory consolidation run: it needs list and get on sessions, list on memories "+
 			"and memoryproposals, and create on memoryproposals in Propose mode")
-	// The caller is reviewed as its canonical identity: a TokenReview user as
-	// Kubernetes authenticated it, and an OIDC or transaction-token caller
-	// as issuer#subject with issuer-prefixed groups, never as a display name
-	// it may have chosen, as for Agent use.
 	subject, reviewable := agentUseReviewSubject(userInfo)
 	if !reviewable || strings.TrimSpace(subject.User) == "" || strings.TrimSpace(task.Namespace) == "" || kubernetesClientsetIsNil(clientset) {
 		return denied

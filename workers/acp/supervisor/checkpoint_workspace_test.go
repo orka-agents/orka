@@ -55,15 +55,10 @@ func TestCheckpointWorkspaceSurvivesNewRuntimeSessionIdentity(t *testing.T) {
 		t.Fatalf("source checkpoint data disappeared before restore: %q, %v", got, err)
 	}
 
-	// The provider has restored this data volume into a fresh pool. Its new
-	// conversation/runtime identity must not change the directory it restores.
 	restored, restoredCfg, profile := newServer("restored-pool")
 	var received []byte
 	var readErr error
 	inspected := false
-	// Inspect the directory handed to the provider before it starts. Stopping
-	// here also lets macOS verify data rebinding without requiring root to
-	// launch a second child under the next non-reused UID.
 	restored.cfg.Provider.ProjectSession = func(
 		_ harnessv2.CreateRuntimeSessionRequest, paths acp.SessionPaths, _ ProviderProxyBinding,
 	) (ProviderSessionProjection, error) {
@@ -86,8 +81,6 @@ func TestCheckpointWorkspaceSurvivesNewRuntimeSessionIdentity(t *testing.T) {
 		t.Fatalf("restored provider did not receive checkpoint file: %q, %v", received, readErr)
 	}
 
-	// Missing restored data must stop before provider startup, including when
-	// the committed marker survives but its directory does not.
 	if err := os.RemoveAll(sourcePath); err != nil {
 		t.Fatal(err)
 	}

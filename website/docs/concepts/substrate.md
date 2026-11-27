@@ -93,6 +93,17 @@ An administrator-managed `ExecutionWorkspaceClass` references that profile and
 the registered provider. Require `acp.runtime.v2` explicitly. Suspension requires
 interactive session reuse, an allowed Suspend action, and bounded expiry.
 
+To keep a detached workspace warm for follow-up turns, set
+`spec.retention.suspendAfterDetach` (for example `10m`, at most `1h`) on the
+profile. After a turn detaches, the workspace stays `Ready` with its Actor and
+supervisor running until the window ends, then the frozen Suspend applies. A
+continuation skips the new worker, Actor restore, credential rotation, and
+supervisor boot only if it attaches while the workspace is still `Ready` (before
+expiry, taint, or a pool drain ends the window). A profile that sets no window
+uses `--acp-workspace-default-suspend-after-detach` (default `0`, disabled) for
+new workspaces; operators may raise that flag or annotate the class to opt out.
+See [Expiry](../reference/configuration.md#expiry), ADR 0055, and ADR 0057.
+
 Enable core's provider API and ACP dispatch with the required provenance and
 class-use admission webhooks. Core has no Substrate ACP backend or native routing
 flag. Give its ServiceAccount read-only Pod access in the worker namespaces so

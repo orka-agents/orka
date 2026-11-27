@@ -13,13 +13,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Connector custody records carry sealed bytes the provider cannot read.
-// These cases check that a provider stores them exactly and decides every
-// conditional command from the plain fields and the expectations Orka sends.
-
-// connectorNow is the time the cases pass as each request's Now.
-// Completion redemption also checks the provider clock, so its fixture expiry
-// must remain live while keeping repeat fixture construction deterministic.
 var (
 	connectorNow              = sealedBaseTime
 	connectorCompletionExpiry = time.Now().UTC().Add(time.Hour)
@@ -299,19 +292,10 @@ func runSealedConnectorCustody(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// shredDuringGrants races shreds against the first grant of new Connections.
-// Readers shred the Connection the writer is about to grant, fenced on the
-// version a first grant takes. A shred whose version matches the record must
-// delete it or, ordered before the grant or after another shred, report it
-// missing: a conflict matches no serial order. A provider that classifies a
-// shred that deleted nothing by reading the record outside the delete's
-// transaction reports a grant made in between as a conflict.
 func shredDuringGrants(t *testing.T, provider storagev1.StateProvider) {
 	const rounds = 50
 	ctx := t.Context()
 	fence := putGrant(t, provider, sealedConnectorCredential("shred-probe", 1, "probe")).Version
-	// created holds the number of Connections granted so far; readers shred
-	// the next one.
 	var created atomic.Int64
 	var versions, conflicts [rounds]atomic.Int64
 	readDuringWrites(t, rounds, func(i int) error {

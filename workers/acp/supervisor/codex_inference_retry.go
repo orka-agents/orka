@@ -29,8 +29,6 @@ func (p *providerProxy) setCodex429Challenge(upstream, child *http.Request, orig
 	}
 }
 
-// On local revocation or expiry, finish the terminal HTTP error with
-// the bytes received so far. The normal relay sanitizes their bounded prefix.
 type codexRetryErrorBody struct {
 	io.ReadCloser
 	ctx context.Context
@@ -132,9 +130,6 @@ func (response *codexInferenceResponse) snapshotRejection(deadline time.Time, ma
 	return complete
 }
 
-// The caller has admitted, normalized and charged one Codex Responses POST.
-// Keep its last 429 for fallback and wait for the auth proxy to finish that
-// response and release its slot before sending again.
 func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, body []byte, response *codexInferenceResponse, gate context.Context, deadline time.Time) (*codexInferenceResponse, error) {
 	ctx := req.Context()
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
@@ -142,10 +137,10 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 	}
 	for attempt := 1; attempt < codexInferenceMaxAttempts && response.StatusCode == http.StatusTooManyRequests; attempt++ {
 		if !s.confirmedCodexRejection(req, response.Response) {
-			break // the first hop did not confirm the qualified route for this send
+			break
 		}
 		if providerproxy.HasDisallowedContentEncoding(response.Header) || response.ContentLength > providerproxy.Codex429RejectionDetailBytes {
-			break // let the normal relay reject the invalid response
+			break
 		}
 		now := time.Now()
 		due := now.Add(codexRetryDelay(response.Header, attempt, now))
@@ -153,9 +148,6 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 		if admissionDone == nil || !due.Before(deadline) {
 			break
 		}
-		// A cancellation stops backoff; it did not cause the HTTP 429 we
-		// already received. Return that independent result, not a local
-		// transport error that would enter the courtesy-cancellation hold.
 		select {
 		case <-ctx.Done():
 			return response, nil
@@ -178,16 +170,13 @@ func (s *providerProxySession) retryRejectedCodexInference(req *http.Request, bo
 			break
 		}
 		if err != nil {
-			return nil, err // no status: delivery is ambiguous
+			return nil, err
 		}
 		req, response = next, retried
 	}
 	return response, nil
 }
 
-// An abandoned retry (including a disconnect during relay) may have no
-// accountable outcome. It cannot certify recovery from the observed 429.
-// A normally accounted result at this sequence or a later one wins.
 func (s *providerProxySession) retainUnrecoveredCodexRejection(auth providerProxyAuthorization) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -200,9 +189,6 @@ func (s *providerProxySession) retainUnrecoveredCodexRejection(auth providerProx
 	}
 }
 
-// The cancellation handler can publish proof before the original prompt
-// writer. A child-reported end_turn is not proof of recovery: join admitted
-// inference after revocation, then use the same issuance order as the relay.
 func (s *providerProxySession) codexCancelFailure(ctx context.Context, promptID string, settlement harnessv2.PromptSettlement) error {
 	if s == nil || s.proxy == nil || s.proxy.providerKind != providerKindCodex || settlement.TerminalEvent != harnessv2.EventCompleted {
 		return nil
@@ -240,8 +226,6 @@ func codexRetryDelay(header http.Header, attempt int, now time.Time) time.Durati
 			value := strings.TrimSpace(raw)
 			if unit == time.Millisecond {
 				ms, err := strconv.ParseFloat(value, 64)
-				// Positive overflow parses as +Inf: don't replace a long
-				// provider hint with the much shorter fallback.
 				if ms >= float64(codexInferenceRetryWindow/time.Millisecond) {
 					return codexInferenceRetryWindow
 				}
@@ -256,7 +240,6 @@ func codexRetryDelay(header http.Header, attempt int, now time.Time) time.Durati
 			}
 			n, err := strconv.ParseUint(value, 10, 64)
 			if errors.Is(err, strconv.ErrRange) || (err == nil && n >= uint64(codexInferenceRetryWindow/unit)) {
-				// A valid but unrepresentably long delay is not a missing hint.
 				return codexInferenceRetryWindow
 			}
 			if err == nil {

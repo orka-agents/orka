@@ -1,10 +1,3 @@
-// Command wrappergen writes wrappers_gen.go for package storagefault. Each
-// generated method passes one provider call through the fault injector, so
-// every method of the storage contract can be failed, delayed, held or
-// counted without hand-written delegation.
-//
-// Run it with go generate in internal/storageclient/storagefault. A test in
-// this package fails when the committed file differs from its output.
 package main
 
 import (
@@ -25,8 +18,6 @@ import (
 
 const storagev1Path = "github.com/orka-agents/orka/pkg/storage/v1"
 
-// importNames gives the generated file's name for each package it imports.
-// Other packages use the last element of their path.
 var importNames = map[string]string{
 	storagev1Path: "storagev1",
 }
@@ -45,27 +36,19 @@ func main() {
 	}
 }
 
-// wrapper describes one generated wrapper type.
 type wrapper struct {
-	// typeName is the wrapper's type in package storagefault.
 	typeName string
-	// inner is the field holding the wrapped provider.
-	inner string
-	// methods are the methods to generate, sorted by name.
-	methods []reflect.Method
-	// contract returns the Go expression naming the contract of a call.
+	inner    string
+	methods  []reflect.Method
 	contract func(method string) string
 }
 
-// generate returns the formatted source of wrappers_gen.go.
 func generate() ([]byte, error) {
 	stateType := reflect.TypeFor[storagev1.StateProvider]()
 	artifactType := reflect.TypeFor[storagev1.ArtifactProvider]()
 	artifactStoreType := reflect.TypeFor[storagev1.ArtifactStore]()
 	embeddedType := reflect.TypeFor[storageclient.EmbeddedStore]()
 
-	// Describe is written by hand, because its faults also rewrite what it
-	// reports.
 	handWritten := []string{"Describe"}
 	wrappers := []wrapper{
 		{
@@ -81,9 +64,6 @@ func generate() ([]byte, error) {
 			contract: func(string) string { return "p.contract" },
 		},
 		{
-			// The embedded store reaches its state.v1 methods, Describe and
-			// HealthCheck through its embedded stateProvider, so it only adds
-			// the artifact methods.
 			typeName: "embeddedStore",
 			inner:    "store",
 			methods:  methodsOf(embeddedType, append(names(stateType), handWritten...)),
@@ -112,7 +92,6 @@ func generate() ([]byte, error) {
 	for importPath := range g.imports {
 		paths = append(paths, importPath)
 	}
-	// Standard library packages come first, as goimports groups them.
 	slices.SortFunc(paths, func(a, b string) int {
 		if standardA, standardB := isStandard(a), isStandard(b); standardA != standardB {
 			if standardA {
@@ -137,15 +116,11 @@ func generate() ([]byte, error) {
 	return format.Source(file.Bytes())
 }
 
-// isStandard reports whether importPath names a standard library package,
-// whose first path element has no dot.
 func isStandard(importPath string) bool {
 	first, _, _ := strings.Cut(importPath, "/")
 	return !strings.Contains(first, ".")
 }
 
-// methodsOf returns the methods of iface, sorted by name, without the methods
-// named in skip.
 func methodsOf(iface reflect.Type, skip []string) []reflect.Method {
 	var methods []reflect.Method
 	for method := range iface.Methods() {
@@ -156,7 +131,6 @@ func methodsOf(iface reflect.Type, skip []string) []reflect.Method {
 	return methods
 }
 
-// names returns the names of the methods of iface.
 func names(iface reflect.Type) []string {
 	var result []string
 	for method := range iface.Methods() {
@@ -166,7 +140,6 @@ func names(iface reflect.Type) []string {
 }
 
 type generator struct {
-	// imports maps each imported package path to its name in the file.
 	imports map[string]string
 }
 
@@ -175,9 +148,6 @@ var (
 	errorType   = reflect.TypeFor[error]()
 )
 
-// method writes one wrapper method. Every provider method takes a context
-// first and returns an error last; the generator refuses any other shape,
-// because the injector needs both.
 func (g *generator) method(out *bytes.Buffer, w wrapper, method reflect.Method) error {
 	signature := method.Type
 	if signature.NumIn() == 0 || signature.In(0) != contextType {
@@ -256,8 +226,6 @@ func (g *generator) method(out *bytes.Buffer, w wrapper, method reflect.Method) 
 	fmt.Fprintf(out, "\tinjected, err := p.injector.call(ctx, %s, %q, func(ctx context.Context) (err error) {\n", w.contract(method.Name), method.Name)
 	isolate()
 	fmt.Fprintf(out, "\t\t%s, err = %s\n\t\treturn err\n\t})\n", strings.Join(results, ", "), call)
-	// An injected outcome replaces the provider's, including any results the
-	// provider returned before its response was lost.
 	out.WriteString("\tif injected {\n")
 	zeros := make([]string, len(results))
 	for i := range results {
@@ -269,8 +237,6 @@ func (g *generator) method(out *bytes.Buffer, w wrapper, method reflect.Method) 
 	return nil
 }
 
-// mutableArgument includes references nested in value requests. Unexported
-// representation fields (notably time.Time) are not provider output surfaces.
 func mutableArgument(t reflect.Type) bool {
 	switch t.Kind() {
 	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
@@ -287,8 +253,6 @@ func mutableArgument(t reflect.Type) bool {
 	return false
 }
 
-// use records an import of the package named packageName and returns its
-// name in the file.
 func (g *generator) use(importPath, packageName string) string {
 	if name, ok := g.imports[importPath]; ok {
 		return name
@@ -301,7 +265,6 @@ func (g *generator) use(importPath, packageName string) string {
 	return name
 }
 
-// typeName returns the Go source for t as the generated file refers to it.
 func (g *generator) typeName(t reflect.Type) (string, error) {
 	if t.Name() != "" {
 		if strings.Contains(t.Name(), "[") {
@@ -310,8 +273,6 @@ func (g *generator) typeName(t reflect.Type) (string, error) {
 		if t.PkgPath() == "" {
 			return t.Name(), nil
 		}
-		// reflect names a type by its package's name, which can differ from
-		// the last element of its import path, as harnessv2 does.
 		packageName := strings.TrimSuffix(t.String(), "."+t.Name())
 		name := g.use(t.PkgPath(), packageName)
 		for other, otherName := range g.imports {
@@ -361,7 +322,6 @@ func (g *generator) typeName(t reflect.Type) (string, error) {
 	return "", fmt.Errorf("unnamed type %s is not supported", t)
 }
 
-// funcType returns the Go source for the function type t.
 func (g *generator) funcType(t reflect.Type) (string, error) {
 	params := make([]string, t.NumIn())
 	for i := range t.NumIn() {

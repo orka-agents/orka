@@ -13,28 +13,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// Fingerprints cover every non-internal object, not just object counts or a
-// version marker. Keep these and the transition SQL immutable: deriving them
-// from currentSchemaStatements would accidentally recognize unknown layouts.
 const (
-	schema149 = "ed423eaa2f45dedb1bd935dff5840016ea0d5976709a2ffecc9d2efb6a9d5ff7" // 0e567418
-	schema150 = "66de67c84e6cf135ea10f5aa98ebb0a65eb920f2742be8c0bd27c5d651167df8" // #731, 1f18614c
-	schema162 = "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7" // #701, 57583975
-	schema166 = "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36" // #732, abd2c040
-	schema167 = "01af383a41304d65579d5221976bf479c7e8561a4ec363ba41dcb5f4d571af6c" // #574, harness v1 tables removed
-	schema168 = "b7af032523fa2f524c19ceb897fc1807e6850a8c43fa6e0779d059f11fe2c133" // dataset identity
-	schema169 = "4756d67c9c3850bd87286c81f4398f245163f5edb038cba38e0269d347dd09e2" // schema version 2: operation receipts and epoch advance
-	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7" // schema version 3: dataset installation binding
-	schema171 = "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2" // schema version 4: retry_pending work actions own their dedupe key
-	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e" // schema version 5: result and artifact write stamps
-	schema173 = "44db6c191e5b2d8c2570a251762e50e89231b2e61ad7a5f40a42d6d5784ed75b" // schema version 6: memory generations and consolidation proposal targets
-	schema174 = "ce3aacb60e5f3f40f03cbe071637ac1218ff4255fb7fff314642e6b7b416317d" // schema version 7: memory consolidation runs
-	schema175 = "54d6dcddb755001aa9ba36a92056d29c9a6a044d60f863e9d5de64cd96ea4d6e" // schema version 8: Agent Host Protocol store
-	schema176 = "4af6f8b91484395ea51813a429338640f875baf8e919f972e3324d29de5afc13" // schema version 9: GitHub sign-in sessions
-	schema177 = "5d98d75e3cc537c5735264ac6a46a4c521c3000c3115e483e68be6fe19c6faa6" // schema version 10: write watermark
+	schema149 = "ed423eaa2f45dedb1bd935dff5840016ea0d5976709a2ffecc9d2efb6a9d5ff7"
+	schema150 = "66de67c84e6cf135ea10f5aa98ebb0a65eb920f2742be8c0bd27c5d651167df8"
+	schema162 = "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7"
+	schema166 = "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36"
+	schema167 = "01af383a41304d65579d5221976bf479c7e8561a4ec363ba41dcb5f4d571af6c"
+	schema168 = "b7af032523fa2f524c19ceb897fc1807e6850a8c43fa6e0779d059f11fe2c133"
+	schema169 = "4756d67c9c3850bd87286c81f4398f245163f5edb038cba38e0269d347dd09e2"
+	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7"
+	schema171 = "bb9e3ee12fe041e1bf1dced0c0f61f49b4525ea04825d2806a9f544fbb432ac2"
+	schema172 = "8d812a8681fbf1d0139be0d700ed3722d725b5bf787576c1cf002b39fa6c402e"
+	schema173 = "44db6c191e5b2d8c2570a251762e50e89231b2e61ad7a5f40a42d6d5784ed75b"
+	schema174 = "ce3aacb60e5f3f40f03cbe071637ac1218ff4255fb7fff314642e6b7b416317d"
+	schema175 = "54d6dcddb755001aa9ba36a92056d29c9a6a044d60f863e9d5de64cd96ea4d6e"
+	schema176 = "4af6f8b91484395ea51813a429338640f875baf8e919f972e3324d29de5afc13"
+	schema177 = "5d98d75e3cc537c5735264ac6a46a4c521c3000c3115e483e68be6fe19c6faa6"
 
-	// #700's tables were subsequently changed by #701. Adding empty tables
-	// alone cannot upgrade this layout, even when its custody tables are empty.
 	unsupportedConnectorSchema = "c82fb870c7ed92488fbe33daf9f0693ffdee5aebff9f48db6fa115fdf99ce83b"
 )
 
@@ -83,7 +78,6 @@ var migration176To177 string
 type schemaMigration struct {
 	from, to string
 	sql      string
-	// precheck runs inside the migration transaction before sql.
 	precheck func(context.Context, *sql.Conn) error
 }
 
@@ -106,17 +100,12 @@ func schemaMigrations() []schemaMigration {
 	}
 }
 
-// versionUpgrade moves a store that already has a dataset identity from one
-// schema version to the next. Its layout and identity row are known exactly,
-// so it keeps the identity row and only changes the layout and user_version.
 type versionUpgrade struct {
 	from, to        int
 	fromLayout, sql string
 	toLayout        string
 }
 
-// versionUpgrades lists the steps between schema versions, in order. A store
-// at any listed version upgrades through every later step in one transaction.
 func versionUpgrades() []versionUpgrade {
 	return []versionUpgrade{
 		{from: 1, to: 2, fromLayout: schema168, sql: migration168To169, toLayout: schema169},
@@ -131,10 +120,6 @@ func versionUpgrades() []versionUpgrade {
 	}
 }
 
-// requireNoHarnessV1Records refuses to upgrade a store that holds harness v1
-// state: rows in the retired tables, or v1 Session lineages that a harness v2
-// controller could never continue. A harness v2 store never writes either, so
-// such rows mean the store belonged to an unsupported harness v1 installation.
 func requireNoHarnessV1Records(ctx context.Context, conn *sql.Conn) error {
 	for _, check := range []struct{ records, query string }{
 		{"harness_v1_attempts", `SELECT COUNT(*) FROM harness_v1_attempts`},
@@ -165,10 +150,6 @@ func schemaFingerprint(schema map[string]string) string {
 	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
-// upgradeSchema is called only while OpenLockedStore owns the process lock.
-// VACUUM INTO must precede BEGIN IMMEDIATE: SQLite disallows it in a transaction.
-// Pin the connection throughout, then recheck the complete source under the
-// SQLite write lock before executing any DDL.
 func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
@@ -180,11 +161,6 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	if err != nil {
 		return err
 	}
-	// A store this or an earlier release wrote has a nonzero user_version and
-	// an established store_dataset row. It upgrades only through the numbered
-	// steps in versionUpgrades, which keep that identity row. The chain below
-	// is for unversioned historical layouts (user_version = 0) only, and always
-	// records a new adopted identity.
 	if version != 0 {
 		return upgradeVersionedSchema(ctx, conn, path, version, validationErr)
 	}
@@ -215,18 +191,6 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	return nil
 }
 
-// upgradeVersionedSchema upgrades a store at schema version from to
-// SchemaVersion. It accepts only the exact layout recorded for that version,
-// and returns validationErr for any other version or layout.
-//
-// A version step keeps the store's identity row and adds no rows, so
-// DatasetInfo is unchanged apart from SchemaVersion: the same ID, and the same
-// CanBootstrapSnapshotKey for a store whose key bootstrap was interrupted. A
-// step must therefore never add rows, even implicitly as FTS5 does, or an
-// empty, unbootstrapped store could never mint its key. Upgrade tests start
-// from schemaVersion1StoreDB for every state in version1StoreStates, not from
-// a layout rebuilt from historical DDL, which has no identity row and takes
-// the adoption path instead.
 func upgradeVersionedSchema(ctx context.Context, conn *sql.Conn, path string, from int, validationErr error) error {
 	steps := versionUpgrades()
 	first := -1
@@ -258,8 +222,6 @@ func upgradeVersionedSchema(ctx context.Context, conn *sql.Conn, path string, fr
 	return nil
 }
 
-// runVersionUpgrades applies steps, in one transaction, to a store at version
-// whose layout has fingerprint source, and records the last step's version.
 func runVersionUpgrades(ctx context.Context, conn *sql.Conn, version int, source string, steps []versionUpgrade) error {
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return err
@@ -368,7 +330,6 @@ func runSchemaMigrations(ctx context.Context, conn *sql.Conn, source string, ste
 	if err := validateSchema(schema, currentSchemaStatements()); err != nil {
 		return err
 	}
-	// Version-0 sources only; see upgradeVersionedSchema for versioned stores.
 	if err := initializeDatasetRecord(conn, datasetOriginAdopted); err != nil {
 		return err
 	}
@@ -394,8 +355,6 @@ func backupSchemaDatabase(ctx context.Context, conn *sql.Conn, path string) (str
 	if err := file.Close(); err != nil {
 		return "", err
 	}
-	// CreateTemp reserves an empty, private file; VACUUM INTO accepts that file
-	// but will never overwrite a nonempty backup. It includes committed WAL data.
 	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, backup); err != nil {
 		return "", err
 	}
@@ -411,7 +370,6 @@ func backupSchemaDatabase(ctx context.Context, conn *sql.Conn, path string) (str
 	if closeErr != nil {
 		return "", closeErr
 	}
-	// The file and directory entry must both be durable before changing schema.
 	for _, name := range []string{backup, filepath.Dir(backup)} {
 		f, err := os.Open(name)
 		if err != nil {

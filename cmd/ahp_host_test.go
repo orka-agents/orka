@@ -14,10 +14,9 @@ import (
 
 func TestValidateAHPSignInRequiresOIDC(t *testing.T) {
 	for name, oidc := range map[string]api.OIDCConfig{
-		"none":        {},
-		"no audience": {Issuer: "https://issuer.example", AllowedSubjects: []string{"*"}},
-		"no issuer":   {Audience: "orka", AllowedSubjects: []string{"*"}},
-		// Every sign-in is refused without a subject allowlist.
+		"none":                   {},
+		"no audience":            {Issuer: "https://issuer.example", AllowedSubjects: []string{"*"}},
+		"no issuer":              {Audience: "orka", AllowedSubjects: []string{"*"}},
 		"no allowed subjects":    {Issuer: "https://issuer.example", Audience: "orka"},
 		"blank allowed subjects": {Issuer: "https://issuer.example", Audience: "orka", AllowedSubjects: []string{" "}},
 	} {

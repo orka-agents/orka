@@ -21,9 +21,6 @@ type failingWriter struct{ err error }
 
 func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 
-// serveOperatorExec answers one exec with a frame of stdout and one of stderr,
-// then reports that the remote command exited 0. It closes streamEnded when
-// the client lets go of the stream.
 func serveOperatorExec(t *testing.T) (*httptest.Server, chan struct{}) {
 	t.Helper()
 	streamEnded := make(chan struct{})
@@ -51,9 +48,6 @@ func serveOperatorExec(t *testing.T) (*httptest.Server, chan struct{}) {
 	return api, streamEnded
 }
 
-// "orka task exec my-task -- cat big > /dev/full" loses its output. The remote
-// command still exits 0, so reporting that status would call a failed transfer
-// a success.
 func TestOperatorExecFailsWhenItsOutputCannotBeWrittenLocally(t *testing.T) {
 	diskFull := errors.New("no space left on device")
 	for name, streams := range map[string]OperatorExecStreams{
@@ -92,7 +86,6 @@ func TestOperatorExecReturnsTheRemoteStatusWhenOutputIsWritten(t *testing.T) {
 	}
 }
 
-// failingReader yields data once, then err on every later read.
 type failingReader struct {
 	data string
 	err  error
@@ -107,9 +100,6 @@ func (r *failingReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// serveOperatorExecReadingStdin behaves like "cat > file": it consumes stdin
-// and exits 0 as soon as it is told the input ended. It reports whether that
-// end-of-input message arrived and closes streamEnded when the client lets go.
 func serveOperatorExecReadingStdin(t *testing.T) (*httptest.Server, *atomic.Bool, chan struct{}) {
 	t.Helper()
 	sawEOF := &atomic.Bool{}
@@ -142,8 +132,6 @@ func serveOperatorExecReadingStdin(t *testing.T) (*httptest.Server, *atomic.Bool
 	return api, sawEOF, streamEnded
 }
 
-// A read error on local stdin is not the end of the input. Announcing a clean
-// end would let the remote command finish on truncated input and exit 0.
 func TestOperatorExecFailsWhenItsStdinCannotBeRead(t *testing.T) {
 	api, sawEOF, streamEnded := serveOperatorExecReadingStdin(t)
 	broken := errors.New("input/output error")

@@ -308,7 +308,6 @@ func TestAgentRuntimeRecoveryEnrollsBeforeConformanceAndReplacesEpoch(t *testing
 	if f.server.Counts() != counts {
 		t.Fatal("epoch rollover replayed a Session or prompt")
 	}
-	// An interrupted reconcile after its exact epoch patch is idempotent.
 	f.reconcile(t)
 	if f.runtime.Status.Ready || f.server.Counts() != counts {
 		t.Fatal("a drained old boot became admissible during replacement")
@@ -521,8 +520,6 @@ func TestAgentRuntimeRecoveryResumesWitnessBeforeRetention(t *testing.T) {
 	if _, err := f.control.ReserveExternalEffect(t.Context(), store.ReserveExternalEffectRequest{Identity: identity, RequestDigest: digest, Fence: f.fence}); err != nil {
 		t.Fatal(err)
 	}
-	// No metadata retention or mutable conformance status was saved. The same
-	// observation must complete, install retention, and only then run probes.
 	f.reconcile(t)
 	if !f.runtime.Status.Ready || f.server.Counts().SessionCreates != 2 {
 		t.Fatalf("interrupted enrollment did not finish: %s", f.runtime.Status.Message)

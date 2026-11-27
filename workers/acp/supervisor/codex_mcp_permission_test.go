@@ -9,9 +9,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// Exact structural envelopes from the pinned codex-acp 2.1.1 bundle's
-// McpToolReporter and buildMcpPermissionRequest. The permission callback
-// must retain the structured identity from the same prompt's preceding update.
 func TestCodexMCPPermissionUsesPinnedStructuredIdentity(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	fence := cfg.Fence
@@ -134,9 +131,6 @@ func TestCodexMCPPermissionIdentityFailsClosed(t *testing.T) {
 	}
 }
 
-// A model can call an MCP tool the frozen policy does not hold. The prompt
-// broker refuses that call, so the prompt keeps running, and the call's
-// permission request can neither name a tool nor be renamed later.
 func TestCodexMCPCallOutsidePolicyKeepsThePromptRunning(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	fence := cfg.Fence

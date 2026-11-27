@@ -6,11 +6,6 @@ import (
 	"time"
 )
 
-// Helpers shared by every DurableControlStore backend. They normalize and
-// validate store-level control records before a backend persists them, so the
-// Kubernetes and SQLite implementations enforce the same contract.
-
-// NormalizeControlTime returns value in UTC, substituting the current time when it is zero.
 func NormalizeControlTime(value time.Time) time.Time {
 	if value.IsZero() {
 		return time.Now().UTC()
@@ -18,7 +13,6 @@ func NormalizeControlTime(value time.Time) time.Time {
 	return value.UTC()
 }
 
-// NormalizeOptionalControlTime returns a UTC copy of value, or nil.
 func NormalizeOptionalControlTime(value *time.Time) *time.Time {
 	if value == nil {
 		return nil
@@ -27,7 +21,6 @@ func NormalizeOptionalControlTime(value *time.Time) *time.Time {
 	return &normalized
 }
 
-// NormalizeBranchClaimForCreate validates and normalizes a new branch claim and its fence.
 func NormalizeBranchClaimForCreate(claim *BranchClaim, fence ControllerEpochFence) (BranchClaim, ControllerEpochFence, error) {
 	if claim == nil {
 		return BranchClaim{}, ControllerEpochFence{}, ValidationErrorf("branch claim is required")
@@ -110,7 +103,6 @@ func NormalizeBranchClaimForCreate(claim *BranchClaim, fence ControllerEpochFenc
 	return normalized, fence, nil
 }
 
-// NormalizeBranchClaimReclamationRequest validates and normalizes a branch claim reclamation request.
 func NormalizeBranchClaimReclamationRequest(request ReclaimBranchClaimRequest) (ReclaimBranchClaimRequest, error) {
 	request.ID = strings.TrimSpace(request.ID)
 	request.ExpectedRepositoryID = strings.TrimSpace(request.ExpectedRepositoryID)
@@ -159,7 +151,6 @@ func NormalizeBranchClaimReclamationRequest(request ReclaimBranchClaimRequest) (
 	return request, nil
 }
 
-// NormalizePromptAttemptForCreate validates and normalizes a new prompt attempt and its fence. It does not inspect CredentialBindings; backends that persist them call NormalizePromptCredentialBindings.
 func NormalizePromptAttemptForCreate(attempt *PromptAttempt, fence ControllerEpochFence) (PromptAttempt, ControllerEpochFence, error) {
 	if attempt == nil {
 		return PromptAttempt{}, ControllerEpochFence{}, ValidationErrorf("prompt attempt is required")
@@ -246,9 +237,6 @@ func NormalizePromptAttemptForCreate(attempt *PromptAttempt, fence ControllerEpo
 	return normalized, fence, nil
 }
 
-// NormalizePromptCredentialBindings sorts attempt.CredentialBindings by role
-// and validates each binding against the attempt namespace, rejecting
-// duplicate roles.
 func NormalizePromptCredentialBindings(attempt *PromptAttempt) error {
 	attempt.CredentialBindings = append([]PromptCredentialBinding(nil), attempt.CredentialBindings...)
 	sort.Slice(attempt.CredentialBindings, func(i, j int) bool {
@@ -269,7 +257,6 @@ func NormalizePromptCredentialBindings(attempt *PromptAttempt) error {
 	return nil
 }
 
-// NormalizePullRequestIntent trims every string field of intent in place.
 func NormalizePullRequestIntent(intent *PullRequestIntent) {
 	intent.BaseRepositoryID = strings.TrimSpace(intent.BaseRepositoryID)
 	intent.BaseRef = strings.TrimSpace(intent.BaseRef)
@@ -278,8 +265,6 @@ func NormalizePullRequestIntent(intent *PullRequestIntent) {
 	intent.ExpectedHeadSHA = strings.TrimSpace(intent.ExpectedHeadSHA)
 }
 
-// NormalizePublicationForCreate validates and normalizes a new publication and its fence.
-//
 //nolint:gocyclo // Publication immutable-input validation is intentionally centralized.
 func NormalizePublicationForCreate(publication *Publication, fence ControllerEpochFence) (Publication, ControllerEpochFence, error) {
 	if publication == nil {
@@ -399,7 +384,6 @@ func NormalizePublicationForCreate(publication *Publication, fence ControllerEpo
 	return normalized, normalizedFence, nil
 }
 
-// NormalizeSessionControlForCreate validates and normalizes a new session control record and its fence.
 func NormalizeSessionControlForCreate(control *SessionControl, fence ControllerEpochFence) (SessionControl, ControllerEpochFence, error) {
 	if control == nil {
 		return SessionControl{}, ControllerEpochFence{}, ValidationErrorf("session control is required")
@@ -468,8 +452,6 @@ func NormalizeSessionControlForCreate(control *SessionControl, fence ControllerE
 	return normalized, fence, nil
 }
 
-// NormalizeControlIdentifierSet trims, drops empty values, deduplicates, and
-// sorts a set of control identifiers so backends persist one canonical order.
 func NormalizeControlIdentifierSet(values []string) []string {
 	set := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -486,8 +468,6 @@ func NormalizeControlIdentifierSet(values []string) []string {
 	return result
 }
 
-// NormalizeSessionTurnForCreate validates a new open SessionTurn, binds it to
-// the normalized controller epoch fence, and stamps version one.
 func NormalizeSessionTurnForCreate(turn SessionTurn, fence ControllerEpochFence) (SessionTurn, ControllerEpochFence, error) {
 	turn.Key.SessionUID = strings.TrimSpace(turn.Key.SessionUID)
 	turn.Key.TaskUID = strings.TrimSpace(turn.Key.TaskUID)

@@ -16,8 +16,6 @@ const (
 	maxBaselineEntrypoints     = 8
 )
 
-// addInvestigationSlices turns threat-model questions into slices whose files
-// are starting points; the reviewer traces the question across the repository.
 func addInvestigationSlices(builder *sliceBuilder, files []repoFile, investigations []security.SecurityInvestigation) {
 	for _, investigation := range security.SanitizeInvestigations(investigations) {
 		owned := investigationFiles(files, investigation.Paths)
@@ -42,8 +40,6 @@ func addInvestigationSlices(builder *sliceBuilder, files []repoFile, investigati
 	}
 }
 
-// addBaselineAuditSlice adds one review that is not anchored on per-component
-// slicing. Its files are the repository's entrypoints.
 func addBaselineAuditSlice(builder *sliceBuilder, files []repoFile) {
 	owned := repositoryEntrypoints(files)
 	if len(owned) == 0 {
@@ -86,7 +82,6 @@ func investigationFiles(files []repoFile, paths []string) []store.ReviewSliceFil
 	return out
 }
 
-// repositoryEntrypoints prefers program entrypoints, shallowest first.
 func repositoryEntrypoints(files []repoFile) []store.ReviewSliceFile {
 	var candidates []repoFile
 	for _, file := range files {

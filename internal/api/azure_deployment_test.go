@@ -22,8 +22,6 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 )
 
-// Removing deployment propagation or using it for logical-model authorization
-// must break this test at the HTTP or resolver boundary, respectively.
 func TestAzureDeploymentResolverRouting(t *testing.T) {
 	for _, route := range []struct {
 		name, providerType, deployment, wantModel, version, wantVersion string
@@ -59,8 +57,6 @@ func TestAzureDeploymentResolverRouting(t *testing.T) {
 					require.NoError(t, err)
 					assert.Equal(t, "logical-model", model)
 					assert.Equal(t, "logical-model", authorizedModel)
-					// A fresh provider exercises Stream's non-streaming detection probe;
-					// subsequent calls exercise cached routing in both APIs.
 					req := &llm.CompletionRequest{Model: model, Messages: []llm.Message{{Role: "user", Content: "hello"}}}
 					before, err := json.Marshal(req)
 					require.NoError(t, err)
@@ -114,7 +110,6 @@ type azureObservedRequest struct {
 	body map[string]any
 }
 
-// Only URL and JSON are captured; credentials and headers never enter evidence.
 func newAzureRoutingServer(t *testing.T, api string, requests chan<- azureObservedRequest) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +163,6 @@ func assertAzureRoutingRequests(t *testing.T, requests <-chan azureObservedReque
 		}
 		assert.Equal(t, path, got.uri)
 		assert.Equal(t, model, got.body["model"])
-		// Assert the complete payload, not only the deployment field.
 		want := fmt.Sprintf(`{"model":%q,"input":[{"role":"user","content":"hello"}]}`, model)
 		if strings.Contains(got.uri, "/chat/completions") {
 			want = fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, model)

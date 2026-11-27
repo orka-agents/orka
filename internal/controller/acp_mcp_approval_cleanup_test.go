@@ -18,9 +18,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// Intercept the real fenced access boundary and SQLite reads and writes, never
-// replace them. The append fallback pauses unfenced appends as well, so the
-// cleanup-wins regression fails on resurrected rows rather than a missing hook.
 type approvalCleanupEventStore struct {
 	*storageclient.Client
 	beforeTransaction func(context.Context) error
@@ -67,8 +64,6 @@ func (s *approvalCleanupEventStore) AppendExecutionEventIfAbsent(ctx context.Con
 	return s.Client.AppendExecutionEventIfAbsent(ctx, event, key)
 }
 
-// AppendExecutionEventsIfAbsent applies the same hooks to each entry of a
-// grouped append before handing the whole group to the store.
 func (s *approvalCleanupEventStore) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
 	for _, entry := range appends {
 		if entry.Event.Type != events.ExecutionEventTypeApprovalRequested && ctx.Value(approvalCleanupTransactionKey{}) == nil && s.beforeTransaction != nil {
@@ -227,11 +222,6 @@ func TestMCPApprovalCleanupWinsRecoveryPair(t *testing.T) {
 	requireApprovalHistoryEmpty(t, f)
 }
 
-// TestMCPApprovalCleanupAfterRetainedReadRefusesProjection covers cleanup
-// that commits between a projection's fenced read of the retained request and
-// its append. No store transaction is open in between, so cleanup completes;
-// the append is refused because cleanup moved the projection's fence, and
-// the repeated projection finds no request, so nothing is resurrected.
 func TestMCPApprovalCleanupAfterRetainedReadRefusesProjection(t *testing.T) {
 	for _, recovery := range []bool{false, true} {
 		name := "broker"
@@ -274,9 +264,6 @@ func TestMCPApprovalCleanupAfterRetainedReadRefusesProjection(t *testing.T) {
 	}
 }
 
-// Recovery copies the Session association it read from the request. Session
-// cleanup between that read and the append must refuse the append, so the
-// retry reads the cleared association instead of restoring the Session.
 func TestMCPApprovalSessionCleanupAfterRecoveryReadRefusesProjection(t *testing.T) {
 	const session = "approval-session"
 	f := newMCPApprovalRecoveryFixture(t)
@@ -322,9 +309,6 @@ func TestMCPApprovalSessionCleanupAfterRecoveryReadRefusesProjection(t *testing.
 	require.Zero(t, latest)
 }
 
-// The broker writes the Session association from the call's credentials, so
-// its projection follows only the Task's own cleanup: cleanup of another Task
-// in the namespace between its read and its append must not refuse it.
 func TestMCPApprovalBrokerProjectionIgnoresOtherTaskCleanup(t *testing.T) {
 	f := newMCPApprovalRecoveryFixture(t)
 	call, _ := seedMCPApprovalPending(t, f, true)
@@ -421,8 +405,6 @@ func TestMCPApprovalProjectionRequiresExactRetainedRequest(t *testing.T) {
 				case "broker_outcome":
 					err = f.broker.approvalOutcome(f.ctx, call, "unknown", acpMCPApprovalUnknownReason, nil)
 				case "recovery":
-					// Exercise the production recovery projection with a valid but
-					// now-stale snapshot, just as cleanup/name reuse can leave it.
 					err = f.dispatcher.projectMCPApprovalExecution(f.ctx, f.task, expected, effect.Identity)
 				}
 				require.NoError(t, err)
@@ -443,8 +425,6 @@ func TestMCPApprovalProjectionReadErrorsRemainRetryable(t *testing.T) {
 			f.task.Status.Phase = corev1alpha1.TaskPhaseCancelled
 			require.NoError(t, f.kube.Update(f.ctx, f.task))
 			_, before := f.approval(t)
-			// Even a conflict-shaped read failure is not evidence of absence
-			// or of a reviewer winning a terminal decision append.
 			outage := store.ConflictErrorf("injected retained-request read failure")
 			wrapped := &approvalCleanupEventStore{Client: f.storage, readError: outage}
 			f.broker.ApprovalEvents, f.dispatcher.EventStore = wrapped, wrapped

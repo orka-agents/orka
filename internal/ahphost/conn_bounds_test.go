@@ -21,8 +21,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// A request id is echoed in its response, so an oversized one is refused
-// rather than queued back to a client that may not read.
 func TestARequestWithAnOversizedIDIsRefused(t *testing.T) {
 	env := newTestEnv(t, store.AHPJournalLimits{})
 	ctx := ctx5(t)
@@ -53,8 +51,6 @@ func TestARequestWithAnOversizedIDIsRefused(t *testing.T) {
 	require.Contains(t, string(data), `"id":"short"`, "a short id is answered")
 }
 
-// A client that does not read is closed once its unsent messages pass
-// maxQueuedBytes, however few messages that takes.
 func TestUnsentMessagesAreBoundedByBytes(t *testing.T) {
 	accepted := make(chan *websocket.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -65,10 +65,6 @@ const (
 	usageWorkflowModel     = "usage-fixture-model"
 )
 
-// This workflow uses the production monitor, AI model loop, ACP journal,
-// authenticated HTTP routes, Task finalizer, and on-disk SQLite store. Kubernetes,
-// provider responses, GitHub, and the publisher's verified delivery are fixtures;
-// no usage observations or PR outcomes are inserted directly into the store.
 func TestUsageIssueToMergedPRWorkflowE2E(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "orka")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
@@ -165,7 +161,6 @@ func testUsageIssueWorkflow(t *testing.T, workerPhase corev1alpha1.TaskPhase, bi
 	require.Equal(t, retained.Summary, current.Summary)
 	require.EqualValues(t, 1, f.github.creates.Load())
 	f.assertCLIReport(t, binary, retained, retainedSelection)
-	// The merge snapshot is also readable independently of the final Task phase.
 	got, _ := f.report(t, mergedSelection)
 	require.Equal(t, merged.Summary, got.Summary)
 }
@@ -185,8 +180,6 @@ func assertUsageWorkflowTotals(t *testing.T, summary usage.Summary, phase corev1
 	}
 }
 
-// usageWorkflowStore is the storage client over SQLite, as production wires
-// every consumer, with test hooks for readiness and the poll cutoff.
 type usageWorkflowStore struct {
 	*storageclient.Client
 	refreshNow bool
@@ -204,8 +197,6 @@ func (s *usageWorkflowStore) HealthCheck(ctx context.Context) error {
 func (s *usageWorkflowStore) ListUsagePullRequestLinks(
 	ctx context.Context, namespace, monitorUID string, before time.Time, limit int,
 ) ([]store.UsagePRLink, error) {
-	// Advance only the poll eligibility cutoff, avoiding a five-minute sleep.
-	// Selection, GitHub verification, observation times, and storage stay real.
 	if s.refreshNow {
 		before = time.Now().UTC().Add(time.Second)
 	}
@@ -240,8 +231,6 @@ func newUsageWorkflowFixture(t *testing.T) *usageWorkflowFixture {
 		startedAt: time.Now().UTC().Add(-time.Minute),
 		viewer:    "fixture-viewer-" + t.Name(), outsider: "fixture-outsider-" + t.Name(),
 	}
-	// This fixture tests persisted workflow state, not connection reuse. Own
-	// its HTTP connections so idle keep-alives cannot delay API replacement.
 	f.transport = http.DefaultTransport.(*http.Transport).Clone()
 	f.transport.DisableKeepAlives = true
 	for _, add := range []func(*runtime.Scheme) error{
@@ -355,8 +344,6 @@ func (f *usageWorkflowFixture) start(t *testing.T) {
 		Client: f.kube, APIReader: f.kube, Scheme: f.scheme, KubeClient: f.clientset,
 		ExecutionEventStore: f.backend, ResultStore: f.backend, ArtifactStore: f.backend, SessionManager: sessions,
 	}
-	// Start accepts a port, not a listener. Retry bind collisions, and only
-	// accept readiness observed by this store instead of another local server.
 	for range 5 {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		require.NoError(t, err)
@@ -766,8 +753,6 @@ func (f *usageWorkflowFixture) finishWorker(t *testing.T, task *corev1alpha1.Tas
 	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKeyFromObject(task), task))
 	task.Status.Phase, task.Status.CompletionTime = phase, new(metav1.Now())
 	require.NoError(t, f.kube.Status().Update(t.Context(), task))
-	// The fake Kubernetes client has no garbage collector. Remove the fixture
-	// Pod after its worker exits, then let the Task controller clean up the Job.
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "delegated-pod", Namespace: task.Namespace}}
 	require.NoError(t, f.kube.Delete(t.Context(), pod))
 	f.reconcileTask(t, task)

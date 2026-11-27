@@ -107,7 +107,6 @@ func safeWorkspaceStatus(task client.TaskDetail) map[string]any {
 		safe["readCredentialConfigured"] = len(nestedMap(workspace, "readCredentialRef")) > 0
 		safe["publicationReadCredentialConfigured"] = len(nestedMap(workspace, "publicationReadCredentialRef")) > 0
 		publicationWriteConfigured := len(nestedMap(workspace, "publicationCredentialRef")) > 0
-		// Preserve the existing summary field while making the write-only role explicit.
 		safe["publicationCredentialConfigured"] = publicationWriteConfigured
 		safe["publicationWriteCredentialConfigured"] = publicationWriteConfigured
 		safe["forgeCredentialConfigured"] = len(nestedMap(workspace, "forgeCredentialRef")) > 0

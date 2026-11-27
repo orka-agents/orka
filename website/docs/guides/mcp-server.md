@@ -157,9 +157,17 @@ connects, so the header doesn't go stale:
 
 Name the same server the client connects to with `--server`: a sign-in saved for any
 other server is then refused, even after you later sign in elsewhere. Claude Code runs a
-project's `headersHelper` only once you trust the workspace. For a client that reads the
-header from the environment, scope `ORKA_TOKEN` to that client's invocation rather than
-leaving it exported in your shell:
+project's `headersHelper` only once you trust the workspace and times out the helper after
+10 seconds, while Orka allows up to 30 seconds for an OIDC token refresh (including
+config-lock waits). If a refresh exceeds Claude Code's timeout, refresh the saved token
+outside Claude Code first and reconnect once it succeeds:
+
+```bash
+env -u ORKA_TOKEN orka auth token --server https://orka.example.com >/dev/null
+```
+
+For a client that reads the header from the environment, scope `ORKA_TOKEN` to that
+client's invocation rather than leaving it exported in your shell:
 `token="$(env -u ORKA_TOKEN orka auth token --server https://orka.example.com)" && ORKA_TOKEN="$token" <client>`.
 That copy doesn't refresh, and if `ORKA_TOKEN` stays exported in the shell, `orka auth token` prints
 it instead of your saved sign-in and bypasses its `--server` check; unset it before

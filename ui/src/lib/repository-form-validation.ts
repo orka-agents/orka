@@ -1,10 +1,5 @@
 const GITHUB_PATH_SEGMENT = /^[A-Za-z0-9._-]+(?:\.git)?$/
 
-/**
- * Accepts only a credential-free GitHub repository root: `https://github.com/org/repo`
- * (optionally `.git`) or `git@github.com:org/repo`. Pull request, issue, branch,
- * file, query, fragment, plain-HTTP, other-host, and token-bearing URLs are rejected.
- */
 export function isCredentialFreeGitHubRepositoryURL(value: string) {
   const repoURL = value.trim()
   if (!repoURL) return false
@@ -33,18 +28,15 @@ export function isCredentialFreeGitHubRepositoryURL(value: string) {
 
 const CRON_DESCRIPTOR = /^@(?:yearly|annually|monthly|weekly|daily|midnight|hourly)$/
 
-// robfig/cron reads everything after exactly "@every " as a Go duration.
 const EVERY_DESCRIPTOR = /^@every(?: (.*))?$/
 const GO_DURATION = /^[-+]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h))+$|^[-+]?0$/
 const GO_DURATION_PART = /(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/g
 const GO_DURATION_UNIT_SECONDS: Record<string, number> = {
   ns: 1e-9, us: 1e-6, 'µs': 1e-6, 'μs': 1e-6, ms: 1e-3, s: 1, m: 60, h: 3600,
 }
-// time.ParseDuration refuses anything past int64 nanoseconds (about 292 years).
 const GO_DURATION_MAX_SECONDS = 2 ** 63 / 1e9
 const MIN_EVERY_SECONDS = 60
 
-/** The seconds a Go duration string stands for, or undefined when Go would not parse it. */
 function goDurationSeconds(value: string) {
   if (!GO_DURATION.test(value)) return undefined
   let seconds = 0
@@ -55,12 +47,6 @@ function goDurationSeconds(value: string) {
   return value.startsWith('-') ? -seconds : seconds
 }
 
-/**
- * Why an `@every` schedule is refused, or undefined when the value is not an
- * `@every` schedule or its interval is accepted. Like the controller, it
- * needs a Go duration (`5m`, `1h30m`) of at least one minute: shorter, zero,
- * and negative intervals would start a new scan almost continuously.
- */
 export function everyScheduleError(value: string) {
   const match = EVERY_DESCRIPTOR.exec(stripCronTimeZone(value))
   if (!match) return undefined
@@ -81,18 +67,15 @@ function stripCronTimeZone(value: string) {
 interface CronField {
   min: number
   max: number
-  /** Case-insensitive names; the first one stands for `min`. */
   names?: readonly string[]
 }
 
-// Bounds and names of the controller's standard cron parser (robfig/cron
-// ParseStandard), which rejects anything outside them, including weekday 7.
 const CRON_FIELDS: readonly CronField[] = [
-  { min: 0, max: 59 }, // minute
-  { min: 0, max: 23 }, // hour
-  { min: 1, max: 31 }, // day of month
+  { min: 0, max: 59 },
+  { min: 0, max: 23 },
+  { min: 1, max: 31 },
   { min: 1, max: 12, names: ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'] },
-  { min: 0, max: 6, names: ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] }, // day of week
+  { min: 0, max: 6, names: ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] },
 ]
 
 function cronValue(token: string, field: CronField) {
@@ -101,7 +84,6 @@ function cronValue(token: string, field: CronField) {
   return index < 0 ? undefined : field.min + index
 }
 
-/** One comma-separated item: `*` or `?`, a value, or a range, each optionally `/step`. */
 function isCronFieldItem(item: string, field: CronField) {
   const [range, step, ...extraSteps] = item.split('/')
   if (extraSteps.length > 0) return false
@@ -114,15 +96,6 @@ function isCronFieldItem(item: string, field: CronField) {
   return start !== undefined && end !== undefined && field.min <= start && start <= end && end <= field.max
 }
 
-/**
- * Checks a cron schedule the way the controller parses it: five
- * space-separated fields (minute 0-59, hour 0-23, day of month 1-31, month
- * 1-12 or JAN-DEC, day of week 0-6 or SUN-SAT) built from `*`, `?`, values,
- * ranges, steps, and lists, one of the @-descriptors, or `@every` with a Go
- * duration of at least one minute, optionally after a `CRON_TZ=`/`TZ=`
- * prefix. Empty list items are refused as typos. The time zone stays the
- * server's call.
- */
 export function isCronSchedule(value: string) {
   const schedule = stripCronTimeZone(value)
   if (CRON_DESCRIPTOR.test(schedule)) return true

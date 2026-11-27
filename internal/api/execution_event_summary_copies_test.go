@@ -138,8 +138,6 @@ func TestExecutionEventHistoryRedactsCodeAndMessageTogether(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			journal, state := newModelHistoryJournal(t, "")
 			appendMarkerWhitespaceUpdate(t, state, markerWhitespaceToolEvent(1, "Inspect", "pwd"), true)
-			// A shorter masked code would expose the normalized pa tail if the
-			// history check masked only code rather than both logical fields.
 			code := "=fixture-value. " + strings.Repeat("x", 40)
 			message := strings.Repeat("x", 4069) + "pa\u00a0"
 			for _, wantNew := range []bool{true, false} {
@@ -189,8 +187,6 @@ func TestExecutionEventSummaryChecksHistoryAndCurrentCopies(t *testing.T) {
 					sequence++
 					firstRow++
 				} else {
-					// Only the normalized summary ends in pa; it must be checked
-					// against the other actual copy of this same message.
 					message = "ssword=fixture-value. " + message
 				}
 				for _, wantNew := range []bool{true, false} {
@@ -283,7 +279,6 @@ func TestExecutionEventSummaryCopiesSurviveReplay(t *testing.T) {
 			} else if content.Message != "s" || first.ContentText != "" {
 				t.Fatal("failure must publish raw JSON message plus summary, not contentText")
 			}
-			// One source copy cannot supply both s characters in password.
 			event := markerWhitespaceToolEvent(sequence+1, "pa", "")
 			event.Update.ToolCall.Kind = "word=fixture-value"
 			appendMarkerWhitespaceUpdate(t, state, event, true)

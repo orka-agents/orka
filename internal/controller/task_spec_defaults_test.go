@@ -15,9 +15,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// TestTaskSpecWithServerDefaultsMatchesCRD walks every default declared in
-// the generated Task CRD (top-level and nested) and checks the Go mirror
-// produces exactly that value, so the two cannot drift silently.
 func TestTaskSpecWithServerDefaultsMatchesCRD(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases", "core.orka.ai_tasks.yaml"))
 	if err != nil {
@@ -53,7 +50,6 @@ func TestTaskSpecWithServerDefaultsMatchesCRD(t *testing.T) {
 	}
 	walk(specSchema, "")
 
-	// Every enclosing object present so nested defaults apply.
 	spec := corev1alpha1.TaskSpec{
 		Type:        corev1alpha1.TaskTypeAgent,
 		RetryPolicy: &corev1alpha1.RetryPolicy{},
@@ -76,21 +72,17 @@ func TestTaskSpecWithServerDefaultsMatchesCRD(t *testing.T) {
 	if err := json.Unmarshal(encoded, &got); err != nil {
 		t.Fatal(err)
 	}
-	// Fields serialized without omitempty are always sent by Go clients, so
-	// the API server never applies their default; nothing to mirror.
 	alwaysSerialized := map[string]bool{".sessionRef.append": true}
 	for path, want := range defaults {
 		if alwaysSerialized[path] {
 			continue
 		}
 		if strings.Contains(path, "[]") {
-			// List item defaults (spec.env[]) apply per element; the spec above has no elements.
 			continue
 		}
 		value, present := lookupJSONPath(got, strings.Split(strings.TrimPrefix(path, "."), "."))
 		if !present {
 			if isZeroDefault(want) {
-				// Zero-value defaults are omitted by omitempty and need no mirror.
 				continue
 			}
 			t.Fatalf("CRD default %s = %#v is not applied by taskSpecWithServerDefaults", path, want)
@@ -159,10 +151,6 @@ func TestTaskSpecWithServerDefaultsPreservesExplicitValues(t *testing.T) {
 	}
 }
 
-// TestMatchingReviewRetryTaskToleratesServerDefaults reproduces the live
-// wedge: the retry Task the controller created on the previous reconcile
-// comes back from the API server with CRD defaults stamped on, and must
-// still be recognised as the expected retry identity.
 func TestMatchingReviewRetryTaskToleratesServerDefaults(t *testing.T) {
 	priority := int32(700)
 	timeout := metav1.Duration{Duration: 2}
@@ -193,7 +181,6 @@ func TestMatchingReviewRetryTaskToleratesServerDefaults(t *testing.T) {
 	if !matchingReviewRetryTask(existing, desired) {
 		t.Fatal("retry task with server defaults applied must match the desired identity")
 	}
-	// The prompt is deterministic within a run and stays part of the identity.
 	reprompted := build()
 	reprompted.Spec = taskSpecWithServerDefaults(reprompted.Spec)
 	reprompted.Spec.Prompt = "review something else"
@@ -209,9 +196,6 @@ func TestMatchingReviewRetryTaskToleratesServerDefaults(t *testing.T) {
 	if matchingReviewRetryTask(tampered, desired) {
 		t.Fatal("a retry task bound to a different agent must not match")
 	}
-	// The conflict diagnostic is persisted into the scan run and the
-	// RepositoryScan condition, so it names differing field paths only and
-	// never echoes spec values from either Task.
 	leaky := build()
 	leaky.Spec = taskSpecWithServerDefaults(leaky.Spec)
 	leaky.Spec.Env = []corev1.EnvVar{{Name: "GITHUB_TOKEN", Value: "ghp_secretvalue"}}

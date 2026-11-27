@@ -4,8 +4,6 @@ import { isAutonomousAgent, seedAgents } from './agents'
 import { liveStory, STORIES, type Beat } from './tasks'
 import { builtinTools } from './tools'
 
-// The controller refuses to run a Task whose agent breaks these rules, so the
-// demo must not show one.
 describe('demo agents', () => {
   const agents = seedAgents()
 
@@ -39,7 +37,6 @@ describe('demo agents', () => {
   })
 
   it('end every autonomous coordinator story by marking its goal complete', () => {
-    // Otherwise the controller would start another iteration, up to maxIterations.
     const goalComplete = (beats: Beat[]) => {
       const plans = beats.flatMap((beat) => beat.events ?? []).filter((event) => event.type === 'PlanUpdated')
       return (plans.at(-1)?.content as { goalComplete?: boolean } | undefined)?.goalComplete === true

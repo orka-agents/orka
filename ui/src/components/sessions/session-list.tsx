@@ -16,8 +16,6 @@ export function SessionList() {
   const deleteSession = useDeleteSession()
   const sessions = error ? [] : (data?.pages ?? []).flatMap((page) => page.items)
 
-  // The shared mutation only remembers its latest variables, so track every
-  // in-flight delete by name to block a repeat while an earlier one runs.
   const [pendingDeletes, setPendingDeletes] = useState<ReadonlySet<string>>(() => new Set())
   const pendingRef = useRef(new Set<string>())
   const deletePending = (name: string) => pendingDeletes.has(name)
@@ -97,8 +95,6 @@ export function SessionList() {
                       aria-label={`Delete session ${session.name}`}
                       title="Delete session"
                       onClick={() => handleDelete(session.name)}
-                      // aria-disabled, not disabled: disabling the focused button would drop
-                      // keyboard focus to <body>, and a failed delete leaves the row in place.
                       aria-disabled={deletePending(session.name) || undefined}
                       className="aria-disabled:opacity-50"
                     >

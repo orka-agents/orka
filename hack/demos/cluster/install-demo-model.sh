@@ -1,23 +1,4 @@
 #!/usr/bin/env bash
-# Provision the model Provider + secrets the model-backed demos (10/20/30/40)
-# need, pointing them at the in-cluster vekil proxy. This script covers the
-# active SDLC demos only; archived execution-workspace demos 60/70 are not
-# configured here.
-#
-# What it creates in the demo namespace (DEMO_NAMESPACE, default demo-magic):
-#   - a Provider CR (DEMO_PROVIDER_REF) used by the type: ai coordinator in
-#     demos 10/20, type openai, baseURL -> vekil /v1, defaultModel an Opus id
-#     (demo 10 requires Opus). The provider api-key is a placeholder; vekil
-#     holds the real Copilot session.
-#   - the provider api-key Secret (DEMO_PROVIDER_SECRET_REF).
-#   - the ACP provider credential Secret (DEMO_RUNTIME_SECRET_REF):
-#     OPENAI_BASE_URL -> vekil /v1 + placeholder OPENAI_API_KEY (=> Codex).
-#   - a git Secret (DEMO_GIT_SECRET_REF) with username/password (PR demos) AND
-#     a token key (demo 30 reads GH_TOKEN from the 'token' key). Token from
-#     GIT_TOKEN/GITHUB_TOKEN or the local gh CLI; never printed.
-#
-# Idempotent. Context-flexible: prefer kind-<ORKA_DEMO_CLUSTER> if it exists,
-# else the current context. Requires kubectl (+ gh for the git token default).
 
 set -Eeuo pipefail
 
@@ -85,13 +66,11 @@ vekil_url="http://vekil.${vekil_ns}.svc.cluster.local:1337/v1"
 log "Ensuring namespace ${demo_namespace}"
 kubectl create namespace "${demo_namespace}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-# --- Provider api-key Secret (placeholder; vekil holds the real session) ----
 log "Creating provider api-key Secret ${demo_namespace}/${provider_secret}"
 kubectl -n "${demo_namespace}" create secret generic "${provider_secret}" \
   --from-literal="${provider_secret_key}=proxy-placeholder" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# --- Provider CR (type: ai coordinator in demos 10/20) ----------------------
 log "Applying Provider ${demo_namespace}/${provider_ref} (baseURL -> vekil, model ${provider_model})"
 kubectl apply -f - <<YAML
 apiVersion: core.orka.ai/v1alpha1
@@ -108,14 +87,12 @@ spec:
   defaultModel: ${provider_model}
 YAML
 
-# --- ACP provider credential Secret (Codex via vekil /v1) ------------------
 log "Creating ACP provider credential Secret ${demo_namespace}/${runtime_secret} (endpoint -> vekil)"
 kubectl -n "${demo_namespace}" create secret generic "${runtime_secret}" \
   --from-literal=OPENAI_BASE_URL="${vekil_url}" \
   --from-literal=OPENAI_API_KEY=proxy-placeholder \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# --- Git Secret (username/password for PRs + token key for demo 30) ---------
 git_token="${GIT_TOKEN:-${GITHUB_TOKEN:-}}"
 if [[ -z "${git_token}" ]] && command -v gh >/dev/null 2>&1; then
   git_token="$(gh auth token 2>/dev/null || true)"
@@ -133,14 +110,6 @@ else
   log "  kubectl -n ${demo_namespace} create secret generic ${git_secret} --from-literal=username=oauth2 --from-literal=password=<token> --from-literal=token=<token>"
 fi
 
-# Built-in coding-agent runtimes are controller-owned, digest-pinned ACP
-# RuntimePools. This demo helper intentionally does not build, repoint, or set
-# process-wide sandbox environment on those runtimes. Install Orka with the
-# desired immutable Codex/Claude/Copilot runtime images before running agent demos.
-
-# build_and_repoint_worker <controller-flag> <dockerfile> <image> <build?> <label>
-# Builds a non-agent worker image for the cluster node architecture, publishes
-# it to the selected cluster, and updates the controller flag that selects it.
 build_and_repoint_worker() {
   local flag="$1" dockerfile="$2" image="$3" do_build="$4" label="$5"
   if command -v docker >/dev/null 2>&1 && [[ "${do_build}" == "1" ]]; then
@@ -172,21 +141,9 @@ build_and_repoint_worker() {
   fi
 }
 
-# --- AI worker image (type: ai coordinator in demos 10/20) ------------------
-# The manual/chat PR coordinators run as a `type: ai` Task, which uses the AI
-# worker image (workers/ai/Dockerfile), not an ACP agent runtime. The Substrate e2e
-# never builds or wires this image, so the controller falls back to the code
-# default ghcr.io/orka-agents/orka/ai-worker:latest, which the kind cluster cannot
-# pull -> ImagePullBackOff and the coordinator never starts.
 build_and_repoint_worker "ai-worker-image" "workers/ai/Dockerfile" \
   "${ai_image}" "${DEMO_BUILD_AI_IMAGE:-1}" "AI worker"
 
-# --- General worker image (validation/discovery container child tasks) -------
-# The type: ai coordinator delegates repo validation/discovery to `type:
-# container` child Tasks that run the GENERAL worker image (workers/general/
-# Dockerfile) when the Task spec pins no image. The Substrate e2e never wires
-# it either, so those children hit ImagePullBackOff on the ghcr default and the
-# coordinator's validation phase stalls. Build + wire it the same way.
 build_and_repoint_worker "general-worker-image" "workers/general/Dockerfile" \
   "${general_image}" "${DEMO_BUILD_GENERAL_IMAGE:-1}" "general worker"
 

@@ -47,8 +47,6 @@ func newNativeGatewayReplySender(
 		if bootstrapCtx.Err() != nil {
 			reason = "bootstrap_timeout"
 		}
-		// Local only: neither upstream diagnostics nor a remote event request
-		// may turn this optional dependency into a leak or startup dependency.
 		fmt.Fprintf(os.Stderr, "warning: reply_in_conversation omitted reason=%s\n", reason)
 		return nil, nil
 	}
@@ -69,8 +67,6 @@ func newNativeGatewayReplySender(
 		if apierrors.IsNotFound(err) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) {
 			return nil, unavailable
 		}
-		// Failure to read optional bootstrap context is not an identity grant,
-		// nor a reason to fail otherwise valid model work.
 		return omit("task_read_unavailable")
 	}
 	if string(task.UID) != env.TaskUID || task.Spec.Type != corev1alpha1.TaskTypeAI ||
@@ -84,10 +80,6 @@ func newNativeGatewayReplySender(
 	if err != nil {
 		return nil, unavailable
 	}
-	// Authenticate durable origin, not current message admission. Readiness or
-	// capability withdrawal must not hide the tool permanently after startup.
-	// Optional service failures deny only this tool; explicit identity rejection
-	// still fails startup. Never infer identity from a budget/capability/503 error.
 	if err = sender.AuthenticateOrigin(bootstrapCtx); err != nil {
 		if parentErr := ctx.Err(); parentErr != nil {
 			return nil, parentErr
@@ -116,9 +108,6 @@ func newNativeGatewayReplyTaskReader(config *rest.Config) (client.Reader, error)
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
-	// The shared client's lazy discovery uses context.TODO(), not Get's context.
-	// This private reader needs only the known Task CRD, so avoid discovery rather
-	// than changing timeouts or mappings for every other worker tool.
 	gv := corev1alpha1.GroupVersion
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	mapper.AddSpecific(gv.WithKind("Task"), gv.WithResource("tasks"), gv.WithResource("task"), meta.RESTScopeNamespace)

@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Session types used by the contract. Gateway sessions are owned by gateway
-// admission and are covered with the gateway families.
 const (
 	sessionsTypeTask = "task"
 	sessionsTypeChat = storagev1.SessionTypeChat
@@ -78,8 +76,6 @@ func runPlans(t *testing.T, newProvider StateFactory) {
 	_, err := provider.GetPlan(ctx, "tenant-a", "coordinator")
 	require.ErrorIs(t, err, storagev1.ErrNotFound)
 
-	// The provider assigns a plan's times from its own clock and ignores the
-	// caller's (see "Clock ownership" in docs/development/storage-contracts.md).
 	supplied := time.Date(2001, time.February, 3, 4, 5, 6, 7, time.UTC)
 	plan := &storagev1.PlanState{Iteration: 1, Summary: "started", ProgressPct: 10, PlanDocument: "# plan",
 		CreatedAt: supplied, UpdatedAt: supplied}
@@ -493,10 +489,6 @@ func runChatTurns(t *testing.T, newProvider StateFactory) {
 	})
 }
 
-// runLeaseClocks checks that a provider decides chat turn reservations and
-// Session locks on the time each request carries, never on its own clock. The
-// request times are months from the wall clock, so a provider that consults
-// its own clock fails these cases.
 func runLeaseClocks(t *testing.T, newProvider StateFactory) {
 	t.Run("a chat turn reservation lapses at its expiry on the request clock", func(t *testing.T) {
 		provider := newProvider(t)

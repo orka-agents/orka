@@ -65,8 +65,6 @@ function ApprovalRow({ item }: { item: AttentionItem }) {
         ) : (
           <>
             {approval.canApprove === true && (
-              // Approval is never one click from the inbox: it opens the Task's
-              // Approvals tab, which shows the exact operation and its inputs.
               <Button asChild size="sm">
                 <Link to="/tasks/$taskId" params={{ taskId: task.name }} search={{ tab: 'approvals' }}>
                   Review to approve
@@ -90,23 +88,16 @@ function ApprovalRow({ item }: { item: AttentionItem }) {
   )
 }
 
-/** Every decidable approval in the namespace, soonest deadline first. */
 export function ApprovalsInbox() {
   const { data, isLoading, error, hasNextPage, fetchNextPage, isFetchingNextPage } = usePendingApprovals()
-  // A 403 or 501 replaces the cached rows: polling has stopped, so keeping
-  // them would leave stale decision controls up indefinitely. Any other
-  // failure keeps the last loaded rows with a note that they are stale.
   const terminal = isTerminalInboxError(error)
   const shownError = error && (terminal || !data) ? error : null
   const staleError = error && !shownError ? error : null
   const pages = shownError ? [] : (data?.pages ?? [])
   const first = pages[0]
-  // The server re-ranks on every read, so a page boundary can repeat an item.
   const items = [...new Map(pages.flatMap((page) => page.items).map((item) => [item.id, item])).values()]
   const incomplete = pages.some((page) => page.incomplete)
   const incompleteReasons = [...new Set(pages.flatMap((page) => page.incompleteReasons ?? []))]
-  // Some Tasks that may be waiting for approval could not be read, so an
-  // empty or short list is not "nothing is pending".
   const partial = pages.some((page) => page.sources?.approvals === 'partial')
 
   return (

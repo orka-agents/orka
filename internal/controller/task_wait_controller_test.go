@@ -79,7 +79,6 @@ func (h *taskWaitHarness) reconcile(name string) ctrl.Result {
 	return result
 }
 
-// settle reconciles until the wait stops requesting an immediate retry.
 func (h *taskWaitHarness) settle(name string) {
 	h.t.Helper()
 	for range 8 {
@@ -128,8 +127,6 @@ func (h *taskWaitHarness) decide(task *corev1alpha1.Task, approvalID, eventType,
 	}
 }
 
-// parkedTestTask is a Task whose turn requested a wait. Its phase and
-// execution describe where that turn is.
 func parkedTestTask(kind corev1alpha1.TaskWaitKind, phase corev1alpha1.TaskPhase, references ...string) *corev1alpha1.Task {
 	state := corev1alpha1.TaskExecutionStateRunning
 	outcome := corev1alpha1.TaskExecutionOutcome("")
@@ -261,8 +258,6 @@ func TestTaskWaitResumesOnApprovalWithANewPromptAndExactlyOneContinuation(t *tes
 	}
 }
 
-// assertTaskWaitContinuation checks that a continuation resumes the Session
-// with a controller-authored prompt and inherits only safe metadata.
 func assertTaskWaitContinuation(t *testing.T, continuation *corev1alpha1.Task) {
 	t.Helper()
 	if continuation.Spec.Prompt == taskWaitTestPrompt || strings.Contains(continuation.Spec.Prompt, taskWaitTestPrompt) {
@@ -345,7 +340,6 @@ func TestTaskWaitResumesWhenChildTasksSettleThroughTheirChains(t *testing.T) {
 		t.Fatalf("a running child must keep the parent waiting, got %s", got)
 	}
 
-	// The child parks too: its Succeeded phase alone must not wake the parent.
 	current := h.task("child")
 	current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	current.Status.Wait = &corev1alpha1.TaskWaitStatus{
@@ -409,7 +403,6 @@ func TestTaskWaitCancellationWhileWaiting(t *testing.T) {
 	if got := h.parkedApprovals(); len(got) != 1 || got[0].Status != approvals.StatusCancelled {
 		t.Fatalf("cancellation must close the sign-off, got %+v", got)
 	}
-	// A late decision is refused and cannot revive the wait.
 	content, _ := json.Marshal(map[string]string{"approvalID": "approval-1", "taskUID": "uid-parked"})
 	if _, err := h.events.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
 		Namespace: taskWaitTestNamespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: "parked", TaskName: "parked",
@@ -438,7 +431,6 @@ func TestTaskWaitDeletionCancelsAContinuationBeingCreated(t *testing.T) {
 	if got := h.task("parked").Status.Wait.State; got != corev1alpha1.TaskWaitStateCancelled {
 		t.Fatalf("deleting the parked Task must cancel its wait, got %s", got)
 	}
-	// The cancelled continuation's link is released, so its deletion completes.
 	h.settle(continuation.Name)
 	if len(h.tasks()) != 1 {
 		t.Fatal("the continuation created in the same window must be cancelled")
@@ -562,8 +554,6 @@ func TestTaskWaitCancellationNeverDeletesAnUnprovenContinuation(t *testing.T) {
 	task.Annotations[labels.AnnotationCancelWait] = "stop"
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
-	// Without provenance admission, a Task holding the reserved name may
-	// carry a forged lineage annotation.
 	forged := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	forged.UID, forged.Finalizers = "uid-forged", nil
 	h := newTaskWaitHarness(t, task, forged)
@@ -657,12 +647,10 @@ func TestTaskWaitAdoptsAContinuationDeletedBeforeItWasLinked(t *testing.T) {
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
 	h := newTaskWaitHarness(t, task)
 
-	// The create landed but the controller lost the response before linking it.
 	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	if err := h.client.Create(context.Background(), continuation); err != nil {
 		t.Fatal(err)
 	}
-	// History pruning or a person deletes it before the link is recorded.
 	if err := h.client.Delete(context.Background(), h.task(continuation.Name)); err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +686,6 @@ func TestTaskWaitRefusesToAdoptWithoutProvenanceAdmission(t *testing.T) {
 	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
-	// Without provenance admission this lineage annotation may be forged.
 	forged := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	forged.UID, forged.Finalizers = "uid-forged", nil
 	h := newTaskWaitHarness(t, task, forged)
@@ -714,8 +701,6 @@ func TestTaskWaitRefusesToAdoptWithoutProvenanceAdmission(t *testing.T) {
 }
 
 func TestTaskWaitIgnoresASameNamedReplacementChild(t *testing.T) {
-	// The authorized child was deleted and an unrelated Task took its name,
-	// carrying only the parent label that admission allows on any create.
 	replacement := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "child", Namespace: taskWaitTestNamespace, UID: "uid-replacement",
@@ -735,7 +720,6 @@ func TestTaskWaitIgnoresASameNamedReplacementChild(t *testing.T) {
 	}
 }
 
-// requesterParkedTestTask is a parked Task whose requester the API sealed.
 func requesterParkedTestTask(t *testing.T) *corev1alpha1.Task {
 	t.Helper()
 	SetRequesterStampKey(testRequesterStampKey)
@@ -748,7 +732,6 @@ func requesterParkedTestTask(t *testing.T) *corev1alpha1.Task {
 
 func TestTaskWaitContinuationWaitsForItsRequesterSeal(t *testing.T) {
 	h := newTaskWaitHarness(t, requesterParkedTestTask(t))
-	// Sealing keeps failing, as if the API server were briefly unavailable.
 	h.r.Client = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			return errors.New("api unavailable")
@@ -774,7 +757,6 @@ func TestTaskWaitSealsTheRequesterOfAnAdoptedContinuation(t *testing.T) {
 	task := requesterParkedTestTask(t)
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
-	// The controller restarted after creating the continuation, before sealing it.
 	existing := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	existing.UID = "uid-existing"
 	h := newTaskWaitHarness(t, task, existing)
@@ -792,8 +774,6 @@ func TestContinuationDeadlineDoesNotDriftWithCreationTime(t *testing.T) {
 	chainDeadline := taskwait.Deadline(parked)
 	remaining := chainDeadline.Sub(taskWaitTestNow)
 	continuation := buildTaskContinuation(parked, taskwait.ContinuationTaskName(parked), remaining, chainDeadline)
-	// The API server assigned the creation time three seconds after the
-	// remaining budget was computed.
 	continuation.CreationTimestamp = metav1.NewTime(taskWaitTestNow.Add(3 * time.Second))
 	if got, ok := acpTaskDeadline(continuation, taskWaitTestNow); !ok || !got.Equal(chainDeadline) {
 		t.Fatalf("enforced deadline = %v, want the chain deadline %v", got, chainDeadline)
@@ -832,8 +812,6 @@ func TestHistoryLimitsPruneAContinuationChainAsOneRun(t *testing.T) {
 			Status: corev1alpha1.TaskStatus{Phase: phase},
 		}
 	}
-	// The newest run parked and its continuation succeeded; an older run
-	// succeeded without parking.
 	older := run("older-run", 5*time.Hour, corev1alpha1.TaskPhaseSucceeded)
 	parked := run("parked-run", 3*time.Hour, corev1alpha1.TaskPhaseSucceeded)
 	parked.Status.Wait = &corev1alpha1.TaskWaitStatus{
@@ -843,7 +821,6 @@ func TestHistoryLimitsPruneAContinuationChainAsOneRun(t *testing.T) {
 	next.Annotations = map[string]string{
 		labels.AnnotationContinuationOfName: "parked-run", labels.AnnotationContinuationOfUID: "uid-parked-run",
 	}
-	// A run whose continuation failed counts as a failed run.
 	failedHead := run("failed-head", 2*time.Hour, corev1alpha1.TaskPhaseSucceeded)
 	failedHead.Status.Wait = &corev1alpha1.TaskWaitStatus{
 		State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "failed-head-next", ContinuationTaskUID: "uid-failed-head-next",
@@ -897,8 +874,6 @@ func TestContinuationOfAPublishedWriteTurnUsesTheSessionBaseline(t *testing.T) {
 	if parked.Spec.Workspace.ExpectedRemoteSHA != preparedSHA {
 		t.Fatal("building the continuation must not mutate the parked Task")
 	}
-	// The Session records the published commit as its verified baseline. The
-	// continuation must start from it instead of failing on the old SHA.
 	baseline := &store.VerifiedBranchBaseline{RepositoryID: "github.com/orka-agents/example", Ref: "refs/heads/orka/release", SHA: publishedSHA}
 	if err := validateSessionExpectedRemoteSHA(unpublished.Spec.Workspace, baseline); err == nil {
 		t.Fatal("the pre-publication precondition conflicts with the published baseline")
@@ -927,7 +902,6 @@ func TestTaskWaitLinksTheContinuationItCreatedDespiteAStatusConflict(t *testing.
 				return c.Create(ctx, obj, opts...)
 			},
 			SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-				// A concurrent writer wins the first link attempt.
 				if obj.GetName() == "parked" && created > 0 && conflicts == 0 {
 					conflicts++
 					return apierrors.NewConflict(schema.GroupResource{Group: "core.orka.ai", Resource: "tasks"}, obj.GetName(), errors.New("modified"))
@@ -936,8 +910,6 @@ func TestTaskWaitLinksTheContinuationItCreatedDespiteAStatusConflict(t *testing.
 			},
 		}).Build()
 	h.r.Client, h.r.APIReader = h.client, h.client
-	// Without provenance admission a later reconcile cannot prove an existing
-	// continuation is Orka's, so the reconcile that created it must link it.
 	h.r.TaskProvenanceProtected = false
 	h.settle("parked")
 	wait := h.task("parked").Status.Wait
@@ -973,7 +945,6 @@ func TestTaskWaitCancelsTheContinuationItCreatedWhenCancelledDuringALostLink(t *
 						return err
 					}
 					if current.Annotations[labels.AnnotationCancelWait] == "" {
-						// The user cancels the wait while the link is being written.
 						current.Annotations[labels.AnnotationCancelWait] = "no longer needed"
 						if err := c.Update(ctx, current); err != nil {
 							return err
@@ -1012,8 +983,6 @@ func TestTaskWaitLinksItsContinuationAfterExhaustingLinkRetries(t *testing.T) {
 				return c.Create(ctx, obj, opts...)
 			},
 			SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-				// Concurrent writers win every link attempt of the reconcile
-				// that created the continuation.
 				if obj.GetName() == "parked" && created > 0 && conflicts < taskWaitLinkAttempts {
 					conflicts++
 					return apierrors.NewConflict(schema.GroupResource{Group: "core.orka.ai", Resource: "tasks"}, obj.GetName(), errors.New("modified"))
@@ -1035,9 +1004,6 @@ func TestTaskWaitLinksItsContinuationAfterExhaustingLinkRetries(t *testing.T) {
 		t.Fatalf("the continuation this controller created must be linked after retries ran out, got %+v (created %d)", wait, created)
 	}
 
-	// After a restart nothing proves the same Task was created here: the
-	// wait is abandoned and the unproven Task left alone. Execution holds it
-	// until a link that will now never be recorded, so it never runs.
 	restarted := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
 	restarted.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	restarted.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(restarted)
@@ -1064,7 +1030,6 @@ func TestTaskWaitConfirmsAMissingChildAuthoritativelyBeforeResuming(t *testing.T
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	h := newTaskWaitHarness(t, parkedTestTask(corev1alpha1.TaskWaitKindTasks, corev1alpha1.TaskPhaseSucceeded, "child"), child)
-	// The informer cache has not observed the just-created child yet.
 	h.r.Client = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if key.Name == "child" {
@@ -1094,12 +1059,10 @@ func TestContinuationExecutionWaitsForItsPredecessorsLink(t *testing.T) {
 	queue := func() (ctrl.Result, error) {
 		t.Helper()
 		current := h.task(continuation.Name)
-		// The binding was frozen; queueing would start the prompt.
 		current.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
 		return r.queueACPRuntimeTask(context.Background(), current, nil)
 	}
 
-	// The predecessor reserved the name but has not linked this Task yet.
 	result, err := queue()
 	if err != nil || result.RequeueAfter == 0 {
 		t.Fatalf("an unlinked continuation must be held, got %+v, %v", result, err)
@@ -1108,8 +1071,6 @@ func TestContinuationExecutionWaitsForItsPredecessorsLink(t *testing.T) {
 		t.Fatalf("a held continuation must not be queued, got %+v", got.Status)
 	}
 
-	// After a restart without provenance admission the wait is abandoned
-	// without linking it. The continuation never ran and now never will.
 	h.r.TaskProvenanceProtected = false
 	h.settle("parked")
 	if wait := h.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateAbandoned {
@@ -1163,8 +1124,6 @@ func TestDeletingAParkedTaskErasesHistoryOnlyAfterItsWaitEnds(t *testing.T) {
 	if len(h.parkedApprovals()) != 1 {
 		t.Fatal("history must not be erased while the wait reconciler may still write to it")
 	}
-	// The wait reconciler ends the wait of the deleting Task and closes its
-	// sign-off; after that it never writes history again.
 	h.settle("parked")
 	if wait := h.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateCancelled {
 		t.Fatalf("a deleting Task's wait must be cancelled, got %+v", wait)
@@ -1189,8 +1148,6 @@ func TestContinuationLinkedBetweenReadsIsNeverOrphaned(t *testing.T) {
 			if key.Name == "parked" {
 				reads++
 				if reads == 1 {
-					// The wait reconciler links the continuation right after
-					// this read returns.
 					linked := obj.(*corev1alpha1.Task).DeepCopy()
 					linked.Status.Wait.State = corev1alpha1.TaskWaitStateResumed
 					linked.Status.Wait.ContinuationTaskUID = "uid-continuation"
@@ -1230,8 +1187,8 @@ func TestForbidConcurrencyCountsAResumedRunUntilItsContinuationSettles(t *testin
 		return next
 	}
 	for name, tc := range map[string]struct {
-		cached        *corev1alpha1.Task // the continuation as the informer cache holds it
-		authoritative *corev1alpha1.Task // the continuation as the API server holds it
+		cached        *corev1alpha1.Task
+		authoritative *corev1alpha1.Task
 		wantNewRun    bool
 	}{
 		"continuation has no phase yet": {
@@ -1264,8 +1221,7 @@ func TestForbidConcurrencyCountsAResumedRunUntilItsContinuationSettles(t *testin
 					ConcurrencyPolicy: corev1alpha1.ForbidConcurrent,
 				},
 				Status: corev1alpha1.TaskStatus{
-					Phase: corev1alpha1.TaskPhaseScheduled,
-					// The next tick after this is already due and inside the starting deadline.
+					Phase:            corev1alpha1.TaskPhaseScheduled,
 					LastScheduleTime: new(metav1.NewTime(time.Now().Add(-70 * time.Second))),
 				},
 			}

@@ -13,8 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// releasableStorageHold records hold-1 over an acknowledgement of dataset-a
-// and acknowledges it, as an operator does after the recovery procedure.
 func releasableStorageHold(t *testing.T) (*Store, client.Client, controlstore.ControllerEpochFence) {
 	t.Helper()
 	ctx := t.Context()
@@ -28,9 +26,6 @@ func releasableStorageHold(t *testing.T) (*Store, client.Client, controlstore.Co
 	return kubeStore, kubeClient, fence
 }
 
-// A release whose status update committed but whose response was lost is
-// reconciled when it is retried: Kubernetes already shows this release, so
-// the retry succeeds without writing again.
 func TestStorageHoldReleaseWithALostResponseSucceedsOnRetry(t *testing.T) {
 	ctx := t.Context()
 	kubeStore, kubeClient, fence := releasableStorageHold(t)
@@ -60,10 +55,6 @@ func TestStorageHoldReleaseWithALostResponseSucceedsOnRetry(t *testing.T) {
 	require.Equal(t, "dataset-b", artifacts.DatasetID)
 }
 
-// A retried release that Kubernetes does not show as this exact release
-// stays a conflict: another release of the hold recorded other
-// acknowledgements, the record changed since the release, or the retry names
-// a hold that was never released.
 func TestStorageHoldReleaseRetryThatDoesNotMatchConflicts(t *testing.T) {
 	released := []controlstore.StorageAcknowledgement{storageAck("state.v1", "dataset-a", 1, 2)}
 	for name, test := range map[string]struct {
@@ -96,8 +87,6 @@ func TestStorageHoldReleaseRetryThatDoesNotMatchConflicts(t *testing.T) {
 	}
 }
 
-// A release by another controller epoch is never taken for this one: the
-// retry under a replaced fence is fenced.
 func TestStorageHoldReleaseRetryUnderAReplacedFenceIsFenced(t *testing.T) {
 	ctx := t.Context()
 	kubeStore, _, fence := releasableStorageHold(t)

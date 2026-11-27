@@ -3,7 +3,6 @@ import { render, screen, within } from '@/test/test-utils'
 import { TaskTraceView } from './task-trace-view'
 import { makeTrace } from '@/test/fixtures/trace'
 
-// Render router Links as anchors so child/session links are assertable.
 vi.mock('@tanstack/react-router', async () => {
   const actual = await vi.importActual('@tanstack/react-router')
   return {
@@ -84,7 +83,6 @@ describe('TaskTraceView', () => {
     render(<TaskTraceView trace={trace} />)
     const errorsSection = screen.getByText('Errors').closest('section')!
     expect(within(errorsSection).getByText('web_fetch timed out')).toBeInTheDocument()
-    // Phase shows Failed in the lifecycle summary.
     expect(screen.getByText('Failed')).toBeInTheDocument()
   })
 
@@ -112,8 +110,6 @@ describe('TaskTraceView', () => {
       modelRequests: [{ id: 'm1', status: 'completed', startSeq: 1 }],
     })
     render(<TaskTraceView trace={trace} />)
-    // "Approvals" also appears as a category badge inside the row, so scope to
-    // the section by its heading.
     const section = screen.getByRole('heading', { name: 'Approvals' }).closest('section')!
     expect(within(section).getByText('ApprovalRequested')).toBeInTheDocument()
     expect(within(section).getByText('approve web_fetch?')).toBeInTheDocument()
@@ -129,7 +125,6 @@ describe('TaskTraceView', () => {
       toolCalls: [{ id: 't1', name: 'web_fetch', status: 'completed', startSeq: 2 }],
     })
     render(<TaskTraceView trace={trace} />)
-    // "Fork" appears as a category badge inside the row, so scope by heading.
     const section = screen.getByRole('heading', { name: 'Fork provenance' }).closest('section')!
     expect(within(section).getByText('TaskForkCreated')).toBeInTheDocument()
   })
@@ -159,7 +154,6 @@ describe('TaskTraceView', () => {
       errors: [{ seq: 1, type: 'TaskFailed', severity: 'error', message: 'it broke' }],
     })
     render(<TaskTraceView trace={trace} />)
-    // The Errors section renders and the misleading empty fallback does not.
     expect(screen.getByText('it broke')).toBeInTheDocument()
     expect(screen.queryByText(/no execution events recorded/i)).not.toBeInTheDocument()
   })
@@ -174,9 +168,6 @@ describe('TaskTraceView', () => {
   })
 
   it('renders the empty state without crashing when the backend sends null arrays', () => {
-    // The Go backend marshals empty trace groups as JSON null (nil slices). The
-    // client casts the response without parsing, so the component must tolerate
-    // null arrays rather than throwing on .filter/.length.
     const nullTrace = {
       task: { namespace: 'default', name: 'tk', phase: 'Succeeded', resultAvailable: false },
       latestSeq: 0,

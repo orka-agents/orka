@@ -23,16 +23,10 @@ import (
 const (
 	liveAnthropicGoalStateSentinel = "<ORKA_GOAL_STATE_REACHED>"
 	liveAnthropicMaxTokens         = 128
-	// anthropicCompatMarker routes the prompts to anthropic_compat.json in
-	// mock mode.
-	anthropicCompatMarker = "[e2e:anthropic-compat]"
-	// anthropicCompatMockModel is any model name; aimock answers by marker.
-	anthropicCompatMockModel = "claude-sonnet-4.5"
+	anthropicCompatMarker          = "[e2e:anthropic-compat]"
+	anthropicCompatMockModel       = "claude-sonnet-4.5"
 )
 
-// The Anthropic-compatible API runs against the live Copilot proxy when
-// E2E_LIVE_COPILOT_PROXY_BASE_URL is set, and otherwise against the suite's
-// aimock, both behind an openai Provider.
 var _ = Describe("Anthropic Compat API", Ordered, func() {
 	const (
 		liveAnthropicProviderName = "e2e-live-anthropic-compat-provider"

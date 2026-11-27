@@ -22,17 +22,11 @@ func recordInternalTaskJobAuthority(ctx context.Context, task *corev1alpha1.Task
 	}
 }
 
-// withInternalTaskData authorizes a worker request against live Kubernetes
-// state and runs mutate with the resulting cleanup fence. No store
-// transaction is open while authorization runs; each fenced store call in
-// mutate refuses once cleanup or a revocation of an authorized Job has
-// invalidated the authorization.
 func withInternalTaskData(c fiber.Ctx, backing any, taskName string, authorize, mutate func(context.Context) error) error {
 	access, ok := backing.(store.TaskDataAccessStore)
 	if !ok {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "task data access unavailable")
 	}
-	// Bound live authorization and cleanup retries.
 	previousContext := c.Context()
 	ctx, cancel := context.WithTimeout(previousContext, 10*time.Second)
 	defer cancel()

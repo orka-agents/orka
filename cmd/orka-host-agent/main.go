@@ -4,12 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Command orka-host-agent runs beside an agent host in its Pod. It answers the
-// host container's probes by checking the host's loopback Agent Host Protocol
-// listener, and serves the host's idle status to the Orka controller. Run as
-// "orka-host-agent stage", it stages the host's connection token and a copy of
-// itself for the host; run as "orka-host-agent init -- command", it is the
-// host container's init process.
 package main
 
 import (

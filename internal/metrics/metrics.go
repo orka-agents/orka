@@ -39,7 +39,6 @@ const (
 )
 
 var (
-	// Approval labels are restricted to lifecycle outcomes and execution paths.
 	ApprovalDecisionDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "orka_approval_decision_duration_seconds",
@@ -49,7 +48,6 @@ var (
 		[]string{"outcome", "path"},
 	)
 
-	// API metrics
 	APIRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_api_requests_total",
@@ -67,7 +65,6 @@ var (
 		[]string{"endpoint", "method"},
 	)
 
-	// Skill metrics
 	SkillsLoaded = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_skills_loaded_total",
@@ -76,7 +73,6 @@ var (
 		[]string{"skill", labelNamespace},
 	)
 
-	// Context-token metrics
 	ContextTokenAuthTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_context_token_auth_total",
@@ -127,11 +123,6 @@ var (
 		[]string{"adapter", "grant_class", labelResult, labelReason},
 	)
 
-	// ACP RuntimePool metrics mirror authoritative controller status. Pool name
-	// and namespace are Kubernetes object identity labels, never Task/session IDs.
-	// ACPWorkspaceRetentionActionsTotal counts retention enforcement actions on
-	// class-backed ACP execution workspaces. Labels stay bounded: no object
-	// names, class names, or session identifiers.
 	ACPWorkspaceRetentionActionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_acp_workspace_retention_actions_total",
@@ -140,8 +131,15 @@ var (
 		[]string{"action", labelReason},
 	)
 
-	// StorageRecoveryHold is 1 while the installation is held for storage
-	// recovery, labeled by the reason the hold records, and 0 otherwise.
+	ACPWorkspaceRuntimePhaseDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_acp_workspace_runtime_phase_duration_seconds",
+			Help:    "Duration of each phase of starting or stopping an execution-workspace runtime, by path and phase",
+			Buckets: []float64{0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 900},
+		},
+		[]string{"path", "phase"},
+	)
+
 	StorageRecoveryHold = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "orka_storage_recovery_hold",
@@ -206,7 +204,6 @@ var (
 		[]string{labelNamespace, labelRuntimePool},
 	)
 
-	// Repository monitor workflow metrics. Labels are low-cardinality intent/action/status values.
 	RepositoryMonitorCommandsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_repository_monitor_commands_total",
@@ -239,8 +236,6 @@ var (
 		[]string{labelReason},
 	)
 
-	// Repository monitor review convergence metrics. Mode, verdict, priority,
-	// and outcome are fixed controller vocabularies.
 	RepositoryMonitorReviewsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_repository_monitor_reviews_total",
@@ -265,7 +260,6 @@ var (
 		},
 	)
 
-	// Execution event metrics. Labels intentionally exclude task/session IDs.
 	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_execution_events_appended_total",
@@ -348,8 +342,6 @@ var (
 		[]string{labelStreamType, labelEventType},
 	)
 
-	// Parked-turn metrics. Labels are the bounded wait kind and state; Task,
-	// Session, and approval identifiers never appear.
 	TaskWaitTransitionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_task_wait_transitions_total",
@@ -375,8 +367,6 @@ var (
 		[]string{labelResult},
 	)
 
-	// WaitingForCapacityTotal counts transitions into a capacity wait. The
-	// resource label is task, substrate_actor_pool, or tool.
 	WaitingForCapacityTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "orka_waiting_for_capacity_total",
@@ -390,6 +380,7 @@ func init() {
 	metrics.Registry.MustRegister(
 		ApprovalDecisionDuration,
 		ACPWorkspaceRetentionActionsTotal,
+		ACPWorkspaceRuntimePhaseDuration,
 		StorageRecoveryHold,
 		APIRequestsTotal,
 		APIRequestDuration,
@@ -431,7 +422,6 @@ func init() {
 	)
 }
 
-// RecordAPIRequest records an API request
 func RecordAPIRequest(endpoint, method string, status int, durationSeconds float64) {
 	statusStr := "2xx"
 	if status >= 400 && status < 500 {
@@ -443,12 +433,10 @@ func RecordAPIRequest(endpoint, method string, status int, durationSeconds float
 	APIRequestDuration.WithLabelValues(endpoint, method).Observe(durationSeconds)
 }
 
-// RecordContextTokenAuth records a context-token authentication attempt.
 func RecordContextTokenAuth(profile, result string) {
 	ContextTokenAuthTotal.WithLabelValues(normalizeMetricLabel(profile), normalizeMetricLabel(result)).Inc()
 }
 
-// RecordContextTokenAuthorization records a context-token authorization decision.
 func RecordContextTokenAuthorization(action, result, reason string) {
 	ContextTokenAuthorizationTotal.WithLabelValues(
 		normalizeMetricLabel(action),
@@ -457,7 +445,6 @@ func RecordContextTokenAuthorization(action, result, reason string) {
 	).Inc()
 }
 
-// RecordContextTokenTTSExchange records a transaction-token TTS exchange attempt.
 func RecordContextTokenTTSExchange(result, reason string, durationSeconds float64) {
 	result = normalizeMetricLabel(result)
 	reason = normalizeMetricLabel(reason)
@@ -465,7 +452,6 @@ func RecordContextTokenTTSExchange(result, reason string, durationSeconds float6
 	ContextTokenTTSExchangeDuration.WithLabelValues(result, reason).Observe(durationSeconds)
 }
 
-// RecordTokenExchange records one low-cardinality OAuth exchange observation.
 func RecordTokenExchange(adapter, grantClass, result, reason string, durationSeconds float64) {
 	adapter = normalizeMetricLabel(adapter)
 	grantClass = normalizeMetricLabel(grantClass)
@@ -477,8 +463,6 @@ func RecordTokenExchange(adapter, grantClass, result, reason string, durationSec
 
 var acpRuntimePoolAdmissionStates = [...]string{labelUnknown, labelClosed, labelAccepting, labelDraining, labelAmbiguous}
 
-// RecordACPRuntimePoolStatus publishes one authoritative RuntimePool status
-// snapshot. Admission state is one-hot so state changes cannot leave a stale 1.
 func RecordACPRuntimePoolStatus(
 	namespace, runtimePool string,
 	desiredReplicas, readyReplicas, sessionsActive, promptsInFlight, queuedTasks int32,
@@ -501,14 +485,12 @@ func RecordACPRuntimePoolStatus(
 	}
 }
 
-// RecordACPRuntimePoolScaleToZero records one completed scale-to-zero transition.
 func RecordACPRuntimePoolScaleToZero(namespace, runtimePool string) {
 	ACPRuntimePoolScaleToZeroTotal.WithLabelValues(
 		normalizeMetricLabel(namespace), normalizeMetricLabel(runtimePool),
 	).Inc()
 }
 
-// DeleteACPRuntimePool removes stale metric series after a RuntimePool is deleted.
 func DeleteACPRuntimePool(namespace, runtimePool string) {
 	namespace = normalizeMetricLabel(namespace)
 	runtimePool = normalizeMetricLabel(runtimePool)
@@ -538,7 +520,6 @@ func normalizeACPRuntimePoolAdmissionState(value string) string {
 	}
 }
 
-// RecordExecutionEventAppend records append success/failure and latency using low-cardinality labels.
 func RecordExecutionEventAppend(streamType, eventType string, success bool, durationSeconds float64) {
 	streamType = normalizeMetricLabel(streamType)
 	eventType = normalizeMetricLabel(eventType)
@@ -552,7 +533,6 @@ func RecordExecutionEventAppend(streamType, eventType string, success bool, dura
 	ExecutionEventAppendDuration.WithLabelValues(streamType, eventType, result).Observe(durationSeconds)
 }
 
-// RecordExecutionEventList records list/read-model request count and latency.
 func RecordExecutionEventList(scope string, success bool, durationSeconds float64) {
 	scope = normalizeMetricLabel(scope)
 	result := "success"
@@ -563,7 +543,6 @@ func RecordExecutionEventList(scope string, success bool, durationSeconds float6
 	ExecutionEventListDuration.WithLabelValues(scope, result).Observe(durationSeconds)
 }
 
-// RecordExecutionEventStreamOpen records stream lifecycle and reconnect detection.
 func RecordExecutionEventStreamOpen(scope string, reconnect bool) func() {
 	scope = normalizeMetricLabel(scope)
 	ExecutionEventStreamConnections.WithLabelValues(scope).Inc()
@@ -573,12 +552,10 @@ func RecordExecutionEventStreamOpen(scope string, reconnect bool) func() {
 	return func() { ExecutionEventStreamConnections.WithLabelValues(scope).Dec() }
 }
 
-// RecordExecutionEventStreamError records a low-cardinality stream failure reason.
 func RecordExecutionEventStreamError(scope, reason string) {
 	ExecutionEventStreamErrorsTotal.WithLabelValues(normalizeMetricLabel(scope), normalizeMetricLabel(reason)).Inc()
 }
 
-// RecordExecutionEventPayloadSanitization records event-level redaction/truncation signals.
 func RecordExecutionEventPayloadSanitization(streamType, eventType string, redacted, truncated bool) {
 	streamType = normalizeMetricLabel(streamType)
 	eventType = normalizeMetricLabel(eventType)
@@ -590,8 +567,6 @@ func RecordExecutionEventPayloadSanitization(streamType, eventType string, redac
 	}
 }
 
-// CounterVecValue returns the current value of a CounterVec for the given label
-// values. It is intended for tests asserting metric accuracy across packages.
 func CounterVecValue(counter *prometheus.CounterVec, labels ...string) float64 {
 	var m dto.Metric
 	if err := counter.WithLabelValues(labels...).Write(&m); err != nil {
@@ -600,33 +575,26 @@ func CounterVecValue(counter *prometheus.CounterVec, labels ...string) float64 {
 	return m.GetCounter().GetValue()
 }
 
-// RecordRepositoryMonitorCommand records a durable command event decision.
 func RecordRepositoryMonitorCommand(intent, status string) {
 	RepositoryMonitorCommandsTotal.WithLabelValues(normalizeMetricLabel(intent), normalizeMetricLabel(status)).Inc()
 }
 
-// RecordRepositoryMonitorWorkAction records a workflow action transition.
 func RecordRepositoryMonitorWorkAction(desiredAction, status string) {
 	RepositoryMonitorWorkActionsTotal.WithLabelValues(normalizeMetricLabel(desiredAction), normalizeMetricLabel(status)).Inc()
 }
 
-// RecordRepositoryMonitorGitHubMutation records one GitHub write audit result.
 func RecordRepositoryMonitorGitHubMutation(operation, status string) {
 	RepositoryMonitorGitHubMutationsTotal.WithLabelValues(normalizeMetricLabel(operation), normalizeMetricLabel(status)).Inc()
 }
 
-// RecordRepositoryMonitorBlock records a low-cardinality monitor block reason.
 func RecordRepositoryMonitorBlock(reason string) {
 	RepositoryMonitorBlocksTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
 }
 
-// RecordRepositoryMonitorReview records one stored pull request review record.
 func RecordRepositoryMonitorReview(mode, verdict string) {
 	RepositoryMonitorReviewsTotal.WithLabelValues(normalizeMetricLabel(mode), normalizeMetricLabel(verdict)).Inc()
 }
 
-// RecordRepositoryMonitorReviewFindings adds count findings of one priority
-// and outcome.
 func RecordRepositoryMonitorReviewFindings(priority, outcome string, count int) {
 	if count <= 0 {
 		return
@@ -634,20 +602,21 @@ func RecordRepositoryMonitorReviewFindings(priority, outcome string, count int) 
 	RepositoryMonitorReviewFindingsTotal.WithLabelValues(normalizeMetricLabel(priority), normalizeMetricLabel(outcome)).Add(float64(count))
 }
 
-// RecordRepositoryMonitorReviewRoundsToPass records how many heads a pull
-// request needed before its first passed review.
 func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
 	RepositoryMonitorReviewRoundsToPass.Observe(float64(rounds))
 }
 
-// RecordACPWorkspaceRetentionAction records one retention enforcement action
-// (suspend or delete) with its bounded reason.
 func RecordACPWorkspaceRetentionAction(action, reason string) {
 	ACPWorkspaceRetentionActionsTotal.WithLabelValues(normalizeMetricLabel(action), normalizeMetricLabel(reason)).Inc()
 }
 
-// RecordTaskWaitTransition records a parked-turn state transition. A
-// positive waited duration is observed when the wait reaches a final state.
+func RecordACPWorkspaceRuntimePhase(path, phase string, duration time.Duration) {
+	if duration < 0 {
+		return
+	}
+	ACPWorkspaceRuntimePhaseDuration.WithLabelValues(normalizeMetricLabel(path), normalizeMetricLabel(phase)).Observe(duration.Seconds())
+}
+
 func RecordTaskWaitTransition(kind, state string, waited time.Duration) {
 	TaskWaitTransitionsTotal.WithLabelValues(normalizeMetricLabel(kind), normalizeMetricLabel(state)).Inc()
 	if waited > 0 {
@@ -655,12 +624,10 @@ func RecordTaskWaitTransition(kind, state string, waited time.Duration) {
 	}
 }
 
-// RecordTaskWaitRuntimeRelease records one parked-turn RuntimeSession retirement.
 func RecordTaskWaitRuntimeRelease(result string) {
 	TaskWaitRuntimeReleasesTotal.WithLabelValues(normalizeMetricLabel(result)).Inc()
 }
 
-// RecordWaitingForCapacity records one transition into a capacity wait.
 func RecordWaitingForCapacity(resource, reason string) {
 	WaitingForCapacityTotal.WithLabelValues(normalizeMetricLabel(resource), normalizeMetricLabel(reason)).Inc()
 }
@@ -669,6 +636,5 @@ func normalizeMetricLabel(value string) string {
 	if value == "" {
 		return labelUnknown
 	}
-	// Prometheus retains labels; callers may supply borrowed HTTP request strings.
 	return strings.Clone(value)
 }

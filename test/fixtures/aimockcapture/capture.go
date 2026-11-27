@@ -4,9 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package aimockcapture is a test-only, in-memory capture proxy for aimock.
-// It retains raw model request bodies, never headers or response bodies. Do not
-// expose this fixture outside an isolated test environment.
 package aimockcapture
 
 import (
@@ -28,24 +25,16 @@ import (
 )
 
 const (
-	// MaxBodyBytes bounds each captured request body.
-	MaxBodyBytes int64 = 4 << 20
-	// MaxTotalBodyBytes bounds retained bodies, including in-flight reservations.
+	MaxBodyBytes      int64 = 4 << 20
 	MaxTotalBodyBytes int64 = 64 << 20
-	// MaxEntries bounds retained entries, including in-flight reservations.
-	MaxEntries = 4096
+	MaxEntries              = 4096
 
-	healthTimeout = 2 * time.Second
-	// clientGoneGrace lets a response finish after its client hangs up. A
-	// streaming client may close once it has the final event, before the
-	// upstream response ends.
+	healthTimeout   = 2 * time.Second
 	clientGoneGrace = time.Second
 	capturePath     = "/__orka_eval/capture"
 	healthPath      = "/__orka_eval/health"
 )
 
-// Entry contains exactly the request body and safe response lifecycle metadata.
-// Status is zero until a final response status is available.
 type Entry struct {
 	RequestID string `json:"requestId"`
 	Path      string `json:"path"`
@@ -56,9 +45,6 @@ type Entry struct {
 	Error     string `json:"error"`
 }
 
-// Capture is a consistent snapshot; entries are never evicted or truncated.
-// InstanceID is nonempty and stable for this handler's lifetime, including empty
-// snapshots. A recreated handler has a new identity.
 type Capture struct {
 	InstanceID string  `json:"instanceId"`
 	Entries    []Entry `json:"entries"`
@@ -70,7 +56,6 @@ type limits struct {
 	entries     int
 }
 
-// Handler owns an isolated capture store and reverse proxy.
 type Handler struct {
 	proxy        *httputil.ReverseProxy
 	healthClient *http.Client
@@ -94,17 +79,13 @@ type relay struct {
 	handler *Handler
 	index   int
 	id      string
-	// client is the downstream request context. Once the client is gone, the
-	// relay may still reach the upstream response's end, but any further
-	// response bytes were not received.
-	client context.Context
+	client  context.Context
 
 	mu      sync.Mutex
 	eof     bool
 	failure string
 }
 
-// New constructs a proxy with fixed capture bounds and a bounded readiness probe.
 func New(upstream *url.URL) (*Handler, error) {
 	return newHandler(upstream, limits{MaxBodyBytes, MaxTotalBodyBytes, MaxEntries})
 }
@@ -134,10 +115,8 @@ func newHandler(upstream *url.URL, bounds limits) (*Handler, error) {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(&target)
 			pr.Out.Host = pr.In.Host
-			// Preserve the query verbatim rather than sanitizing it as a side effect of Rewrite.
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 			if state, ok := pr.In.Context().Value(requestKey{}).(*relay); ok {
-				// Set after hop-by-hop header removal so the minted ID always reaches aimock.
 				pr.Out.Header.Set("X-Request-Id", state.id)
 			}
 		},
@@ -159,7 +138,6 @@ func newHandler(upstream *url.URL, bounds limits) (*Handler, error) {
 	return h, nil
 }
 
-// ServeHTTP captures all POSTs except the aimock and evaluation control namespaces.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case capturePath, healthPath:
@@ -194,14 +172,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	returned := false
 	defer func() { state.finish(r.Context(), returned) }()
 	h.proxy.ServeHTTP(writer, r)
-	// Flush server-side buffering before declaring a successfully relayed response.
 	_ = writer.FlushError()
 	returned = true
 }
 
-// afterClientGone returns a context canceled grace after parent is. A response
-// that ends within the grace, with no bytes left to send, is recorded
-// complete; a stalled upstream still sees the cancellation.
 func afterClientGone(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	stop := context.AfterFunc(parent, func() { time.AfterFunc(grace, cancel) })
@@ -211,8 +185,6 @@ func afterClientGone(parent context.Context, grace time.Duration) (context.Conte
 	}
 }
 
-// Only one export may allocate a snapshot or encoding buffer at a time. Waiting
-// readers retain neither, and cancellation does not have to wait for that export.
 func (h *Handler) writeCapture(w http.ResponseWriter, r *http.Request) {
 	select {
 	case h.captureReads <- struct{}{}:
@@ -225,9 +197,6 @@ func (h *Handler) writeCapture(w http.ResponseWriter, r *http.Request) {
 	_ = writeSnapshot(w, h.snapshot())
 }
 
-// Encode one bounded entry at a time rather than buffering the entire capture.
-// The snapshot copies metadata only: immutable body strings are shared with the
-// store. Insignificant newlines from Encode preserve the existing JSON schema.
 func writeSnapshot(w io.Writer, snapshot Capture) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
@@ -299,7 +268,6 @@ func (h *Handler) capture(r *http.Request) (*relay, int, string) {
 	if r.ContentLength >= 0 {
 		allowance = min(allowance, r.ContentLength)
 	}
-	// Reserve both a slot and bytes before reading, including unknown-length bodies.
 	h.pending++
 	h.reserved += allowance
 	h.mu.Unlock()
@@ -324,7 +292,6 @@ func (h *Handler) capture(r *http.Request) (*relay, int, string) {
 		}
 	}
 	if status == 0 && !utf8.Valid(body) {
-		// JSON string fields cannot preserve invalid UTF-8; fail closed before forwarding.
 		status, message = http.StatusBadRequest, "capture body encoding invalid"
 	}
 	if status != 0 {

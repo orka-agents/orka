@@ -14,11 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 )
 
-// Managed runtime Pods run the supervisor without CAP_DAC_OVERRIDE, so once the
-// session root is handed to the child (0700, child-owned) the supervisor can no
-// longer traverse it. The workspace identity operator copies rely on must be
-// pinned before that handoff, for every session creation including native
-// restores and continuations.
 func TestCreateSessionPinsWorkspaceIdentityBeforeOwnershipHandoff(t *testing.T) {
 	previousRecord, previousFinalize := recordSessionWorkspaceIdentity, finalizeSessionOwnership
 	t.Cleanup(func() { recordSessionWorkspaceIdentity, finalizeSessionOwnership = previousRecord, previousFinalize })
@@ -49,16 +44,11 @@ func TestCreateSessionPinsWorkspaceIdentityBeforeOwnershipHandoff(t *testing.T) 
 	if err := syscall.Stat(paths.Workspace, &stat); err != nil || stat.Ino != paths.WorkspaceInode {
 		t.Fatalf("pinned identity %d does not match the workspace (%d, %v)", paths.WorkspaceInode, stat.Ino, err)
 	}
-	// The directory stays held open for the session's lifetime, so its inode
-	// number cannot be given to a directory the child creates after deleting
-	// its workspace.
 	if _, _, err := paths.PinnedWorkspaceIdentity(); err != nil {
 		t.Fatalf("a live session does not hold its workspace directory: %v", err)
 	}
 }
 
-// The hold lasts exactly as long as the session: removing a stopped session's
-// files lets go of the directory, and its recorded identity is then refused.
 func TestRemovingSessionFilesReleasesTheWorkspaceHold(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "session")
 	state := &sessionState{paths: acp.SessionPaths{Root: root, Workspace: filepath.Join(root, "workspace")}}
@@ -79,8 +69,6 @@ func TestRemovingSessionFilesReleasesTheWorkspaceHold(t *testing.T) {
 	}
 }
 
-// A creation that fails after the identity was recorded must not keep the
-// directory open: nothing would ever release it.
 func TestFailedCreateReleasesTheWorkspaceHold(t *testing.T) {
 	previousRecord, previousFinalize := recordSessionWorkspaceIdentity, finalizeSessionOwnership
 	t.Cleanup(func() { recordSessionWorkspaceIdentity, finalizeSessionOwnership = previousRecord, previousFinalize })

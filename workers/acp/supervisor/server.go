@@ -50,8 +50,6 @@ type Server struct {
 	operator           operatorAccessState
 }
 
-// Session-creation filesystem steps, replaceable in tests that check their
-// order.
 var (
 	recordSessionWorkspaceIdentity = acp.RecordWorkspaceIdentity
 	finalizeSessionOwnership       = acp.FinalizeSessionOwnership
@@ -74,10 +72,6 @@ func prepareE2EPromptWriteAmbiguityLedger(identityStateDir string) (string, erro
 	return dir, nil
 }
 
-// consumeE2EPromptWriteFaultLocked records the test fault before the handler
-// aborts its connection. Durable workspace pools use one exclusive-create file
-// per operation; direct pools use a controller-owned record. The caller must
-// hold s.mu.
 func (s *Server) consumeE2EPromptWriteFaultLocked(
 	ctx context.Context,
 	metadata harnessv2.MutationMetadata,
@@ -134,53 +128,28 @@ func (s *Server) consumeE2EPromptWriteFaultLocked(
 	return true, nil
 }
 
-// statusNonceRetentionSlack keeps a consumed status nonce past its capability
-// TTL by a clock-skew margin so a token cannot be replayed at the edge of
-// expiry.
 const statusNonceRetentionSlack = 30 * time.Second
 
-// operationReplayRetentionSlack keeps a session operation and any stored
-// response briefly past the request capability expiry. This preserves replay
-// classification across the allowed clock-skew edge without retaining expired
-// capabilities for the lifetime of a resident session.
 const operationReplayRetentionSlack = 30 * time.Second
 
 const sessionDeletionOperationReserve = 1
 
-// tombstoneRetention bounds how long a deleted or failed session's replay
-// tombstone is retained. It must exceed the maximum operation-capability
-// lifetime plus clock skew so a legitimate replay whose capability is still
-// valid is still classified against its tombstone; past this window the
-// capability itself has expired and the replay is rejected at the capability
-// layer, so the tombstone is no longer needed. Retain every tombstone inside
-// this window: the finite, never-reused UID/GID allocator already bounds their
-// count, while count-based eviction would reopen valid create capabilities for
-// replay.
 const tombstoneRetention = time.Hour
 
 type sessionTombstone struct {
 	harnessv2.RuntimeSessionTombstone
-	sessionID     harnessv2.RuntimeSessionID
-	prompt        *retiredPromptSettlement
-	cancellations map[harnessv2.OperationID]*operationReplay
-	// Late cancellation records stay separate so explicit deletion replays
-	// continue to return the original immutable wire tombstone.
+	sessionID              harnessv2.RuntimeSessionID
+	prompt                 *retiredPromptSettlement
+	cancellations          map[harnessv2.OperationID]*operationReplay
 	cancellationOperations map[harnessv2.OperationID]harnessv2.OperationRecord
-	// drainCleaned marks a session retired by drain cleanup rather than by an
-	// authenticated delete, so a fresh prompt for it is provably unaccepted.
-	drainCleaned bool
+	drainCleaned           bool
 }
 
-// A retired prompt retains proof, never its input, output, or capabilities.
-// Its lifetime follows the session tombstone, independently of the admission
-// capability, which can expire while a renewed prompt is still running.
 type retiredPromptSettlement struct {
 	metadata   harnessv2.MutationMetadata
 	settlement harnessv2.PromptSettlement
 }
 
-// pruneTombstonesLocked drops only records older than tombstoneRetention. It
-// must be called with s.mu held, before a new tombstone is inserted.
 func (s *Server) pruneTombstonesLocked(now time.Time) {
 	for uid, tombstone := range s.tombstones {
 		if now.Sub(tombstone.DeletedAt) > tombstoneRetention {
@@ -194,9 +163,7 @@ type sessionCreationError struct {
 	stage               string
 	cause               error
 	workspaceResumeLost bool
-	// rejectedMessage marks a permanent, caller-visible rejection of the
-	// request itself; it must not contain workspace contents or secrets.
-	rejectedMessage string
+	rejectedMessage     string
 }
 
 const sessionCreationStageDurableResumeVerification = "durable resume verification"
@@ -239,9 +206,6 @@ func isSessionCreationResumeLost(err error) bool {
 	return ok && creation.workspaceResumeLost
 }
 
-// workspaceRejectedError is returned by ProviderProfile.ValidateWorkspace when
-// the workspace itself is unsupported. publicMessage is one of the fixed
-// acp.*Message constants the controller surfaces; detail is logged only.
 type workspaceRejectedError struct {
 	publicMessage string
 	detail        string
@@ -263,26 +227,12 @@ func sessionCreationRejected(err error) error {
 	return &sessionCreationError{stage: "workspace validation", cause: err, rejectedMessage: message}
 }
 
-// validateWorkspaceAsSessionChild re-runs workspace validation for an idle
-// adapter restart. By then the session tree belongs to the child, and a
-// write-intent workspace is its private 0700 directory; the supervisor has no
-// DAC_OVERRIDE, so as itself it could not even look inside, and would retire
-// every clean session. The check runs as the child would see the tree. It only
-// inspects entries without following them, so anything the child changes can
-// at worst make the check fail, which retires the session.
 func validateWorkspaceAsSessionChild(validate func(acp.SessionPaths) error, paths acp.SessionPaths, uid, gid int) func() error {
 	return func() error {
 		return asSessionChild(uid, gid, func() error { return validate(paths) })
 	}
 }
 
-// quiesceOperatorsBeforeRelaunch closes operator admission for the session
-// whose exited adapter is about to be replaced and waits until every admitted
-// operation is gone. Operator commands run as the session child, so one that
-// ran between the workspace check and the replacement launch could change
-// what the provider loads. Admission reopens only when the replacement
-// accepts the prompt that triggered the restart (setSessionState); a failed
-// restart retires the session with admission still closed.
 func (s *Server) quiesceOperatorsBeforeRelaunch(sessionID harnessv2.RuntimeSessionID, runtime *acp.RuntimeSession) error {
 	s.mu.Lock()
 	state := s.sessions[sessionID]
@@ -348,59 +298,42 @@ type sessionState struct {
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 	nativeCapture           *nativeSessionCapture
 	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
-	// operators registers admitted operator processes (nil while starting).
-	// Leaving an operator-admitting state revokes and kills all of them.
-	operators   map[uint64]*operatorRegistration
-	operatorSeq uint64
-	// operatorsClosed is set by the freeze/deletion barrier and cleared when
-	// the session returns to an operator-admitting state.
-	operatorsClosed bool
+	operators               map[uint64]*operatorRegistration
+	operatorSeq             uint64
+	operatorsClosed         bool
 }
 
 type promptState struct {
-	request             harnessv2.StartPromptRequest
-	operation           harnessv2.OperationRecord
-	lease               harnessv2.PromptLease
-	startedAt           time.Time
-	acceptedAt          time.Time
-	sequence            uint64
-	assistant           strings.Builder
-	assistantOverflow   bool
-	finalAnswer         strings.Builder
-	finalAnswerSeen     bool
-	finalAnswerOverflow bool
-	lastMessage         strings.Builder
-	lastMessageID       string
-	lastMessageOverflow bool
-	// untagged holds text Codex sent without a message ID since the last
-	// named chunk, such as a /review result.
-	untagged         strings.Builder
-	untaggedOverflow bool
-	settlement       *harnessv2.PromptSettlement
-	settlementDigest string
-	// Only the bounded supervisor classification, never a raw child error.
-	// PromptSettlement does not carry the terminal event's failure detail.
-	cancelInferenceFailure error
-	// providerDrainTimedOut records that an admitted inference request was
-	// still in flight when the child settled and did not finish within the
-	// cancel grace, so the prompt's inference accounting is incomplete.
+	request                  harnessv2.StartPromptRequest
+	operation                harnessv2.OperationRecord
+	lease                    harnessv2.PromptLease
+	startedAt                time.Time
+	acceptedAt               time.Time
+	sequence                 uint64
+	assistant                strings.Builder
+	assistantOverflow        bool
+	finalAnswer              strings.Builder
+	finalAnswerSeen          bool
+	finalAnswerOverflow      bool
+	lastMessage              strings.Builder
+	lastMessageID            string
+	lastMessageOverflow      bool
+	untagged                 strings.Builder
+	untaggedOverflow         bool
+	settlement               *harnessv2.PromptSettlement
+	settlementDigest         string
+	cancelInferenceFailure   error
 	providerDrainTimedOut    bool
 	remoteSettlementUnproven bool
 	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
 	toolCallNames            map[string]string
-	// live is set when the controller asked for live updates.
-	live bool
-	// redactor replaces the session's credentials in every event this prompt
-	// emits. The redaction streams hold back a chunk suffix that could begin
-	// a credential until the stream's next chunk or its end.
-	redactor           *credentialRedactor
-	assistantRedaction *redactionStream
-	thoughtRedaction   *redactionStream
-	rawInputs          map[string]string
-	// lastEventAt is the time of the prompt's last emitted event.
-	lastEventAt time.Time
-	// genai records the prompt's GenAI spans and metrics; nil when disabled.
-	genai *promptGenAI
+	live                     bool
+	redactor                 *credentialRedactor
+	assistantRedaction       *redactionStream
+	thoughtRedaction         *redactionStream
+	rawInputs                map[string]string
+	lastEventAt              time.Time
+	genai                    *promptGenAI
 }
 
 type promptMutationExecutor interface {
@@ -425,9 +358,6 @@ type operationFailure struct {
 	retryable bool
 }
 
-// recordSessionOperationLocked records a session operation and the deadline
-// after which neither its classification record nor response replay is useful.
-// The caller must hold s.mu when the state belongs to a live Server.
 func recordSessionOperationLocked(
 	state *sessionState,
 	metadata harnessv2.MutationMetadata,
@@ -445,9 +375,6 @@ func recordSessionOperationLocked(
 	state.operationRetention[metadata.OperationID] = metadata.ExpiresAt.Add(operationReplayRetentionSlack)
 }
 
-// pruneSessionOperationsLocked drops operations whose capability expiry and
-// replay-skew window have elapsed. The caller must hold s.mu when the state
-// belongs to a live Server.
 func pruneSessionOperationsLocked(state *sessionState, now time.Time) {
 	if state == nil {
 		return
@@ -467,10 +394,6 @@ func sessionOperationPtrLocked(state *sessionState, operationID harnessv2.Operat
 	return operationPtr(state.operations, operationID)
 }
 
-// ensureSessionOperationCapacityLocked preserves one final journal slot for
-// explicit deletion. Tombstones retain every still-replayable operation, so a
-// live session must stop accepting fresh mutations before the protocol limit
-// is reached rather than evicting valid replay records.
 func ensureSessionOperationCapacityLocked(state *sessionState, reservedSlots int) error {
 	if state == nil || reservedSlots < 0 || reservedSlots >= harnessv2.MaxRuntimeSessionTombstoneOperations {
 		return fmt.Errorf("invalid runtime session operation capacity request")
@@ -517,11 +440,6 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 	}
 	identityStateDir := cfg.SessionBaseDir
 	if strings.TrimSpace(cfg.DurableWorkspaceDir) != "" {
-		// The session base directory dies with a data-only cold suspension
-		// while the durable workspace root survives it. The allocator
-		// high-water mark must live with the surviving data, or a cold-booted
-		// supervisor would restart allocation at zero and hand the
-		// continuation the same UID/GID the pre-suspension session used.
 		identityStateDir = filepath.Join(cfg.DurableWorkspaceDir, ".session-identity")
 		if err := validateDurableCheckpointIdentityState(cfg.DurableWorkspaceDir, identityStateDir); err != nil {
 			return nil, fmt.Errorf("inspect durable session identity state: %w", err)
@@ -622,7 +540,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	capabilities := s.cfg.Capabilities
 	if r.Header.Get(harnessv2.NativeSessionLimitsHeader) != "1" {
-		// Preserve strict old-client decoding during controller/runtime upgrades.
 		capabilities.Limits.MaxNativeSessionBytes = 0
 		capabilities.SupportsNativeSessions = false
 	}
@@ -637,11 +554,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeController(w, r) {
 		return
 	}
-	// Status discloses Task, prompt, permission, and fence identifiers, so it
-	// requires proof of the operation-capability secret in addition to the
-	// controller bearer; a disclosed bearer alone must not read it. The
-	// capability is bound to this runtime's profile and carries a single-use
-	// nonce so a captured token cannot be replayed within its TTL.
 	if s.cfg.RequireCapabilities {
 		binding := harnessv2.StatusCapabilityBinding{
 			RuntimeProfileDigest: s.cfg.Fence.RuntimeProfileDigest,
@@ -663,10 +575,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-// tombstoneFailedCreateLocked records a tombstone for a create that failed
-// after identity allocation so a replay of the same request is classified as
-// a duplicate rather than allocating another non-reused identity. It must be
-// called with s.mu held.
 func (s *Server) tombstoneFailedCreateLocked(
 	sessionID harnessv2.RuntimeSessionID,
 	metadata harnessv2.MutationMetadata,
@@ -696,10 +604,6 @@ func (s *Server) tombstoneFailedCreateLocked(
 	s.failedCreates[metadata.Fence.RuntimeSessionUID] = *replay
 }
 
-// rejectTombstonedSessionCreateLocked classifies a create against the deletion
-// tombstone for its session UID/generation. It must be called with s.mu held;
-// when it handles the request it unlocks s.mu, writes the response, and
-// returns true, so the caller must return immediately.
 func (s *Server) rejectTombstonedSessionCreateLocked(
 	w http.ResponseWriter,
 	metadata harnessv2.MutationMetadata,
@@ -726,8 +630,6 @@ func (s *Server) rejectTombstonedSessionCreateLocked(
 		"tombstonedGeneration", tombstone.RuntimeSessionGeneration, "operationID", metadata.OperationID,
 		"classification", classification.Class, "existingPhase", classification.Phase)
 	if classification.Class == harnessv2.RequestClassificationFresh {
-		// The session UID/generation is tombstoned but this operation was never
-		// recorded on it: fail closed rather than resurrect it.
 		writeError(w, http.StatusGone, harnessv2.ErrorCodeStaleFence, "runtime session was deleted", nil, false)
 		return true
 	}
@@ -742,9 +644,6 @@ func (s *Server) rejectTombstonedSessionCreateLocked(
 	return true
 }
 
-// consumeStatusNonce records a status capability nonce and reports whether it
-// was previously unseen. Expired nonces are pruned opportunistically; the map
-// stays bounded because nonces live only for the capability TTL.
 func (s *Server) consumeStatusNonce(nonce string) bool {
 	if nonce == "" {
 		return false
@@ -908,8 +807,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expected := s.expectedFence(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
-	// Fresh creates have no operation record or tombstone to classify, but
-	// must still match the current supervisor before allocating an identity.
 	if mismatch := harnessv2.CompareFence(expected, request.Metadata.Fence, true); mismatch != harnessv2.FenceMatch {
 		writeClassificationError(w, harnessv2.Classification{Class: harnessv2.RequestClassificationStaleFence, FenceMismatch: mismatch})
 		return
@@ -940,9 +837,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 		existingState, existingCreating := existing.descriptor.State, existing.creating
 		s.mu.Unlock()
-		// The controller only sees the classification code; record the resident
-		// session's state so a rejected create can be reconstructed from the
-		// supervisor log without exposing request content.
 		slog.Info("ACP runtime session create rejected by replay classification",
 			"runtimeSessionID", request.RuntimeSessionID, "operationID", request.Metadata.OperationID,
 			"classification", classification.Class, "existingPhase", classification.Phase,
@@ -950,9 +844,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeClassificationError(w, classification)
 		return
 	}
-	// A create replayed after the session was deleted must not recreate it and
-	// re-run the prompt: consult the deletion tombstone before admitting a new
-	// OS identity.
 	if handled := s.rejectTombstonedSessionCreateLocked(w, request.Metadata, expected, now); handled {
 		return
 	}
@@ -1002,8 +893,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
+	timings := newSessionStartTimings()
+	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid, timings)
+	timings.finish()
+	span.SetAttributes(timings.spanAttributes()...)
 	if createErr != nil {
+		slog.Error("ACP runtime session creation failed",
+			append([]any{"stage", sessionCreationStage(createErr), "runtimeSessionID", request.RuntimeSessionID}, timings.logAttrs()...)...)
 		if isNativeInstallUnknown(createErr) && paths.Root != "" {
 			s.retainUnresolvedCreate(state, request, paths, nil, nativeInstallUnknownMessage, now)
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, nativeInstallUnknownMessage, nil, false)
@@ -1014,11 +910,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, createCleanupUnprovenMessage, nil, false)
 			return
 		}
-		// The allocated UID/GID is permanently consumed (identities are never
-		// reused). Tombstone the failed create so a replay of the same request
-		// is classified as a duplicate instead of allocating another identity
-		// on every retry and exhausting the pool's identity range; a genuine
-		// new attempt advances the session generation and is not blocked.
 		statusCode := http.StatusInternalServerError
 		code := harnessv2.ErrorCodeSessionPoisoned
 		retryable := true
@@ -1033,8 +924,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				statusCode: statusCode, code: code, message: message, retryable: retryable,
 			}
 		} else if rejection, rejected := sessionCreationRejection(createErr); rejected {
-			// Retrying the same workspace cannot succeed: fail the attempt
-			// instead of consuming another child identity per retry.
 			statusCode = http.StatusBadRequest
 			code = harnessv2.ErrorCodeInvalidRequest
 			retryable = false
@@ -1047,7 +936,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.tombstoneFailedCreateLocked(request.RuntimeSessionID, request.Metadata, now, replay)
 		s.mu.Unlock()
-		slog.Error("ACP runtime session creation failed", "stage", sessionCreationStage(createErr))
 		writeError(w, statusCode, code, message, nil, retryable)
 		return
 	}
@@ -1079,6 +967,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if drainCleanup {
 		go s.cleanupDrainedSession(request.RuntimeSessionID, state)
 	}
+	slog.Info("ACP runtime session created",
+		append([]any{"runtimeSessionID", request.RuntimeSessionID, "nativeRestore", request.NativeRestore != nil}, timings.logAttrs()...)...)
 	writeJSON(w, http.StatusCreated, harnessv2.CreateRuntimeSessionResponse{
 		Protocol:       harnessv2.ProtocolVersion,
 		Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
@@ -1093,6 +983,7 @@ func (s *Server) createSession(
 	now time.Time,
 	uid int,
 	gid int,
+	timings *sessionStartTimings,
 ) (
 	resultRuntime *acp.RuntimeSession, resultDescriptor harnessv2.RuntimeSessionDescriptor, resultPaths acp.SessionPaths,
 	resultBaseline *workspacedelta.Snapshot, resultProviderProxy *providerProxySession, resultMCPProxy *mcpProxySession,
@@ -1106,6 +997,7 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("path preparation", err)
 	}
+	timings.mark("sessionPaths")
 	cleanup := true
 	nativeJournalDir := ""
 	ownsNativeJournal := false
@@ -1123,26 +1015,13 @@ func (s *Server) createSession(
 			resultErr = sessionCreationFailed("native create filesystem cleanup", &createCleanupUnprovenError{Err: errors.Join(resultErr, cleanupErr)})
 		}
 	}()
-	// Under a durable workspace root, the repository workspace of one logical
-	// session lives on the provider's durable data volume so a data-only cold
-	// suspension preserves exactly it; every other session path stays in the
-	// ephemeral tree that dies with this process. Committed content resumes
-	// without re-materialization, and the recorded repository binding must
-	// match the declared baseline so continuation never silently switches
-	// source content.
 	materialize := true
 	resumedFromCheckpoint := false
-	// A dedicated provider workspace keeps the same data key when a checkpoint
-	// seeds a new RuntimeSession. Runtime identities and their UID/GID allocator
-	// remain independent; only the workspace directory has a stable name.
 	sessionComponent := s.cfg.DurableWorkspaceKey
 	if sessionComponent == "" {
 		sessionComponent = string(request.Metadata.Fence.RuntimeSessionUID)
 	}
 	if request.Workspace.ExpectDurableResume && s.cfg.DurableWorkspaceDir == "" {
-		// The controller asserts this session resumes a committed durable
-		// checkpoint; a runtime without a durable root cannot possibly hold
-		// it and must fail closed instead of running on a fresh tree.
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 			errors.New("controller expects a committed durable checkpoint, but this runtime has no durable workspace root"))
 	}
@@ -1156,14 +1035,6 @@ func (s *Server) createSession(
 				durableWorkspacePreparationFailed(request.Workspace.ExpectDurableResume, durableErr)
 		}
 		if request.Workspace.ExpectDurableResume && committed == nil {
-			// The provider returned an empty or replacement volume after
-			// snapshot loss: silently materializing the verified baseline
-			// would let the continuation run cleanly while every
-			// checkpoint-only change has vanished. One authorized exception
-			// exists: a repository-identity transition staged its record
-			// durably before wiping the old checkpoint, and a transient
-			// failure before the recommit leaves exactly this shape - the
-			// retry may materialize the SAME staged target fresh.
 			transition, transitionErr := acp.DurableWorkspaceTransitionTarget(s.cfg.DurableWorkspaceDir, sessionComponent)
 			if transitionErr != nil {
 				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace transition record", transitionErr)
@@ -1184,18 +1055,8 @@ func (s *Server) createSession(
 		}
 		paths.Workspace = workspaceDir
 		if committed != nil {
-			// Continuity is judged on the stable session-level identity, not
-			// the raw Task-scoped baseline: a no-repository continuation
-			// carries a fresh Task UID in the protocol identity, and a
-			// verified publication legitimately advances the revision the
-			// controller validated before requesting this session.
 			if request.Workspace.ExpectDurableResume &&
 				committed.SessionGeneration < request.Workspace.ExpectDurableResumeMinGeneration {
-				// Same volume, valid marker, OLDER recorded generation: the
-				// provider restored a stale data snapshot of this repository.
-				// Diffing it against the newest verified baseline would let
-				// the next publication silently drop or revert newer
-				// checkpoint-only edits; fail closed instead.
 				return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 					fmt.Errorf(
 						"committed durable checkpoint records session generation %d, older than the controller's floor %d; a stale snapshot restore is refused",
@@ -1205,11 +1066,6 @@ func (s *Server) createSession(
 				acp.StableDurableWorkspaceIdentity(committed.RepositoryIdentity, committed.Revision),
 				acp.StableDurableWorkspaceIdentity(request.Workspace.Baseline.RepositoryIdentity, request.Workspace.Baseline.Revision),
 			) {
-				// The preserved tree still carries the previous session
-				// child's ownership and 0700 modes; without DAC_OVERRIDE the
-				// supervisor cannot capture the resumed baseline until the
-				// tree is reclaimed. Finalization below reassigns it to this
-				// session's fresh child identity.
 				if err := acp.ReclaimSessionOwnership(paths.Workspace); err != nil {
 					return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership reclaim", err)
 				}
@@ -1220,32 +1076,10 @@ func (s *Server) createSession(
 					if !durableResumeTransitionAuthorized(
 						committed.RepositoryIdentity, committed.Revision, request.Workspace.ExpectDurableResumeFrom,
 					) {
-						// The controller asserts continuity with this session's
-						// preserved lineage, but the committed checkpoint binds a
-						// DIFFERENT repository identity than both the resumed
-						// lineage and any controller-authorized prior identity:
-						// the provider restored a wrong or stale snapshot.
-						// Wiping it would silently destroy someone's preserved
-						// data and run the continuation on a clean baseline;
-						// fail closed instead.
 						return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationResumeLost(
 							errors.New("committed durable checkpoint binds a different repository identity than the resumed lineage; refusing to wipe it"))
 					}
-					// The checkpoint binds exactly the controller-asserted
-					// PRIOR identity of a verified publication transition:
-					// the wipe below re-materializes from the authenticated
-					// new baseline rather than poisoning the continuation.
 				}
-				// A verified publication transition can move the session to a
-				// new repository identity (for example the fork a PR
-				// publishes to); the authenticated controller validated that
-				// transition before requesting this session, so the stale
-				// durable tree is wiped and the workspace re-materializes
-				// from the newly declared baseline instead of poisoning the
-				// continuation. The authorization is staged DURABLY before
-				// the wipe: a transient failure between this wipe and the
-				// commit would otherwise leave a resumed lineage with no
-				// committed marker, and the retry would fail closed forever.
 				if err := acp.MarkDurableWorkspaceTransitionAuthorized(
 					s.cfg.DurableWorkspaceDir, sessionComponent,
 					acp.DurableWorkspaceBinding{
@@ -1270,23 +1104,17 @@ func (s *Server) createSession(
 				paths.Workspace = workspaceDir
 			}
 		}
+		timings.mark("durableWorkspace")
 	}
 	if materialize {
 		if err := s.cfg.WorkspaceMaterializer.Materialize(ctx, request, paths.Workspace); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace materialization", err)
 		}
+		timings.mark("workspaceMaterialization")
 	}
 	var baseline *workspacedelta.Snapshot
 	readOnly := request.Workspace.Intent == harnessv2.WorkspaceIntentRead
 	if resumedFromCheckpoint {
-		// The preserved checkpoint may carry unpublished pre-suspension
-		// edits (a failed or cancelled Task detaches with Suspend without
-		// publishing its delta). Capturing the checkpoint tree as the
-		// baseline would silently drop those edits from the next
-		// publication, so the baseline is reconstructed from the
-		// controller-verified repository baseline instead: the next delta
-		// then expresses everything not yet published, pre-suspension edits
-		// included.
 		baselineDir := filepath.Join(paths.Root, "baseline-reconstruction")
 		if err = os.MkdirAll(baselineDir, 0o700); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("baseline reconstruction root", err)
@@ -1317,15 +1145,18 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace baseline capture", err)
 		}
 	}
+	timings.mark("baselineCapture")
 	if s.cfg.Provider.ValidateWorkspace != nil {
 		if err := s.cfg.Provider.ValidateWorkspace(paths); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationRejected(err)
 		}
+		timings.mark("workspaceValidation")
 	}
 	if s.cfg.Provider.PrepareSession != nil {
 		if err := s.cfg.Provider.PrepareSession(paths); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
 		}
+		timings.mark("providerHome")
 	}
 	providerProxy, proxyBinding, err := s.providerProxy.newSessionForRequest(request)
 	if err != nil {
@@ -1337,6 +1168,11 @@ func (s *Server) createSession(
 			providerProxy.close()
 		}
 	}()
+	if s.cfg.Provider.BindProviderProxy != nil {
+		if err := s.cfg.Provider.BindProviderProxy(paths, proxyBinding); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider home preparation", err)
+		}
+	}
 	mcpProxy, mcpServer, err := s.mcpProxy.newSession(request.Metadata.Fence, request.MCPConfiguration)
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("MCP proxy setup", err)
@@ -1347,6 +1183,7 @@ func (s *Server) createSession(
 			mcpProxy.close()
 		}
 	}()
+	timings.mark("proxySetup")
 	projection := ProviderSessionProjection{}
 	if s.cfg.Provider.ProjectSession != nil {
 		projection, err = s.cfg.Provider.ProjectSession(request, paths, proxyBinding)
@@ -1366,9 +1203,6 @@ func (s *Server) createSession(
 	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
-	// Skills land in the session tree before ownership is finalized, so each
-	// private copy belongs to this session's identity alone. Claude's go to a
-	// shared plugin folder no session identity owns.
 	if err := materializeSessionSkills(s.cfg.Provider.Kind, s.cfg.Skills, skillMountRoot, paths); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("skill projection", err)
 	}
@@ -1377,6 +1211,7 @@ func (s *Server) createSession(
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
 	}
 	maps.Copy(envValues, azureEnvironment)
+	timings.mark("providerConfiguration")
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
@@ -1401,15 +1236,8 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session installation", installErr)
 		}
 		resumeSessionID = snapshot.ProviderSessionID
+		timings.mark("nativeRestore")
 	}
-	// Operator file copies reopen the workspace by path once the child, which
-	// may own the session root, is running, so its identity is pinned here and
-	// the directory is held open until the session ends: a deleted workspace's
-	// inode number could otherwise be given to a directory the child creates.
-	// It must precede the ownership handoff: afterwards the 0700 child-owned
-	// session root is no longer traversable by a supervisor that runs without
-	// CAP_DAC_OVERRIDE, as managed runtime Pods do. Ownership changes do not
-	// change the directory's identity, and nothing later replaces it.
 	if err := recordSessionWorkspaceIdentity(&paths); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace identity", err)
 	}
@@ -1422,9 +1250,6 @@ func (s *Server) createSession(
 		}
 	}
 	if s.cfg.DurableWorkspaceDir != "" {
-		// The durable workspace lives outside the session root, and each cold
-		// resume allocates a fresh non-reused child identity, so the preserved
-		// tree is re-assigned to exactly this session's UID.
 		if err := finalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
@@ -1441,25 +1266,16 @@ func (s *Server) createSession(
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
 	}
 	if resumedFromCheckpoint {
-		// Invalidate the committed marker only NOW, immediately before the
-		// provider child (the only writer of the durable tree) can spawn: a
-		// failure in any earlier stage - baseline reconstruction, provider
-		// home preparation, proxy setup - leaves the committed marker intact
-		// so the untouched checkpoint is reused on retry instead of being
-		// wiped as a partial session. A failure after this point wipes, as
-		// it must: the child may have modified the repository. The
-		// successful commit below restores the marker.
 		if err := acp.MarkDurableSessionWorkspaceResumePending(
 			s.cfg.DurableWorkspaceDir, sessionComponent,
 		); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
 	}
+	timings.mark("ownershipAndEnvironment")
 	var (
 		validateAdapterRelaunch func() error
-		// relaunched is set once the RuntimeSession exists, before it is
-		// published; a relaunch happens only after that.
-		relaunched *acp.RuntimeSession
+		relaunched              *acp.RuntimeSession
 	)
 	if validate := s.cfg.Provider.ValidateWorkspace; validate != nil {
 		check := validateWorkspaceAsSessionChild(validate, paths, uid, gid)
@@ -1484,14 +1300,11 @@ func (s *Server) createSession(
 			GID:           gid,
 			ClientOptions: acp.Options{MaxMessageBytes: s.cfg.Capabilities.Limits.MaxRequestBytes},
 		},
-		MCPServers:      []acp.MCPServer{mcpServer},
-		NewSessionMeta:  projection.NewSessionMeta,
-		RequiredModeID:  projection.RequiredModeID,
-		ResumeSessionID: resumeSessionID,
-		AuthMethodID:    s.cfg.Provider.AuthMethodID,
-		// The agent can write the workspace between prompts; an idle adapter
-		// restart must not launch the provider over configuration that
-		// creation would have refused.
+		MCPServers:              []acp.MCPServer{mcpServer},
+		NewSessionMeta:          projection.NewSessionMeta,
+		RequiredModeID:          projection.RequiredModeID,
+		ResumeSessionID:         resumeSessionID,
+		AuthMethodID:            s.cfg.Provider.AuthMethodID,
 		ValidateAdapterRelaunch: validateAdapterRelaunch,
 		InitializeTimeout:       defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),
 		PromptLease:             time.Duration(s.cfg.Capabilities.Limits.MaxPromptLeaseMillis) * time.Millisecond,
@@ -1500,21 +1313,21 @@ func (s *Server) createSession(
 		MaxBufferedEvents:       s.cfg.Capabilities.Limits.MaxBufferedEvents,
 		MaxBufferedEventBytes:   supervisorMaxBufferedPromptEventBytes,
 	})
+	timings.mark("adapterStartup")
 	if err != nil {
-		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
+		initialization, failed := errors.AsType[*acp.InitializationError](err)
+		if failed && initialization.RuntimeSession() != nil {
+			timings.recordAdapter(initialization.RuntimeSession().StartupTimings())
+		}
+		if failed && !initialization.Cleanup.Proven {
 			cleanup = false
 			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &createCleanupUnprovenError{Err: err})
 		}
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
+	timings.recordAdapter(runtimeSession.StartupTimings())
 	relaunched = runtimeSession
 	if s.cfg.DurableWorkspaceDir != "" {
-		// The marker commits only after the session is fully initialized: a
-		// creation that fails part-way leaves its binding pending, so the next
-		// creation wipes the uncommitted durable tree and
-		// materializes clean instead of reusing state a failed create — or a
-		// partially started provider — may have modified. A resume recommits
-		// here, retiring its pending record.
 		if commitErr := acp.CommitDurableSessionWorkspace(
 			s.cfg.DurableWorkspaceDir,
 			sessionComponent,
@@ -1526,10 +1339,6 @@ func (s *Server) createSession(
 				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration,
 			},
 		); commitErr != nil {
-			// The credential-bearing child is already running; its removal
-			// must be PROVEN before this creation is abandoned, or the
-			// surviving descendant would be untracked by any session and
-			// later pool lifecycle decisions would proceed over it.
 			cleanupResult, deleteErr := runtimeSession.Delete(ctx)
 			if deleteErr != nil || !cleanupResult.Proven {
 				if request.NativeRestore != nil {
@@ -1540,6 +1349,7 @@ func (s *Server) createSession(
 			}
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
 		}
+		timings.mark("durableCommit")
 	}
 	cleanup = false
 	cleanupProviderProxy = false
@@ -1597,12 +1407,6 @@ func (s *Server) decodeMutation(w http.ResponseWriter, r *http.Request, target a
 	return s.decodeAuthenticatedJSON(w, r, target)
 }
 
-// decodeAuthenticatedJSON verifies the controller bearer token before reading
-// the request body. An untrusted ACP child shares the Pod network namespace
-// and can reach this listener, so unauthenticated peers must be rejected on
-// headers alone instead of being allowed to drip-feed mutation bodies. The
-// operation-capability check still runs after decoding because it needs the
-// mutation metadata from the body.
 func (s *Server) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	if !s.authorizeController(w, r) {
 		return false
@@ -1610,9 +1414,6 @@ func (s *Server) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request,
 	return decodeJSON(w, r, s.cfg.Capabilities.Limits.MaxRequestBytes, target)
 }
 
-// Only the native bundle data receives the larger create-request allowance.
-// Whitespace, escaped padding, and all other fields still consume the ordinary
-// request budget, even when a native restore is present.
 func (s *Server) decodeAuthenticatedCreateJSON(w http.ResponseWriter, r *http.Request, target *harnessv2.CreateRuntimeSessionRequest) bool {
 	if !s.authorizeController(w, r) {
 		return false
@@ -1875,9 +1676,6 @@ func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *s
 	s.mu.Lock()
 	cleanup := s.poisonPoolLocked(reason)
 	if s.sessions[sessionID] == state {
-		// The attempt has returned, so an authenticated delete or a fresh
-		// drain may retry cleanup. Keep admission closed and retain all
-		// session evidence until that retry proves retirement.
 		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		state.drainCleanupScheduled = false
@@ -1886,8 +1684,6 @@ func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *s
 	s.startDrainCleanup(cleanup)
 }
 
-// tombstoneSessionLocked preserves replay and terminal proof after either
-// explicit deletion or automatic cleanup. The caller must hold s.mu.
 func (s *Server) tombstoneSessionLocked(state *sessionState, deletedAt time.Time) sessionTombstone {
 	pruneSessionOperationsLocked(state, deletedAt)
 	operations := make([]harnessv2.OperationRecord, 0, len(state.operations))
@@ -1908,8 +1704,6 @@ func (s *Server) tombstoneSessionLocked(state *sessionState, deletedAt time.Time
 	}
 	for operationID, replay := range state.operationReplays {
 		if replay.isCancellation {
-			// Keep the shared replay until its owner finishes, even when cleanup
-			// overtakes an in-flight cancellation handler.
 			tombstone.cancellations[operationID] = replay
 		}
 	}
@@ -1920,8 +1714,6 @@ func (s *Server) tombstoneSessionLocked(state *sessionState, deletedAt time.Time
 	return tombstone
 }
 
-// Close stops admission and tears down all resident runtime sessions. A cleanup
-// failure is returned so the caller can poison/restart the enclosing RuntimePool.
 func (s *Server) Close(ctx context.Context) error {
 	s.mu.Lock()
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
@@ -1949,7 +1741,6 @@ func (s *Server) Close(ctx context.Context) error {
 		}
 		if state.runtime != nil {
 			if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
-				// Keep the session's resources; the pool is replaced instead.
 				errs = append(errs, fmt.Errorf("runtime session operator quiesce: %w", err))
 				continue
 			}
@@ -2008,18 +1799,12 @@ func (s *Server) poisonPoolLocked(reason string) []drainCleanupCandidate {
 			state.mcpProxy.revoke(harnessv2.RuntimeSessionStatePoisoned)
 		}
 	}
-	// A poisoned pool can only be retired. Keep the requested drain in a
-	// protocol-valid terminal lifecycle while health reports the failure.
 	s.poisoned = true
 	s.lifecycle = harnessv2.SupervisorLifecycleTerminating
 	s.drain = harnessv2.DrainStatus{AcceptingNewSessions: false, Requested: true, RequestedAt: time.Now().UTC(), Reason: reason, WorkerEvictionAt: s.drain.WorkerEvictionAt}
 	if !firstPoison {
 		return nil
 	}
-	// Retire eligible peers once, even when no controller Drain preceded the
-	// failure. A failing deletion is still Deleting and therefore excluded.
-	// Later failures remain available for authenticated retries, rather than
-	// repeatedly scheduling each other's unproven cleanup.
 	return s.beginDrainLocked(reason, s.drain.RequestedAt)
 }
 
@@ -2038,9 +1823,6 @@ func (s *Server) BeginDrain(reason string) {
 	s.lifecycle = drainingLifecycle(s.lifecycle)
 }
 
-// drainingLifecycle is the lifecycle after a drain request. Terminating is
-// final: Close does not record a drain, and a later request must not reopen
-// what teardown, including operator admission, has closed.
 func drainingLifecycle(current harnessv2.SupervisorLifecycle) harnessv2.SupervisorLifecycle {
 	if current == harnessv2.SupervisorLifecycleTerminating {
 		return current
@@ -2048,11 +1830,6 @@ func drainingLifecycle(current harnessv2.SupervisorLifecycle) harnessv2.Supervis
 	return harnessv2.SupervisorLifecycleDraining
 }
 
-// durableResumeTransitionAuthorized reports whether a committed durable
-// checkpoint that mismatches the resumed lineage's declared baseline may be
-// wiped and re-materialized: only when the controller asserted the exact
-// PRIOR repository identity of a verified publication transition and the
-// checkpoint binds precisely that identity.
 func durableResumeTransitionAuthorized(committedIdentity, committedRevision, expectedPrior string) bool {
 	expectedPrior = strings.TrimSpace(expectedPrior)
 	if expectedPrior == "" {

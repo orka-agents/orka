@@ -15,11 +15,31 @@ var wireMethods = []string{
 	"SaveArtifact",
 	"Describe",
 	"HealthCheck",
+	"AppendExecutionEvent",
+	"AppendExecutionEventIfAbsent",
+	"AppendExecutionEventWithPlanIfAbsent",
+	"AppendExecutionEventsIfAbsent",
+	"DeleteExecutionEvents",
+	"GetLatestExecutionEventSeq",
+	"GetLatestExecutionEventSeqs",
+	"ListExecutionEvents",
+	"ListSessionExecutionEvents",
 	"ConsumeMessages",
 	"DeleteParentMessages",
 	"DeleteTaskMessages",
 	"ListUnreadMessages",
 	"SendMessage",
+	"AdvanceControllerEpoch",
+	"AdvanceWriteWatermark",
+	"BindDataset",
+	"CompleteDatasetBootstrap",
+	"DetachDatasetBinding",
+	"GetControllerEpochMirror",
+	"GetDatasetBinding",
+	"GetWriteWatermark",
+	"PruneOperationReceipts",
+	"ResolveOperation",
+	"UpdateBindingKeyFingerprint",
 	"DeletePlan",
 	"DeleteResult",
 	"GetPlan",
@@ -69,6 +89,52 @@ func (p *recordingProvider) HealthCheck(ctx context.Context) error {
 	return err
 }
 
+func (p *recordingProvider) AppendExecutionEvent(ctx context.Context, event *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
+	results, err := p.called(ctx, "AppendExecutionEvent", event)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), err
+}
+
+func (p *recordingProvider) AppendExecutionEventIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string) (*storagev1.ExecutionEvent, bool, error) {
+	results, err := p.called(ctx, "AppendExecutionEventIfAbsent", event, dedupeKey)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), resultAs[bool](results, 1), err
+}
+
+func (p *recordingProvider) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string, plan *storagev1.PlanState) (*storagev1.ExecutionEvent, bool, error) {
+	results, err := p.called(ctx, "AppendExecutionEventWithPlanIfAbsent", event, dedupeKey, plan)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), resultAs[bool](results, 1), err
+}
+
+func (p *recordingProvider) AppendExecutionEventsIfAbsent(ctx context.Context, appends []storagev1.ExecutionEventAppend) ([]storagev1.ExecutionEventAppendResult, error) {
+	results, err := p.called(ctx, "AppendExecutionEventsIfAbsent", appends)
+	return resultAs[[]storagev1.ExecutionEventAppendResult](results, 0), err
+}
+
+func (p *recordingProvider) DeleteExecutionEvents(ctx context.Context, namespace string, streamType string, streamID string) error {
+	results, err := p.called(ctx, "DeleteExecutionEvents", namespace, streamType, streamID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) GetLatestExecutionEventSeq(ctx context.Context, namespace string, streamType string, streamID string) (int64, error) {
+	results, err := p.called(ctx, "GetLatestExecutionEventSeq", namespace, streamType, streamID)
+	return resultAs[int64](results, 0), err
+}
+
+func (p *recordingProvider) GetLatestExecutionEventSeqs(ctx context.Context, namespace string, streamType string, streamIDs []string) (map[string]int64, error) {
+	results, err := p.called(ctx, "GetLatestExecutionEventSeqs", namespace, streamType, streamIDs)
+	return resultAs[map[string]int64](results, 0), err
+}
+
+func (p *recordingProvider) ListExecutionEvents(ctx context.Context, filter storagev1.ExecutionEventFilter) ([]storagev1.ExecutionEvent, error) {
+	results, err := p.called(ctx, "ListExecutionEvents", filter)
+	return resultAs[[]storagev1.ExecutionEvent](results, 0), err
+}
+
+func (p *recordingProvider) ListSessionExecutionEvents(ctx context.Context, filter storagev1.SessionExecutionEventFilter) ([]storagev1.SessionExecutionEvent, int64, error) {
+	results, err := p.called(ctx, "ListSessionExecutionEvents", filter)
+	return resultAs[[]storagev1.SessionExecutionEvent](results, 0), resultAs[int64](results, 1), err
+}
+
 func (p *recordingProvider) ConsumeMessages(ctx context.Context, request storagev1.ConsumeMessagesRequest) ([]storagev1.Message, error) {
 	results, err := p.called(ctx, "ConsumeMessages", request)
 	return resultAs[[]storagev1.Message](results, 0), err
@@ -96,6 +162,62 @@ func (p *recordingProvider) SendMessage(ctx context.Context, msg *storagev1.Mess
 	writeBackInto(p.writtenFor("SendMessage"), 0, msg)
 	_ = results
 	return err
+}
+
+func (p *recordingProvider) AdvanceControllerEpoch(ctx context.Context, request storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	results, err := p.called(ctx, "AdvanceControllerEpoch", request)
+	return resultAs[storagev1.ControllerEpochMirrorState](results, 0), err
+}
+
+func (p *recordingProvider) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	results, err := p.called(ctx, "AdvanceWriteWatermark")
+	return resultAs[storagev1.WriteWatermark](results, 0), err
+}
+
+func (p *recordingProvider) BindDataset(ctx context.Context, request storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "BindDataset", request)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
+}
+
+func (p *recordingProvider) CompleteDatasetBootstrap(ctx context.Context, datasetID string) error {
+	results, err := p.called(ctx, "CompleteDatasetBootstrap", datasetID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) DetachDatasetBinding(ctx context.Context, request storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "DetachDatasetBinding", request)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
+}
+
+func (p *recordingProvider) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	results, err := p.called(ctx, "GetControllerEpochMirror", name)
+	return resultAs[storagev1.ControllerEpochMirrorState](results, 0), err
+}
+
+func (p *recordingProvider) GetDatasetBinding(ctx context.Context, datasetID string) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "GetDatasetBinding", datasetID)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
+}
+
+func (p *recordingProvider) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	results, err := p.called(ctx, "GetWriteWatermark")
+	return resultAs[storagev1.WriteWatermark](results, 0), err
+}
+
+func (p *recordingProvider) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
+	results, err := p.called(ctx, "PruneOperationReceipts", limit)
+	return resultAs[int](results, 0), err
+}
+
+func (p *recordingProvider) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	results, err := p.called(ctx, "ResolveOperation", request)
+	return resultAs[storagev1.OperationOutcome](results, 0), err
+}
+
+func (p *recordingProvider) UpdateBindingKeyFingerprint(ctx context.Context, request storagev1.UpdateBindingKeyRequest) (storagev1.DatasetBinding, error) {
+	results, err := p.called(ctx, "UpdateBindingKeyFingerprint", request)
+	return resultAs[storagev1.DatasetBinding](results, 0), err
 }
 
 func (p *recordingProvider) DeletePlan(ctx context.Context, namespace string, taskName string) error {

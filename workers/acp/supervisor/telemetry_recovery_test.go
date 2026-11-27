@@ -20,12 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Exercise the SDK's asynchronous error path and reuse the same provider after
-// the collector recovers. Failed exports must neither expose response content
-// nor disable later exports or override a remote parent's sampling decision.
 func TestSupervisorTelemetrySamplingAndRecovery(t *testing.T) {
-	// The SDK's first SetErrorHandler call permanently changes previously
-	// returned delegators. A subprocess keeps that state out of other tests.
 	if os.Getenv("ORKA_TELEMETRY_RECOVERY_FIXTURE") != "true" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

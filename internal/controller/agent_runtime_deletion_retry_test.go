@@ -21,8 +21,6 @@ import (
 func TestAgentRuntimeReconcilerRetriesPoisonedDrainCleanup(t *testing.T) {
 	server, reconciler, runtimeObject, _ := newAgentRuntimeDrainRetryFixture(t)
 	request := reconcileRequestFor(runtimeObject)
-	// Automatic drain already failed. No Task or Session cleanup controller is
-	// present to send a second DELETE on behalf of this resident session.
 	if _, err := reconciler.Reconcile(t.Context(), request); err == nil ||
 		!strings.Contains(err.Error(), "retry poisoned AgentRuntime session cleanup") {
 		t.Fatalf("failed cleanup reconcile error = %v, want retained cleanup failure", err)
@@ -42,8 +40,6 @@ func TestAgentRuntimeReconcilerRetriesPoisonedDrainCleanup(t *testing.T) {
 	if len(deletes) != 2 || deletes[0].Metadata.OperationID != deletes[1].Metadata.OperationID {
 		t.Fatalf("cleanup retries = %#v, want one stable operation for the original resident", deletes)
 	}
-	// A second poisoned resident was also available. Reconciliation remains
-	// bounded to one exact DELETE, and never interrupts active/deleting peers.
 	if len(server.DrainOperationIDs()) != 0 {
 		t.Fatal("cleanup retry allocated another pool drain operation")
 	}
@@ -147,8 +143,6 @@ func newAgentRuntimeDrainRetryFixture(t *testing.T) (*agentRuntimeDrainRetryServ
 func (s *agentRuntimeDrainRetryServer) handleRetry(w http.ResponseWriter, request *http.Request) {
 	switch {
 	case request.Method == http.MethodGet && request.URL.Path == harnessv2.StatusPath:
-		// Reuse the existing fixture's authenticated status implementation,
-		// replacing only the observed resident cleanup state.
 		response := httptest.NewRecorder()
 		s.handleStatus(response, request)
 		if response.Code != http.StatusOK {

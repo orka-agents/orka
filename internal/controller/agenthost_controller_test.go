@@ -99,12 +99,11 @@ func userToken(value string) *corev1.Secret {
 }
 
 type agentHostHarness struct {
-	t          *testing.T
-	client     client.Client
-	reconciler *AgentHostReconciler
-	idle       *fakeIdleStatus
-	now        time.Time
-	// podCreateErr, when set, is how the API server answers a Pod create.
+	t            *testing.T
+	client       client.Client
+	reconciler   *AgentHostReconciler
+	idle         *fakeIdleStatus
+	now          time.Time
 	podCreateErr error
 }
 
@@ -142,7 +141,6 @@ func newAgentHostHarness(t *testing.T, objects ...client.Object) *agentHostHarne
 	return h
 }
 
-// settle reconciles until the result stops asking for an immediate retry.
 func (h *agentHostHarness) settle() {
 	h.t.Helper()
 	for range 20 {
@@ -265,8 +263,6 @@ func assertHardenedHostPod(t *testing.T, pod *corev1.Pod) {
 		sidecar.RestartPolicy == nil || *sidecar.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("host agent sidecar = %+v", sidecar)
 	}
-	// Orka's own image stages the connection token and the host agent, so host
-	// images need no tools.
 	stage := pod.Spec.InitContainers[0]
 	if stage.Image != testAgentImage || len(stage.Args) == 0 || stage.Args[0] != "stage" {
 		t.Fatalf("staging container = %+v", stage)
@@ -292,7 +288,6 @@ func assertHardenedHostPod(t *testing.T, pod *corev1.Pod) {
 			t.Fatal("the GitHub token must be mounted into the host container only")
 		}
 	}
-	// The host runs the staged host agent as its init, from a mount it cannot write.
 	if !slices.Contains(stage.Args, "--agent-to="+env[agenthost.HostAgentEnv]) {
 		t.Fatalf("host agent staged by %v, host runs %q", stage.Args, env[agenthost.HostAgentEnv])
 	}
@@ -310,9 +305,6 @@ func assertHardenedHostPod(t *testing.T, pod *corev1.Pod) {
 	}
 }
 
-// The API server's refusal of a host object, here an unknown RuntimeClass,
-// fails the host with its reason instead of retrying in silence, and the host
-// recovers once the cause is gone.
 func TestAgentHostReportsARefusedPod(t *testing.T) {
 	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
 		testHost(), userToken("ghs_user_token"))
@@ -372,7 +364,6 @@ func TestAgentHostNeverAdoptsForeignObjects(t *testing.T) {
 		t.Fatal("no Pod may start next to a foreign volume")
 	}
 
-	// Deletion leaves the foreign object alone.
 	if err := h.client.Delete(context.Background(), got); err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +379,6 @@ func TestAgentHostAdoptsObjectFromAnInterruptedCreate(t *testing.T) {
 	host.Spec.GitHubTokenSecretRef = nil
 	host.Status.HostNamespace = testHostNamespace
 	names := agenthost.ObjectNames(host, testHostNamespace)
-	// The receipt was recorded but the controller stopped before saving the UID.
 	host.Status.Objects = []corev1alpha1.AgentHostObjectReceipt{{Kind: agentHostKindSecret, Name: names.ConnectionTokenSecret, Nonce: "n1"}}
 	host.Finalizers = []string{agentHostFinalizer}
 	created := agenthost.ConnectionTokenSecret(host, names, "n1", []byte("token-value"))
@@ -449,7 +439,6 @@ func TestAgentHostReplacesATerminatedPod(t *testing.T) {
 		t.Fatal("a replacement Pod gets a fresh creation nonce")
 	}
 
-	// A second failure doubles the wait, and readiness resets the count.
 	second.Status.Phase = corev1.PodFailed
 	if err := h.client.Status().Update(context.Background(), second); err != nil {
 		t.Fatal(err)
@@ -589,8 +578,6 @@ func TestAgentHostNeverRecoversUserNamespaceObjectsByNonce(t *testing.T) {
 	host.Finalizers = []string{agentHostFinalizer}
 	host.Status.HostNamespace = testHostNamespace
 	names := agenthost.ObjectNames(host, testHostNamespace)
-	// The receipt is public in status; a user copies its nonce onto a Secret
-	// before the controller records the real Secret's UID.
 	host.Status.Objects = []corev1alpha1.AgentHostObjectReceipt{{
 		Kind: agentHostKindConnectionSecret, Namespace: testUserNamespace, Name: names.Connection, Nonce: "public-nonce",
 	}}
@@ -679,7 +666,6 @@ func TestAgentHostIdleSuspendAndWake(t *testing.T) {
 		t.Fatalf("idleSince = %v", got)
 	}
 
-	// A stale report never suspends.
 	since = h.now.Add(-2 * time.Hour)
 	h.idle.status = agenthost.IdleStatus{Idle: true, IdleSince: &since, Stale: true}
 	h.settle()
@@ -697,7 +683,6 @@ func TestAgentHostIdleSuspendAndWake(t *testing.T) {
 		t.Fatalf("status = %+v", host.Status)
 	}
 
-	// An older wake request does nothing; a newer one starts the host.
 	before := metav1.NewTime(host.Status.IdleSuspendedAt.Add(-time.Minute))
 	host.Spec.WakeRequestedAt = &before
 	if err := h.client.Update(context.Background(), host); err != nil {
@@ -722,8 +707,6 @@ func TestAgentHostIdleSuspendAndWake(t *testing.T) {
 	}
 }
 
-// A wake request dated in the future does nothing until its time, then wakes
-// the host once; it never keeps defeating later idle suspensions.
 func TestAgentHostFutureWakeRequestWakesOnceAtItsTime(t *testing.T) {
 	template := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
 	template.Spec.IdleSuspend = &corev1alpha1.AgentHostIdleSuspend{After: metav1.Duration{Duration: 30 * time.Minute}}
@@ -765,8 +748,6 @@ func TestAgentHostFutureWakeRequestWakesOnceAtItsTime(t *testing.T) {
 	}
 }
 
-// The host's NetworkPolicy follows the controller's current namespace and Pod
-// labels, so the controller can keep reading the host's status.
 func TestAgentHostNetworkPolicyFollowsTheController(t *testing.T) {
 	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
 		testHost(), userToken("ghs_user_token"))
@@ -825,8 +806,6 @@ func TestAgentHostRotatesTheGitHubTokenCopy(t *testing.T) {
 	}
 }
 
-// The daemon reads its identity from the token once, at start, so a token from
-// another Secret or key needs a new Pod; a new value in the same one does not.
 func TestAgentHostReplacesItsPodForAnotherTokenSecretOrKey(t *testing.T) {
 	second := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "alice-github-2", Namespace: testUserNamespace},
@@ -864,9 +843,6 @@ func TestAgentHostReplacesItsPodForAnotherTokenSecretOrKey(t *testing.T) {
 	}
 }
 
-// A token from another Secret reaches the host's copy only once the Pod
-// started with the old one is gone: the copy is mounted into that Pod, whose
-// processes could otherwise read the new token while they stop.
 func TestAgentHostCopiesAnotherTokenOnlyAfterTheOldPodIsGone(t *testing.T) {
 	bob := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "bob-github", Namespace: testUserNamespace},
@@ -878,7 +854,6 @@ func TestAgentHostCopiesAnotherTokenOnlyAfterTheOldPodIsGone(t *testing.T) {
 	h.markPodReady()
 	h.settle()
 	old, _ := h.pod()
-	// The kubelet keeps a deleted Pod until its processes have stopped.
 	old.Finalizers = []string{"test.orka.ai/stopping"}
 	if err := h.client.Update(context.Background(), old); err != nil {
 		t.Fatal(err)
@@ -919,8 +894,6 @@ func TestAgentHostCopiesAnotherTokenOnlyAfterTheOldPodIsGone(t *testing.T) {
 	}
 }
 
-// A Pod whose UID was never recorded, which the cache has not seen yet, still
-// keeps a token from another source out of the copy until it is gone.
 func TestAgentHostConfirmsTheOldPodIsGoneWithoutTheCache(t *testing.T) {
 	bob := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "bob-github", Namespace: testUserNamespace},
@@ -934,7 +907,6 @@ func TestAgentHostConfirmsTheOldPodIsGoneWithoutTheCache(t *testing.T) {
 	if err := h.client.Update(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
-	// The controller stopped between creating the Pod and recording its UID.
 	host := h.host()
 	findAgentHostReceipt(host, agentHostKindPod, "", h.names().Pod).UID = ""
 	if err := h.client.Status().Update(context.Background(), host); err != nil {
@@ -977,8 +949,6 @@ func agentUpdatePending(host *corev1alpha1.AgentHost) *metav1.Condition {
 	return meta.FindStatusCondition(host.Status.Conditions, agentHostConditionAgentUpdatePending)
 }
 
-// A new host agent, such as after an upgrade, reaches a running host when it
-// reports idle, so no running turn is lost to the update.
 func TestAgentHostMovesToANewHostAgentWhenIdle(t *testing.T) {
 	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
 		testHost(), userToken("ghs_user_token"))
@@ -1024,8 +994,6 @@ func TestAgentHostMovesToANewHostAgentWhenIdle(t *testing.T) {
 	}
 }
 
-// A host that never reports idle, or has no idle status, still moves to a new
-// host agent within a day.
 func TestAgentHostMovesToANewHostAgentWithinADay(t *testing.T) {
 	template := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
 	template.Spec.IdleStatusFile = ""
@@ -1050,8 +1018,6 @@ func TestAgentHostMovesToANewHostAgentWithinADay(t *testing.T) {
 	}
 }
 
-// The update deadline counts from when the controller first saw the new
-// agent, through readiness changes, and also moves a Pod that is not ready.
 func TestAgentHostAgentUpdateDeadlineSurvivesReadinessChanges(t *testing.T) {
 	h := newAgentHostHarness(t, testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired),
 		testHost(), userToken("ghs_user_token"))
@@ -1097,8 +1063,6 @@ func TestAgentHostAgentUpdateDeadlineSurvivesReadinessChanges(t *testing.T) {
 	}
 }
 
-// Recreating a template under its name moves its hosts to the new template on
-// the volumes they already have.
 func TestAgentHostMovesToARecreatedTemplate(t *testing.T) {
 	template := testTemplate(corev1alpha1.AgentHostAccessRelay, corev1alpha1.AgentHostCredentialRequired)
 	h := newAgentHostHarness(t, template, testHost(), userToken("ghs_user_token"))

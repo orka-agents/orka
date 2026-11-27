@@ -16,7 +16,6 @@ const (
 	defaultJitter     = 0.1
 )
 
-// RetryProvider wraps a Provider with automatic retry logic for transient errors.
 type RetryProvider struct {
 	inner      Provider
 	maxRetries int
@@ -25,8 +24,6 @@ type RetryProvider struct {
 	jitter     float64
 }
 
-// NewRetryProvider creates a RetryProvider wrapping inner with the default
-// retry budget (3 retries, 1s base delay, 30s cap, 10% jitter).
 func NewRetryProvider(inner Provider) *RetryProvider {
 	return &RetryProvider{
 		inner:      inner,
@@ -37,18 +34,14 @@ func NewRetryProvider(inner Provider) *RetryProvider {
 	}
 }
 
-// Name delegates to the inner provider.
 func (r *RetryProvider) Name() string {
 	return r.inner.Name()
 }
 
-// TelemetryProviderName delegates to the inner provider so tracing preserves
-// concrete provider identity through retry wrapping.
 func (r *RetryProvider) TelemetryProviderName() string {
 	return ProviderTelemetryName(r.inner)
 }
 
-// Complete calls the inner provider's Complete with retry logic.
 func (r *RetryProvider) Complete(ctx context.Context, req *CompletionRequest) (*CompletionResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt <= r.maxRetries; attempt++ {
@@ -74,7 +67,6 @@ func (r *RetryProvider) Complete(ctx context.Context, req *CompletionRequest) (*
 	return nil, lastErr
 }
 
-// Stream retries transient errors until the provider emits output or completes.
 func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-chan StreamChunk, error) {
 	var lastErr error
 	for attempt := 0; attempt <= r.maxRetries; attempt++ {
@@ -92,7 +84,6 @@ func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 			continue
 		}
 
-		// Usage-only updates do not commit this attempt before output arrives.
 		firstChunk, ok := firstStreamResult(innerCh)
 		if !ok {
 			ch := make(chan StreamChunk)
@@ -108,7 +99,6 @@ func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 				close(ch)
 				return ch, nil
 			}
-			// Drain remaining chunks
 			for range innerCh {
 			}
 			if attempt < r.maxRetries {
@@ -124,7 +114,6 @@ func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 			continue
 		}
 
-		// First chunk is content — proxy it through a new channel
 		outCh := make(chan StreamChunk)
 		go func() {
 			defer close(outCh)
@@ -136,7 +125,6 @@ func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 		return outCh, nil
 	}
 
-	// All retries exhausted — return last error as a chunk
 	ch := make(chan StreamChunk, 1)
 	if lastErr != nil {
 		ch <- StreamChunk{Error: lastErr, Done: true}
@@ -145,7 +133,6 @@ func (r *RetryProvider) Stream(ctx context.Context, req *CompletionRequest) (<-c
 	return ch, nil
 }
 
-// sleep performs an interruptible sleep with exponential backoff and jitter.
 func (r *RetryProvider) sleep(ctx context.Context, attempt int) error {
 	delay := r.backoff(attempt)
 	timer := time.NewTimer(delay)
@@ -158,7 +145,6 @@ func (r *RetryProvider) sleep(ctx context.Context, attempt int) error {
 	}
 }
 
-// backoff calculates the delay for the given attempt with exponential backoff and jitter.
 func (r *RetryProvider) backoff(attempt int) time.Duration {
 	delay := float64(r.baseDelay) * math.Pow(2, float64(attempt))
 	if delay > float64(r.maxDelay) {
@@ -169,6 +155,5 @@ func (r *RetryProvider) backoff(attempt int) time.Duration {
 	return time.Duration(delay)
 }
 
-// Ensure RetryProvider implements Provider and TelemetryIdentity.
 var _ Provider = (*RetryProvider)(nil)
 var _ TelemetryIdentity = (*RetryProvider)(nil)

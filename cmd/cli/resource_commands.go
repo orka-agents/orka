@@ -27,9 +27,6 @@ type crudResourceSpec struct {
 	ListFlags    func(*cobra.Command)
 	ListQuery    func(*cobra.Command) map[string]string
 	TablePrinter func(*cobra.Command, any) error
-	// DescribeRows lists the fields `get` prints first in its readable view,
-	// in reading order. A resource without one falls back to name,
-	// namespace, status or phase, and age.
 	DescribeRows func(map[string]any) []describeRow
 }
 

@@ -201,10 +201,6 @@ func removeOrphanedSessionIdentityTemps(baseDir string) error {
 	return nil
 }
 
-// validateDurableCheckpointIdentityState binds surviving workspace history to
-// the allocator high-water state. Missing state and state rolled back below a
-// checkpoint's recorded floor both fail closed before a fresh child can reuse
-// a pre-suspension UID/GID.
 func validateDurableCheckpointIdentityState(durableRoot, identityStateDir string) error {
 	state, stateExists, err := readSessionIdentityState(filepath.Join(identityStateDir, sessionIdentityStateFile))
 	if err != nil {

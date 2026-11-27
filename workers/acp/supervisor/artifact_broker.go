@@ -45,8 +45,6 @@ func NewBrokerArtifactAuthorizationProvider(baseURL, namespace, bearer string, c
 	if strings.TrimSpace(namespace) == "" || len(strings.TrimSpace(bearer)) < 32 || len(capabilitySecret) < harnessv2.MinCapabilitySecretBytes {
 		return nil, fmt.Errorf("artifact broker identity is invalid")
 	}
-	// Authenticated in-cluster controller traffic must never traverse an
-	// inherited environment proxy.
 	client := &http.Client{Timeout: 30 * time.Second, Transport: harnessv2.NewProxylessTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return &brokerArtifactAuthorizationProvider{endpoint: parsed, client: client, namespace: namespace, controllerBearer: bearer, capabilitySecret: append([]byte(nil), capabilitySecret...)}, nil
 }
@@ -80,8 +78,6 @@ func (p *brokerArtifactAuthorizationProvider) AuthorizeArtifact(ctx context.Cont
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+p.controllerBearer)
 	httpRequest.Header.Set(harnessv2.OperationCapabilityHeader, capability)
-	// Carry the non-secret pool identity so the controller can authenticate the
-	// bearer before reading this request body.
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolNamespaceHeader, p.namespace)
 	httpRequest.Header.Set(harnessv2.MCPBrokerPoolUIDHeader, string(brokerRequest.Metadata.Fence.RuntimePoolUID))
 	response, err := p.client.Do(httpRequest)

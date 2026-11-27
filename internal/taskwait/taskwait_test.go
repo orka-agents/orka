@@ -157,7 +157,6 @@ func TestDeadlineUsesTimeoutOrHarnessDefault(t *testing.T) {
 	if task.Annotations == nil {
 		task.Annotations = map[string]string{}
 	}
-	// An inherited chain deadline can only shorten the deadline.
 	task.Annotations[labels.AnnotationContinuationChainDeadline] = created.Add(time.Hour).Format(time.RFC3339)
 	if got := Deadline(task); !got.Equal(created.Add(time.Hour)) {
 		t.Fatalf("chain deadline = %v", got)

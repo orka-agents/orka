@@ -29,8 +29,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// testEnvelope returns an envelope whose request digest covers method and
-// args, as the storage client issues it.
 func testEnvelope(t *testing.T, method string, args ...any) storagev1.WriteEnvelope {
 	t.Helper()
 	digest, err := storagev1.RequestDigest(method, args...)
@@ -50,11 +48,6 @@ var testFence = storagev1.TaskDataFence{
 	Jobs: []storagev1.TaskJobIdentity{{Namespace: "n", TaskUID: "task-uid", JobUID: "job-uid"}},
 }
 
-// Every method with a wire RPC carries every argument, its Task data fence
-// and, for a write, its envelope to the provider, and every result and
-// written record back, through the generated client and server over real
-// TLS. The server recomputes each write's request digest from the decoded
-// arguments, so a fill the wire did not preserve exactly fails here.
 func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, serveBoth(provider))
@@ -88,10 +81,6 @@ func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 			}
 			if len(results) > 0 {
 				if described, isInfo := results[0].(storagev1.ProviderInfo); isInfo {
-					// A Describe notes the serving dataset, which every later
-					// call must name, and the server describes only the
-					// contract parts it serves and the artifact limit it
-					// enforces.
 					described.DatasetID = testDataset
 					described.Contracts = []string{storagev1.StateContract, storagev1.ArtifactsContract}
 					described.Limits.MaxArtifactBytes = storagev1.MaxArtifactBytes
@@ -131,8 +120,6 @@ func TestEveryWireMethodRoundTripsArgumentsAndResults(t *testing.T) {
 	}
 }
 
-// A provider writes the ID it assigns into SendMessage's record; the caller
-// sees it over the wire as it would in process.
 func TestSendMessageWritesTheAssignedIDBack(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
@@ -145,8 +132,6 @@ func TestSendMessageWritesTheAssignedIDBack(t *testing.T) {
 	require.True(t, sentAt.Equal(msg.CreatedAt))
 }
 
-// A zero Task data fence crosses as an empty header value and still reaches
-// the provider as a fence, as in process, never as no fence at all.
 func TestAZeroTaskDataFenceStillReachesTheProvider(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
@@ -175,10 +160,6 @@ func TestServerRefusesARequestThatDoesNotMatchItsDigest(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"))
 }
 
-// A write's envelope names the dataset its call names. The client refuses
-// one for another dataset before sending, and the server refuses it before
-// the provider runs, so a write never commits to a dataset other than the one
-// its response names.
 func TestWriteEnvelopeMustNameTheCallsDataset(t *testing.T) {
 	provider := newRecordingProvider()
 	plan := &storagev1.PlanState{Summary: "s"}
@@ -202,8 +183,6 @@ func TestWriteEnvelopeMustNameTheCallsDataset(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"), "the server refuses it before the provider runs")
 }
 
-// Only a write carries an envelope. The client leaves it off other calls,
-// and the server refuses one a read carries.
 func TestServerRefusesAnEnvelopeOnARead(t *testing.T) {
 	provider := newRecordingProvider()
 	plans := storagepb.NewResultsClient(wiretest.Dial(t, wire.ServerConfig{State: provider}))
@@ -227,7 +206,7 @@ func TestServerRefusesAnUndecodableTaskDataFence(t *testing.T) {
 
 	unknown, err := proto.Marshal(&storagepb.TaskDataFence{Namespace: "n"})
 	require.NoError(t, err)
-	unknown = append(unknown, 0xf8, 0x07, 0x01) // field 127, varint 1
+	unknown = append(unknown, 0xf8, 0x07, 0x01)
 	ctx = metadata.AppendToOutgoingContext(contractContext(t.Context()), wire.HeaderTaskDataFence, string(unknown))
 	_, err = plans.GetPlan(ctx, &storagepb.GetPlanRequest{Namespace: "n", TaskName: "t"})
 	_, reason = reasonOf(t, err)
@@ -235,8 +214,6 @@ func TestServerRefusesAnUndecodableTaskDataFence(t *testing.T) {
 	require.Empty(t, provider.callsTo("GetPlan"))
 }
 
-// contractContext names the contract, revision 1 and the recording
-// provider's dataset, as a bound client does, for a raw stub call.
 func contractContext(ctx context.Context) context.Context {
 	return datasetContext(ctx, testDataset)
 }
@@ -287,12 +264,10 @@ func TestServerRefusesCallsWithoutTheContractHeaders(t *testing.T) {
 	require.NoError(t, err, "an older or equal revision is served")
 }
 
-// An older server never ignores a field it does not know, so a newer
-// precondition cannot be dropped silently.
 func TestServerRefusesUnknownRequestFields(t *testing.T) {
 	provider := newRecordingProvider()
 	plans := storagepb.NewResultsClient(wiretest.Dial(t, serveBoth(provider)))
-	unknown := []byte{0xf8, 0x07, 0x01} // field 127, varint 1
+	unknown := []byte{0xf8, 0x07, 0x01}
 
 	request := &storagepb.DeletePlanRequest{Namespace: "n", TaskName: "t"}
 	request.ProtoReflect().SetUnknown(unknown)
@@ -326,9 +301,6 @@ func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, provider.callsTo("GetPlan")[0].hasEnvelope, "a read carries no envelope")
 
-	// The server library forwards a write that carries no envelope; refusing
-	// it is the provider's job, which the conformance suite's
-	// missing-envelopes family checks over the wire.
 	require.NoError(t, client.DeletePlan(t.Context(), "n", "t"))
 	require.False(t, provider.callsTo("DeletePlan")[0].hasEnvelope, "the provider sees no envelope")
 }
@@ -389,8 +361,6 @@ func TestClientRefusesInvalidRequestsWithoutSending(t *testing.T) {
 	require.Empty(t, provider.callsTo("SendMessage"), "nothing reached the server")
 	require.Empty(t, provider.callsTo("SavePlan"))
 
-	// A context that is already done starts no attempt, so even a write is
-	// safely unavailable rather than an unknown outcome.
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
 	err = client.SavePlan(canceled, "n", "t", &storagev1.PlanState{})
@@ -400,8 +370,6 @@ func TestClientRefusesInvalidRequestsWithoutSending(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"))
 }
 
-// A provider result protobuf cannot encode may follow a committed write, so
-// the client reports an unknown outcome rather than a refused request.
 func TestUnencodableResultsAreProviderErrors(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, serveBoth(provider))
@@ -421,9 +389,6 @@ func TestUnencodableResultsAreProviderErrors(t *testing.T) {
 	require.False(t, errors.Is(err, storagev1.ErrValidation), "the request was valid")
 }
 
-// gRPC refuses to send a response over the message limit with a bare status,
-// which would make a read look safe to retry. The server reports it as a
-// provider error instead.
 func TestOversizeResponsesAreProviderErrors(t *testing.T) {
 	provider := newRecordingProvider()
 	client := wiretest.Serve(t, wire.ServerConfig{State: provider})
@@ -464,10 +429,6 @@ func TestResponsesNameTheContractRevisionAndDataset(t *testing.T) {
 	require.Equal(t, []string{"dataset-7"}, header.Get(wire.HeaderDataset))
 }
 
-// The server refuses, before the provider runs, a call that names another
-// dataset, names none, or names more than one. Describe and HealthCheck may
-// name none, so a client can learn its dataset, but one that names a dataset
-// is checked too.
 func TestServerChecksTheRequestDataset(t *testing.T) {
 	provider := newRecordingProvider()
 	conn := wiretest.Dial(t, wire.ServerConfig{State: provider})
@@ -502,9 +463,6 @@ func TestServerChecksTheRequestDataset(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"))
 }
 
-// A read describes the provider again before it runs, so a provider whose
-// dataset changed while it serves never answers a client bound to the dataset
-// it served before, even when no Describe call came in between.
 func TestServerRechecksTheDatasetBeforeEachRead(t *testing.T) {
 	provider := newRecordingProvider()
 	conn := wiretest.Dial(t, wire.ServerConfig{State: provider})
@@ -535,8 +493,6 @@ func TestServerRechecksTheDatasetBeforeEachRead(t *testing.T) {
 	require.Len(t, provider.callsTo("GetPlan"), 3)
 }
 
-// A server whose provider cannot describe its dataset cannot check a call's
-// dataset, so it refuses the call as unavailable without running it.
 func TestServerThatCannotNameItsDatasetIsUnavailable(t *testing.T) {
 	provider := newRecordingProvider()
 	provider.set("Describe", nil, errors.New("the dataset is not open"))
@@ -553,9 +509,6 @@ func TestServerThatCannotNameItsDatasetIsUnavailable(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrIncompatible, "a contract error from Describe keeps its reason")
 	require.Empty(t, provider.callsTo("SavePlan"))
 
-	// An error Describe may not return, such as a cold replica's
-	// ErrNotReady, is the server being unavailable, not an answer for
-	// another dataset.
 	provider.set("Describe", nil, storagev1.NotReadyErrorf("the replica is still priming"))
 	_, err = client.GetPlan(t.Context(), "n", "t")
 	require.ErrorIs(t, err, storagev1.ErrUnavailable)
@@ -563,9 +516,6 @@ func TestServerThatCannotNameItsDatasetIsUnavailable(t *testing.T) {
 	require.Empty(t, provider.callsTo("GetPlan"))
 }
 
-// foreignResults answers plan calls for whatever datasets it is given, as a
-// server that does not check the request's dataset might, with err when it
-// is set.
 type foreignResults struct {
 	storagepb.UnimplementedResultsServer
 	served []string
@@ -591,9 +541,6 @@ func (r foreignResults) SavePlan(ctx context.Context, _ *storagepb.SavePlanReque
 	return &storagepb.SavePlanResponse{}, r.answer(ctx)
 }
 
-// A bound client refuses a response that does not come from its dataset. A
-// write that reached such a server may have changed another dataset, so its
-// outcome is unknown.
 func TestClientRefusesAResponseFromAnotherDataset(t *testing.T) {
 	for name, served := range map[string][]string{
 		"another dataset":       {"dataset-other"},
@@ -608,8 +555,6 @@ func TestClientRefusesAResponseFromAnotherDataset(t *testing.T) {
 			err = client.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 			require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
 
-			// Another dataset's NOT_FOUND or refused write says nothing
-			// about the client's dataset.
 			client = serveForeign(t, foreignResults{served: served, err: storageStatus(codes.NotFound, wire.ReasonNotFound)})
 			_, err = client.GetPlan(t.Context(), "n", "t")
 			require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
@@ -622,9 +567,6 @@ func TestClientRefusesAResponseFromAnotherDataset(t *testing.T) {
 	}
 }
 
-// A refusal a server can send before its dataset check keeps its reason
-// whatever dataset the response names, and an error from the client's own
-// dataset keeps its reason too.
 func TestClientKeepsRefusalsSentBeforeTheDatasetCheck(t *testing.T) {
 	for reason, want := range map[string]error{
 		wire.ReasonUnauthenticated:  storagev1.ErrUnauthenticated,
@@ -649,8 +591,6 @@ func TestClientKeepsRefusalsSentBeforeTheDatasetCheck(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrNotFound)
 }
 
-// serveForeign serves results on a TCP loopback and returns a client bound to
-// testDataset.
 func serveForeign(t *testing.T, results foreignResults) *wire.Client {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -662,8 +602,6 @@ func serveForeign(t *testing.T, results foreignResults) *wire.Client {
 	return wire.NewClient(dialInsecure(t, listener.Addr().String()), wire.ClientConfig{Dataset: testDataset})
 }
 
-// storageStatus is a status with a storage ErrorInfo, as the server library
-// sends.
 func storageStatus(code codes.Code, reason string) error {
 	st, err := status.New(code, reason).WithDetails(&errdetails.ErrorInfo{Domain: wire.ErrorDomain, Reason: reason})
 	if err != nil {
@@ -672,14 +610,12 @@ func storageStatus(code codes.Code, reason string) error {
 	return st.Err()
 }
 
-// rejectAll fails every authentication.
 type rejectAll struct{}
 
 func (rejectAll) Authenticate(context.Context, string, metadata.MD) error {
 	return errors.New("no credentials")
 }
 
-// The server authenticates from headers before it reads the request.
 func TestFailedAuthenticationIsUnauthenticated(t *testing.T) {
 	provider := newRecordingProvider()
 	server, err := wire.NewServer(wire.ServerConfig{State: provider, Authenticator: rejectAll{}})
@@ -693,16 +629,12 @@ func TestFailedAuthenticationIsUnauthenticated(t *testing.T) {
 	require.Empty(t, provider.callsTo("SavePlan"))
 }
 
-// leakyAuthenticator refuses every call with an error that quotes the
-// presented credential.
 type leakyAuthenticator struct{}
 
 func (leakyAuthenticator) Authenticate(_ context.Context, _ string, header metadata.MD) error {
 	return fmt.Errorf("token %q is not accepted", header.Get("authorization"))
 }
 
-// The server never logs an authenticator's error, which can quote the
-// credential it refused.
 func TestFailedAuthenticationNeverLogsTheCredential(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -715,16 +647,12 @@ func TestFailedAuthenticationNeverLogsTheCredential(t *testing.T) {
 	require.NotContains(t, logs.String(), "secret-credential-value")
 }
 
-// acceptAll passes every authentication.
 type acceptAll struct{}
 
 func (acceptAll) Authenticate(context.Context, string, metadata.MD) error {
 	return nil
 }
 
-// A call that reaches the server through a transport that runs no tap, as
-// grpc.Server.ServeHTTP does not, never passed the authenticator, so the
-// server refuses it before the provider runs.
 func TestServerRefusesCallsThatSkippedItsAuthenticator(t *testing.T) {
 	provider := newRecordingProvider()
 	server, err := wire.NewServer(wire.ServerConfig{State: provider, Authenticator: acceptAll{}})
@@ -749,8 +677,6 @@ func TestServerRefusesCallsThatSkippedItsAuthenticator(t *testing.T) {
 	require.Empty(t, provider.calls, "the provider never ran")
 }
 
-// A dataset ID may hold any UTF-8 text, which the binary dataset header
-// carries in both directions.
 func TestDatasetIDsNeedNotBeASCII(t *testing.T) {
 	provider := newRecordingProvider()
 	provider.set("Describe", []any{storagev1.ProviderInfo{DatasetID: "données"}}, nil)
@@ -772,9 +698,6 @@ func TestNewServerRequiresAProvider(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A server carries results, receipts and artifacts of the contract's sizes,
-// so it refuses a smaller blob limit for each contract part it serves, and it
-// never advertises a result limit above the one it enforces.
 func TestServerBlobLimitCoversTheResultContract(t *testing.T) {
 	_, err := wire.NewServer(wire.ServerConfig{State: newRecordingProvider(), MaxBlobBytes: wire.MaxChunkBytes})
 	require.ErrorContains(t, err, "below the state contract's")
@@ -794,15 +717,11 @@ func TestServerBlobLimitCoversTheResultContract(t *testing.T) {
 		"the advertised result limit is the server's blob limit")
 }
 
-// serveInsecure serves server on a TCP loopback without TLS. Only tests that
-// inject transport faults below TLS use it; wiretest always uses TLS.
 func serveInsecure(t *testing.T, server *wire.Server) *grpc.ClientConn {
 	t.Helper()
 	return dialInsecure(t, serveInsecureWith(t, server))
 }
 
-// serveInsecureWith serves server on a TCP loopback without TLS, with extra
-// gRPC server options, and returns its address.
 func serveInsecureWith(t *testing.T, server *wire.Server, opts ...grpc.ServerOption) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -820,4 +739,25 @@ func dialInsecure(t *testing.T, address string) *grpc.ClientConn {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+func TestOwnershipIsAnsweredByTheDatasetsOwner(t *testing.T) {
+	watermark := storagev1.WriteWatermark{DatasetID: testDataset, Value: 3, AdvancedAt: time.Date(2026, 11, 25, 1, 2, 3, 0, time.UTC)}
+
+	state, artifacts := newRecordingProvider(), newRecordingProvider()
+	state.set("GetWriteWatermark", []any{watermark}, nil)
+	client := wiretest.Serve(t, wire.ServerConfig{State: state, Artifacts: artifacts})
+	got, err := client.GetWriteWatermark(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, watermark.Value, got.Value)
+	require.Len(t, state.callsTo("GetWriteWatermark"), 1)
+	require.Empty(t, artifacts.callsTo("GetWriteWatermark"), "the state provider answers for both parts")
+
+	only := newRecordingProvider()
+	only.set("GetWriteWatermark", []any{watermark}, nil)
+	client = wiretest.Serve(t, wire.ServerConfig{Artifacts: only})
+	got, err = client.GetWriteWatermark(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, watermark.Value, got.Value)
+	require.Len(t, only.callsTo("GetWriteWatermark"), 1)
 }

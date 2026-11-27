@@ -118,8 +118,6 @@ func TestNativeSubstrateWorkspaceBootstrapRetriesIssuedCredential(t *testing.T) 
 				require.Zero(t, puts, "changed placement must fail before sending bootstrap credentials")
 				return
 			}
-			// The controller issues its own random per-Actor credential and never
-			// installs the caller-supplied static handoff value.
 			first := installed
 			require.Regexp(t, "^[0-9a-f]{64}$", first)
 			if failure == "closed executor" || failure == "restarted executor" || failure == "restarted after observation" || failure == "replaced during recovery" {
@@ -190,7 +188,6 @@ func TestNativeSubstrateWorkspaceSealedBootstrap(t *testing.T) {
 				var request harnessv2.WorkspaceBootstrapRequest
 				require.NoError(t, json.Unmarshal(plain, &request))
 				if r.Method == http.MethodPost {
-					// A fresh process has no installed credential to recover.
 					require.True(t, request.Recover)
 					reply, err := json.Marshal(harnessv2.WorkspaceBootstrapRequest{})
 					require.NoError(t, err)
@@ -200,8 +197,6 @@ func TestNativeSubstrateWorkspaceSealedBootstrap(t *testing.T) {
 					return
 				}
 				puts++
-				// The controller delivers its own per-Actor credential, never the
-				// static value supplied with the upload.
 				require.Regexp(t, "^[0-9a-f]{64}$", request.HandoffToken)
 				w.WriteHeader(http.StatusNoContent)
 			}))

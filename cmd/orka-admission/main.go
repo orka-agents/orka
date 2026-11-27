@@ -4,10 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// orka-admission serves the stateless, fail-closed admission boundary shared
-// by namespace-isolated installations. It owns no controllers,
-// dispatch state, runtime credentials, SQLite database, or leader-election
-// lease.
 package main
 
 import (
@@ -92,9 +88,6 @@ func (o *options) bind(fs *flag.FlagSet) {
 			"and vendor workers. The identity-bound Agent rule applies to them whether or not they are trusted.")
 }
 
-// taskProvenanceConfig builds the Task provenance admission configuration.
-// Like the manager-hosted webhook, it applies worker rules to every worker
-// ServiceAccount, including ones named only in --worker-service-accounts.
 func (o options) taskProvenanceConfig(controllerUsernames []string) orkaadmission.TaskProvenanceConfig {
 	provenanceUsers := strings.TrimSpace(o.taskProvenanceTrustedUsers)
 	if provenanceUsers == "" {
@@ -199,8 +192,6 @@ func main() {
 		setupLog.Error(err, "unable to create admission manager")
 		os.Exit(1)
 	}
-	// GetWebhookServer lazily adds the configured server to the manager's
-	// runnable set. Registering only on the pre-manager value would not start it.
 	webhookServer = mgr.GetWebhookServer()
 
 	controllerUsernames := splitCommaList(opts.controllerUsernames)

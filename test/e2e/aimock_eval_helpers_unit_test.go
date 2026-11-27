@@ -213,7 +213,6 @@ func TestAimockEvalJournalReadDeadline(t *testing.T) {
 	require.NotContains(t, err.Error(), "SYNTHETIC_TIMEOUT_CANARY")
 }
 
-// stallKubectl puts a kubectl on PATH that writes partial output, then hangs.
 func stallKubectl(t *testing.T) {
 	t.Helper()
 	bin := t.TempDir()
@@ -232,7 +231,7 @@ func TestAimockEvalCaptureStallHelper(t *testing.T) {
 	if _, err := os.Stdout.WriteString(partial); err != nil {
 		os.Exit(1)
 	}
-	time.Sleep(time.Hour) // The parent's bounded CommandContext must terminate this process.
+	time.Sleep(time.Hour)
 	os.Exit(0)
 }
 
@@ -246,14 +245,9 @@ func TestAimockEvalCaptureFinalFlushDeadline(t *testing.T) {
 	}))
 	defer server.Close()
 	port := server.Listener.Addr().(*net.TCPAddr).Port
-	// A successful write() return may still leave a small final chunk buffered.
-	// Withhold its callback, while an active handle models the blocked pipe.
 	blocked := `Object.defineProperty(process, "stdout", {value: {write(_chunk, _callback) {
 		setInterval(() => {}, 1000); return true;
 	}}});`
-	// Node startup on a hosted runner can take seconds, so wall-clock time does
-	// not identify the deadline. Exit status 1 with the local context unexpired
-	// does: a local kill reports -1.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, node, "-e", blocked+mockLLMReadScript(port, "/", 100*time.Millisecond))

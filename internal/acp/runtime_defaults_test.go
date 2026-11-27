@@ -78,10 +78,6 @@ func TestBuiltInRuntimeNativeToolPolicy(t *testing.T) {
 	}
 }
 
-// TestBuiltInRuntimeNativePolicyUnrestrictedCountsOnlyNativeDenies covers the
-// deny list: denying one of the provider's own tools narrows the native
-// policy, and denying anything else, such as a forwarding Tool's write tool,
-// leaves it whole.
 func TestBuiltInRuntimeNativePolicyUnrestrictedCountsOnlyNativeDenies(t *testing.T) {
 	for _, provider := range []string{"codex", "copilot"} {
 		all := append(BuiltInRuntimeNativeToolNames(provider), "azurearm")

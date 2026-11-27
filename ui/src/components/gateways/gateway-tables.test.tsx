@@ -127,7 +127,6 @@ describe('gateway tables', () => {
       maxAttempts: 10, manualRetryCount: 0, lastError: message, nextAttemptAt: '2026-07-18T10:00:00Z',
       expiresAt: '2026-07-19T10:00:00Z', createdAt: '2026-07-18T09:00:00Z', updatedAt: '2026-07-18T10:00:00Z',
     }
-    // Table cells are whitespace-nowrap, so the message must opt back in to wrapping.
     const { unmount } = render(<GatewayEventsTable events={[{ ...event, stateMessage: message }]} loading={false} />)
     expect(screen.getByText(message)).toHaveClass('whitespace-normal', 'break-words')
     unmount()

@@ -19,11 +19,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
-// WorkspaceRuntimePoolReconciler owns the core-side link and demand. Provider
-// status and attachment acknowledgement remain exclusively provider-written.
 type WorkspaceRuntimePoolReconciler struct {
 	client.Client
 	APIReader client.Reader
+	Now       func() time.Time
 }
 
 func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -47,9 +46,6 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, fmt.Errorf("workspace RuntimePool link identifies another incarnation")
 	}
 	deleting := !w.DeletionTimestamp.IsZero() || w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredDeleted
-	// The retention controller owns lifetime expiry and requests API deletion
-	// with the exact workspace UID. Setting desiredState here first would stop
-	// retention before it establishes the metadata deletion/finalizer path.
 	if deleting {
 		if pool.DeletionTimestamp.IsZero() {
 			if err := r.Delete(ctx, pool, deleteCurrentObjectPreconditions(pool)...); err != nil && !apierrors.IsNotFound(err) {
@@ -58,8 +54,18 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady || w.Spec.Attachment == nil {
-		if pool.Spec.DesiredReplicas != 0 {
+	now := r.now()
+	if !workspaceRuntimePoolDemandHeld(w, now) && pool.Spec.DesiredReplicas != 0 {
+		current := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := uncachedReader(r.APIReader, r.Client).Get(ctx, req.NamespacedName, current); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+		if current.UID != w.UID {
+			return ctrl.Result{}, fmt.Errorf("workspace RuntimePool link identifies another incarnation")
+		}
+		w = current
+		if !workspaceRuntimePoolDemandHeld(w, now) && w.DeletionTimestamp.IsZero() &&
+			w.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredDeleted {
 			before := pool.DeepCopy()
 			pool.Spec.DesiredReplicas = 0
 			if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -67,7 +73,37 @@ func (r *WorkspaceRuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl
 			}
 		}
 	}
+	if w.Spec.Attachment == nil {
+		deadline, held := acpWorkspaceSpeculativeStartHoldsPool(w, now)
+		if !held && acpWorkspaceSpeculativeResumePending(w, now) {
+			deadline, _, held = parseACPWorkspaceSpeculativeStart(w.Annotations[acpWorkspaceSpeculativeStartAnnotation])
+		}
+		if held {
+			return ctrl.Result{RequeueAfter: deadline.Sub(now) + time.Second}, nil
+		}
+	}
 	return ctrl.Result{}, nil
+}
+
+func (r *WorkspaceRuntimePoolReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+func workspaceRuntimePoolDemandHeld(w *workspacev1alpha1.ExecutionWorkspace, now time.Time) bool {
+	if w.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady && w.Spec.Attachment != nil {
+		return true
+	}
+	if acpWorkspaceWarmWindowHoldsPool(w) {
+		return true
+	}
+	if acpWorkspaceSpeculativeResumePending(w, now) {
+		return true
+	}
+	_, held := acpWorkspaceSpeculativeStartHoldsPool(w, now)
+	return held
 }
 
 func (r *WorkspaceRuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -81,8 +117,6 @@ func (r *WorkspaceRuntimePoolReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		})).Named("workspace-runtime-pool").Complete(r)
 }
 
-// ValidateExternalWorkspaceUpgrade runs before dispatch controllers start.
-// Pool schema pruning is never authority to recreate a legacy allocation.
 func ValidateExternalWorkspaceUpgrade(ctx context.Context, reader client.Reader) error {
 	var blockers []string
 	pools := &corev1alpha1.RuntimePoolList{}

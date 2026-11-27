@@ -572,17 +572,12 @@ type recordingEpochDataset struct {
 	datasetID string
 	state     storagev1.DatasetState
 
-	mu       sync.Mutex
-	requests []storagev1.AdvanceControllerEpochRequest
-	// advanceErrs, when non-empty, fail the next advances in order.
-	advanceErrs []error
-	// describeErrs, when non-empty, fail the next descriptions in order.
-	describeErrs []error
-	// watermark is the fake dataset's write watermark.
-	watermark   int64
-	watermarkAt time.Time
-	// floorRefusals are the advances refused because the dataset held a
-	// lower epoch than their AcknowledgedEpoch, as the contract requires.
+	mu            sync.Mutex
+	requests      []storagev1.AdvanceControllerEpochRequest
+	advanceErrs   []error
+	describeErrs  []error
+	watermark     int64
+	watermarkAt   time.Time
 	floorRefusals []storagev1.AdvanceControllerEpochRequest
 }
 
@@ -626,8 +621,6 @@ func (d *recordingEpochDataset) AdvanceControllerEpoch(
 	}, nil
 }
 
-// refusedBelowFloor returns the advances the dataset refused because it held
-// a lower epoch than they acknowledged.
 func (d *recordingEpochDataset) refusedBelowFloor() []storagev1.AdvanceControllerEpochRequest {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -644,7 +637,6 @@ func (d *recordingEpochDataset) GetControllerEpochMirror(context.Context, string
 	return storagev1.ControllerEpochMirrorState{DatasetID: last.DatasetID, Epoch: last.Epoch, InstallationID: last.InstallationID}, nil
 }
 
-// advancedEpochs returns the epochs the manager advanced the dataset to.
 func (d *recordingEpochDataset) advancedEpochs() []store.ControllerEpoch {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -661,8 +653,6 @@ func (d *recordingEpochDataset) advanceRequests() []storagev1.AdvanceControllerE
 	return slices.Clone(d.requests)
 }
 
-// installationEpochStore gives an epoch store without its own installation
-// record a fixed installation ID, and keeps its storage record in memory.
 type installationEpochStore struct {
 	store.ControllerEpochStore
 	*memoryStorageRecords
@@ -689,9 +679,6 @@ var (
 	controllerEpochTestObjectUIDSequence atomic.Int64
 )
 
-// withControllerEpochLeaseUIDs assigns the UIDs the API server would to
-// controller epoch Leases and ControllerEpoch objects, which the fake client
-// leaves empty.
 func withControllerEpochLeaseUIDs(t testing.TB, baseClient client.Client) client.WithWatch {
 	t.Helper()
 	withWatch, ok := baseClient.(client.WithWatch)

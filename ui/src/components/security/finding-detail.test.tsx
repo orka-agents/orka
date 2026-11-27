@@ -14,8 +14,6 @@ vi.mock('@tanstack/react-router', async () => {
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
-// A fixed query result for cases the real hook would reach only after its
-// retries (a 500) or a background refetch; null uses the real hook.
 const findingQuery = vi.hoisted(() => ({ current: null as null | Record<string, unknown> }))
 
 vi.mock('@/hooks/use-security', async (importOriginal) => {
@@ -114,7 +112,6 @@ describe('FindingDetail', () => {
       auth = request.headers.get('authorization')
       return HttpResponse.text('{}')
     }))
-    // jsdom lacks blob URL + anchor click plumbing; stub them.
     const createUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x')
     const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})

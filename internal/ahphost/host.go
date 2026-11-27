@@ -33,60 +33,37 @@ const (
 
 var errUnknownChannel = errors.New("unknown channel")
 
-// Config configures a Host.
 type Config struct {
-	Store    store.AHPStore
-	Tokens   *TokenService
-	Backends *Registry
-	// Limits bound each user's replay journal.
-	Limits     store.AHPJournalLimits
-	ServerInfo ahptypes.Implementation
-	// SendQueue bounds the messages waiting for one slow client.
-	SendQueue int
-	// TokenRecheck is how often connected tokens are checked again.
+	Store        store.AHPStore
+	Tokens       *TokenService
+	Backends     *Registry
+	Limits       store.AHPJournalLimits
+	ServerInfo   ahptypes.Implementation
+	SendQueue    int
 	TokenRecheck time.Duration
-	// PingInterval is how often an open connection is pinged; a client that
-	// does not answer within it is disconnected.
 	PingInterval time.Duration
 	Logger       logr.Logger
 	Now          func() time.Time
 }
 
-// Host serves the Agent Host Protocol for every user. Each user has their
-// own sequence, journal, channel states and session catalog; the host keeps
-// one hub per user that serializes changes and fans them out to that user's
-// connections.
 type Host struct {
 	cfg Config
 
-	mu      sync.Mutex
-	hubs    map[string]*userHub
-	byToken map[string]map[*conn]struct{}
-	stopped bool
-	// swept records the users whose leftover channels this process dropped,
-	// and sweeping the users whose sweep runs, closed when it ends. resweep
-	// records the users who left a channel behind while their sweep ran.
+	mu       sync.Mutex
+	hubs     map[string]*userHub
+	byToken  map[string]map[*conn]struct{}
+	stopped  bool
 	swept    map[string]bool
 	sweeping map[string]chan struct{}
 	resweep  map[string]bool
-	// creating are the channel URIs, per user, whose creation as a session or
-	// terminal is under way.
 	creating map[string]*channelCreation
 }
 
-// channelCreation is one channel URI being created. A terminal's backend can
-// emit to it before the host has stored it, as when its shell exits at once;
-// such actions are held and applied once the channel is stored.
 type channelCreation struct {
 	hold    bool
 	actions []ahptypes.StateAction
 }
 
-// claimChannelURI reserves a channel URI for one creation at a time, so two
-// connections of a user cannot both create it, as a session or a terminal.
-// It reports false while another creation of the URI runs.
-// With hold, actions a backend emits to the URI meanwhile wait for
-// finishCreation instead of failing as for an unknown channel.
 func (h *Host) claimChannelURI(userKey, uri string, hold bool) (func(), bool) {
 	key := userKey + "\x00" + uri
 	h.mu.Lock()
@@ -108,8 +85,6 @@ func (h *Host) claimChannelURI(userKey, uri string, hold bool) (func(), bool) {
 	}, true
 }
 
-// holdForCreation keeps a backend's actions for a channel whose creation
-// holds them, and reports whether it did.
 func (h *Host) holdForCreation(userKey, channel string, actions []ahptypes.StateAction) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -121,8 +96,6 @@ func (h *Host) holdForCreation(userKey, channel string, actions []ahptypes.State
 	return true
 }
 
-// finishCreation applies, in order, the actions held while a stored channel
-// was being created, then lets later actions apply directly.
 func (h *Host) finishCreation(ctx context.Context, principal Principal, channel string) error {
 	key := principal.UserKey + "\x00" + channel
 	for {
@@ -145,30 +118,21 @@ func (h *Host) finishCreation(ctx context.Context, principal Principal, channel 
 }
 
 type userHub struct {
-	mu     sync.Mutex
-	key    string
-	seq    int64
-	loaded bool
-	conns  map[*conn]struct{}
-	// rootNotified is the sequence at the user's latest root notification,
-	// or, until one in this process, the sequence the hub first loaded at.
-	// Root notifications are not journaled, so a client that last saw no
-	// later sequence may have missed one.
+	mu           sync.Mutex
+	key          string
+	seq          int64
+	loaded       bool
+	conns        map[*conn]struct{}
 	rootNotified int64
 	rootKnown    bool
 }
 
-// storedChannel is how a channel's state is stored: the reduced state plus
-// the session that owns the channel, so its actions reach the session's
-// backend. A root-level resource such as a terminal names its backend instead.
 type storedChannel struct {
 	Session string                 `json:"session"`
 	Backend string                 `json:"backend,omitempty"`
 	State   ahptypes.SnapshotState `json:"state"`
 }
 
-// storedChannelJSON names the state's kind. Decoding a snapshot state by its
-// shape alone cannot tell a terminal from a session: both have a lifecycle.
 type storedChannelJSON struct {
 	Session string          `json:"session"`
 	Backend string          `json:"backend,omitempty"`
@@ -236,7 +200,6 @@ func (s *storedChannel) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(stored.State, target)
 }
 
-// New builds a Host. Wire its token service's OnRevoke to Host.CloseToken.
 func New(cfg Config) (*Host, error) {
 	if cfg.Store == nil || cfg.Tokens == nil {
 		return nil, fmt.Errorf("an AHP store and token service are required")
@@ -263,13 +226,10 @@ func New(cfg Config) (*Host, error) {
 	return h, nil
 }
 
-// Tokens returns the host's token service.
 func (h *Host) Tokens() *TokenService { return h.cfg.Tokens }
 
-// Store returns the host's store, for session backends' own records.
 func (h *Host) Store() store.AHPStore { return h.cfg.Store }
 
-// RegisterBackend adds a session backend before the host serves connections.
 func (h *Host) RegisterBackend(backend SessionBackend) error {
 	if h.cfg.Backends == nil {
 		return fmt.Errorf("the AHP host has no backend registry")
@@ -277,17 +237,12 @@ func (h *Host) RegisterBackend(backend SessionBackend) error {
 	return h.cfg.Backends.Register(backend)
 }
 
-// Emitter delivers a backend's actions for a user, connected or not.
 func (h *Host) Emitter(principal Principal) Emitter { return emitter{host: h, principal: principal} }
 
-// Recheck reports whether a principal's connection token is still valid:
-// not revoked, not expired, and its owner may still sign in.
 func (h *Host) Recheck(ctx context.Context, principal Principal) error {
 	return h.cfg.Tokens.Recheck(ctx, principal)
 }
 
-// Start rechecks connected tokens until ctx ends, closing connections whose
-// token was revoked or expired.
 func (h *Host) Start(ctx context.Context) error {
 	ticker := time.NewTicker(h.cfg.TokenRecheck)
 	defer ticker.Stop()
@@ -309,7 +264,6 @@ func (h *Host) Start(ctx context.Context) error {
 	}
 }
 
-// CloseToken closes every connection that uses a token.
 func (h *Host) CloseToken(tokenID string) {
 	h.mu.Lock()
 	conns := make([]*conn, 0, len(h.byToken[tokenID]))
@@ -351,7 +305,6 @@ func (h *Host) hub(userKey string) *userHub {
 	return hub
 }
 
-// register adds a connection; it refuses once the host has stopped.
 func (h *Host) register(c *conn) bool {
 	h.mu.Lock()
 	if h.stopped {
@@ -385,7 +338,6 @@ func (h *Host) unregister(c *conn) {
 	hub.mu.Unlock()
 }
 
-// loadLocked reads the user's sequence once. hub.mu must be held.
 func (h *Host) loadLocked(ctx context.Context, hub *userHub) error {
 	if hub.loaded {
 		return nil
@@ -410,10 +362,6 @@ func (h *Host) serverSeq(ctx context.Context, userKey string) (int64, error) {
 	return seq, err
 }
 
-// locked runs fn with the user's current sequence under the hub lock. Actions
-// are applied and delivered under the same lock, so a snapshot taken, a
-// subscription installed and a response queued inside fn are never overtaken
-// by a concurrent action, nor miss one.
 func (h *Host) locked(ctx context.Context, userKey string, fn func(seq int64) error) error {
 	hub := h.hub(userKey)
 	hub.mu.Lock()
@@ -424,9 +372,6 @@ func (h *Host) locked(ctx context.Context, userKey string, fn func(seq int64) er
 	return fn(hub.seq)
 }
 
-// ChannelState reads a channel's state as the host stored it, for a backend
-// that reconciles its own records with what clients were shown. A missing
-// channel is store.ErrNotFound.
 func ChannelState(ctx context.Context, s store.AHPStore, userKey, channel string) (ahptypes.SnapshotState, error) {
 	record, err := s.GetAHPChannelState(ctx, userKey, channel)
 	if err != nil {
@@ -454,8 +399,6 @@ func (h *Host) readChannel(ctx context.Context, userKey, channel string) (stored
 	return stored, record.FromSeq, nil
 }
 
-// apply reduces actions into a channel's state, journals them under the next
-// sequence numbers, and fans them out to the user's subscribed connections.
 func (h *Host) apply(
 	ctx context.Context,
 	principal Principal,
@@ -515,9 +458,6 @@ func (h *Host) apply(
 			c.deliverAction(envelope)
 		}
 	}
-	// The actions are committed and delivered. A catalog summary that cannot
-	// be brought in step is not a failure to apply them: their side effects
-	// must still run, and the next action on the session syncs it again.
 	if stored.State.Session != nil && stored.Session == channel {
 		if err := h.syncSessionSummaryLocked(ctx, hub, principal, channel, stored.State.Session); err != nil {
 			h.cfg.Logger.Error(err, "sync AHP session summary", "session", channel)
@@ -526,10 +466,6 @@ func (h *Host) apply(
 	return nil
 }
 
-// journalEnvelope is what the durable journal keeps of an envelope. Terminal
-// input is what a person typed, a password at a prompt that does not echo it
-// as well as anything else, and changes no state: the journal keeps that it
-// came, without its data, and only live subscribers see the data.
 func journalEnvelope(envelope ahptypes.ActionEnvelope) ahptypes.ActionEnvelope {
 	if input, ok := envelope.Action.Value.(*ahptypes.TerminalInputAction); ok {
 		kept := *input
@@ -539,8 +475,6 @@ func journalEnvelope(envelope ahptypes.ActionEnvelope) ahptypes.ActionEnvelope {
 	return envelope
 }
 
-// syncSessionSummaryLocked keeps a session's catalog summary in step with its
-// state and tells the user's root subscribers what changed. hub.mu must be held.
 func (h *Host) syncSessionSummaryLocked(
 	ctx context.Context, hub *userHub, principal Principal, session string, state *ahptypes.SessionState,
 ) error {
@@ -596,8 +530,6 @@ func (h *Host) syncSessionSummaryLocked(
 	return nil
 }
 
-// summaryStatus is the session's status as a list shows it: what its busiest
-// chat is doing, plus the session's read and archived flags.
 func summaryStatus(state *ahptypes.SessionState) ahptypes.SessionStatus {
 	flags := state.Status & (ahptypes.SessionStatusIsRead | ahptypes.SessionStatusIsArchived)
 	activity := ahptypes.SessionStatusIdle
@@ -650,11 +582,6 @@ func jsonEqual(a, b any) bool {
 	return errA == nil && errB == nil && string(left) == string(right)
 }
 
-// forgetSession deletes a session's channels, then its catalog record: while
-// any channel is left, the record keeps the session findable, so disposing of
-// it again finishes. Both go under the lock actions apply under: an action
-// applying now finishes writing the session and its summary first, and a
-// later one finds the session gone, so neither writes it back.
 func (h *Host) forgetSession(ctx context.Context, userKey, session string, channels []string) error {
 	return h.locked(ctx, userKey, func(int64) error {
 		if err := h.cfg.Store.DeleteAHPChannelStates(ctx, userKey, channels); err != nil {
@@ -664,7 +591,6 @@ func (h *Host) forgetSession(ctx context.Context, userKey, session string, chann
 	})
 }
 
-// storeChannels records new channel states without journaling actions.
 func (h *Host) storeChannels(ctx context.Context, userKey string, channels map[string]storedChannel) error {
 	hub := h.hub(userKey)
 	hub.mu.Lock()
@@ -687,8 +613,6 @@ func (h *Host) storeChannels(ctx context.Context, userKey string, channels map[s
 	return nil
 }
 
-// notifyRoot sends a protocol notification to the user's connections
-// subscribed to the root channel. Notifications are not journaled.
 func (h *Host) notifyRoot(userKey, method string, params any) {
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -703,8 +627,6 @@ func (h *Host) notifyRoot(userKey, method string, params any) {
 	}
 }
 
-// snapshot returns a channel's current state for the principal, or
-// errUnknownChannel if the user has no such channel.
 func (h *Host) snapshot(ctx context.Context, principal Principal, channel string) (ahptypes.Snapshot, error) {
 	var snapshot ahptypes.Snapshot
 	err := h.locked(ctx, principal.UserKey, func(seq int64) error {
@@ -715,7 +637,6 @@ func (h *Host) snapshot(ctx context.Context, principal Principal, channel string
 	return snapshot, err
 }
 
-// snapshotLocked is snapshot for a caller inside locked, at sequence seq.
 func (h *Host) snapshotLocked(ctx context.Context, principal Principal, seq int64, channel string) (ahptypes.Snapshot, error) {
 	if channel == rootChannel {
 		root, err := h.rootState(ctx, principal)
@@ -759,7 +680,6 @@ func (h *Host) rootState(ctx context.Context, principal Principal) (*ahptypes.Ro
 	return root, nil
 }
 
-// emitter delivers a backend's actions for one principal.
 type emitter struct {
 	host      *Host
 	principal Principal

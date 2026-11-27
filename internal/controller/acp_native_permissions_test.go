@@ -86,9 +86,6 @@ func TestRequesterTaskFreezesAnAskingLaunch(t *testing.T) {
 	}
 }
 
-// A RuntimeSession is bound to its launch mode through the MCP binding
-// digest: a mode change recreates the session instead of reusing a provider
-// launched the other way, and a pre-approved launch keeps its digest.
 func TestRuntimeSessionBindingFollowsTheLaunchMode(t *testing.T) {
 	preapproved := harnessv2.MCPPolicyConfiguration{
 		ToolPolicyDigest: testControlDigestForDispatcher("tool"), ApprovalPolicyDigest: testControlDigestForDispatcher("approval"),
@@ -132,8 +129,6 @@ func TestRuntimeSessionBindingFollowsTheLaunchMode(t *testing.T) {
 	require.Equal(t, askDigest, switched.Binding.MCPDigest)
 }
 
-// A Session turn whose launch mode differs from its live runtime session's
-// recreates the runtime session from the Session transcript.
 func TestSessionTurnWithAnotherLaunchModeRecreatesTheRuntimeSession(t *testing.T) {
 	ctx := context.Background()
 	controlStore, fence, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "mode-switch.db"))

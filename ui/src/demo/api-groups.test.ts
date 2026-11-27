@@ -2,8 +2,6 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-// Every apiVersion in the demo's sample data and tour YAML must name a group
-// the CRDs define, so the YAML a visitor copies refers to real resources.
 const repoRoot = path.resolve(__dirname, '../../..')
 const apiGroups = new Set(
   readdirSync(path.join(repoRoot, 'api'), { recursive: true, encoding: 'utf8' })

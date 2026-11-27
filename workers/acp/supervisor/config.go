@@ -32,44 +32,20 @@ type ProviderProfile struct {
 	AuthMethodID          string
 	AdapterName           string
 	AdapterDigest         string
-	// ValidateWorkspace rejects a materialized workspace the provider cannot
-	// run safely, before any provider state or child process exists. Its
-	// error fails the create permanently with a caller-visible reason.
-	ValidateWorkspace func(acp.SessionPaths) error
-	PrepareSession    func(acp.SessionPaths) error
+	ValidateWorkspace     func(acp.SessionPaths) error
+	PrepareSession        func(acp.SessionPaths) error
+	BindProviderProxy     func(acp.SessionPaths, ProviderProxyBinding) error
 }
 
 type ProviderSessionProjection struct {
-	Instructions   *acp.InstructionProjection
-	AdditionalArgs []string
-	Environment    map[string]string
-	NewSessionMeta acp.Meta
-	// AgentDiagnosticFilter recognizes provider CLI diagnostics the adapter
-	// wrote into the ACP agent message stream instead of its own log. Nil
-	// forwards every chunk.
+	Instructions          *acp.InstructionProjection
+	AdditionalArgs        []string
+	Environment           map[string]string
+	NewSessionMeta        acp.Meta
 	AgentDiagnosticFilter *AgentDiagnosticFilter
-	// RequiredModeID is the ACP session mode the adapter must report as
-	// current whenever it creates or resumes the provider session. Empty
-	// accepts any mode.
-	RequiredModeID string
+	RequiredModeID        string
 }
 
-// AgentDiagnosticFilter recognizes assistant text chunks that are provider
-// CLI diagnostics rather than model output. Recognized chunks are withheld
-// from the harness event stream and the terminal assistant text and logged by
-// the supervisor instead. The recognizer sees only the chunk text; the
-// supervisor anchors it on prompt state it can prove, so a model chunk that
-// merely repeats a diagnostic sentence is forwarded: Startup diagnostics are
-// withheld only when the session received them from the child
-// (acp.PromptEvent.ReceivedAt, stamped before any buffering) before the
-// provider proxy began relaying the prompt's first non-error inference
-// response. Model output can only be derived from those bytes, while the CLI
-// emits its startup diagnostics ahead of its first inference request.
-//
-// The recognizer returns a summary the supervisor may log. Chunk text is
-// child-controlled and the child holds session credentials, so the summary
-// must be built only from values the supervisor already knows (such as the
-// session's own exclusion list), never from the chunk itself.
 type AgentDiagnosticFilter struct {
 	Startup func(text string) (summary string, ok bool)
 }
@@ -85,12 +61,7 @@ func (f WorkspaceMaterializerFunc) Materialize(ctx context.Context, request harn
 }
 
 type Config struct {
-	// Tracer belongs to this supervisor. Nil disables instrumentation. It never
-	// enters the provider process configuration or environment.
-	Tracer trace.Tracer
-	// GenAITracer and Meter record GenAI invoke_agent, chat and execute_tool
-	// telemetry derived from the ACP session stream and provider proxy. Nil
-	// disables each. They never capture prompt, completion or tool content.
+	Tracer        trace.Tracer
 	GenAITracer   trace.Tracer
 	Meter         metric.Meter
 	ListenAddress string
@@ -102,53 +73,26 @@ type Config struct {
 	CapabilitySecret      []byte
 	RequireCapabilities   bool
 
-	SessionBaseDir string
-	// DurableWorkspaceDir, when set, hosts each logical session's repository
-	// workspace on the provider's durable data volume so a data-only cold
-	// suspension preserves exactly that directory. The session root, home,
-	// temporary files, XDG state, and every credential stay under the
-	// ephemeral SessionBaseDir tree - EXCEPT the non-secret session identity
-	// allocator state (high-water mark, range, lock), which moves to
-	// <DurableWorkspaceDir>/.session-identity so a cold boot can never reuse
-	// a pre-suspension child UID/GID; snapshots must preserve it.
-	DurableWorkspaceDir string
-	// DurableWorkspaceKey gives a dedicated single-session pool one stable
-	// data directory across checkpoint restores into new RuntimeSession IDs.
-	// Empty keeps the default directory per RuntimeSession.
-	DurableWorkspaceKey   string
-	UIDAllocator          *acp.UIDAllocator
-	ProviderProxy         ProviderProxyConfig
-	MCPBroker             MCPBroker
-	WorkspaceMaterializer WorkspaceMaterializer
-	ArtifactUploader      *RemoteArtifactUploader
-	DeltaOptions          workspacedelta.Options
-	// E2EPromptWriteFaultRecorder persists direct-pool fault consumption
-	// outside the runtime Pod so replacement cannot re-arm the test fault.
+	SessionBaseDir              string
+	DurableWorkspaceDir         string
+	DurableWorkspaceKey         string
+	UIDAllocator                *acp.UIDAllocator
+	ProviderProxy               ProviderProxyConfig
+	MCPBroker                   MCPBroker
+	WorkspaceMaterializer       WorkspaceMaterializer
+	ArtifactUploader            *RemoteArtifactUploader
+	DeltaOptions                workspacedelta.Options
 	E2EPromptWriteFaultRecorder E2EPromptWriteFaultRecorder
 
 	InitializeTimeout time.Duration
 	PermissionTimeout time.Duration
 	CancelGrace       time.Duration
 
-	// E2EPromptWriteAmbiguityMarker enables a test-only transport fault for an
-	// exact prompt marker. The supervisor aborts the first authenticated request
-	// for each operation after fully decoding and validating it, but before
-	// recording the operation. The one-shot record survives runtime and
-	// supervisor recreation so live conformance exposes an accidental retry.
 	E2EPromptWriteAmbiguityMarker string
 
-	// Toolboxes are the frozen profile toolboxes bound into this Pod, in
-	// declared order. Their PATH folders are appended after the default child
-	// PATH. The supervisor never opens or runs anything inside them.
-	Toolboxes []harnessv2.RuntimeToolbox
-	// ToolboxMountMethod is how the controller bound the toolboxes. With
-	// imageVolume the files were never sanitized, so startup runs the
-	// unprivileged architecture check.
+	Toolboxes          []harnessv2.RuntimeToolbox
 	ToolboxMountMethod string
-	// Skills are the frozen profile skills bound read-only into this Pod at
-	// harnessv2.RuntimeSkillMountRoot/<name>. Each session receives a
-	// validated private copy in its runtime's native skills folder.
-	Skills []harnessv2.RuntimeSkill
+	Skills             []harnessv2.RuntimeSkill
 }
 
 func (c Config) Validate() error {

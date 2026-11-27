@@ -57,10 +57,6 @@ func revokeTaskJobAuthority(ctx context.Context, resultStore store.ResultStore, 
 	return authority.RevokeTaskJob(ctx, identity)
 }
 
-// recoverTaskJob only adopts a Job whose UID was already recorded by the
-// controller. An unbound Job may have executed before a crash, so it must not
-// be adopted or automatically replaced. Names and owner references alone are
-// forgeable by namespace Job creators.
 func (r *TaskReconciler) recoverTaskJob(ctx context.Context, task *corev1alpha1.Task, expected *batchv1.Job, validationTask bool) (*batchv1.Job, error) {
 	reader := uncachedReader(r.APIReader, r.Client)
 	existing := &batchv1.Job{}
@@ -103,8 +99,6 @@ func (r *TaskReconciler) recordTaskJobIdentityRejection(ctx context.Context, tas
 			current.Status.JobName != jobName || current.Status.JobUID != jobUID {
 			return
 		}
-		// Persist the cleanup name and replay barrier before deleting the Job.
-		// Its unverified UID must never become worker authorization.
 		current.Status.JobName = job.Name
 		meta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
 			Type: ConditionTypeJobCreated, Status: metav1.ConditionFalse, Reason: taskJobIdentityRejectedReason,
@@ -144,9 +138,6 @@ func (r *TaskReconciler) deleteRejectedTaskJob(ctx context.Context, job *batchv1
 	return nil
 }
 
-// retireAISoulTaskJob fences replay before retiring a Job that may have started
-// even though its Running status write was lost. Terminal projection must wait
-// for foreground deletion to finish, so the worker cannot outlive the Task.
 func (r *TaskReconciler) retireAISoulTaskJob(ctx context.Context, task *corev1alpha1.Task, message string) (bool, error) {
 	reader := uncachedReader(r.APIReader, r.Client)
 	job := &batchv1.Job{}

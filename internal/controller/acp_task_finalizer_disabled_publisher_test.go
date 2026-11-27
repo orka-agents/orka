@@ -76,7 +76,6 @@ func deniedWriteTaskDeletionFixture() (*corev1alpha1.Task, *TaskReconciler, *pro
 	task.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
 		State: corev1alpha1.TaskDeliveryStateNotRequested, Outcome: corev1alpha1.TaskDeliveryOutcomeNotRequested,
 	}
-	// Earlier artifact retirement does not waive deleting-Task reclamation.
 	meta.SetStatusCondition(&task.Status.Conditions, metav1.Condition{
 		Type: conditionTypeACPArtifactsRetired, Status: metav1.ConditionTrue,
 		Reason: "ArtifactReferencesReleased", LastTransitionTime: now,

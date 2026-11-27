@@ -512,8 +512,6 @@ func TestListPullRequestsTool_WithTaskName(t *testing.T) {
 }
 
 func TestListPullRequestsTool_BodyTruncationMultiByteUTF8(t *testing.T) {
-	// 498 ASCII chars + 2 emoji (4 bytes each) = 500 runes but 506 bytes.
-	// Byte-based slicing at 500 would split inside the first emoji.
 	multiByteBody := strings.Repeat("a", 498) + "🎉🎉"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -558,7 +556,6 @@ func TestListPullRequestsTool_BodyTruncationMultiByteUTF8(t *testing.T) {
 	if strings.Contains(body, "\ufffd") {
 		t.Error("truncated body contains replacement character U+FFFD")
 	}
-	// 500 runes exactly — should not be truncated
 	if len([]rune(body)) != 500 {
 		t.Errorf("expected 500 runes (no truncation needed), got %d", len([]rune(body)))
 	}
@@ -586,8 +583,6 @@ func TestListPullRequestsTool_PerPageCap(t *testing.T) {
 	}
 }
 
-// TestListPullRequestsTool_BoundsLargeErrorBodies covers a non-2xx response
-// with a large body: the error carries a bounded note, not the whole response.
 func TestListPullRequestsTool_BoundsLargeErrorBodies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

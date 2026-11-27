@@ -19,24 +19,17 @@ import (
 
 const getIssueToolName = "get_issue"
 
-// GetIssueTool fetches full details of a specific GitHub issue including comments.
 type GetIssueTool struct {
-	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
-	// maxResultBytes bounds the encoded result when positive.
+	k8sClient      client.Client
+	apiBaseURL     string
 	maxResultBytes int
 }
 
-// WithMaxResultBytes bounds the encoded result: the oldest comments are
-// dropped first, then the body is cut, so a long discussion returns usable
-// partial data instead of a result too big for its transport.
 func (t *GetIssueTool) WithMaxResultBytes(limit int) *GetIssueTool {
 	t.maxResultBytes = limit
 	return t
 }
 
-// boundGetIssueResult trims result until its JSON encoding fits limit; a
-// nonpositive limit leaves it unchanged. comment_count keeps the true total.
 func boundGetIssueResult(result GetIssueResult, limit int) GetIssueResult {
 	if limit <= 0 {
 		return result
@@ -66,13 +59,8 @@ func boundGetIssueResult(result GetIssueResult, limit int) GetIssueResult {
 	return result
 }
 
-// maxGitHubErrorNoteBytes bounds a GitHub error quoted in a result or an
-// error: it can carry a response body of up to the response limit, which a
-// result's size bound never trims.
 const maxGitHubErrorNoteBytes = 512
 
-// boundedNote cuts text to at most maxGitHubErrorNoteBytes of valid UTF-8,
-// marking a cut.
 func boundedNote(text string) string {
 	if len(text) <= maxGitHubErrorNoteBytes {
 		return text
@@ -80,69 +68,56 @@ func boundedNote(text string) string {
 	return strings.ToValidUTF8(text[:maxGitHubErrorNoteBytes], "") + "…"
 }
 
-// GetIssueArgs are the arguments for the get_issue tool.
 type GetIssueArgs struct {
-	// TaskName is the name of the task to read workspace config from (optional).
-	TaskName string `json:"task_name"`
-	// RepoURL is a direct GitHub repo URL (optional; falls back to ORKA_GIT_REPO).
-	RepoURL string `json:"repo_url"`
-	// IssueNumber is the GitHub issue number (required).
-	IssueNumber int `json:"issue_number"`
+	TaskName    string `json:"task_name"`
+	RepoURL     string `json:"repo_url"`
+	IssueNumber int    `json:"issue_number"`
 }
 
-// IssueComment represents a single comment on a GitHub issue.
 type IssueComment struct {
 	Author    string `json:"author"`
 	Body      string `json:"body"`
 	CreatedAt string `json:"created_at"`
 }
 
-// GetIssueResult is the result of fetching a GitHub issue.
 type GetIssueResult struct {
-	Number       int            `json:"number"`
-	Title        string         `json:"title"`
-	Body         string         `json:"body"`
-	Author       string         `json:"author"`
-	Labels       []string       `json:"labels"`
-	Assignees    []string       `json:"assignees"`
-	State        string         `json:"state"`
-	CreatedAt    string         `json:"created_at"`
-	HTMLURL      string         `json:"html_url"`
-	CommentCount int            `json:"comment_count"`
-	Comments     []IssueComment `json:"comments"`
-	// Truncated reports that the result was cut to fit a size budget; the
-	// note says what was dropped.
-	Truncated      bool   `json:"truncated,omitempty"`
-	TruncationNote string `json:"truncation_note,omitempty"`
+	Number         int            `json:"number"`
+	Title          string         `json:"title"`
+	Body           string         `json:"body"`
+	Author         string         `json:"author"`
+	Labels         []string       `json:"labels"`
+	Assignees      []string       `json:"assignees"`
+	State          string         `json:"state"`
+	CreatedAt      string         `json:"created_at"`
+	HTMLURL        string         `json:"html_url"`
+	CommentCount   int            `json:"comment_count"`
+	Comments       []IssueComment `json:"comments"`
+	Truncated      bool           `json:"truncated,omitempty"`
+	TruncationNote string         `json:"truncation_note,omitempty"`
 }
 
-// NewGetIssueTool creates a new get_issue tool.
 func NewGetIssueTool(k8sClient client.Client) *GetIssueTool {
 	return &GetIssueTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// Name returns the tool name.
 func (t *GetIssueTool) Name() string {
 	return getIssueToolName
 }
 
-// Description returns the tool description.
 func (t *GetIssueTool) Description() string {
 	return "Fetch full details of a specific GitHub issue by number, including title, body, labels, " +
 		"assignees, state, and the first page of comments. Use this to understand an issue's context " +
 		"before working on it or creating related tasks."
 }
 
-// Parameters returns the JSON schema for tool parameters.
 func (t *GetIssueTool) Parameters() json.RawMessage {
 	schema := map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{taskNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: workspaceTaskDescription}, repoURLField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Direct GitHub repository URL (e.g. 'https://github.com/owner/repo'). Falls back to ORKA_GIT_REPO env var if not provided"}, githubIssueNumberField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "GitHub issue number to fetch"}}, jsonSchemaRequiredField: []string{githubIssueNumberField}}
 	data, _ := json.Marshal(schema)
 	return data
 }
 
-// Execute fetches the issue details and comments from GitHub.
 func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (string, error) {
 	var args GetIssueArgs
 	if err := json.Unmarshal(argsJSON, &args); err != nil {
@@ -160,13 +135,11 @@ func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (s
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
-	// Fetch issue details
 	issueResult, err := fetchIssueDetails(ctx, httpClient, baseURL, token, owner, repo, args.IssueNumber)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch issue: %w", err)
 	}
 
-	// Fetch comments (non-fatal on failure, but never silent)
 	comments, err := fetchIssueComments(ctx, httpClient, baseURL, token, owner, repo, args.IssueNumber, issueResult.CommentCount)
 	if err == nil {
 		issueResult.Comments = comments
@@ -183,7 +156,6 @@ func (t *GetIssueTool) Execute(ctx context.Context, argsJSON json.RawMessage) (s
 	return string(resultJSON), nil
 }
 
-// fetchIssueDetails fetches a single issue from the GitHub API.
 func fetchIssueDetails(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, issueNumber int) (*GetIssueResult, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d", baseURL, owner, repo, issueNumber)
 
@@ -257,17 +229,11 @@ func fetchIssueDetails(ctx context.Context, httpClient *http.Client, baseURL, to
 	}, nil
 }
 
-// fetchIssueComments fetches the first page of comments for a GitHub issue.
-// issueCommentsPerPage and maxIssueCommentPages bound the comment pages one
-// get_issue call reads: the newest pages first, since a size-bounded result
-// keeps the newest comments.
 const (
 	issueCommentsPerPage = 100
 	maxIssueCommentPages = 5
 )
 
-// fetchIssueComments reads up to maxIssueCommentPages pages of an issue's
-// comments, ending at the newest page for total comments.
 func fetchIssueComments(ctx context.Context, httpClient *http.Client, baseURL, token, owner, repo string, issueNumber, total int) ([]IssueComment, error) {
 	lastPage := max(1, (total+issueCommentsPerPage-1)/issueCommentsPerPage)
 	firstPage := max(1, lastPage-maxIssueCommentPages+1)

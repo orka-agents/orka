@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ExportProvider is the part of a provider the export and import cases use.
 type ExportProvider interface {
 	storagev1.ProviderDescriber
 	storagev1.DatasetExporter
@@ -22,30 +21,14 @@ type ExportProvider interface {
 	storagev1.MigrationMarkerStore
 }
 
-// ExportFactory returns an ExportProvider over a fresh, empty dataset, in the
-// same way as StateFactory.
 type ExportFactory func(t *testing.T) ExportProvider
 
-// ExportSeed fills an empty dataset with records to export, such as through
-// the provider's own methods.
 type ExportSeed func(t *testing.T, provider ExportProvider)
 
-// exportPageLimit keeps pages small, so every export spans several pages.
 const exportPageLimit = 2
 
-// importBatchRecords keeps batches small, so every import spans several
-// batches.
 const importBatchRecords = 3
 
-// RunExportImport runs the export and import cases against providers from
-// newProvider, copying a dataset that seed fills. RunState and RunArtifacts
-// run it for a provider that reports [storagev1.ExportCapability], and then
-// check through state.v1 that the copy continues message IDs, transcript
-// order and execution event sequences past values deleted before the
-// export, and serves a security finding with its evidence and scan run
-// unchanged. A provider can also run it with a seed of its own, for example one
-// that reaches the sequences the shared seeds cannot observe through the
-// contract, such as usage accounting order.
 func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 	t.Helper()
 	t.Run("families", func(t *testing.T) {
@@ -151,8 +134,6 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		target := newProvider(t)
 		_, err = target.BeginImport(t.Context(), invalid)
 		require.ErrorIs(t, err, storagev1.ErrValidation)
-		// The request is built directly: for a provider that serves only
-		// artifacts.v1 the shorter manifest is empty, which has no digest.
 		invalid = request
 		invalid.Manifest = manifest[1:]
 		invalid.Source.ManifestDigest = controlDigest("a manifest that misses a family")
@@ -213,8 +194,6 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		requireRefused(err, storagev1.ErrValidation, "an encoding other than the manifest's")
 		_, err = target.ImportRecords(t.Context(), batch(2, record))
 		requireRefused(err, storagev1.ErrConflict, "a batch that skips a sequence")
-		// A provider may refuse any batch of two records with ErrTooLarge;
-		// either way the batch commits nothing.
 		refusedPair := func(err error, want error, msg string) {
 			t.Helper()
 			if errors.Is(err, storagev1.ErrTooLarge) {
@@ -232,8 +211,6 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 			refusedPair(err, storagev1.ErrConflict, "a batch that holds one key with two bodies")
 		}
 
-		// Two copies of one record count once. A provider that takes one
-		// record at a time may refuse the pair instead.
 		pair, err := target.ImportRecords(t.Context(), batch(1, record, record))
 		if !errors.Is(err, storagev1.ErrTooLarge) {
 			require.NoError(t, err, "a batch that holds one record twice")
@@ -361,8 +338,6 @@ func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {
 		require.True(t, ok)
 		atLimit := strings.Repeat("w", storagev1.MaxControlIdentifierBytes)
 		identifiers := []string{"namespace", "from_task", "to_task", "parent_task"}
-		// message returns a message whose identifiers are at the bound, except
-		// over, which is one byte longer.
 		message := func(id int64, over string) storagev1.RawRecord {
 			values := make([]any, len(schema.Fields))
 			for i, field := range schema.Fields {
@@ -534,9 +509,6 @@ func seededSource(t *testing.T, newProvider ExportFactory, seed ExportSeed) Expo
 	return source
 }
 
-// exportDataset exports every family of provider page by page, checks each
-// record and the provider's digests, and returns the manifest and the
-// records by family, sorted by key.
 func exportDataset(t *testing.T, provider ExportProvider) ([]storagev1.FamilyDigest, map[string][]storagev1.RawRecord) {
 	t.Helper()
 	families, err := provider.ExportFamilies(t.Context())
@@ -597,11 +569,6 @@ func beginImportRequest(t *testing.T, source storagev1.ProviderInfo, manifest []
 	}
 }
 
-// importDataset imports records family by family, in manifest order, in
-// small batches. A batch the provider refuses with ErrTooLarge is sent again
-// in halves under the same sequence, as the contract permits. With replay
-// set, it repeats each family's first batch after committing it. It returns
-// each family's next batch sequence.
 func importDataset(
 	t *testing.T, target ExportProvider, sessionID string,
 	manifest []storagev1.FamilyDigest, records map[string][]storagev1.RawRecord, replay bool,
@@ -646,8 +613,6 @@ func requireProgressMatches(t *testing.T, manifest []storagev1.FamilyDigest, pro
 	}
 }
 
-// importedSequence returns the last batch a family committed, or -1 when the
-// progress does not list the family.
 func importedSequence(progress storagev1.ImportProgress, family string) int64 {
 	for _, held := range progress.Families {
 		if held.Family == family {
@@ -666,9 +631,6 @@ func importedCount(progress storagev1.ImportProgress, family string) int64 {
 	return -1
 }
 
-// firstRecord returns the first record of the first non-empty family, preferring
-// one with a field outside its key when available, so custom seeds that only
-// populate key-only families still work.
 func firstRecord(t *testing.T, manifest []storagev1.FamilyDigest, records map[string][]storagev1.RawRecord) (string, storagev1.RawRecord) {
 	t.Helper()
 	if family, rec, ok := firstMutableRecord(manifest, records); ok {
@@ -683,8 +645,6 @@ func firstRecord(t *testing.T, manifest []storagev1.FamilyDigest, records map[st
 	return "", storagev1.RawRecord{}
 }
 
-// firstMutableRecord returns the first record of the first non-empty family
-// that has a field outside its key.
 func firstMutableRecord(manifest []storagev1.FamilyDigest, records map[string][]storagev1.RawRecord) (string, storagev1.RawRecord, bool) {
 	for _, family := range manifest {
 		schema, _ := storagev1.LookupExportSchema(family.Family)
@@ -695,7 +655,6 @@ func firstMutableRecord(manifest []storagev1.FamilyDigest, records map[string][]
 	return "", storagev1.RawRecord{}, false
 }
 
-// changedRecord returns record with its first field outside the key changed.
 func changedRecord(t *testing.T, record storagev1.RawRecord) storagev1.RawRecord {
 	t.Helper()
 	schema, ok := storagev1.LookupExportSchema(record.Family)
@@ -718,9 +677,6 @@ func changedRecord(t *testing.T, record storagev1.RawRecord) storagev1.RawRecord
 func changedExportValue(field storagev1.ExportField, value any) any {
 	switch typed := value.(type) {
 	case string:
-		// Replace a single rune with another rune of the exact same UTF-8 byte
-		// width so identifiers at MaxControlIdentifierBytes never grow past the
-		// limit.
 		if typed == "" {
 			return "x"
 		}
@@ -754,8 +710,6 @@ func changedExportValue(field storagev1.ExportField, value any) any {
 	case bool:
 		return !typed
 	case []byte:
-		// A changed byte keeps the size, so a value at the target's limit
-		// stays within it and the change is the only difference.
 		if len(typed) == 0 {
 			return []byte{'x'}
 		}
@@ -769,8 +723,6 @@ func changedExportValue(field storagev1.ExportField, value any) any {
 	}
 }
 
-// typedError returns the error of type T in err, which a provider may
-// return as a value or a pointer, and fails the test when err holds neither.
 func typedError[T error, P interface {
 	*T
 	error
@@ -785,10 +737,8 @@ func typedError[T error, P interface {
 	return *pointer
 }
 
-// exportExampleTime is a time with nanoseconds, in a zone other than UTC.
 var exportExampleTime = time.Date(2026, 9, 1, 12, 0, 0, 123456789, time.FixedZone("UTC+3", 3*60*60))
 
-// exampleExportValue returns a value of kind that differs for each n.
 func exampleExportValue(kind storagev1.ExportFieldKind, n int) any {
 	switch kind {
 	case storagev1.ExportString:

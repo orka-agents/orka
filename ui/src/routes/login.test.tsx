@@ -15,7 +15,6 @@ vi.mock('@tanstack/react-router', async () => {
     ...actual,
     createFileRoute: (_path: string) => (opts: any) => ({ ...opts, path: _path }),
     useNavigate: () => mockNavigate,
-    // Like the browser-history router, the fragment mirrors the address bar.
     useLocation: () => ({ pathname: mockPathname, hash: window.location.hash.slice(1) }),
   }
 })
@@ -101,8 +100,6 @@ describe('login route', () => {
     useAuthStore.setState({ token: 'existing-token' })
     const LoginPage = Route.component!
     render(<LoginPage />)
-    // The token swaps the root layout before the route match changes, so
-    // the login page mounts again for a moment at the new address.
     mockPathname = '/settings/connectors'
     render(<LoginPage />)
     expect(mockNavigate).toHaveBeenCalledTimes(1)
@@ -129,7 +126,6 @@ describe('login route', () => {
       authorization = request.headers.get('Authorization')
       return new HttpResponse(null, { status: 200 })
     }))
-    // What the root route leaves behind for /monitors/example#token=deep-link-token.
     window.history.replaceState(null, '', '/monitors/example#token=deep-link-token')
     captureHashToken()
     sessionStorage.setItem('orka-login-return', '/monitors/example')
@@ -176,7 +172,6 @@ describe('login route', () => {
     render(<LoginPage />)
 
     expect(await screen.findByText('Token from CLI is invalid or expired. Please generate a new one.')).toBeInTheDocument()
-    // The rejected switch must not continue silently under the old identity.
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(mockNavigate).not.toHaveBeenCalled()
     expect(useAuthStore.getState().token).toBe('old-token')

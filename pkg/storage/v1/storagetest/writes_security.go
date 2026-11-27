@@ -9,8 +9,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// securityState is what the security write cases observe: every record a
-// security write can change in the workflow namespace.
 type securityState struct {
 	ScanRuns    []storagev1.ScanRun
 	Findings    []storagev1.Finding
@@ -197,8 +195,6 @@ func init() {
 		}),
 		security(writeCase[storagev1.StateProvider]{
 			method: "CreatePatchProposal",
-			// A pointer to a zero value is part of the record the write
-			// returns, and a replay must keep it apart from nil.
 			args: func(storagev1.ControllerEpochFence) []any {
 				proposal := securityWriteProposal()
 				proposal.PRNumber = new(int)

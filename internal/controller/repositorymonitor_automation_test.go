@@ -35,7 +35,6 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	original := server.Config.Handler
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if strings.HasSuffix(req.URL.Path, "/check-runs") {
-			// The base commit passes, so the failure is the pull request's own.
 			conclusion := "success"
 			if strings.Contains(req.URL.Path, "/commits/head31/") {
 				conclusion = "failure"
@@ -68,8 +67,6 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pr-fix"}}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	// Policy selection only queues an accepted command. The next reconciliation
-	// executes its canonical run, with no parallel inline Task creation.
 	var queuedTasks corev1alpha1.TaskList
 	if err := cl.List(ctx, &queuedTasks); err != nil || len(queuedTasks.Items) != 0 {
 		t.Fatalf("automatic repair bypassed command queue: tasks=%d err=%v", len(queuedTasks.Items), err)
@@ -108,7 +105,6 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	if err != nil || len(commands) != 1 || commands[0].Source != "controller_policy" || commands[0].Intent != repositoryMonitorCommandIntentFixCI {
 		t.Fatalf("automatic command = %#v, err=%v", commands, err)
 	}
-	// The repair attempt records the CI evidence its prompt carries.
 	frozen, ok := repositoryMonitorRepairCIInputFromPrompt(task.Spec.Prompt, "head31")
 	if !ok || len(frozen.Evidence.Checks) != 1 || frozen.Evidence.Checks[0].ID != "check_run:10" {
 		t.Fatalf("repair prompt CI evidence = %+v ok=%t", frozen, ok)
@@ -125,7 +121,6 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	if err := cl.List(ctx, &tasks); err != nil || len(tasks.Items) != 1 {
 		t.Fatalf("duplicate or concurrent task: count=%d err=%v", len(tasks.Items), err)
 	}
-	// Recovering accepted commands must retain the same Task/run identity.
 	if _, err := reconciler.enqueueAcceptedRepositoryMonitorCommands(ctx, monitor); err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +132,6 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 			t.Fatal("Task does not use the canonical command run")
 		}
 	}
-	// A failed Task consumes one attempt, but a second same-head attempt must
-	// get its own command identity rather than collide on the legacy SQL key.
 	task.Status.Phase = corev1alpha1.TaskPhaseFailed
 	if err := cl.Status().Update(ctx, &task); err != nil {
 		t.Fatal(err)
@@ -325,8 +318,6 @@ func TestRepositoryMonitorRepairDoesNotStarveLaterPullRequests(t *testing.T) {
 			if err := db.CreateRepairJob(ctx, &store.RepairJob{ID: "first-pr-repair", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: 1, HeadSHA: "head1", TaskName: "active-repair", Phase: phase, CreatedAt: time.Now()}); err != nil {
 				t.Fatal(err)
 			}
-			// The first PR's head is already reviewed, so only its repair can
-			// compete for the run's single slot.
 			if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "first-pr-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "head1", Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun}); err != nil {
 				t.Fatal(err)
 			}
@@ -463,7 +454,6 @@ func TestRepositoryMonitorRepairPromptIncludesOnlyMatchingReviewEvidence(t *test
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	// CI lookups for the fix_ci prompt fail here, so it carries no check list.
 	unavailable := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(unavailable.Close)
 	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db, GitHubAPIBaseURL: unavailable.URL}

@@ -30,29 +30,15 @@ import (
 )
 
 const (
-	connectorToolCallTimeout = 5 * time.Minute
-	// connectorToolResponseLimit bounds the controller's JSON envelope. The
-	// executor caps a tool body at 10 MiB and JSON escaping can expand a
-	// body of control characters sixfold, so the bound covers that worst
-	// case with room for the envelope; overflow is reported, not truncated.
-	connectorToolResponseLimit = 64 << 20
-	// connectorToolUnavailableRetries bounds how often a 503 from the
-	// controller is retried: a fresh worker Pod can reach the endpoint
-	// before the Task's Job identity is published, and that window closes
-	// within seconds.
+	connectorToolCallTimeout        = 5 * time.Minute
+	connectorToolResponseLimit      = 64 << 20
 	connectorToolUnavailableRetries = 5
 	connectorToolErrorBodyLimit     = 2048
 	saTokenPathDefault              = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 )
 
-// connectorBindings holds, by OutboundAccessPolicy name, the Connection
-// identity the controller froze for this Task at dispatch. It is set once at
-// startup from the Job environment and carries no token material.
 var connectorBindings = map[string]corev1alpha1.ConnectionBinding{}
 
-// parseConnectionBindings decodes the frozen bindings the Job builder placed
-// in the worker environment. An unreadable value yields no bindings, which
-// makes every connector approval digest fail to match at the controller.
 func parseConnectionBindings(raw string) map[string]corev1alpha1.ConnectionBinding {
 	result := map[string]corev1alpha1.ConnectionBinding{}
 	if strings.TrimSpace(raw) == "" {
@@ -70,10 +56,6 @@ func parseConnectionBindings(raw string) map[string]corev1alpha1.ConnectionBindi
 	return result
 }
 
-// connectorToolProxyTimeout is the Tool's declared request timeout, clamped
-// to the controller's connector maximum, plus a settlement margin, or the
-// default proxy deadline when it declares none. Clamping first also keeps a
-// huge declared duration from overflowing when the margin is added.
 func connectorToolProxyTimeout(tool *corev1alpha1.Tool) time.Duration {
 	if tool != nil && tool.Spec.HTTP != nil && tool.Spec.HTTP.Timeout != nil && tool.Spec.HTTP.Timeout.Duration > 0 {
 		return min(tool.Spec.HTTP.Timeout.Duration, connectors.MaxHTTPToolTimeout) + connectorToolSettlementMargin
@@ -81,20 +63,12 @@ func connectorToolProxyTimeout(tool *corev1alpha1.Tool) time.Duration {
 	return connectorToolCallTimeout
 }
 
-// connectorToolSettlementMargin covers the controller's own work around the
-// provider call (claims, ledger writes, response encoding).
 const connectorToolSettlementMargin = 30 * time.Second
 
-// connectorToolRetryBackoff is the first 503 retry delay; it doubles per
-// attempt. A variable so tests do not wait through it.
 var connectorToolRetryBackoff = 500 * time.Millisecond
 
-// connectorBackedToolNames is set once at startup from the loaded custom
-// Tools; the agent loop consults it to route calls to the controller.
 var connectorBackedToolNames = map[string]bool{}
 
-// frozenConnectorToolDigests decodes the connector tool digests the Job
-// builder froze into the worker environment; an unreadable value yields none.
 func frozenConnectorToolDigests(raw string) map[string]string {
 	digests := map[string]string{}
 	if strings.TrimSpace(raw) == "" {
@@ -106,19 +80,8 @@ func frozenConnectorToolDigests(raw string) map[string]string {
 	return digests
 }
 
-// connectorToolPolicies holds, per connector-backed tool, the connection-mode
-// policy spec loaded with it, so approval targets bind the injection
-// configuration the controller will recompute from the live policy.
 var connectorToolPolicies = map[string]corev1alpha1.OutboundAccessPolicySpec{}
 
-// connectorBackedTools reports which loaded custom Tools sit behind a
-// connection-mode OutboundAccessPolicy. Those tools never execute in this
-// Pod: the person's token lives only in the controller, so the worker asks
-// the controller to run the call on the Task's behalf.
-//
-// A policy that cannot be read is retried briefly and then fails startup:
-// a tool marked connector-backed without its policy spec would compute an
-// approval target the controller never matches, wasting the approval.
 func connectorBackedTools(
 	ctx context.Context,
 	k8sClient client.Client,
@@ -126,10 +89,6 @@ func connectorBackedTools(
 	customTools map[string]*corev1alpha1.Tool,
 ) (map[string]bool, error) {
 	result := map[string]bool{}
-	// The digests the controller froze into this Job are the routing upper
-	// bound: a tool dispatched as connector-backed always goes to the
-	// controller, which refuses it if its policy or definition drifted. Live
-	// state can only add tools, never route a frozen one back into this Pod.
 	for name := range frozenConnectorToolDigests(os.Getenv(workerenv.ConnectorToolDigests)) {
 		if _, loaded := customTools[name]; loaded {
 			result[name] = true
@@ -143,8 +102,6 @@ func connectorBackedTools(
 		policy, err := readConnectorPolicy(ctx, k8sClient, policyKey)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				// A missing policy is treated as connector-backed so the Pod
-				// never tries to resolve a credential it may not hold.
 				result[name] = true
 				continue
 			}
@@ -158,15 +115,11 @@ func connectorBackedTools(
 	return result, nil
 }
 
-// connectorPolicyReadAttempts and connectorPolicyReadBackoff bound the
-// retries of a transient policy read at startup; tests shorten the backoff.
 var (
 	connectorPolicyReadAttempts = 5
 	connectorPolicyReadBackoff  = 200 * time.Millisecond
 )
 
-// readConnectorPolicy reads a policy, retrying transient failures; a
-// NotFound is returned at once.
 func readConnectorPolicy(
 	ctx context.Context, k8sClient client.Client, key client.ObjectKey,
 ) (*corev1alpha1.OutboundAccessPolicy, error) {
@@ -190,28 +143,14 @@ func readConnectorPolicy(
 	return nil, err
 }
 
-// connectorToolRequest is the body sent to the controller's internal
-// connector-tool endpoint.
-// connectorBackedToolAnnotation marks an in-memory Tool the worker routes to
-// the controller. Approval targets for such tools digest the plain Tool spec,
-// which the controller recomputes from the live Tool before claiming the
-// approval; policy and transaction identity are the controller's concern.
 const connectorBackedToolAnnotation = "orka.ai/connector-backed"
 
-// isConnectorBackedTool reports whether the worker routes tool to the
-// controller as a connector-backed tool.
 func isConnectorBackedTool(tool *corev1alpha1.Tool) bool {
 	return tool != nil && tool.Annotations[connectorBackedToolAnnotation] == connectorBackedToolValue
 }
 
-// connectorBackedToolValue marks a connector-backed Tool.
 const connectorBackedToolValue = "true"
 
-// markConnectorBackedTools annotates the in-memory Tools the worker routes to
-// the controller so the approval gate digests their plain spec. The marker is
-// derived from the routing classification only: any value that arrived on
-// the Tool object itself is cleared first, so a Tool cannot opt out of the
-// worker's full approval digest by carrying the annotation.
 func markConnectorBackedTools(customTools map[string]*corev1alpha1.Tool, names map[string]bool) {
 	for _, tool := range customTools {
 		if tool != nil {
@@ -234,19 +173,14 @@ type connectorToolRequest struct {
 	Arguments      json.RawMessage `json:"arguments"`
 	CallID         string          `json:"callId,omitempty"`
 	IdempotencyKey string          `json:"idempotencyKey,omitempty"`
-	// ApprovalID is the approval the worker matched for this call, when the
-	// tool required one. The controller verifies it before executing.
-	ApprovalID string `json:"approvalId,omitempty"`
+	ApprovalID     string          `json:"approvalId,omitempty"`
 }
 
 type connectorToolResponse struct {
-	Result string `json:"result"`
-	// Error is the API's shared envelope ({"code", "message"}); a plain
-	// string is accepted too.
-	Error json.RawMessage `json:"error,omitempty"`
+	Result string          `json:"result"`
+	Error  json.RawMessage `json:"error,omitempty"`
 }
 
-// errorMessage returns the controller's error message from either shape.
 func (r connectorToolResponse) errorMessage() string {
 	var envelope struct {
 		Message string `json:"message"`
@@ -261,10 +195,6 @@ func (r connectorToolResponse) errorMessage() string {
 	return ""
 }
 
-// controllerHTTPClient is the client for the worker's authenticated calls to
-// the controller's internal API: inherited proxy settings are ignored and
-// redirects are not followed, so the projected ServiceAccount token is only
-// ever sent to the controller URL itself.
 func controllerHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -274,9 +204,6 @@ func controllerHTTPClient() *http.Client {
 	}
 }
 
-// executeConnectorToolViaController runs a connector-backed tool in the
-// controller. Errors after the request was sent are marked as attempted so
-// the approval gate does not re-fire a consequential action.
 func executeConnectorToolViaController(
 	ctx context.Context,
 	httpClient *http.Client,
@@ -295,7 +222,6 @@ func executeConnectorToolViaController(
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	// The approval key doubles as the idempotency key in the worker's gate.
 	body, err := json.Marshal(connectorToolRequest{
 		Arguments: args, CallID: callID, IdempotencyKey: idempotencyKey, ApprovalID: idempotencyKey,
 	})
@@ -306,9 +232,6 @@ func executeConnectorToolViaController(
 	if token == "" {
 		return "", errors.New("worker service account token is unavailable for connector tool execution")
 	}
-	// The controller applies the Tool's own request timeout; the proxy
-	// deadline covers that plus the controller's settlement margin, so a
-	// legitimately slow tool is never cut off by the proxy first.
 	callCtx, cancel := context.WithTimeout(ctx, connectorToolProxyTimeout(tool))
 	defer cancel()
 	if httpClient == nil {
@@ -318,19 +241,11 @@ func executeConnectorToolViaController(
 	for attempt := 0; ; attempt++ {
 		status, raw, err := postConnectorToolRequest(callCtx, httpClient, endpoint, token, body)
 		if err != nil {
-			// A transport failure is ambiguous (the request may or may not
-			// have reached the controller) but never consumes the local
-			// approval: the controller's claim and effect ledger make an
-			// exact retry safe, replaying a committed result or refusing a
-			// call that is still executing. A response that arrived but
-			// could not be read was attempted.
 			if errors.As(err, new(connectorResponseError)) {
 				return "", attempted(fmt.Errorf("connector tool %q: %w", toolName, err))
 			}
 			return "", fmt.Errorf("connector tool %q: %w", toolName, err)
 		}
-		// 503 means the controller cannot yet judge this caller (the Task's
-		// Job identity is not published); nothing was executed, so retry.
 		if status == http.StatusServiceUnavailable && attempt < connectorToolUnavailableRetries {
 			select {
 			case <-callCtx.Done():
@@ -344,9 +259,6 @@ func executeConnectorToolViaController(
 	}
 }
 
-// postConnectorToolRequest sends one request and returns the status and
-// bounded body. A body past the bound is an error rather than a truncated
-// document that would later fail to decode as an attempted call.
 func postConnectorToolRequest(
 	ctx context.Context, httpClient *http.Client, endpoint, token string, body []byte,
 ) (int, []byte, error) {
@@ -374,8 +286,6 @@ func postConnectorToolRequest(
 	return resp.StatusCode, raw, nil
 }
 
-// connectorResponseError marks a failure after the controller answered: the
-// call was attempted, whatever the body said.
 type connectorResponseError struct{ err error }
 
 func (e connectorResponseError) Error() string { return e.err.Error() }
@@ -404,7 +314,6 @@ func decodeConnectorToolResponse(toolName string, status int, raw []byte) (strin
 	}
 	err := fmt.Errorf("connector tool %q failed (HTTP %d): %s", toolName, status, message)
 	if status == http.StatusBadGateway {
-		// The controller reached the provider; the action may have happened.
 		return "", attempted(worker.ToolExecutionError{Err: err})
 	}
 	return "", err

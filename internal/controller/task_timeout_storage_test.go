@@ -18,10 +18,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// A Task whose Job succeeded before the Task timeout, but whose completion was
-// deferred past it, for example while the store was not accepting writes,
-// completes as the Job's success. A Job that succeeded after the deadline, or
-// whose completion time is unknown, still times out.
 func TestHandleRunningCompletesAJobThatSucceededBeforeTheTimeout(t *testing.T) {
 	timeout := metav1.Duration{Duration: 10 * time.Second}
 	started := metav1.NewTime(time.Now().Add(-time.Minute))
@@ -74,8 +70,6 @@ func TestHandleRunningCompletesAJobThatSucceededBeforeTheTimeout(t *testing.T) {
 
 			_, err := r.handleRunning(ctx, task.DeepCopy())
 			if tc.lookupErr != nil {
-				// Later calls would succeed, so the first lookup failure must
-				// not let timeout finalization overwrite an actual success.
 				require.ErrorIs(t, err, tc.lookupErr)
 			}
 			current := &corev1alpha1.Task{}

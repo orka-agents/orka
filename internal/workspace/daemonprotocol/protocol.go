@@ -1,6 +1,3 @@
-// Package daemonprotocol preserves the legacy provider-routed client surface while
-// the public DTOs live in orka-workspace/sdk/workspaceagent. New adapters must import the public
-// package directly.
 package daemonprotocol
 
 import workspaceagent "github.com/orka-agents/orka-workspace/sdk/workspaceagent"

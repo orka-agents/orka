@@ -30,9 +30,6 @@ import { splitShellWords } from '@/lib/shell-words'
 import { actionErrorMessage } from './action-error'
 import { taskNameError } from './task-name'
 
-// The Advanced section can be collapsed, so the browser's own number checks
-// never see these values: mirror the Task CRD's 0-1000 priority bound and
-// the API's Go duration parse instead of sending a value the server rejects.
 function priorityError(value: string): string | undefined {
   const trimmed = value.trim()
   if (!trimmed) return undefined
@@ -46,8 +43,6 @@ function timeoutError(value: string): string | undefined {
   const trimmed = value.trim()
   if (!trimmed) return undefined
   if (trimmed !== '0' && !goDuration.test(trimmed)) return 'Timeout must be a duration such as 90s, 30m, or 1h30m.'
-  // A zero timeout has elapsed the moment the task starts, so the API
-  // rejects it; units carry no digits, so no nonzero digit means zero.
   if (!/[1-9]/.test(trimmed)) return 'Timeout must be greater than zero, such as 90s, 30m, or 1h30m.'
   return undefined
 }
@@ -70,9 +65,6 @@ function optionalCredentialReference(name: string, key: string) {
 export function TaskCreateForm() {
   const navigate = useNavigate()
   const createTask = useCreateTask()
-  // Suppress cached agent data whenever the current request errors (for
-  // example a 403 from a token that cannot list Agents): stale names from an
-  // earlier identity must not populate the selector.
   const agentsQuery = useAgentListAll()
   const agentsData = agentsQuery.error ? undefined : agentsQuery.data
   const namespace = useUIStore((s) => s.namespace)
@@ -86,9 +78,6 @@ export function TaskCreateForm() {
   const [prompt, setPrompt] = useState('')
   const [runtimeAgentSelection, setRuntimeAgentSelection] = useState<{ namespace: string; name: string } | null>(null)
   const setAgentRef = (name: string) => setRuntimeAgentSelection(name ? { namespace, name } : null)
-  // Agent names are namespace-scoped: the selection remembers the namespace it
-  // was made in and is treated as empty once the dashboard namespace changes,
-  // so an unqualified name is never submitted against a different namespace.
   const [aiAgentSelection, setAIAgentSelection] = useState<{ namespace: string; name: string } | null>(null)
   const setAIAgentRef = (name: string) => setAIAgentSelection(name ? { namespace, name } : null)
   const [showAIModelOverrides, setShowAIModelOverrides] = useState(false)
@@ -96,15 +85,11 @@ export function TaskCreateForm() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [priority, setPriority] = useState('')
   const [timeout, setTimeout] = useState('')
-  // Field errors appear once a field is left or a submit is attempted, so a
-  // half-typed value ("my-", "30") is not flagged mid-keystroke.
   const [visitedFields, setVisitedFields] = useState<ReadonlySet<string>>(() => new Set())
   const [submitAttempted, setSubmitAttempted] = useState(false)
   const visitField = (field: string) => setVisitedFields((prev) => (prev.has(field) ? prev : new Set(prev).add(field)))
   const fieldError = (field: string, error: string | undefined) =>
     submitAttempted || visitedFields.has(field) ? error : undefined
-  // isPending updates a render after the click, so a fast double click
-  // would otherwise POST twice (a 201 followed by a 409 toast).
   const submittingRef = useRef(false)
 
   const [showWorkspace, setShowWorkspace] = useState(false)
@@ -134,8 +119,6 @@ export function TaskCreateForm() {
     () => (agentsData?.items ?? []).filter((agent) => agent.spec.runtime),
     [agentsData],
   )
-  // The inverse of dispatchableAgents: native AI-worker Agents carry their own
-  // provider/model configuration and never set spec.runtime.
   const inlineAgents = useMemo(
     () => (agentsData?.items ?? []).filter((agent) => !agent.spec.runtime),
     [agentsData],
@@ -149,12 +132,6 @@ export function TaskCreateForm() {
       : dispatchableAgents.some((agent) => agent.metadata.name === runtimeAgentSelection.name))
       ? runtimeAgentSelection.name
       : ''
-  // The selection only counts while it names a native Agent in the current
-  // namespace's latest list: an Agent deleted (or turned into a runtime
-  // Agent) after being picked must not be submitted as a stale agentRef. The
-  // pick survives only a genuine initial load — an errored list (agentsData
-  // deliberately suppressed above) drops it, so a hidden stale Agent is
-  // never silently submitted while the selector renders empty.
   const aiAgentRef =
     aiAgentSelection &&
     aiAgentSelection.namespace === namespace &&
@@ -167,11 +144,7 @@ export function TaskCreateForm() {
     () => inlineAgents.find((agent) => agent.metadata.name === aiAgentRef),
     [aiAgentRef, inlineAgents],
   )
-  // The controller resolves a providerRef Agent's Provider CRD and makes its
-  // type authoritative, so an inline provider override would be discarded.
   const agentProviderLocked = Boolean(selectedAIAgent?.spec.providerRef?.name)
-  // Tokenized as the user types so a dangling quote is flagged inline instead of
-  // after the Task has been created and failed in the container.
   const parsedCommand = useMemo(() => splitShellWords(command), [command])
   const commandError = 'error' in parsedCommand ? parsedCommand.error : undefined
   const selectedAgent = useMemo(
@@ -198,7 +171,6 @@ export function TaskCreateForm() {
     try {
       created = await submitTask()
     } finally {
-      // A created task keeps the guard set while the page navigates away.
       if (!created) submittingRef.current = false
     }
   }
@@ -207,7 +179,6 @@ export function TaskCreateForm() {
     setSubmitAttempted(true)
     if (nameError) return false
     if (priorityIssue || timeoutIssue) {
-      // Collapsed fields are still submitted, so reveal the invalid one.
       setShowAdvanced(true)
       return false
     }
@@ -222,10 +193,6 @@ export function TaskCreateForm() {
       if (parsedCommand.words.length > 0) body.command = parsedCommand.words
     } else if (type === 'ai') {
       if (aiAgentRef) {
-        // The Agent supplies provider/model (and providerRef credentials);
-        // only send explicit overrides so the controller merges the rest. A
-        // Provider-CRD-backed Agent ignores ai.provider (the CRD type is
-        // authoritative), so that override is never submitted for it.
         body.agentRef = { name: aiAgentRef }
         const ai: Record<string, unknown> = { prompt }
         if (provider && !agentProviderLocked) ai.provider = provider
@@ -274,8 +241,6 @@ export function TaskCreateForm() {
         return false
       }
 
-      // The controller workspace preflight rejects source selectors and read
-      // credentials without a repository; fail here instead of after creation.
       if (!gitRepo.trim()) {
         const dependentField = [
           { label: 'Source branch', value: branch },
@@ -290,8 +255,6 @@ export function TaskCreateForm() {
           return false
         }
       }
-      // Mirror the controller's canonical source-ref validation so malformed
-      // selectors fail here instead of after the Task is created.
       if (gitRef.trim()) {
         const refError = workspaceSourceRefError(gitRef.trim())
         if (refError) {
@@ -325,10 +288,6 @@ export function TaskCreateForm() {
         return false
       }
 
-      // Mirror the controller's canonical repository identity checks: a
-      // supplied identity must use the github provider and match the
-      // canonical credential-free URL identity, with the publication
-      // identity's URL falling back to the source URL.
       const identityError = (label: string, provider: string, id: string, canonicalUrl: string): string | null => {
         if (!provider.trim() && !id.trim()) return null
         if (provider.trim().toLowerCase() !== 'github') return `${label} provider must be github`
@@ -355,7 +314,6 @@ export function TaskCreateForm() {
           toast.error(publicationIdentityError)
           return false
         }
-        // Mirror the controller's publication branch validation.
         for (const field of [
           { label: 'Publication branch', value: pushBranch },
           { label: 'Pull request base branch', value: prBaseBranch },
@@ -397,7 +355,6 @@ export function TaskCreateForm() {
         if (prBaseBranch.trim()) workspace.prBaseBranch = prBaseBranch.trim()
         if (createPR) workspace.createPR = true
       }
-      // The implicit read workspace needs no serialized configuration.
       if (Object.keys(workspace).length > 1) {
         const workspaceResult = workspaceConfigSchema.safeParse(workspace)
         if (!workspaceResult.success) {
@@ -528,9 +485,6 @@ export function TaskCreateForm() {
                     onValueChange={(value) => {
                       const next = value === '__none__' ? '' : value
                       setAIAgentRef(next)
-                      // Inline provider/model become hidden overrides once an
-                      // Agent is chosen; drop them so only values the user
-                      // re-enters after opening the disclosure are submitted.
                       if (next) {
                         setProvider('')
                         setModel('')
@@ -539,9 +493,6 @@ export function TaskCreateForm() {
                     }}
                     disabled={inlineAgents.length === 0}
                   >
-                    {/* Capped at the field width so a long agent label (or the
-                        "No agent" choice on a phone) truncates instead of
-                        widening the card. */}
                     <SelectTrigger id="ai-agent" aria-label="AI agent" className="max-w-full">
                       <span className="min-w-0 truncate"><SelectValue placeholder="Select an agent (optional)" /></span>
                     </SelectTrigger>

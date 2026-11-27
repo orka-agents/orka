@@ -18,14 +18,12 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// FileReadTool implements file reading functionality
 type FileReadTool struct {
 	workDir      string
 	maxFileSize  int64
 	allowedPaths []string
 }
 
-// FileReadArgs are the arguments for the file read tool
 type FileReadArgs struct {
 	Path     string `json:"path"`
 	Offset   int64  `json:"offset,omitempty"`
@@ -33,7 +31,6 @@ type FileReadArgs struct {
 	Encoding string `json:"encoding,omitempty"`
 }
 
-// FileReadResult represents the file read result
 type FileReadResult struct {
 	Content   string `json:"content"`
 	Path      string `json:"path"`
@@ -41,7 +38,6 @@ type FileReadResult struct {
 	Truncated bool   `json:"truncated"`
 }
 
-// NewFileReadTool creates a new file read tool
 func NewFileReadTool() *FileReadTool {
 	workDir := os.Getenv(workerenv.WorkDir)
 	if workDir == "" {
@@ -50,7 +46,7 @@ func NewFileReadTool() *FileReadTool {
 
 	return &FileReadTool{
 		workDir:     workDir,
-		maxFileSize: 1024 * 1024, // 1MB max
+		maxFileSize: 1024 * 1024,
 		allowedPaths: []string{
 			defaultWorkspacePath,
 			tempDirPath,
@@ -58,17 +54,14 @@ func NewFileReadTool() *FileReadTool {
 	}
 }
 
-// Name returns the tool name
 func (t *FileReadTool) Name() string {
 	return fileReadToolName
 }
 
-// Description returns the tool description
 func (t *FileReadTool) Description() string {
 	return "Read the contents of a file from the workspace. Use this to examine code, configuration, or data files."
 }
 
-// Parameters returns the JSON Schema for parameters
 func (t *FileReadTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -90,7 +83,6 @@ func (t *FileReadTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// Execute reads the file.
 func (t *FileReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	_ = ctx
 	var readArgs FileReadArgs
@@ -174,8 +166,6 @@ func (t *FileReadTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	return string(output), nil
 }
 
-// allowedRootForPath maps a requested path to one os.Root-relative name. os.Root
-// enforces confinement across symlink traversal and closes the check/open race.
 func (t *FileReadTool) allowedRootForPath(requested string) (string, string, bool) {
 	candidate := requested
 	if !filepath.IsAbs(candidate) {
@@ -199,5 +189,4 @@ func (t *FileReadTool) allowedRootForPath(requested string) (string, string, boo
 	return "", "", false
 }
 
-// Ensure FileReadTool implements Tool
 var _ Tool = (*FileReadTool)(nil)

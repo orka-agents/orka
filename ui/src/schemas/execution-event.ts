@@ -1,6 +1,5 @@
 import { z } from 'zod'
 
-// Mirrors internal/events/redaction.go ExecutionEventTruncation.
 const executionEventTruncationSchema = z.object({
   summaryTruncated: z.boolean().optional(),
   summaryOriginalChars: z.number().optional(),
@@ -10,10 +9,6 @@ const executionEventTruncationSchema = z.object({
   contentJsonOriginalBytes: z.number().optional(),
 })
 
-// Mirrors internal/api/execution_event_dto.go ExecutionEventResponse, plus the
-// optional taskSeq/taskStreamID fields that only appear on aggregated session
-// streams (SessionExecutionEventResponse). Keeping them optional lets one type
-// describe both task and session event frames.
 export const executionEventSchema = z.object({
   id: z.string(),
   namespace: z.string(),
@@ -27,11 +22,6 @@ export const executionEventSchema = z.object({
   agentName: z.string().optional(),
   toolName: z.string().optional(),
   toolCallID: z.string().optional(),
-  // Model telemetry, emitted at top level by the backend ExecutionEventResponse
-  // on ModelRequest* events. These MUST be declared here: the schema parses live
-  // SSE frames too, and Zod strips undeclared keys — without them a streamed
-  // model event would drop this telemetry and, via mergeEventsBySeq (later wins),
-  // overwrite the full-telemetry row from the initial page until a refresh.
   provider: z.string().optional(),
   model: z.string().optional(),
   stopReason: z.string().optional(),
@@ -45,7 +35,6 @@ export const executionEventSchema = z.object({
   contentText: z.string().optional(),
   truncation: executionEventTruncationSchema.optional(),
   createdAt: z.string(),
-  // Session-stream only.
   taskSeq: z.number().optional(),
   taskStreamID: z.string().optional(),
 })
@@ -59,7 +48,6 @@ export const listExecutionEventsResponseSchema = z.object({
   events: z.array(executionEventSchema),
 })
 
-// stream_complete SSE frame payload.
 export const streamCompleteSchema = z.object({
   lastSeq: z.number(),
   type: z.string(),
@@ -68,8 +56,6 @@ export const streamCompleteSchema = z.object({
 export type ExecutionEvent = z.infer<typeof executionEventSchema>
 export type ListExecutionEventsResponse = z.infer<typeof listExecutionEventsResponseSchema>
 export type StreamComplete = z.infer<typeof streamCompleteSchema>
-
-// ---- Task trace (mirrors internal/tasktrace/tasktrace.go) ----
 
 const traceEventSchema = z.object({
   seq: z.number(),
@@ -174,8 +160,6 @@ export const taskTraceSchema = z.object({
 export type TraceEvent = z.infer<typeof traceEventSchema>
 export type TaskTrace = z.infer<typeof taskTraceSchema>
 
-// ---- Approvals (mirrors internal/approvals/approvals.go) ----
-
 const approvalSchema = z.object({
   id: z.string(),
   action: z.string(),
@@ -205,8 +189,6 @@ export const listTaskApprovalsResponseSchema = z.object({
 
 export type Approval = z.infer<typeof approvalSchema>
 export type ListTaskApprovalsResponse = z.infer<typeof listTaskApprovalsResponseSchema>
-
-// ---- Fork (mirrors internal/api/fork_handlers.go + internal/fork/context.go) ----
 
 const forkEventSummarySchema = z.object({
   seq: z.number(),

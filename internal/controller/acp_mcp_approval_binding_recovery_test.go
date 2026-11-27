@@ -94,8 +94,6 @@ func TestMCPApprovalBindingRecoveryProjectsExpiredLeaseAfterLabelPatch(t *testin
 					f.broker.ApprovalSecrets = nil
 				}
 
-				// One scan must project the receipt returned by the expired-lease
-				// CAS, rather than retaining the pre-transition candidate version.
 				require.NoError(t, f.reconcile(t))
 				after, listed := f.approval(t)
 				require.Equal(t, call.ID, after.ID)
@@ -131,8 +129,6 @@ func TestMCPApprovalBindingRecoveryPreservesLegacyHintBehavior(t *testing.T) {
 			require.NoError(t, err)
 			digest, err := acpMCPApprovalRequestDigest(f.request, descriptor, "")
 			require.NoError(t, err)
-			// A pre-upgrade reservation has no immutable binding. The broker
-			// may later add the discovery label without changing that spec.
 			_, err = f.control.ReserveExternalEffect(f.ctx, store.ReserveExternalEffectRequest{
 				Identity: mcpApprovalRecoveryEffectIdentity(f.request), RequestDigest: digest, Fence: f.fence,
 			})
@@ -180,9 +176,6 @@ func TestMCPApprovalBindingRecoveryDoesNotBorrowAnotherTasksEffect(t *testing.T)
 			f.dispatcher.EventStore = observed
 			count := f.count.Load()
 
-			// The immutable owner is absent from this reconciliation snapshot.
-			// Another Task sharing its session cannot inherit either its pending
-			// reservation or its receipt through the mutable discovery hint.
 			for range 2 {
 				require.NoError(t, f.dispatcher.reconcileExpiredExternalEffects(f.ctx, []corev1alpha1.Task{*other}))
 			}
@@ -263,8 +256,6 @@ func seedMCPApprovalRecoveryExpiredLease(t *testing.T, f *mcpApprovalRecoveryFix
 	require.NoError(t, err)
 	digest, err := acpMCPApprovalRequestDigest(f.request, descriptor, "")
 	require.NoError(t, err)
-	// Seed coherent historical times through the real store API. No status
-	// patch or sleep fabricates expiry, and recovery has no executable Secret.
 	created := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
 	call := &acpMCPApprovalCall{
 		ID: acpMCPApprovalIdentity(f.request), RequestDigest: digest, Request: f.request, Descriptor: descriptor,

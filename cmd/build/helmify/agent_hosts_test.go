@@ -57,7 +57,6 @@ func TestStaticChartAgentHostControllerFlags(t *testing.T) {
 			t.Errorf("controller args are missing %s:\n%s", want, strings.Join(container.Args, "\n"))
 		}
 	}
-	// Each host's NetworkPolicy admits only Pods with this label.
 	if got := deployment.Spec.Template.Labels["orka.ai/network-role"]; got != "controller" {
 		t.Fatalf("controller Pod label orka.ai/network-role = %q, want controller", got)
 	}
@@ -110,8 +109,6 @@ func TestStaticChartAgentHostRoleMatchesKustomize(t *testing.T) {
 	if role == nil || binding == nil {
 		t.Fatalf("render has no Role and RoleBinding in %s", agentHostTestNamespace)
 	}
-	// Like the namespace, they outlive a change of host namespace, so the
-	// controller can still clean up the hosts left in the old one.
 	for _, doc := range []*workerRBACDocument{role, binding} {
 		if got := doc.Metadata.Annotations["helm.sh/resource-policy"]; got != "keep" {
 			t.Errorf("%s helm.sh/resource-policy = %q, want keep", doc.Kind, got)
@@ -225,9 +222,6 @@ func TestStaticChartRejectsInvalidAgentHostValues(t *testing.T) {
 	}
 }
 
-// Helm and Kustomize enforce the same AgentHost admission, and only the
-// controller whose identity the Deployment names may create a host fed by a
-// Connection.
 func TestStaticChartAgentHostPolicyMatchesSharedAdmission(t *testing.T) {
 	shared, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "policy", "workspace_class_use_policy.yaml"))
 	if err != nil {
@@ -261,9 +255,6 @@ func TestStaticChartAgentHostPolicyMatchesSharedAdmission(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(chartDoc), &chartPolicy); err != nil {
 		t.Fatal(err)
 	}
-	// The chart's controller check names one release's controller, so its
-	// policy covers only that release's namespace; with Kustomize there is
-	// one controller, whose watch namespace can change.
 	selector := chartPolicy.Spec.MatchConstraints.NamespaceSelector
 	releaseOnly := map[string]string{"kubernetes.io/metadata.name": "orka-test"}
 	if selector == nil || !reflect.DeepEqual(selector.MatchLabels, releaseOnly) || len(selector.MatchExpressions) != 0 {
@@ -284,8 +275,6 @@ func agentHostGitHubValues(extra ...string) []string {
 	), extra...)
 }
 
-// People's Connections outlive an uninstall and hold the provider, so Helm
-// keeps the provider, its template and the client Secret the chart created.
 func TestStaticChartAgentHostGitHubOutlivesAnUninstall(t *testing.T) {
 	rendered := requireHelmRender(t, append(agentHostGitHubValues(
 		"--set", "controller.agentHosts.github.clientSecret.value=not-a-real-secret"),
@@ -301,9 +290,6 @@ func TestStaticChartAgentHostGitHubOutlivesAnUninstall(t *testing.T) {
 	}
 }
 
-// Names YAML would read as numbers stay strings, as Kubernetes requires. The
-// render is decoded untyped: decoding into the typed objects would convert
-// them by the field's type, while the API server receives the YAML's.
 func TestStaticChartAgentHostGitHubQuotesItsNames(t *testing.T) {
 	rendered := requireHelmRender(t, append(agentHostGitHubValues(
 		"--set", "controller.agentHosts.github.providerName=123",
@@ -347,8 +333,6 @@ func TestStaticChartAgentHostGitHubQuotesItsNames(t *testing.T) {
 	}
 }
 
-// One helm install gives people hosts from GitHub: the chart renders the
-// provider and the copilotd template, which is the sample's, unchanged.
 func TestStaticChartAgentHostGitHubRendersTheProviderAndTemplate(t *testing.T) {
 	rendered := requireHelmRender(t, append(agentHostGitHubValues(
 		"--set", "controller.agentHosts.github.clientSecret.value=not-a-real-secret"),
@@ -396,7 +380,6 @@ func TestStaticChartAgentHostGitHubRendersTheProviderAndTemplate(t *testing.T) {
 		t.Fatal("hosts fed by a Connection need a Relay template")
 	}
 
-	// An existing Secret is named instead of rendered.
 	existing := requireHelmRender(t, append(agentHostGitHubValues(
 		"--set", "controller.agentHosts.github.clientSecret.existingSecret=github-app"),
 		"--show-only", "templates/agent-host-github.yaml")...)
@@ -404,9 +387,6 @@ func TestStaticChartAgentHostGitHubRendersTheProviderAndTemplate(t *testing.T) {
 		t.Fatalf("existing Secret render:\n%s", existing)
 	}
 
-	// A Secret key YAML would read as another type stays a string. Decoding
-	// into the typed objects would hide this: it converts by the field's type,
-	// while the API server receives the YAML's.
 	for _, source := range []string{"existingSecret=github-app", "value=not-a-real-secret"} {
 		rendered := requireHelmRender(t, append(agentHostGitHubValues(
 			"--set", "controller.agentHosts.github.clientSecret."+source,
@@ -496,7 +476,6 @@ func TestStaticChartAgentHostTemplateImagesMatchRuntimePolicy(t *testing.T) {
 func TestStaticChartAgentHostTemplateImagesIgnoredWhenDisabled(t *testing.T) {
 	for _, enabled := range []string{"false", "true"} {
 		t.Run("agent hosts enabled="+enabled, func(t *testing.T) {
-			// Without the GitHub provider, no chart-managed template uses these images.
 			rendered := requireHelmRender(t,
 				"--set", "controller.agentHosts.enabled="+enabled,
 				"--set-string", "controller.agentHosts.template.copilotdImage=registry.example.com/copilotd:latest",
@@ -538,7 +517,6 @@ func TestStaticChartAgentHostGitHubRefusesIncompleteSettings(t *testing.T) {
 	}
 }
 
-// With the Tailscale operator, the API is served on the tailnet.
 func TestStaticChartIngressForTailscale(t *testing.T) {
 	rendered := requireHelmRender(t, "--set", "ingress.enabled=true", "--set", "ingress.className=tailscale",
 		"--set", "ingress.tls[0].hosts[0]=orka", "--show-only", "templates/ingress.yaml")
@@ -555,7 +533,6 @@ func TestStaticChartIngressForTailscale(t *testing.T) {
 	if _, err := helmTemplateStaticChart(t, "--show-only", "templates/ingress.yaml"); err == nil {
 		t.Fatal("the default render must not create an Ingress")
 	}
-	// A class name YAML would read as a number or a boolean stays a string.
 	for _, className := range []string{"123", "true"} {
 		rendered := requireHelmRender(t, "--set", "ingress.enabled=true", "--set", "ingress.className="+className,
 			"--show-only", "templates/ingress.yaml")
@@ -569,8 +546,6 @@ func TestStaticChartIngressForTailscale(t *testing.T) {
 	}
 }
 
-// An upgrade that reuses an older release's values has no ingress map and no
-// agent-host template or GitHub defaults; it renders as a fresh install would.
 func TestStaticChartAgentHostGitHubRendersFromReusedValues(t *testing.T) {
 	if _, err := helmTemplateStaticChart(t, "--set", "ingress=null"); err != nil {
 		t.Fatalf("a release without an ingress map must render: %v", err)
@@ -612,8 +587,6 @@ func TestStaticChartAgentHostGitHubRendersFromReusedValues(t *testing.T) {
 	}
 }
 
-// GitHub sign-in rides on the agent-host GitHub App and admits only its
-// allow-list.
 func TestStaticChartGitHubSignIn(t *testing.T) {
 	signIn := agentHostGitHubValues("--set", "controller.agentHosts.github.clientSecret.value=x",
 		"--set", "controller.githubSignIn.enabled=true",

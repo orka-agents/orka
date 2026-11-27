@@ -141,7 +141,6 @@ describe('chatConfigSchema', () => {
         maxDuration: '60s',
         maxTasksPerTurn: 5,
         maxConcurrent: 3,
-        // missing availableTools
       })
     ).toThrow()
   })

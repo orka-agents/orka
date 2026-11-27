@@ -13,9 +13,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// authorizedTaskCoordinationParent binds a worker-created coordination edge to
-// the authenticated Pod's live Job and Task. ServiceAccount allowlisting alone
-// does not establish which Task the worker is authorized to act for.
 func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 	ctx context.Context,
 	req ctrladmission.Request,
@@ -23,8 +20,6 @@ func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 ) (bool, error) {
 	parentOwner := taskCoordinationOwner(child)
 	if parentOwner == nil {
-		// Label-only lineage (including cross-namespace delegation) grants no
-		// coordination access: that requires a matching Task controller owner.
 		return true, nil
 	}
 	parentName := labels.ParentTaskName(child.Labels, child.Annotations)
@@ -68,15 +63,11 @@ func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 	}
 }
 
-// coordinationParentMayDelegate reports whether a parent may still start
-// work: not being deleted, with no recorded outcome, and not asked to stop.
 func coordinationParentMayDelegate(parent *corev1alpha1.Task) bool {
 	_, cancelRequested := parent.Annotations[labels.AnnotationCancelRequested]
 	return parent.DeletionTimestamp.IsZero() && parent.Status.ExecutionOutcome == nil && !cancelRequested
 }
 
-// A worker can pass on its own session authority, including the history
-// cutoff, but cannot introduce an arbitrary session into its Task tree.
 func taskCoordinationSessionAllowed(child, parent *corev1alpha1.Task) bool {
 	return child.Spec.SessionRef == nil ||
 		(parent.Spec.SessionRef != nil && *child.Spec.SessionRef == *parent.Spec.SessionRef)

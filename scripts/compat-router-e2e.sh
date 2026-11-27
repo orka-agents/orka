@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Validate shared compatibility routing with two real namespace-scoped
-# controllers and container workers. All credentials stay in Go process memory.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

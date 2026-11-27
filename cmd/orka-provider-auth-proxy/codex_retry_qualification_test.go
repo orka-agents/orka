@@ -18,7 +18,7 @@ import (
 const (
 	fixtureEgress    = "http://gateway-a1b2c3.test.svc:1337"
 	fixtureModel     = "test-model"
-	fixtureRouteID   = "04a11d52ead447b3e59aad569e2ad08e" // fixtureEgress and fixtureModel
+	fixtureRouteID   = "04a11d52ead447b3e59aad569e2ad08e"
 	fixtureChallenge = fixtureRouteID + ".aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	routeHeader      = "X-Orka-Codex-429-Route"
 	replayHeader     = "X-Orka-Codex-429-Retry"
@@ -59,8 +59,6 @@ func TestAuthProxyQualificationBoundToPhysicalEgress(t *testing.T) {
 	}
 }
 
-// Keep the actual configured origin/Host; map only its socket to loopback.
-// The backend deliberately supplies the exact proof it should never own.
 func runQualificationExchange(t *testing.T, cfg proxyConfig, path, body, challenge string, replay bool, backendStatus, wantSends int, wantProof bool) {
 	t.Helper()
 	runQualificationWireExchange(t, cfg, path, body, challenge, replay, backendStatus, wantSends, wantProof, nil)

@@ -4,10 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package aitools resolves the effective built-in and configured tool set exposed
-// to AI workers and brokered agent runtimes. It is deliberately pure so
-// authorization, child transaction checks, and runtime injection share the
-// exact same decision.
 package aitools
 
 import (
@@ -91,20 +87,14 @@ var childMessagingToolNames = []string{
 	checkMessagesToolName,
 }
 
-// MemoryToolNames returns the names of the built-in memory tools.
 func MemoryToolNames() []string {
 	return append([]string(nil), memoryToolNames...)
 }
 
-// CoordinationToolNames returns the tools registered for coordinator workers.
 func CoordinationToolNames() []string {
 	return append([]string(nil), registeredCoordinationToolNames...)
 }
 
-// RegistersCoordinationTools reports whether the AI worker registers Orka's
-// coordination tool implementations for task. Disabling implicit injection only
-// narrows the selected tool list; AI child identity still enables the registry
-// so explicitly selected coordination tools remain platform-provided.
 func RegistersCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	if !usesAIWorkerToolRegistry(task, agent) {
 		return false
@@ -115,9 +105,6 @@ func RegistersCoordinationTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 	return task != nil && labels.ParentTaskName(task.Labels, task.Annotations) != ""
 }
 
-// IsImplicitTool reports whether name is injected by Orka rather than selected
-// explicitly by an Agent or Task. Authorization uses it to distinguish platform
-// tools from Tool CR references without broadening implicit capabilities.
 func IsImplicitTool(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -155,9 +142,6 @@ func memoryToolsImplicitlyEnabled(task *corev1alpha1.Task, agent *corev1alpha1.A
 	return agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
 }
 
-// DeprecatedMemoryToolNames returns memory tools enabled only by the warning
-// release's compatibility policy. The next release will require explicit
-// selection or coordination without the disable-injection annotation.
 func DeprecatedMemoryToolNames(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || !usesAIWorkerToolRegistry(task, agent) ||
 		memoryToolsImplicitlyEnabled(task, agent) {
@@ -192,7 +176,6 @@ func memoryToolSelected(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name
 }
 
 func usesAIWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
-	// Runtime Agents use their runtime's tool policy even without a Task.
 	if agent != nil && agent.Spec.Runtime != nil {
 		return false
 	}
@@ -209,8 +192,6 @@ func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return false
 	}
-	// ACP injects messaging for labeled children of built-in runtimes. External
-	// runtimeRef profiles own their tool policy and receive no implicit tools.
 	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.RuntimeRef != nil &&
 		strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		return false
@@ -219,20 +200,10 @@ func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 	return isChildTask
 }
 
-// Resolve returns the ordered, de-duplicated configured and implicit tool set
-// exposed for task. Container tasks do not expose AI tools. Agent tasks retain
-// configured/brokered tools and built-in agent children get messaging tools.
-// Native AI Tasks retain their legacy memory tools for the warning release.
-// DeprecatedMemoryToolNames identifies calls that will require opt-in next release.
-// Consumers loading Tool CRs must also enforce ValidateRemoteMCPSelection;
-// this name-only resolver cannot distinguish remote backends from legacy Tools.
 func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		return nil
 	}
-	// A memory consolidation run (ADR 0051) calls no tools, whatever its
-	// Agent or Task lists, so it never freezes or dispatches connector tools
-	// it cannot use.
 	if task != nil && task.Spec.AI != nil && task.Spec.AI.MemoryConsolidation != nil {
 		return nil
 	}

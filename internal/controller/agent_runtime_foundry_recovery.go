@@ -14,9 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// The replacement is an authenticated relay only. Its observation is kept
-// with the proof, but it cannot become an admitted boot until old retirement
-// has committed. Container death alone never proves remote Foundry retirement.
 type agentRuntimeFoundryRetirement struct {
 	Relay    agentRuntimeBootWitness                 `json:"relay"`
 	IssuedAt time.Time                               `json:"issuedAt"`
@@ -25,9 +22,6 @@ type agentRuntimeFoundryRetirement struct {
 }
 
 func validateAgentRuntimeFoundryRelay(old, relay agentRuntimeBootWitness) error {
-	// A rollout changes the template and container image. The replacement is
-	// independently authenticated and revalidated only as a retirement relay;
-	// it never inherits the old boot's admission or execution authority.
 	if recoveryProviderKind(old.Spec) != agentRuntimeFoundryProvider || old.FoundryBroker == nil ||
 		old.FoundryBroker.Validate() != nil || recoveryProviderKind(relay.Spec) != agentRuntimeFoundryProvider ||
 		relay.FoundryBroker == nil || *old.FoundryBroker != *relay.FoundryBroker ||
@@ -60,8 +54,6 @@ func validateAgentRuntimeFoundryRetirement(witness agentRuntimeBootWitness, proo
 		request.Broker != *witness.FoundryBroker {
 		return fmt.Errorf("%w: Foundry retirement proof subject changed", store.ErrConflict)
 	}
-	// Durable proof outlives its transport capability. Validate the exact
-	// original issuance time instead of requiring an unexpired request now.
 	if err := request.ValidateAt(retirement.IssuedAt); err != nil {
 		return fmt.Errorf("%w: invalid Foundry retirement request: %v", store.ErrConflict, err)
 	}
@@ -147,8 +139,6 @@ func (r *AgentRuntimeReconciler) observeFoundryContainerRetirement(
 	if err := validate(ctx); err != nil {
 		return false, err
 	}
-	// The control store guards both reservation and immutable proof commit by
-	// the current epoch. This never claims a prompt or an execution result.
 	if err := r.persistBootRetirement(ctx, witness, proof, owner); err != nil {
 		return false, err
 	}

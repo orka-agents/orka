@@ -13,8 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// apiAuthorizationDocPath is the operator reference that documents every
-// external route policy.
 const apiAuthorizationDocPath = "../../website/docs/reference/api-authorization.md"
 
 var (
@@ -24,15 +22,11 @@ var (
 		`covers all (\d+) authenticated external route registrations, including (\d+) non-GET registrations under ` + "`/api/v1`")
 )
 
-// apiAuthorizationDocRow is one route permissions table row.
 type apiAuthorizationDocRow struct {
 	route                                              string
 	group, resource, verb, name, namespace, additional string
 }
 
-// apiAuthorizationDocRoutes returns the route permissions table rows: every
-// table row whose first two cells are a backticked HTTP method and a
-// backticked path.
 func apiAuthorizationDocRoutes(doc string) []apiAuthorizationDocRow {
 	var routes []apiAuthorizationDocRow
 	for line := range strings.SplitSeq(doc, "\n") {
@@ -63,9 +57,6 @@ func apiAuthorizationDocRoutes(doc string) []apiAuthorizationDocRow {
 	return routes
 }
 
-// TestExternalAPIRouteInventoryMatchesAuthorizationDoc keeps the operator
-// reference in sync with externalAPIPolicies. TestExternalAPIRouteInventory
-// already ties every registered route to a policy and an HTTP test.
 func TestExternalAPIRouteInventoryMatchesAuthorizationDoc(t *testing.T) {
 	raw, err := os.ReadFile(apiAuthorizationDocPath)
 	require.NoError(t, err)
@@ -117,7 +108,6 @@ func TestExternalAPIRouteInventoryMatchesAuthorizationDoc(t *testing.T) {
 		problems = append(problems, "rows whose permission columns differ from the policy:\n  "+strings.Join(mismatched, "\n  "))
 	}
 
-	// The introduction states the inventory size; keep it accurate too.
 	counts := apiAuthorizationDocCountPattern.FindStringSubmatch(strings.Join(strings.Fields(doc), " "))
 	if counts == nil {
 		problems = append(problems, "introduction no longer states \"covers all N authenticated external route registrations, "+
@@ -138,8 +128,6 @@ func TestExternalAPIRouteInventoryMatchesAuthorizationDoc(t *testing.T) {
 	}
 }
 
-// apiAuthorizationDocNamespaceCodes maps each namespace source to the code the
-// route permissions table uses for it.
 var apiAuthorizationDocNamespaceCodes = map[apiNamespaceSource]string{
 	apiQueryNamespace:         "`Q`",
 	apiCreateNamespace:        "`C`",
@@ -151,11 +139,6 @@ var apiAuthorizationDocNamespaceCodes = map[apiNamespaceSource]string{
 	apiUsageTeamNamespaces:    "`Q`",
 }
 
-// apiAuthorizationDocRowProblems compares a table row's structured columns
-// with its route policy: the first permission fills the group, resource, verb,
-// name, and namespace columns, and every further permission must be named in
-// the additional-checks column by its verb and resource, so a row may not
-// defer its permissions to another row.
 func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRoutePolicy) []string {
 	var problems []string
 	check := func(column, got, want string) {
@@ -176,7 +159,7 @@ func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRouteP
 	primary := policy.permissions[0]
 	group := primary.group
 	if group == "" {
-		group = `""` // the core API group
+		group = `""`
 	}
 	check("API group", row.group, "`"+group+"`")
 	check("resource", row.resource, "`"+primary.resource+"`")
@@ -202,12 +185,6 @@ func apiAuthorizationDocRowProblems(row apiAuthorizationDocRow, policy apiRouteP
 	return problems
 }
 
-// apiAuthorizationDocNamesPermission reports whether one semicolon-separated
-// clause of an additional-checks cell grants the permission's verb on its
-// resource, written "`verb`[, `verb`...] on `[group/]resource`[ and ...]".
-// Matching within a clause keeps verbs paired with their own resources and
-// SAR names: a named permission's clause must state "`:param`", and an
-// unnamed permission's clause must state no URL parameter.
 func apiAuthorizationDocNamesPermission(additional string, permission apiResourcePermission) bool {
 	for clause := range strings.SplitSeq(additional, ";") {
 		verbs, targets, ok := strings.Cut(clause, " on ")
@@ -218,8 +195,6 @@ func apiAuthorizationDocNamesPermission(additional string, permission apiResourc
 			!strings.Contains(targets, "`"+permission.group+"/"+permission.resource+"`") {
 			continue
 		}
-		// A named permission states its URL parameter; an unnamed one states
-		// none (an explicit "empty name" or no name at all).
 		if permission.nameParam != "" {
 			if strings.Contains(targets, "`:"+permission.nameParam+"`") {
 				return true

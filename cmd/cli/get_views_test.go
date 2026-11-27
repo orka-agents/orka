@@ -16,8 +16,6 @@ import (
 	"testing"
 )
 
-// runCLI executes the root command against a test server and returns
-// combined stdout/stderr.
 func runCLI(t *testing.T, serverURL string, args ...string) (string, error) {
 	t.Helper()
 	var out bytes.Buffer
@@ -29,7 +27,6 @@ func runCLI(t *testing.T, serverURL string, args ...string) (string, error) {
 	return out.String(), err
 }
 
-// jsonServer answers every GET/POST with the given routes' JSON bodies.
 func jsonServer(t *testing.T, routes map[string]any) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,9 +42,6 @@ func jsonServer(t *testing.T, routes map[string]any) *httptest.Server {
 	}))
 }
 
-// assertReadableAndJSON runs a command twice: the default must print every
-// wanted fragment as a readable view without JSON braces, and -o json must
-// be exactly the indented JSON encoding of the API response.
 func assertReadableAndJSON(t *testing.T, srv *httptest.Server, response any, wanted []string, unwanted []string, args ...string) {
 	t.Helper()
 	out, err := runCLI(t, srv.URL, args...)

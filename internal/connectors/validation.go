@@ -4,9 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package connectors validates ConnectorProvider and Connection resources and
-// resolves their references. Everything here is status-safe: no Issue message
-// carries a credential or a credential-bearing URL.
 package connectors
 
 import (
@@ -45,8 +42,7 @@ import (
 )
 
 const (
-	ReasonAccepted = "Accepted"
-	// ReasonConnectionsRemain holds a deleting provider while Connections reference it.
+	ReasonAccepted          = "Accepted"
 	ReasonConnectionsRemain = "ConnectionsRemain"
 	ReasonInvalidProvider   = "InvalidProvider"
 	ReasonResolvedRefs      = "ResolvedRefs"
@@ -54,85 +50,48 @@ const (
 	ReasonReferenceInvalid  = "ReferenceInvalid"
 	ReasonResolutionFailed  = "ResolutionFailed"
 
-	maxToolCount = 64
-	maxScopes    = 32
-	// maxScopeBytes bounds one configured scope, matching the bound applied
-	// to scopes a provider reports, so a scope can never push the
-	// authorization URL past what browsers and proxies accept.
-	maxScopeBytes = 256
-	// maxAuthorizeParameterValueBytes and maxAuthorizeParametersEncodedBytes
-	// keep static authorize parameters from pushing the authorization URL
-	// past what browsers, proxies, and providers accept.
+	maxToolCount                       = 64
+	maxScopes                          = 32
+	maxScopeBytes                      = 256
 	maxAuthorizeParameterValueBytes    = 512
 	maxAuthorizeParametersEncodedBytes = 2048
 	maxEndpointQueryBytes              = 1024
 	maxScopesEncodedBytes              = 2048
-	// maxClientIDBytes bounds the client_id every authorization URL carries.
-	maxClientIDBytes = 256
-	// maxEndpointURLBytes bounds every endpoint and HTTP tool URL. With the
-	// client ID, scope, and authorize-parameter bounds and the flow's own
-	// parameters, an authorization URL stays under the 8 KiB request
-	// target common servers and proxies accept.
-	maxEndpointURLBytes = 2048
-	// Static tool headers stay well inside common server header limits.
-	maxToolHeaderNameBytes  = 128
-	maxToolHeaderValueBytes = 1024
-	maxToolHeadersBytes     = 4096
+	maxClientIDBytes                   = 256
+	maxEndpointURLBytes                = 2048
+	maxToolHeaderNameBytes             = 128
+	maxToolHeaderValueBytes            = 1024
+	maxToolHeadersBytes                = 4096
 
-	// MaxHTTPToolTimeout bounds curated HTTP tool requests.
 	MaxHTTPToolTimeout = 10 * time.Minute
 )
 
 var (
 	toolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
-	// reservedAuthorizeParameters are set by the consent flow and may not be
-	// overridden by a provider.
 	reservedAuthorizeParameters = map[string]struct{}{
 		"client_id": {}, "client_secret": {}, "redirect_uri": {}, "response_type": {},
 		"scope": {}, "state": {}, "code_challenge": {}, "code_challenge_method": {},
 		"code": {}, "code_verifier": {}, "grant_type": {}, "refresh_token": {},
 	}
 
-	// deniedHosts are cluster-internal or metadata endpoints that must never be
-	// an OAuth or tool endpoint. A host equal to one of these, or under it,
-	// is rejected.
 	deniedHosts = []string{"metadata.google.internal", "kubernetes.default", "localhost"}
 
-	// deniedHostSuffixes cover cluster-local service names under any cluster
-	// domain, mDNS, and other non-public name spaces. Names under these never
-	// resolve to a public provider.
 	deniedHostSuffixes = []string{".svc", ".cluster.local", ".local", ".localhost", ".internal", ".localdomain", ".home.arpa"}
 
-	// reservedToolHeaders may not be set by a provider tool definition.
 	reservedToolHeaders = map[string]struct{}{
 		"Authorization": {}, "Cookie": {}, "Host": {}, "Txn-Token": {}, "Proxy-Authorization": {},
 		"Content-Length": {}, "Transfer-Encoding": {},
-		// Hop-by-hop fields: Connection could nominate the injected
-		// Authorization header for removal by an intermediary, and all of
-		// them are invalid on HTTP/2.
 		"Connection": {}, "Keep-Alive": {}, "Proxy-Connection": {}, "Te": {}, "Trailer": {}, "Upgrade": {},
 	}
 )
 
-// allowPrivateEndpoints relaxes the public-host rules for provider and tool
-// endpoints. It exists for local and CI fixtures only: a controller that
-// sets it will hand a person's token to a cluster-local address.
 var allowPrivateEndpoints atomic.Bool
 
-// SetAllowPrivateEndpoints turns the private-endpoint allowance on or off
-// for this process. Never enable it in production.
 func SetAllowPrivateEndpoints(allowed bool) { allowPrivateEndpoints.Store(allowed) }
 
-// PrivateEndpointsAllowed reports whether private, loopback, and
-// cluster-local provider endpoints are accepted in this process.
 func PrivateEndpointsAllowed() bool { return allowPrivateEndpoints.Load() }
 
-// hostDenied reports whether host is a denied name, lies under one, extends
-// one with more labels (kubernetes.default.svc.example), carries a
-// cluster-local service label, or is a single-label name, which a Pod's DNS
-// search domains complete to a cluster Service (kubernetes, orka-api). It
-// expects a lowercase host without a trailing dot.
 func hostDenied(host string) bool {
 	if net.ParseIP(host) == nil && !strings.Contains(host, ".") {
 		return true
@@ -147,13 +106,9 @@ func hostDenied(host string) bool {
 			return true
 		}
 	}
-	// <service>.<namespace>.svc.<cluster-domain> under any cluster domain.
 	return strings.Contains(host, ".svc.")
 }
 
-// InfrastructureHostDenied reports the hosts no connector endpoint may
-// ever name, allowance or not: cloud metadata services and the Kubernetes
-// API service under any cluster domain. host is compared lowercased.
 func InfrastructureHostDenied(host string) bool {
 	host = strings.ToLower(host)
 	host = strings.TrimSuffix(host, ".")
@@ -162,8 +117,6 @@ func InfrastructureHostDenied(host string) bool {
 			return true
 		}
 	}
-	// The API server's own address as the Pod sees it, so an alias or a
-	// rebinding to the literal address is refused like the name.
 	if apiHost := strings.ToLower(strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))); apiHost != "" && host == strings.Trim(apiHost, "[]") {
 		return true
 	}
@@ -173,24 +126,13 @@ func InfrastructureHostDenied(host string) bool {
 	return false
 }
 
-// InfrastructureAddressDenied reports the addresses no connector request
-// may be dialed to under the private-endpoint allowance: the cloud metadata
-// services and the Kubernetes API service address. The general private,
-// loopback, and link-local rules are applied separately, outside the
-// allowance.
 func InfrastructureAddressDenied(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	// The whole link-local range: cloud metadata and credential services
-	// (169.254.169.254, EKS Pod Identity at 169.254.170.23, and the like)
-	// live there, and no fixture needs it; plus the IPv6 metadata address.
 	if ip.IsLinkLocalUnicast() || ip.Equal(net.ParseIP("fd00:ec2::254")) {
 		return true
 	}
-	// Alibaba Cloud serves instance metadata from the shared address range
-	// rather than link-local, so the general private allowance would let it
-	// through.
 	if ip.Equal(net.ParseIP("100.100.100.200")) {
 		return true
 	}
@@ -200,9 +142,6 @@ func InfrastructureAddressDenied(ip net.IP) bool {
 	return false
 }
 
-// PrivateEndpointDialContext is the dialer for the fixture-only allowance:
-// it reaches private and cluster-local addresses, but never the
-// infrastructure addresses, whatever name resolved to them.
 func PrivateEndpointDialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -235,9 +174,6 @@ func PrivateEndpointDialContext(ctx context.Context, network, address string) (n
 	return nil, lastErr
 }
 
-// validHeaderToken reports whether name is an RFC 9110 token, which is what
-// net/http requires of a header field name. http.CanonicalHeaderKey returns
-// invalid names unchanged, so canonical-form equality alone is not enough.
 func validHeaderToken(name string) bool {
 	if name == "" {
 		return false
@@ -254,8 +190,6 @@ func validHeaderToken(name string) bool {
 	return true
 }
 
-// validHeaderValue reports whether value contains only bytes net/http will
-// serialize: visible ASCII, space, tab, and obs-text; no other control bytes.
 func validHeaderValue(value string) bool {
 	for i := 0; i < len(value); i++ {
 		c := value[i]
@@ -269,7 +203,6 @@ func validHeaderValue(value string) bool {
 	return true
 }
 
-// Issue is a status-safe validation failure.
 type Issue struct {
 	Reason  string
 	Message string
@@ -290,14 +223,8 @@ func unresolved(reason, message string) *Issue {
 	return &Issue{Reason: reason, Message: message}
 }
 
-// BuiltinToolCheck reports whether name is a known Orka built-in tool. A nil
-// check accepts any well-formed name.
 type BuiltinToolCheck func(name string) bool
 
-// ValidateProviderSpec validates structural and security invariants of a
-// ConnectorProvider without reading referenced objects.
-// maxProviderNameLength is the Kubernetes label value limit; the provider
-// name is a label on every Connection.
 const maxProviderNameLength = 63
 
 func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin BuiltinToolCheck) *Issue {
@@ -305,8 +232,6 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 		return invalid("provider is required")
 	}
 	if len(provider.Name) > maxProviderNameLength {
-		// The provider name labels every Connection; label values stop at
-		// 63 characters.
 		return invalid("provider name must be at most 63 characters")
 	}
 	oauth := provider.Spec.OAuth
@@ -321,9 +246,6 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	if issue := validateEndpointURL("revocationURL", oauth.RevocationURL, false); issue != nil {
 		return issue
 	}
-	// Disconnect posts the person's tokens to the revocation endpoint. On
-	// another host than the issuer's token endpoint it could collect tokens
-	// another service issued (a GitHub provider's linked tokens, say).
 	if strings.TrimSpace(oauth.RevocationURL) != "" && !SameEndpointHost(oauth.TokenURL, oauth.RevocationURL) {
 		return invalid("oauth.revocationURL must be on the token endpoint's host; tokens are only sent back to their issuer")
 	}
@@ -336,8 +258,6 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	if strings.TrimSpace(oauth.ClientSecretRef.Name) == "" || strings.TrimSpace(oauth.ClientSecretRef.Key) == "" {
 		return invalid("oauth.clientSecretRef requires name and key")
 	}
-	// A reference no Secret could ever have would fail every resolution
-	// as a transient error; it is an invalid spec instead.
 	if len(k8svalidation.IsDNS1123Subdomain(oauth.ClientSecretRef.Name)) > 0 || len(k8svalidation.IsConfigMapKey(oauth.ClientSecretRef.Key)) > 0 {
 		return invalid("oauth.clientSecretRef must name a valid Secret and data key")
 	}
@@ -352,8 +272,6 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 	if issue := validateScopes("write", oauth.Scopes.Write); issue != nil {
 		return issue
 	}
-	// A readWrite consent requests both groups in one scope parameter of
-	// the browser's authorization URL, so their encoded total is bounded.
 	if len(url.QueryEscape(strings.Join(ScopesForMode(provider, corev1alpha1.ConnectionModeReadWrite), " "))) > maxScopesEncodedBytes {
 		return invalid(fmt.Sprintf("oauth.scopes must encode to at most %d bytes in total", maxScopesEncodedBytes))
 	}
@@ -375,8 +293,6 @@ func ValidateProviderSpec(provider *corev1alpha1.ConnectorProvider, knownBuiltin
 			return invalid(fmt.Sprintf("oauth.additionalAuthorizeParameters values must be at most %d bytes", maxAuthorizeParameterValueBytes))
 		}
 	}
-	// The parameters ride in the browser's authorization URL, so their
-	// encoded total is bounded like the scopes.
 	encoded := url.Values{}
 	for key, value := range oauth.AdditionalAuthorizeParameters {
 		encoded.Set(key, value)
@@ -391,9 +307,6 @@ func validateEndpointURL(field, raw string, required bool) *Issue {
 	return validateURL(field, raw, required, true)
 }
 
-// validateURL checks an OAuth endpoint (oauthEndpoint) or an HTTP tool URL.
-// Both follow the same host rules; only OAuth endpoints refuse flow-owned
-// query names, since a tool's API may use names such as state as filters.
 func validateURL(field, raw string, required, oauthEndpoint bool) *Issue {
 	if strings.TrimSpace(raw) == "" {
 		if required {
@@ -420,10 +333,6 @@ func validateURL(field, raw string, required, oauthEndpoint bool) *Issue {
 			return invalid(fmt.Sprintf("oauth.%s port must be between 1 and 65535", field))
 		}
 	}
-	// Clients IDNA-normalize a non-ASCII host before resolving it, so
-	// 127。0。0。1 (ideographic full stops, possibly percent-encoded)
-	// dials loopback while matching none of the checks below. Hosts must
-	// arrive in their ASCII (punycode) form.
 	if !asciiHost(host) {
 		return invalid(fmt.Sprintf("oauth.%s host must be ASCII; use the punycode (xn--) form of an internationalized name", field))
 	}
@@ -441,21 +350,12 @@ func validateURL(field, raw string, required, oauthEndpoint bool) *Issue {
 			return invalid(fmt.Sprintf("oauth.%s must not target private, loopback, or link-local addresses", field))
 		}
 	}
-	// The fixed infrastructure hosts (cloud metadata and credential services
-	// on the link-local range, the Kubernetes API) stay denied even under
-	// the fixture allowance, which relaxes only the general private,
-	// loopback, and cluster-local rules.
 	if InfrastructureHostDenied(host) {
 		return invalid(fmt.Sprintf("oauth.%s host is not allowed", field))
 	}
 	return validateEndpointQuery(field, parsed.RawQuery, oauthEndpoint)
 }
 
-// validDNSName reports whether host is a syntactically valid DNS name:
-// at most 253 bytes of dot-separated labels of 1 to 63 letters, digits,
-// hyphens, or underscores, none starting or ending with a hyphen. A name
-// that fails this can never resolve, so it is refused rather than accepted
-// and left permanently unusable.
 func validDNSName(host string) bool {
 	if len(host) == 0 || len(host) > 253 {
 		return false
@@ -481,7 +381,6 @@ func dnsLabelByte(c byte) bool {
 	return false
 }
 
-// asciiHost reports whether host is printable ASCII.
 func asciiHost(host string) bool {
 	for i := 0; i < len(host); i++ {
 		if host[i] <= ' ' || host[i] > '~' {
@@ -491,12 +390,6 @@ func asciiHost(host string) bool {
 	return true
 }
 
-// nonCanonicalNumericHost reports whether host is a numeric spelling that
-// net.ParseIP rejects but resolvers accept, such as 127.1, 2130706433,
-// 0177.0.0.1, or 0x7f000001. The authorize URL is opened by the person's
-// browser, not the guarded dialer, so such spellings must not slip past the
-// loopback check. Hostnames whose last label contains a non-hex letter, and
-// labels without digits, are ordinary names.
 func nonCanonicalNumericHost(host string) bool {
 	labels := strings.Split(strings.ToLower(host), ".")
 	last := labels[len(labels)-1]
@@ -530,17 +423,10 @@ func nonCanonicalNumericHost(host string) bool {
 	return hexOnly && hasDigit && strings.HasPrefix(last, "0x")
 }
 
-// validateEndpointQuery rejects malformed queries and credential-like query
-// parameters on every endpoint, and flow-owned OAuth parameters on the
-// authorization endpoint, so a preconfigured state, redirect URI, or secret
-// can never ride along in public configuration.
 func validateEndpointQuery(field, rawQuery string, oauthEndpoint bool) *Issue {
 	if rawQuery == "" {
 		return nil
 	}
-	// The authorization URL is opened by the browser and tool URLs carry
-	// the person's token; a static query is bounded so neither can exceed
-	// what browsers, proxies, and providers accept.
 	if len(rawQuery) > maxEndpointQueryBytes {
 		return invalid(fmt.Sprintf("oauth.%s query must be at most %d bytes", field, maxEndpointQueryBytes))
 	}
@@ -556,8 +442,6 @@ func validateEndpointQuery(field, rawQuery string, oauthEndpoint bool) *Issue {
 		if credentialLikeParameter(normalized) {
 			return invalid(fmt.Sprintf("oauth.%s query must not carry credentials; the spec is public configuration", field))
 		}
-		// Flow-owned fields (code, code_verifier, grant_type, state, ...) are
-		// never legitimate static configuration on an OAuth endpoint.
 		if _, reserved := reservedAuthorizeParameters[normalized]; reserved && oauthEndpoint {
 			return invalid(fmt.Sprintf("oauth.%s query must not preset reserved OAuth fields", field))
 		}
@@ -565,11 +449,6 @@ func validateEndpointQuery(field, rawQuery string, oauthEndpoint bool) *Issue {
 	return nil
 }
 
-// credentialLikeParameter reports whether a query or authorization parameter
-// name looks like it carries a credential. Names are compared lowercased with
-// underscores folded to hyphens, and again with every separator removed, so
-// concatenated aliases (Authentication, X-Accesskey, awsaccesskeyid) are
-// caught too.
 func credentialLikeParameter(name string) bool {
 	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
 	if slices.Contains([]string{"sig", "signature", "assertion", "key", "auth", "x-auth", "pin", "passcode"}, normalized) {
@@ -613,7 +492,6 @@ func validateScopes(group string, scopes []string) *Issue {
 		if len(scope) > maxScopeBytes {
 			return invalid(fmt.Sprintf("oauth.scopes.%s entries must be at most %d bytes", group, maxScopeBytes))
 		}
-		// The value is not repeated: this message becomes public status.
 		if _, dup := seen[scope]; dup {
 			return invalid(fmt.Sprintf("oauth.scopes.%s contains a duplicate scope", group))
 		}
@@ -622,8 +500,6 @@ func validateScopes(group string, scopes []string) *Issue {
 	return nil
 }
 
-// validAuthorizeParameterValue rejects control bytes (including NUL, CR, and
-// LF) in a static authorize parameter value.
 func validAuthorizeParameterValue(value string) bool {
 	for i := 0; i < len(value); i++ {
 		if value[i] < 0x20 || value[i] == 0x7F {
@@ -633,8 +509,6 @@ func validAuthorizeParameterValue(value string) bool {
 	return true
 }
 
-// validClientID applies the RFC 6749 client identifier grammar (VSCHAR,
-// %x20-7E) and forbids surrounding whitespace.
 func validClientID(clientID string) bool {
 	if clientID == "" || clientID != strings.TrimSpace(clientID) {
 		return false
@@ -647,12 +521,6 @@ func validClientID(clientID string) bool {
 	return true
 }
 
-// validScopeToken applies the RFC 6749 scope-token grammar: one or more bytes
-// in %x21 / %x23-5B / %x5D-7E, which excludes whitespace, quotes, backslashes,
-// control bytes, and non-ASCII text. A comma, though RFC-legal inside a
-// token, is refused as well: GitHub delimits granted scopes with commas in
-// its token response, and a configured scope that contained one could be
-// fabricated by splitting a single scope the provider issued.
 func validScopeToken(scope string) bool {
 	if scope == "" {
 		return false
@@ -679,8 +547,6 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 		if strings.TrimSpace(host.TemplateRef.Name) == "" {
 			return invalid("agentHost.templateRef.name is required")
 		}
-		// Orka asks api.github.com whose a host's token is, so the token
-		// must come from github.com, and never goes anywhere else.
 		if endpoint, err := url.Parse(provider.Spec.OAuth.TokenURL); err != nil || endpoint.Host != "github.com" {
 			return invalid("agentHost requires a github.com provider: oauth.tokenURL must be on github.com")
 		}
@@ -710,11 +576,6 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 			if knownBuiltin != nil && !knownBuiltin(tool.Name) {
 				return invalid(fmt.Sprintf("builtin tool %q is not a known Orka tool", tool.Name))
 			}
-			// Only a built-in that consumes the linked credential may be
-			// declared, and only with the class its credential use fixes:
-			// a declaration the tool would ignore, or a write tool declared
-			// as read, would let a call run under a different credential or
-			// skip the approval and readOnly rules the class carries.
 			class, linked := BuiltinConnectorToolClass(tool.Name)
 			if !linked {
 				return invalid(fmt.Sprintf("builtin tool %q cannot use a linked account; only %s can", tool.Name, strings.Join(BuiltinConnectorToolNames(), ", ")))
@@ -722,10 +583,6 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 			if tool.Class != class {
 				return invalid(fmt.Sprintf("builtin tool %q must be declared with class %s", tool.Name, class))
 			}
-			// The built-ins send the credential to one fixed resource
-			// server; a provider whose tokens are not meant for it (GitHub
-			// Enterprise, or another service entirely) would have the
-			// person's token disclosed to the wrong server.
 			if !ProviderIssuesGitHubCredentials(provider) {
 				return invalid(fmt.Sprintf("builtin tool %q sends its credential to %s; only a %s OAuth provider may declare it", tool.Name, BuiltinConnectorToolAudience, builtinConnectorIssuerHost))
 			}
@@ -733,8 +590,6 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 			if tool.HTTP == nil {
 				return invalid(fmt.Sprintf("HTTP tool %q requires http", tool.Name))
 			}
-			// Tool selection and execution are name-based: an HTTP tool
-			// named like a built-in would shadow or be shadowed by it.
 			if knownBuiltin != nil && knownBuiltin(tool.Name) {
 				return invalid(fmt.Sprintf("HTTP tool %q collides with a built-in Orka tool name", tool.Name))
 			}
@@ -757,10 +612,6 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 	return nil
 }
 
-// validateForwardingTool keeps a forwarding tool to one origin: its
-// arguments are the runtime's fixed request shape, so it declares none. It is
-// class read; writes, which a linked account makes only through a
-// readWrite link, need its forward.writes as well as the Tool's.
 func validateForwardingTool(tool corev1alpha1.ConnectorTool) *Issue {
 	forward := tool.HTTP.Forward
 	if forward == nil {
@@ -784,8 +635,6 @@ func validateForwardingTool(tool corev1alpha1.ConnectorTool) *Issue {
 	return nil
 }
 
-// validateToolParameters requires an object-shaped JSON Schema, which is the
-// only shape LLM tool definitions accept.
 func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issue {
 	if parameters == nil || len(parameters.Raw) == 0 {
 		return nil
@@ -794,8 +643,6 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 	if err := json.Unmarshal(parameters.Raw, &schema); err != nil || schema == nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a JSON Schema object", name))
 	}
-	// The root type is required: without it JSON Schema accepts non-object
-	// inputs, which the HTTP executor cannot map onto request arguments.
 	var typeName string
 	if raw, ok := schema["type"]; !ok || json.Unmarshal(raw, &typeName) != nil || typeName != "object" {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must declare type \"object\"", name))
@@ -812,10 +659,6 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 			return invalid(fmt.Sprintf("HTTP tool %q parameters.required must be an array of strings", name))
 		}
 	}
-	// The execution path resolves the whole schema, so a nested shape it
-	// would reject must not be accepted here. The library's error text is
-	// not repeated: it can quote schema values and whole $ref URLs, and
-	// this message becomes public provider status.
 	var full jsonschema.Schema
 	if err := json.Unmarshal(parameters.Raw, &full); err != nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a valid JSON Schema", name))
@@ -823,8 +666,6 @@ func validateToolParameters(name string, parameters *apiextensionsv1.JSON) *Issu
 	if _, err := full.Resolve(nil); err != nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must be a resolvable JSON Schema with only local references", name))
 	}
-	// Execution refuses a schema whose numbers a float64 cannot hold
-	// exactly, so such a provider would accept no call at all.
 	if numbersExactlyRepresentable(parameters.Raw) != nil {
 		return invalid(fmt.Sprintf("HTTP tool %q parameters must use only numbers a float64 holds exactly", name))
 	}
@@ -835,8 +676,6 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 	if issue := validateURL("tools."+name+".url", spec.URL, true, false); issue != nil {
 		return &Issue{Reason: ReasonInvalidProvider, Message: strings.Replace(issue.Message, "oauth.", "", 1)}
 	}
-	// The curated URL is the exact destination the person consented to:
-	// Tool URL templates would let call arguments rewrite its path or query.
 	if strings.Contains(spec.URL, "{{") || strings.Contains(spec.URL, "}}") || strings.Contains(spec.URL, "%7B%7B") || strings.Contains(spec.URL, "%7b%7b") {
 		return invalid(fmt.Sprintf("HTTP tool %q url must not contain template placeholders; it is the exact destination", name))
 	}
@@ -858,8 +697,6 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 			return invalid(fmt.Sprintf("HTTP tool %q may not set the %s header", name, canonical))
 		}
 		if credentialLikeParameter(canonical) {
-			// The header name is not repeated: a credential pasted into it
-			// must not travel into public provider status.
 			return invalid(fmt.Sprintf("HTTP tool %q has a header whose name looks like a credential; the linked account is the only credential", name))
 		}
 		if !validHeaderValue(value) {
@@ -879,9 +716,6 @@ func validateHTTPTool(name string, spec corev1alpha1.ConnectorHTTPTool) *Issue {
 	return nil
 }
 
-// ResolveProviderReferences verifies that the client secret Secret exists in
-// the provider namespace and carries a non-empty key. The value is never
-// returned.
 func ResolveProviderReferences(ctx context.Context, reader client.Reader, provider *corev1alpha1.ConnectorProvider) (*Issue, error) {
 	if reader == nil {
 		return nil, errors.New("connector reference reader is required")
@@ -900,8 +734,6 @@ func ResolveProviderReferences(ctx context.Context, reader client.Reader, provid
 	if value, ok := secret.Data[ref.Key]; !ok || len(strings.TrimSpace(string(value))) == 0 {
 		return unresolved(ReasonReferenceInvalid, "client secret Secret key was not found or is empty"), nil
 	}
-	// A provider that serves agent hosts is ready only once their template
-	// exists and reaches each host only through its owner's account.
 	if host := provider.Spec.AgentHost; host != nil {
 		template := &corev1alpha1.AgentHostTemplate{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: provider.Namespace, Name: host.TemplateRef.Name}, template); err != nil {
@@ -913,8 +745,6 @@ func ResolveProviderReferences(ctx context.Context, reader client.Reader, provid
 		if template.Spec.Access != corev1alpha1.AgentHostAccessRelay {
 			return unresolved(ReasonReferenceInvalid, "agentHost template must use access: Relay"), nil
 		}
-		// A template the AgentHost reconciler would refuse leaves every host
-		// it provisions failed, so the provider is not offered meanwhile.
 		if err := agenthost.ValidateTemplate(template); err != nil {
 			return unresolved(ReasonReferenceInvalid, fmt.Sprintf("agentHost template is invalid: %v", err)), nil
 		}
@@ -922,8 +752,6 @@ func ResolveProviderReferences(ctx context.Context, reader client.Reader, provid
 	return nil, nil
 }
 
-// ProviderReferencesSecret reports whether the provider's client secret lives
-// in the given Secret.
 func ProviderReferencesSecret(provider *corev1alpha1.ConnectorProvider, secret client.Object) bool {
 	if provider == nil || secret == nil {
 		return false
@@ -931,8 +759,6 @@ func ProviderReferencesSecret(provider *corev1alpha1.ConnectorProvider, secret c
 	return secret.GetNamespace() == provider.Namespace && secret.GetName() == provider.Spec.OAuth.ClientSecretRef.Name
 }
 
-// ProviderAccepted reports whether a provider's Accepted and ResolvedRefs
-// conditions are True for its current generation and it is not being deleted.
 func ProviderAccepted(provider *corev1alpha1.ConnectorProvider) bool {
 	if provider == nil || !provider.DeletionTimestamp.IsZero() {
 		return false
@@ -949,8 +775,6 @@ func ProviderAccepted(provider *corev1alpha1.ConnectorProvider) bool {
 	return true
 }
 
-// ToolsForMode returns the provider tools a Connection in the given mode may
-// use: read tools always, write tools only for readWrite.
 func ToolsForMode(provider *corev1alpha1.ConnectorProvider, mode string) []corev1alpha1.ConnectorTool {
 	if provider == nil {
 		return nil
@@ -965,8 +789,6 @@ func ToolsForMode(provider *corev1alpha1.ConnectorProvider, mode string) []corev
 	return result
 }
 
-// ScopesCover reports whether every required scope was granted. No required
-// scopes means any grant suffices.
 func ScopesCover(granted, required []string) bool {
 	have := make(map[string]struct{}, len(granted))
 	for _, scope := range granted {
@@ -980,19 +802,6 @@ func ScopesCover(granted, required []string) bool {
 	return true
 }
 
-// ConnectionLinked reports whether a Connection currently holds usable
-// material for its mode: consent completed (Ready), the provider resolves
-// (ProviderResolved), and the granted scopes cover the mode (ScopesGranted).
-// The two controller-owned conditions must have observed the current
-// generation, so a mode change or provider loss fails closed until the
-// controller has judged it.
-//
-// This is a status view, and status trails the provider by one reconcile:
-// after a provider change the old conditions stay True until the Connection's
-// watch-driven reconcile runs. A caller that releases token material must
-// also load the provider and verify ProviderAccepted, the authority digest
-// sealed with the credential, and the scopes the mode requires; the
-// credential-injection path does exactly that.
 func ConnectionLinked(connection *corev1alpha1.Connection) bool {
 	if connection == nil || !connection.DeletionTimestamp.IsZero() {
 		return false
@@ -1010,17 +819,6 @@ func ConnectionLinked(connection *corev1alpha1.Connection) bool {
 	return true
 }
 
-// ProviderAuthorityDigest is a hex SHA-256 digest of everything a consent
-// authorizes a token to reach: the provider UID, client ID, client secret
-// reference, authentication method, endpoints, the static authorize
-// parameters (which can select the resource server a token targets, such as
-// an Auth0 audience), and the curated HTTP tool destinations the credential
-// is sent to, including their static headers (which can change request
-// semantics, such as a tenant-routing or method-override header). It carries no secret material and changes whenever a held token
-// would belong to a different client, target a different resource, or be sent
-// to a different endpoint, so such a change asks for consent again. Scopes
-// are judged separately by ScopesGranted. Every field is length-prefixed, so
-// the encoding is injective regardless of field contents.
 func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
@@ -1035,9 +833,6 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	slices.SortFunc(tools, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, tool := range tools {
 		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method, "parameters", canonicalSchema(tool.Parameters))
-		// A forwarding tool may reach any read path on its origin, not one
-		// endpoint, so turning a tool into one needs renewed consent, and so
-		// does letting it write. Tools without either keep their digest.
 		if tool.HTTP.Forward != nil {
 			parts = append(parts, "forward", string(tool.HTTP.Forward.Protocol))
 			if tool.HTTP.Forward.Writes != nil {
@@ -1053,10 +848,6 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 			parts = append(parts, "header", name, tool.HTTP.Headers[name])
 		}
 	}
-	// Built-in declarations are part of what the person consented to as
-	// well: each names a tool that will act with the token against the
-	// catalog's fixed audience, and a write tool added later must not be
-	// authorized by a consent that never mentioned it.
 	builtins := make([]corev1alpha1.ConnectorTool, 0, len(provider.Spec.Tools))
 	for _, tool := range provider.Spec.Tools {
 		if tool.Source == corev1alpha1.ConnectorToolSourceBuiltin {
@@ -1067,22 +858,12 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	for _, tool := range builtins {
 		parts = append(parts, "builtin", tool.Name, string(tool.Class), BuiltinConnectorToolAudience)
 	}
-	// Serving agent hosts hands the person's access tokens to their host,
-	// where its code can read them: a consent that never disclosed that does
-	// not cover it.
 	if host := provider.Spec.AgentHost; host != nil {
 		parts = append(parts, "agentHost", host.TemplateRef.Name)
 	}
 	return lengthPrefixedDigest(parts)
 }
 
-// ProviderIssuerDigest is a hex SHA-256 digest of the OAuth client that
-// issues, refreshes, and revokes tokens: the provider UID, client ID, client
-// secret reference, authentication method, endpoints, and static authorize
-// parameters. Unlike ProviderAuthorityDigest it excludes the curated tool
-// destinations, so a retargeted tool still lets a held token be refreshed
-// or revoked against the client that issued it. It is sealed with every
-// credential.
 func ProviderIssuerDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
@@ -1090,10 +871,6 @@ func ProviderIssuerDigest(provider *corev1alpha1.ConnectorProvider) string {
 	return lengthPrefixedDigest(providerIssuerParts(provider))
 }
 
-// ProviderRevocationDigest names what the revocation endpoint authenticates:
-// the OAuth client and the revocation URL, without the token URL. It is
-// sealed with every credential so disconnect still revokes after an
-// operator moved only the token endpoint.
 func ProviderRevocationDigest(provider *corev1alpha1.ConnectorProvider) string {
 	if provider == nil {
 		return ""
@@ -1106,13 +883,6 @@ func ProviderRevocationDigest(provider *corev1alpha1.ConnectorProvider) string {
 	})
 }
 
-// providerIssuerParts names the OAuth client a token was issued by: what
-// the refresh endpoint authenticates. The authorize URL and authorize-only
-// parameters (prompt, audience hints) shape consent but not the issued
-// token's authority, so they belong to the consent fence
-// (providerConsentParts); the revocation URL belongs to the revocation
-// identity (ProviderRevocationDigest). Changing either must neither block a
-// refresh nor force a new consent.
 func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
 	oauth := provider.Spec.OAuth
 	return []string{
@@ -1123,8 +893,6 @@ func providerIssuerParts(provider *corev1alpha1.ConnectorProvider) []string {
 	}
 }
 
-// providerConsentParts extends the issuer parts with the authorize URL and
-// the authorize-only parameters the person consented under.
 func providerConsentParts(provider *corev1alpha1.ConnectorProvider) []string {
 	oauth := provider.Spec.OAuth
 	pkce := true
@@ -1144,9 +912,6 @@ func providerConsentParts(provider *corev1alpha1.ConnectorProvider) []string {
 	return parts
 }
 
-// canonicalSchema renders a declared parameter schema in canonical JSON, so
-// a broadened or narrowed request constraint moves the consent fence; an
-// absent or unreadable schema renders as empty.
 func canonicalSchema(schema *apiextensionsv1.JSON) string {
 	if schema == nil || len(schema.Raw) == 0 {
 		return ""
@@ -1162,8 +927,6 @@ func canonicalSchema(schema *apiextensionsv1.JSON) string {
 	return string(encoded)
 }
 
-// lengthPrefixedDigest hashes parts with an injective length-prefixed
-// encoding.
 func lengthPrefixedDigest(parts []string) string {
 	sum := sha256.New()
 	for _, part := range parts {
@@ -1173,8 +936,6 @@ func lengthPrefixedDigest(parts []string) string {
 	return hex.EncodeToString(sum.Sum(nil))
 }
 
-// ConsentFor returns the consent record to store when a consent completes
-// against provider.
 func ConsentFor(provider *corev1alpha1.ConnectorProvider) *corev1alpha1.ConnectionConsent {
 	if provider == nil {
 		return nil
@@ -1182,9 +943,6 @@ func ConsentFor(provider *corev1alpha1.ConnectorProvider) *corev1alpha1.Connecti
 	return &corev1alpha1.ConnectionConsent{ProviderUID: string(provider.UID), AuthorityDigest: ProviderAuthorityDigest(provider)}
 }
 
-// ConsentMatchesProvider reports whether the Connection's recorded consent
-// was granted against exactly this provider OAuth client. A missing record
-// never matches.
 func ConsentMatchesProvider(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) bool {
 	if connection == nil || provider == nil || connection.Status.Consent == nil {
 		return false
@@ -1193,7 +951,6 @@ func ConsentMatchesProvider(connection *corev1alpha1.Connection, provider *corev
 	return consent.ProviderUID == string(provider.UID) && consent.AuthorityDigest == ProviderAuthorityDigest(provider)
 }
 
-// ScopesForMode returns the OAuth scopes to request for a Connection mode.
 func ScopesForMode(provider *corev1alpha1.ConnectorProvider, mode string) []string {
 	if provider == nil {
 		return nil

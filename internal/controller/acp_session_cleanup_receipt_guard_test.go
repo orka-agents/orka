@@ -26,8 +26,6 @@ func TestSessionCleanupReceiptUsesOriginalFence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The receipt boundary receives an already verified terminal target.
-			// Construct it directly so this test does not execute prompt planning.
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Namespace: defaultNS, Name: "receipt-task", UID: types.UID("receipt-task-uid")},
 				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, SessionRef: &corev1alpha1.SessionReference{Name: "receipt-conversation"}},

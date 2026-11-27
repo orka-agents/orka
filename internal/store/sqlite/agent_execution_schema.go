@@ -6,9 +6,6 @@ MIT License - see LICENSE file for details.
 
 package sqlite
 
-// agentExecutionSchemaStatements defines encrypted snapshots and Session
-// lineage. The lineage CHECK keeps its released form so existing stores keep
-// their exact layout; only orka.harness.v2 lineages are written.
 func agentExecutionSchemaStatements() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS agent_execution_snapshots (

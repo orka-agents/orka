@@ -60,18 +60,12 @@ func (r *RuntimePoolReconciler) runtimePoolEnvironment(pool *corev1alpha1.Runtim
 		{Name: "ORKA_NATIVE_SESSION_MAX_BYTES", Value: strconv.Itoa(nativeSessionMaxBytes)},
 	}
 	env = append(env, runtimePoolCapacityEnvironment(pool)...)
-	// Only a configured timeout reaches the Pod, so leaving it unset never
-	// changes existing RuntimePool templates.
 	if r.PermissionTimeout > 0 {
 		env = append(env, corev1.EnvVar{Name: "ORKA_ACP_PERMISSION_TIMEOUT", Value: r.PermissionTimeout.String()})
 	}
 	return env
 }
 
-// runtimePoolCapacityEnvironment hands a non-default pool capacity to the
-// supervisor, which otherwise caps each runtime instance at its built-in
-// limits. Workspace-backed pools are single-session and keep the supervisor's
-// own single-session enforcement.
 func runtimePoolCapacityEnvironment(pool *corev1alpha1.RuntimePool) []corev1.EnvVar {
 	if pool.Spec.ExecutionWorkspace != nil {
 		return nil

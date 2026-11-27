@@ -88,14 +88,10 @@ func TestDeliveryMarkInsideAnOperationDoesNotWaitForTheAppendMutex(t *testing.T)
 	dataset := advanceTestEpoch(t, s, testWriteFence)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// An ordinary append holds the mutex while it waits for the connection,
-	// which the operation already holds.
 	s.executionEventMu.Lock()
 	defer s.executionEventMu.Unlock()
 	now := time.Now().UTC()
 	markCtx, _ := testEnvelope(t, ctx, dataset, "MarkGatewayDeliveryDelivered", now, "ns", "delivery", "owner", "message", now)
-	// Lock ignores ctx, so a call that waits for the mutex is detected by a
-	// bounded wait rather than its deadline.
 	done := make(chan error, 1)
 	go func() { done <- s.MarkGatewayDeliveryDelivered(markCtx, "ns", "delivery", "owner", "message", now) }()
 	select {
@@ -130,8 +126,6 @@ func TestSecurityWritesStayInsideTheOperation(t *testing.T) {
 	require.NoError(t, err)
 	counted := *run
 	counted.SliceCount++
-	// The ingestion's steps call wrapped security writes, which run as part
-	// of the enveloped commit rather than as operations of their own.
 	commit := store.ScanTaskIngestionCommit{
 		Ingestion: store.ScanTaskIngestion{ScanTaskIdentity: identity}, ExpectedRun: *run, Run: counted, At: now,
 		Steps: []store.ScanIngestionStep{{UpsertObservedFinding: &store.Finding{
@@ -177,7 +171,6 @@ func TestIsLockedClearsAnExpiredLockInsideAnOperation(t *testing.T) {
 	acquiredAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	require.NoError(t, s.AcquireLockUntil(ctx, "ns", "session", "task-a", "uid-a", acquiredAt, acquiredAt.Add(time.Minute)))
 
-	// The lock is judged at the request time, when it has expired.
 	checkedAt := acquiredAt.Add(time.Minute)
 	lockedCtx, _ := testEnvelope(t, ctx, dataset, "IsLocked", time.Now().UTC(), "ns", "session", "task-b", "uid-b", checkedAt)
 	locked, err := s.IsLocked(lockedCtx, "ns", "session", "task-b", "uid-b", checkedAt)

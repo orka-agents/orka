@@ -107,8 +107,6 @@ func TestValidateGatewayTaskPassToolPermitsOnlyReviewedFields(t *testing.T) {
 	}
 	require.NoError(t, ValidateGatewayTaskPassTool(valid()))
 
-	// Every field outside the reviewed set, including fields added later, must
-	// be refused once populated.
 	permitted := map[string]map[string]bool{
 		"ToolSpec":      {"Description": true, "Parameters": true, "BrokeredToolClass": true, "HTTP": true},
 		"HTTPExecution": {"GatewayTaskPass": true, "URL": true, "Method": true, "Timeout": true, "AuthInject": true},

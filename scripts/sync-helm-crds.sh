@@ -113,7 +113,6 @@ destination_name_for_source() {
     printf '%s-customresourcedefinition.yaml\n' "$(printf '%s' "${kind}" | tr '''[:upper:]''' '''[:lower:]''')"
     return
   fi
-  # Synthetic unit-test fixtures without a CRD spec retain their basename.
   printf '%s\n' "${source_file##*/}"
 }
 

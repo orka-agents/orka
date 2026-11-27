@@ -40,7 +40,6 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("write workspace content: %v", err)
 	}
 
-	// Content covered only by the pending marker is wiped by the next preparation.
 	again, committed, err := PrepareDurableSessionWorkspace(root, "session-uid-1", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare after uncommitted content: %v", err)
@@ -78,7 +77,6 @@ func TestPrepareDurableSessionWorkspaceLifecycle(t *testing.T) {
 		t.Fatalf("committed content = %q err=%v, want it preserved across preparation", content, err)
 	}
 
-	// Distinct logical sessions never share a durable directory.
 	otherDir, otherCommitted, err := PrepareDurableSessionWorkspace(root, "session-uid-2", testDurableHighWater)
 	if err != nil {
 		t.Fatalf("prepare second session: %v", err)
@@ -94,15 +92,11 @@ func TestStableDurableWorkspaceIdentity(t *testing.T) {
 	if got := StableDurableWorkspaceIdentity(noWorkspace+":task-a", noWorkspace); got != noWorkspace {
 		t.Fatalf("no-workspace identity = %q, want %q", got, noWorkspace)
 	}
-	// Two no-repository continuations with different Task-scoped identities
-	// reduce to the same stable identity.
 	first := StableDurableWorkspaceIdentity(noWorkspace+":task-a", noWorkspace)
 	second := StableDurableWorkspaceIdentity(noWorkspace+":task-b", noWorkspace)
 	if first != second {
 		t.Fatalf("task-scoped no-workspace identities must reduce equally: %q vs %q", first, second)
 	}
-	// Repository workspaces are identified by the repository identity alone;
-	// verified revision advances stay within the same stable identity.
 	if StableDurableWorkspaceIdentity(testDurableRepository, "abc") !=
 		StableDurableWorkspaceIdentity(testDurableRepository, "def") {
 		t.Fatal("revision advance must not change the stable repository identity")
@@ -113,8 +107,6 @@ func TestStableDurableWorkspaceIdentity(t *testing.T) {
 	}
 }
 
-// A resume marks its tree pending before initialization; an interrupted
-// creation must wipe the tree, while a recommit preserves it.
 func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -133,7 +125,6 @@ func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	// Resume marks pending, then recommits: the tree survives.
 	if err := MarkDurableSessionWorkspaceResumePending(root, "session-pending-1"); err != nil {
 		t.Fatalf("mark pending: %v", err)
 	}
@@ -147,8 +138,6 @@ func TestDurableSessionWorkspaceResumePendingLifecycle(t *testing.T) {
 		t.Fatalf("recommitted content = %q err=%v, want it preserved", content, err)
 	}
 
-	// Resume marks pending and the creation dies: the next preparation wipes
-	// the tree instead of reusing possibly-modified state.
 	if err := MarkDurableSessionWorkspaceResumePending(root, "session-pending-1"); err != nil {
 		t.Fatalf("mark pending again: %v", err)
 	}
@@ -210,8 +199,6 @@ func TestMarkDurableSessionWorkspaceResumePendingRestoresMarkerWhenSyncFails(t *
 	}
 }
 
-// A verified publication transition wipes the tree so the continuation
-// re-materializes from the newly declared baseline.
 func TestWipeDurableSessionWorkspaceClearsTreeAndMarkers(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -290,10 +277,6 @@ func TestWipeDurableSessionWorkspaceSyncsMarkersBeforeDeletingTree(t *testing.T)
 	}
 }
 
-// A failed same-repository resume has a pending binding but no transition
-// record. The wipe must retain that binding through the first durability
-// barrier so a crash before tree removal cannot leave markerless history that
-// blocks the supervisor's next cold boot.
 func TestWipeDurableSessionWorkspaceKeepsResumePendingMarkerUntilTreeRemoval(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -451,10 +434,6 @@ func TestPrepareDurableSessionWorkspaceRejectsUnusableCheckpoint(t *testing.T) {
 	}
 }
 
-// A crash between the commit rename and the pending-marker retirement leaves
-// both markers on disk. The committed marker proves the commit completed, so
-// the next preparation must retire the stale pending marker and resume the
-// tree instead of wiping it.
 func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -474,9 +453,6 @@ func TestPrepareDurableSessionWorkspaceSurvivesInterruptedCommitRetirement(t *te
 	if err := CommitDurableSessionWorkspace(root, sessionUID, binding); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	// Simulate the crash window: a resume marked the tree pending, the
-	// recommit renamed the fresh marker into place, and the process died
-	// before removing the pending marker.
 	if err := os.WriteFile(durableWorkspacePendingMarkerPath(root, sessionUID), []byte("{}"), 0o600); err != nil {
 		t.Fatalf("materialize stale pending marker: %v", err)
 	}
@@ -623,9 +599,6 @@ func TestCommitDurableSessionWorkspaceDefersPostCommitCleanupFailures(t *testing
 	}
 }
 
-// A repository-identity transition stages its authorization durably before
-// the old checkpoint is wiped, survives a mid-transition crash for the retry
-// to read, and is retired by the next successful commit.
 func TestDurableWorkspaceTransitionLifecycle(t *testing.T) {
 	root := t.TempDir()
 	target := DurableWorkspaceBinding{

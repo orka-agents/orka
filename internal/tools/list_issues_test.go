@@ -104,7 +104,6 @@ func TestListIssuesTool_DefaultUnassigned(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify default unassigned filter is applied
 	if !strings.Contains(receivedURL, "assignee=none") {
 		t.Errorf("expected assignee=none in URL, got: %s", receivedURL)
 	}
@@ -144,7 +143,6 @@ func TestListIssuesTool_DefaultUnassigned(t *testing.T) {
 func TestListIssuesTool_FiltersPullRequests(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Return a mix of issues and PRs (GitHub issues API includes PRs)
 		_, _ = fmt.Fprint(w, `[
 			{
 				"number": 1,
@@ -201,7 +199,6 @@ func TestListIssuesTool_FiltersPullRequests(t *testing.T) {
 		t.Fatalf("failed to parse result: %v", err)
 	}
 
-	// Should have 2 issues (PR #2 filtered out)
 	if listResult.Count != 2 {
 		t.Errorf("expected 2 issues (PR filtered), got %d", listResult.Count)
 	}
@@ -245,7 +242,6 @@ func TestListIssuesTool_UnassignedOnlyFalse(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should NOT have assignee=none when unassigned_only is explicitly false
 	if strings.Contains(receivedURL, "assignee=none") {
 		t.Errorf("should not have assignee=none when unassigned_only=false, got: %s", receivedURL)
 	}
@@ -395,7 +391,6 @@ func TestListIssuesTool_GitHubAPI404(t *testing.T) {
 }
 
 func TestListIssuesTool_NoRepoURL(t *testing.T) {
-	// Clear all repo sources
 	t.Setenv("ORKA_GIT_REPO", "")
 	t.Setenv("GITHUB_TOKEN", testGitHubToken)
 
@@ -447,7 +442,6 @@ func TestListIssuesTool_WithRepoURL(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify correct path is called
 	if receivedPath != "/repos/myorg/myrepo/issues" {
 		t.Errorf("expected /repos/myorg/myrepo/issues, got: %s", receivedPath)
 	}
@@ -486,7 +480,6 @@ func TestListIssuesTool_DefaultPagination(t *testing.T) {
 		apiBaseURL: server.URL,
 	}
 
-	// No per_page or page specified — should default to 30 and 1
 	args, _ := json.Marshal(ListIssuesArgs{
 		RepoURL: testOrgTestRepoURL,
 	})
@@ -547,7 +540,6 @@ func TestListIssuesTool_EmptyLabels(t *testing.T) {
 func TestListIssuesTool_HasNextPageTrueWhenFullPage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Return 3 items (matching per_page=3) with one being a PR
 		_, _ = fmt.Fprint(w, `[
 			{"number":1,"title":"Issue 1","body":"","user":{"login":"a"},"labels":[],"created_at":"2025-01-01T00:00:00Z","html_url":"https://github.com/o/r/issues/1"},
 			{"number":2,"title":"PR","body":"","user":{"login":"b"},"labels":[],"created_at":"2025-01-02T00:00:00Z","html_url":"https://github.com/o/r/pull/2","pull_request":{"url":"https://api.github.com/repos/o/r/pulls/2"}},
@@ -586,7 +578,6 @@ func TestListIssuesTool_HasNextPageTrueWhenFullPage(t *testing.T) {
 func TestListIssuesTool_HasNextPageFalseWhenPartialPage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Return 2 items when per_page=5 → partial page
 		_, _ = fmt.Fprint(w, `[
 			{"number":1,"title":"Issue 1","body":"","user":{"login":"a"},"labels":[],"created_at":"2025-01-01T00:00:00Z","html_url":"https://github.com/o/r/issues/1"},
 			{"number":2,"title":"Issue 2","body":"","user":{"login":"b"},"labels":[],"created_at":"2025-01-02T00:00:00Z","html_url":"https://github.com/o/r/issues/2"}
@@ -622,8 +613,6 @@ func TestListIssuesTool_HasNextPageFalseWhenPartialPage(t *testing.T) {
 }
 
 func TestListIssuesTool_BodyTruncationMultiByteUTF8(t *testing.T) {
-	// 498 ASCII chars + 2 emoji (4 bytes each) = 500 runes but 506 bytes.
-	// Byte-based slicing at 500 would split inside the first emoji.
 	multiByteBody := strings.Repeat("a", 498) + "🎉🎉"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -672,14 +661,11 @@ func TestListIssuesTool_BodyTruncationMultiByteUTF8(t *testing.T) {
 	if strings.Contains(body, "\ufffd") {
 		t.Error("truncated body contains replacement character U+FFFD")
 	}
-	// 500 runes exactly — should not be truncated
 	if len([]rune(body)) != 500 {
 		t.Errorf("expected 500 runes (no truncation needed), got %d", len([]rune(body)))
 	}
 }
 
-// TestListIssuesTool_BoundsLargeErrorBodies covers a non-2xx response with
-// a large body: the error carries a bounded note, not the whole response.
 func TestListIssuesTool_BoundsLargeErrorBodies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

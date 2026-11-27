@@ -23,34 +23,22 @@ import (
 )
 
 const (
-	// SecretKeyCurrent holds the PEM PKCS#8 Ed25519 key that signs deliveries.
-	SecretKeyCurrent = "current"
-	// SecretKeyPrevious optionally holds the key retired by the latest
-	// rotation. It never signs; it stays published so tokens signed before the
-	// rotation reached every replica still verify.
+	SecretKeyCurrent  = "current"
 	SecretKeyPrevious = "previous"
 
 	defaultKeyCacheTTL = 15 * time.Second
 	mintAttempts       = 3
 )
 
-// ErrSigningUnavailable reports that no valid signing key could be loaded.
-// Deliveries fail closed and are never sent unsigned.
 var ErrSigningUnavailable = errors.New("webhook signing key is unavailable")
 
-// KeySource provides the current signing key set.
 type KeySource interface {
-	// SigningKeys returns the key set for signing, minting a current key into
-	// the backing store when the source allows it and none exists.
 	SigningKeys(ctx context.Context) (KeySet, error)
-	// PublishedKeys returns the key set for publication. It never writes.
 	PublishedKeys(ctx context.Context) (KeySet, error)
 }
 
-// StaticKeySource serves a fixed key set.
 type StaticKeySource struct{ Keys KeySet }
 
-// SigningKeys implements KeySource.
 func (s StaticKeySource) SigningKeys(context.Context) (KeySet, error) {
 	if s.Keys.Current == nil {
 		return KeySet{}, ErrSigningUnavailable
@@ -58,24 +46,16 @@ func (s StaticKeySource) SigningKeys(context.Context) (KeySet, error) {
 	return s.Keys, nil
 }
 
-// PublishedKeys implements KeySource.
 func (s StaticKeySource) PublishedKeys(context.Context) (KeySet, error) { return s.Keys, nil }
 
-// SecretKeySource loads signing keys from one Kubernetes Secret in the
-// controller namespace. Rotation is an edit of that Secret: move the current
-// key to "previous" and write a new "current"; every replica picks it up
-// within the cache TTL without a restart.
 type SecretKeySource struct {
 	Reader    ctrlclient.Reader
 	Writer    ctrlclient.Writer
 	Namespace string
 	Name      string
-	// CacheTTL bounds staleness after rotation. Defaults to 15s.
-	CacheTTL time.Duration
-	Now      func() time.Time
+	CacheTTL  time.Duration
+	Now       func() time.Time
 
-	// lock serializes cache access; unlike a mutex, a waiter gives up when
-	// its context ends.
 	lock      chan struct{}
 	lockOnce  sync.Once
 	cached    KeySet
@@ -83,10 +63,6 @@ type SecretKeySource struct {
 	hasCached bool
 }
 
-// SigningKeys implements KeySource. A missing Secret is created, and a Secret
-// without a current key gets one minted, so a fresh install signs without
-// operator action. An invalid current key is never overwritten: signing fails
-// closed until an operator repairs it.
 func (s *SecretKeySource) SigningKeys(ctx context.Context) (KeySet, error) {
 	if s == nil {
 		return KeySet{}, ErrSigningUnavailable
@@ -101,7 +77,6 @@ func (s *SecretKeySource) SigningKeys(ctx context.Context) (KeySet, error) {
 	return keys, nil
 }
 
-// PublishedKeys implements KeySource.
 func (s *SecretKeySource) PublishedKeys(ctx context.Context) (KeySet, error) {
 	return s.load(ctx, false)
 }
@@ -113,8 +88,6 @@ func (s *SecretKeySource) now() time.Time {
 	return time.Now()
 }
 
-// keyLoadTimeout bounds one signing Secret load, including any create or mint
-// writes. It matches the connect bound of a delivery attempt.
 var keyLoadTimeout = 10 * time.Second
 
 func (s *SecretKeySource) load(ctx context.Context, mint bool) (KeySet, error) {
@@ -135,8 +108,6 @@ func (s *SecretKeySource) load(ctx context.Context, mint bool) (KeySet, error) {
 	if s.hasCached && s.now().Sub(s.cachedAt) < ttl && (!mint || s.cached.Current != nil) {
 		return s.cached, nil
 	}
-	// A stalled Secret read must not hold the caller (a Task reconcile
-	// worker, or a JWKS request) or the cache lock indefinitely.
 	readCtx, cancel := context.WithTimeout(ctx, keyLoadTimeout)
 	defer cancel()
 	keys, err := s.read(readCtx, mint)
@@ -182,8 +153,6 @@ func (s *SecretKeySource) read(ctx context.Context, mint bool) (KeySet, error) {
 		if updateErr := s.Writer.Update(ctx, secret); updateErr != nil && !apierrors.IsConflict(updateErr) {
 			return KeySet{}, fmt.Errorf("%w: store minted key: %v", ErrSigningUnavailable, apierrors.ReasonForError(updateErr))
 		}
-		// Re-read either way: on conflict another replica won and its key is
-		// the one every replica must sign with.
 	}
 	return KeySet{}, fmt.Errorf("%w: signing Secret kept changing", ErrSigningUnavailable)
 }

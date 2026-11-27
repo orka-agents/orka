@@ -46,8 +46,6 @@ describe('UsagePage', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'payments' })
     useAuthStore.setState({ token: 'fixture' })
-    // The fixtures' records belong to the live Task of the same name (UID ==
-    // name), so their Open Task links are kept.
     server.use(http.get('/api/v1/tasks/:id', ({ params }) =>
       HttpResponse.json({ metadata: { name: params.id, namespace: 'payments', uid: params.id }, spec: { type: 'agent' } })))
   })

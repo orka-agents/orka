@@ -33,7 +33,6 @@ func TestThreatModelInvestigationsRoundTripThroughMarkdown(t *testing.T) {
 		t.Fatalf("title = %q, want question as fallback title", got[1].Title)
 	}
 
-	// Re-rendering replaces the section instead of appending a second one.
 	again := RenderThreatModelInvestigations(content, got[:1])
 	if strings.Count(again, threatModelInvestigationsMarker) != 1 || len(ThreatModelInvestigations(again)) != 1 {
 		t.Fatalf("re-rendered threat model kept stale investigations:\n%s", again)
@@ -68,7 +67,6 @@ func TestParseThreatModelResultRendersInvestigations(t *testing.T) {
 		t.Fatalf("investigations = %#v", got)
 	}
 
-	// An incremental result that omits investigations keeps the saved ones.
 	result.ThreatModel, result.Investigations = content, nil
 	updated, err := ParseThreatModelResult(mustMarshalSecurityResult(t, result), AgentResultBinding{
 		RepositoryScan: binding.RepositoryScan, ScanID: binding.ScanID, PolicyDigest: binding.PolicyDigest,
@@ -126,12 +124,10 @@ func TestValidateFindingsV2AcceptsReferenceFileEvidence(t *testing.T) {
 		"unlisted file":     {Path: "pkg/other/other.go", StartLine: 1, EndLine: 2},
 		"inverted in range": {Path: "pkg/consumer/consumer.go", StartLine: 5, EndLine: 4},
 	} {
-		// The unverifiable citation is removed; the verified one keeps the finding.
 		got := validate(ref)
 		if len(got.Accepted) != 1 || len(got.Accepted[0].Evidence) != 1 || got.Accepted[0].Evidence[0].Path != "app.go" {
 			t.Fatalf("%s: result = %#v, want the finding with only its verified evidence", name, got)
 		}
-		// A finding whose only citation is unverifiable is dropped.
 		only := validFinding()
 		only.Evidence = []FindingsV2EvidenceRef{ref}
 		dropped := ValidateFindingsV2(FindingsV2Artifact{
@@ -204,9 +200,6 @@ func TestBuildThreatModelResultPromptRequestsInvestigationsForFullScans(t *testi
 	}
 }
 
-// Shapes taken from live reviews: resolved questions written as
-// {question, answer, evidence}, an extra scan.limitations key, and narrative
-// fields returned as structured JSON.
 func TestParseFindingsResultToleratesDescriptiveShapeDrift(t *testing.T) {
 	binding := testResultBinding()
 	repository := FindingsV2Repository{RepoURL: "https://github.com/example/project", Branch: "main"}
@@ -228,7 +221,6 @@ func TestParseFindingsResultToleratesDescriptiveShapeDrift(t *testing.T) {
 		t.Fatalf("artifact = %#v", artifact)
 	}
 
-	// Identity stays strict.
 	mismatched := strings.Replace(string(data), `"mode":"initial"`, `"mode":"incremental"`, 1)
 	if _, err := ParseFindingsResult([]byte(mismatched), FindingsResultExpectation{Binding: binding, SliceID: "slice_inv", Mode: "initial", Repository: repository}); err == nil {
 		t.Fatal("ParseFindingsResult() accepted a mismatched scan mode")
@@ -239,7 +231,6 @@ func TestParseFindingsResultToleratesDescriptiveShapeDrift(t *testing.T) {
 	}
 }
 
-// Calibrated ratings and a single-string list.
 func TestParseValidationResultAcceptsCalibratedRatings(t *testing.T) {
 	finding := &store.Finding{ID: "fnd_1", ScanRunID: "scan_123"}
 	expected := ValidationResultExpectation{
@@ -339,8 +330,6 @@ func TestMarshalReviewContextsFailsWhenExcerptsAloneExceedTheBound(t *testing.T)
 	}
 }
 
-// reviewContextFixture writes one 64 KiB Go file per slice so each default
-// review context carries a large excerpt.
 func reviewContextFixture(t *testing.T, count int) (string, []store.ReviewSlice, map[string][]ReviewContextReferenceFile) {
 	t.Helper()
 	root := t.TempDir()
@@ -384,7 +373,6 @@ func TestBuildReviewContextsKeepsDefaultContextsThatFit(t *testing.T) {
 
 func TestBuildReviewContextsScalesExcerptsForManySlices(t *testing.T) {
 	root, slices, references := reviewContextFixture(t, 60)
-	// The default contexts need about 10 MiB; give the run 2 MiB.
 	const budget = 2 << 20
 	encoded, err := BuildReviewContexts(root, slices, references, budget)
 	if err != nil {
@@ -434,8 +422,6 @@ func TestReviewPromptNamesTheLastIndexedRepositoryFile(t *testing.T) {
 	}
 }
 
-// A reviewer that writes "file" for an evidence path keeps the finding, and a
-// test file it cites does not become the finding's primary location.
 func TestFindingEvidenceAcceptsFileKeyAndAnchorsOnSource(t *testing.T) {
 	var finding FindingsV2Finding
 	data := `{"title":"t","evidence":[{"file":"src/registry.test.ts","startLine":5,"endLine":9,"role":"context"},` +

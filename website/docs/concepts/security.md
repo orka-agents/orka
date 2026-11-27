@@ -96,10 +96,19 @@ These workers use dedicated ServiceAccounts bound to `orka-ai-worker-role`,
 `orka-vendor-worker-role`, or `orka-container-worker-role`. Include these identities when
 auditing Kubernetes access.
 
-Container Tasks are untrusted compute. A Task's `spec.secretRef` is mounted only when an
-operator sets `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true`; without it the mount is omitted and the
-Task still runs. A `spec.env` entry that reads a Secret or ConfigMap through `valueFrom` is
-refused outright: without the opt-in the Task fails before its Pod is created. Task `env`
+Container Tasks are untrusted compute. By default a Task's `spec.secretRef` is omitted and
+the Task still runs, and a `spec.env` entry that reads a Secret or ConfigMap through
+`valueFrom` makes the Task fail before its Pod is created. With the Secret use policy
+(`--container-task-secret-use-authorization-enabled`), the admission policy requires the
+identity that writes a container Task to hold the `use` verb on each Secret it names (except
+for scheduled runs written by the controller, which the controller validates against their
+authorized parent scheduled Task; revoking `use` later does not stop delivery for Tasks that
+were already admitted). Orka grants that
+verb to none of its own identities, so Tasks created by agents, tools, chat, or the API never
+qualify, and the controller delivers nothing until it has confirmed the admission policy is
+bound and covers the namespace (clusters must have the `ValidatingAdmissionPolicy` admission
+plugin enabled). The legacy `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true` switch instead delivers to every
+container Task and cannot be combined with the policy. Task `env`
 never reaches the workspace preparation init container, which holds the clone credential;
 only `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` pass through to it. See
 [Container tasks](../guides/container-tasks.md#other-fields).
@@ -401,7 +410,7 @@ When OIDC API authentication is enabled, configure an explicit subject allowlist
 
 ### Per-namespace Task limits
 
-Use `--max-tasks-per-namespace` to cap the number of active (Pending/Running) tasks per namespace. Tasks exceeding the limit are requeued with backoff. Set to `0` (default) for unlimited.
+Use `--max-tasks-per-namespace` to cap the number of admitted tasks per namespace (controller-owned validation child tasks do not consume a slot and may run while their review parent holds one). A task holds a slot from its admission until it finishes; a Pending task still waiting for a slot does not count, so waiting tasks never block each other, and the controller grants slots through one ledger per namespace, kept in the controller namespace where the admission policy blocks tenant writes, so parallel reconciles never admit past the limit. Tasks over the limit are requeued with backoff. Set to `0` (default) for unlimited.
 
 ### Recommended production configuration
 

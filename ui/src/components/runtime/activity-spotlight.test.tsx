@@ -115,6 +115,6 @@ describe('ActivitySpotlight', () => {
     expect(screen.getByText('Last run')).toBeInTheDocument()
     expect(screen.getByText('Completed')).toBeInTheDocument()
     expect(screen.queryByText('Active now')).not.toBeInTheDocument()
-    expect(screen.getByText('5s')).toBeInTheDocument() // frozen at completion, not growing
+    expect(screen.getByText('5s')).toBeInTheDocument()
   })
 })

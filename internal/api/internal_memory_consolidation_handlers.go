@@ -20,8 +20,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// memoryConsolidationSource reads a run's inputs from the session, memory
-// and run stores.
 type memoryConsolidationSource struct {
 	store.SessionStore
 	store.MemoryStore
@@ -29,10 +27,6 @@ type memoryConsolidationSource struct {
 	store.MemoryProposalStore
 }
 
-// memoryConsolidationCaller returns the authenticated worker's Task when it is
-// an active memory consolidation run. Only the run's own worker may begin or
-// complete it: the run reads every user's Sessions, which admission allowed
-// only for the caller that created the Task.
 func (h *InternalHandlers) memoryConsolidationCaller(c fiber.Ctx) (string, *corev1alpha1.Task, error) {
 	namespace := c.Params("namespace")
 	if namespace == "" {
@@ -51,24 +45,13 @@ func (h *InternalHandlers) memoryConsolidationCaller(c fiber.Ctx) (string, *core
 	return namespace, task, nil
 }
 
-// memoryConsolidationBeginAttempts bounds how often a run chooses its window
-// again after another run moved its mode's cursor.
 const memoryConsolidationBeginAttempts = 3
 
-// memoryConsolidationNow is the clock a run's window ends by; tests move it
-// past the Sessions they write.
 var memoryConsolidationNow = time.Now
 
-// errAbandonedMemoryConsolidation answers a run another run took over after
-// its lease ended: it can neither resume nor complete.
 var errAbandonedMemoryConsolidation = fiber.NewError(fiber.StatusConflict,
 	"this memory consolidation run's lease ended and another run took over")
 
-// BeginMemoryConsolidation starts the caller's run, or resumes it when it
-// already began. Beginning reads the run's inputs once and records them with
-// the run, so a resumed worker reads the same input and completion is
-// checked against exactly what the model saw. A run with too few changed
-// Sessions is recorded as skipped without calling the model.
 func (h *InternalHandlers) BeginMemoryConsolidation(c fiber.Ctx) error {
 	var response memoryconsolidation.BeginResponse
 	if err := h.withMemoryConsolidationRun(c, func(ctx context.Context, namespace string, task *corev1alpha1.Task) error {
@@ -81,10 +64,6 @@ func (h *InternalHandlers) BeginMemoryConsolidation(c fiber.Ctx) error {
 	return c.JSON(response)
 }
 
-// withMemoryConsolidationRun authorizes the caller as an active run's worker
-// and runs access under the namespace's Task data fence, so a revoked worker
-// can neither read the run's transcripts nor complete it, even with a request
-// authorized just before the revocation.
 func (h *InternalHandlers) withMemoryConsolidationRun(c fiber.Ctx,
 	access func(ctx context.Context, namespace string, task *corev1alpha1.Task) error) error {
 	if h.memoryConsolidationStore == nil || h.sessionStore == nil || h.memoryStore == nil || h.memoryProposalStore == nil {
@@ -105,8 +84,6 @@ func (h *InternalHandlers) beginOrResumeMemoryConsolidation(ctx context.Context,
 	task *corev1alpha1.Task) (memoryconsolidation.BeginResponse, error) {
 	settings := memoryconsolidation.SettingsFor(task.Spec.AI.MemoryConsolidation)
 	run, err := h.memoryConsolidationStore.GetMemoryConsolidationRun(ctx, namespace, string(task.UID))
-	// A run in the mode that completed while this one read its inputs moved
-	// the cursor past this window's start; read the inputs again from there.
 	if errors.Is(err, store.ErrNotFound) {
 		for attempt := 1; ; attempt++ {
 			run, err = h.beginMemoryConsolidation(ctx, namespace, task, settings)
@@ -142,8 +119,6 @@ func (h *InternalHandlers) beginOrResumeMemoryConsolidation(ctx context.Context,
 	return memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Input: &input}, nil
 }
 
-// beginMemoryConsolidation fixes a new run's window from its mode's cursor,
-// reads its inputs and records both.
 func (h *InternalHandlers) beginMemoryConsolidation(ctx context.Context, namespace string, task *corev1alpha1.Task,
 	settings memoryconsolidation.Settings) (*store.MemoryConsolidationRun, error) {
 	cursor, err := h.memoryConsolidationStore.GetMemoryConsolidationCursor(ctx, namespace, string(settings.Mode))
@@ -158,7 +133,6 @@ func (h *InternalHandlers) beginMemoryConsolidation(ctx context.Context, namespa
 		return nil, err
 	}
 	if cursor != nil && start.After(*cursor) {
-		// The cursor lay further back than MaxLookback.
 		cut := cursor.UTC()
 		input.CutFrom = &cut
 	}
@@ -175,13 +149,7 @@ func (h *InternalHandlers) beginMemoryConsolidation(ctx context.Context, namespa
 	return run, nil
 }
 
-// CompleteMemoryConsolidation validates the caller's submitted result against
-// the input its run recorded, and against the targets' current generations,
-// and records the report. In Propose mode it also creates a pending proposal
-// for every kept operation, in the same write. A run that already finished
-// returns its report unchanged.
 func (h *InternalHandlers) CompleteMemoryConsolidation(c fiber.Ctx) error {
-	// The body is read before the fence is resolved.
 	var submission memoryconsolidation.Submission
 	if err := c.Bind().JSON(&submission); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
@@ -194,8 +162,6 @@ func (h *InternalHandlers) CompleteMemoryConsolidation(c fiber.Ctx) error {
 	}); err != nil {
 		return err
 	}
-	// The worker records the report as the Task result: see
-	// finishedMemoryConsolidation.
 	return c.JSON(report.Structure())
 }
 
@@ -213,9 +179,6 @@ func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Cont
 	default:
 		return decodeMemoryConsolidationReport(run)
 	}
-	// An absent or null operations list is a malformed result, not a run
-	// that found nothing: completing it would move the cursor past
-	// Sessions nobody read. A run that found nothing submits an empty list.
 	if submission.Operations == nil {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "a memory consolidation result needs its operations list, empty when nothing changes")
 	}
@@ -227,17 +190,12 @@ func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Cont
 	if err != nil {
 		return nil, consolidationStoreError("read memory consolidation targets", err)
 	}
-	// Proposals created while the run ran are not repeated either. A reload
-	// that reached a limit marks the report's input truncated, since those
-	// left out were not checked.
 	var laterTruncated bool
 	input.LaterProposals, laterTruncated, err = memoryconsolidation.OpenProposals(ctx, h.memoryProposalStore, namespace)
 	if err != nil {
 		return nil, consolidationStoreError("read open memory proposals", err)
 	}
 	input.Truncated = input.Truncated || laterTruncated
-	// A proposal the run read may have been applied, rejected or archived
-	// while it ran; an operation may then not cover it.
 	input.ClosedProposals, err = memoryconsolidation.ClosedProposals(ctx, h.memoryProposalStore, namespace, input.Proposals)
 	if err != nil {
 		return nil, consolidationStoreError("read memory proposals the run read", err)
@@ -258,10 +216,6 @@ func (h *InternalHandlers) completeSubmittedMemoryConsolidation(ctx context.Cont
 	return decodeMemoryConsolidationReport(completed)
 }
 
-// currentTargetGenerations returns the current generation of every active
-// memory the run read. Only those can be targeted, and the input holds at
-// most memoryconsolidation.MaxInputMemories of them, so whatever a
-// submission names, every permissible target is looked up.
 func (h *InternalHandlers) currentTargetGenerations(ctx context.Context, namespace string, input memoryconsolidation.Input) (map[string]uint64, error) {
 	ids := make([]string, 0, len(input.Memories))
 	for _, memory := range input.Memories {
@@ -318,8 +272,6 @@ func finishedMemoryConsolidation(settings memoryconsolidation.Settings, run *sto
 	if err != nil {
 		return memoryconsolidation.BeginResponse{}, err
 	}
-	// The worker records what it is given as the Task result, which anyone
-	// who can read the Task can read, so it gets only the structure.
 	structure := report.Structure()
 	return memoryconsolidation.BeginResponse{Status: run.Status, Settings: settings, Report: &structure}, nil
 }
@@ -339,9 +291,6 @@ func agentNameOf(task *corev1alpha1.Task) string {
 	return ""
 }
 
-// consolidationStoreError is memoryStoreError for a fenced access: a stale
-// or revoked fence is returned unchanged, so withInternalTaskData retries it
-// or answers that the Job is no longer active.
 func consolidationStoreError(action string, err error) error {
 	if errors.Is(err, store.ErrTaskDataCleanupChanged) || errors.Is(err, store.ErrTaskJobRevoked) {
 		return err

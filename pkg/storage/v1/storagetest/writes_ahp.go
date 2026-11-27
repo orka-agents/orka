@@ -9,8 +9,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The Agent Host Protocol write cases.
-
 const (
 	catalogAHPUser    = "ahp-user-a"
 	catalogAHPChannel = "ahp-session://catalog/one"

@@ -14,8 +14,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// A Session that does not exist cannot appear by waiting when the Task asks
-// not to create it, so the Task fails at once instead of at its deadline.
 func TestACPDispatcherFailsCreateFalseTaskForMissingSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()

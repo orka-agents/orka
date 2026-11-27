@@ -28,17 +28,12 @@ const NAV_ITEMS = [
   { to: '/settings/connectors', label: 'Connectors', icon: Link2 },
 ] as const
 
-// The demo build's tour entry; other builds drop it (static mode check).
 const DemoTourLauncher = import.meta.env.MODE === 'demo'
   ? lazy(() => import('@/demo/tour/tour').then((m) => ({ default: m.TourLauncher })))
   : null
 
 export function Sidebar() {
   const location = useLocation()
-  // Connectors exist only on a controller started with --connectors-enabled;
-  // the entry is hidden once the server says they are off (shown until known).
-  // Without chat the config route is absent, so the connectors API itself is
-  // asked: it answers 501 when connectors are off.
   const { data: chatConfig, isError: chatConfigUnavailable } = useChatConfig()
   const connectorsProbe = useQuery({
     queryKey: ['connectorsAvailability'],
@@ -52,11 +47,6 @@ export function Sidebar() {
   const { sidebarCollapsed: desktopCollapsed, toggleSidebar, mobileSidebarOpen, setMobileSidebarOpen } = useUIStore()
   const isMobile = useIsMobile()
 
-  // Below the md breakpoint the expanded sidebar would leave ~135px for content,
-  // so it starts as the icon rail on entry; expanding it there overlays the
-  // page (see the max-md: classes) instead of squeezing it. The mobile overlay
-  // state is separate from (and never written to) the persisted desktop
-  // preference, so leaving the breakpoint restores the desktop layout.
   useEffect(() => {
     if (isMobile) setMobileSidebarOpen(false)
   }, [isMobile, setMobileSidebarOpen])
@@ -69,9 +59,6 @@ export function Sidebar() {
     else toggleSidebar()
   }
 
-  // The mobile overlay is modal: it takes initial focus, keeps Tab inside the
-  // drawer, closes on Escape, and hands focus back to whatever opened it. The
-  // covered page is made inert by RootLayout while it is open.
   const asideRef = useRef<HTMLElement>(null)
   useEffect(() => {
     if (!overlayOpen) return
@@ -148,7 +135,6 @@ export function Sidebar() {
           )}
         </Button>
       </div>
-      {/* Scrolls on short screens, so whatever sits below it stays in view. */}
       <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
         {navItems.map(({ to, label, icon: Icon }) => {
           const isActive = to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
@@ -157,16 +143,11 @@ export function Sidebar() {
               key={to}
               to={to}
               aria-current={isActive ? 'page' : undefined}
-              // The collapsed rail hides the visible text, so the link needs
-              // an explicit accessible name.
               aria-label={sidebarCollapsed ? label : undefined}
               title={sidebarCollapsed ? label : undefined}
               onClick={() => { if (overlayOpen) closeOverlay() }}
               className={cn(
                 'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                // Active: a quiet grey fill and full-strength ink. In a
-                // black-and-white UI an accent bar or tint would be the
-                // loudest thing in the sidebar.
                 isActive
                   ? 'bg-accent text-foreground'
                   : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',

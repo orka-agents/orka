@@ -74,7 +74,6 @@ func TestWebFetchTool_Execute_HTML(t *testing.T) {
 	if fetchResult.Extractor != "html_text" {
 		t.Errorf("extractor = %q, want %q", fetchResult.Extractor, "html_text")
 	}
-	// Script and style content should be stripped
 	if strContains(fetchResult.Content, "var x=1") {
 		t.Error("content should not contain script content")
 	}

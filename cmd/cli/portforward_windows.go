@@ -11,14 +11,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// stillActive is the exit code GetExitCodeProcess reports for a process that
-// is still running.
 const stillActive = 259
 
-// processStartMark returns when running process pid was created, or "" when
-// that cannot be read. While a process runs, no other process has its PID, so
-// a running process with the recorded PID and creation time is the forward the
-// CLI started.
 func processStartMark(pid int) string {
 	if pid <= 0 || int64(pid) > math.MaxUint32 {
 		return ""
@@ -39,10 +33,6 @@ func processStartMark(pid int) string {
 	return strconv.FormatInt(created.Nanoseconds(), 10)
 }
 
-// portForwardProcessRunning reports whether the process the CLI started for
-// the cached forward is still running. Another process's command line cannot
-// be read here with documented calls, so the forward is recognised by the
-// creation time recorded when the CLI started it.
 func portForwardProcessRunning(cached *portForwardCache) bool {
 	return cached.ProcessStart != "" && processStartMark(cached.PID) == cached.ProcessStart
 }

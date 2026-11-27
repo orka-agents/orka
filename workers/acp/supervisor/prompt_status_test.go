@@ -52,8 +52,6 @@ func TestCancellationPublishesSettledStatusBeforePromptStreamFinishes(t *testing
 			if err := cancellation.Validate(); err != nil {
 				t.Fatal(err)
 			}
-			// The original prompt HTTP writer can still be blocked. Status must
-			// publish the cancellation's settlement without waiting for it.
 			after := readPromptTestStatus(t, server, cfg)
 			wantState := harnessv2.RuntimeSessionStatePoisoned
 			if outcome == acp.PromptOutcomeCompleted {

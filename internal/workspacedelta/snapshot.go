@@ -16,14 +16,10 @@ import (
 
 const snapshotVersion uint32 = 1
 
-// Capture validates and fingerprints a workspace tree without following
-// symlinks. The returned Snapshot is suitable as a trusted pre-prompt baseline.
 func Capture(root string, options Options) (*Snapshot, error) {
 	return CaptureContext(context.Background(), root, options)
 }
 
-// CaptureContext is Capture with cancellation propagated through workspace
-// traversal and regular-file hashing.
 func CaptureContext(ctx context.Context, root string, options Options) (*Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -35,8 +31,6 @@ func CaptureContext(ctx context.Context, root string, options Options) (*Snapsho
 	return capture(ctx, root, normalized, false, nil)
 }
 
-// capture walks root. Without a baseline it records the tree's ignore rules;
-// with one it skips new paths those baseline rules ignore.
 func capture(ctx context.Context, root string, options normalizedOptions, retainContent bool, baseline *Snapshot) (*Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -274,9 +268,6 @@ func captureRegular(
 	if retainContent {
 		result.content = append([]byte(nil), content.Bytes()...)
 	}
-	// The content policy verdict is evaluated behind the walk and applied to
-	// the entry once every file has been captured; the buffer is handed over
-	// and not touched again here.
 	if policy != nil {
 		if err := policy.submit(relative, content.Bytes(), policyWeight); err != nil {
 			return entry{}, pathError("content policy", relative, err)

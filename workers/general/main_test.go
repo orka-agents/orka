@@ -72,7 +72,6 @@ type terminalGeneralEventRecorder struct {
 }
 
 func (r *terminalGeneralEventRecorder) Record(ctx context.Context, eventType string, _ ...common.EventOption) {
-	// Model persistence followed by cancellation before the response is read.
 	r.types = append(r.types, eventType)
 	r.cancel()
 	r.ctx = ctx
@@ -431,7 +430,6 @@ func TestRun_CommandNotFound(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 
-	// run() calls os.Exit for exec failures, so we test the underlying exec
 	os.Args = []string{"worker", "nonexistent_command_12345"}
 	err := run()
 	if err == nil {

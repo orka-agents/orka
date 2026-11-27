@@ -17,11 +17,13 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// These helpers convert the Go types that have no direct protobuf scalar.
-// The generated mapping calls them; field names a value for its error.
+func intFromWire(value int64, field string) (int, error) {
+	if value < math.MinInt || value > math.MaxInt {
+		return 0, storagev1.ValidationErrorf("%s is outside the supported integer range", field)
+	}
+	return int(value), nil
+}
 
-// timeToWire encodes t. The zero time is an absent field, and a time outside
-// the Timestamp range (0001-01-01 to 9999-12-31) is a validation error.
 func timeToWire(t time.Time, field string) (*timestamppb.Timestamp, error) {
 	if t.IsZero() {
 		return nil, nil
@@ -33,7 +35,6 @@ func timeToWire(t time.Time, field string) (*timestamppb.Timestamp, error) {
 	return encoded, nil
 }
 
-// timeFromWire decodes a time in UTC. An absent field is the zero time.
 func timeFromWire(encoded *timestamppb.Timestamp, field string) (time.Time, error) {
 	if encoded == nil {
 		return time.Time{}, nil
@@ -44,8 +45,6 @@ func timeFromWire(encoded *timestamppb.Timestamp, field string) (time.Time, erro
 	return encoded.AsTime(), nil
 }
 
-// nullableTimeToWire encodes a *time.Time: nil is an absent message, and a
-// pointer to the zero time is a message with no value.
 func nullableTimeToWire(t *time.Time, field string) (*storagepb.NullableTime, error) {
 	if t == nil {
 		return nil, nil
@@ -82,7 +81,6 @@ func durationFromWire(encoded *durationpb.Duration, field string) (time.Duration
 	if err := encoded.CheckValid(); err != nil {
 		return 0, storagev1.ValidationErrorf("%s is not a valid duration", field)
 	}
-	// AsDuration saturates at the time.Duration range; refuse instead.
 	const (
 		maxSeconds = math.MaxInt64 / int64(time.Second)
 		minSeconds = math.MinInt64 / int64(time.Second)
@@ -97,8 +95,6 @@ func durationFromWire(encoded *durationpb.Duration, field string) (time.Duration
 	return encoded.AsDuration(), nil
 }
 
-// jsonToWire encodes a dynamic value as its encoding/json bytes. A nil value
-// is an absent field.
 func jsonToWire(value any, field string) (*storagepb.JSONValue, error) {
 	if value == nil {
 		return nil, nil
@@ -110,8 +106,6 @@ func jsonToWire(value any, field string) (*storagepb.JSONValue, error) {
 	return &storagepb.JSONValue{Json: encoded}, nil
 }
 
-// jsonMapToWire encodes a map[string]any. Nil and empty maps are equivalent,
-// so both are an absent field.
 func jsonMapToWire(value map[string]any, field string) (*storagepb.JSONValue, error) {
 	if len(value) == 0 {
 		return nil, nil
@@ -119,10 +113,8 @@ func jsonMapToWire(value map[string]any, field string) (*storagepb.JSONValue, er
 	return jsonToWire(value, field)
 }
 
-// rawJSONToWire carries json.RawMessage bytes unchanged. Empty bytes are an
-// absent field.
 func rawJSONToWire(value json.RawMessage, field string) (*storagepb.JSONValue, error) {
-	if len(value) == 0 {
+	if len(bytes.TrimSpace(value)) == 0 {
 		return nil, nil
 	}
 	if !json.Valid(value) {
@@ -131,13 +123,6 @@ func rawJSONToWire(value json.RawMessage, field string) (*storagepb.JSONValue, e
 	return &storagepb.JSONValue{Json: append([]byte(nil), value...)}, nil
 }
 
-// jsonFromWire decodes a dynamic value into T (any or map[string]any).
-//
-// With exact set, as a server decodes a request, numbers decode as
-// json.Number, so the provider stores them and the request digest covers them
-// exactly as the caller wrote them. Otherwise, as a client decodes a
-// response, the decoded types are those encoding/json produces, as a
-// provider that stores JSON text returns them in process.
 func jsonFromWire[T any](encoded *storagepb.JSONValue, field string, exact bool) (T, error) {
 	var value T
 	if encoded == nil || len(encoded.GetJson()) == 0 {
@@ -168,9 +153,6 @@ func rawJSONFromWire(encoded *storagepb.JSONValue, field string) (json.RawMessag
 	return json.RawMessage(append([]byte(nil), encoded.GetJson()...)), nil
 }
 
-// sanitizeText bounds text that crosses a trust boundary into status, logs or
-// errors: invalid UTF-8 and control characters are dropped, and the result is
-// at most limit bytes.
 func sanitizeText(text string, limit int) string {
 	var builder strings.Builder
 	for _, r := range text {

@@ -119,8 +119,6 @@ type ExternalEffectList struct {
 	Items           []ExternalEffect `json:"items"`
 }
 
-// DeepCopyInto is hand-written so this new root type is usable before the
-// repository owner regenerates zz_generated.deepcopy.go.
 func (in *ExternalEffect) DeepCopyInto(out *ExternalEffect) {
 	*out = *in
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
@@ -136,7 +134,6 @@ func (in *ExternalEffect) DeepCopyInto(out *ExternalEffect) {
 	deepCopyControlRecordMutationStatus(&in.Status.ControlRecordMutationStatus, &out.Status.ControlRecordMutationStatus)
 }
 
-// DeepCopy creates an independent copy.
 func (in *ExternalEffect) DeepCopy() *ExternalEffect {
 	if in == nil {
 		return nil
@@ -146,7 +143,6 @@ func (in *ExternalEffect) DeepCopy() *ExternalEffect {
 	return out
 }
 
-// DeepCopyObject implements runtime.Object.
 func (in *ExternalEffect) DeepCopyObject() runtime.Object {
 	if copy := in.DeepCopy(); copy != nil {
 		return copy
@@ -154,7 +150,6 @@ func (in *ExternalEffect) DeepCopyObject() runtime.Object {
 	return nil
 }
 
-// DeepCopyInto copies a list and all of its items.
 func (in *ExternalEffectList) DeepCopyInto(out *ExternalEffectList) {
 	*out = *in
 	in.ListMeta.DeepCopyInto(&out.ListMeta)
@@ -166,7 +161,6 @@ func (in *ExternalEffectList) DeepCopyInto(out *ExternalEffectList) {
 	}
 }
 
-// DeepCopy creates an independent list copy.
 func (in *ExternalEffectList) DeepCopy() *ExternalEffectList {
 	if in == nil {
 		return nil
@@ -176,7 +170,6 @@ func (in *ExternalEffectList) DeepCopy() *ExternalEffectList {
 	return out
 }
 
-// DeepCopyObject implements runtime.Object.
 func (in *ExternalEffectList) DeepCopyObject() runtime.Object {
 	if copy := in.DeepCopy(); copy != nil {
 		return copy

@@ -34,9 +34,6 @@ func newRunCmd() *cobra.Command {
   Interactive: orka run
   Piped:       echo "fix bugs" | orka run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Without a prompt argument, run reads the prompt from piped stdin,
-			// so a credential cannot come from stdin too. The prompt is empty
-			// on the same condition as below, so "" counts as no prompt.
 			if strings.Join(args, " ") == "" {
 				if stdinStat, err := os.Stdin.Stat(); err == nil && stdinStat.Mode()&os.ModeCharDevice == 0 {
 					if err := rejectStdinCredential(cmd, "orka run uses for the prompt; pass the prompt as an argument"); err != nil {
@@ -46,10 +43,8 @@ func newRunCmd() *cobra.Command {
 			}
 			c := newClientFromCmd(cmd)
 
-			// Pre-flight check (retry once on stale cache)
 			cfg, err := c.GetChatConfig(context.Background())
 			if err != nil {
-				// Clear stale cache and re-discover
 				clearPortForwardCache(cmd)
 				c = newClientFromCmd(cmd)
 				cfg, err = c.GetChatConfig(context.Background())
@@ -61,7 +56,6 @@ func newRunCmd() *cobra.Command {
 				return fmt.Errorf("chat is disabled on this server")
 			}
 
-			// Determine provider/model info
 			if agent == "" && provider == "" {
 				provider = cfg.Provider
 			}
@@ -74,7 +68,6 @@ func newRunCmd() *cobra.Command {
 				displayProvider = "agent:" + agent
 			}
 
-			// Generate session ID if not provided
 			if session == "" {
 				b := make([]byte, 8)
 				_, _ = rand.Read(b)
@@ -96,14 +89,11 @@ func newRunCmd() *cobra.Command {
 			}
 			fmt.Fprintf(os.Stderr, "Session: %s (use --session to continue)\n\n", session)
 
-			// Determine prompt source
 			prompt := strings.Join(args, " ")
 
-			// Check stdin
 			if prompt == "" {
 				stdinStat, _ := os.Stdin.Stat()
 				if stdinStat.Mode()&os.ModeCharDevice == 0 {
-					// Piped stdin
 					data, err := io.ReadAll(os.Stdin)
 					if err != nil {
 						return fmt.Errorf("read stdin: %w", err)
@@ -113,7 +103,6 @@ func newRunCmd() *cobra.Command {
 			}
 
 			if prompt != "" {
-				// One-shot mode
 				return runOneShot(c, client.ChatRequest{
 					Message:   prompt,
 					SessionID: session,
@@ -124,7 +113,6 @@ func newRunCmd() *cobra.Command {
 				}, verbose, stderrTTY, stdoutTTY)
 			}
 
-			// Interactive REPL mode
 			return runREPL(c, session, agent, model, provider, verbose, stderrTTY, stdoutTTY)
 		},
 	}
@@ -234,7 +222,6 @@ func streamChat(
 	hadContent := false
 	thinking := true
 
-	// Show a thinking indicator
 	if stderrTTY {
 		fmt.Fprint(os.Stderr, "⠋ Thinking…")
 	}
@@ -245,7 +232,6 @@ func streamChat(
 			break
 		}
 
-		// Clear thinking indicator on first real event
 		if thinking {
 			if stderrTTY {
 				fmt.Fprint(os.Stderr, "\r\033[2K")
@@ -253,7 +239,6 @@ func streamChat(
 			thinking = false
 		}
 
-		// Feed to tracker
 		t.handleEvent(evt)
 
 		var data client.SSEEventData
@@ -263,7 +248,6 @@ func streamChat(
 
 		switch evt.Event {
 		case cliStatusKey:
-			// Session acknowledged — no action needed
 		case "message":
 			if data.Content != "" {
 				contentBuf.WriteString(data.Content)
@@ -314,7 +298,6 @@ func handleToolCallEvent(data client.SSEEventData, verbosity int) {
 			}
 		}
 	case "check_task_progress", "wait_for_task":
-		// Suppressed — tracker shows status
 	case "fetch_task_output":
 		if verbosity >= VerbosityV {
 			fmt.Fprintf(os.Stderr, "⚙ Fetching result\n")
@@ -367,10 +350,8 @@ func finishStream(contentBuf *strings.Builder, hadContent, stdoutTTY bool) int {
 	return 0
 }
 
-// trailingAnsiPad matches trailing ANSI escape sequences interspersed with whitespace.
 var trailingAnsiPad = regexp.MustCompile(`(?:\x1b\[[0-9;]*m[\t ]*)+[\t ]*$`)
 
-// renderMarkdown renders Markdown text using glamour.
 func renderMarkdown(text string) string {
 	r, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
@@ -383,7 +364,6 @@ func renderMarkdown(text string) string {
 	if err != nil {
 		return ""
 	}
-	// Strip trailing ANSI-colored padding glamour adds to fill word-wrap width.
 	lines := strings.Split(out, "\n")
 	for i, line := range lines {
 		lines[i] = trailingAnsiPad.ReplaceAllString(line, "")

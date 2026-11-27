@@ -35,10 +35,6 @@ type EventSummary struct {
 	ContentText string          `json:"contentText,omitempty"`
 }
 
-// CoalesceAdjacentModelMessages joins streamed harness v2 chunks from the same
-// prompt before fork retention is applied. Stored events remain immutable; the
-// returned slice is a fork-context read model whose sequence/content identity
-// points at the newest included chunk.
 func CoalesceAdjacentModelMessages(values []store.ExecutionEvent) []store.ExecutionEvent {
 	coalesced := make([]store.ExecutionEvent, 0, len(values))
 	for _, event := range values {
@@ -84,8 +80,6 @@ func executionEventContentTextChars(event store.ExecutionEvent) int {
 	return utf8.RuneCountInString(event.ContentText)
 }
 
-// SameHarnessV2ModelMessage reports whether two model-message events belong to
-// the same harness v2 prompt and can therefore be adjacent stream chunks.
 func SameHarnessV2ModelMessage(left, right store.ExecutionEvent) bool {
 	if left.Type != executionevents.ExecutionEventTypeModelMessage || right.Type != executionevents.ExecutionEventTypeModelMessage {
 		return false
@@ -118,14 +112,10 @@ func harnessV2PromptIdentity(content json.RawMessage) (promptIdentity, bool) {
 	return identity, identity.TaskUID != "" && identity.TaskAttempt > 0 && identity.PromptID != ""
 }
 
-// BuildContext returns a bounded, already-sanitized summary of events up to afterSeq.
 func BuildContext(namespace, taskName string, afterSeq int64, events []store.ExecutionEvent, maxEvents int) Context {
 	return BuildContextWithLimits(namespace, taskName, afterSeq, events, maxEvents, DefaultMaxContextBytes)
 }
 
-// BuildContextWithLimits returns a bounded, already-sanitized summary of events up to afterSeq.
-// Events are selected newest-first, then returned in chronological order. The byte limit bounds
-// the marshaled Context payload that may be embedded into a forked Task prompt.
 func BuildContextWithLimits(
 	namespace,
 	taskName string,

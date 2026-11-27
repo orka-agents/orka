@@ -32,15 +32,11 @@ import (
 const testHostConnection = "github-alice"
 
 type fakeHostCredentials struct {
-	token string
-	// neverExpires hands out a token without an expiry; unrefreshable, one
-	// whose expiry is Orka's own deadline.
+	token         string
 	neverExpires  bool
 	unrefreshable bool
 	unavailable   bool
-	// broken makes every call fail as a store outage would.
-	broken bool
-	// connection is the Connection that feeds hosts; empty means testHostConnection.
+	broken        bool
 	connection    string
 	connectionUID string
 	grantSequence int64
@@ -74,7 +70,6 @@ func (f *fakeHostCredentials) CheckHostLink(_ context.Context, namespace, name s
 	return nil
 }
 
-// fakeGitHubAccounts maps a token to its account.
 type fakeGitHubAccounts map[string]corev1alpha1.AgentHostGitHubAccount
 
 func (f fakeGitHubAccounts) Account(_ context.Context, token string) (corev1alpha1.AgentHostGitHubAccount, error) {
@@ -146,8 +141,6 @@ func TestAgentHostTakesItsTokenFromItsConnection(t *testing.T) {
 		t.Fatalf("pinned account = %+v", got)
 	}
 
-	// A refreshed token replaces the copy without restarting the host, and
-	// the host comes back before its token is due.
 	credentials.token = "ghu_second"
 	accounts["ghu_second"] = alice
 	result, err := h.reconciler.Reconcile(context.Background(), ctrl.Request{
@@ -207,8 +200,6 @@ func TestAgentHostRecordsDeliveredConnectionGrant(t *testing.T) {
 	}
 }
 
-// Code in the host can read its token, so a Connection token that never
-// expires, as a GitHub App without user-token expiration issues, is refused.
 func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	h, credentials, _ := newConnectionHostHarness(t)
 	credentials.neverExpires = true
@@ -222,7 +213,6 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("ready = %+v", ready)
 	}
-	// Nor on one whose expiry only Orka set: custody cannot refresh it.
 	credentials.neverExpires, credentials.unrefreshable = false, true
 	h.settle()
 	if _, ok := h.tokenCopy(); ok {
@@ -231,7 +221,6 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	if ready := agentHostReady(h.host()); ready == nil || ready.Reason != agentHostReasonGitHubTokenNeverExpires {
 		t.Fatalf("unrefreshable: ready = %+v", ready)
 	}
-	// Once the link holds an expiring token, the host runs.
 	credentials.unrefreshable = false
 	h.settle()
 	if _, ok := h.pod(); !ok {
@@ -239,9 +228,6 @@ func TestAgentHostRefusesATokenThatNeverExpires(t *testing.T) {
 	}
 }
 
-// A person who declines a host after it was provisioned stops it: its Pod
-// and token copy go and its volume stays, and it runs again once they take
-// the decline back.
 func TestAgentHostStopsWhenItsPersonDeclinesIt(t *testing.T) {
 	h, credentials, _ := newConnectionHostHarness(t)
 	connection := &corev1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: testHostConnection, Namespace: testUserNamespace}}
@@ -279,8 +265,6 @@ func TestAgentHostStopsWhenItsPersonDeclinesIt(t *testing.T) {
 		t.Fatal("taking the decline back must restart the host")
 	}
 
-	// A decline stops the host even while the link check can only be
-	// retried, as when its provider's status lags.
 	credentials.broken = true
 	connection.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
 	if err := h.client.Update(context.Background(), connection); err != nil {
@@ -313,7 +297,6 @@ func TestAgentHostStopsWhenItsConnectionIsUnavailable(t *testing.T) {
 		t.Fatalf("status = %+v", got.Status)
 	}
 
-	// Reconnecting restarts the host on the same volume.
 	credentials.unavailable = false
 	h.settle()
 	if _, ok := h.pod(); !ok {
@@ -324,7 +307,6 @@ func TestAgentHostStopsWhenItsConnectionIsUnavailable(t *testing.T) {
 	}
 }
 
-// A suspended host keeps no token copy, and waking it checks the account.
 func TestAgentHostSuspendedChecksItsConnection(t *testing.T) {
 	h, credentials, accounts := newConnectionHostHarness(t)
 	h.settle()
@@ -343,8 +325,6 @@ func TestAgentHostSuspendedChecksItsConnection(t *testing.T) {
 		t.Fatalf("ready = %+v", got)
 	}
 
-	// Waking the host after the link was given to another GitHub account
-	// writes no token and fails the host.
 	credentials.unavailable = false
 	credentials.token = "ghu_mallory"
 	accounts["ghu_mallory"] = corev1alpha1.AgentHostGitHubAccount{ID: 2002, Login: "mallory"}
@@ -414,8 +394,6 @@ func TestAgentHostFromAConnectionNeedsARelayTemplate(t *testing.T) {
 	}
 }
 
-// A running host whose template is recreated without Relay access stops and
-// loses the token copy it already had.
 func TestAgentHostFromAConnectionLosesItsTokenWhenItsTemplateTurnsStandalone(t *testing.T) {
 	h, _, _ := newConnectionHostHarness(t)
 	h.settle()
@@ -446,8 +424,6 @@ func TestAgentHostFromAConnectionLosesItsTokenWhenItsTemplateTurnsStandalone(t *
 	}
 }
 
-// A suspension goes ahead while the link cannot be checked; a running host
-// in the same state keeps retrying instead.
 func TestAgentHostSuspendsWhileItsLinkCannotBeChecked(t *testing.T) {
 	h, credentials, _ := newConnectionHostHarness(t)
 	h.settle()
@@ -480,8 +456,6 @@ func TestAgentHostSuspendsWhileItsLinkCannotBeChecked(t *testing.T) {
 	}
 }
 
-// With a sign-in allow-list, a refreshed token admits the host only while its
-// account is still a member; GitHub failing to answer is retried.
 func TestAgentHostStopsWhenItsAccountLeavesTheAllowedOrgs(t *testing.T) {
 	h, credentials, accounts := newConnectionHostHarness(t)
 	verdict := error(nil)
@@ -518,8 +492,6 @@ func TestAgentHostStopsWhenItsAccountLeavesTheAllowedOrgs(t *testing.T) {
 	}
 }
 
-// Under a sign-in allow-list, a token that never expires would never bring
-// a membership check, so the host refuses it.
 func TestAgentHostRefusesANeverExpiringTokenUnderAnAllowList(t *testing.T) {
 	h, credentials, _ := newConnectionHostHarness(t)
 	h.reconciler.Membership = func(context.Context, string, string) error { return nil }
@@ -540,7 +512,6 @@ func TestAgentHostRefusesANeverExpiringTokenUnderAnAllowList(t *testing.T) {
 	}
 }
 
-// A provider edit reaches every host its links feed, and no other.
 func TestAgentHostProviderChangeReachesTheHostsItsLinksFeed(t *testing.T) {
 	fed := connectionHost()
 	secretFed := testHost()

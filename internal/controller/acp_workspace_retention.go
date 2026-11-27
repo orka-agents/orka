@@ -41,27 +41,15 @@ import (
 )
 
 const (
-	// acpWorkspaceLastDetachedAnnotation records when the last Task attachment
-	// was revoked. The class idleTimeout counts from this instant (or from
-	// creation for a workspace that never attached).
-	acpWorkspaceLastDetachedAnnotation = "acp.workspace.orka.ai/last-detached-at"
-	// acpWorkspaceMaxSuspendedAnnotation freezes the class retention cap on
-	// the materialized workspace so settlement enforces it without reloading
-	// the execution snapshot.
-	acpWorkspaceMaxSuspendedAnnotation = "acp.workspace.orka.ai/max-suspended"
-	// acpWorkspaceLegacyRetentionDeadlineAnnotation stores a fixed fallback
-	// cleanup deadline when the normal idle clock cannot safely bound a
-	// workspace. The historical key is retained for compatibility with
-	// workspaces migrated by earlier builds of the retention controller.
-	acpWorkspaceLegacyRetentionDeadlineAnnotation = "acp.workspace.orka.ai/legacy-retention-deadline"
-	// acpWorkspaceRetentionRequeue bounds how often retention re-evaluates a
-	// workspace with no imminent deadline.
-	acpWorkspaceRetentionRequeue     = 5 * time.Minute
-	acpWorkspaceLegacyRetentionGrace = 24 * time.Hour
-	// One class-owned Lease stores at most one pending suspended-capacity
-	// claim. Its resourceVersion serializes transactions across leader handoff;
-	// settled occupancy is counted from live workspaces, so the annotation is
-	// constant-size regardless of the configured cap.
+	acpWorkspaceLastDetachedAnnotation             = "acp.workspace.orka.ai/last-detached-at"
+	acpWorkspaceMaxSuspendedAnnotation             = "acp.workspace.orka.ai/max-suspended"
+	acpWorkspaceSuspendAfterDetachAnnotation       = "acp.workspace.orka.ai/suspend-after-detach"
+	acpWorkspaceSuspendAtAnnotation                = "acp.workspace.orka.ai/suspend-at"
+	acpWorkspaceSuspendPendingAnnotation           = "acp.workspace.orka.ai/suspend-pending"
+	maxACPWorkspaceSuspendAfterDetach              = time.Hour
+	acpWorkspaceLegacyRetentionDeadlineAnnotation  = "acp.workspace.orka.ai/legacy-retention-deadline"
+	acpWorkspaceRetentionRequeue                   = 5 * time.Minute
+	acpWorkspaceLegacyRetentionGrace               = 24 * time.Hour
 	acpSuspendQuotaLeaseClassUIDAnnotation         = "acp.workspace.orka.ai/suspend-quota-class-uid"
 	acpSuspendQuotaLeaseClaimsAnnotation           = "acp.workspace.orka.ai/suspend-quota-claims"
 	acpWorkspaceRetentionFenceIdentityLabel        = "acp.workspace.orka.ai/retention-fence-for"
@@ -76,19 +64,9 @@ const (
 
 var errACPWorkspaceRevocationStampInvalid = errors.New("workspace revocation stamp is invalid")
 
-// ACPWorkspaceRetentionReconciler enforces the frozen class lifetime policy on
-// class-backed ACP execution workspaces: idleTimeout bounds how long an
-// unattached workspace may stay Ready or Suspended, and maxLifetime is the
-// hard upper bound that forces terminal cleanup regardless of state. It acts
-// in Orka core's role (it writes desired state and object deletion only);
-// the workspace adapter keeps executing the transitions.
 type ACPWorkspaceRetentionReconciler struct {
 	client.Client
-	// APIReader bypasses the informer cache for suspended-capacity counts so
-	// a quota claim never trusts a stale list. Falls back to Client when nil.
-	APIReader client.Reader
-	// DurableControlStore resolves immutable Session identities for unlinked
-	// continuation Tasks. Without it, retention keeps demand fail-closed.
+	APIReader           client.Reader
 	DurableControlStore store.DurableControlStore
 	Recorder            events.EventRecorder
 	Now                 func() time.Time
@@ -119,10 +97,6 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(workspace, executionWorkspaceFinalizer) {
-		// The cleanup finalizer is the guarantee that an expiry delete runs
-		// the linked RuntimePool teardown and records the terminal
-		// disposition; deleting before the core controller installs it would
-		// remove the object immediately and orphan the pool. Wait for it.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	now := r.now()
@@ -133,18 +107,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	if deadlineStamped {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	// Inspect the deterministic retention fence before either lifetime path can
-	// return. A malformed reserved Lease must not survive a maxLifetime-only
-	// workspace and keep future incarnations fail-closed forever.
 	retentionFence, demandCutoff, err := r.currentACPWorkspaceRetentionFence(ctx, workspace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// The lifetime deadline never bypasses idle evaluation: a class whose
-	// maxLifetime is nearer than the poll interval must still apply an
-	// already-elapsed idleTimeout now, so the earliest applicable deadline
-	// only clamps the requeue below.
 	lifetimeRequeue := acpWorkspaceRetentionRequeue
 	if lifetime := workspace.Spec.Lifecycle.MaxLifetime; lifetime != nil && lifetime.Duration > 0 {
 		deadline := workspace.CreationTimestamp.Add(lifetime.Duration)
@@ -176,11 +143,6 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	if workspace.Spec.Attachment != nil || workspace.Status.AttachedEpoch > 0 {
-		// A live attachment, or a revoked one whose epoch the adapter still
-		// enforces, defers idle evaluation; the detach instant stamped at
-		// revocation start opens a fresh idle window. spec.attachmentEpoch is
-		// deliberately NOT consulted: it is the monotonic high-water mark and
-		// stays positive forever after the first attachment.
 		return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 	}
 	if refreshed, err := refreshACPWorkspaceDetachInstantAfterEpochRelease(ctx, r.Client, workspace, now); err != nil {
@@ -191,25 +153,46 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, err
 	} else if refreshed {
-		// Re-read after the optimistic patch before applying idle policy. This
-		// also gives Task settlement a chance to execute the frozen detach
-		// action against the completed revocation.
 		return releaseQuota(ctrl.Result{RequeueAfter: time.Second})
+	}
+	if deadline, open := acpWorkspaceWarmWindowOpen(workspace); open {
+		tainted, taintErr := acpWorkspaceOperatorTainted(ctx, uncachedReader(r.APIReader, r.Client), workspace)
+		if taintErr != nil {
+			return ctrl.Result{}, taintErr
+		}
+		if !tainted && now.Before(deadline) {
+			return releaseQuota(ctrl.Result{RequeueAfter: min(deadline.Sub(now)+time.Second, lifetimeRequeue)})
+		}
+	}
+	if result, handled, err := r.reconcileWarmDetachWindow(ctx, workspace, now, lifetimeRequeue); err != nil {
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
+	}
+	if acpWorkspaceWarmSuspendRetryable(workspace) {
+		demandOutstanding, err := r.pendingWorkspaceDemandOutstanding(ctx, workspace, demandCutoff)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if demandOutstanding {
+			if retentionFence != nil {
+				if err := r.deleteACPWorkspaceRetentionFence(ctx, retentionFence); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
+		}
+	}
+	if result, handled, err := r.retryPendingWarmSuspend(ctx, workspace, now); err != nil {
+		return ctrl.Result{}, err
+	} else if handled {
+		return result, nil
 	}
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
-		// With idle retention disabled, demand cannot change any decision
-		// here (every branch below the demand lookup returns the same
-		// lifetime requeue), so the uncached requester lookup and the
-		// namespace-wide continuation scan are skipped entirely instead of
-		// running O(workspaces x Tasks) every five-minute requeue.
 		return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 	}
 	if _, present := workspace.Annotations[acpWorkspaceLastDetachedAnnotation]; !present && workspace.Spec.AttachmentEpoch > 0 {
-		// Older controllers could settle a suspension without recording the
-		// detach instant. Start one full idle interval at the first post-upgrade
-		// observation instead of expiring that retained workspace from its
-		// creation time. A present but malformed stamp remains fail-closed below.
 		base := workspace.DeepCopy()
 		if workspace.Annotations == nil {
 			workspace.Annotations = map[string]string{}
@@ -228,19 +211,11 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 	if demandOutstanding && retentionFence != nil {
-		// A controller restart can occur after the idle-expiry fence is
-		// installed but before its post-fence demand scan cancels it. Retire
-		// that stale barrier before returning for live demand so the requester
-		// can resume the preserved incarnation.
 		if err := r.deleteACPWorkspaceRetentionFence(ctx, retentionFence); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	if workspace.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady && demandOutstanding {
-		// A live continuation requested cold resume and has not attached yet;
-		// the workspace is actively demanded even after the boot completes.
-		// Observed Suspended or Suspending alone is not demand: if the requester
-		// dies, idle retention resumes from the actual detach timestamp.
 		return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 	}
 	idleStart := workspace.CreationTimestamp.Time
@@ -248,11 +223,6 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 		raw := strings.TrimSpace(value)
 		parsed, parseErr := time.Parse(time.RFC3339Nano, raw)
 		if parseErr != nil {
-			// The stamp is controller-written, so a malformed value means the
-			// admission-protected metadata was corrupted. Falling back to the
-			// creation time would treat a long-lived workspace as instantly
-			// idle-expired and destroy or suspend it; fail closed on the
-			// bounded maxLifetime path instead.
 			r.recordRetention(workspace, "RetentionIdleStampInvalid",
 				"the last-detached-at annotation is not RFC3339Nano; idle retention is held and only maxLifetime applies")
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
@@ -268,27 +238,14 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 	switch workspace.Spec.DesiredState {
 	case workspacev1alpha1.ExecutionWorkspaceDesiredSuspended:
 		if demandOutstanding {
-			// A continuation already registered UID-bound demand (it can
-			// stamp it while the suspension still settles); the retained
-			// checkpoint is about to be resumed, not expired. maxLifetime
-			// remains the hard bound if that requester dies.
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
-		// A suspended workspace past its idle timeout has exhausted its
-		// retention: only terminal deletion is admitted until richer retention
-		// dispositions exist.
 		return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "IdleRetentionExpired",
 			"class idleTimeout elapsed for the suspended workspace; retention is exhausted", true)
 	case workspacev1alpha1.ExecutionWorkspaceDesiredReady:
-		// Task detach overrides govern settlement only. Once an unattached
-		// Ready workspace exhausts idleTimeout, the frozen class default is
-		// the retention policy regardless of the last Task's choice.
 		if recordedAction, present := workspace.Annotations[acpWorkspaceDetachActionAnnotation]; present &&
 			recordedAction != string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			recordedAction != string(workspacev1alpha1.WorkspaceOnDetachDelete) {
-			// The controller-written settlement action is corrupt or from a
-			// newer binary. Hold cleanup even though idle retention uses the
-			// class default: another controller path may still consume it.
 			r.recordRetention(workspace, "UnknownIdleAction",
 				"class idleTimeout elapsed, but the recorded Task detach action is not executable by this controller; failing closed")
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
@@ -301,23 +258,16 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		if workspace.Status.State == workspacev1alpha1.ExecutionWorkspaceStateFailed {
-			// The adapter treats Failed as terminal and will not retry a cold
-			// resume or suspension. Starting another suspension would only
-			// refresh last-detached-at and extend retained data past idleTimeout.
 			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "FailedWorkspaceIdleExpired",
 				"class idleTimeout elapsed for the terminally failed workspace; applying the Delete disposition", true)
 		}
 		if durableMarker, present := workspace.Annotations[acpWorkspaceDurableAnnotation]; idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) && present && durableMarker != booleanTrueValue {
-			// A present durable marker is controller-authenticated. Invalid
-			// content is corruption, not evidence that Delete is safe.
 			r.recordRetention(workspace, "InvalidDurableCapability",
 				"class idleTimeout elapsed, but the durable-workspace marker is invalid; failing closed")
 			return releaseQuota(ctrl.Result{RequeueAfter: lifetimeRequeue})
 		}
 		operatorTainted := false
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) {
-			// The workspace marker and the marker of every Task linked to this
-			// exact incarnation both count; an unreadable Task holds retention.
 			tainted, err := acpWorkspaceOperatorTainted(ctx, r.quotaReader(), workspace)
 			if err != nil {
 				return ctrl.Result{}, err
@@ -325,17 +275,12 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			operatorTainted = tainted
 		}
 		if operatorTainted {
-			// Operator access forfeits retention: a tainted workspace is never
-			// captured into a data checkpoint for continuation or forks.
 			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "OperatorTaintedIdleExpired",
 				"class idleTimeout elapsed for a workspace tainted by operator access; applying the Delete disposition instead of Suspend", true)
 		}
 		if idleAction == string(workspacev1alpha1.WorkspaceOnDetachSuspend) &&
 			runtimePoolWorkspaceSuspendableAnnotationPresent(workspace) &&
 			strings.TrimSpace(workspace.Annotations[acpWorkspaceDurableSessionCommittedAnnotation]) == "" {
-			// A materialized RuntimePool is not proof that this incarnation
-			// contains a durable session. Match Task settlement and delete an
-			// empty workspace rather than suspending it for a later continuation.
 			return ctrl.Result{}, r.expireWorkspace(ctx, workspace, "UncommittedWorkspaceIdleExpired",
 				"class idleTimeout elapsed before a durable RuntimeSession checkpoint was committed; deleting the empty workspace incarnation", true)
 		}
@@ -349,9 +294,6 @@ func (r *ACPWorkspaceRetentionReconciler) Reconcile(ctx context.Context, req ctr
 			)
 			switch {
 			case errors.Is(err, errACPSuspendQuotaExhausted):
-				// Quota exhaustion does not authorize replacing the class
-				// default Suspend action with Delete. Keep the workspace Ready
-				// and retry; maxLifetime remains the independent hard bound.
 				r.recordRetention(workspace, "SuspendQuotaExhausted",
 					"class idleTimeout elapsed and the retention cap is exhausted; the class Suspend action remains pending")
 				return ctrl.Result{RequeueAfter: lifetimeRequeue}, nil
@@ -377,10 +319,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileQuarantinedWorkspaceRetention
 	now time.Time,
 	lifetimeRequeue time.Duration,
 ) (ctrl.Result, error) {
-	// Quarantine is terminal and never reusable, but it can still carry the
-	// deterministic Session workspace name. Apply idleTimeout from the
-	// revocation/detach instant so an idle-only class eventually enters the
-	// finalizer-backed cleanup path instead of retaining the record forever.
 	idle := workspace.Spec.Lifecycle.IdleTimeout
 	if idle == nil || idle.Duration <= 0 {
 		if err := releaseObsoleteACPSuspendQuotaLease(ctx, r.Client, r.quotaReader(), workspace); err != nil {
@@ -412,11 +350,6 @@ func (r *ACPWorkspaceRetentionReconciler) reconcileQuarantinedWorkspaceRetention
 		"class idleTimeout elapsed for the terminal quarantined workspace; forcing terminal cleanup", false)
 }
 
-// ensureRetentionFallbackDeadline gives workspaces whose normal idle clock is
-// unavailable one bounded migration window from their first observation. This
-// covers legacy unbounded retention, corrupted controller-owned idle metadata,
-// and old quota-capped bindings that lack the maxLifetime now required for
-// bounded suspension deferral.
 func (r *ACPWorkspaceRetentionReconciler) ensureRetentionFallbackDeadline(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -487,10 +420,6 @@ func acpWorkspaceRetentionFallbackReason(workspace *workspacev1alpha1.ExecutionW
 	return "", false
 }
 
-// refreshACPWorkspaceDetachInstantAfterEpochRelease replaces the provisional
-// revocation-start timestamp once the adapter no longer enforces the epoch.
-// Comparing the two stamps makes the update one-shot while retaining the
-// revocation marker until Task settlement applies the frozen detach action.
 func refreshACPWorkspaceDetachInstantAfterEpochRelease(
 	ctx context.Context,
 	writer client.Client,
@@ -529,10 +458,6 @@ func refreshACPWorkspaceDetachInstantAfterEpochRelease(
 	return true, nil
 }
 
-// runtimePoolWorkspaceSuspendableAnnotationPresent reports whether the
-// materialized workspace carries frozen evidence that its class profile
-// permitted DataOnly suspension. The detach action remains accepted for
-// workspaces created before the durable marker was introduced.
 func runtimePoolWorkspaceSuspendableAnnotationPresent(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
 	durable, present := workspace.Annotations[acpWorkspaceDurableAnnotation]
 	if present {
@@ -542,10 +467,6 @@ func runtimePoolWorkspaceSuspendableAnnotationPresent(workspace *workspacev1alph
 		workspace.Annotations[acpWorkspaceDetachActionAnnotation] == string(workspacev1alpha1.WorkspaceOnDetachSuspend)
 }
 
-// runtimePoolWorkspaceMayContainDurableData is the fail-closed retention and
-// quota predicate. A present malformed controller-owned durable marker is
-// possible preservation evidence until the adapter proves data absence or
-// terminal cleanup.
 func runtimePoolWorkspaceMayContainDurableData(workspace *workspacev1alpha1.ExecutionWorkspace) bool {
 	if workspace == nil || workspace.Annotations[acpWorkspaceDurableDataAbsentAnnotation] == booleanTrueValue {
 		return false
@@ -570,10 +491,6 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 			return err
 		}
 		if retentionFence != nil {
-			// Fence creation is the idle-expiry linearization point. Re-scan
-			// through the uncached reader after it exists so every continuation
-			// admitted before the fence wins and cancels deletion. A Task born
-			// later is ordered after expiry and may start a fresh incarnation.
 			activatedAt, activationErr := acpWorkspaceRetentionFenceActivation(retentionFence)
 			if activationErr != nil {
 				return activationErr
@@ -587,25 +504,15 @@ func (r *ACPWorkspaceRetentionReconciler) expireWorkspace(
 			}
 		}
 	}
-	// Idle-triggered deletions are fenced with UID+resourceVersion so a
-	// concurrent attachment or resume settles as a retried conflict instead
-	// of destroying a workspace that became actively demanded; the
-	// maxLifetime hard bound stays intentionally unconditional.
 	preconditions := []client.DeleteOption{client.Preconditions{UID: &workspace.UID}}
 	if fenced {
 		preconditions = deleteCurrentObjectPreconditions(workspace)
 	}
 	if err := r.Delete(ctx, workspace, preconditions...); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Another owner already completed deletion. Retention applied no
-			// action, so do not emit an Event or increment the action metric.
 			return nil
 		}
 		if fenced && apierrors.IsConflict(err) {
-			// The fenced deletion lost to a concurrent update (an attachment
-			// or resume made the workspace actively demanded); nothing was
-			// applied, so no Event or action metric is recorded. Cancel the
-			// expiry fence too so the winning Task remains admissible.
 			if retentionFence != nil {
 				return r.deleteACPWorkspaceRetentionFence(ctx, retentionFence)
 			}
@@ -677,8 +584,6 @@ func (r *ACPWorkspaceRetentionReconciler) acpWorkspaceRetentionControl(
 	}
 	if err := r.quotaReader().Get(ctx, controlKey, control); err != nil {
 		if apierrors.IsNotFound(err) {
-			// A deleted Session cannot admit another continuation for this
-			// immutable UID, so no surviving admission fence is needed.
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read RuntimeSessionControl for workspace retention fence: %w", err)
@@ -687,9 +592,6 @@ func (r *ACPWorkspaceRetentionReconciler) acpWorkspaceRetentionControl(
 		return nil, fmt.Errorf("RuntimeSessionControl identity does not match the retained workspace Session")
 	}
 	if control.Spec.SessionUID != sessionUID {
-		// A same-name replacement Session cannot admit a continuation for the
-		// workspace's immutable Session UID, so it leaves no surviving Task
-		// admission path to fence.
 		return nil, nil
 	}
 	return control, nil
@@ -735,10 +637,6 @@ func (r *ACPWorkspaceRetentionReconciler) activateACPWorkspaceRetentionFence(
 		}
 		return lease, nil
 	}
-	// Keep the deterministic logical-workspace name, but recreate the Lease for
-	// each workspace incarnation. Its API-server creationTimestamp is the
-	// linearization point shared with Task creationTimestamp; patching the old
-	// Lease would retain an earlier cutoff and could miss new demand.
 	return r.replaceACPWorkspaceRetentionFence(ctx, lease, workspace, control)
 }
 
@@ -779,9 +677,6 @@ func (r *ACPWorkspaceRetentionReconciler) ensureACPWorkspaceRetentionFenceActiva
 	if raw := strings.TrimSpace(lease.Annotations[acpWorkspaceRetentionFenceActivatedAnnotation]); raw == canonical {
 		return activatedAt, nil
 	}
-	// The API server owns creationTimestamp, so it is safe to canonicalize old,
-	// missing, or controller-clock activation values to that shared ordering
-	// point. Tasks and the fence are then compared on one clock.
 	base := lease.DeepCopy()
 	if lease.Annotations == nil {
 		lease.Annotations = map[string]string{}
@@ -861,10 +756,6 @@ func (r *ACPWorkspaceRetentionReconciler) currentACPWorkspaceRetentionFence(
 		return nil, nil, err
 	}
 	if control == nil || validateACPWorkspaceRetentionFence(lease, workspace, control) != nil {
-		// This deterministic name is reserved for the logical workspace. Remove
-		// malformed or incorrectly owned pre-upgrade objects with exact object
-		// preconditions so a concurrent valid replacement wins and the next
-		// reconcile re-reads it.
 		if err := r.deleteACPWorkspaceRetentionFence(ctx, lease); err != nil {
 			return nil, nil, err
 		}
@@ -922,10 +813,6 @@ func (r *TaskReconciler) taskBlockedByACPWorkspaceRetentionFence(
 			return false, fmt.Errorf("%w: workspace retention fence metadata is invalid", errACPWorkspaceBindingConflict)
 		}
 		if workspace != nil && string(workspace.UID) == fencedWorkspaceUID {
-			// The retention reconciler creates the barrier before its final
-			// uncached demand scan. Tasks visible to that scan cancel expiry;
-			// later Tasks wait without mutating the old incarnation until cleanup
-			// exposes an absent or replacement UID.
 			return true, nil
 		}
 	}
@@ -947,22 +834,13 @@ type acpSuspendQuotaLockEntry struct {
 	references int
 }
 
-// acpSuspendQuotaLocks avoids redundant Lease contention inside one process.
-// The Kubernetes Lease below fences claims across leader handoff. Entries
-// remain only while a holder or waiter references them, so deleted and
-// recreated classes do not accumulate process-local locks.
 var (
 	acpSuspendQuotaLocksMu sync.Mutex
 	acpSuspendQuotaLocks   = map[string]*acpSuspendQuotaLockEntry{}
 )
 
-// errACPSuspendQuotaExhausted reports a claim rejected by the frozen class
-// retention cap; callers reject admission or keep the frozen Suspend action
-// pending until capacity opens.
 var errACPSuspendQuotaExhausted = errors.New("class suspended-workspace retention cap is exhausted")
 
-// errACPSuspendQuotaBusy asks the caller to retry after another workspace's
-// Kubernetes-backed count-and-patch transaction finishes or is recovered.
 var errACPSuspendQuotaBusy = errors.New("class suspended-workspace quota claim is in progress")
 
 func lockACPSuspendQuota(namespace string, classUID types.UID) func() {
@@ -1208,10 +1086,6 @@ func claimACPSuspendQuotaSlot(
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("read suspension quota Lease: %w", err)
 	}
-	// Read the durable transaction fence before taking the authoritative
-	// workspace snapshot. Any claim or release that races the list advances
-	// the Lease resourceVersion, so the final optimistic write retries instead
-	// of committing against stale occupancy from another leader.
 	workspaces, listErr := listACPSuspendQuotaWorkspaces(
 		ctx, reader, workspace.Namespace, workspace.Spec.ClassBinding.UID,
 	)
@@ -1225,10 +1099,6 @@ func claimACPSuspendQuotaSlot(
 		lease, workspace.Spec.ClassBinding.Name, workspace.Spec.ClassBinding.UID,
 	)
 	if err != nil {
-		// The name is reserved for this class transaction fence. Replace a
-		// malformed pre-upgrade or tenant-created object only if its exact UID
-		// and resourceVersion still match the authoritative read. A concurrent
-		// valid replacement wins and forces this claimant to retry.
 		if deleteErr := writer.Delete(ctx, lease, deleteCurrentObjectPreconditions(lease)...); deleteErr != nil {
 			if apierrors.IsConflict(deleteErr) || apierrors.IsNotFound(deleteErr) {
 				return errACPSuspendQuotaBusy
@@ -1318,19 +1188,12 @@ func releaseObsoleteACPSuspendQuotaLease(
 		!workspaceConsumesSuspendedQuota(current) && current.DeletionTimestamp.IsZero() &&
 		current.Spec.DesiredState == workspacev1alpha1.ExecutionWorkspaceDesiredReady &&
 		claim.WorkspaceName == current.Name && claim.ResourceVersion == current.ResourceVersion {
-		// The workspace write recorded by this pending claim can still succeed.
-		// Keep the slot reserved so a replacement leader can finish it.
 		return nil
 	}
 	delete(claims, uid)
 	return patchACPSuspendQuotaClaims(ctx, writer, lease, claims)
 }
 
-// suspendACPWorkspaceWithinQuota atomically claims one suspension slot under
-// the workspace's frozen retention cap and patches it to Suspended, stamping
-// the detach instant so the suspended state earns a full retention interval.
-// It returns errACPSuspendQuotaExhausted when the cap is already consumed and
-// passes patch conflicts through for the caller's requeue policy.
 func suspendACPWorkspaceWithinQuota(
 	ctx context.Context,
 	writer client.Client,
@@ -1341,9 +1204,6 @@ func suspendACPWorkspaceWithinQuota(
 	settledTaskUID string,
 	settledTaskEpoch int64,
 ) error {
-	// Backstop for every suspension path: a workspace tainted through its own
-	// marker or the marker of any Task linked to this exact incarnation is
-	// never checkpointed, and an unreadable Task refuses the suspension.
 	tainted, err := acpWorkspaceOperatorTainted(ctx, reader, workspace)
 	if err != nil {
 		return fmt.Errorf("refusing to suspend workspace %s: %w", workspace.Name, err)
@@ -1357,8 +1217,6 @@ func suspendACPWorkspaceWithinQuota(
 		) && acpWorkspaceSettlementReceiptCoversTask(
 		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation], settledTaskUID, settledTaskEpoch,
 	) {
-		// This settlement already landed or a later attachment displaced it.
-		// Do not reserve quota or suspend newer Ready state.
 		return nil
 	}
 	unlock := lockACPSuspendQuota(workspace.Namespace, workspace.Spec.ClassBinding.UID)
@@ -1378,17 +1236,14 @@ func suspendACPWorkspaceWithinQuota(
 	}
 	delete(workspace.Annotations, acpWorkspaceRevocationStartedAnnotation)
 	if settledTaskUID != "" {
-		// The settlement receipt lands in the SAME patch as the suspension:
-		// if the controller dies before the separate Task-side marker patch,
-		// a restarted reconcile of that Task finds its receipt here and
-		// completes the marker instead of re-applying Suspend to newer
-		// session state.
 		workspace.Annotations[acpWorkspaceLastSettledTaskAnnotation] =
 			formatACPWorkspaceSettlementReceipt(settledTaskUID, settledTaskEpoch)
 	}
-	// Suspension settles any pending provisioning or resume demand; a later
-	// continuation stamps fresh demand when it flips the workspace back.
 	delete(workspace.Annotations, acpWorkspaceResumeRequestedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendAtAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSuspendPendingAnnotation)
+	delete(workspace.Annotations, acpWorkspaceWarmWindowDrainedAnnotation)
+	delete(workspace.Annotations, acpWorkspaceSpeculativeStartAnnotation)
 	workspace.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredSuspended
 	return writer.Patch(ctx, workspace, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
@@ -1425,9 +1280,6 @@ func workspaceConsumesSuspendedQuota(workspace *workspacev1alpha1.ExecutionWorks
 	return suspendedCharge || coldResumeCharge || failedDurableCharge || maintenanceCharge || deletingCharge
 }
 
-// countSuspendedClassWorkspaces counts suspended workspaces bound to the exact
-// class UID in one namespace, skipping candidates the exclude predicate
-// accepts.
 func countSuspendedClassWorkspaces(
 	ctx context.Context,
 	reader client.Reader,
@@ -1453,10 +1305,6 @@ func countSuspendedClassWorkspaces(
 	return count, nil
 }
 
-// pendingWorkspaceDemandOutstanding reports whether the demand record on the
-// workspace still has a live requester. Current records bind the requesting
-// Task's immutable UID. Legacy records without that identity fall through to
-// the exact Session continuation scan below.
 func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -1465,17 +1313,9 @@ func (r *ACPWorkspaceRetentionReconciler) pendingWorkspaceDemandOutstanding(
 	if outstanding, err := r.recordedWorkspaceDemandLive(ctx, workspace, createdNotAfter); err != nil || outstanding {
 		return outstanding, err
 	}
-	// The single UID-bound stamp records only the LAST writer: when several
-	// Tasks queue for the same suspended Session workspace, a later requester
-	// overwrites an earlier one, and the recorded requester terminating must
-	// not surrender the workspace while another live continuation still
-	// waits. Any live, non-terminal Task on the workspace's Session keeps
-	// demand outstanding; maxLifetime remains the hard bound.
 	return r.liveSessionContinuationExists(ctx, workspace, createdNotAfter)
 }
 
-// recordedWorkspaceDemandLive reports whether the current UID-bound demand
-// stamp names a live, non-terminal requester.
 func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -1487,15 +1327,9 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 	}
 	fields, valid := parseACPWorkspaceResumeRequestStamp(value)
 	if !valid {
-		// A malformed controller-owned stamp is not safe evidence that demand
-		// ended. Fail closed while the persisted fallback deadline bounds the
-		// corruption when the class has no maxLifetime.
 		return true, nil
 	}
 	if len(fields) < 3 {
-		// Legacy controllers recorded either only the timestamp or the timestamp
-		// plus a mutable Task name. Neither format proves requester identity, so
-		// resolve demand through the exact Session continuation scan below.
 		return false, nil
 	}
 	task := &corev1alpha1.Task{}
@@ -1507,8 +1341,6 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 		return true, err
 	}
 	if len(fields) >= 3 && string(task.UID) != fields[2] {
-		// A replacement Task under the recycled namespace/name is not the
-		// requester; its unrelated lifetime must not keep stale demand alive.
 		return false, nil
 	}
 	if taskCreatedAfter(task, createdNotAfter) {
@@ -1518,8 +1350,6 @@ func (r *ACPWorkspaceRetentionReconciler) recordedWorkspaceDemandLive(
 		task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
 		task.Status.Phase == corev1alpha1.TaskPhaseFailed ||
 		task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		// The requester can never attach; its settlement (or deletion
-		// settlement) owns any remaining cleanup.
 		return false, nil
 	}
 	return true, nil
@@ -1536,9 +1366,6 @@ func parseACPWorkspaceResumeRequestStamp(value string) ([]string, bool) {
 	return fields, true
 }
 
-// liveSessionContinuationExists reports whether any live, non-terminal Task
-// targets the workspace's Session. The Task CRD exposes sessionRef.name as a
-// selectable field, so the uncached read remains bounded to that Session.
 func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -1558,8 +1385,6 @@ func (r *ACPWorkspaceRetentionReconciler) liveSessionContinuationExists(
 			return true, nil
 		}
 		if r.DurableControlStore == nil {
-			// Without the immutable Session lookup, retain the existing
-			// fail-closed behavior for an otherwise eligible waiter.
 			return true, nil
 		}
 		control, controlErr := r.DurableControlStore.GetSessionControl(
@@ -1583,12 +1408,6 @@ func taskCreatedAfter(task *corev1alpha1.Task, cutoff *time.Time) bool {
 	return task != nil && cutoff != nil && !task.CreationTimestamp.IsZero() && task.CreationTimestamp.After(*cutoff)
 }
 
-// liveACPSessionContinuations returns every live, non-terminal continuation
-// Task targeting this exact workspace incarnation, in list order. It fails
-// closed (error, treated as demand outstanding by callers) on list errors.
-// Returning ALL candidates lets settlement scan past one ineligible waiter
-// (an out-of-policy override, a recreated Session) instead of concluding no
-// successor exists while a later valid continuation is queued.
 func liveACPSessionContinuations(
 	ctx context.Context,
 	reader client.Reader,
@@ -1606,10 +1425,6 @@ func liveACPSessionContinuations(
 	); err != nil {
 		return nil, err
 	}
-	// The class-UID verification for unlinked candidates is resolved once: a
-	// class deleted and recreated under the same name carries a different
-	// immutable UID, and its Tasks resolve a NEW workspace incarnation, so
-	// they are never demand for this one.
 	classIdentityChecked := false
 	classIdentityMatches := false
 	var candidates []*corev1alpha1.Task
@@ -1621,15 +1436,6 @@ func liveACPSessionContinuations(
 		if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) != sessionName {
 			continue
 		}
-		// Demand binds to this workspace INCARNATION, not the Session name: a
-		// Session deleted and recreated under the same namespace/name
-		// resolves a different immutable Session UID, and its Tasks can never
-		// attach here. A waiter that has been reconciled carries the
-		// controller-written workspace link (name plus incarnation UID);
-		// verification rejects cross-incarnation links before they are ever
-		// stamped, so a Task linked elsewhere is never demand for this
-		// workspace. A not-yet-linked waiter counts until its first
-		// reconcile either links it here or fails it terminally.
 		linkName := strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel])
 		linkUID := strings.TrimSpace(task.Annotations[acpExecutionWorkspaceUIDAnnotation])
 		exactIncarnation := linkName == workspace.Name && linkUID == string(workspace.UID)
@@ -1637,20 +1443,10 @@ func liveACPSessionContinuations(
 			continue
 		}
 		if !exactIncarnation {
-			// An unlinked Task counts only when it actually requests a
-			// session-reused execution workspace: a plain transcript-backed
-			// Task sharing the Session name can never attach here, and
-			// counting it would suppress idle retention (and hold quota) for
-			// its entire lifetime.
 			if task.Spec.Execution == nil || task.Spec.Execution.Workspace == nil ||
 				task.Spec.Execution.Workspace.ClassRef == nil ||
 				task.Spec.Execution.Workspace.ClassRef.Name != workspace.Spec.ClassBinding.Name ||
 				task.Spec.Execution.Workspace.ReusePolicy != corev1alpha1.WorkspaceReusePolicySession {
-				// Different classes deliberately produce separate workspace
-				// incarnations, and the legacy enabled-workspace path never
-				// binds a class workspace: a Task that cannot resolve to
-				// THIS workspace must not defer its settlement or hold its
-				// retention.
 				continue
 			}
 			if !classIdentityChecked {
@@ -1661,8 +1457,6 @@ func liveACPSessionContinuations(
 				}, class)
 				switch {
 				case apierrors.IsNotFound(err):
-					// The frozen class is gone: name-matched waiters resolve
-					// nothing (or a future recreation's NEW incarnation).
 				case err != nil:
 					return nil, err
 				default:
@@ -1670,10 +1464,6 @@ func liveACPSessionContinuations(
 				}
 			}
 			if !classIdentityMatches {
-				// The class was deleted and recreated under the same name:
-				// this waiter's classRef resolves the REPLACEMENT class and a
-				// different workspace incarnation, so it must not suppress
-				// this workspace's settlement or idle retention.
 				continue
 			}
 		}
@@ -1688,20 +1478,14 @@ func liveACPSessionContinuations(
 	return candidates, nil
 }
 
-// acpWorkspaceSuspendedCapFromAnnotation parses the frozen retention cap
-// recorded on the materialized workspace, or nil when unbounded.
 func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.ExecutionWorkspace) *int32 {
 	value, present := workspace.Annotations[acpWorkspaceMaxSuspendedAnnotation]
 	if !present {
-		// Absent means the class froze no cap: retention is unbounded by
-		// design.
 		return nil
 	}
 	raw := strings.TrimSpace(value)
 	parsed, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil || parsed < 0 {
-		// A present-but-invalid frozen value fails closed as an exhausted cap
-		// (zero) instead of silently disabling the class's hard quota.
 		zero := int32(0)
 		return &zero
 	}
@@ -1709,7 +1493,6 @@ func acpWorkspaceSuspendedCapFromAnnotation(workspace *workspacev1alpha1.Executi
 	return &limit
 }
 
-// SetupWithManager registers retention enforcement for ACP class workspaces.
 func (r *ACPWorkspaceRetentionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	ours := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		return object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] == acpWorkspaceControllerLabelValue || (object.GetLabels()[workspacev1alpha1.ProviderControllerLabel] != "" && object.GetAnnotations()[acpExecutionWorkspacePoolAnnotation] != "")

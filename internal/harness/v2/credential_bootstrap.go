@@ -12,48 +12,24 @@ import (
 	"strings"
 )
 
-// Credential bootstrap is the one-time seeding step for provider-hosted
-// supervisors that boot credential-free: execution-workspace providers
-// materialize the workload from a provider-visible template (and may build a
-// golden snapshot by booting and checkpointing an instance), so no credential
-// may exist in the process or its template until the controller seeds it. A
-// public per-instance nonce binds the target workload, while an Ed25519
-// signature derived from a controller-only bootstrap seed authenticates the
-// exact payload against a non-secret public key embedded in the template. The
-// signing seed is distinct from every credential in the request body.
-
 const (
-	// CredentialBootstrapPath is the one-time, idempotent seeding endpoint.
-	CredentialBootstrapPath = "/v2/credential-bootstrap"
-	// CredentialBootstrapNonceHeader carries the pool bootstrap nonce.
-	CredentialBootstrapNonceHeader = "X-Orka-Credential-Bootstrap-Nonce"
-	// CredentialBootstrapSignatureHeader carries the controller's Ed25519
-	// signature over the nonce and exact request body.
+	CredentialBootstrapPath            = "/v2/credential-bootstrap"
+	CredentialBootstrapNonceHeader     = "X-Orka-Credential-Bootstrap-Nonce"
 	CredentialBootstrapSignatureHeader = "X-Orka-Credential-Bootstrap-Signature"
-	// CredentialBootstrapPublicKeyEnv carries the non-secret per-instance Ed25519
-	// public key used by a credential-free provider-hosted supervisor.
-	CredentialBootstrapPublicKeyEnv = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_PUBLIC_KEY"
+	CredentialBootstrapPublicKeyEnv    = "ORKA_ACP_CREDENTIAL_BOOTSTRAP_PUBLIC_KEY"
 
 	credentialBootstrapSigningSeedDomain = "orka.harness.v2/credential-bootstrap-signing-seed/v1"
 	credentialBootstrapSigningDomain     = "orka.harness.v2/credential-bootstrap-signature/v1"
 )
 
-// ProviderTokenEgressInjectionPlaceholder is the public provider token Core
-// seeds into a runtime whose provider-proxy bearer the backend egress gateway
-// injects. The supervisor sends it as "Authorization: Bearer <placeholder>";
-// the gateway replaces the whole header value before the request reaches the
-// provider proxy, which never accepts the placeholder itself.
 const ProviderTokenEgressInjectionPlaceholder = "orka-egress-gateway-injects-provider-credential"
 
-// CredentialBootstrapRequest is the seeding payload. First write wins; an
-// identical repeat is acknowledged; a different payload conflicts.
 type CredentialBootstrapRequest struct {
 	ControllerToken  string `json:"controllerToken"`
 	CapabilitySecret string `json:"capabilitySecret"`
 	ProviderToken    string `json:"providerToken"`
 }
 
-// Validate enforces the same minimum credential shapes as supervisor boot.
 func (r CredentialBootstrapRequest) Validate() error {
 	if len(strings.TrimSpace(r.ControllerToken)) < 32 {
 		return errors.New("controllerToken must be at least 32 bytes")
@@ -67,8 +43,6 @@ func (r CredentialBootstrapRequest) Validate() error {
 	return nil
 }
 
-// CredentialBootstrapPublicKey derives and encodes the non-secret Ed25519
-// verification key for one controller-only bootstrap signing seed.
 func CredentialBootstrapPublicKey(signingSeed []byte) (string, error) {
 	privateKey, err := credentialBootstrapSigningKey(signingSeed)
 	if err != nil {
@@ -78,8 +52,6 @@ func CredentialBootstrapPublicKey(signingSeed []byte) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(publicKey), nil
 }
 
-// SignCredentialBootstrap signs the public nonce and exact request body with
-// the controller-only key derived from the bootstrap signing seed.
 func SignCredentialBootstrap(signingSeed []byte, nonce string, body []byte) (string, error) {
 	privateKey, err := credentialBootstrapSigningKey(signingSeed)
 	if err != nil {
@@ -92,8 +64,6 @@ func SignCredentialBootstrap(signingSeed []byte, nonce string, body []byte) (str
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, message)), nil
 }
 
-// VerifyCredentialBootstrap verifies a controller signature from the public
-// key embedded in the provider-visible template.
 func VerifyCredentialBootstrap(publicKeyEncoded, nonce string, body []byte, signatureEncoded string) error {
 	publicKey, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(publicKeyEncoded))
 	if err != nil || len(publicKey) != ed25519.PublicKeySize {

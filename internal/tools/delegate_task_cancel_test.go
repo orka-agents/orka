@@ -20,10 +20,6 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 )
 
-// TestDelegationSeesAParentCancelledAroundChildCreation covers a parent
-// cancelled while a brokered delegation creates its child: a parent already
-// cancelling delegates nothing, and one cancelled right after the child was
-// created cancels that child, which its cascade may have missed.
 func TestDelegationSeesAParentCancelledAroundChildCreation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -76,9 +72,6 @@ func TestDelegationSeesAParentCancelledAroundChildCreation(t *testing.T) {
 	}
 }
 
-// TestCancelChildOfCancelledParentKeepsOtherRequestsAndReplacements covers
-// the post-create cancel finding a child someone already asked to cancel, or
-// a different Task under the child's name: neither is overwritten.
 func TestCancelChildOfCancelledParentKeepsOtherRequestsAndReplacements(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -108,7 +101,7 @@ func TestCancelChildOfCancelledParentKeepsOtherRequestsAndReplacements(t *testin
 	}
 
 	created := replacement.DeepCopy()
-	created.UID = "created-uid" // the child this delegation created, since replaced
+	created.UID = "created-uid"
 	if err := cancelChildOfCancelledParent(ctx, c, c, parent, created); err != nil {
 		t.Fatal(err)
 	}
@@ -120,10 +113,6 @@ func TestCancelChildOfCancelledParentKeepsOtherRequestsAndReplacements(t *testin
 	}
 }
 
-// TestLateChildCancelSurvivesTheCallersCancellation covers the broker
-// cancelling the delegation's context as the caller's authority ends, right
-// after the child was created: the child of the cancelled parent is still
-// cancelled, and a transient write failure is retried.
 func TestLateChildCancelSurvivesTheCallersCancellation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -149,7 +138,7 @@ func TestLateChildCancelSurvivesTheCallersCancellation(t *testing.T) {
 		},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the caller's authority already ended
+	cancel()
 	if err := ensureLateChildCancelled(ctx, base, flaky, parent, child); err != nil {
 		t.Fatalf("ensureLateChildCancelled() = %v, want the child cancelled", err)
 	}
@@ -162,11 +151,6 @@ func TestLateChildCancelSurvivesTheCallersCancellation(t *testing.T) {
 	}
 }
 
-// TestChildOfAnUnknownCreateIsCancelled covers a Create the caller's
-// cancellation cut short after the API server committed the child: its name
-// was never learned, and the parent's cascade had already listed, so the
-// child is found by the parent that delegated it and cancelled. Siblings of
-// another delegation effect and other parents' children are left alone.
 func TestChildOfAnUnknownCreateIsCancelled(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -194,7 +178,6 @@ func TestChildOfAnUnknownCreateIsCancelled(t *testing.T) {
 	stranger := child("parent-child-zz9zz", "earlier-parent-uid", "effect-1")
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, committed, sibling, stranger).Build()
 
-	// The Create's own object never learned the generated name.
 	attempted := committed.DeepCopy()
 	attempted.Name, attempted.UID = "", ""
 	ctx, cancel := context.WithCancel(context.Background())
@@ -215,7 +198,6 @@ func TestChildOfAnUnknownCreateIsCancelled(t *testing.T) {
 		}
 	}
 
-	// A live parent's own cascade lists the child, so nothing is cancelled.
 	live := parent.DeepCopy()
 	live.Annotations = nil
 	other := child("parent-child-live1", "parent-uid", "effect-2")
@@ -251,9 +233,6 @@ func TestChildCreateOutcomeUnknown(t *testing.T) {
 	}
 }
 
-// TestUnknownCreateSearchOutlastsALiveParent covers a parent still live at the
-// search's first look, then cancelled before the child commits: the search
-// keeps watching for its whole window and cancels the child.
 func TestUnknownCreateSearchOutlastsALiveParent(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -281,8 +260,6 @@ func TestUnknownCreateSearchOutlastsALiveParent(t *testing.T) {
 			if key.Name == parent.Name {
 				parentReads++
 				if parentReads == 1 {
-					// After the first look: the parent is cancelled, and the
-					// child the cut-short Create sent commits.
 					live := &corev1alpha1.Task{}
 					if err := w.Get(ctx, key, live); err != nil {
 						return err
@@ -313,9 +290,6 @@ func TestUnknownCreateSearchOutlastsALiveParent(t *testing.T) {
 	}
 }
 
-// TestChildTokenCleanupSurvivesTheCallersCancellation covers a delegation the
-// broker cancelled right after its child token was prepared: the Secret is
-// still deleted, since the parent that owns it is kept.
 func TestChildTokenCleanupSurvivesTheCallersCancellation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {

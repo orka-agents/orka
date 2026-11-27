@@ -23,8 +23,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// extendedBackend adds root extensions, an extension command, a resource and
-// a changeset channel to the fake backend.
 type extendedBackend struct {
 	*fakeBackend
 	read []string
@@ -42,8 +40,6 @@ func (b *extendedBackend) CreateSession(ctx context.Context, principal Principal
 	return created, nil
 }
 
-// HandleClientAction marks the chat busy when the title changes, so the
-// session's summary changes too.
 func (b *extendedBackend) HandleClientAction(ctx context.Context, _ Principal, channel string, action ahptypes.StateAction, emit Emitter) {
 	if _, ok := action.Value.(*ahptypes.SessionTitleChangedAction); !ok {
 		return
@@ -137,8 +133,6 @@ func TestResourceReadServesOnlyASessionsChannels(t *testing.T) {
 	require.NoError(t, err)
 	createSession(t, client, "ahp-session:/one")
 
-	// The client helper always targets the root channel; clients reading a
-	// changeset name its channel.
 	read := func(client *ahp.Client, params ahptypes.ResourceReadParams) (*ahptypes.ResourceReadResult, error) {
 		var out ahptypes.ResourceReadResult
 		err := client.Request(ctx, "resourceRead", params, &out)
@@ -149,7 +143,6 @@ func TestResourceReadServesOnlyASessionsChannels(t *testing.T) {
 	require.Equal(t, "package a\n", got.Data)
 	require.Equal(t, []string{"ahp-session:/one ahp-session:/one/changes file:///work/a.go"}, backend.read)
 
-	// The protocol's root-channel form reaches the backend without a session.
 	root, err := client.ResourceRead(ctx, ahptypes.ResourceReadParams{Uri: "file:///work/a.go"})
 	require.NoError(t, err)
 	require.Equal(t, "package a\n", root.Data)
@@ -164,7 +157,6 @@ func TestResourceReadServesOnlyASessionsChannels(t *testing.T) {
 		require.Equal(t, ahptypes.ErrorCodeNotFound, rpcCode(t, err), "%+v", params)
 	}
 
-	// Another user cannot read the session's resources.
 	other := env.connect(env.mint("bob").Token)
 	_, err = other.Initialize(ctx, "client-b", ahptypes.SupportedProtocolVersions(), nil)
 	require.NoError(t, err)
@@ -209,7 +201,6 @@ func TestSessionSummaryFollowsItsChats(t *testing.T) {
 			t.Fatalf("summary changes: title=%v status=%v", title, status)
 		}
 	}
-	// A moved working directory reaches the summary too.
 	_, err = client.Dispatch(ctx, "ahp-session:/one", ahptypes.StateAction{Value: &ahptypes.SessionWorkingDirectorySetAction{
 		Type: ahptypes.ActionTypeSessionWorkingDirectorySet, Directory: "file:///work/next"}})
 	require.NoError(t, err)
@@ -230,7 +221,6 @@ func TestSessionSummaryFollowsItsChats(t *testing.T) {
 	require.Equal(t, "renamed", listed.Items[0].Title)
 	require.Equal(t, ahptypes.SessionStatusInProgress, listed.Items[0].Status)
 
-	// Disposing removes the changeset channel with the session.
 	require.NoError(t, client.Request(ctx, "disposeSession", ahptypes.DisposeSessionParams{Channel: "ahp-session:/one"}, nil))
 	_, err = env.store.GetAHPChannelState(ctx, ahpUserKey(t, env, minted.Token), changesetURI("ahp-session:/one"))
 	require.ErrorIs(t, err, store.ErrNotFound)

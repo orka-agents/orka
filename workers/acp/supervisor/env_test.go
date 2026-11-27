@@ -17,6 +17,12 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
+var claudeVendorTrafficOptOuts = []string{
+	"DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "DISABLE_INSTALLATION_CHECKS",
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
+	"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+}
+
 func TestProviderProfilesDisableUpdatesAndUsePrivateHomes(t *testing.T) {
 	paths := acp.SessionPaths{Home: "/sessions/private/home"}
 	request := harnessv2.CreateRuntimeSessionRequest{}
@@ -53,7 +59,7 @@ func TestProviderProfilesDisableUpdatesAndUsePrivateHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "DISABLE_INSTALLATION_CHECKS"} {
+	for _, name := range claudeVendorTrafficOptOuts {
 		if claudeEnv[name] != "1" {
 			t.Fatalf("%s = %q", name, claudeEnv[name])
 		}
@@ -160,9 +166,6 @@ func TestCodexProviderSessionProjectionReadOnlySurface(t *testing.T) {
 	}
 	maps.Copy(environment, projection.Environment)
 	assertCodexResumeModelProvider(t, environment)
-	// Read-only sessions keep the orka-external agent mode: Codex's own
-	// sandbox needs unprivileged user namespaces the runtime Pod forbids, so
-	// the RuntimeSession boundary enforces the read-only surface instead.
 	if environment["INITIAL_AGENT_MODE"] != codexAgentModeOrkaExternal {
 		t.Fatalf("INITIAL_AGENT_MODE = %q, want orka-external", environment["INITIAL_AGENT_MODE"])
 	}
@@ -226,7 +229,7 @@ func TestClaudeProviderSessionProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	maps.Copy(environment, projection.Environment)
-	for _, name := range []string{"DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "DISABLE_INSTALLATION_CHECKS"} {
+	for _, name := range claudeVendorTrafficOptOuts {
 		if environment[name] != "1" {
 			t.Fatalf("%s = %q", name, environment[name])
 		}
@@ -244,8 +247,6 @@ func TestClaudeProviderSessionProjection(t *testing.T) {
 		!slices.Contains(options["disallowedTools"].([]string), providerToolBash) {
 		t.Fatalf("Claude options = %#v", options)
 	}
-	// The adapter defaults to user, project, and local settings; repository
-	// settings can define hooks and redirect the provider base URL.
 	if sources, ok := options["settingSources"].([]string); !ok || sources == nil || len(sources) != 0 {
 		t.Fatalf("Claude settingSources = %#v, want an explicit empty list", options["settingSources"])
 	}
@@ -355,8 +356,6 @@ func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
 		})
 	}
 
-	// The child owns the session root after it has run, so a restart's check
-	// must not follow a workspace it replaced with a link to another tree.
 	linked := newPaths(t)
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere", "workspace")
 	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
@@ -374,9 +373,6 @@ func TestOpenCodeRejectsWorkspaceProjectConfiguration(t *testing.T) {
 	}
 }
 
-// OPENCODE_CONFIG_DIR is OpenCode's global configuration folder and lives in
-// the agent-writable session tree. An idle adapter restart must refuse
-// anything there that Orka or OpenCode did not put there, and $HOME/.opencode.
 func TestOpenCodeRejectsSessionConfigurationWrittenAfterCreation(t *testing.T) {
 	profile, err := providerProfile(providerKindOpencode, "openai/gpt-test", harnessv2.WorkspaceIntentWrite, testOpenCodeModelLimits())
 	if err != nil {
@@ -394,14 +390,12 @@ func TestOpenCodeRejectsSessionConfigurationWrittenAfterCreation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// Before PrepareSession the folder does not exist yet.
 		if err := profile.ValidateWorkspace(paths); err != nil {
 			t.Fatalf("fresh session tree was rejected: %v", err)
 		}
 		if err := profile.PrepareSession(paths); err != nil {
 			t.Fatal(err)
 		}
-		// What OpenCode and Orka add while the session runs.
 		configDir := filepath.Join(paths.Config, "opencode")
 		writeTestFile(t, filepath.Join(configDir, ".gitignore"), "node_modules\n")
 		writeTestFile(t, filepath.Join(configDir, "skills", "code-review", "SKILL.md"), "---\nname: code-review\n---\n")
@@ -782,8 +776,6 @@ func TestCodexProviderProfileUsesExternalRuntimeSandbox(t *testing.T) {
 	}
 }
 
-// Both adapter processes must receive the actual Codex provider environment,
-// including after the runtime reconnects the persisted session with session/resume.
 func TestCodexProviderResumeEnvironmentSurvivesIdleRestart(t *testing.T) {
 	server, cfg, profile := newTestServer(t, adapterResumeMode)
 	codex, err := providerProfile(providerKindCodex, profile.Model, profile.WorkspaceIntent)
@@ -845,8 +837,6 @@ func assertCodexResumeModelProvider(t *testing.T, environment map[string]string)
 	if err := json.Unmarshal([]byte(environment["CODEX_CONFIG"]), &config); err != nil {
 		t.Fatal(err)
 	}
-	// The pinned adapter does not consult CODEX_CONFIG for thread/resume's
-	// modelProvider. Its explicit MODEL_PROVIDER must match the session config.
 	if got := environment["MODEL_PROVIDER"]; got != codexProviderID || got != config["model_provider"] {
 		t.Fatalf("MODEL_PROVIDER = %q, CODEX_CONFIG.model_provider = %v, want %q", got, config["model_provider"], codexProviderID)
 	}
@@ -1144,7 +1134,6 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 		}
 	}
 
-	// The file variable always wins over the bootstrap variable.
 	controllerToken := filepath.Join(dir, "controller-token")
 	if err := os.WriteFile(controllerToken, []byte(strings.Repeat("f", 32)), 0o600); err != nil {
 		t.Fatal(err)
@@ -1164,7 +1153,6 @@ func TestLoadConfigFromEnvBootstrapSecrets(t *testing.T) {
 		t.Fatal("unused bootstrap secret survived file-backed config load")
 	}
 
-	// Neither the file nor the bootstrap variable fails closed.
 	t.Setenv(EnvControllerTokenFile, "")
 	t.Setenv(EnvControllerTokenBootstrap, "")
 	t.Setenv(EnvCapabilitySecretBootstrap, strings.Repeat("s", 32))
@@ -1279,10 +1267,6 @@ func containsArg(args []string, want string) bool {
 	return slices.Contains(args, want)
 }
 
-// assertCodexWebSocketTransportsDisabled proves the session config selects
-// the custom HTTPS-only provider instead of Codex's built-in "openai"
-// provider, whose Responses WebSocket attempt the proxy rejects with 403 and
-// whose fallback warning would leak into the agent's first message.
 func assertCodexWebSocketTransportsDisabled(t *testing.T, config map[string]any) {
 	t.Helper()
 	if config["model_provider"] != codexProviderID {
@@ -1307,9 +1291,69 @@ func TestPrepareCodexHomeDisablesResponsesWebSockets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := string(data)
-	if !strings.Contains(config, "check_for_update_on_startup = false") {
-		t.Fatalf("config.toml lacks the update opt-out:\n%s", config)
+	config := map[string]string{}
+	for line := range strings.Lines(string(data)) {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " = ")
+		if !ok {
+			t.Fatalf("config.toml line %q is not a key = value pair", line)
+		}
+		if _, duplicate := config[key]; duplicate {
+			t.Fatalf("config.toml sets %s twice", key)
+		}
+		config[key] = value
+	}
+	for key, want := range map[string]string{
+		"check_for_update_on_startup":           "false",
+		"analytics.enabled":                     "false",
+		"features.unbounded_connection_retries": "false",
+		"features.plugins":                      "false",
+		"features.apps":                         "false",
+		"otel.exporter":                         `"none"`,
+		"otel.trace_exporter":                   `"none"`,
+		"otel.metrics_exporter":                 `"none"`,
+	} {
+		if config[key] != want {
+			t.Fatalf("config.toml %s = %q, want %q:\n%s", key, config[key], want, data)
+		}
+	}
+}
+
+func TestCodexProjectionMakesProviderProxyTheDefaultProvider(t *testing.T) {
+	paths := acp.SessionPaths{Home: t.TempDir()}
+	if err := prepareCodexHome(paths); err != nil {
+		t.Fatal(err)
+	}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "local-session-credential"}
+	codex, err := providerProfile(providerKindCodex, "gpt-test", harnessv2.WorkspaceIntentWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := codex.BindProviderProxy(acp.SessionPaths{}, proxy); err == nil {
+		t.Fatal("binding the provider proxy without a session home succeeded")
+	}
+	if err := codex.BindProviderProxy(paths, proxy); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(paths.Home, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range []string{
+		"check_for_update_on_startup = false",
+		`model_provider = "orka"`,
+		`model_providers.orka.base_url = "` + proxy.BaseURL + `"`,
+		`model_providers.orka.wire_api = "responses"`,
+		`model_providers.orka.env_key = "CODEX_API_KEY"`,
+		"model_providers.orka.request_max_retries = 0",
+		"model_providers.orka.stream_max_retries = 0",
+	} {
+		if !slices.Contains(lines, line) {
+			t.Fatalf("config.toml lacks %q:\n%s", line, data)
+		}
+	}
+	if strings.Contains(string(data), proxy.Credential) {
+		t.Fatalf("config.toml contains the provider credential:\n%s", data)
 	}
 }
 

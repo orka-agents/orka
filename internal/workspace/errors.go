@@ -12,7 +12,6 @@ import (
 	"fmt"
 )
 
-// ErrorKind classifies executor failures without exposing backend-specific error types.
 type ErrorKind string
 
 const (
@@ -24,12 +23,9 @@ const (
 	ErrorKindCanceled           ErrorKind = "Canceled"
 	ErrorKindFailedPrecondition ErrorKind = "FailedPrecondition"
 	ErrorKindCommandFailed      ErrorKind = "CommandFailed"
-	// ErrorKindResourceExhausted reports exhausted provider capacity or quota.
-	// It is retryable; callers surface it as a wait for capacity.
-	ErrorKindResourceExhausted ErrorKind = "ResourceExhausted"
+	ErrorKindResourceExhausted  ErrorKind = "ResourceExhausted"
 )
 
-// Error is the structured error type returned by WorkspaceExecutor implementations.
 type Error struct {
 	Op        string
 	Kind      ErrorKind
@@ -38,7 +34,6 @@ type Error struct {
 	Err       error
 }
 
-// Error renders a compact human-readable error.
 func (e *Error) Error() string {
 	if e == nil {
 		return "<nil>"
@@ -63,7 +58,6 @@ func (e *Error) Error() string {
 	return prefix
 }
 
-// Unwrap returns the underlying backend or context error.
 func (e *Error) Unwrap() error {
 	if e == nil {
 		return nil
@@ -71,7 +65,6 @@ func (e *Error) Unwrap() error {
 	return e.Err
 }
 
-// NewError constructs a structured executor error.
 func NewError(op string, kind ErrorKind, message string, retryable bool, err error) *Error {
 	if kind == "" {
 		kind = ErrorKindUnknown
@@ -79,8 +72,6 @@ func NewError(op string, kind ErrorKind, message string, retryable bool, err err
 	return &Error{Op: op, Kind: kind, Message: message, Retryable: retryable, Err: err}
 }
 
-// KindOf returns the structured kind for err, or ErrorKindUnknown when err is
-// not a workspace Error.
 func KindOf(err error) ErrorKind {
 	var workspaceErr *Error
 	if errors.As(err, &workspaceErr) && workspaceErr.Kind != "" {
@@ -89,7 +80,6 @@ func KindOf(err error) ErrorKind {
 	return ErrorKindUnknown
 }
 
-// IsKind reports whether err contains a workspace Error with kind.
 func IsKind(err error, kind ErrorKind) bool {
 	return KindOf(err) == kind
 }

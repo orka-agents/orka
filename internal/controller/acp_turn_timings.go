@@ -1,0 +1,115 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package controller
+
+import (
+	"context"
+	"time"
+
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+type acpTurnStep struct {
+	name     string
+	duration time.Duration
+}
+
+type acpTurnTimings struct {
+	now      func() time.Time
+	created  time.Time
+	started  time.Time
+	last     time.Time
+	steps    []acpTurnStep
+	prompted bool
+}
+
+func newACPTurnTimings(task *corev1alpha1.Task, now func() time.Time) *acpTurnTimings {
+	started := now()
+	return &acpTurnTimings{now: now, created: task.CreationTimestamp.Time, started: started, last: started}
+}
+
+func (t *acpTurnTimings) mark(step string) {
+	if t == nil {
+		return
+	}
+	now := t.now()
+	t.steps = append(t.steps, acpTurnStep{name: step, duration: now.Sub(t.last)})
+	t.last = now
+	if step == acpTurnStepPromptAccepted {
+		t.prompted = true
+	}
+}
+
+func (t *acpTurnTimings) markPromptAccepted() {
+	if t == nil || t.prompted {
+		return
+	}
+	t.mark(acpTurnStepPromptAccepted)
+}
+
+func (t *acpTurnTimings) markFailedPromptStream(accepted bool) {
+	if t == nil || !accepted {
+		return
+	}
+	t.markPromptAccepted()
+	t.mark(acpTurnStepPromptStream)
+}
+
+const (
+	acpTurnStepDispatchPreflight    = "dispatchPreflight"
+	acpTurnStepRuntimeClient        = "runtimeClient"
+	acpTurnStepSessionPlan          = "sessionPlan"
+	acpTurnStepWorkspacePrepare     = "workspacePrepare"
+	acpTurnStepSessionCreate        = "sessionCreate"
+	acpTurnStepPromptAccepted       = "promptAccepted"
+	acpTurnStepPromptStream         = "promptStream"
+	acpTurnStepTerminalPersistence  = "terminalPersistence"
+	acpTurnStepWorkspaceDelta       = "workspaceDelta"
+	acpTurnStepExecutionSettled     = "executionSettled"
+	acpTurnStepPublication          = "publication"
+	acpTurnStepPublicationFinalize  = "publicationFinalization"
+	acpTurnStepRuntimeFinalize      = "runtimeSessionFinalization"
+	acpTurnStepSessionResult        = "sessionResult"
+	acpTurnStepRuntimeRetirement    = "runtimeSessionRetirement"
+	acpTurnStepTaskCompletion       = "taskCompletion"
+	acpTurnTimingsLogMessage        = "ACP turn timings"
+	acpTurnTimingsDebugVerbosity    = 1
+	acpTurnTimingsMaxReportedMillis = int64(1) << 53
+)
+
+func (t *acpTurnTimings) keysAndValues(end time.Time) []any {
+	if t == nil {
+		return nil
+	}
+	values := make([]any, 0, 6+2*len(t.steps))
+	if !t.created.IsZero() && !t.started.Before(t.created) {
+		values = append(values, "sinceTaskCreatedMs", boundedMillis(t.started.Sub(t.created)))
+	}
+	values = append(values, "totalMs", boundedMillis(end.Sub(t.started)), "promptAccepted", t.prompted)
+	for _, step := range t.steps {
+		values = append(values, step.name+"Ms", boundedMillis(step.duration))
+	}
+	return values
+}
+
+func boundedMillis(duration time.Duration) int64 {
+	return min(duration.Milliseconds(), acpTurnTimingsMaxReportedMillis)
+}
+
+func (t *acpTurnTimings) log(ctx context.Context, task *corev1alpha1.Task, err error) {
+	if t == nil {
+		return
+	}
+	logger := logf.FromContext(ctx)
+	if !t.prompted {
+		logger = logger.V(acpTurnTimingsDebugVerbosity)
+	}
+	values := append([]any{"namespace", task.Namespace, "task", task.Name, "returnedError", err != nil}, t.keysAndValues(t.now())...)
+	logger.Info(acpTurnTimingsLogMessage, values...)
+}

@@ -27,10 +27,8 @@ describe('DiffViewer', () => {
     render(<DiffViewer diff={sampleDiff} />)
     const viewer = screen.getByTestId('diff-viewer')
     expect(viewer).toBeInTheDocument()
-    // Check that addition lines have green background
     const additionLines = viewer.querySelectorAll('.bg-status-succeeded-bg')
     expect(additionLines.length).toBe(2)
-    // Check that deletion lines have red background
     const deletionLines = viewer.querySelectorAll('.bg-status-failed-bg')
     expect(deletionLines.length).toBe(1)
   })
@@ -75,10 +73,8 @@ index 489ce0f..3e5126c 100644
     expect(rows).toHaveLength(9)
     const byContent = Object.fromEntries(rows.map((row) => [cells(row).content, cells(row)]))
 
-    // The removed and added lines both belong to line 1 of their files.
     expect(byContent['-old']).toMatchObject({ old: '1', new: '' })
     expect(byContent['+new']).toMatchObject({ old: '', new: '1' })
-    // Metadata keeps no numbers and never advances the counters.
     expect(byContent['index 489ce0f..3e5126c 100644']).toMatchObject({ old: '', new: '' })
     expect(byContent['\\ No newline at end of file']).toMatchObject({ old: '', new: '' })
   })
@@ -107,7 +103,6 @@ index 489ce0f..3e5126c 100644
     const byContent = Object.fromEntries(rows.map((row) => [cells(row).content, cells(row)]))
 
     expect(byContent[' twelve']).toMatchObject({ old: '12', new: '12' })
-    // A blank context line carries a leading space and still counts.
     expect(byContent[' ']).toMatchObject({ old: '13', new: '13' })
     expect(byContent[' thirteen']).toMatchObject({ old: '14', new: '14' })
     expect(byContent['\\ No newline at end of file']).toMatchObject({ old: '', new: '' })

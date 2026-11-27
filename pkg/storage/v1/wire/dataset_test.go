@@ -22,9 +22,6 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/wiretest"
 )
 
-// Every call except Describe and HealthCheck must name the serving dataset,
-// and the server refuses it before the provider runs, so a client bound to
-// one dataset never reads or writes another.
 func TestServerRefusesCallsForAnotherDataset(t *testing.T) {
 	provider := newRecordingProvider()
 	conn := wiretest.Dial(t, serveBoth(provider))
@@ -68,8 +65,6 @@ func TestServerRefusesCallsForAnotherDataset(t *testing.T) {
 	require.Empty(t, provider.callsTo("GetPlan"))
 	require.Empty(t, provider.callsTo("SaveResult"))
 
-	// A client bound to another dataset gets the contract error, and a
-	// refused write is not an unknown outcome.
 	other := wire.NewClient(conn, wire.ClientConfig{Dataset: "another-dataset"})
 	err = other.SavePlan(t.Context(), "n", "t", &storagev1.PlanState{})
 	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
@@ -78,9 +73,6 @@ func TestServerRefusesCallsForAnotherDataset(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrDatasetMismatch)
 }
 
-// A server learns its dataset from the provider before the first call that
-// needs it, without any client Describe, and follows the provider when a
-// later description reports another dataset.
 func TestServerFollowsTheProvidersDataset(t *testing.T) {
 	provider := newRecordingProvider()
 	server, err := wire.NewServer(serveBoth(provider))
@@ -102,8 +94,6 @@ func TestServerFollowsTheProvidersDataset(t *testing.T) {
 	require.Len(t, provider.callsTo("SavePlan"), 1)
 }
 
-// When the provider cannot describe its dataset, a call that needs it is
-// refused as unavailable, never passed to the provider.
 func TestServerRefusesCallsWhenTheDatasetIsUnknown(t *testing.T) {
 	for _, describeErr := range []error{errors.New("database is down"), storagev1.ErrNotReady} {
 		provider := newRecordingProvider()
@@ -125,9 +115,6 @@ func TestServerRefusesCallsWhenTheDatasetIsUnknown(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrUnavailable, "a provider that reports no dataset serves nothing")
 }
 
-// separateProvider describes its own dataset, which a test can change, so a
-// server given it as the artifacts provider beside another state provider
-// can see two datasets.
 type separateProvider struct {
 	*recordingProvider
 	dataset *atomic.Pointer[string]
@@ -145,8 +132,6 @@ func (p separateProvider) Describe(context.Context) (storagev1.ProviderInfo, err
 	return info, nil
 }
 
-// One server serves one dataset: state and artifacts providers that report
-// different datasets serve nothing.
 func TestServerRefusesProvidersOfDifferentDatasets(t *testing.T) {
 	state := newRecordingProvider()
 	artifacts := newSeparateProvider("artifacts-dataset")
@@ -158,9 +143,6 @@ func TestServerRefusesProvidersOfDifferentDatasets(t *testing.T) {
 	require.Empty(t, state.callsTo("SavePlan"))
 }
 
-// A server that already serves a dataset stops admitting calls for it once a
-// description finds no single dataset, and resumes when a consistent
-// description succeeds.
 func TestServerForgetsItsDatasetWhenTheProvidersDisagree(t *testing.T) {
 	state := newRecordingProvider()
 	artifacts := newSeparateProvider(testDataset)
@@ -191,8 +173,6 @@ func TestServerForgetsItsDatasetWhenTheProvidersDisagree(t *testing.T) {
 	require.Len(t, state.callsTo("SavePlan"), 2)
 }
 
-// lateDescriber describes its dataset only after delay, ignoring its
-// context's cancellation.
 type lateDescriber struct {
 	*recordingProvider
 	delay time.Duration
@@ -203,9 +183,6 @@ func (p lateDescriber) Describe(ctx context.Context) (storagev1.ProviderInfo, er
 	return p.recordingProvider.Describe(context.WithoutCancel(ctx))
 }
 
-// A provider that ignores cancellation can describe its dataset after the
-// call's time limit passed. The server then refuses the call as unavailable
-// rather than start provider work with an expired context.
 func TestServerStartsNoProviderWorkAfterTheTimeLimit(t *testing.T) {
 	provider := lateDescriber{recordingProvider: newRecordingProvider(), delay: 200 * time.Millisecond}
 	server, err := wire.NewServer(wire.ServerConfig{State: provider, Limits: wire.Limits{
@@ -217,8 +194,6 @@ func TestServerStartsNoProviderWorkAfterTheTimeLimit(t *testing.T) {
 	require.Empty(t, provider.callsTo("GetPlan"), "no provider work starts after the limit")
 }
 
-// gatedProvider describes the dataset it holds when Describe starts and,
-// while gate is set, waits on it before answering.
 type gatedProvider struct {
 	separateProvider
 	gate    *atomic.Pointer[chan struct{}]
@@ -234,9 +209,6 @@ func (p gatedProvider) Describe(ctx context.Context) (storagev1.ProviderInfo, er
 	return info, err
 }
 
-// A read describes the providers before it runs. If a newer description
-// clears the serving dataset meanwhile, the older one no longer admits the
-// read, even though it found the dataset the read names.
 func TestServerRefusesReadsWhoseDescriptionWasSuperseded(t *testing.T) {
 	state := newRecordingProvider()
 	artifacts := gatedProvider{separateProvider: newSeparateProvider(testDataset),
@@ -271,9 +243,6 @@ func TestServerRefusesReadsWhoseDescriptionWasSuperseded(t *testing.T) {
 	require.Empty(t, state.callsTo("GetPlan"))
 }
 
-// A gRPC server built with the storage options authenticates every call and
-// refuses any method the storage protocol does not define, even one another
-// service registered on the same server.
 func TestServerFailsClosedForMethodsOutsideTheProtocol(t *testing.T) {
 	for _, authenticator := range []wire.Authenticator{nil, rejectAll{}} {
 		server, err := wire.NewServer(wire.ServerConfig{State: newRecordingProvider(), Authenticator: authenticator})
@@ -296,7 +265,6 @@ func TestServerFailsClosedForMethodsOutsideTheProtocol(t *testing.T) {
 	}
 }
 
-// A server serves only the contract parts it has providers for.
 func TestServerServesOnlyItsContractParts(t *testing.T) {
 	provider := newRecordingProvider()
 	artifactsOnly := wiretest.Serve(t, wire.ServerConfig{Artifacts: provider})
@@ -310,8 +278,6 @@ func TestServerServesOnlyItsContractParts(t *testing.T) {
 	require.ErrorIs(t, err, storagev1.ErrIncompatible)
 	require.Empty(t, provider.callsTo("ListArtifacts"))
 
-	// The provider reports both parts, but each server describes only the
-	// part it serves.
 	info, err := artifactsOnly.Describe(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, []string{storagev1.ArtifactsContract}, info.Contracts)
@@ -322,8 +288,6 @@ func TestServerServesOnlyItsContractParts(t *testing.T) {
 	require.Zero(t, info.Limits.MaxArtifactBytes, "a state-only server advertises no artifact limit")
 }
 
-// A call over its class's concurrency limit is refused as overloaded before
-// the provider runs, and other classes keep their own capacity.
 func TestServerShedsCallsOverTheClassLimit(t *testing.T) {
 	provider := newRecordingProvider()
 	release := make(chan struct{})
@@ -350,9 +314,6 @@ func TestServerShedsCallsOverTheClassLimit(t *testing.T) {
 	require.Empty(t, provider.callsTo("GetPlan"))
 }
 
-// OVERLOADED arrived with protocol revision 2, so a shed call from a
-// revision 1 client is refused as UNAVAILABLE, which that client takes as a
-// refusal before any work rather than an unknown outcome.
 func TestShedCallsUseAReasonTheClientKnows(t *testing.T) {
 	provider := newRecordingProvider()
 	release := make(chan struct{})
@@ -382,7 +343,6 @@ func TestShedCallsUseAReasonTheClientKnows(t *testing.T) {
 	require.Len(t, provider.callsTo("SavePlan"), 1)
 }
 
-// deadlineProvider records the deadline its GetPlan runs with.
 type deadlineProvider struct {
 	*recordingProvider
 	deadline chan time.Time
@@ -394,7 +354,6 @@ func (p deadlineProvider) GetPlan(ctx context.Context, _, _ string) (*storagev1.
 	return nil, nil
 }
 
-// The provider runs with the caller's deadline, capped by the server.
 func TestServerCapsCallDurations(t *testing.T) {
 	provider := deadlineProvider{recordingProvider: newRecordingProvider(), deadline: make(chan time.Time, 2)}
 	client := wiretest.Serve(t, wire.ServerConfig{State: provider, Limits: wire.Limits{
@@ -415,19 +374,17 @@ func TestServerCapsCallDurations(t *testing.T) {
 	require.True(t, shorter.Before(started.Add(time.Second)), "a shorter caller deadline wins")
 }
 
-// observedCalls records the calls a server reports.
 type observedCalls struct {
 	calls chan wire.CallInfo
 }
 
 func (o observedCalls) ObserveCall(call wire.CallInfo) { o.calls <- call }
 
-// The server reports each call's outcome, including refusals.
 func TestServerReportsCalls(t *testing.T) {
 	provider := newRecordingProvider()
 	observer := observedCalls{calls: make(chan wire.CallInfo, 8)}
 	client := wiretest.Serve(t, wire.ServerConfig{State: provider, Artifacts: provider, Observer: observer})
-	<-observer.calls // the client's Describe
+	<-observer.calls
 
 	require.NoError(t, client.SaveResult(t.Context(), "n", "t", []byte("r")))
 	call := <-observer.calls
@@ -442,4 +399,33 @@ func TestServerReportsCalls(t *testing.T) {
 	call = <-observer.calls
 	require.Equal(t, storagev1.CallInteractive, call.Class)
 	require.Equal(t, wire.ReasonNotFound, call.Reason)
+}
+
+func TestOwnershipIsRefusedWhenTheProvidersDisagree(t *testing.T) {
+	state := newRecordingProvider()
+	artifacts := newSeparateProvider(testDataset)
+	server, err := wire.NewServer(wire.ServerConfig{State: state, Artifacts: artifacts})
+	require.NoError(t, err)
+	client := wire.NewClient(serveInsecure(t, server), boundConfig)
+	state.set("GetWriteWatermark", []any{storagev1.WriteWatermark{DatasetID: testDataset, Value: 1}}, nil)
+	_, err = client.GetWriteWatermark(t.Context())
+	require.NoError(t, err)
+
+	artifacts.dataset.Store(new("replacement-artifacts"))
+	_, err = client.ResolveOperation(t.Context(), storagev1.ResolveOperationRequest{
+		DatasetID: testDataset, OperationID: "op", Method: "SaveArtifact", RequestDigest: "digest", IssuedAt: time.Now(),
+	})
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	_, err = client.AdvanceControllerEpoch(t.Context(), storagev1.AdvanceControllerEpochRequest{DatasetID: testDataset})
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	_, err = client.GetDatasetBinding(t.Context(), testDataset)
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	_, err = client.GetWriteWatermark(t.Context())
+	require.ErrorIs(t, err, storagev1.ErrUnavailable)
+	require.Empty(t, server.DatasetID())
+	for _, method := range []string{"ResolveOperation", "AdvanceControllerEpoch", "GetDatasetBinding"} {
+		require.Empty(t, state.callsTo(method), method)
+		require.Empty(t, artifacts.callsTo(method), method)
+	}
+	require.Len(t, state.callsTo("GetWriteWatermark"), 1, "only the call made while the providers agreed ran")
 }

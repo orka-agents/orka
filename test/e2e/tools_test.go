@@ -67,7 +67,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		dumpDebugInfo(searchTaskName, fileReadTaskName, customToolTask, filterTaskName, priorTask1Name, priorTask2Name, webFetchTaskName, fileWriteTaskName)
 	})
 
-	// Test: AI task using web_search tool
 	It("should execute an AI task that uses the web_search tool", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -114,9 +113,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 
 		if e2eMockOpenAI {
 			By("verifying the web_search output reached the model")
-			// Without SEARCH_API_URL the worker searches DuckDuckGo, which often
-			// answers CI runners with a bot challenge instead of results. Either
-			// outcome must be genuine: parsed results, or the tool error.
 			output := expectMockLLMToolResult("[e2e:tools-web-search]", "web_search", 30*time.Second)
 			if strings.HasPrefix(output, "Error executing tool: ") {
 				Expect(output).To(ContainSubstring("DuckDuckGo"), "web_search output: %s", output)
@@ -132,7 +128,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		}
 	})
 
-	// Test: AI task using file_read tool
 	It("should execute an AI task that uses the file_read tool", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -142,8 +137,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		}
 
 		By("creating an AI task that reads a file")
-		// code_exec runs in its own Pod by default, so a file it writes is not
-		// visible to file_read in the worker. Stage the file with file_write.
 		taskManifest := fmt.Sprintf(`{
 			"apiVersion": "core.orka.ai/v1alpha1",
 			"kind": "Task",
@@ -178,7 +171,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 
 		if e2eMockOpenAI {
 			By("verifying file_read returned the requested byte range")
-			// The fixture reads 9 bytes at offset 11 of "hello from file_read test".
 			output := expectMockLLMToolResult("[e2e:tools-file-read]", "file_read", 30*time.Second)
 			var result struct {
 				Content   string `json:"content"`
@@ -190,7 +182,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		}
 	})
 
-	// Test: Custom Tool CRD
 	It("should create and use a custom Tool CRD", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -293,7 +284,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		Eventually(func(g Gomega) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			// Exercise Service DNS/routing, not the API-server proxy or a port-forward.
 			cmd := exec.CommandContext(ctx, "kubectl", "exec", echoReceiverName, "-n", namespace,
 				"-c", "echo", "--", "python3", "-c", customToolReceiverHTTPProbe, echoURL)
 			output, err := utils.Run(cmd)
@@ -384,7 +374,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		}
 	})
 
-	// Test: Agent tool filtering via allowedTools/disallowedTools
 	It("should pass tool filtering configuration to the Job", func() {
 		By("creating an Agent with tool filtering")
 		agentManifest := fmt.Sprintf(`{
@@ -448,8 +437,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		}, 2*time.Minute)
 	})
 
-	// Test: PriorTaskRef
-	// Test: PriorTaskRef chaining
 	It("should set ORKA_PRIOR_TASK env var when priorTaskRef is specified", func() {
 		By("creating an Agent for prior task test")
 		agentManifest := fmt.Sprintf(`{
@@ -540,8 +527,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		verifyNoJobForTask(priorTask2Name, 5*time.Second)
 	})
 
-	// Test: AI task using web_fetch tool
-	// Test: AI task using web_fetch tool
 	It("should execute an AI task that uses the web_fetch tool", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
@@ -584,9 +569,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		verifyResultAvailable(webFetchTaskName)
 
 		if e2eMockOpenAI {
-			// The fixture fetches the link-local metadata address and the
-			// in-cluster aimock Service instead of the internet, so this
-			// checks the SSRF guard on both an IP literal and a resolved name.
 			By("verifying web_fetch refused non-public destinations")
 			outputs := expectMockLLMToolResults("[e2e:tools-web-fetch]", "web_fetch", 2, 30*time.Second)
 			Expect(outputs[0]).To(ContainSubstring("URL must not target private, loopback, or link-local addresses"))
@@ -597,7 +579,6 @@ var _ = Describe("Tools and Configuration", Ordered, func() {
 		}
 	})
 
-	// Test: AI task using file_write tool
 	It("should execute an AI task that uses the file_write tool", func() {
 		skipIfNoKey("E2E_OPENAI_API_KEY")
 
