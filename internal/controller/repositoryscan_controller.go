@@ -4725,20 +4725,7 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 	previousValidationJSON := finding.ValidationJSON
 
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-		validationProblem := ""
-		if strings.TrimSpace(task.Labels[labels.LabelSecurityScanID]) != strings.TrimSpace(finding.ScanRunID) {
-			validationProblem = "validation task scan identity does not match finding"
-		}
-		if validationProblem == "" {
-			expectedCommit := strings.TrimSpace(finding.CommitSHA)
-			if expectedCommit != "" && store.ValidateGitObjectID("finding commit", expectedCommit) == nil {
-				if task.Spec.Workspace == nil {
-					validationProblem = "validation task workspace is missing"
-				} else if actualRef := strings.TrimSpace(task.Spec.Workspace.Ref); actualRef != expectedCommit {
-					validationProblem = "validation task workspace commit does not match finding commit"
-				}
-			}
-		}
+		validationProblem := validationTaskBindingProblem(task, finding)
 		policy, policyErr := security.LoadScannerPolicy(ctx, r.Client, scan.Namespace, scan.Spec)
 		if policyErr != nil {
 			return policyErr
@@ -4798,6 +4785,23 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 		metrics.RecordSecurityValidationOutcome(findingValidationStatusError)
 	}
 	return nil
+}
+
+func validationTaskBindingProblem(task *corev1alpha1.Task, finding *store.Finding) string {
+	if strings.TrimSpace(task.Labels[labels.LabelSecurityScanID]) != strings.TrimSpace(finding.ScanRunID) {
+		return "validation task scan identity does not match finding"
+	}
+	expectedCommit := strings.TrimSpace(finding.CommitSHA)
+	if expectedCommit == "" || store.ValidateGitObjectID("finding commit", expectedCommit) != nil {
+		return ""
+	}
+	if task.Spec.Workspace == nil {
+		return "validation task workspace is missing"
+	}
+	if actualRef := strings.TrimSpace(task.Spec.Workspace.Ref); actualRef != expectedCommit {
+		return "validation task workspace commit does not match finding commit"
+	}
+	return ""
 }
 
 func (r *RepositoryScanReconciler) persistValidatedFinding(ctx context.Context, finding, canonical *store.Finding) error {
