@@ -345,6 +345,10 @@ func HostPod(
 func aggregatePodLevelResources(initContainers, containers []corev1.Container) *corev1.ResourceRequirements {
 	requests := corev1.ResourceList{}
 	limits := corev1.ResourceList{}
+	requestBounded := map[corev1.ResourceName]bool{
+		corev1.ResourceCPU:    len(containers) > 0,
+		corev1.ResourceMemory: len(containers) > 0,
+	}
 	limitBounded := map[corev1.ResourceName]bool{
 		corev1.ResourceCPU:    len(containers) > 0,
 		corev1.ResourceMemory: len(containers) > 0,
@@ -355,7 +359,11 @@ func aggregatePodLevelResources(initContainers, containers []corev1.Container) *
 			if !ok {
 				q, ok = limSrc[name]
 			}
-			if !ok || q.IsZero() {
+			if !ok {
+				requestBounded[name] = false
+				continue
+			}
+			if q.IsZero() {
 				continue
 			}
 			cur := requests[name]
@@ -394,7 +402,9 @@ func aggregatePodLevelResources(initContainers, containers []corev1.Container) *
 			if !reqOK {
 				reqQ, reqOK = initContainers[i].Resources.Limits[name]
 			}
-			if reqOK && reqQ.Cmp(requests[name]) > 0 {
+			if !reqOK {
+				requestBounded[name] = false
+			} else if reqQ.Cmp(requests[name]) > 0 {
 				requests[name] = reqQ.DeepCopy()
 			}
 			q, ok := initContainers[i].Resources.Limits[name]
@@ -408,6 +418,9 @@ func aggregatePodLevelResources(initContainers, containers []corev1.Container) *
 		}
 	}
 	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		if !requestBounded[name] {
+			delete(requests, name)
+		}
 		if !limitBounded[name] {
 			delete(limits, name)
 			continue

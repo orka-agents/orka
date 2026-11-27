@@ -927,24 +927,15 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 		Container: "worker",
 		TailLines: &tailLines,
 	}
-	logStream, usedSplitStream, err := openPodLogsWithStreamFallback(ctx, h.clientset, namespace, podName, opts, logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
+	logStream, err := openPodLogsWithStreamFallback(ctx, h.clientset, namespace, podName, opts, logStreamSelector, h.clusterCapabilities.PodLogsSplitStreams)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get logs: %v", err))
 	}
 	defer func() { _ = logStream.Close() }()
 
-	var logs string
-	if usedSplitStream {
-		logs, err = readBoundedTailLogLines(logStream, tailLines, maxTaskLogReadBytes)
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", err))
-		}
-	} else {
-		logBytes, readErr := io.ReadAll(io.LimitReader(logStream, maxTaskLogReadBytes))
-		if readErr != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", readErr))
-		}
-		logs = string(logBytes)
+	logs, err := readBoundedTailLogLines(logStream, tailLines, maxTaskLogReadBytes)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read logs: %v", err))
 	}
 	return c.JSON(fiber.Map{
 		"logs": logs,
@@ -975,7 +966,7 @@ func openPodLogsWithStreamFallback(
 	baseOpts *corev1.PodLogOptions,
 	streamSelector string,
 	splitStreamsSupported bool,
-) (io.ReadCloser, bool, error) {
+) (io.ReadCloser, error) {
 	opts := baseOpts.DeepCopy()
 	if streamSelector != "" && splitStreamsSupported {
 		splitOpts := opts.DeepCopy()
@@ -985,14 +976,13 @@ func openPodLogsWithStreamFallback(
 		}
 		stream, err := clientset.CoreV1().Pods(namespace).GetLogs(podName, splitOpts).Stream(ctx)
 		if err == nil {
-			return stream, splitOpts.TailLines == nil && baseOpts.TailLines != nil, nil
+			return stream, nil
 		}
 		if !apierrors.IsBadRequest(err) && !apierrors.IsInvalid(err) {
-			return nil, false, err
+			return nil, err
 		}
 	}
-	stream, err := clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
-	return stream, false, err
+	return clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
 }
 
 func streamPodLogsWithStream(
@@ -1005,8 +995,7 @@ func streamPodLogsWithStream(
 		Container: containerName,
 		Follow:    true,
 	}
-	stream, _, err := openPodLogsWithStreamFallback(ctx, clientset, namespace, podName, opts, streamSelector, splitStreamsSupported)
-	return stream, err
+	return openPodLogsWithStreamFallback(ctx, clientset, namespace, podName, opts, streamSelector, splitStreamsSupported)
 }
 
 func readBoundedTailLogLines(r io.Reader, tailLines, maxBytes int64) (string, error) {

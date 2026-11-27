@@ -172,3 +172,31 @@ func TestHostPodLevelResourcesDefaultsMissingRequestsFromLimits(t *testing.T) {
 		t.Fatalf("Pod memory request = %s, want %s", got.String(), wantMemReq.String())
 	}
 }
+
+func TestHostPodLevelResourcesOmitsUnspecifiedResourceKeys(t *testing.T) {
+	host, template := testAgentHostFixtures()
+	delete(template.Spec.Containers[0].Resources.Requests, corev1.ResourceCPU)
+	delete(template.Spec.Containers[0].Resources.Limits, corev1.ResourceCPU)
+	names := ObjectNames(host, "orka-agent-hosts")
+
+	pod := HostPod(host, names, "nonce-5", template, PodOptions{
+		AgentImage: "example.com/host-agent:v1",
+		ClusterCapabilities: k8scaps.Capabilities{
+			ServerVersion:     "v1.35.0",
+			PodLevelResources: true,
+		},
+	})
+	if pod.Spec.Resources == nil {
+		t.Fatal("expected Pod-level Resources for memory to be set")
+	}
+	if _, hasCPU := pod.Spec.Resources.Requests[corev1.ResourceCPU]; hasCPU {
+		t.Fatalf("Pod CPU request = %v, want omitted when app container omits CPU request and limit", pod.Spec.Resources.Requests[corev1.ResourceCPU])
+	}
+	if _, hasCPU := pod.Spec.Resources.Limits[corev1.ResourceCPU]; hasCPU {
+		t.Fatalf("Pod CPU limit = %v, want omitted when app container omits CPU limit", pod.Spec.Resources.Limits[corev1.ResourceCPU])
+	}
+	wantMemReq := resource.MustParse("528Mi")
+	if got := pod.Spec.Resources.Requests[corev1.ResourceMemory]; got.Cmp(wantMemReq) != 0 {
+		t.Fatalf("Pod memory request = %s, want %s", got.String(), wantMemReq.String())
+	}
+}
