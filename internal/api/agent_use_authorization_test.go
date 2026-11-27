@@ -137,6 +137,43 @@ func TestAgentRefsUseChecksOnlyNewlyNamedAgents(t *testing.T) {
 	}
 }
 
+func TestCreateManualSecurityScanEnforcesValidationAgentUse(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		attributes := review.Spec.ResourceAttributes
+		review.Status.Allowed = attributes != nil && attributes.Verb == agentUseVerb && attributes.Name == "analysis"
+		return true, review, nil
+	})
+
+	scan := &corev1alpha1.RepositoryScan{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scan-1",
+			Namespace: "demo",
+		},
+		Spec: corev1alpha1.RepositoryScanSpec{
+			RepoURL:            securityTestRepoURL,
+			Branch:             "main",
+			AnalysisAgentRef:   corev1alpha1.AgentReference{Name: "analysis"},
+			ValidationAgentRef: &corev1alpha1.AgentReference{Name: "restricted-validator"},
+		},
+	}
+	app, handlers := setupSecurityHandlersWithAuthzFixture(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff, scan)
+	handlers.clientset = clientset
+	app = fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview})
+		return c.Next()
+	})
+	app.Post("/security/repositories/:name/scans", handlers.CreateManualSecurityScan)
+
+	req := httptest.NewRequest(http.MethodPost, "/security/repositories/scan-1/scans?namespace=demo", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
 func TestCreateRepositoryMonitorEnforcesAgentUse(t *testing.T) {
 	create := func(t *testing.T, name string) int {
 		t.Helper()

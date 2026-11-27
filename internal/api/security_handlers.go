@@ -1107,7 +1107,12 @@ func (h *Handlers) CreateManualSecurityScan(c fiber.Ctx) error {
 	}
 	if security.EffectiveValidationMode(scan) != "off" &&
 		scan.Spec.ValidationAgentRef != nil && strings.TrimSpace(scan.Spec.ValidationAgentRef.Name) != "" {
-		if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, securityValidationAgentRef(scan)); err != nil {
+		validationAgentRef := securityValidationAgentRef(scan)
+		if err := h.authorizeContextTokenSecurityScanTask(c, "createManualSecurityScan", scan, validationAgentRef); err != nil {
+			return err
+		}
+		if err := authorizeAgentRefsUse(c.Context(), h.clientset, GetUserInfo(c), scan.Namespace, "repositoryscan", scan.Name,
+			[]corev1alpha1.AgentReference{validationAgentRef}, nil); err != nil {
 			return err
 		}
 	}
