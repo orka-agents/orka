@@ -49,6 +49,7 @@ type EntraIssuer struct {
 	cache        *entraclient.Cache
 	flightJoined func()
 }
+
 func FileCredential(path string) func() (string, error) {
 	return entraclient.FileCredential(path)
 }
@@ -182,7 +183,7 @@ func (i *EntraIssuer) tokenCache() *entraclient.Cache {
 
 func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Values) (string, time.Duration, error) {
 	client := entraclient.Client{
-		Authority:     i.Config.authority(),
+		Authority:     i.Config.Authority,
 		TenantID:      i.Config.TenantID,
 		HTTPClient:    i.HTTPClient,
 		MetricAdapter: "agentIdentity",
