@@ -30,6 +30,7 @@ const (
 type commentTestGitHub struct {
 	permission       string
 	selfLogin        string
+	identityStatus   int
 	permissionCalls  atomic.Int32
 	identityCalls    atomic.Int32
 	unexpectedCalled atomic.Int32
@@ -41,6 +42,10 @@ func (g *commentTestGitHub) serve(t *testing.T) *httptest.Server {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/user":
 			g.identityCalls.Add(1)
+			if g.identityStatus != 0 {
+				http.Error(w, "identity lookup refused", g.identityStatus)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"login":%q}`, g.selfLogin)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/permission"):
@@ -359,6 +364,23 @@ func TestGitHubCommentCommand_MonitorOwnIdentityIsIgnored(t *testing.T) {
 	requireIgnored(t, status, response, "own identity")
 	if len(env.commands(t)) != 0 || env.github.permissionCalls.Load() != 0 {
 		t.Fatal("the monitor's own comment must record nothing")
+	}
+}
+
+func TestGitHubCommentCommand_FailedIdentityLookupRefusesTheCommand(t *testing.T) {
+	for _, identityStatus := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(http.StatusText(identityStatus), func(t *testing.T) {
+			env := newCommentTestEnv(t, nil)
+			env.github.selfLogin = commentTestAuthor
+			env.github.identityStatus = identityStatus
+			status, response := env.deliver(t, "delivery-identity-refused", commentTestPayload{body: "/orka implement"})
+			if status != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d response = %#v, want the command refused while the identity is unknown", status, response)
+			}
+			if len(env.commands(t)) != 0 || env.github.permissionCalls.Load() != 0 {
+				t.Fatal("a comment whose author could be the monitor itself must record nothing")
+			}
+		})
 	}
 }
 

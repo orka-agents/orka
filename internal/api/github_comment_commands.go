@@ -323,9 +323,6 @@ func (h *Handlers) repositoryMonitorCommentFromMonitorIdentity(ctx context.Conte
 	if err != nil {
 		return false, err
 	}
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-		return false, nil
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, fmt.Errorf("GitHub identity lookup returned %d", resp.StatusCode)
 	}
