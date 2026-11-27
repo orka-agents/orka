@@ -37,6 +37,8 @@ const (
 	fakeEntraBlueprnt      = "0e2e0000-0000-4000-8000-000000000002"
 	fakeEntraIdentity      = "0e2e0000-0000-4000-8000-000000000003"
 	fakeEntraResource      = "api://orka-e2e-identity-probe"
+	fakeEntraWorkload      = "0e2e0000-0000-4000-8000-000000000004"
+	fakeEntraModels        = "https://ai.azure.com"
 	fakeEntraTokenLifetime = 70 * time.Second
 	fakeEntraTrustDir      = "/etc/orka-e2e-entra"
 
@@ -292,6 +294,7 @@ func deployFakeEntra(assertion string) []byte {
 						"args": []string{
 							"--tenant=" + fakeEntraTenant, "--blueprint=" + fakeEntraBlueprnt,
 							"--identities=" + fakeEntraIdentity, "--resource=" + fakeEntraResource,
+							"--workloads=" + fakeEntraWorkload, "--model-resource=" + fakeEntraModels,
 							"--assertion-file=/etc/fakeentra/assertion", "--token-lifetime=" + fakeEntraTokenLifetime.String(),
 							"--tls-cert=/etc/fakeentra/tls.crt", "--tls-key=/etc/fakeentra/tls.key",
 						},
@@ -320,6 +323,18 @@ func deployFakeEntra(assertion string) []byte {
 }
 
 func configureControllerForFakeEntra() {
+	configureControllerWithFakeEntraTrust(map[string]string{
+		"agent-identity-entra-tenant-id":           fakeEntraTenant,
+		"agent-identity-entra-blueprint-client-id": fakeEntraBlueprnt,
+		"agent-identity-entra-authority":           "https://" + fakeEntraHost(),
+		"agent-identity-token-file":                fakeEntraTrustDir + "/assertion",
+		"agent-use-authorization-enabled":          "true",
+		"connectors-allow-private-endpoints":       "i-understand-tokens-may-leave-the-cluster",
+		"connector-callback-base-url":              "http://localhost:18080",
+	})
+}
+
+func configureControllerWithFakeEntraTrust(flags map[string]string) {
 	name, err := controllerManagerDeploymentName()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	var deployment appsv1.Deployment
@@ -330,15 +345,7 @@ func configureControllerForFakeEntra() {
 	manager := podSpec.Containers[index]
 	original := []any{manager.Args, manager.Env, manager.VolumeMounts, podSpec.Volumes}
 
-	args := authorizationReplaceFlags(manager.Args, map[string]string{
-		"agent-identity-entra-tenant-id":           fakeEntraTenant,
-		"agent-identity-entra-blueprint-client-id": fakeEntraBlueprnt,
-		"agent-identity-entra-authority":           "https://" + fakeEntraHost(),
-		"agent-identity-token-file":                fakeEntraTrustDir + "/assertion",
-		"agent-use-authorization-enabled":          "true",
-		"connectors-allow-private-endpoints":       "i-understand-tokens-may-leave-the-cluster",
-		"connector-callback-base-url":              "http://localhost:18080",
-	})
+	args := authorizationReplaceFlags(manager.Args, flags)
 	env := append(slices.Clone(manager.Env), corev1.EnvVar{Name: "SSL_CERT_DIR", Value: fakeEntraTrustDir + "/ca"})
 	mounts := append(slices.Clone(manager.VolumeMounts),
 		corev1.VolumeMount{Name: fakeEntraTrust, MountPath: fakeEntraTrustDir, ReadOnly: true})

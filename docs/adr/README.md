@@ -126,6 +126,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0053](0053-approval-webhook-events.md) | Opt-in signed approval webhook events from durable approval transitions | Accepted, partly superseded by 0054 |
 | [0054](0054-task-webhook-delivery-workers.md) | Deliver Task webhooks from a worker pool, not the Task reconcile | Accepted |
 | [0055](0055-mcp-oauth-protected-resource-metadata.md) | Serve OAuth protected-resource metadata for the MCP server | Accepted |
+| [0058](0058-keyless-azure-openai-providers.md) | Keyless Azure OpenAI Providers authenticate in the controller | Accepted |
 
 ### Agent hosts and the Agent Host Protocol
 
