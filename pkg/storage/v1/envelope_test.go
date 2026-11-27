@@ -70,8 +70,6 @@ func TestEnvelopeErrorsAreDistinct(t *testing.T) {
 }
 
 func TestOperationLimitsCoverEveryAcceptedRetry(t *testing.T) {
-	// A receipt recorded at provider time C may be retried by an operation the
-	// provider still accepts until C + MaxClockSkew + MaxOperationAge.
 	require.Greater(t, storagev1.MinReceiptRetention, storagev1.MaxOperationAge+storagev1.MaxClockSkew)
 	require.Positive(t, storagev1.MaxReceiptResultBytes)
 	require.True(t, storagev1.IsValidOperationState(storagev1.OperationCommitted))

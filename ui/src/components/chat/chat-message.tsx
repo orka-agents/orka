@@ -13,9 +13,6 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralForm}`
 }
 
-// A created Task's live phase. Each chip polls its own Task at a modest
-// interval and stops once the Task is terminal (or forbidden/deleted, which
-// useTask already stops on), so finished turns cost no requests.
 function TaskChip({ name }: { name: string }) {
   const [polling, setPolling] = useState(true)
   const { data: task } = useTask(name, polling ? TASK_CHIP_POLL_MS : false)
@@ -35,13 +32,10 @@ function TaskChip({ name }: { name: string }) {
 }
 
 export function ChatMessage({ message }: { message: ChatMessageType }) {
-  // Tool call/result messages get their own compact display
   if (message.role === 'tool_call' || message.role === 'tool_result') {
     return <ChatToolCall message={message} />
   }
 
-  // Status and error pills wrap within the transcript: a long model name or
-  // a provider's raw JSON error body must not widen it into a sideways scroll.
   if (message.role === 'status') {
     return (
       <div className="flex justify-center py-1">
@@ -66,8 +60,6 @@ export function ChatMessage({ message }: { message: ChatMessageType }) {
 
   const isUser = message.role === 'user'
 
-  // User turns keep a right-aligned bubble; assistant turns render flush (like
-  // an agentic console, not a symmetric consumer chat).
   if (isUser) {
     return (
       <div className="flex justify-end gap-3 py-2">
@@ -89,7 +81,6 @@ export function ChatMessage({ message }: { message: ChatMessageType }) {
       <div className="min-w-0 flex-1 space-y-1.5">
         <div className="whitespace-pre-wrap wrap-anywhere text-sm text-foreground">{message.content}</div>
 
-        {/* Cross-silo links: tasks created during this turn link into the graph. */}
         {message.tasksCreatedNames && message.tasksCreatedNames.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
             {message.tasksCreatedNames.map((name) => (

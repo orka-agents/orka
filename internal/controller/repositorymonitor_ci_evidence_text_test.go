@@ -15,10 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// repositoryMonitorEvidenceTextFixtures returns CI free text that carries a
-// credential: every sanitizer regression case, and the shapes a security
-// re-review found the sanitizer misses. Each value in secrets must stay out
-// of the repair prompt unless the monitor opts in to CI free text.
 func repositoryMonitorEvidenceTextFixtures() []repositoryMonitorEvidenceLeakCase {
 	v := "Qv7Rm2" + "Lc9Wx4Tz8Np3Hs"
 	b := base64.StdEncoding.EncodeToString([]byte("deploy:" + v))
@@ -55,9 +51,6 @@ func repositoryMonitorEvidenceTextFixtures() []repositoryMonitorEvidenceLeakCase
 	return cases
 }
 
-// repositoryMonitorEvidenceTextTestGitHub reports one failing check run and
-// one failing commit status, with text in every free-text field GitHub
-// returns for them.
 func repositoryMonitorEvidenceTextTestGitHub(text, statusURL string) *repositoryMonitorRepairLabelsGitHub {
 	run := repositoryMonitorEvidenceTestRun(701, "deploy", "completed", "failure", 1)
 	output := run["output"].(map[string]any)
@@ -85,14 +78,10 @@ func repositoryMonitorEvidenceTextTestPrompt(t *testing.T, github *repositoryMon
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The prompt JSON-encodes the evidence; decode the escapes a credential
-	// could hide behind.
 	prompt = strings.NewReplacer(`\n`, "\n", `\"`, `"`, `\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(prompt)
 	return prompt, input
 }
 
-// By default, the repair prompt carries no CI free text: only check and
-// annotation structure and GitHub links.
 func TestRepositoryMonitorCIEvidenceOmitsTextByDefault(t *testing.T) {
 	for _, tc := range repositoryMonitorEvidenceTextFixtures() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,7 +113,6 @@ func TestRepositoryMonitorCIEvidenceOmitsTextByDefault(t *testing.T) {
 	}
 }
 
-// A monitor that opts in gets the free text, sanitized.
 func TestRepositoryMonitorCIEvidenceTextOptIn(t *testing.T) {
 	token := repositoryMonitorEvidenceTestGitHubToken
 	text := "--- FAIL: TestDeploy (0.01s)\n    deploy_test.go:12: expected 200, got 401\n\nauth with " + token + " failed"
@@ -169,8 +157,6 @@ func TestRepositoryMonitorEvidenceGitHubCheckURL(t *testing.T) {
 	if got := repositoryMonitorEvidenceGitHubCheckURL("https://github.com/orka-agents/orka/actions/runs/9", "", ""); got != "" {
 		t.Errorf("a link without a monitored repository = %q, want it dropped", got)
 	}
-	// In both modes, a check run link is kept only on GitHub and a commit
-	// status link only when it is a GitHub Actions page.
 	for _, optIn := range []bool{false, true} {
 		github := repositoryMonitorEvidenceTextTestGitHub("failed", "https://github.com/orka-agents/orka/actions/runs/77")
 		github.runs["head51"][0]["html_url"] = "https://ci.example.invalid/download/" + repositoryMonitorEvidenceLeakValue
@@ -184,9 +170,6 @@ func TestRepositoryMonitorEvidenceGitHubCheckURL(t *testing.T) {
 	}
 }
 
-// Structured-only evidence is frozen per attempt like text: a retried
-// handoff reuses the Task's prompt, and the prompt's input round-trips with
-// its digest.
 func TestRepositoryMonitorCIEvidenceDefaultIsFrozenPerAttempt(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
@@ -232,7 +215,6 @@ func TestRepositoryMonitorCIEvidenceDefaultIsFrozenPerAttempt(t *testing.T) {
 		t.Fatalf("frozen input = %+v ok=%t, want digest %s", frozen, ok, first.digest())
 	}
 
-	// GitHub now reports different structure for the same head.
 	github.annotations[301][0]["start_line"] = 30
 	created, second, err := reconciler.createRepositoryMonitorRepairTaskWithEvidence(ctx, monitor, monitorRun, command, "orka-agents", "orka", pr, item, 1, 1)
 	if err != nil || created != 0 || second.digest() != first.digest() {

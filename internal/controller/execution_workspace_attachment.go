@@ -47,7 +47,6 @@ var (
 	errWorkspaceAttachmentRotationNotReady = errors.New("expired workspace attachment is not ready for credential rotation")
 )
 
-// WorkspaceAttachmentManager owns Lease, epoch, and attachment Secret rotation.
 type WorkspaceAttachmentManager struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -55,7 +54,6 @@ type WorkspaceAttachmentManager struct {
 	Now       func() time.Time
 }
 
-// WorkspaceAttachmentResult contains references safe to pass to a worker Job.
 type WorkspaceAttachmentResult struct {
 	Epoch         int64
 	AttachmentRef workspacev1alpha1.SecretReference
@@ -122,9 +120,6 @@ func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
 	wantEpoch := strconv.FormatInt(epoch, 10)
 	leaseEpoch := strings.TrimSpace(lease.Annotations[workspaceAttachmentLeaseEpochAnnotation])
 	if leaseEpoch == "" {
-		// Leases created before epoch fencing need a one-time marker. Every new
-		// publisher updates this same Lease before writing attachment intent, so
-		// its optimistic resourceVersion fence closes a concurrent handoff.
 		before := lease.DeepCopy()
 		if lease.Annotations == nil {
 			lease.Annotations = map[string]string{}
@@ -142,6 +137,15 @@ func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
 		}
 		leaseEpoch = strings.TrimSpace(lease.Annotations[workspaceAttachmentLeaseEpochAnnotation])
 	}
+	if parsed, err := strconv.ParseInt(leaseEpoch, 10, 64); err == nil && parsed > epoch {
+		current := &workspacev1alpha1.ExecutionWorkspace{}
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current); err != nil {
+			return fmt.Errorf("re-read workspace for staged attachment Lease %s: %w", key, err)
+		}
+		if current.UID == workspace.UID && current.Spec.Attachment == nil && current.Spec.AttachmentEpoch == epoch {
+			return nil
+		}
+	}
 	if leaseEpoch != wantEpoch {
 		return fmt.Errorf(
 			"workspace attachment Lease %s belongs to epoch %q, not revoked epoch %d; refusing deletion",
@@ -154,9 +158,6 @@ func deleteWorkspaceOwnedAttachmentLeaseForEpoch(
 	return nil
 }
 
-// Attach rotates authority and writes attachment intent. Bearer token text
-// exists only in the created Secret and this function's short-lived buffer.
-//
 //nolint:gocyclo // Lease acquisition, epoch fencing, Secret creation, and rollback must remain ordered.
 func (m WorkspaceAttachmentManager) Attach(
 	ctx context.Context,
@@ -167,10 +168,6 @@ func (m WorkspaceAttachmentManager) Attach(
 	return m.attach(ctx, workspace, task, annotations, validateWorkspaceAttachmentAttempt)
 }
 
-// attach revalidates the caller's admission policy at every ownership fence.
-// The public Attach path always requires a reusable workspace; ACP may also
-// attach its exact materialized workspace before provider compute is started.
-//
 //nolint:gocyclo // Lease acquisition, epoch fencing, Secret creation, and rollback must remain ordered.
 func (m WorkspaceAttachmentManager) attach(
 	ctx context.Context,
@@ -185,101 +182,16 @@ func (m WorkspaceAttachmentManager) attach(
 	if workspace.Namespace != task.Namespace || workspace.UID == "" || task.UID == "" {
 		return nil, fmt.Errorf("workspace and task must be persisted in the same namespace")
 	}
-	now := m.now()
-	if err := validate(workspace, task, now); err != nil {
-		return nil, err
-	}
-	ttl := m.LeaseTTL
-	if ttl <= 0 {
-		ttl = defaultAttachmentLeaseTTL
-	}
-
-	bearer, err := newWorkspaceAttachmentBearer()
+	staged, err := m.stageAttachment(ctx, workspace, task, validate)
 	if err != nil {
 		return nil, err
 	}
-	defer zeroBytes(bearer)
-	tokenDigest := sha256.Sum256(bearer)
-
-	leaseClaimed, err := m.acquireLease(ctx, workspace, task, now, ttl)
-	if err != nil {
-		return nil, err
-	}
-	var createdSecret *corev1.Secret
+	now, ttl, key, epoch, secretName := staged.now, staged.ttl, staged.key, staged.epoch, staged.secretName
+	expiresAt := staged.expiresAt
 	preserveCreatedSecret := false
 	fail := func(cause error) error {
-		secret := createdSecret
-		if preserveCreatedSecret {
-			secret = nil
-		}
-		cleanupErr := m.cleanupFailedAttachmentAttempt(ctx, workspace, task, secret, leaseClaimed)
-		if cleanupErr != nil {
-			return errors.Join(cause, cleanupErr)
-		}
-		return cause
+		return staged.fail(cause, preserveCreatedSecret)
 	}
-
-	key := types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}
-	current := &workspacev1alpha1.ExecutionWorkspace{}
-	if err := m.Client.Get(ctx, key, current); err != nil {
-		return nil, fail(fmt.Errorf("get workspace before attachment: %w", err))
-	}
-	if current.UID != workspace.UID {
-		return nil, fail(fmt.Errorf("workspace %s/%s was replaced before attachment", workspace.Namespace, workspace.Name))
-	}
-	if err := validate(current, task, now); err != nil {
-		return nil, fail(fmt.Errorf("revalidate workspace before attachment: %w", err))
-	}
-
-	expiresAt := now.Add(ttl)
-	if maxLifetime := current.Spec.Lifecycle.MaxLifetime; maxLifetime != nil && maxLifetime.Duration > 0 {
-		maxExpiry := current.CreationTimestamp.Add(maxLifetime.Duration)
-		if maxExpiry.Before(expiresAt) {
-			expiresAt = maxExpiry
-		}
-	}
-	if !expiresAt.After(now) {
-		return nil, fail(fmt.Errorf("workspace attachment would already be expired"))
-	}
-
-	epoch, err := nextWorkspaceAttachmentEpoch(current)
-	if err != nil {
-		return nil, fail(err)
-	}
-	secretName := attachmentSecretName(current.Name, epoch)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: current.Namespace,
-			Labels: map[string]string{
-				workspaceAttachmentLabel: string(current.UID),
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			workspaceAttachmentTokenKey: append([]byte(nil), bearer...),
-			"workspaceUID":              []byte(current.UID),
-			taskUIDField:                []byte(task.UID),
-			epochField:                  []byte(strconv.FormatInt(epoch, 10)),
-		},
-	}
-	if err := controllerutil.SetControllerReference(current, secret, m.Client.Scheme()); err != nil {
-		return nil, fail(fmt.Errorf("set attachment Secret owner: %w", err))
-	}
-	if err := m.Client.Create(ctx, secret); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return nil, fail(fmt.Errorf("create attachment Secret: %w", err))
-		}
-		recovered, recoveredDigest, recoverErr := m.recoverOrphanedAttachmentSecret(
-			ctx, current, epoch, secretName,
-		)
-		if recoverErr != nil {
-			return nil, fail(recoverErr)
-		}
-		secret = recovered
-		tokenDigest = recoveredDigest
-	}
-	createdSecret = secret
 
 	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &workspacev1alpha1.ExecutionWorkspace{}
@@ -306,20 +218,10 @@ func (m WorkspaceAttachmentManager) attach(
 		preserveCreatedSecret = false
 
 		before := current.DeepCopy()
-		attachment := &workspacev1alpha1.ExecutionWorkspaceAttachment{
-			TaskRef:     workspacev1alpha1.ObjectIdentityReference{Name: task.Name, UID: task.UID},
-			Epoch:       epoch,
-			TokenSHA256: "sha256:" + hex.EncodeToString(tokenDigest[:]),
-			ExpiresAt:   metav1.NewTime(expiresAt),
-		}
-		attachment.TokenSecretRef.Name = secretName
+		attachment := staged.attachment()
 		current.Spec.AttachmentEpoch = epoch
 		current.Spec.Attachment = attachment
 		current.Spec.DesiredState = workspacev1alpha1.ExecutionWorkspaceDesiredReady
-		// Caller-supplied metadata (the attached Task's frozen detach action)
-		// binds in the SAME optimistic update that installs the attachment,
-		// so no crash window can leave the attachment observable with a stale
-		// prior action.
 		if len(annotations) > 0 {
 			if current.Annotations == nil {
 				current.Annotations = map[string]string{}
@@ -418,15 +320,9 @@ func (m WorkspaceAttachmentManager) recoverOrphanedAttachmentSecret(
 			secretName,
 		)
 	}
-	// taskUID records the attempt that created the orphan. It can differ after
-	// an expired Lease transfers to a successor Task; the workspace owner,
-	// epoch, renewed Lease fence, and optimistic workspace patch decide which
-	// Task may publish the recovered authority.
 	return secret, sha256.Sum256(bearer), nil
 }
 
-// BeginRevocation clears attachment intent. The adapter must revoke the active
-// epoch before FinalizeRevocation removes the Secret and Lease.
 func (m WorkspaceAttachmentManager) BeginRevocation(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -458,8 +354,6 @@ func (m WorkspaceAttachmentManager) BeginRevocation(
 	})
 }
 
-// FinalizeRevocation deletes the token Secret and Lease only after provider
-// status no longer reports the epoch as attached.
 func (m WorkspaceAttachmentManager) FinalizeRevocation(
 	ctx context.Context,
 	workspace *workspacev1alpha1.ExecutionWorkspace,
@@ -583,10 +477,6 @@ func validateWorkspaceAttachmentCandidate(workspace *workspacev1alpha1.Execution
 	return nil
 }
 
-// validateWorkspaceAttachmentAttempt admits either a detached reusable
-// workspace or an expired, fully enforced attachment held by the same Task.
-// The latter is a new attachment attempt: Attach advances the epoch, renews
-// the Lease, and rotates the bearer without opening a detached ownership gap.
 func validateWorkspaceAttachmentAttempt(
 	workspace *workspacev1alpha1.ExecutionWorkspace,
 	task *corev1alpha1.Task,
@@ -649,18 +539,18 @@ func (m WorkspaceAttachmentManager) cleanupFailedAttachmentAttempt(
 	leaseClaimed bool,
 ) error {
 	current := &workspacev1alpha1.ExecutionWorkspace{}
-	workspaceErr := m.Client.Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current)
+	workspaceErr := uncachedReader(m.APIReader, m.Client).Get(ctx, types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, current)
 	if workspaceErr != nil && !apierrors.IsNotFound(workspaceErr) {
 		return fmt.Errorf("verify failed workspace attachment attempt: %w", workspaceErr)
 	}
 
 	workspaceHasAttachment := workspaceErr == nil && current.UID == workspace.UID && current.Spec.Attachment != nil
-	// A handed-off orphan can still race the original paused attempt. Once
-	// either Task attaches this exact Secret, cleanup must preserve the bearer;
-	// the workspace's optimistic patch decides which attachment won.
+	intent, staged := parseACPWorkspaceAttachmentIntent(current)
+	secretIsStaged := workspaceErr == nil && current.UID == workspace.UID && staged && secret != nil &&
+		intent.SecretName == secret.Name
 	secretIsActive := workspaceHasAttachment && secret != nil &&
 		current.Spec.Attachment.TokenSecretRef.Name == secret.Name
-	if secretIsActive {
+	if secretIsActive || secretIsStaged {
 		return nil
 	}
 
@@ -739,4 +629,145 @@ func boundedWorkspaceChildName(workspaceName, suffix string) string {
 		workspaceName = "w"
 	}
 	return workspaceName + "-" + hashSuffix + "-" + suffix
+}
+
+type stagedWorkspaceAttachment struct {
+	m             WorkspaceAttachmentManager
+	workspace     *workspacev1alpha1.ExecutionWorkspace
+	task          *corev1alpha1.Task
+	now           time.Time
+	ttl           time.Duration
+	key           types.NamespacedName
+	epoch         int64
+	secretName    string
+	tokenDigest   [sha256.Size]byte
+	expiresAt     time.Time
+	createdSecret *corev1.Secret
+	leaseClaimed  bool
+}
+
+func (s *stagedWorkspaceAttachment) fail(cause error, preserveSecret bool) error {
+	secret := s.createdSecret
+	if preserveSecret {
+		secret = nil
+	}
+	if cleanupErr := s.m.cleanupFailedAttachmentAttempt(context.Background(), s.workspace, s.task, secret, s.leaseClaimed); cleanupErr != nil {
+		return errors.Join(cause, cleanupErr)
+	}
+	return cause
+}
+
+func (s *stagedWorkspaceAttachment) attachment() *workspacev1alpha1.ExecutionWorkspaceAttachment {
+	attachment := &workspacev1alpha1.ExecutionWorkspaceAttachment{
+		TaskRef:     workspacev1alpha1.ObjectIdentityReference{Name: s.task.Name, UID: s.task.UID},
+		Epoch:       s.epoch,
+		TokenSHA256: "sha256:" + hex.EncodeToString(s.tokenDigest[:]),
+		ExpiresAt:   metav1.NewTime(s.expiresAt),
+	}
+	attachment.TokenSecretRef.Name = s.secretName
+	return attachment
+}
+
+func (m WorkspaceAttachmentManager) stageAttachment(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	validate func(*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.Task, time.Time) error,
+) (*stagedWorkspaceAttachment, error) {
+	now := m.now()
+	if err := validate(workspace, task, now); err != nil {
+		return nil, err
+	}
+	ttl := m.LeaseTTL
+	if ttl <= 0 {
+		ttl = defaultAttachmentLeaseTTL
+	}
+
+	bearer, err := newWorkspaceAttachmentBearer()
+	if err != nil {
+		return nil, err
+	}
+	defer zeroBytes(bearer)
+	staged := &stagedWorkspaceAttachment{m: m, workspace: workspace, task: task, now: now, ttl: ttl,
+		key: types.NamespacedName{Namespace: workspace.Namespace, Name: workspace.Name}, tokenDigest: sha256.Sum256(bearer)}
+
+	staged.leaseClaimed, err = m.acquireLease(ctx, workspace, task, now, ttl)
+	if err != nil {
+		return nil, err
+	}
+	current := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := m.Client.Get(ctx, staged.key, current); err != nil {
+		return nil, staged.fail(fmt.Errorf("get workspace before attachment: %w", err), false)
+	}
+	if current.UID != workspace.UID {
+		return nil, staged.fail(fmt.Errorf("workspace %s/%s was replaced before attachment", workspace.Namespace, workspace.Name), false)
+	}
+	if err := validate(current, task, now); err != nil {
+		return nil, staged.fail(fmt.Errorf("revalidate workspace before attachment: %w", err), false)
+	}
+
+	staged.expiresAt = now.Add(ttl)
+	if maxLifetime := current.Spec.Lifecycle.MaxLifetime; maxLifetime != nil && maxLifetime.Duration > 0 {
+		maxExpiry := current.CreationTimestamp.Add(maxLifetime.Duration)
+		if maxExpiry.Before(staged.expiresAt) {
+			staged.expiresAt = maxExpiry
+		}
+	}
+	if !staged.expiresAt.After(now) {
+		return nil, staged.fail(fmt.Errorf("workspace attachment would already be expired"), false)
+	}
+
+	staged.epoch, err = nextWorkspaceAttachmentEpoch(current)
+	if err != nil {
+		return nil, staged.fail(err, false)
+	}
+	staged.secretName = attachmentSecretName(current.Name, staged.epoch)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      staged.secretName,
+			Namespace: current.Namespace,
+			Labels: map[string]string{
+				workspaceAttachmentLabel: string(current.UID),
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			workspaceAttachmentTokenKey: append([]byte(nil), bearer...),
+			"workspaceUID":              []byte(current.UID),
+			taskUIDField:                []byte(task.UID),
+			epochField:                  []byte(strconv.FormatInt(staged.epoch, 10)),
+		},
+	}
+	if err := controllerutil.SetControllerReference(current, secret, m.Client.Scheme()); err != nil {
+		return nil, staged.fail(fmt.Errorf("set attachment Secret owner: %w", err), false)
+	}
+	if err := m.Client.Create(ctx, secret); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, staged.fail(fmt.Errorf("create attachment Secret: %w", err), false)
+		}
+		recovered, recoveredDigest, recoverErr := m.recoverOrphanedAttachmentSecret(ctx, current, staged.epoch, staged.secretName)
+		if recoverErr != nil {
+			return nil, staged.fail(recoverErr, false)
+		}
+		secret = recovered
+		staged.tokenDigest = recoveredDigest
+	}
+	staged.createdSecret = secret
+	return staged, nil
+}
+
+func (m WorkspaceAttachmentManager) prepareAttachmentIntent(
+	ctx context.Context,
+	workspace *workspacev1alpha1.ExecutionWorkspace,
+	task *corev1alpha1.Task,
+	validate func(*workspacev1alpha1.ExecutionWorkspace, *corev1alpha1.Task, time.Time) error,
+) (*workspacev1alpha1.ExecutionWorkspaceAttachment, error) {
+	staged, err := m.stageAttachment(ctx, workspace, task, validate)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.renewAttachmentLeaseFence(ctx, workspace, task, staged.epoch, staged.ttl); err != nil {
+		return nil, staged.fail(err, true)
+	}
+	return staged.attachment(), nil
 }

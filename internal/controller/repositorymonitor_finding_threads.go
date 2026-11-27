@@ -19,16 +19,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// repositoryMonitorAddressedPrefix opens an inline comment whose finding a
-// later review found fixed.
 const repositoryMonitorAddressedPrefix = "✅ Addressed in `"
 
-// repositoryMonitorGraphQLNumberVariable names the pull request number in
-// GitHub GraphQL queries.
 const repositoryMonitorGraphQLNumberVariable = "number"
 
-// repositoryMonitorInlineFindingMarker matches the finding ID in the hidden
-// marker Orka appends to its inline comments.
 var repositoryMonitorInlineFindingMarker = regexp.MustCompile(`<!-- orka:repo-monitor-inline review=\S+ finding=(f-[0-9a-f]+) -->`)
 
 type repositoryMonitorReviewComment struct {
@@ -36,16 +30,7 @@ type repositoryMonitorReviewComment struct {
 	Body string `json:"body"`
 }
 
-// markRepositoryMonitorFixedFindingThreads marks the inline comments of the
-// findings record found fixed: each comment gets an "Addressed in" note and
-// its thread is resolved. Only comments on reviews Orka published are
-// touched, so a comment that copies Orka's marker is ignored, and each
-// finding is marked once. Marking links a finding to its fix, so a
-// security-sensitive review or finding is never marked unless the monitor
-// posts security-sensitive reviews.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord) error {
-	// Only an accepted review updates the record of findings; a skipped or
-	// failed result must not declare anything fixed on GitHub either.
 	if r.Store == nil || !monitor.Spec.Review.Publish.Enabled || record == nil || !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
 		return nil
 	}
@@ -61,8 +46,6 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(c
 	if err != nil {
 		return err
 	}
-	// The same live checks gate these writes as gate publishing: a head that
-	// moved since the review may have reintroduced the defect.
 	current, err := r.fetchRepositoryMonitorPullRequest(ctx, owner, repository, token, item.Number)
 	if err != nil || !repositoryMonitorPullRequestThreadsMarkable(monitor, *current, record) {
 		return err
@@ -84,8 +67,6 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(c
 	return nil
 }
 
-// repositoryMonitorUnmarkedFixedFindings returns the IDs of the findings
-// record found fixed that may be marked and are not marked yet.
 func (r *RepositoryMonitorReconciler) repositoryMonitorUnmarkedFixedFindings(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) (map[string]bool, error) {
 	restricted := !monitor.Spec.Review.Publish.PostSecuritySensitive
 	if restricted &&
@@ -118,8 +99,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorUnmarkedFixedFindings(ctx
 	return fixed, nil
 }
 
-// repositoryMonitorPullRequestThreadsMarkable reports whether the live pull
-// request still passes the checks that gate publishing record's review.
 func repositoryMonitorPullRequestThreadsMarkable(monitor *corev1alpha1.RepositoryMonitor, current repositoryMonitorPullRequest, record *store.ReviewRecord) bool {
 	return strings.EqualFold(strings.TrimSpace(current.State), repositoryMonitorItemStateOpen) &&
 		strings.TrimSpace(current.BaseBranch) == effectiveRepositoryMonitorBranch(monitor) &&
@@ -129,18 +108,12 @@ func repositoryMonitorPullRequestThreadsMarkable(monitor *corev1alpha1.Repositor
 		repositoryMonitorPullRequestReviewed(monitor.Spec, current)
 }
 
-// repositoryMonitorFindingComment is an inline comment Orka posted for a
-// finding.
 type repositoryMonitorFindingComment struct {
 	findingID string
 	comment   repositoryMonitorReviewComment
 }
 
-// repositoryMonitorFixedFindingComments returns the inline comments, on
-// reviews Orka published for the pull request, of the fixed findings.
 func (r *RepositoryMonitorReconciler) repositoryMonitorFixedFindingComments(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repository, token string, number int64, fixed map[string]bool) ([]repositoryMonitorFindingComment, error) {
-	// A finding fixed long after it was reported sits on an old publication,
-	// so read every page.
 	var publishes []store.ReviewPublishRecord
 	for cursor := ""; ; {
 		page, next, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
@@ -155,9 +128,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFixedFindingComments(ctx 
 		}
 		cursor = next
 	}
-	// Each finding is marked once, on the first comment found for it, so the
-	// lookup stops once every fixed finding has one and skips publications
-	// that posted no inline comments.
 	var targets []repositoryMonitorFindingComment
 	found := map[string]bool{}
 	for _, publish := range publishes {
@@ -185,8 +155,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFixedFindingComments(ctx 
 	return targets, nil
 }
 
-// markRepositoryMonitorFindingAddressed notes the fix on one comment and
-// resolves its thread, once per finding and review.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFindingAddressed(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, record *store.ReviewRecord, target repositoryMonitorFindingComment, threads map[int64]repositoryMonitorReviewThread, owner, repository, token, note string) error {
 	mutationID := repositoryMonitorFindingAddressedMutationID(record, target.findingID)
 	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
@@ -270,8 +238,6 @@ type repositoryMonitorReviewThread struct {
 	resolved bool
 }
 
-// listRepositoryMonitorReviewThreads maps each thread's first comment ID to
-// the thread.
 func (r *RepositoryMonitorReconciler) listRepositoryMonitorReviewThreads(ctx context.Context, owner, repository, token string, number int64) (map[int64]repositoryMonitorReviewThread, error) {
 	const query = `query($owner:String!,$name:String!,$number:Int!,$after:String) {
  repository(owner:$owner,name:$name) { pullRequest(number:$number) {
@@ -336,8 +302,6 @@ func (r *RepositoryMonitorReconciler) resolveRepositoryMonitorReviewThread(ctx c
 	return nil
 }
 
-// repositoryMonitorGitHubGraphQL runs one GitHub GraphQL operation and
-// decodes its data into out.
 func (r *RepositoryMonitorReconciler) repositoryMonitorGitHubGraphQL(ctx context.Context, token, query string, variables map[string]any, out any) error {
 	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
@@ -383,9 +347,6 @@ func repositoryMonitorGitHubBaseURL(r *RepositoryMonitorReconciler) string {
 	return repositoryMonitorDefaultGitHubAPIBaseURL
 }
 
-// markRepositoryMonitorFixedFindingThreadsBestEffort keeps a GitHub failure
-// from blocking review ingestion; marking threads only tidies the PR. A
-// failure is recorded so inventory polls retry it for a bounded time.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreadsBestEffort(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord) {
 	markErr := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record)
 	if markErr != nil {
@@ -397,13 +358,8 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreadsBe
 }
 
 const (
-	// repositoryMonitorFindingThreadRetryWindow bounds how long after a
-	// review inventory polls retry marking its fixed findings' threads.
-	repositoryMonitorFindingThreadRetryWindow = time.Hour
-	// repositoryMonitorFindingThreadRetryInterval spaces those retries.
-	repositoryMonitorFindingThreadRetryInterval = 5 * time.Minute
-	// repositoryMonitorOperationMarkFindingThreads records a failed attempt
-	// to mark a review's fixed findings, and its eventual success.
+	repositoryMonitorFindingThreadRetryWindow    = time.Hour
+	repositoryMonitorFindingThreadRetryInterval  = 5 * time.Minute
 	repositoryMonitorOperationMarkFindingThreads = "mark_finding_threads"
 )
 
@@ -411,9 +367,6 @@ func repositoryMonitorFindingThreadMarkingID(record *store.ReviewRecord) string 
 	return "ghmut-" + repositoryMonitorShortHash(record.MonitorNamespace+"|"+record.MonitorName+"|"+record.ID+"|mark-finding-threads")
 }
 
-// recordRepositoryMonitorFindingThreadMarking records a failed marking
-// attempt for retry, and settles an earlier failure once marking succeeds.
-// A review that never failed gets no record.
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorFindingThreadMarking(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord, markErr error) error {
 	if r.Store == nil || record == nil {
 		return nil
@@ -441,10 +394,6 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorFindingThreadMarkin
 	return r.updateRepositoryMonitorGitHubMutation(ctx, monitor, attempt)
 }
 
-// retryRepositoryMonitorFindingThreadMarking retries marking the fixed
-// findings of item's latest review after a failed attempt, at most every
-// retry interval and only within the retry window after the review, while
-// that review still covers the item's head.
 func (r *RepositoryMonitorReconciler) retryRepositoryMonitorFindingThreadMarking(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem) error {
 	if r.Store == nil || item == nil || strings.TrimSpace(item.LastReviewID) == "" || !monitor.Spec.Review.Publish.Enabled {
 		return nil
@@ -473,10 +422,6 @@ func (r *RepositoryMonitorReconciler) retryRepositoryMonitorFindingThreadMarking
 	return nil
 }
 
-// repositoryMonitorFindingAddressedMutationID names the GitHub mutation that
-// marks one finding addressed at one head. It is keyed by the head, not the
-// review, so a re-review of the same head does not resolve a thread again
-// that a maintainer reopened.
 func repositoryMonitorFindingAddressedMutationID(record *store.ReviewRecord, findingID string) string {
 	key := strings.Join([]string{record.MonitorNamespace, record.MonitorName, strconv.FormatInt(record.Number, 10), findingID, record.HeadSHA, "addressed"}, "|")
 	return "ghmut-" + repositoryMonitorShortHash(key)

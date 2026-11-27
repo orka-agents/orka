@@ -80,8 +80,6 @@ func TestReceiptCodecReplaysExactValues(t *testing.T) {
 	require.NoError(t, unmarshalReceiptValue(encoded, &decoded))
 	require.Nil(t, decoded)
 
-	// A string cut inside a multibyte character, as byte-bounded sanitizing
-	// can leave it, keeps its exact bytes, as a value and as a map key.
 	truncated := strings.Repeat("a", 255) + "\xf0\x9f"
 	encodedStrings, err := marshalReceiptValue(map[string]string{truncated: truncated, "ok": "\u00e9"})
 	require.NoError(t, err)

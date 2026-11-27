@@ -13,8 +13,6 @@ const (
 	MaxExecutionEventLimit     = 1000
 )
 
-// ExecutionEvent is the store-facing representation of a task execution timeline event.
-// Seq is monotonically increasing per (namespace, stream_type, stream_id).
 type ExecutionEvent struct {
 	ID          string                    `json:"id"`
 	Namespace   string                    `json:"namespace"`
@@ -34,24 +32,14 @@ type ExecutionEvent struct {
 	Truncation  *ExecutionEventTruncation `json:"truncation,omitempty"`
 	CreatedAt   time.Time                 `json:"createdAt"`
 
-	// Usage is a usage observation Orka derived from this event. When the
-	// event is newly appended, the provider records it in the same
-	// transaction, as RecordUsage would, and the append fails if recording
-	// fails. An append that returns an existing event by its deduplication
-	// key records nothing. Reads never return it.
 	Usage *ExecutionEventUsage `json:"-"`
 }
 
-// ExecutionEventUsage is a usage observation carried by an execution event.
 type ExecutionEventUsage struct {
-	Observation UsageObservation
-	// KeepFirstObservedAt makes the provider keep the ObservedAt of an
-	// observation already recorded under the same namespace and ID before
-	// comparing them, so a report retried under a new event stays idempotent.
+	Observation         UsageObservation
 	KeepFirstObservedAt bool
 }
 
-// ExecutionEventFilter constrains execution event list queries.
 type ExecutionEventFilter struct {
 	Namespace   string
 	StreamType  string
@@ -63,8 +51,6 @@ type ExecutionEventFilter struct {
 	Limit       int
 }
 
-// SessionExecutionEventFilter constrains the aggregated session event read model.
-// AfterSeq is a session-level cursor assigned by deterministic ordering over task events.
 type SessionExecutionEventFilter struct {
 	Namespace   string
 	SessionName string
@@ -73,14 +59,12 @@ type SessionExecutionEventFilter struct {
 	Limit       int
 }
 
-// SessionExecutionEvent is a task-derived event with an aggregated session sequence.
 type SessionExecutionEvent struct {
 	ExecutionEvent
 	SessionSeq int64
 	TaskSeq    int64
 }
 
-// Normalized returns a copy of f with whitespace trimmed and limit defaults applied.
 func (f ExecutionEventFilter) Normalized() ExecutionEventFilter {
 	f.Namespace = strings.TrimSpace(f.Namespace)
 	f.StreamType = strings.TrimSpace(f.StreamType)
@@ -110,7 +94,6 @@ func (f ExecutionEventFilter) Normalized() ExecutionEventFilter {
 	return f
 }
 
-// Validate reports unsupported filter values.
 func (f ExecutionEventFilter) Validate() error {
 	f = f.Normalized()
 	if !IsValidExecutionEventStreamType(f.StreamType) {
@@ -124,7 +107,6 @@ func (f ExecutionEventFilter) Validate() error {
 	return nil
 }
 
-// Normalized returns a copy of f with whitespace trimmed and limit defaults applied.
 func (f SessionExecutionEventFilter) Normalized() SessionExecutionEventFilter {
 	f.Namespace = strings.TrimSpace(f.Namespace)
 	f.SessionName = strings.TrimSpace(f.SessionName)
@@ -148,7 +130,6 @@ func (f SessionExecutionEventFilter) Normalized() SessionExecutionEventFilter {
 	return f
 }
 
-// Validate reports unsupported session event read-model filter values.
 func (f SessionExecutionEventFilter) Validate() error {
 	f = f.Normalized()
 	if f.Namespace == "" {
@@ -165,54 +146,29 @@ func (f SessionExecutionEventFilter) Validate() error {
 	return nil
 }
 
-// ExecutionEventStore defines the persistence/query contract for execution
-// events. Content must be valid JSON when present; content that is only
-// whitespace is stored and returned as no content.
 type ExecutionEventStore interface {
 	AppendExecutionEvent(ctx context.Context, event *ExecutionEvent) (*ExecutionEvent, error)
 	ListExecutionEvents(ctx context.Context, filter ExecutionEventFilter) ([]ExecutionEvent, error)
 	ListSessionExecutionEvents(ctx context.Context, filter SessionExecutionEventFilter) ([]SessionExecutionEvent, int64, error)
 	GetLatestExecutionEventSeq(ctx context.Context, namespace, streamType, streamID string) (int64, error)
-	// GetLatestExecutionEventSeqs reads only the requested streams in bounded
-	// batches, all from one snapshot. Keys are trimmed stream IDs; absent
-	// streams have sequence zero.
 	GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error)
 	DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error
 }
 
-// ExecutionEventAppend is one deduplicated event of a grouped append.
 type ExecutionEventAppend struct {
 	Event     *ExecutionEvent
 	DedupeKey string
 }
 
-// ExecutionEventAppendResult reports one entry of a grouped append: the
-// persisted event and whether this call appended it.
 type ExecutionEventAppendResult struct {
 	Event    *ExecutionEvent
 	Appended bool
 }
 
-// GroupedExecutionEventStore appends several deduplicated events in one
-// transaction, in order. Each entry behaves as AppendExecutionEventIfAbsent
-// would, including a terminal approval conflict; when any entry fails, none
-// is appended. Orka uses it for evidence that must not be recorded in part,
-// such as a recovered approval decision and its execution outcome.
 type GroupedExecutionEventStore interface {
 	AppendExecutionEventsIfAbsent(ctx context.Context, appends []ExecutionEventAppend) ([]ExecutionEventAppendResult, error)
 }
 
-// DeduplicatingExecutionEventStore atomically appends one event for a caller-
-// supplied key scoped to its execution-event stream. A repeated key returns the
-// existing event with appended=false when the request belongs to the same
-// Task, Session and tool call as that event; otherwise it returns
-// ErrDuplicateMismatch. A field left empty on either side matches, so a
-// request that does not know an event's Session still finds it. The stream
-// needs no comparison, because the key is scoped to it. The type, content and summary may differ: competing outcomes
-// of one step, such as a completion and a failure, share a key so the first
-// durable outcome wins, and Orka may derive an event again after a restart
-// under newer redaction rules. An approval is identified by its tool call;
-// terminal approval events are limited to one per approval separately.
 type DeduplicatingExecutionEventStore interface {
 	ExecutionEventStore
 	AppendExecutionEventIfAbsent(
@@ -222,9 +178,6 @@ type DeduplicatingExecutionEventStore interface {
 	) (persisted *ExecutionEvent, appended bool, err error)
 }
 
-// AtomicExecutionEventPlanStore persists a deduplicated execution event and
-// its plan projection in one transaction. A repeated event key returns the
-// existing event without changing the current plan projection.
 type AtomicExecutionEventPlanStore interface {
 	DeduplicatingExecutionEventStore
 	AppendExecutionEventWithPlanIfAbsent(
@@ -272,8 +225,6 @@ func TerminalApprovalConflict(existingType, approvalID string) error {
 	return fmt.Errorf("%w: approval %q already has terminal event %s", ErrConflict, approvalID, existingType)
 }
 
-// NormalizeExecutionEventDedupeKey validates and normalizes an opaque store-
-// internal execution-event deduplication key.
 func NormalizeExecutionEventDedupeKey(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

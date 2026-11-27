@@ -19,8 +19,6 @@ import (
 	"time"
 )
 
-// Validate the public schema without buffering the full capture on the test
-// client either. Each decoded body is compared and then discarded.
 func checkCaptureStream(reader io.Reader, expected Capture) error {
 	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
@@ -171,7 +169,6 @@ func TestCaptureExportConcurrentReadersSerializedAndCancelable(t *testing.T) {
 	if index := <-started; index != 0 {
 		t.Error("unexpected first capture reader")
 	}
-	// A blocked export must not hold the store lock or stop model admission.
 	admitted := make(chan int, 1)
 	go func() { admitted <- post(t, h, "later request", false) }()
 	select {
@@ -222,7 +219,6 @@ func TestCaptureExportConcurrentReadersSerializedAndCancelable(t *testing.T) {
 	if h.snapshot().Rejected != after.Rejected {
 		t.Fatal("capture readers changed the model rejection count")
 	}
-	// Ensure a disconnected reader releases the export gate for subsequent GETs.
 	h.ServeHTTP(&captureExportWriter{sink: failingCaptureSink{}, header: make(http.Header)},
 		httptest.NewRequest(http.MethodGet, capturePath, nil))
 	w := httptest.NewRecorder()

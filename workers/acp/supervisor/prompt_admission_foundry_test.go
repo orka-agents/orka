@@ -44,7 +44,7 @@ func testFoundryPreActivationAdmissionRetry(t *testing.T, rejection error) {
 			}
 			settled[value.PromptID] = true
 			settlements = append(settlements, value)
-		case "/internal/v1/retire": // Fixture shutdown, after the assertions below.
+		case "/internal/v1/retire":
 		default:
 			t.Error("unexpected Foundry request from the native adapter fixture")
 		}
@@ -69,12 +69,6 @@ func testFoundryPreActivationAdmissionRetry(t *testing.T, rejection error) {
 		request.Metadata.RequestDigest = digest
 	}
 
-	// Install only the unaccepted supervisor journal entry. The runtime's
-	// pre-activation fences precede the non-I/O activation callback,
-	// so neither provider/MCP activation nor Foundry beginPrompt may have run.
-	// Rejection is exercised at the production failure helper, complemented
-	// by the ACP blocked-writer test of activation callback ordering; this is
-	// deliberately not another private-pipe fault-injection fixture.
 	server.mu.Lock()
 	state := server.sessions[create.RuntimeSessionID]
 	prompt := &promptState{
@@ -118,8 +112,6 @@ func testFoundryPreActivationAdmissionRetry(t *testing.T, rejection error) {
 		t.Fatalf("never-accepted Foundry identity caused %d remote control calls", callsBeforeRetry)
 	}
 
-	// Pending cancellation permits an identical retry. An expired request
-	// needs a fresh lease, but may reuse its never-accepted prompt identity.
 	retryRequest := request
 	if expired {
 		retryRequest = testStartPromptRequest(t, cfg, create.Metadata.Fence)

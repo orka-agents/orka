@@ -28,43 +28,24 @@ import (
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
 
-// defaultWorkspaceSlotName mirrors the API default for
-// Task.spec.execution.workspace.workspaceSlot.
 const (
 	defaultWorkspaceSlotName     = "default"
 	acpWorkspaceSessionUIDMapKey = "sessionUID"
 	acpWorkspaceSlotMapKey       = "workspaceSlot"
 )
 
-// ACPRuntimeWorkspaceBinding is the resolved, canonical execution-workspace
-// binding for one ACP RuntimePool. It carries no provider-native identifiers
-// and no secrets; it is frozen into the immutable execution snapshot and
-// recomputed exactly during snapshot verification.
 type ACPRuntimeWorkspaceBinding struct {
-	Provider      corev1alpha1.WorkspaceProvider
-	ReusePolicy   corev1alpha1.WorkspaceReusePolicy
-	CleanupPolicy corev1alpha1.WorkspaceCleanupPolicy
-	WorkspaceSlot string
-	// SessionUID is the immutable durable SessionControl identity when
-	// ReusePolicy is session. It is empty for per-Task workspaces.
-	SessionUID string
-	// SessionKey scopes the physical workspace to one logical RuntimeSession:
-	// the immutable Session UID under reusePolicy session, or the exact Task UID
-	// otherwise.
-	SessionKey string
-	// TemplateNamespace and TemplateName reference the operator-owned Substrate
-	// infrastructure ActorTemplate. They are set exactly when Provider is
-	// substrate: agent-sandbox workloads run only controller-rendered templates.
+	Provider          corev1alpha1.WorkspaceProvider
+	ReusePolicy       corev1alpha1.WorkspaceReusePolicy
+	CleanupPolicy     corev1alpha1.WorkspaceCleanupPolicy
+	WorkspaceSlot     string
+	SessionUID        string
+	SessionKey        string
 	TemplateNamespace string
 	TemplateName      string
-	// Class is the frozen controller-first ExecutionWorkspaceClass binding for
-	// class-selected workspaces. Every nonnil workspace binding requires a class.
-	Class *ACPWorkspaceClassBinding
-	// RestoreFrom is a provider-neutral immutable Data checkpoint reference.
-	RestoreFrom *corev1alpha1.WorkspaceCheckpointReference
-	// BindingDigest is the canonical digest over the fields above. It is part
-	// of the RuntimePool identity.
-	BindingDigest string
+	Class             *ACPWorkspaceClassBinding
+	RestoreFrom       *corev1alpha1.WorkspaceCheckpointReference
+	BindingDigest     string
 }
 
 func acpSubstratePoolSuspendMode(binding *ACPRuntimeWorkspaceBinding) string {
@@ -75,8 +56,6 @@ func acpSubstratePoolSuspendMode(binding *ACPRuntimeWorkspaceBinding) string {
 	return binding.Class.SuspendMode
 }
 
-// resolveACPWorkspaceBindingWithClass builds a canonical binding from a class
-// request and its pre-resolved, frozen class data.
 func resolveACPWorkspaceBindingWithClass(
 	task *corev1alpha1.Task,
 	sessionUID string,
@@ -95,8 +74,6 @@ func resolveACPWorkspaceBindingWithClass(
 	return resolveACPClassWorkspaceBinding(task, sessionUID, resolvedClass)
 }
 
-// resolveACPWorkspaceSessionScope resolves the reuse policy, workspace slot,
-// immutable Session UID, and session key of a class binding.
 func resolveACPWorkspaceSessionScope(
 	task *corev1alpha1.Task,
 	sessionUID string,
@@ -139,7 +116,6 @@ func resolveACPWorkspaceSessionScope(
 	return reuse, slot, sessionUID, sessionKey, nil
 }
 
-// resolveACPClassWorkspaceBinding builds the canonical class binding.
 func resolveACPClassWorkspaceBinding(
 	task *corev1alpha1.Task,
 	sessionUID string,
@@ -203,9 +179,6 @@ func validateSubstrateWorkspaceTemplateReference(namespace, name string) error {
 	return nil
 }
 
-// validateACPWorkspaceBindingRequestWithClass validates a class request with
-// a validation-only Session placeholder that is
-// never persisted or used for pool identity.
 func validateACPWorkspaceBindingRequestWithClass(
 	task *corev1alpha1.Task,
 	resolvedClass *acpResolvedWorkspaceClass,
@@ -235,10 +208,6 @@ func acpWorkspaceSessionIdentityRequest(task *corev1alpha1.Task) (string, string
 	return name, sessionType, transcriptBackedPrompt, nil
 }
 
-// planACPWorkspaceSessionUID resolves an existing immutable Session identity
-// or proposes a fresh one without creating transcript or SessionControl state.
-// The proposal is established only after the complete execution candidate has
-// passed validation and canonical encoding.
 func (r *TaskReconciler) planACPWorkspaceSessionUID(ctx context.Context, task *corev1alpha1.Task) (string, error) {
 	name, sessionType, transcriptBackedPrompt, err := acpWorkspaceSessionIdentityRequest(task)
 	if err != nil || name == "" {
@@ -284,10 +253,6 @@ func (r *TaskReconciler) planACPWorkspaceSessionUID(ctx context.Context, task *c
 	return uid, nil
 }
 
-// ensureACPWorkspaceSessionUID establishes the proposed immutable Session
-// identity after candidate resolution. Concurrent creators converge on the
-// first durable SessionControl UID; the caller rebuilds the still-unbound
-// candidate if that winner differs from the proposal.
 func (r *TaskReconciler) ensureACPWorkspaceSessionUID(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -337,14 +302,10 @@ func (r *TaskReconciler) ensureACPWorkspaceSessionUID(
 	return control.SessionUID, nil
 }
 
-// acpWorkspaceBindingDigest canonically digests the binding identity fields.
-// The encoded fields are unchanged so stored class bindings retain their digest.
 func acpWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, error) {
 	return acpWorkspaceBindingDigestWithClassOnDetach(binding, false)
 }
 
-// legacyACPWorkspaceBindingDigest reproduces schema-v1 class binding digests
-// written before the effective detach action became attachment-scoped.
 func legacyACPWorkspaceBindingDigest(binding *ACPRuntimeWorkspaceBinding) (string, error) {
 	return acpWorkspaceBindingDigestWithClassOnDetach(binding, true)
 }
@@ -394,11 +355,6 @@ func acpWorkspaceBindingDigestWithClassOnDetach(
 		if includeClassOnDetach {
 			fields["classOnDetach"] = binding.Class.EffectiveOnDetach
 		}
-		// The effective detach action is deliberately NOT part of the pool
-		// binding: it is attachment-scoped (a session suspended by one Task
-		// can be continued by a Task selecting Delete), and folding it into
-		// the immutable physical-pool identity would fail pool validation for
-		// every continuation that chooses a different allowed action.
 		if binding.Class.SuspendMode != "" {
 			fields["classSuspendMode"] = binding.Class.SuspendMode
 		}
@@ -413,12 +369,13 @@ func acpWorkspaceBindingDigestWithClassOnDetach(
 		if binding.Class.MaxSuspendedWorkspaces != nil {
 			fields["classMaxSuspended"] = fmt.Sprintf("%d", *binding.Class.MaxSuspendedWorkspaces)
 		}
+		if binding.Class.SuspendAfterDetach != "" {
+			fields["classSuspendAfterDetach"] = binding.Class.SuspendAfterDetach
+		}
 	}
 	return acpDomainDigest("execution-workspace-binding", fields)
 }
 
-// applyACPWorkspaceBindingToPlan folds a resolved workspace binding into the
-// RuntimePool identity so workspace-backed sessions never share a plain pool.
 func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWorkspaceBinding) (ACPRuntimePlan, error) {
 	if binding == nil {
 		return plan, nil
@@ -429,10 +386,6 @@ func applyACPWorkspaceBindingToPlan(plan ACPRuntimePlan, binding *ACPRuntimeWork
 	identityFields := map[string]string{"workspaceBindingDigest": binding.BindingDigest}
 	poolKind := plan.Profile.ProviderKind
 	if binding.ReusePolicy == corev1alpha1.WorkspaceReusePolicySession {
-		// One immutable Session UID owns one physical workspace. Keep its pool
-		// name stable across every mutable runtime and workspace-selection input
-		// so an incompatible continuation reaches the existing pool and fails
-		// closed instead of silently materializing a fresh filesystem.
 		identityFields = map[string]string{
 			acpWorkspaceSessionUIDMapKey: binding.SessionUID,
 			acpWorkspaceSlotMapKey:       binding.WorkspaceSlot,
@@ -457,11 +410,6 @@ func acpWorkspaceRuntimePoolName(providerKind string, digest harnessv2.ProfileDi
 	return fmt.Sprintf("acp-ws-%s-%s", providerKind, hexDigest[:16])
 }
 
-// projectACPExecutionWorkspaceStatus advances the provider-neutral Task
-// workspace projection alongside the ACP execution state machine:
-// Pending -> Ready once the prompt is running in the workspace-backed pool,
-// and Pending/Ready -> Released once the attempt settles terminally. It never
-// writes provider-native identifiers and never overrides a Failed projection.
 func (r *TaskReconciler) projectACPExecutionWorkspaceStatus(ctx context.Context, task *corev1alpha1.Task) error {
 	current := task.Status.ExecutionWorkspace
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent || current == nil || task.Status.Execution == nil || !taskManagedByACP(task) {
@@ -504,11 +452,6 @@ func (r *TaskReconciler) projectACPExecutionWorkspaceStatus(ctx context.Context,
 	next := update.Status()
 	statusrules.PreserveReadyTelemetry(next, current)
 	if err := r.projectACPClassAttachmentIdentity(ctx, task, next); err != nil {
-		// The rebuilt projection has no class-backed identity yet; persisting
-		// the advanced phase over a transient read failure would drop
-		// ClassRef/WorkspaceRef/State/AttachedEpoch with no retry (the phase
-		// gate above would then skip this projection forever). Surface the
-		// error so the transition itself retries.
 		return err
 	}
 	base := task.DeepCopy()
@@ -541,12 +484,6 @@ func (r *TaskReconciler) refreshACPClassAttachmentIdentity(ctx context.Context, 
 	return r.Status().Patch(ctx, task, client.MergeFrom(base))
 }
 
-// projectACPClassAttachmentIdentity surfaces the epoch-fenced class attachment
-// in Task status for class-backed executions: the selected class, the concrete
-// workspace incarnation, its observed state, and the enforced attachment
-// epoch. Session-reused workspaces carry no Task owner reference, so the
-// generic workspace controller cannot project these fields; the ACP
-// projection is their only writer.
 func (r *TaskReconciler) projectACPClassAttachmentIdentity(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -559,7 +496,6 @@ func (r *TaskReconciler) projectACPClassAttachmentIdentity(
 	workspace := &workspacev1alpha1.ExecutionWorkspace{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, workspace); err != nil {
 		if apierrors.IsNotFound(err) {
-			// A deleted workspace legitimately leaves no identity to project.
 			return nil
 		}
 		return fmt.Errorf("project class attachment identity: %w", err)
@@ -575,18 +511,11 @@ func (r *TaskReconciler) projectACPClassAttachmentIdentity(
 	next.State = string(workspace.Status.State)
 	if attachment := workspace.Spec.Attachment; attachment != nil && attachment.TaskRef.UID == task.UID &&
 		workspace.Status.AttachedEpoch == attachment.Epoch {
-		// The requested spec epoch and the adapter-enforced status epoch
-		// deliberately diverge while attachment is pending and after
-		// max-lifetime enforcement clears the enforced epoch; the Task may
-		// only claim an epoch the adapter is actually enforcing for it.
 		next.AttachedEpoch = attachment.Epoch
 	}
 	return nil
 }
 
-// validateACPWorkspaceBindingValues re-verifies a frozen snapshot workspace
-// binding without consulting live cluster state.
-//
 //nolint:gocyclo // Frozen binding validation keeps all fail-closed identity checks in one auditable boundary.
 func validateACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) error {
 	if binding == nil {
@@ -704,9 +633,6 @@ func acpWorkspaceWorkloadCheckpointReference(ref *corev1alpha1.WorkspaceCheckpoi
 	return &workspacev1alpha1.WorkloadCheckpointReference{Name: ref.Name, UID: types.UID(ref.UID), Digest: ref.Digest}
 }
 
-// validateSnapshotACPWorkspaceBindingValues accepts the prior schema-v1 class
-// digest while re-verifying an immutable snapshot. New bindings never use this
-// compatibility path.
 func validateSnapshotACPWorkspaceBindingValues(binding *ACPRuntimeWorkspaceBinding) error {
 	if binding == nil {
 		return nil

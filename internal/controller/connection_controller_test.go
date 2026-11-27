@@ -43,8 +43,6 @@ func testConnection(namespace, name, provider string) *corev1alpha1.Connection {
 	}
 }
 
-// scopedConnectorProvider is an accepted provider whose read and write scopes
-// differ, so mode changes have observable scope requirements.
 func scopedConnectorProvider() *corev1alpha1.ConnectorProvider {
 	provider := acceptedConnectorProvider()
 	provider.Spec.OAuth.Scopes = corev1alpha1.ConnectorScopes{Read: []string{"read:user"}, Write: []string{"repo"}}
@@ -82,8 +80,6 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			wantGranted: metav1.ConditionUnknown,
 		},
 		{
-			// A provider that stops being accepted never leaves an earlier
-			// ScopesGranted=True beside ProviderResolved=False.
 			name:    "provider not accepted clears a granted verdict",
 			objects: []runtime.Object{testConnectorProvider("tenant", "github")},
 			existing: &corev1alpha1.ConnectionStatus{
@@ -148,8 +144,6 @@ func TestConnectionReconcilerProviderResolution(t *testing.T) {
 			name:    "expired survives a provider outage",
 			objects: []runtime.Object{acceptedConnectorProvider()},
 			existing: &corev1alpha1.ConnectionStatus{
-				// A previous reconcile with a missing provider projected Error
-				// over the stored state; the Ready reason still says Expired.
 				State:      corev1alpha1.ConnectionStateError,
 				Conditions: []metav1.Condition{{Type: corev1alpha1.ConnectionConditionReady, Status: metav1.ConditionFalse, Reason: corev1alpha1.ConnectionReasonExpired}},
 			},
@@ -338,8 +332,8 @@ func TestConnectionReconcilerRepairsIndexLabels(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	connection := testConnection("tenant", "github-alice", "github")
 	provider := acceptedConnectorProvider()
-	connection.Labels = map[string]string{"orka.ai/connection-subject": "stale"} // stripped provider label, wrong subject digest
-	connection.Spec.ProviderRef.Name = strings.Repeat("p", 80)                   // longer than a label value may be
+	connection.Labels = map[string]string{"orka.ai/connection-subject": "stale"}
+	connection.Spec.ProviderRef.Name = strings.Repeat("p", 80)
 	provider.Name = connection.Spec.ProviderRef.Name
 	c := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(connection, provider).WithStatusSubresource(&corev1alpha1.Connection{}).Build()
 	reconciler := &ConnectionReconciler{Client: c, Scheme: scheme}
@@ -360,7 +354,6 @@ func TestConnectionReconcilerRepairsIndexLabels(t *testing.T) {
 	if value := repaired.Labels[connectors.ConnectionProviderLabel]; len(value) > 63 || !strings.HasPrefix(value, "sha256-") {
 		t.Fatalf("a long provider name must be label-encoded, got %q", value)
 	}
-	// The repaired object is now found by a label-indexed listing.
 	owned := &corev1alpha1.ConnectionList{}
 	if err := c.List(context.Background(), owned, ctrlclient.InNamespace("tenant"), ctrlclient.MatchingLabels{
 		connectors.ConnectionSubjectLabel: connectors.ConnectionSubjectLabelValue(repaired.Spec.Subject.Issuer, repaired.Spec.Subject.Subject),
@@ -477,8 +470,7 @@ type fakeConnectorCredentialStore struct {
 	deletedCompletions   []string
 	failCompletionDelete bool
 	grants               map[string]int64
-	// getErr, when set, fails custody reads as a transient store error.
-	getErr error
+	getErr               error
 }
 
 func newFakeConnectorCredentialStore() *fakeConnectorCredentialStore {
@@ -587,7 +579,6 @@ func (f *fakeConnectorCredentialStore) DeleteConnectorCompletion(_ context.Conte
 }
 
 func (f *fakeConnectorCredentialStore) ListConnectorCompletionsForConnection(_ context.Context, connectionUID string) ([]store.ConnectorCompletion, error) {
-	// A copy, as the real store returns: callers delete while iterating.
 	return append([]store.ConnectorCompletion(nil), f.parked[connectionUID]...), nil
 }
 
@@ -597,10 +588,8 @@ func (f *fakeConnectorCredentialStore) DeleteConnectorConsentsForConnection(_ co
 }
 
 type fakeConnectorRevoker struct {
-	tokens []string
-	err    error
-	// custody, when set, records whether the UID was already tombstoned
-	// when the first provider call was made.
+	tokens             []string
+	err                error
 	custody            *fakeConnectorCredentialStore
 	tombstonedAtRevoke *bool
 }
@@ -650,7 +639,6 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 		t.Fatalf("state = %q, want Pending", updated.Status.State)
 	}
 
-	// Link it, park an uncommitted completion, then disconnect.
 	updated.Status.Consent = connectors.ConsentFor(provider)
 	if err := c.Status().Update(context.Background(), updated); err != nil {
 		t.Fatal(err)
@@ -676,8 +664,6 @@ func TestConnectionReconcilerFinalizerAndDisconnect(t *testing.T) {
 	if strings.Join(revoker.tokens, ",") != "ghr_refresh,gho_access,ghr_previous,gho_previous" {
 		t.Fatalf("revoked tokens = %v, want the committed credential and the ones it replaced, refresh before access", revoker.tokens)
 	}
-	// Commits are fenced before the slow provider calls, so a completion
-	// racing the disconnect cannot land material that is never revoked.
 	if revoker.tombstonedAtRevoke == nil || !*revoker.tombstonedAtRevoke {
 		t.Fatal("custody must be tombstoned before revocation starts")
 	}
@@ -724,11 +710,8 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
 		{Nonce: "live", ExpiresAt: time.Now().Add(5 * time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_live", AuthorityDigest: authority, RevocationDigest: connectors.ProviderRevocationDigest(provider)}},
 		{Nonce: "stale", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_stale", RefreshToken: "ghr_stale", AuthorityDigest: authority, RevocationDigest: connectors.ProviderRevocationDigest(provider)}},
-		// A committed completion whose row outlived a failed delete: active custody, never revoked.
 		{Nonce: "committed", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed", AuthorityDigest: authority, RevocationDigest: connectors.ProviderRevocationDigest(provider)}},
-		// Issued by a provider OAuth client that has since changed: deleted, but never sent to the new authority.
 		{Nonce: "foreign", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_foreign", RefreshToken: "ghr_foreign", AuthorityDigest: "stale-authority"}},
-		// Same access token as custody but a rotated refresh token: distinct material, revoked.
 		{Nonce: "rotated", ExpiresAt: time.Now().Add(-time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_rotated", AuthorityDigest: authority, RevocationDigest: connectors.ProviderRevocationDigest(provider)}},
 	}
 	credentials.credentials[string(connection.UID)] = store.ConnectorCredential{AccessToken: "gho_committed", RefreshToken: "ghr_committed", AuthorityDigest: authority, RevocationDigest: connectors.ProviderRevocationDigest(provider)}
@@ -740,7 +723,6 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The live completion is reaped when it expires, with no polling.
 	if result.RequeueAfter < 4*time.Minute || result.RequeueAfter > 5*time.Minute+2*time.Second {
 		t.Fatalf("RequeueAfter = %v, want just past the live completion's expiry", result.RequeueAfter)
 	}
@@ -755,9 +737,6 @@ func TestConnectionReconcilerReapsExpiredCompletions(t *testing.T) {
 	}
 }
 
-// TestConnectionReconcilerRetriesFailedCompletionCleanup covers an expired
-// completion whose deletion fails: with no periodic requeue, the failure
-// itself schedules the retry.
 func TestConnectionReconcilerRetriesFailedCompletionCleanup(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -780,9 +759,6 @@ func TestConnectionReconcilerRetriesFailedCompletionCleanup(t *testing.T) {
 	}
 }
 
-// TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority
-// covers a provider replaced under the same name: custody is deleted, but the
-// stored tokens are never sent to the replacement's revocation endpoint.
 func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -813,10 +789,6 @@ func TestConnectionReconcilerDisconnectSkipsRevocationAgainstChangedAuthority(t 
 	}
 }
 
-// TestConnectionReconcilerRevokesOnlyCommittedTokens covers the rule that
-// disconnect revokes the committed credential while parked tokens nobody
-// committed are deleted unrevoked, because they may belong to another
-// person's grant.
 func TestConnectionReconcilerRevokesOnlyCommittedTokens(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -834,14 +806,12 @@ func TestConnectionReconcilerRevokesOnlyCommittedTokens(t *testing.T) {
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
 	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials, Revoker: revoker}
 	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
-	// The reaper drops the expired parked row without revoking it.
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}
 	if len(revoker.tokens) != 0 || strings.Join(credentials.deletedCompletions, ",") != "stale" {
 		t.Fatalf("reaper: revoked = %v deleted = %v", revoker.tokens, credentials.deletedCompletions)
 	}
-	// Disconnect revokes the committed credential only.
 	credentials.parked[string(connection.UID)] = []store.ConnectorCompletion{
 		{Nonce: "parked", ExpiresAt: time.Now().Add(time.Minute), Credential: store.ConnectorCredential{AccessToken: "gho_parked", RefreshToken: "ghr_parked", AuthorityDigest: authority, RevocationDigest: connectors.ProviderRevocationDigest(provider)}},
 	}
@@ -863,10 +833,6 @@ func TestConnectionReconcilerRevokesOnlyCommittedTokens(t *testing.T) {
 	}
 }
 
-// TestConnectionReconcilerFinishesCommittedCompletion covers a completion
-// whose custody write succeeded but whose status write never did: the
-// controller records the link from the committed material and removes the
-// completion; a committed row custody no longer matches is only removed.
 func TestConnectionReconcilerFinishesCommittedCompletion(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -898,8 +864,6 @@ func TestConnectionReconcilerFinishesCommittedCompletion(t *testing.T) {
 			},
 		}).Build()
 	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
-	// A failed status write keeps the committed completion: it is the
-	// durable record the next pass repairs the status from.
 	statusFailure.Store(true)
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "github-alice"}}); err == nil {
 		t.Fatal("a failed status write must surface")
@@ -922,9 +886,6 @@ func TestConnectionReconcilerFinishesCommittedCompletion(t *testing.T) {
 		t.Fatalf("deleted completions = %v remaining = %+v", credentials.deletedCompletions, credentials.parked[string(connection.UID)])
 	}
 
-	// A committed completion consented under an authority the provider no
-	// longer has (a retargeted tool destination) is dropped without linking:
-	// the same fence the API applies to a retried completion.
 	stale := testConnection("tenant", "github-carol", "github")
 	stale.Finalizers = []string{ConnectionCustodyFinalizer}
 	stale.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
@@ -949,9 +910,6 @@ func TestConnectionReconcilerFinishesCommittedCompletion(t *testing.T) {
 	}
 }
 
-// TestConnectionReconcilerExpiresRefreshlessLink covers an access token
-// without a refresh token that expired after the link was recorded: the
-// controller withdraws Ready instead of advertising an unusable account.
 func TestConnectionReconcilerExpiresRefreshlessLink(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -1006,7 +964,6 @@ func TestConnectionNextPassFollowsExpiry(t *testing.T) {
 	if got := connectionNextPass(connection, now, time.Time{}); got < time.Hour || got > time.Hour+2*time.Second {
 		t.Fatalf("far expiry = %v, want just past the expiry", got)
 	}
-	// A parked completion that expires first is reaped on time.
 	if got := connectionNextPass(connection, now, now.Add(10*time.Minute)); got < 10*time.Minute || got > 10*time.Minute+2*time.Second {
 		t.Fatalf("completion deadline = %v, want just past the completion's expiry", got)
 	}
@@ -1015,15 +972,11 @@ func TestConnectionNextPassFollowsExpiry(t *testing.T) {
 	if got := connectionNextPass(connection, now, time.Time{}); got != 0 {
 		t.Fatalf("past expiry = %v, want no requeue", got)
 	}
-	// A kept completion whose deadline passed during the pass is still due.
 	if got := connectionNextPass(connection, now, now.Add(-time.Millisecond)); got != time.Second {
 		t.Fatalf("elapsed completion deadline = %v, want a prompt requeue", got)
 	}
 }
 
-// A completion recovered on an already settled Connection is the only thing
-// that changes its status; that change must be written before the
-// completion row goes, or a lost write leaves the link Pending for good.
 func TestConnectionReconcilerPersistsRecoveredStatusOnSettledConnection(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -1035,7 +988,6 @@ func TestConnectionReconcilerPersistsRecoveredStatusOnSettledConnection(t *testi
 		WithStatusSubresource(&corev1alpha1.Connection{}).Build()
 	reconciler := &ConnectionReconciler{Client: c, APIReader: c, Scheme: scheme, Credentials: credentials, Consents: credentials}
 	key := types.NamespacedName{Namespace: "tenant", Name: "github-alice"}
-	// First pass settles the controller-owned status with nothing to recover.
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
 		t.Fatal(err)
 	}
@@ -1046,8 +998,6 @@ func TestConnectionReconcilerPersistsRecoveredStatusOnSettledConnection(t *testi
 	if connectors.ConnectionLinked(settled) || settled.Status.ObservedGeneration != settled.Generation {
 		t.Fatalf("settled status = %+v, want an observed, unlinked Connection", settled.Status)
 	}
-	// Custody and a committed completion land (the API's status write was
-	// lost); the next pass must record the link from them.
 	authority := connectors.ProviderIssuerDigest(provider)
 	material := store.ConnectorCredential{
 		AccessToken: "gho_done", RefreshToken: "ghr_done", AuthorityDigest: authority, GrantSequence: 1,
@@ -1073,9 +1023,6 @@ func TestConnectionReconcilerPersistsRecoveredStatusOnSettledConnection(t *testi
 	}
 }
 
-// TestConnectionReconcilerRevokesAfterTokenEndpointMove covers an operator
-// who moved only the token endpoint: the client and revocation endpoint are
-// unchanged, so disconnect still revokes; a changed client does not.
 func TestConnectionReconcilerRevokesAfterTokenEndpointMove(t *testing.T) {
 	for name, mutate := range map[string]struct {
 		mutate func(*corev1alpha1.ConnectorProvider)
@@ -1120,10 +1067,6 @@ func TestConnectionReconcilerRevokesAfterTokenEndpointMove(t *testing.T) {
 	}
 }
 
-// TestConnectionReconcilerRetainsCustodyWithoutRevocationMaterial covers a
-// client Secret deleted before disconnect: custody is the only copy of the
-// tokens, so it and the finalizer stay until the Secret is restored, and the
-// disconnect then revokes and finishes.
 func TestConnectionReconcilerRetainsCustodyWithoutRevocationMaterial(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -1153,7 +1096,6 @@ func TestConnectionReconcilerRetainsCustodyWithoutRevocationMaterial(t *testing.
 	if err := c.Get(context.Background(), key, &corev1alpha1.Connection{}); err != nil {
 		t.Fatalf("the finalizer must hold the Connection: %v", err)
 	}
-	// Commits stay fenced meanwhile.
 	if len(credentials.tombstoned) != 1 {
 		t.Fatalf("tombstoned = %v, want the custody fence in place", credentials.tombstoned)
 	}
@@ -1171,11 +1113,6 @@ func TestConnectionReconcilerRetainsCustodyWithoutRevocationMaterial(t *testing.
 	}
 }
 
-// TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted covers
-// namespace teardown: the client Secret is gone and the provider carries a
-// deletion timestamp, so nothing can restore the revocation material; the
-// disconnect finishes with the tokens left to expire instead of holding the
-// namespace.
 func TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -1212,10 +1149,6 @@ func TestConnectionReconcilerFinishesDisconnectWhenProviderIsBeingDeleted(t *tes
 	}
 }
 
-// TestConnectionReconcilerKeepsCustodyWhenOnlyProviderIsDeleted covers a
-// provider deleted outside namespace teardown while its client Secret is
-// missing: the Secret can still be restored, so custody and the finalizer
-// are kept instead of leaving live tokens unrevoked.
 func TestConnectionReconcilerKeepsCustodyWhenOnlyProviderIsDeleted(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -1251,9 +1184,6 @@ func TestConnectionReconcilerKeepsCustodyWhenOnlyProviderIsDeleted(t *testing.T)
 	}
 }
 
-// TestConnectionReconcilerPersistsScopesGrantedOnlyChange covers a pass whose
-// only change is ScopesGranted: the consent owner already wrote Ready=True and
-// state Ready, so nothing else moves, and the write must still happen.
 func TestConnectionReconcilerPersistsScopesGrantedOnlyChange(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	connection := testConnection("tenant", "github-alice", "github")
@@ -1287,10 +1217,6 @@ func TestConnectionReconcilerPersistsScopesGrantedOnlyChange(t *testing.T) {
 	}
 }
 
-// TestConnectionReconcilerKeepsCommittedCompletionWhenCustodyUnreadable
-// covers a committed completion whose status write was lost: a custody read
-// that fails transiently proves no grant mismatch, so the completion, the
-// only record that can repair the status, is kept for the next pass.
 func TestConnectionReconcilerKeepsCommittedCompletionWhenCustodyUnreadable(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	provider := acceptedConnectorProvider()
@@ -1328,10 +1254,6 @@ func TestConnectionReconcilerKeepsCommittedCompletionWhenCustodyUnreadable(t *te
 	}
 }
 
-// TestConnectionReconcilerRevocationReadsProviderUncached covers an operator
-// who retargets the revocation endpoint and disconnects before the informer
-// catches up: the provider is read uncached before any token is disclosed,
-// so the stale cached endpoint never receives them.
 func TestConnectionReconcilerRevocationReadsProviderUncached(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	cachedProvider := acceptedConnectorProvider()
@@ -1365,9 +1287,6 @@ func TestConnectionReconcilerRevocationReadsProviderUncached(t *testing.T) {
 	}
 }
 
-// TestConnectionReconcilerRefusesInvalidProviderReference covers a provider
-// reference no object could ever have: it is a stable invalid reference,
-// not a read failure retried forever.
 func TestConnectionReconcilerRefusesInvalidProviderReference(t *testing.T) {
 	scheme := connectorTestScheme(t)
 	connection := testConnection("tenant", "github-alice", "bad/name")

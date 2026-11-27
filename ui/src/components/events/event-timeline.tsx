@@ -26,27 +26,21 @@ const SEVERITY_FILTERS: { value: ExecutionEventSeverityLevel | 'all'; label: str
 
 export interface EventTimelineProps {
   events: ExecutionEvent[]
-  // Live-follow status from the stream hook. Drives the live indicator.
   streamStatus?: ExecutionStreamStatus
-  // Latest cursor (for the resume-from-seq helper text).
   lastSeq?: number
   isLoading?: boolean
   error?: string | null
   onRetry?: () => void
-  // Follow toggle controls.
   following?: boolean
   onToggleFollow?: () => void
-  // Per-row extras.
   showTask?: boolean
   taskLink?: (taskName: string) => React.ReactNode
   onFork?: (event: ExecutionEvent) => void
   emptyMessage?: string
-  // Label for the surface (task vs session).
   title?: string
 }
 
 function copyEventJson(event: ExecutionEvent) {
-  // Copy the redacted API payload exactly as served — never hidden raw data.
   const payload = JSON.stringify(event, null, 2)
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
     void navigator.clipboard
@@ -75,7 +69,6 @@ export function EventTimeline({
   const [severityFilter, setSeverityFilter] = useState<ExecutionEventSeverityLevel | 'all'>('all')
   const [categoryFilter, setCategoryFilter] = useState<ExecutionEventCategory | 'all'>('all')
 
-  // Categories actually present, for a compact filter row.
   const presentCategories = useMemo(() => {
     const set = new Set<ExecutionEventCategory>()
     for (const e of events) set.add(executionEventCategory(e.type))
@@ -101,8 +94,6 @@ export function EventTimeline({
   return (
     <div className="space-y-3" data-testid="event-timeline">
       <div className="flex flex-wrap items-center gap-2">
-        {/* Rendered directly under a detail page tab (task and session
-            Timeline), so it is the section heading below the page h1. */}
         <h2 className="text-sm font-semibold">{title}</h2>
         <span className="text-xs text-muted-foreground">
           {filtered.length} of {events.length} event{events.length !== 1 ? 's' : ''}

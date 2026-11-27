@@ -343,12 +343,6 @@ type journalDiskRecord struct {
 	record journalRecord
 }
 
-// reclaimLocked removes workspace archives after no started operation can
-// need them for an upload retry. It also keeps at most the latest replay record
-// at each durable owner-progress boundary: beginning a later operation proves
-// the controller consumed and persisted every earlier terminal result for that
-// Task or Publication. The active operation is protected so a delayed replay
-// cannot lose its record while it is being served.
 func (s *journalStore) reclaimLocked(protectedOperationID, protectedWorkspaceDigest string) error {
 	records, err := s.journalRecordsLocked()
 	if err != nil {

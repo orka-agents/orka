@@ -17,8 +17,6 @@ import (
 
 const testLeaderLeaseUID = "leader-lease-uid"
 
-// testLeaderLease returns the leader election Lease as leader election left
-// it when holder took over at transition count transitions.
 func testLeaderLease(holder string, transitions int32) *coordinationv1.Lease {
 	return &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "orka-system", Name: "leader", UID: testLeaderLeaseUID},
@@ -26,11 +24,8 @@ func testLeaderLease(holder string, transitions int32) *coordinationv1.Lease {
 	}
 }
 
-// testThisLeader is this process as the leader election Lease names it.
 var testThisLeader = &LeaderLease{Key: client.ObjectKey{Namespace: "orka-system", Name: "leader"}, HolderPrefix: "pod-b_"}
 
-// testMarker returns a marker a leader created at created, recording the
-// leader Lease transition recorded ("" for none).
 func testMarker(created metav1.Time, recorded string) *coordinationv1.Lease {
 	marker := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "orka-system", Name: EnforcementLeaseName, CreationTimestamp: created, UID: "marker",
@@ -42,8 +37,6 @@ func testMarker(created metav1.Time, recorded string) *coordinationv1.Lease {
 	return marker
 }
 
-// testEnforcementClient serves objects and stamps a created object with
-// created, as the API server's clock would.
 func testEnforcementClient(t *testing.T, created metav1.Time, objects ...client.Object) client.Client {
 	t.Helper()
 	return interceptor.NewClient(fake.NewClientBuilder().WithScheme(enforcementTestScheme(t)).WithObjects(objects...).Build(), interceptor.Funcs{
@@ -63,10 +56,6 @@ func testRecordedTransition(t *testing.T, c client.Client) string {
 	return marker.Annotations[enforcementTransitionAnnotation]
 }
 
-// TestEnforcementPeriodSurvivesRestartsAndEndsWhenTheCheckIsOff covers the
-// marker an enforcing leader keeps: the next enforcing leader keeps its
-// period and records itself, and a controller without the check deletes
-// it, so the next enforcing leader starts anew.
 func TestEnforcementPeriodSurvivesRestartsAndEndsWhenTheCheckIsOff(t *testing.T) {
 	started := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
 	c := testEnforcementClient(t, metav1.Now(), testMarker(started, testLeaderLeaseUID+"/4"), testLeaderLease("pod-b_1", 5))
@@ -92,14 +81,6 @@ func TestEnforcementPeriodSurvivesRestartsAndEndsWhenTheCheckIsOff(t *testing.T)
 	}
 }
 
-// TestEnforcementPeriodRestartsAfterAnotherLeader covers a leader between two
-// enforcing ones that may not have checked Agent use and did not delete the
-// marker, for example because its deletion was slow or failed while it
-// served requests. Its leadership advanced the leader Lease's count, so the
-// enforcing leader after it starts a new period instead of continuing the
-// marker's. A recreated leader Lease, whose count starts over, never matches
-// an old count, and a marker from before counts were recorded never
-// continues.
 func TestEnforcementPeriodRestartsAfterAnotherLeader(t *testing.T) {
 	first := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
 	now := metav1.NewTime(time.Now().Truncate(time.Second))
@@ -120,10 +101,6 @@ func TestEnforcementPeriodRestartsAfterAnotherLeader(t *testing.T) {
 	}
 }
 
-// TestEnforcementPeriodIsDecidedAtEachLeadership covers controllers whose
-// processes overlap: an enforcing standby saw a period when it started, a
-// controller without the check then led and deleted it, and the standby
-// leads last. It must start a new period, not trust the one it saw.
 func TestEnforcementPeriodIsDecidedAtEachLeadership(t *testing.T) {
 	first := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
 	now := metav1.NewTime(time.Now().Truncate(time.Second))
@@ -138,11 +115,6 @@ func TestEnforcementPeriodIsDecidedAtEachLeadership(t *testing.T) {
 	}
 }
 
-// TestStartEnforcementPeriodNeedsTheLeaderLease covers a controller that
-// cannot show which leadership it is: one that no longer holds the leader
-// Lease, or cannot read it, decides nothing and leaves the marker alone.
-// Without leader election, nothing shows who served before, so every start
-// begins a new period.
 func TestStartEnforcementPeriodNeedsTheLeaderLease(t *testing.T) {
 	first := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
 	now := metav1.NewTime(time.Now().Truncate(time.Second))
@@ -165,10 +137,6 @@ func TestStartEnforcementPeriodNeedsTheLeaderLease(t *testing.T) {
 	}
 }
 
-// TestStartEnforcementPeriodReplacesAMarkerNoLeaderCreated covers the leader
-// starting a period: it creates the marker, keeps one it created, and
-// replaces one an earlier, unfenced run created, so the start always follows
-// the unchecked leader's last request.
 func TestStartEnforcementPeriodReplacesAMarkerNoLeaderCreated(t *testing.T) {
 	stale := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
 	unfenced := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{

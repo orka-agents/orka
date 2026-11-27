@@ -57,24 +57,16 @@ describe('use-execution-events hooks', () => {
     expect(url.pathname).toBe('/api/v1/tasks/tk/events')
     expect(url.searchParams.get('after')).toBe('0')
     expect(url.searchParams.get('namespace')).toBe('default')
-    // Requests the server's max page size so completed tasks with many events
-    // aren't truncated to the small default page.
     expect(url.searchParams.get('limit')).toBe('1000')
     expect(result.current.data?.latestSeq).toBe(2)
     expect(result.current.data?.events).toHaveLength(1)
   })
 
   it('useTaskEvents scopes its cache by task uid so a recreated same-name task does not inherit stale events', async () => {
-    // Same name+namespace, different uid (a delete+recreate). Each uid must hit
-    // the server and get its own cache entry — the recreated task must not show
-    // the prior task's latestSeq/events.
     let calls = 0
     server.use(
       http.get(`${API}/tasks/:id/events`, () => {
         calls += 1
-        // First fetch (uid-old) reports a high sequence; second fetch (uid-new)
-        // reports the restarted low sequence. If the second hook were served from
-        // the first's cache, it would never fetch and would show latestSeq 9.
         const latestSeq = calls === 1 ? 9 : 1
         return HttpResponse.json({
           namespace: 'default', streamType: 'task', streamID: 'tk', afterSeq: 0, latestSeq, events: [],
@@ -85,8 +77,6 @@ describe('use-execution-events hooks', () => {
     const first = renderHook(() => useTaskEvents('tk', true, 'uid-old'), { wrapper })
     await waitFor(() => expect(first.result.current.isSuccess).toBe(true))
     expect(first.result.current.data?.latestSeq).toBe(9)
-    // A different uid under the same name must NOT return the cached uid-old entry —
-    // it issues its own fetch and gets the recreated task's sequence.
     const second = renderHook(() => useTaskEvents('tk', true, 'uid-new'), { wrapper })
     await waitFor(() => expect(second.result.current.isSuccess).toBe(true))
     expect(second.result.current.data?.latestSeq).toBe(1)
@@ -94,15 +84,9 @@ describe('use-execution-events hooks', () => {
   })
 
   it('useTaskEvents does not share a cache key with the full-history taskEvents hook', async () => {
-    // The paged full-history hook in use-tasks.ts caches under ['taskEvents', ...].
-    // This single-page replay hook must use a DISTINCT key so a refetch of one
-    // never overwrites the other with an incompatible shape/partial page. Seed the
-    // ['taskEvents', ...] entry with a sentinel and confirm this hook ignores it
-    // and fetches its own data.
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
     })
-    // Sentinel under the OTHER hook's key (same id/namespace/uid tuple).
     client.setQueryData(
       ['taskEvents', 'tk', 'default', 'uid-1'],
       { latestSeq: 999, events: [{ seq: 999 }] },
@@ -121,8 +105,6 @@ describe('use-execution-events hooks', () => {
     )
     const { result } = renderHook(() => useTaskEvents('tk', true, 'uid-1'), { wrapper })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    // It fetched fresh (didn't read the sentinel under the other hook's key) and
-    // shows ITS own data, not the seeded 999 — proving the keys don't collide.
     expect(fetched).toBe(true)
     expect(result.current.data?.latestSeq).toBe(3)
   })
@@ -241,7 +223,6 @@ describe('use-execution-events hooks', () => {
         return HttpResponse.json({
           namespace: 'default',
           taskName: params.id,
-          // All terminal — nothing pending, so polling must not continue.
           approvals: [{ id: 'ap-1', action: 'web_fetch', status: 'approved', createdAt: '2026-06-13T00:00:00Z' }],
         })
       }),
@@ -249,8 +230,6 @@ describe('use-execution-events hooks', () => {
     const { result } = renderHook(() => useTaskApprovals('tk', true, 50), { wrapper: createWrapper() })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     const afterFirst = calls
-    // Wait well beyond several poll intervals; with no pending approval the
-    // refetchInterval function returns false, so no further requests fire.
     await new Promise((r) => setTimeout(r, 250))
     expect(calls).toBe(afterFirst)
   })
@@ -260,13 +239,11 @@ describe('use-execution-events hooks', () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
         calls += 1
-        // No approvals yet, but the task is still running so a future
-        // ApprovalRequested could appear — polling must continue.
         return HttpResponse.json({ namespace: 'default', taskName: params.id, approvals: [] })
       }),
     )
     const { result } = renderHook(
-      () => useTaskApprovals('tk', true, 50, /* taskRunning */ true),
+      () => useTaskApprovals('tk', true, 50, true),
       { wrapper: createWrapper() },
     )
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
@@ -287,7 +264,6 @@ describe('use-execution-events hooks', () => {
     )
     const { result } = renderHook(() => useTaskApprovals('tk', true, 50), { wrapper: createWrapper() })
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    // A pending approval keeps the poll alive, so more requests accrue over time.
     await waitFor(() => expect(calls).toBeGreaterThan(1), { timeout: 1000 })
   })
 
@@ -296,7 +272,6 @@ describe('use-execution-events hooks', () => {
     server.use(
       http.get(`${API}/tasks/:id/approvals`, ({ params }) => {
         calls += 1
-        // Legacy approvals have no execution outcome for v2 recovery to settle.
         return HttpResponse.json({
           namespace: 'default',
           taskName: params.id,
@@ -305,13 +280,11 @@ describe('use-execution-events hooks', () => {
       }),
     )
     const { result } = renderHook(
-      // pollIntervalMs set, not running, taskTerminal = true.
-      () => useTaskApprovals('tk', true, 50, /* taskRunning */ false, /* taskTerminal */ true),
+      () => useTaskApprovals('tk', true, 50, false, true),
       { wrapper: createWrapper() },
     )
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
     const afterFirst = calls
-    // A terminal task must not keep refetching a legacy pending approval.
     await new Promise((r) => setTimeout(r, 250))
     expect(calls).toBe(afterFirst)
   })
@@ -341,7 +314,6 @@ describe('use-execution-events hooks', () => {
       { wrapper: createWrapper() },
     )
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
-    // An already-terminal task still needs updates from execution recovery.
     await waitFor(() => expect(calls).toBeGreaterThan(1))
 
     approval = { ...approval, status: settledStatus, executionOutcome: settledOutcome, executionReason: reason }
@@ -447,10 +419,6 @@ describe('use-execution-events hooks', () => {
   })
 
   it('useForkTask invalidates both event caches so full-history and replay views refresh', async () => {
-    // The fork mutation must invalidate BOTH this hook's single-page replay key
-    // (TASK_EVENTS_PAGE_KEY) AND the full-history ['taskEvents', ...] cache used by
-    // the Overview/Execution panels (use-tasks.ts). A client.invalidateQueries spy
-    // records which keys were invalidated.
     server.use(
       http.post(`${API}/tasks/:id/fork`, ({ params }) =>
         HttpResponse.json(
@@ -476,16 +444,12 @@ describe('use-execution-events hooks', () => {
     const { result } = renderHook(() => useForkTask('tk'), { wrapper })
     await result.current.mutateAsync({ afterSeq: 1 })
     const keys = invalidated.map((k) => (Array.isArray(k) ? k[0] : k))
-    // Both the single-page replay key and the full-history taskEvents key.
     expect(keys).toContain('taskEventsPage')
     expect(keys).toContain('taskEvents')
     spy.mockRestore()
   })
 
   it('useForkTask invalidates the trace query so fork provenance refreshes', async () => {
-    // The Trace tab derives its Fork provenance section from the source task's
-    // timeline; a successful fork must invalidate the taskTrace query so an
-    // already-loaded trace refetches instead of going stale.
     let traceCalls = 0
     server.use(
       http.get(`${API}/tasks/:id/trace`, ({ params }) => {
@@ -506,8 +470,6 @@ describe('use-execution-events hooks', () => {
         ),
       ),
     )
-    // Both hooks share one QueryClient so the mutation's invalidation reaches the
-    // trace query.
     const wrapper = createWrapper()
     const { result } = renderHook(
       () => ({ trace: useTaskTrace('tk'), fork: useForkTask('tk') }),
@@ -516,7 +478,6 @@ describe('use-execution-events hooks', () => {
     await waitFor(() => expect(result.current.trace.isSuccess).toBe(true))
     const before = traceCalls
     await result.current.fork.mutateAsync({ afterSeq: 2 })
-    // The fork invalidates the trace, so it refetches.
     await waitFor(() => expect(traceCalls).toBeGreaterThan(before))
   })
 })

@@ -2,12 +2,8 @@ import type { Agent, AgentSpec } from '@/schemas/agent'
 import { ago, DEMO_NAMESPACE, uid } from '../shared'
 import { AGENTS, TASKS, type AgentKey } from '../world'
 
-// Agent CRs for the demo namespace. AI agents run Orka's own tool loop against
-// a Provider; runtime agents run a coding-agent CLI over ACP in a workspace.
-
 const tools = (...names: string[]) => names.map((name) => ({ name, enabled: true }))
 
-/** ConfigMaps in the demo namespace that agents read their system prompt from, by name and key. */
 export const promptConfigMaps: Record<string, Record<string, string>> = {
   'incident-responder-prompt': {
     'system.md': [
@@ -99,7 +95,6 @@ const specs: Record<AgentKey, AgentSpec> = {
     },
   },
   deps: {
-    // OpenCode takes provider-qualified model IDs and explicit token limits.
     model: { name: `openai/${AGENTS.deps.model}`, contextWindow: 1047576, maxTokens: 32768 },
     runtime: {
       type: 'opencode',
@@ -159,16 +154,11 @@ export function demoAgent(name: string, spec: AgentSpec, createdAt: string, stat
   }
 }
 
-/**
- * An autonomous coordinator: the controller re-runs its Task until the plan
- * marks the goal complete, so its stories must end that way.
- */
 export function isAutonomousAgent(key: AgentKey): boolean {
   const coordination = specs[key].coordination
   return Boolean(coordination?.enabled && coordination.autonomous)
 }
 
-/** The seeded agents, one per world.AGENTS entry. */
 export function seedAgents(): Agent[] {
   return (Object.keys(AGENTS) as AgentKey[]).map((key) =>
     demoAgent(AGENTS[key].name, specs[key], ago(createdDaysAgo[key] * 24 * 60), agentStatus(key)),

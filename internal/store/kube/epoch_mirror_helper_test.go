@@ -8,10 +8,6 @@ import (
 	controlstore "github.com/orka-agents/orka/internal/store"
 )
 
-// syncTestEpochMirror copies the current Kubernetes controller epoch into the
-// SQLite persistence's mirror, as the controller epoch manager does before any
-// fenced write. SQLite checks the fences of its control records against that
-// mirror when they commit. It does nothing before the first epoch exists.
 func syncTestEpochMirror(t *testing.T, kubeStore *Store, persistence any) {
 	t.Helper()
 	epoch, err := kubeStore.GetControllerEpoch(context.Background(), controlstore.DefaultControllerEpochName)

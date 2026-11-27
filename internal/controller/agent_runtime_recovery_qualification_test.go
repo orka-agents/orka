@@ -17,8 +17,6 @@ func TestAgentRuntimeFoundryRecoveryUnqualifiedEnrollmentAndDrain(t *testing.T) 
 		t.Run(map[bool]string{false: "live boot drains", true: "lost boot remains retained"}[lostBoot], func(t *testing.T) {
 			f := newRuntimeRecoveryFixture(t)
 			configureFoundryRuntimeRecoveryFixture(t, f)
-			// An unqualified or legacy supervisor omits both the capability and
-			// broker status identity. Use its original endpoint without overlays.
 			f.slice.Ports[0].Port = new(runtimeRecoveryServerPort(t, f.server.URL()))
 			if err := f.r.Update(t.Context(), f.slice); err != nil {
 				t.Fatal(err)

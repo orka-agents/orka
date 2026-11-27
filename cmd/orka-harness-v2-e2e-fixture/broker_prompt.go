@@ -26,8 +26,6 @@ import (
 const brokerPromptPath = "/__e2e/accepted-prompt"
 const brokerReadTool = "e2eauthorizationnote"
 
-// acceptedBrokerPrompt contains only controller-supplied, non-secret fences and
-// policy. It never exports prompt content, HTTP auth headers, or capabilities.
 type acceptedBrokerPrompt struct {
 	Metadata      harnessv2.MutationMetadata       `json:"metadata"`
 	Lease         harnessv2.PromptLease            `json:"lease"`
@@ -84,8 +82,6 @@ func (p *brokerPromptRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		var prompt harnessv2.StartPromptRequest
 		if json.Unmarshal(body, &prompt) == nil && prompt.Input.Metadata["orka.conformance"] == "" {
-			// The inner conformant fixture still verifies bearer, capability, request
-			// digest, session, and fences. Recording alone never grants acceptance.
 			captured := acceptedBrokerPrompt{Metadata: prompt.Metadata,
 				Lease:         prompt.Lease,
 				Authorization: prompt.MCPAuthorization}
@@ -112,7 +108,6 @@ func (p *brokerPromptRecorder) recordAccepted(response *http.Response) error {
 	if err != nil {
 		return err
 	}
-	// Preserve exactly the accepted event for the real controller stream.
 	response.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(line), reader), Closer: response.Body}
 	var event harnessv2.Event
 	if json.Unmarshal(line, &event) != nil || event.Type != harnessv2.EventAccepted ||

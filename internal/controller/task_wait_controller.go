@@ -40,46 +40,22 @@ import (
 )
 
 const (
-	// taskWaitPollInterval is the fallback re-check while an event is
-	// awaited; Task watches and approval nudges normally wake the wait first.
-	taskWaitPollInterval = 30 * time.Second
-	// taskWaitPendingTurnInterval re-checks a requested wait whose turn has
-	// not settled yet.
+	taskWaitPollInterval        = 30 * time.Second
 	taskWaitPendingTurnInterval = 5 * time.Second
 	maxTaskWaitMessageLength    = 1024
-	// taskWaitStepInterval runs the next durable step, or retries a lost
-	// optimistic-concurrency race, promptly.
-	taskWaitStepInterval = 100 * time.Millisecond
-	// taskWaitLinkAttempts bounds how often one reconcile retries linking a
-	// continuation it created when the status write loses a race.
-	taskWaitLinkAttempts = 4
+	taskWaitStepInterval        = 100 * time.Millisecond
+	taskWaitLinkAttempts        = 4
 
 	taskWaitReasonPrefix = "Awaiting"
 )
 
-// TaskWaitReconciler drives data-only parked turns. It arms a wait only after
-// the exact turn that requested it settled Succeeded, so no prompt, tool
-// call, or publication is in flight. It never preserves or restores process
-// memory: when the awaited event arrives it creates one continuation Task on
-// the same Session, which re-freezes and revalidates policy like any other
-// Session continuation.
 type TaskWaitReconciler struct {
 	client.Client
-	// APIReader reads authoritative state for exactly-once transitions.
-	APIReader client.Reader
-	// ExecutionEvents holds parked approval requests and decisions.
-	ExecutionEvents store.DeduplicatingExecutionEventStore
-	// TaskProvenanceProtected reports that Task provenance admission reserves
-	// the continuation lineage annotations to the controller. Only then can an
-	// existing Task with the reserved name be proven to be Orka's continuation.
+	APIReader               client.Reader
+	ExecutionEvents         store.DeduplicatingExecutionEventStore
 	TaskProvenanceProtected bool
-	// Now is overridable for tests.
-	Now func() time.Time
+	Now                     func() time.Time
 
-	// created records the UID of each continuation this controller created
-	// and has not linked yet. It is the proof that lets a later reconcile
-	// link it without provenance admission after the linking status write
-	// kept losing races.
 	createdMu sync.Mutex
 	created   map[types.NamespacedName]types.UID
 }
@@ -116,15 +92,10 @@ func (r *TaskWaitReconciler) now() time.Time {
 	return time.Now().UTC()
 }
 
-// reader serves the frequent, watch-driven reads from the cache. Every
-// transition is fenced on the Task resourceVersion, so a stale read can only
-// lose a race and requeue.
 func (r *TaskWaitReconciler) reader() client.Reader {
 	return r.Client
 }
 
-// authoritativeReader bypasses the cache where a stale miss would cause a
-// redundant create attempt.
 func (r *TaskWaitReconciler) authoritativeReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -132,7 +103,6 @@ func (r *TaskWaitReconciler) authoritativeReader() client.Reader {
 	return r.Client
 }
 
-// Reconcile advances one parked wait by at most one durable transition per step.
 func (r *TaskWaitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	task := &corev1alpha1.Task{}
 	if err := r.reader().Get(ctx, req.NamespacedName, task); err != nil {
@@ -148,8 +118,6 @@ func (r *TaskWaitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil
 	}
 	if !wait.State.IsTerminal() {
-		// Act on the authoritative object: a cached Task may predate the
-		// turn's settlement or a cancellation request.
 		if err := r.authoritativeReader().Get(ctx, req.NamespacedName, task); err != nil {
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
@@ -175,7 +143,6 @@ func (r *TaskWaitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 }
 
-// taskWaitRetry requeues promptly when a fenced transition lost a race.
 func taskWaitRetry(done bool) ctrl.Result {
 	if done {
 		return ctrl.Result{}
@@ -193,7 +160,6 @@ func taskWaitCancellation(task *corev1alpha1.Task) (string, bool) {
 	return "", false
 }
 
-// reconcileRequested arms a wait only on proven success of its exact turn.
 func (r *TaskWaitReconciler) reconcileRequested(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	wait := task.Status.Wait
 	execution := task.Status.Execution
@@ -246,7 +212,6 @@ func taskWaitArmedMessage(wait *corev1alpha1.TaskWaitStatus) string {
 	}
 }
 
-// reconcileWaiting checks the awaited event and the deadlines.
 func (r *TaskWaitReconciler) reconcileWaiting(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	wait := task.Status.Wait
 	now := r.now()
@@ -258,8 +223,6 @@ func (r *TaskWaitReconciler) reconcileWaiting(ctx context.Context, task *corev1a
 		if now.Before(wait.Deadline.Time) {
 			return ctrl.Result{RequeueAfter: min(retryAfter, wait.Deadline.Sub(now)+time.Second)}, nil
 		}
-		// The wait deadline passed first. An undecided parked approval is
-		// closed before anything resumes; a racing decision wins instead.
 		if wait.Kind == corev1alpha1.TaskWaitKindApproval {
 			closed, closeErr := r.closeParkedApproval(ctx, task, true, "the wait deadline passed")
 			if closeErr != nil || !closed {
@@ -284,8 +247,6 @@ func (r *TaskWaitReconciler) reconcileWaiting(ctx context.Context, task *corev1a
 	return ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil
 }
 
-// evaluate reports whether the awaited event arrived and, if so, the
-// controller-authored description handed to the continuation turn.
 func (r *TaskWaitReconciler) evaluate(ctx context.Context, task *corev1alpha1.Task, now time.Time) (string, bool, time.Duration, error) {
 	wait := task.Status.Wait
 	switch wait.Kind {
@@ -334,8 +295,6 @@ func (r *TaskWaitReconciler) evaluateApproval(ctx context.Context, task *corev1a
 			return fmt.Sprintf("Your sign-off request was %s without a decision.", approval.Status), true, 0, nil
 		}
 	}
-	// The request event is appended when the wait arms; until it is visible
-	// the approval is simply pending.
 	return "", false, taskWaitPollInterval, nil
 }
 
@@ -344,16 +303,10 @@ func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alph
 	if err != nil || !ready || !missing {
 		return outcome, ready, retryAfter, err
 	}
-	// The cache may not have observed a just-created child or continuation
-	// yet. A missing, replaced, or unlinked child resumes this Task only when
-	// authoritative reads confirm it.
 	outcome, ready, retryAfter, _, err = r.evaluateTasksWith(ctx, r.authoritativeReader(), task)
 	return outcome, ready, retryAfter, err
 }
 
-// evaluateTasksWith evaluates the child wait through reader. It also reports
-// whether the outcome rests on a child, owner link, or continuation that the
-// reader did not find or could not verify.
 func (r *TaskWaitReconciler) evaluateTasksWith(
 	ctx context.Context,
 	reader client.Reader,
@@ -380,8 +333,6 @@ func (r *TaskWaitReconciler) evaluateTasksWith(
 			}
 			return "", false, taskWaitPollInterval, false, err
 		}
-		// Only the exact child authorized when the wait was recorded counts;
-		// a same-named replacement never controls when this Task resumes.
 		if len(wait.ReferenceUIDs) != len(wait.References) || string(child.UID) != wait.ReferenceUIDs[i] {
 			missing = true
 			lines = append(lines, name+": is no longer the task this wait was authorized for")
@@ -417,8 +368,6 @@ func (r *TaskWaitReconciler) evaluateTasksWith(
 		". Call wait_for_tasks with the same names to read their results.", true, 0, missing, nil
 }
 
-// taskWaitChildOwners returns the parked Task and its verified predecessors.
-// A continuation keeps authority over the children its predecessors delegated.
 func (r *TaskWaitReconciler) taskWaitChildOwners(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) ([]*corev1alpha1.Task, error) {
 	owners := []*corev1alpha1.Task{task}
 	current := task
@@ -445,8 +394,6 @@ func taskWaitChildBelongsToAny(owners []*corev1alpha1.Task, child *corev1alpha1.
 	return false
 }
 
-// taskWaitChildBelongs re-checks the parent link verified when the wait was
-// requested, so a deleted-and-recreated name is not mistaken for the child.
 func taskWaitChildBelongs(parent, child *corev1alpha1.Task) bool {
 	if labels.ParentTaskName(child.Labels, child.Annotations) != parent.Name {
 		return false
@@ -460,8 +407,6 @@ func taskWaitChildBelongs(parent, child *corev1alpha1.Task) bool {
 	return true
 }
 
-// reconcileResuming creates the continuation exactly once. The name was
-// reserved durably before creation, so a restart adopts the existing Task.
 func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	wait := task.Status.Wait
 	name := strings.TrimSpace(wait.ContinuationTaskName)
@@ -478,21 +423,11 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 		}
 		if !r.TaskProvenanceProtected {
 			if r.createdContinuation(existing) {
-				// This controller created exactly this incarnation; an earlier
-				// reconcile lost every attempt to link it.
 				return r.markCreatedResumed(ctx, task, existing)
 			}
-			// Without provenance admission anyone who can create Tasks could
-			// forge the lineage annotation; linking it would hand that Task
-			// this one's authority, and deleting it would act on a forgeable
-			// claim. Fail closed and leave it alone: execution holds every
-			// continuation until its predecessor links it, so this one never
-			// ran and, once the wait ends unlinked, never will.
 			return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateAbandoned,
 				"an existing continuation cannot be proven to be Orka's because Task provenance admission is disabled")
 		}
-		// A restart may have landed between creation and sealing. Seal before
-		// linking so the retry happens while this Task is still Resuming.
 		if err := r.ensureContinuationRequesterSealed(ctx, task, existing); err != nil && !errors.Is(err, ErrChildSealRefused) {
 			return ctrl.Result{}, fmt.Errorf("seal adopted continuation requester: %w", err)
 		}
@@ -509,9 +444,6 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 	}
 	continuation := buildTaskContinuation(task, name, remaining, chainDeadline)
 	if continuationRequesterSealable(task) {
-		// Mark the requester as API-sourced from creation so admission waits
-		// for the seal instead of freezing a snapshot without the requester's
-		// connectors.
 		continuation.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
 	}
 	tracing.StampTaskTraceContext(ctx, continuation)
@@ -524,20 +456,12 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 	r.rememberCreatedContinuation(continuation)
 	logf.FromContext(ctx).Info("Created continuation for parked task", "task", task.Name, "continuation", name, "kind", wait.Kind)
 	if err := r.ensureContinuationRequesterSealed(ctx, task, continuation); err != nil {
-		// Linking the continuation that now exists matters more than its
-		// connectors. Admission waits out the stamp grace period and then
-		// fails its connector tools closed, like an unsealed scheduled run.
 		logf.FromContext(ctx).Info("Continuation requester was not sealed; its connector tools fail closed",
 			"task", task.Name, "continuation", name, "reason", err.Error())
 	}
 	return r.markCreatedResumed(ctx, task, continuation)
 }
 
-// markCreatedResumed links the continuation this reconcile created. Creating
-// it is the proof that it is Orka's, and a later reconcile can re-prove that
-// only with provenance admission, so a status write that loses a race is
-// retried here against the authoritative Task while its wait still reserves
-// this continuation and has not been cancelled.
 func (r *TaskWaitReconciler) markCreatedResumed(ctx context.Context, task, continuation *corev1alpha1.Task) (ctrl.Result, error) {
 	for attempt := range taskWaitLinkAttempts {
 		if attempt > 0 {
@@ -568,8 +492,6 @@ func (r *TaskWaitReconciler) markResumed(ctx context.Context, task *corev1alpha1
 	return result, err
 }
 
-// linkContinuation records the continuation on the parked Task. It reports
-// false when the fenced status write lost a race.
 func (r *TaskWaitReconciler) linkContinuation(ctx context.Context, task, continuation *corev1alpha1.Task) (bool, ctrl.Result, error) {
 	wait := task.Status.Wait
 	now := r.now()
@@ -583,18 +505,12 @@ func (r *TaskWaitReconciler) linkContinuation(ctx context.Context, task, continu
 	}
 	metrics.RecordTaskWaitTransition(string(wait.Kind), string(corev1alpha1.TaskWaitStateResumed), taskWaitedFor(wait, now))
 	r.forgetCreatedContinuation(continuation.Namespace, continuation.Name)
-	// The UID is durable now; the continuation may be deleted like any Task.
 	if err := r.releaseContinuationLink(ctx, continuation.Namespace, continuation.Name); err != nil {
 		return true, ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil //nolint:nilerr // The continuation's own reconcile retries the release.
 	}
 	return true, ctrl.Result{}, nil
 }
 
-// releaseContinuationLink removes the link finalizer once the predecessor no
-// longer needs it: it recorded this continuation, ended its wait without it,
-// or no longer exists. While the predecessor is still Resuming with this
-// name, the finalizer stays so that recovery adopts this Task instead of
-// creating another one.
 func (r *TaskWaitReconciler) releaseContinuationLink(ctx context.Context, namespace, name string) error {
 	continuation := &corev1alpha1.Task{}
 	if err := r.authoritativeReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, continuation); err != nil {
@@ -625,21 +541,14 @@ func (r *TaskWaitReconciler) releaseContinuationLink(ctx context.Context, namesp
 	return nil
 }
 
-// cancel ends a non-terminal wait. A continuation created in the same window
-// is deleted, which cancels it like any other agent Task.
 func (r *TaskWaitReconciler) cancel(ctx context.Context, task *corev1alpha1.Task, reason string) (ctrl.Result, error) {
 	wait := task.Status.Wait
 	if wait.State == corev1alpha1.TaskWaitStateResuming && strings.TrimSpace(wait.ContinuationTaskName) != "" {
-		// Read authoritatively: a continuation created moments ago may not be
-		// cached yet, and missing it would leave it running after cancellation.
 		existing := &corev1alpha1.Task{}
 		err := r.authoritativeReader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: wait.ContinuationTaskName}, existing)
 		switch {
 		case err == nil && existing.Annotations[labels.AnnotationContinuationOfUID] == string(task.UID) &&
 			(r.TaskProvenanceProtected || r.createdContinuation(existing)):
-			// Only a continuation proven to be Orka's is deleted. An unproven
-			// one is left alone; execution holds it until a link that the
-			// cancelled wait will never record.
 			uid := existing.UID
 			if err := r.Delete(ctx, existing, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("cancel continuation task: %w", err)
@@ -651,8 +560,6 @@ func (r *TaskWaitReconciler) cancel(ctx context.Context, task *corev1alpha1.Task
 	return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateCancelled, reason)
 }
 
-// finishWithoutResume moves a wait to a final state in which nothing resumes,
-// closing an undecided parked approval first.
 func (r *TaskWaitReconciler) finishWithoutResume(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -680,17 +587,12 @@ func (r *TaskWaitReconciler) finishWithoutResume(
 	return ctrl.Result{}, nil
 }
 
-// closeParkedApproval appends the terminal event for an undecided parked
-// approval. It reports false when a human decision landed first; the caller
-// then re-evaluates so that the decision wins.
 func (r *TaskWaitReconciler) closeParkedApproval(ctx context.Context, task *corev1alpha1.Task, expired bool, reason string) (bool, error) {
 	wait := task.Status.Wait
 	if r.ExecutionEvents == nil || len(wait.References) != 1 {
 		return true, nil
 	}
 	if wait.State == corev1alpha1.TaskWaitStateRequested {
-		// A request that never armed may not have its event yet; ensure it
-		// exists so the closing event has a request to close.
 		if err := taskwait.EnsureParkedApprovalRequested(ctx, r.ExecutionEvents, task, wait); err != nil {
 			return false, err
 		}
@@ -712,8 +614,6 @@ func (r *TaskWaitReconciler) closeParkedApproval(ctx context.Context, task *core
 	return true, nil
 }
 
-// transition applies one wait mutation fenced on the Task resourceVersion and
-// the exact prior wait state. It reports false on a lost race.
 func (r *TaskWaitReconciler) transition(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -753,8 +653,6 @@ func (r *TaskWaitReconciler) syncWaitingCondition(ctx context.Context, task *cor
 	return nil
 }
 
-// setTaskWaitingCondition mirrors the wait into the Waiting condition and
-// reports whether it changed.
 func setTaskWaitingCondition(task *corev1alpha1.Task) bool {
 	wait := task.Status.Wait
 	if wait == nil {
@@ -784,8 +682,6 @@ func taskWaitedFor(wait *corev1alpha1.TaskWaitStatus, now time.Time) time.Durati
 	return max(now.Sub(wait.WaitingSince.Time), time.Nanosecond)
 }
 
-// taskWaitChainDeadline is the deadline of the parked Task. Each continuation
-// is created with only the remaining time, so it is also the chain deadline.
 func taskWaitChainDeadline(task *corev1alpha1.Task) time.Time {
 	if deadline, ok := acpTaskDeadline(task, time.Now()); ok {
 		return deadline
@@ -793,14 +689,10 @@ func taskWaitChainDeadline(task *corev1alpha1.Task) time.Time {
 	return taskwait.Deadline(task)
 }
 
-// Labels and annotations a continuation inherits so its frozen runtime
-// policy matches the parked turn. Controller runtime state is never copied.
 var (
 	taskContinuationInheritedLabels = []string{
 		labels.LabelAgentName, labels.LabelAgentUID, labels.LabelTaskType, labels.LabelParentTask,
 		labels.LabelCoordinator, labels.LabelDelegatedAgent, labels.LabelCreatedBy, labels.LabelChatSession,
-		// The chat's namespace and incarnation travel with its name, so a
-		// continuation stays the turn of the exact chat that created it.
 		labels.LabelChatSessionNamespace, labels.LabelChatSessionEpoch,
 		labels.LabelScheduledRun, labels.LabelPurpose, labels.LabelManaged,
 	}
@@ -811,10 +703,6 @@ var (
 	}
 )
 
-// buildTaskContinuation copies the parked Task's execution inputs. Only the
-// prompt, the Session reference flags, and the remaining timeout change. The
-// chain's absolute deadline is recorded too, so creation latency or clock
-// skew cannot extend it.
 func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining time.Duration, chainDeadline time.Time) *corev1alpha1.Task {
 	spec := *parked.Spec.DeepCopy()
 	spec.Prompt = taskContinuationPrompt(parked)
@@ -822,10 +710,6 @@ func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining tim
 	spec.Suspend = nil
 	spec.Timeout = &metav1.Duration{Duration: remaining}
 	if workspace := spec.Workspace; workspace != nil && taskWaitTurnPublished(parked) {
-		// The parked turn moved the branch, and its Session recorded the
-		// published commit as the verified baseline that now governs the
-		// next publication. The pre-publication precondition would conflict
-		// with that baseline and fail the continuation before it resumes.
 		workspace.ExpectedRemoteSHA = ""
 	}
 	if ref := parked.Spec.SessionRef; ref != nil {
@@ -838,15 +722,12 @@ func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining tim
 			Name: name, Namespace: parked.Namespace,
 			Labels: map[string]string{labels.LabelContinuationOf: labels.SelectorValue(parked.Name)},
 			Annotations: map[string]string{
-				labels.AnnotationContinuationOfName: parked.Name,
-				labels.AnnotationContinuationOfUID:  string(parked.UID),
-				labels.AnnotationContinuationIndex:  strconv.Itoa(int(taskwait.ChainIndex(parked)) + 1),
-				// RFC 3339 drops sub-second precision, which only shortens the deadline.
+				labels.AnnotationContinuationOfName:        parked.Name,
+				labels.AnnotationContinuationOfUID:         string(parked.UID),
+				labels.AnnotationContinuationIndex:         strconv.Itoa(int(taskwait.ChainIndex(parked)) + 1),
 				labels.AnnotationContinuationChainDeadline: chainDeadline.UTC().Format(time.RFC3339),
 			},
 			Finalizers: []string{labels.ContinuationLinkFinalizer},
-			// A non-controller owner: deleting the parked Task cancels its
-			// continuation without making it a coordination child.
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind,
 				Name: parked.Name, UID: parked.UID,
@@ -867,8 +748,6 @@ func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining tim
 	return continuation
 }
 
-// taskWaitTurnPublished reports whether the parked turn published a verified
-// commit to its write workspace's branch.
 func taskWaitTurnPublished(parked *corev1alpha1.Task) bool {
 	delivery := parked.Status.Delivery
 	if delivery == nil || strings.TrimSpace(delivery.VerifiedRemoteSHA) == "" {
@@ -882,8 +761,6 @@ func taskWaitTurnPublished(parked *corev1alpha1.Task) bool {
 	}
 }
 
-// taskContinuationPrompt is controller-authored. It describes the event and
-// never repeats the parked prompt, which the Session transcript already holds.
 func taskContinuationPrompt(parked *corev1alpha1.Task) string {
 	wait := parked.Status.Wait
 	var b strings.Builder
@@ -895,16 +772,11 @@ func taskContinuationPrompt(parked *corev1alpha1.Task) string {
 	return b.String()
 }
 
-// continuationRequesterSealable reports whether the parked Task carries a
-// verified requester that its continuation must be sealed with.
 func continuationRequesterSealable(parked *corev1alpha1.Task) bool {
 	return len(requesterStampKey) >= connectors.MinRequesterStampKeyBytes && parked != nil &&
 		parked.Spec.RequestedBy != nil && connectors.RequesterStampValid(requesterStampKey, parked)
 }
 
-// ensureContinuationRequesterSealed seals the continuation's requester stamp
-// unless it is already valid, re-reading the continuation when a concurrent
-// write fences the patch.
 func (r *TaskWaitReconciler) ensureContinuationRequesterSealed(ctx context.Context, parked, continuation *corev1alpha1.Task) error {
 	if !continuationRequesterSealable(parked) {
 		return nil
@@ -931,9 +803,6 @@ func (r *TaskWaitReconciler) ensureContinuationRequesterSealed(ctx context.Conte
 	return err
 }
 
-// sealContinuationRequesterStamp binds the parked Task's verified requester to
-// its continuation. It mirrors SealChildRequesterStamp, but proves the link by
-// the parked Task's owner reference and continuation annotation.
 func sealContinuationRequesterStamp(ctx context.Context, c client.Client, key []byte, parked, continuation *corev1alpha1.Task) error {
 	if len(key) < connectors.MinRequesterStampKeyBytes || continuation.Spec.RequestedBy == nil {
 		return nil
@@ -971,9 +840,6 @@ func boundTaskWaitText(value string, limit int) string {
 	return value[:cut] + "..."
 }
 
-// SetupWithManager watches Tasks. A change to any Task also wakes the parked
-// Task waiting on it: its coordination parent for child waits, and the parked
-// Task a continuation resumes, so chained child waits settle promptly.
 func (r *TaskWaitReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

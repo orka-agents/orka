@@ -107,11 +107,6 @@ func (f connectorToolFixture) connection(mode string, ready bool) *corev1alpha1.
 	return connection
 }
 
-// reader serves the fixture objects plus extra. Without a "github"
-// provider among extra an accepted one is served, and every linked
-// Connection without a consent record carries the consent the flow records
-// against the provider it is read with, so a stale-consent case is built by
-// setting Status.Consent explicitly.
 func (f connectorToolFixture) reader(extra ...ctrlclient.Object) ctrlclient.Client {
 	providers := map[string]*corev1alpha1.ConnectorProvider{}
 	for _, object := range extra {
@@ -133,9 +128,6 @@ func (f connectorToolFixture) reader(extra ...ctrlclient.Object) ctrlclient.Clie
 	return ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(objects...).Build()
 }
 
-// consentedConnection returns a copy of a linked Connection carrying the
-// consent and granted scopes the consent flow records against provider,
-// unless it already has a consent record.
 func consentedConnection(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider) *corev1alpha1.Connection {
 	if connection == nil || provider == nil || connection.Status.GrantSequence == 0 || connection.Status.Consent != nil {
 		return connection
@@ -235,8 +227,6 @@ func TestFreezeAndBindNativeConnections(t *testing.T) {
 	if frozenConnectionDigest(nil, "github-conn") != "" || frozenConnectionDigest(executor.FrozenConnections(), "other") != "" {
 		t.Fatal("missing bindings must yield an empty digest")
 	}
-	// A policy frozen with no Connection held for it names no link, so an
-	// approval or effect record never claims one.
 	for _, unbound := range []outboundaccess.FrozenConnection{{}, {UID: "conn-uid", Generation: 3}} {
 		if frozenConnectionDigest(map[string]outboundaccess.FrozenConnection{"github-conn": unbound}, "github-conn") != "" {
 			t.Fatalf("unbound entry %+v must yield an empty digest", unbound)
@@ -269,8 +259,6 @@ func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	if err != nil || digest == "" || digest != want {
 		t.Fatalf("digest = %q err = %v want %q", digest, err, want)
 	}
-	// A changed policy or Tool moves the binding, which an approval or
-	// effect record made under the old one will no longer match.
 	changed := f.policy.DeepCopy()
 	changed.Spec.Connection.Output = &corev1alpha1.OutboundCredentialOutput{Header: "X-Linked-Token"}
 	changedReader := ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(changed, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool, task).Build()
@@ -284,9 +272,6 @@ func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "direct_write", Source: harnessv2.MCPToolSourceBrokeredCustom}); err != nil || digest != "" {
 		t.Fatalf("a tool whose policy was never frozen has no digest: %q err = %v", digest, err)
 	}
-	// A policy retargeted after dispatch (connection mode when the Task
-	// froze a Connection for it, direct now) is classification drift: the
-	// call never executes under the policy's new credentials.
 	retargeted := f.policy.DeepCopy()
 	retargeted.Spec = f.direct.Spec
 	retargetedReader := ctrlfake.NewClientBuilder().WithScheme(f.scheme).WithObjects(retargeted, f.direct, f.readTool, f.writeTool, f.plainTool, f.directTool, task).Build()
@@ -308,8 +293,6 @@ func TestRegistryACPMCPToolExecutorConnectionDigest(t *testing.T) {
 	if digest, err := executor.ConnectionDigest(ctx, request, harnessv2.MCPToolDescriptor{Name: "web_search", Source: harnessv2.MCPToolSourceBrokeredBuiltin}); err != nil || digest != "" {
 		t.Fatalf("built-in tools have no digest: %q err = %v", digest, err)
 	}
-	// A binding that cannot be established is an error, never a silent
-	// "not connector-backed": the effect must carry the digest it promises.
 	if _, err := executor.ConnectionDigest(context.Background(), request, custom); err == nil {
 		t.Fatal("an unauthenticated context must be an error")
 	}
@@ -374,23 +357,17 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 	}
 	_ = plan
 
-	// A readWrite link on a runtime without approval support hides the write
-	// tool rather than exposing it unapproved or failing the session.
 	cfg := build(f.connection(corev1alpha1.ConnectionModeReadWrite, true), corev1alpha1.AgentRuntimeClaude)
 	if descriptorNames(cfg) != "gh_read" || len(cfg.ApprovalPolicy.RequiredTools) != 0 {
 		t.Fatalf("claude runtime: tools = %q approval = %v", descriptorNames(cfg), cfg.ApprovalPolicy.RequiredTools)
 	}
-	// A readOnly link hides it as well.
 	if cfg := build(f.connection(corev1alpha1.ConnectionModeReadOnly, true), corev1alpha1.AgentRuntimeClaude); descriptorNames(cfg) != "gh_read" {
 		t.Fatalf("readOnly: tools = %q", descriptorNames(cfg))
 	}
-	// Without any link the tools stay listed and fail closed at call time.
 	if cfg := build(nil, corev1alpha1.AgentRuntimeClaude); descriptorNames(cfg) != "gh_read" {
 		t.Fatalf("no link on claude: tools = %q (write hidden for lack of approvals)", descriptorNames(cfg))
 	}
 
-	// The adjustment leaves unrelated inputs untouched and never mutates the
-	// caller's objects.
 	adjustedTask, adjustedAgent, _, err := adjustInputsForConnectorTools(context.Background(), f.reader(f.connection(corev1alpha1.ConnectionModeReadWrite, true)), nil, task, agent)
 	if err != nil {
 		t.Fatal(err)
@@ -406,9 +383,6 @@ func TestBuildRuntimeSessionMCPConfigurationConnectorWriteTools(t *testing.T) {
 	}
 }
 
-// TestConnectorToolsSkipBuiltinNames covers a Tool resource that shares its
-// name with a built-in tool: every runtime runs the built-in, so the
-// resource is neither hidden, approval-gated, nor frozen as connector-backed.
 func TestConnectorToolsSkipBuiltinNames(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	shadow := f.writeTool.DeepCopy()
@@ -428,21 +402,12 @@ func TestConnectorToolsSkipBuiltinNames(t *testing.T) {
 	if err != nil || len(digests) != 1 || digests["gh_write"] == "" {
 		t.Fatalf("digests = %v err = %v, want only the real connector tool", digests, err)
 	}
-	// Classification follows the registry the runtime's policy was built
-	// against: a runtime whose registry has no such built-in sees the Tool
-	// resource, and it is the connector write tool a readOnly link hides.
 	visible, write, err = FilterConnectorToolsForRequester(context.Background(), reader, tools.NewRegistry(), f.task, names)
 	if err != nil || len(visible) != 0 || len(write) != 0 {
 		t.Fatalf("visible = %v write = %v err = %v, want the shadowed resource classified by the runtime registry", visible, write, err)
 	}
 }
 
-// TestRequesterConnectionRevalidatesAgainstCurrentProvider covers a Ready
-// Connection the Connection controller has not yet re-judged after a
-// provider change: a consent granted against another authority, granted
-// scopes that no longer cover the mode, or a provider that is no longer
-// accepted make the link unusable at dispatch, instead of freezing a grant
-// the credential source refuses on every call.
 func TestRequesterConnectionRevalidatesAgainstCurrentProvider(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	ctx := context.Background()
@@ -480,12 +445,6 @@ func TestRequesterConnectionRevalidatesAgainstCurrentProvider(t *testing.T) {
 	}
 }
 
-// TestConnectorClassificationUnchanged covers an ACP binding whose tools
-// changed between the classification that decided visibility and approvals
-// and the Connection freeze: a policy that entered connection mode, a
-// connection-mode policy object that changed, and a Tool retargeted onto a
-// policy another Tool already uses are all drift, so the snapshot is never
-// committed with a credential the plan did not account for.
 func TestConnectorClassificationUnchanged(t *testing.T) {
 	read := connectorToolInfo{PolicyName: "github-conn", PolicyUID: "policy-uid", PolicyGeneration: 3, Provider: "github", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}
 	planned := map[string]connectorToolInfo{"gh_read": read}
@@ -501,10 +460,9 @@ func TestConnectorClassificationUnchanged(t *testing.T) {
 	retargeted := read
 	retargeted.Provider = "gitlab"
 	for name, frozen := range map[string]map[string]connectorToolInfo{
-		"changed generation":   {"gh_read": changed},
-		"retargeted provider":  {"gh_read": retargeted},
-		"left connection mode": {},
-		// plain was decided as a plain tool, then joined gh_read's policy.
+		"changed generation":     {"gh_read": changed},
+		"retargeted provider":    {"gh_read": retargeted},
+		"left connection mode":   {},
 		"joined a shared policy": {"gh_read": read, "plain": read},
 	} {
 		if err := connectorClassificationUnchanged(planned, frozen, names); !errors.Is(err, errConnectorDispatchDrift) {
@@ -513,11 +471,6 @@ func TestConnectorClassificationUnchanged(t *testing.T) {
 	}
 }
 
-// TestCreateTaskJobBoundsAMissingToolPolicy covers a native Task whose Agent
-// lists a Tool that references an OutboundAccessPolicy that does not exist:
-// dispatch retries shortly while the policy may still be applied, and after
-// the grace period the Task fails naming the policy instead of staying
-// Pending with no reason.
 func TestCreateTaskJobBoundsAMissingToolPolicy(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "ai-agent", Namespace: "default"},
@@ -561,10 +514,6 @@ func TestCreateTaskJobBoundsAMissingToolPolicy(t *testing.T) {
 	}
 }
 
-// TestNativeWorkerToolRegistryLeavesProxyPRToolsToCoordination covers the
-// pull request tools the controller registers for its compatibility
-// proxies: a native worker has them only as coordination tools, so without
-// coordination a Tool resource of the same name is what the worker runs.
 func TestNativeWorkerToolRegistryLeavesProxyPRToolsToCoordination(t *testing.T) {
 	defaults := tools.NewRegistry()
 	defaults.Register(tools.NewCreatePullRequestTool(nil))
@@ -584,10 +533,6 @@ func TestNativeWorkerToolRegistryLeavesProxyPRToolsToCoordination(t *testing.T) 
 	}
 }
 
-// TestTaskBindersCarryOnlyAVerifiedRequester covers a Task whose requestedBy
-// the controller key never sealed, such as one a worker or a planted object
-// claims for someone else: neither binder hands that person to the executor,
-// so it reaches no credential lookup and no identity-use record.
 func TestTaskBindersCarryOnlyAVerifiedRequester(t *testing.T) {
 	f := newConnectorToolFixture(t)
 	ctx := context.Background()

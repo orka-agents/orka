@@ -41,7 +41,6 @@ function attention(extra: Partial<AttentionResponse> = {}): AttentionResponse {
 }
 
 function renderWithClient() {
-  // retryDelay 0 lets the hook's own retries for server errors settle quickly.
   const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, gcTime: 0 } } })
   rawRender(<QueryClientProvider client={client}><NeedsYouCard /></QueryClientProvider>)
   return client

@@ -36,8 +36,6 @@ type migrationState struct {
 	Data        []byte `json:"data"`
 }
 
-// Native migration requires an explicitly selected API endpoint. Kubernetes
-// discovery identifies resources, not the application entrusted with history.
 func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), error) {
 	server := configuredServer(cmd, loadConfig())
 	if server == "" {
@@ -50,8 +48,6 @@ func newMigrationClient(cmd *cobra.Command) (*client.Client, string, func(), err
 	if strings.TrimSpace(c.Token) == "" && c.TxnToken == "" {
 		return nil, "", nil, errors.New("native migration requires API authentication: provide an Orka bearer token or transaction token; Kubernetes exec and certificate credentials are not API credentials")
 	}
-	// The journal and the import receipt are bound to the namespace, so it must
-	// be known before the request rather than chosen by the server.
 	if strings.TrimSpace(c.Namespace) == "" {
 		return nil, "", nil, errors.New("native migration requires a namespace: pass --namespace, set " + envNamespace + ", or configure one")
 	}
@@ -142,8 +138,6 @@ func readMigrationState(journal string, expected migrationState, maxBytes ...int
 	return &saved, nil
 }
 
-// Compare only fixed operation identity; Data is deliberately retained from the
-// first request so an uncertain retry cannot capture a newer conversation.
 func identityJSON(state migrationState) []byte {
 	state.Data, state.OperationID = nil, ""
 	data, _ := json.Marshal(state)
@@ -173,7 +167,6 @@ func publishMigrationJSON(journal, target string, value any) error {
 	if err != nil {
 		return err
 	}
-	// Publish without replacing another invocation's immutable request.
 	if err := os.Link(name, filepath.Join(journal, target)); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			old, readErr := os.ReadFile(filepath.Join(journal, target))
@@ -314,8 +307,6 @@ func newSessionMigrateExportCmd() *cobra.Command {
 				return err
 			}
 			if sqliteHome := os.Getenv("CODEX_SQLITE_HOME"); sqliteHome != "" {
-				// Relative overrides depend on the resume CWD; fresh-home validation
-				// covers databases in this exact absolute home only.
 				resolvedSQLiteHome, sqliteErr := migrationDir(sqliteHome, false)
 				if sqliteHome != strings.TrimSpace(sqliteHome) || !filepath.IsAbs(sqliteHome) || sqliteErr != nil || resolvedSQLiteHome != resolvedHome {
 					return errors.New("CODEX_SQLITE_HOME must be unset or an absolute path without surrounding whitespace resolving to the destination CODEX_HOME before native export")

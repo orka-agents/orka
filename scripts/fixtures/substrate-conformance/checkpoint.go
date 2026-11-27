@@ -10,8 +10,6 @@ import (
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
-// Verify actual provider file survival and independent fork data, in addition
-// to the Orka checkpoint controller's journal and ownership unit tests.
 func exerciseDataRestore(
 	ctx context.Context, cfg workspace.SubstrateConfig, executor *workspace.SubstrateWorkspaceExecutor,
 	ref workspace.WorkspaceRef, suffix string,
@@ -66,8 +64,6 @@ func exerciseDataRestore(
 		if snapshot.GetDurableSnapshot().GetState() != ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED {
 			return false, nil
 		}
-		// v1 Tags keep only the source Actor name; bind the exact lifetime
-		// through its unchanged UID and the captured template identity.
 		if !completedDataSnapshot(snapshot) || tag.GetSourceActor().GetName() != source.GetName() ||
 			tag.GetStatus().GetActorTemplateUid() == "" ||
 			tag.GetStatus().GetActorTemplateUid() != captured.GetActorTemplateUid() {
@@ -86,7 +82,6 @@ func exerciseDataRestore(
 	}); err != nil {
 		return err
 	}
-	// Each fork sees the immutable source even after another fork changes it.
 	for index := range 2 {
 		if err := restoreDataFork(ctx, cfg, api, actor.ActorTemplate, tagRef, suffix, index); err != nil {
 			return err

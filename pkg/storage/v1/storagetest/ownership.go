@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runControllerOwnership checks that a dataset's controller epoch only moves
-// forward, belongs to one installation, and fences writes at commit.
 func runControllerOwnership(t *testing.T, newProvider StateFactory) {
 	advance := func(provider storagev1.StateProvider, dataset string, epoch storagev1.ControllerEpoch, installation string) (storagev1.ControllerEpochMirrorState, error) {
 		return provider.AdvanceControllerEpoch(t.Context(), storagev1.AdvanceControllerEpochRequest{
@@ -75,8 +73,6 @@ func runControllerOwnership(t *testing.T, newProvider StateFactory) {
 					require.NoError(t, err)
 				}
 				before, beforeErr := provider.GetControllerEpochMirror(ctx, controlEpochName)
-				// Kubernetes acknowledged epoch 10, but the dataset lost it.
-				// Each new controller must refuse without hiding that gap.
 				for _, next := range []int64{11, 12} {
 					_, err := provider.AdvanceControllerEpoch(ctx, storagev1.AdvanceControllerEpochRequest{
 						DatasetID: dataset, Epoch: mirroredEpoch(next, "new-owner"),

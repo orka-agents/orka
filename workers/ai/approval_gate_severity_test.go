@@ -95,8 +95,6 @@ func TestRequestApprovalToolInvalidSeverityFailsClosed(t *testing.T) {
 						{
 							ToolCalls: []llm.ToolCall{
 								{ID: "call-approval", Name: "request_approval", Arguments: args},
-								// Different arguments keep the terminal target's denial out of preScan;
-								// this side effect must still be skipped by the invalid explicit request.
 								{ID: "call-dispatch", Name: gatedDispatchTool, Arguments: json.RawMessage(`{"incident":"inc-2"}`)},
 							},
 							StopReason: "tool_use",

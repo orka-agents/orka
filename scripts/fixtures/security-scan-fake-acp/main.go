@@ -223,7 +223,6 @@ func serve(input io.Reader, output io.Writer) error {
 				return err
 			}
 		case methodSessionCancel:
-			// The fixture completes synchronously, so cancellation is always a no-op.
 		}
 	}
 	return scanner.Err()

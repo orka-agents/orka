@@ -35,9 +35,6 @@ func TestUnknownReadSessionDoesNotSkipRuntimeSettlement(t *testing.T) {
 			RuntimeInstanceID: "runtime-instance", RuntimeSessionSupervisorBootID: "runtime-boot",
 		}},
 	}
-	// A continued read Session may have completed natively just as the
-	// controller lost its result. It is not proven settled/retired merely
-	// because it did not request publication.
 	readErr := errors.New("exact runtime authority read unavailable")
 	dispatcher := &ACPDispatcher{APIReader: &validationRecoveryUnavailableReader{err: readErr}}
 	ready, err := dispatcher.reconcileRecoveredTaskScopedRuntimeSession(context.Background(), task, task.UID, false)
@@ -182,8 +179,6 @@ func TestRecoveredValidationWorkspaceUsesOnlyFrozenEvidence(t *testing.T) {
 	for _, git := range []bool{false, true} {
 		t.Run(map[bool]string{false: "empty", true: "git"}[git], func(t *testing.T) {
 			d, task, _, _ := validationRecoveryFixture(t, git)
-			// A later input edit must never retarget a pending validation or refetch a
-			// branch. There is deliberately no Publisher/credential resolver here.
 			task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{GitRepo: "https://github.com/unrelated/repository.git", Intent: corev1alpha1.WorkspaceIntentRead, SubPath: "different"}
 			baseline, workspace, err := d.recoveredValidationWorkspace(t.Context(), task, task.UID)
 			if err != nil {
@@ -231,8 +226,6 @@ func TestRecoverAbandonedValidationPreservesOutcomeAndDoesNotPublish(t *testing.
 			git := scenario == "write-empty" || scenario == "write-prepared"
 			d, task, control, fence := newValidationRecoveryFixture(t, git, scenario != "task-scoped-legacy")
 			if scenario == "task-scoped-legacy" {
-				// A task-scoped Task from an earlier controller recorded no
-				// workspace digest; its recovery must still finish.
 				task.Status.Execution.RuntimeSessionWorkspaceDigest = ""
 			}
 			baseline, _, baselineErr := d.recoveredValidationWorkspace(t.Context(), task, task.UID)
@@ -524,8 +517,6 @@ func TestCurrentEpochAbandonedValidationKeepsWorkspacePoolsOffNativeCleanupAutho
 	if err := d.Client.Update(t.Context(), pool); err != nil {
 		t.Fatal(err)
 	}
-	// The retained cleanup client is native-only. A same-epoch workspace pool
-	// must keep its ordinary current-epoch path instead of failing there.
 	_, err := d.reconcileRecoveredTaskScopedRuntimeSession(t.Context(), task, task.UID, false)
 	if err != nil && strings.Contains(err.Error(), "retained native runtime cleanup authority is incomplete") {
 		t.Fatalf("workspace pool recovery used native-only retained cleanup authority: %v", err)

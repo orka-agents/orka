@@ -61,20 +61,18 @@ const (
 )
 
 type repositoryMonitorReviewResult struct {
-	SchemaVersion    string                            `json:"schemaVersion"`
-	Repo             string                            `json:"repo"`
-	PRNumber         int64                             `json:"prNumber"`
-	HeadSHA          string                            `json:"headSHA"`
-	Verdict          string                            `json:"verdict"`
-	Confidence       string                            `json:"confidence"`
-	Repairable       bool                              `json:"repairable"`
-	Summary          string                            `json:"summary"`
-	Findings         []repositoryMonitorReviewFinding  `json:"findings"`
-	Security         repositoryMonitorReviewSecurity   `json:"security"`
-	Tests            repositoryMonitorReviewTestStatus `json:"tests"`
-	SuggestedComment string                            `json:"suggestedComment"`
-	// PreviousFindings reports, in a follow-up review, whether each open
-	// finding Orka listed in the prompt is fixed at this head.
+	SchemaVersion    string                                   `json:"schemaVersion"`
+	Repo             string                                   `json:"repo"`
+	PRNumber         int64                                    `json:"prNumber"`
+	HeadSHA          string                                   `json:"headSHA"`
+	Verdict          string                                   `json:"verdict"`
+	Confidence       string                                   `json:"confidence"`
+	Repairable       bool                                     `json:"repairable"`
+	Summary          string                                   `json:"summary"`
+	Findings         []repositoryMonitorReviewFinding         `json:"findings"`
+	Security         repositoryMonitorReviewSecurity          `json:"security"`
+	Tests            repositoryMonitorReviewTestStatus        `json:"tests"`
+	SuggestedComment string                                   `json:"suggestedComment"`
 	PreviousFindings []repositoryMonitorReviewPreviousFinding `json:"previousFindings"`
 }
 
@@ -87,29 +85,15 @@ type repositoryMonitorReviewFinding struct {
 	Body           string `json:"body"`
 	Recommendation string `json:"recommendation"`
 
-	// The fields below form Orka's record of findings for a pull request.
-	// Orka sets them when it ingests a review and ignores any value the
-	// reviewer supplies.
-	ID string `json:"id,omitempty"`
-	// Status is empty or open while the finding is open.
-	Status string `json:"status,omitempty"`
-	// FirstHead is the head the finding was first reported at, and
-	// FirstReview the review record that reported it.
-	FirstHead   string `json:"firstHead,omitempty"`
-	FirstReview string `json:"firstReview,omitempty"`
-	// ResolvedHead is the head a follow-up review found the finding fixed at.
-	ResolvedHead string `json:"resolvedHead,omitempty"`
-	// OutsideChanges marks a follow-up finding outside the changes the
-	// follow-up review covered.
-	OutsideChanges bool `json:"outsideChanges,omitempty"`
-	// SecuritySensitive marks a finding reported by a security-sensitive
-	// review. It keeps every later review that carries it open
-	// security-sensitive, so its details stay unpublished.
-	SecuritySensitive bool `json:"securitySensitive,omitempty"`
+	ID                string `json:"id,omitempty"`
+	Status            string `json:"status,omitempty"`
+	FirstHead         string `json:"firstHead,omitempty"`
+	FirstReview       string `json:"firstReview,omitempty"`
+	ResolvedHead      string `json:"resolvedHead,omitempty"`
+	OutsideChanges    bool   `json:"outsideChanges,omitempty"`
+	SecuritySensitive bool   `json:"securitySensitive,omitempty"`
 }
 
-// repositoryMonitorReviewPreviousFinding is a follow-up review's status for
-// one finding Orka listed as open.
 type repositoryMonitorReviewPreviousFinding struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
@@ -252,8 +236,6 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	}
 	reviewerVerdict := strings.TrimSpace(review.Verdict)
 	verdict := repositoryMonitorDerivedReviewVerdict(monitor.Spec, reviewerVerdict, ledger)
-	// A review shown an open security-sensitive finding may describe it in
-	// its own prose even after fixing it, so it stays unpublished.
 	securityStatus := strings.TrimSpace(review.Security.Status)
 	if repositoryMonitorLedgerSecuritySensitive(ledger) || repositoryMonitorLedgerSecuritySensitive(plan.Ledger) {
 		securityStatus = repositoryMonitorReviewVerdictSecuritySensitive
@@ -261,8 +243,6 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	summary := strings.TrimSpace(review.Summary)
 	repairable := review.Repairable
 	if verdict != reviewerVerdict {
-		// The reviewer judged passed against findings Orka still counts as
-		// blocking; those are concrete code defects, so they are repairable.
 		repairable = repairable || verdict == repositoryMonitorReviewVerdictNeedsChanges
 		summary = strings.TrimSpace(repositoryMonitorDerivedVerdictNote(monitor.Spec, verdict) + " " + summary)
 	}
@@ -280,9 +260,6 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		}
 	}
 	if gateReason := repositoryMonitorReviewVerdictGateReason(task.Spec.Prompt, verdict); gateReason != "" {
-		// Do not rely on the model honoring the prompt's safety rule: a
-		// passed verdict without complete diff context is downgraded before
-		// it can mark the head merge-ready.
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 		summary = strings.TrimSpace("Verdict downgraded from passed to needs_human because " + gateReason + ". " + summary)
 		if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, strings.TrimSpace(review.HeadSHA), "review_verdict_downgraded", fmt.Sprintf("Pull request #%d review verdict downgraded to needs_human: %s", item.Number, gateReason), map[string]any{
@@ -299,8 +276,6 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		}
 	}
 	if verdict == repositoryMonitorReviewVerdictNeedsChanges && repositoryMonitorMaxRoundsReached(monitor.Spec, rounds) {
-		// The findings stay open and published; needs_human stops automatic
-		// repair of them so a person can rethink the change.
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 		summary = strings.TrimSpace(repositoryMonitorMaxRoundsNote(monitor.Spec, rounds) + " " + summary)
 		if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, reviewedHead, repositoryMonitorReviewEscalatedEvent, fmt.Sprintf("Pull request #%d review verdict raised to needs_human after %d reviewed heads without a passed review", item.Number, rounds.SincePass), map[string]any{
@@ -805,9 +780,6 @@ func repositoryMonitorReviewJSONPayload(raw string) (string, error) {
 	if json.Valid([]byte(raw)) {
 		return raw, nil
 	}
-	// ACP results can include earlier commentary containing code braces or
-	// diagnostic objects. Select the review by its schema, without choosing
-	// between multiple review results or accepting nested example objects.
 	var reviewPayload string
 	for {
 		payload, ok := firstJSONObject(raw)
@@ -1049,7 +1021,6 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 			marksFresh = validationRetry.exhausted
 		}
 		if marksFresh {
-			// An exhaustive review is not done until its last pass.
 			pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, record)
 			if err != nil {
 				return err
@@ -1067,8 +1038,6 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 			item.LastReviewedHeadSHA = ""
 		}
 	}
-	// Only a head that counts as reviewed, with no exhaustive pass still
-	// due, can be merge-ready.
 	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA && item.LastReviewedHeadSHA == record.HeadSHA &&
 		repositoryMonitorReviewRecordAllowsAutomerge(monitor, record) && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		item.AutomergeState = repositoryMonitorAutomergeStateMergeReady

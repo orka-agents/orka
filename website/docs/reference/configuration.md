@@ -415,6 +415,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--dashboard-enabled` | `false` | Serve the embedded web dashboard on the API port. Without it, paths outside the APIs answer with a JSON 404, `orka dashboard` stops with an error, and the connector consent callback lands on a plain page that shows the `orka connection complete` command. Helm: `controller.dashboard.enabled`. Env: `ORKA_DASHBOARD_ENABLED` |
 | `--agent-use-authorization-enabled` | `false` | Require the `use` verb on an Agent before API callers create a Task, or create or edit a RepositoryScan or RepositoryMonitor, that names it. Pair it with the policies in `config/agent-use-policy` so direct Kubernetes writes are checked too; the Helm value installs both. Identity-bound Agents rely on those policies and the controller does not detect them, so set the flag outside Helm only once they are installed. See [API authorization](api-authorization.md). Helm: `controller.agentUseAuthorization.enabled`. Env: `ORKA_AGENT_USE_AUTHORIZATION_ENABLED` |
 | `--provider-use-authorization-enabled` | `false` | Require the `use` verb on a Provider before API callers create a Task whose `spec.ai.providerRef` names it, create or edit an Agent so that its `providerRef` or model fallbacks name it, or send a chat request that resolves to it. Pair it with the policies in `config/provider-use-policy` so direct Kubernetes writes of Tasks and Agents are checked too; the Helm value installs both. See [API authorization](api-authorization.md). Helm: `controller.providerUseAuthorization.enabled`. Env: `ORKA_PROVIDER_USE_AUTHORIZATION_ENABLED` |
+| `--container-task-secret-use-authorization-enabled` | `false` | Deliver the Secrets a container Task names in `spec.secretRef` or `spec.env[].valueFrom.secretKeyRef` only when the identity that wrote the Task holds the `use` verb on each Secret, without `ORKA_AGENT_DIRECT_SECRET_MOUNTS`, which it cannot be combined with. Requires the policy in `config/container-task-secret-use-policy`, which the controller confirms is bound before it delivers anything; the Helm value installs both. See [Container tasks](../guides/container-tasks.md#secrets). Helm: `controller.containerTaskSecretUse.enabled`. Env: `ORKA_CONTAINER_TASK_SECRET_USE_AUTHORIZATION_ENABLED` |
+| `--container-task-secret-use-policy-name` | `container-task-secret-use.orka.ai` | Name of the container Task Secret use ValidatingAdmissionPolicy and its binding. Env: `ORKA_CONTAINER_TASK_SECRET_USE_POLICY_NAME` |
 | `--agent-identity-entra-tenant-id` | empty | Entra tenant of the agent identity blueprint. Set together with `--agent-identity-entra-blueprint-client-id` to accept `Agent.spec.identity.entra`; both must be GUIDs. The controller then also requires Task provenance admission (`--task-provenance-admission-enabled` or `--task-provenance-admission-external`), which Helm always enables. Helm: `controller.agentIdentity.entra.tenantID`. Env: `ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID` |
 | `--agent-identity-entra-blueprint-client-id` | empty | Client ID of the Entra agent identity blueprint that every bound identity belongs to. Helm: `controller.agentIdentity.entra.blueprintClientID`. Env: `ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID` |
 | `--agent-identity-entra-authority` | `https://login.microsoftonline.com` | Entra authority for agent identity tokens, for example a sovereign cloud's login URL. Must be https, without credentials, query, or fragment. A non-default authority is part of the issuer instance Task bindings freeze, so changing it fails bound Tasks' identity-backed calls closed. Helm: `controller.agentIdentity.entra.authority`. Env: `ORKA_AGENT_IDENTITY_ENTRA_AUTHORITY` |
@@ -451,9 +453,10 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--watch-namespace` | required | One non-empty watched namespace. Its `orka.ai/controller-mode` label must match; the controller adds it when absent. |
 | `--claim-namespace-mode` | `true` | Label an unlabeled watched namespace with the controller's mode on first start. Set `false` to require an operator-applied label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
-| `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
+| `--max-tasks-per-namespace` | `0` | Max admitted tasks per namespace (0 = unlimited, at most 4096). A Pending task waiting for a slot does not count. |
 | `--acp-permission-timeout` | `ORKA_ACP_PERMISSION_TIMEOUT` env or `0` | How long built-in runtimes wait for the answer to a permission request, between `1m` and `1h`. Bounds how long a Task's requester has to decide a [held permission request](../guides/human-approval-v2.md#permission-requests-from-built-in-runtimes). `0` keeps the runtime default of 5m |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
+| `--acp-workspace-default-suspend-after-detach` | `0` | Warm-detach window frozen into each new session-reused Substrate workspace whose profile sets none; `0` (the default) disables the controller default, while class annotations still apply (ADR 0057) |
 | `--acp-workspace-allow-provider-token-in-sandbox` | `ORKA_ACP_WORKSPACE_ALLOW_PROVIDER_TOKEN_IN_SANDBOX` env or `false` | Deliver the provider-proxy token into gateway-enforced native workspaces whose provider cannot inject it at the egress gateway; when false they fail admission |
 | `--operator-workspace-access-enabled` | `false` | Serve `orka task exec` / `orka task cp`. Each call also needs the class `acp.workspace.orka.ai/operator-access` opt-in and the `tasks/exec` or `tasks/files` permission; write-capable access taints the session. Requires Task provenance admission. See [Operator workspace access](../guides/operator-workspace-access.md) |
 | `--substrate-mcp-tools-enabled` | `ORKA_SUBSTRATE_MCP_TOOLS_ENABLED` env or `false` | Enable native MCP Tool actors and actor pools; does not allocate ACP workspaces. |
@@ -519,6 +522,8 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--task-provenance-admission-trusted-users` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_USERS` env or controller ServiceAccount usernames | Comma-separated Kubernetes usernames trusted to set Orka-managed Task provenance fields |
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or configured AI/vendor worker ServiceAccounts | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation. Explicit values override the worker ServiceAccount defaults. |
 | `--task-webhook-delivery-workers` | `8` | Task webhook attempts the controller sends at once (1-256). Delivery runs outside Task reconciliation, so slow receivers only delay other webhook notices, never Task processing, and only once this many attempts are in flight. See [Task webhooks](../guides/task-webhooks.md#retries-and-status). |
+| `--task-max-concurrent-reconciles` | `4` | Different Tasks the Task controller reconciles at once (1-64). A Task is never reconciled concurrently with itself, and every fence, epoch, and optimistic-lock check still applies. `--max-tasks-per-namespace` and coordination `maxConcurrentChildren` grant slots through a resourceVersion-checked ledger and count only admitted Tasks, so they stay exact, and waiting Tasks never block each other, at any value. Set `1` to reconcile Tasks one at a time. |
+| `--runtime-pool-max-concurrent-reconciles` | `4` | Different RuntimePools the RuntimePool controller reconciles at once (1-64). A pool is never reconciled concurrently with itself, and every object a pool reconcile writes is named for, or linked one-to-one with, that pool, so concurrent cold starts publish their workloads without queueing behind each other. |
 | `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | Native AI worker container image |
 | `--acp-runtime-namespace` / `ORKA_ACP_RUNTIME_NAMESPACE` | `orka-runtimes` | Namespace for managed runtime Deployments, Services, Secrets, and policies. |
 | `--acp-runtime-pool-max-running-prompts` | `4` | Concurrent prompts in each new built-in runtime RuntimePool; cannot exceed `--acp-runtime-pool-max-resident-sessions`. |
@@ -709,11 +714,42 @@ readiness and Task binding fail closed.
 | `idleTimeout` | class lifecycle | Idle suspended workspaces expire; idle `Ready` workspaces take the class default action. |
 | `maxLifetime` | class lifecycle | Hard cleanup bound, always. |
 | `spec.retention.maxSuspendedWorkspaces` | provider-owned workspace profile | Caps concurrently suspended workspaces per class and namespace. Rejected at admission, retried at settlement with the frozen Suspend action preserved. This is a cap, not an expiry. |
+| `spec.retention.suspendAfterDetach` | Substrate workspace profile | Optional warm-detach window, a duration such as `10m`. A detached workspace whose frozen action is Suspend stays `Ready`, with its runtime running, for this long before the Suspend applies. When unset, new workspaces use the controller default below (which defaults to `0`, disabled). Requires a Substrate provider release and `SubstrateWorkspaceProfile` CRD that define and validate `spec.retention.suspendAfterDetach`. |
 
 A queued continuation may take a still-`Ready` workspace directly. Deletion policies that
 retain data past workspace deletion are rejected.
 
-ADRs 0026–0030 carry the full contract.
+`suspendAfterDetach` must be positive and at most one hour, and shorter than the class
+`idleTimeout` and `maxLifetime` when they are set. The class must allow Suspend with a
+`DataOnly` profile and Session reuse. The window is frozen into each new workspace, so
+changing the profile affects only new workspaces. A follow-up turn that arrives within the
+window attaches the running workspace and skips the cold resume. A turn that parked, an
+uncommitted, failed, or quarantined workspace, and a workspace tainted by operator access
+never stay warm; a taint during the window ends it at once and deletes the workspace,
+and its runtime is stopped without a data-preserving suspension. A warm workspace does not
+count against `maxSuspendedWorkspaces`. If that cap is full when the window ends, the
+runtime stops and the workspace stays `Ready`; retention applies the pending Suspend once
+the cap has room. Each warm workspace holds one private worker Pod for up to the window.
+
+When a profile sets no `suspendAfterDetach`, Core freezes a default window into each new
+session-reused Substrate workspace whose class allows Suspend with a `DataOnly` profile. The
+`--acp-workspace-default-suspend-after-detach` flag sets it (default `0`, disabled). The
+`acp.workspace.orka.ai/default-suspend-after-detach` annotation on an `ExecutionWorkspaceClass`
+overrides it for new workspaces of that class with another duration, or opts the class out with
+`disabled`; the annotation applies even when the flag is `0`. A default that is not shorter than `idleTimeout` and `maxLifetime` is not applied.
+Existing workspaces keep the window they froze, and the default never changes profile, class,
+or binding hashes. Each default window costs one idle Actor slot per Session for its duration:
+one Actor's reservation on a shared worker, or one worker Pod on a private one.
+
+Core also starts a workspace runtime speculatively for classes that allow Suspend with a
+`DataOnly` profile. A Session follow-up that cold-resumes a suspended workspace, or the first
+turn of a new workspace, lets the provider start booting
+before the Task's attachment handshake completes. The runtime passes every startup attestation
+and credential bootstrap, and receives no prompt until the Task holds the attachment. A start
+nobody claims within two minutes, or whose Task is cancelled, is retired through the ordinary
+data-preserving path.
+
+ADRs 0026–0030, 0055, and 0057 carry the full contract.
 
 ### External API OIDC authentication
 
@@ -851,6 +887,7 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_acp_runtime_pool_queued_tasks` | Gauge | `namespace`, `runtime_pool` | Durable unsatisfied Task demand assigned to the pool |
 | `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
 | `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
+| `orka_acp_workspace_runtime_phase_duration_seconds` | Histogram | `path`, `phase` | Execution-workspace runtime start and stop phases. Starts use `path` `cold`, `restore`, `resume`, or `replacement` with phases `provision` (first sequence only, from RuntimePool creation to the published workload), `provider_materialization` (to the provider's `DataPlaneReady`), `bootstrap_and_probe` (to admission), and `start_total` (published workload to admission). Stops use the retirement action (`suspend`, `stop`, `delete`) with `drain` (from when the controller requested or first saw the RuntimePool's retirement of the sequence, for example after a cleared attachment scaled it to zero, to retirement authorization; when deletion supersedes a retirement whose stop Core has not yet proven, to the later authorization), `provider_retirement` (to Core's first proof that the runtime stopped, including for a deleted RuntimePool), and `stop_total` (`drain` plus `provider_retirement`). The retirement start is held in memory and saved in the authorization's workspace patch as `acp.workspace.orka.ai/stop-requested-at`, so `drain` and `stop_total` are omitted when the controller restarted after the retirement began and before it was authorized, and for a later authorization of a sequence whose stop Core already proved, such as a Delete after a completed Suspend. `provider_materialization` and `bootstrap_and_probe` are reported only when the provider's `DataPlaneReady` was observed for the workspace's current generation. A start is reported when an instance first admits work and a stop once per retirement; deduplication is in memory, so a controller restart can report one transition again. The controller also logs `ACP workspace runtime started` and `ACP workspace runtime stopped` with the same phases in milliseconds |
 | `orka_repository_monitor_reviews_total` | Counter | `mode`, `verdict` | Repository monitor pull request review records by review mode (`full`, `incremental`, `same_head`) and recorded verdict |
 | `orka_repository_monitor_review_findings_total` | Counter | `priority`, `outcome` | Review findings by priority (`P0`–`P3`) and outcome: `reported` when first recorded, `fixed` when a later review resolves one |
 | `orka_repository_monitor_review_rounds_to_pass` | Histogram | — | Pull request heads reviewed up to and including each pull request's first passed review; see [Repository monitors](../guides/repository-monitors.md#review-metrics) |

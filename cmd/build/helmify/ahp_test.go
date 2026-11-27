@@ -118,9 +118,6 @@ func TestStaticChartAHPWorkspaceFlags(t *testing.T) {
 	}
 }
 
-// An upgrade that reuses values from a release before AHP has no idle timeout,
-// and the controller keeps its own default instead of failing on "<nil>". An
-// explicit 0, which keeps workspaces, still reaches it.
 func TestStaticChartAHPWorkspaceIdleTimeoutFromReusedValues(t *testing.T) {
 	for setting, want := range map[string]string{"null": "", "0": "--ahp-workspace-idle-timeout=0"} {
 		got := ""
@@ -136,8 +133,6 @@ func TestStaticChartAHPWorkspaceIdleTimeoutFromReusedValues(t *testing.T) {
 	}
 }
 
-// Workspaces turned on during an upgrade that reuses values from a release
-// before AHP have no namespace value, and get the default namespace.
 func TestStaticChartAHPWorkspaceNamespaceFromReusedValues(t *testing.T) {
 	args := ahpControllerArgs(t, ahpWorkspacesEnabled("--set", "controller.ahp.workspaceNamespace=null")...)
 	if want := "--ahp-workspace-namespace=" + ahpTestWorkspaceNamespace; !containsString(args, want) {
@@ -145,7 +140,6 @@ func TestStaticChartAHPWorkspaceNamespaceFromReusedValues(t *testing.T) {
 	}
 }
 
-// ahpWorkspaceObjects decodes the workspace template into its objects by kind.
 func ahpWorkspaceObjects(t *testing.T, rendered string) map[string][]byte {
 	t.Helper()
 	objects := map[string][]byte{}

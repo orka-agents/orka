@@ -98,7 +98,6 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 			wantErr: "forbids Bash",
 		},
 		{
-			// Dispatch matches deny entries exactly, so "bash" does not remove "Bash".
 			name:  "differently cased deny entry does not narrow the request",
 			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools(), AllowBash: no}),
 			task: func() *corev1alpha1.Task {
@@ -125,7 +124,6 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 			task:  ceilingTestTask(nil, no),
 		},
 		{
-			// Codex read sessions still run read commands through the shell.
 			name:    "codex read-only session still has a shell",
 			agent:   ceilingTestAgent(corev1alpha1.AgentRuntimeCodex, &corev1alpha1.AgentRuntimeCeiling{AllowBash: no}),
 			task:    ceilingTestTask(tools("Glob", "Grep", "Read"), no),
@@ -209,8 +207,6 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 			wantErr: `does not allow tool "send_message"`,
 		},
 		{
-			// Dispatch materializes the native list before injecting messaging
-			// tools, so the exact-match deny entry "bash" leaves "Bash" granted.
 			name:  "delegated child judged on the materialized native list",
 			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowBash: no}),
 			task: func() *corev1alpha1.Task {
@@ -373,8 +369,6 @@ func TestValidateAgentRuntimeCeilingAgentDefaultsOnly(t *testing.T) {
 	no := new(bool)
 	tight := &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"Read"}, AllowBash: no, MaxTurns: func() *int32 { n := int32(20); return &n }()}
 
-	// Tasks may still supply their own policy, so an Agent without explicit
-	// defaults is not judged against the ceiling on its own.
 	if err := validateAgentRuntimeCeiling(nil, ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, tight)); err != nil {
 		t.Fatalf("agent without explicit defaults: error = %v, want nil", err)
 	}
@@ -473,12 +467,10 @@ func TestRuntimeRefCeilingJudgesRegisteredPolicy(t *testing.T) {
 	if err := validateAgentRuntimeCeilingWithRegisteredPolicy(exact, agent, registered("update-inventory")); err != nil {
 		t.Fatalf("registration denies the tool outside the ceiling: error = %v, want nil", err)
 	}
-	// The registered deny list matches names exactly, as at dispatch.
 	err := validateAgentRuntimeCeilingWithRegisteredPolicy(exact, agent, registered("Update-Inventory"))
 	if err == nil || !strings.Contains(err.Error(), `ceiling does not allow tool "update-inventory"`) {
 		t.Fatalf("differently cased registered deny: error = %v, want ceiling rejection", err)
 	}
-	// An allowlist that does not match the registration is judged as requested.
 	mismatch := ceilingTestTask([]string{"update-inventory"}, nil)
 	err = validateAgentRuntimeCeilingWithRegisteredPolicy(mismatch, agent, registered("update-inventory"))
 	if err == nil || !strings.Contains(err.Error(), `ceiling does not allow tool "update-inventory"`) {
@@ -489,9 +481,6 @@ func TestRuntimeRefCeilingJudgesRegisteredPolicy(t *testing.T) {
 	}
 }
 
-// TestCeilingCoversForwardingWriteTools covers a registered external runtime
-// that lists a forwarding Tool's write tool by name: the ceiling entry for
-// the Tool covers it, and no other entry does.
 func TestCeilingCoversForwardingWriteTools(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "fibey", Namespace: "team-a"},

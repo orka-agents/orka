@@ -4,10 +4,6 @@ import type {
 } from '@/lib/usage'
 import type { UsageLedger, UsageLinkRecord, UsagePRRecord, UsageRecordTask, UsageWorkRecord } from './usage'
 
-// A browser-side port of the controller's usage report (internal/usage/report.go):
-// the same cohort rules, PR outcome counting, shared-usage handling, and
-// other-usage categories, applied to the demo ledger.
-
 export interface UsageFilter {
   teams: string[]
   repository?: string
@@ -100,7 +96,6 @@ function summarize(works: BuiltWork[], tasks: Iterable<MeasuredTask>): UsageSumm
   return summary
 }
 
-/** The ledger as it stood at `asOf`: later tasks, measurements, links, and merges are not yet known. */
 function asOfView(ledger: UsageLedger, asOf: Date) {
   const cutoff = asOf.getTime()
   const tasks = ledger.tasks
@@ -246,7 +241,6 @@ function pageBounds(page: Omit<UsagePage, 'total'>, total: number) {
   return [start, Math.min(start + page.limit, total)] as const
 }
 
-/** A compact work row: the page lists PRs and tasks only in the work detail. */
 function compactWork(built: BuiltWork): UsageWork {
   const work: Partial<BuiltWork> = { ...built }
   delete work.unfinished
@@ -254,7 +248,6 @@ function compactWork(built: BuiltWork): UsageWork {
   return work as UsageWork
 }
 
-/** GET /usage: totals over the whole selection with one page of compact work rows. */
 export function usageReport(ledger: UsageLedger, filter: UsageFilter, page: Omit<UsagePage, 'total'>): UsageReport {
   const report = build(ledger, filter, false, '')
   const [start, end] = pageBounds(page, report.works.length)
@@ -269,7 +262,6 @@ export function usageReport(ledger: UsageLedger, filter: UsageFilter, page: Omit
   }
 }
 
-/** GET /usage/work/:id: one request with its tasks, PRs, and models, or undefined. */
 export function usageWork(ledger: UsageLedger, filter: UsageFilter, id: string) {
   const found = build(ledger, filter, true, '').works.find((work) => work.id === id)
   if (!found) return undefined
@@ -278,7 +270,6 @@ export function usageWork(ledger: UsageLedger, filter: UsageFilter, id: string) 
   return { selection: selection(filter), work: work as UsageWork }
 }
 
-/** GET /usage/other/:category: one page of the category's tasks. */
 export function usageOther(ledger: UsageLedger, filter: UsageFilter, category: string, page: Omit<UsagePage, 'total'>) {
   const group = build(ledger, filter, false, category).otherWork.find((item) => item.category === category)
   if (!group) return undefined

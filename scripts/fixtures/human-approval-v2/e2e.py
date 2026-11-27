@@ -216,8 +216,6 @@ class FixtureAcceptance(Acceptance):
         api_task = self.task(name)
         task = self.kube_json("get", "task", name, "-o", "json")
         require(recovery.identity(task) == recovery.identity(api_task), "Task identity changed while capturing admission")
-        # Hash the same stored representation used at cleanup. The typed API
-        # omits zero values that Kubernetes CRD defaults retain, such as createPR=false.
         self.cleanup_admissions[name] = recovery.admission_evidence(task, effect, self.witness)
         self.report["admissions"][name] = self.cleanup_admissions[name]
         self.report["exposures"].append({"task": name, **recovery.effect_evidence(effect)})
@@ -238,8 +236,6 @@ class FixtureAcceptance(Acceptance):
 
     def observe(self, name, enabled):
         if enabled:
-            # Product finalization can reclaim the event stream. Keep the
-            # original call identity before DELETE, not after reclamation.
             approval = self.approval(name)
             self.cleanup_approvals[name] = [recovery._approval_evidence(approval)] if approval else []
             self.cleanup_artifacts[name] = recovery.task_artifacts(self.cluster, self.task(name))
@@ -292,7 +288,6 @@ def cleanup_authority(cluster, run):
     recovery.delete_exact(cluster, "agentruntimes", run.runtime)
     run.wait("normally finalized enrolled AgentRuntime", lambda: recovery.absent(cluster, {"kind": "AgentRuntime", **recovery.identity(run.runtime)}), 600)
     for secret in authority:
-        # Metadata-only lookup avoids reading retained controller credentials.
         run.wait("retired boot authority removal", lambda item=secret: not any(
             current["metadata"]["name"] == item["metadata"]["name"] for current in recovery.secret_metadata(cluster)))
     require(not recovery.authority_metadata(cluster, run.runtime["metadata"]["uid"]),
@@ -355,8 +350,6 @@ def failure_diagnostics(run):
         try:
             status = run.task(task).get("status", {})
             approval = run.approval(task) or {}
-            # Keep lifecycle fields only. Task messages, executable inputs,
-            # provider responses, and credentials do not belong in CI artifacts.
             result.append({"task": task, "phase": status.get("phase"),
                 "taskOutcome": status.get("execution", {}).get("outcome"),
                 "approvalStatus": approval.get("status"),
@@ -540,8 +533,6 @@ def run_acceptance(cluster, args):
     work = args.work
     api_identity(cluster, work)
     cluster.call("apply", "-f", str(ROOT / "examples/human-approval-v2/tools.yaml"))
-    # Keep the Tool timeout below the four-minute approval execution budget.
-    # The held-call crash must happen well before this independent timeout.
     cluster.call("patch", "tool", "create-work-order", "--type=merge", "--patch-file=/dev/stdin",
                  body={"spec": {"http": {"timeout": "239s"}}})
     epoch = wait("controller epoch", lambda: controller_epoch(cluster))
@@ -581,8 +572,6 @@ def run_acceptance(cluster, args):
             for scenario in ("approve", "decline", "cancel", "expire"):
                 print("Starting " + run.args.backend + " " + scenario, flush=True)
                 run.run_case(scenario)
-        # Both backends must survive the ordinary proxy timeout and the full
-        # 600-second review expiry. Independent counters isolate each run.
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(scenarios, run) for run in runs]
             for future in futures:
@@ -592,8 +581,6 @@ def run_acceptance(cluster, args):
             runtime_recovery(cluster, run)
         current_epoch = pending_controller_recovery(cluster, runs, epoch)
         current_epoch = inflight_controller_recovery(cluster, runs, current_epoch)
-        # Cluster teardown is not evidence of normal cleanup. Keep the
-        # controller and supervisors alive until receipts and finalizers finish.
         for run in runs:
             run.cleanup_tasks()
             cleanup_authority(cluster, run)

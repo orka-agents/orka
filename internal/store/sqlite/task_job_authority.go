@@ -24,9 +24,6 @@ func (s *Store) revokeTaskJobWrite(ctx context.Context, identity store.TaskJobId
 	return err
 }
 
-// DeleteTaskJobRevocations is the finalizer-only reclamation step. A fresh
-// namespace generation replaces the removed Task generation, so in-flight
-// authorization cannot reuse its old generation after reclamation or name reuse.
 func (s *Store) DeleteTaskJobRevocations(ctx context.Context, namespace, taskName, taskUID string) error {
 	return writeOperationErr(ctx, s, "DeleteTaskJobRevocations", func(ctx context.Context) error {
 		return s.deleteTaskJobRevocationsWrite(ctx, namespace, taskName, taskUID)

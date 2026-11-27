@@ -20,8 +20,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// TaskGrant is nonsecret authority frozen only from a UID-linked durable event.
-// Tools and Deadline are narrowed by the controller before snapshot persistence.
 type TaskGrant struct {
 	GrantRef     string           `json:"grantRef"`
 	NamespaceUID string           `json:"namespaceUID"`
@@ -33,8 +31,6 @@ type TaskGrant struct {
 	Parent       *TaskGrantParent `json:"parent,omitempty"`
 }
 
-// TaskGrantParent pins controller-protected delegation to a frozen snapshot.
-// It contains no credential or provider identity.
 type TaskGrantParent struct {
 	Namespace      string `json:"namespace"`
 	Name           string `json:"name"`
@@ -42,7 +38,6 @@ type TaskGrantParent struct {
 	SnapshotDigest string `json:"snapshotDigest"`
 }
 
-// ResolveTaskGrant never trusts Task markers or a shared Session as authority.
 func (s *Service) ResolveTaskGrant(ctx context.Context, task *corev1alpha1.Task) (*TaskGrant, error) {
 	event, err := s.resolveReplyOrigin(ctx, task)
 	if err != nil || event == nil {
@@ -54,10 +49,6 @@ func (s *Service) ResolveTaskGrant(ctx context.Context, task *corev1alpha1.Task)
 	return s.taskGrantFromEvent(ctx, event)
 }
 
-// ValidateParentTaskGrantOrigin checks only retained root origin. The controller
-// must verify that this is a live ancestor (Running or successfully parked for
-// the exact child), with its original immutable binding, before calling it.
-// This does not reopen root reply or terminal Task tool authority.
 func (s *Service) ValidateParentTaskGrantOrigin(ctx context.Context, task *corev1alpha1.Task, frozen *TaskGrant) error {
 	if s == nil || !s.Config.Enabled || s.EventStore == nil || frozen == nil || task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return errTaskPass
@@ -91,21 +82,16 @@ func (s *Service) taskGrantFromEvent(ctx context.Context, event *store.GatewayEv
 	if err != nil {
 		return nil, err
 	}
-	// Pass endpoints are fixed at the authenticated gateway's origin.
 	return &TaskGrant{GrantRef: event.Metadata[protocol.GatewayGrantRefKey], NamespaceUID: event.NamespaceUID, GatewayUID: event.GatewayUID, Endpoint: parsed.Scheme + "://" + parsed.Host, ServiceRef: object.Spec.Adapter.ServiceRef != nil, Deadline: event.ExpiresAt}, nil
 }
 
 var errTaskPass = errors.New("gateway task pass is unavailable")
 
-// TaskPassCredential pins the operator's credential to its trusted HTTPS origin.
-// A namespace editor cannot retarget it by editing the same Gateway's spec.
 type TaskPassCredential struct {
 	Endpoint string `json:"endpoint"`
 	Token    string `json:"token"`
 }
 
-// LoadTaskPassCredentials reads an operator-mounted Gateway UID to credential map.
-// Values never enter Kubernetes objects or errors.
 func LoadTaskPassCredentials(path string) (map[string]TaskPassCredential, error) {
 	if path == "" {
 		return nil, nil
@@ -139,8 +125,6 @@ func validTaskPass(token string) bool {
 	return true
 }
 
-// Issued passes use a JSON-stable bearer alphabet so standard response encoding
-// cannot hide the literal token from the executor's existing redaction.
 func validIssuedTaskPass(token string) bool {
 	if !validTaskPass(token) {
 		return false
@@ -153,8 +137,6 @@ func validIssuedTaskPass(token string) bool {
 	return true
 }
 
-// ValidateTaskGrant rechecks Task liveness and durable origin immediately before
-// both issuance and tool send. Children and unbound Tasks have no authority.
 func (s *Service) ValidateTaskGrant(ctx context.Context, task *corev1alpha1.Task, frozen *TaskGrant, tool string) error {
 	if s == nil || frozen == nil || task == nil || !frozen.Deadline.After(time.Now()) || !slices.Contains(frozen.Tools, tool) {
 		return errTaskPass
@@ -177,8 +159,6 @@ func taskGrantParentUID(grant *TaskGrant) string {
 	return grant.Parent.UID
 }
 
-// TaskPass acquires one bounded pass, never retries issuance or persists tokens.
-// The controller's required callback revalidates the complete live chain.
 func (s *Service) TaskPass(ctx context.Context, task *corev1alpha1.Task, frozen *TaskGrant, validate func(context.Context) error) (string, error) {
 	if validate == nil || validate(ctx) != nil {
 		return "", errTaskPass

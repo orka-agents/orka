@@ -12,14 +12,8 @@ import { toYaml } from './manifests'
 import { stopsIn, TOUR_STEPS, type TourStep } from './steps'
 import { useTourStore } from './store'
 
-/**
- * From Tailwind's xl breakpoint the tour is a rail beside the page, below it a
- * panel under the page. Either way it takes its own space, so it never covers
- * the controls a step asks the visitor to use.
- */
 const RAIL_MEDIA_QUERY = '(min-width: 1280px)'
 
-// The sample data lives in one namespace, and a visitor may have switched away.
 const switchToSampleNamespace = () => useUIStore.getState().setNamespace(DEMO_NAMESPACE)
 
 function useTour() {
@@ -60,10 +54,6 @@ function StepBody({ step }: { step: TourStep }) {
   const streaming = useChatStore((s) => s.isStreaming)
   const namespace = useUIStore((s) => s.namespace)
   const chatNamespace = useChatStore((s) => s.activeNamespace)
-  // A prompt waits until both the page and Chat are on the sample namespace:
-  // sendMessage posts to the namespace it was rendered with, and Chat clears
-  // its transcript, in-flight turn included, when it moves between namespaces.
-  // Each step mounts its own StepBody, so leaving the step drops a held prompt.
   const pendingPrompt = useRef<string | null>(null)
   useEffect(() => {
     const prompt = pendingPrompt.current
@@ -73,7 +63,6 @@ function StepBody({ step }: { step: TourStep }) {
   }, [namespace, chatNamespace, sendMessage])
   return (
     <div className="space-y-3">
-      {/* One live region, so a screen reader announces the points with the body. */}
       <div aria-live="polite" className="space-y-3 text-sm leading-relaxed text-muted-foreground">
         <p className="whitespace-pre-line">{step.body}</p>
         {step.points && (
@@ -111,7 +100,6 @@ function StepBody({ step }: { step: TourStep }) {
   )
 }
 
-/** Where the page's data comes from, and the same thing as YAML or from the CLI. */
 function StepSource({ step }: { step: TourStep }) {
   const [open, setOpen] = useState<'yaml' | 'cli' | null>(null)
   const { manifest, note, cli } = step
@@ -146,7 +134,6 @@ function StepSource({ step }: { step: TourStep }) {
       )}
       {open === 'cli' && cli && (
         <SourceBlock label="CLI commands" caption="The same from the orka CLI, against a real cluster." wrap>
-          {/* Long commands wrap between words with a hanging indent; each stays one line when copied. */}
           {cli.map((line) => (
             <span key={line} className={cn('block pl-[2ch] -indent-[2ch]', line.startsWith('#') && 'text-muted-foreground')}>
               {line.split(' ').map((word, index) => (
@@ -220,14 +207,11 @@ function TourRail() {
           <X className="h-4 w-4" />
         </Button>
       </div>
-      {/* Keyed by step so each step starts scrolled to the top. */}
       <div key={current.title} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
         <Progress step={current} />
         <h2 className="text-base font-semibold">{current.title}</h2>
         <StepBody step={current} />
       </div>
-      {/* Pinned footer: Back and Next stay in the same place on every step,
-          however long the step's text is. */}
       <div className="shrink-0 border-t border-border px-5 py-3">
         <StepNav />
       </div>
@@ -263,8 +247,6 @@ function TourSheet() {
               <Progress step={current} />
               <StepBody step={current} />
             </div>
-            {/* Outside the scroll area, at the bottom of a bottom-anchored
-                sheet, so the controls hold their position between steps. */}
             <div className="mt-3">
               <StepNav />
             </div>
@@ -275,7 +257,6 @@ function TourSheet() {
   )
 }
 
-/** The guided tour, placed by RootLayout in both slots; only the one for the current width renders. */
 export function TourPanel({ slot }: { slot: 'rail' | 'bottom' }) {
   const open = useTourStore((s) => s.open)
   const wide = useMediaQuery(RAIL_MEDIA_QUERY)
@@ -283,7 +264,6 @@ export function TourPanel({ slot }: { slot: 'rail' | 'bottom' }) {
   return slot === 'rail' ? <TourRail /> : <TourSheet />
 }
 
-/** Sidebar entry that (re)starts the tour. */
 export function TourLauncher({ collapsed, onSelect }: { collapsed: boolean; onSelect?: () => void }) {
   const start = useTourStore((s) => s.start)
   return (

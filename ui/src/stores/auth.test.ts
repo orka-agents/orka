@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-// Make persist a pass-through so stores work without localStorage
 vi.mock('zustand/middleware', () => ({
   persist: (fn: unknown) => fn,
 }))

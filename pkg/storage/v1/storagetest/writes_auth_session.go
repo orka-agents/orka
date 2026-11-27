@@ -9,8 +9,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The GitHub sign-in session write cases.
-
 var catalogAuthSessionAt = time.Date(2026, time.October, 22, 8, 0, 0, 0, time.UTC)
 
 func observeAuthSessions(t *testing.T, p storagev1.StateProvider) any {

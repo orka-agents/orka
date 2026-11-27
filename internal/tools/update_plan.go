@@ -18,23 +18,18 @@ import (
 	"github.com/orka-agents/orka/internal/workerenv"
 )
 
-// UpdatePlanTool allows the LLM to update the autonomous plan state.
 type UpdatePlanTool struct{}
 
-// NewUpdatePlanTool creates a new UpdatePlanTool.
 func NewUpdatePlanTool() *UpdatePlanTool {
 	return &UpdatePlanTool{}
 }
 
-// Name returns the tool name.
 func (t *UpdatePlanTool) Name() string { return updatePlanToolName }
 
-// Description returns the tool description for the LLM.
 func (t *UpdatePlanTool) Description() string {
 	return "Update the autonomous execution plan. Call this to save progress, track completed phases, and signal when the goal is complete. Must be called at least once per iteration."
 }
 
-// Parameters returns the JSON Schema for the tool parameters.
 func (t *UpdatePlanTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -62,7 +57,6 @@ func (t *UpdatePlanTool) Parameters() json.RawMessage {
 	}`)
 }
 
-// updatePlanArgs are the arguments for the update_plan tool.
 type updatePlanArgs struct {
 	Summary      string `json:"summary"`
 	ProgressPct  int    `json:"progress_pct"`
@@ -70,7 +64,6 @@ type updatePlanArgs struct {
 	PlanDocument string `json:"plan_document"`
 }
 
-// Execute saves the plan state via the controller's internal API.
 func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a updatePlanArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -96,7 +89,6 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 		return "", errors.New(missingControllerTaskEnvMessage)
 	}
 
-	// Read SA token from file if not in env
 	if saToken == "" {
 		data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
 		if err == nil {
@@ -104,7 +96,6 @@ func (t *UpdatePlanTool) Execute(ctx context.Context, args json.RawMessage) (str
 		}
 	}
 
-	// Build request payload
 	payload, err := json.Marshal(a)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal plan: %w", err)

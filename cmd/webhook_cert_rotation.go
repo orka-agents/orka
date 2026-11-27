@@ -17,21 +17,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// The rotator watches ValidatingWebhookConfigurations cluster-wide and rewrites
-// its own caBundle whenever the serving CA changes. The RBAC for that is
-// deliberately not a kubebuilder marker: only the Helm chart's generated
-// certificate mode grants it, name-scoped for writes, so raw-manifest and
-// Kustomize installs that mount an operator certificate never receive it.
-
 const (
 	webhookCertRotationCAName       = "orka-webhook-ca"
 	webhookCertRotationOrganization = "orka"
 	webhookCertRotationFieldOwner   = "orka-controller"
 )
 
-// webhookCertRotationOptions configures controller-managed webhook serving
-// certificates. When SecretName is empty the operator supplies the certificate
-// and the controller only reads the mounted files.
 type webhookCertRotationOptions struct {
 	SecretName  string
 	WebhookName string
@@ -45,9 +36,6 @@ func (o webhookCertRotationOptions) enabled() bool {
 	return strings.TrimSpace(o.SecretName) != ""
 }
 
-// validateWebhookCertRotationOptions rejects a partially configured rotation so
-// a misconfigured install fails at startup instead of serving without a
-// trusted certificate.
 func validateWebhookCertRotationOptions(o webhookCertRotationOptions) error {
 	if !o.enabled() {
 		return nil
@@ -82,12 +70,6 @@ func validateWebhookCertRotationOptions(o webhookCertRotationOptions) error {
 	return nil
 }
 
-// setupWebhookCertRotation registers the certificate rotator with the manager
-// and returns a channel that closes once the serving certificate has been
-// written to the Secret, synchronized into CertDir, and its CA injected into
-// the webhook configuration. The API syncer writes CertDir; the rotator still
-// waits for those files without depending on kubelet projection. Without rotation the
-// channel is already closed so callers can wait on it unconditionally.
 func setupWebhookCertRotation(
 	mgr manager.Manager,
 	namespace string,
@@ -127,9 +109,7 @@ func setupWebhookCertRotation(
 			Name: strings.TrimSpace(o.WebhookName),
 			Type: rotator.Validating,
 		}},
-		FieldOwner: webhookCertRotationFieldOwner,
-		// The controller is a single-writer singleton behind leader election
-		// with a Recreate rollout, so only the leader mints or rotates the CA.
+		FieldOwner:            webhookCertRotationFieldOwner,
 		RequireLeaderElection: true,
 	})
 	if err != nil {
@@ -138,10 +118,6 @@ func setupWebhookCertRotation(
 	return ready, nil
 }
 
-// webhookReadyChecker reports the webhook server ready only after its serving
-// certificate exists and the server has started. Before that the Pod stays
-// unready so a fail-closed admission configuration is never pointed at a
-// listener without a trusted certificate.
 func webhookReadyChecker(certsReady <-chan struct{}, started healthz.Checker) healthz.Checker {
 	return func(req *http.Request) error {
 		select {

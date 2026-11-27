@@ -15,13 +15,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// ErrorDomain is the google.rpc.ErrorInfo domain of every status the server
-// library produces. A status without an ErrorInfo in this domain came from
-// the gRPC library or a proxy, not from the server.
 const ErrorDomain = "storage.orka.ai"
 
-// ErrorInfo reasons. The reason, not the gRPC code, identifies the contract
-// error: two errors can share a code.
 const (
 	ReasonNotFound                     = "NOT_FOUND"
 	ReasonConflict                     = "CONFLICT"
@@ -51,44 +46,24 @@ const (
 	ReasonTooLarge                     = "TOO_LARGE"
 	ReasonUnavailable                  = "UNAVAILABLE"
 	ReasonOutcomeUnknown               = "OUTCOME_UNKNOWN"
-	// ReasonUnauthenticated refuses a call whose credentials the server
-	// library's Authenticator or the provider rejected.
-	ReasonUnauthenticated = "UNAUTHENTICATED"
-	// ReasonIncompatible reports a provider that cannot serve the call's
-	// contract revision or the dataset's schema.
-	ReasonIncompatible = "INCOMPATIBLE"
-	// ReasonContractMismatch refuses a call without the expected contract and
-	// revision headers.
-	ReasonContractMismatch = "CONTRACT_MISMATCH"
-	// ReasonUnsupportedField refuses a request that carries a field the server
-	// does not know, so an older server never ignores a newer precondition.
-	ReasonUnsupportedField = "UNSUPPORTED_FIELD"
-	// ReasonOverloaded refuses a call over the server's concurrency limit for
-	// its class, before the provider runs.
-	ReasonOverloaded = "OVERLOADED"
-	// ReasonProviderError reports a provider error that is not a contract
-	// error, or a provider panic. A write that fails this way may have
-	// committed.
-	ReasonProviderError = "PROVIDER_ERROR"
+	ReasonUnauthenticated              = "UNAUTHENTICATED"
+	ReasonIncompatible                 = "INCOMPATIBLE"
+	ReasonContractMismatch             = "CONTRACT_MISMATCH"
+	ReasonUnsupportedField             = "UNSUPPORTED_FIELD"
+	ReasonOverloaded                   = "OVERLOADED"
+	ReasonProviderError                = "PROVIDER_ERROR"
 )
 
-// messageLimit bounds the client-safe message a status forwards.
 const messageLimit = 1024
 
-// messageKey is the ErrorInfo metadata key of a client-safe message.
 const messageKey = "message"
 
-// sentinelReason pairs a contract sentinel that carries no detail with its
-// reason and advisory code.
 type sentinelReason struct {
 	reason   string
 	code     codes.Code
 	sentinel error
 }
 
-// outcomeReasons are the infrastructure outcomes. They come before every
-// other contract error, so an error that also matches a family sentinel
-// keeps its outcome.
 var outcomeReasons = []sentinelReason{
 	{ReasonOutcomeUnknown, codes.Unknown, storagev1.ErrOutcomeUnknown},
 	{ReasonUnavailable, codes.Unavailable, storagev1.ErrUnavailable},
@@ -96,11 +71,6 @@ var outcomeReasons = []sentinelReason{
 	{ReasonIncompatible, codes.FailedPrecondition, storagev1.ErrIncompatible},
 }
 
-// sentinelReasons are the other sentinels that carry no detail. The order
-// matters only for an error that matches several: a sentinel comes before
-// one it wraps, such as ErrDatasetDetached or ErrDatasetMigrated before
-// ErrNotReady, and family
-// errors before the generic errors they resemble.
 var sentinelReasons = []sentinelReason{
 	{ReasonOperationExpired, codes.FailedPrecondition, storagev1.ErrOperationExpired},
 	{ReasonOperationAborted, codes.Aborted, storagev1.ErrOperationAborted},
@@ -124,7 +94,6 @@ var sentinelReasons = []sentinelReason{
 	{ReasonCapacity, codes.ResourceExhausted, storagev1.ErrCapacity},
 }
 
-// errorStatus builds a status carrying a storage ErrorInfo.
 func errorStatus(code codes.Code, reason, message string, metadata map[string]string) error {
 	st := status.New(code, message)
 	detailed, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: ErrorDomain, Metadata: metadata})
@@ -134,8 +103,6 @@ func errorStatus(code codes.Code, reason, message string, metadata map[string]st
 	return detailed.Err()
 }
 
-// contractStatus encodes a contract error. ok is false for an error that is
-// not a contract error.
 func contractStatus(err error) (encoded error, ok bool) {
 	for _, entry := range outcomeReasons {
 		if errors.Is(err, entry.sentinel) {
@@ -153,7 +120,6 @@ func contractStatus(err error) (encoded error, ok bool) {
 	case isBinding:
 		return bindingConflictStatus(binding), true
 	case isTooLarge:
-		// Only the typed fields cross, never the provider's wrapping text.
 		bounded := storagev1.TooLargeError{What: sanitizeText(tooLarge.What, messageLimit), Size: tooLarge.Size, Limit: tooLarge.Limit}
 		return errorStatus(codes.ResourceExhausted, ReasonTooLarge, bounded.Error(), map[string]string{
 			"what":  bounded.What,
@@ -176,9 +142,6 @@ func contractStatus(err error) (encoded error, ok bool) {
 	return nil, false
 }
 
-// asTyped finds the typed contract error T in err's chain in its value or
-// its pointer form. The contract's typed errors have value receivers, so a
-// provider may return either.
 func asTyped[T error, P interface {
 	*T
 	error
@@ -193,11 +156,6 @@ func asTyped[T error, P interface {
 	return zero, false
 }
 
-// typedMessage returns the message of the typed error T in err's chain, so
-// the client's errors.As finds the message an in-process caller finds. A
-// provider that wrapped the bare sentinel instead sends its error's text. A
-// provider that returned a pointer to the typed error gets the same treatment
-// as one that returned the value, so its wrapping text never crosses.
 func typedMessage[T error, P interface {
 	*T
 	error
@@ -208,16 +166,11 @@ func typedMessage[T error, P interface {
 	return err.Error()
 }
 
-// messageStatus encodes an error message the contract defines as
-// client-safe, bounded and stripped of control characters.
 func messageStatus(code codes.Code, reason, text string) error {
 	message := sanitizeText(text, messageLimit)
 	return errorStatus(code, reason, message, map[string]string{messageKey: message})
 }
 
-// bindingConflictStatus encodes a BindingConflictError with the error itself
-// as a second status detail. When the detail cannot be encoded the status
-// carries the bounded reason alone.
 func bindingConflictStatus(conflict storagev1.BindingConflictError) error {
 	conflict.DatasetID = sanitizeText(conflict.DatasetID, messageLimit)
 	conflict.Reason = sanitizeText(conflict.Reason, messageLimit)
@@ -232,9 +185,6 @@ func bindingConflictStatus(conflict storagev1.BindingConflictError) error {
 	return errorStatus(codes.Aborted, ReasonBindingConflict, message, info.GetMetadata())
 }
 
-// providerErrorStatus reports an error that is not a contract error without
-// its text, which can quote stored values. correlation ties it to the
-// server's log entry.
 func providerErrorStatus(correlation string) error {
 	return errorStatus(codes.Internal, ReasonProviderError,
 		"storage provider error (correlation "+correlation+")", map[string]string{"correlation": correlation})
@@ -248,8 +198,6 @@ func newCorrelationID() string {
 	return hex.EncodeToString(raw[:])
 }
 
-// remoteError is a contract sentinel decoded from a status. Error returns the
-// server's client-safe message when it sent one.
 type remoteError struct {
 	sentinel error
 	message  string
@@ -264,7 +212,6 @@ func (e remoteError) Error() string {
 
 func (e remoteError) Unwrap() error { return e.sentinel }
 
-// storageErrorInfo returns the status's storage ErrorInfo, if any.
 func storageErrorInfo(st *status.Status) *errdetails.ErrorInfo {
 	for _, detail := range st.Details() {
 		if info, ok := detail.(*errdetails.ErrorInfo); ok && info.GetDomain() == ErrorDomain {
@@ -274,10 +221,6 @@ func storageErrorInfo(st *status.Status) *errdetails.ErrorInfo {
 	return nil
 }
 
-// refusedBeforeDataset holds the reasons a server can send before its
-// dataset check, or without knowing its dataset: authentication, the contract
-// and request checks, admission, the dataset check itself, and a provider
-// that cannot describe its dataset.
 var refusedBeforeDataset = map[string]bool{
 	ReasonUnauthenticated:  true,
 	ReasonContractMismatch: true,
@@ -288,10 +231,6 @@ var refusedBeforeDataset = map[string]bool{
 	ReasonOverloaded:       true,
 }
 
-// answersForDataset reports whether err is a storage status that answers for
-// the server's dataset, so the response must name the client's dataset as a
-// successful response must. A NOT_FOUND or a refused write from another
-// dataset says nothing about the client's own.
 func answersForDataset(err error) bool {
 	st, ok := status.FromError(err)
 	if !ok {
@@ -301,7 +240,6 @@ func answersForDataset(err error) bool {
 	return info != nil && !refusedBeforeDataset[info.GetReason()]
 }
 
-// decodeError turns a failed call into the error its caller receives.
 func decodeError(ctx context.Context, m *method, err error, evidence *sendEvidence) error {
 	st, ok := status.FromError(err)
 	if ok {
@@ -309,14 +247,12 @@ func decodeError(ctx context.Context, m *method, err error, evidence *sendEviden
 			return decodeReason(m, st, info)
 		}
 		if st.Code() == codes.Unimplemented {
-			// The server has no such RPC, so nothing ran.
 			return fmt.Errorf("%w: storage server does not serve %s", storagev1.ErrIncompatible, m.name)
 		}
 	}
 	return transportError(ctx, m, err, evidence)
 }
 
-// decodeReason rebuilds the contract error a server reported.
 func decodeReason(m *method, st *status.Status, info *errdetails.ErrorInfo) error {
 	metadata := info.GetMetadata()
 	message := sanitizeText(metadata[messageKey], messageLimit)
@@ -350,7 +286,6 @@ func decodeReason(m *method, st *status.Status, info *errdetails.ErrorInfo) erro
 			}
 		}
 	}
-	// PROVIDER_ERROR, or a reason this client does not know.
 	correlation := sanitizeText(metadata["correlation"], 64)
 	if m.mayChange() {
 		return fmt.Errorf("%w: %s failed in the storage provider (correlation %q)", storagev1.ErrOutcomeUnknown, m.name, correlation)
@@ -358,8 +293,6 @@ func decodeReason(m *method, st *status.Status, info *errdetails.ErrorInfo) erro
 	return fmt.Errorf("%s failed in the storage provider (correlation %q)", m.name, correlation)
 }
 
-// decodeBindingConflict rebuilds a BindingConflictError from its status
-// detail, or from the forwarded message when the detail is missing.
 func decodeBindingConflict(st *status.Status, message string) error {
 	for _, detail := range st.Details() {
 		encoded, ok := detail.(*storagepb.BindingConflictError)
@@ -377,9 +310,6 @@ func decodeBindingConflict(st *status.Status, message string) error {
 	return storagev1.BindingConflictError{Reason: message}
 }
 
-// transportError classifies a failure that carries no storage ErrorInfo,
-// from the gRPC library or a proxy, by whether the request may have left this
-// process.
 func transportError(ctx context.Context, m *method, err error, evidence *sendEvidence) error {
 	detail := "transport failure"
 	if st, ok := status.FromError(err); ok {

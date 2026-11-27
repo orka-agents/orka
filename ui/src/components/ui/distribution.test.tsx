@@ -20,14 +20,13 @@ describe('Distribution', () => {
 
   it('segment widths are proportional and sum to ~100% of the total', () => {
     render(<Distribution segments={segments} />)
-    const total = segments.reduce((s, x) => s + x.count, 0) // 10
+    const total = segments.reduce((s, x) => s + x.count, 0)
     const widths = segments.map((s) => {
       const el = screen.getByTestId(`dist-segment-${s.phase}`)
       return parseFloat((el as HTMLElement).style.width)
     })
     const sum = widths.reduce((a, b) => a + b, 0)
     expect(Math.round(sum)).toBe(100)
-    // Running (3/10) => 30%
     expect(Math.round(widths[1])).toBe((3 / total) * 100)
   })
 
@@ -53,14 +52,12 @@ describe('Distribution', () => {
         ]}
       />,
     )
-    // No segments rendered, but the legend + track still present.
     expect(screen.queryByTestId('dist-segment-Running')).not.toBeInTheDocument()
     expect(screen.getByRole('img', { name: /distribution/i })).toBeInTheDocument()
   })
 
   it('renders a legend entry with the count for each phase', () => {
     render(<Distribution segments={segments} />)
-    // Legend shows all four labels.
     for (const label of ['Pending', 'Running', 'Succeeded', 'Failed']) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }

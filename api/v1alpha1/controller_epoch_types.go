@@ -110,29 +110,12 @@ type StorageEpochAcknowledgement struct {
 }
 
 const (
-	// StorageRecoveryAcknowledgedAnnotation releases the storage recovery hold
-	// whose ID it names. An operator sets it, after recovering storage, on the
-	// ControllerEpoch for the installation's hold, or on the held Task for a
-	// record hold.
-	StorageRecoveryAcknowledgedAnnotation = "storage.orka.ai/recovery-acknowledged"
-	// ConditionStorageRecoveryRequired is True while the installation, or a
-	// Task that carries the condition, is held for storage recovery.
-	ConditionStorageRecoveryRequired = "StorageRecoveryRequired"
-	// StorageRecoveryAcknowledgedReason is the reason of a
-	// StorageRecoveryRequired condition that an operator released.
-	StorageRecoveryAcknowledgedReason = "RecoveryAcknowledged"
-	// StorageRecoveryMissingRecordReason is the reason of a Task's
-	// StorageRecoveryRequired condition when a store record its Kubernetes
-	// records require is missing.
-	StorageRecoveryMissingRecordReason = "MissingRecord"
-	// StorageRecoveryConflictingRecordReason is the reason of a Task's
-	// StorageRecoveryRequired condition when a store record its Kubernetes
-	// records require differs from what they recorded.
+	StorageRecoveryAcknowledgedAnnotation  = "storage.orka.ai/recovery-acknowledged"
+	ConditionStorageRecoveryRequired       = "StorageRecoveryRequired"
+	StorageRecoveryAcknowledgedReason      = "RecoveryAcknowledged"
+	StorageRecoveryMissingRecordReason     = "MissingRecord"
 	StorageRecoveryConflictingRecordReason = "ConflictingRecord"
-	// StorageRecoveryRecordFoundReason is the reason of a Task's
-	// StorageRecoveryRequired condition once the record it was held for is
-	// found again, after a restore.
-	StorageRecoveryRecordFoundReason = "RecordFound"
+	StorageRecoveryRecordFoundReason       = "RecordFound"
 )
 
 // StorageRecoveryReason says why Orka held the installation for storage
@@ -141,19 +124,10 @@ const (
 type StorageRecoveryReason string
 
 const (
-	// StorageRecoveryEpochRegressed means a dataset holds a lower controller
-	// epoch than it acknowledged.
-	StorageRecoveryEpochRegressed StorageRecoveryReason = "EpochRegressed"
-	// StorageRecoveryWatermarkRegressed means a dataset holds a lower write
-	// watermark than it acknowledged.
+	StorageRecoveryEpochRegressed     StorageRecoveryReason = "EpochRegressed"
 	StorageRecoveryWatermarkRegressed StorageRecoveryReason = "WatermarkRegressed"
-	// StorageRecoveryDatasetChanged means a storage contract is served by a
-	// different dataset than the one that acknowledged it.
-	StorageRecoveryDatasetChanged StorageRecoveryReason = "DatasetChanged"
-	// StorageRecoveryUnsafeSwitch means the database of a dataset whose
-	// durability class can lose acknowledged writes in a failover restarted or
-	// switched.
-	StorageRecoveryUnsafeSwitch StorageRecoveryReason = "UnsafeSwitch"
+	StorageRecoveryDatasetChanged     StorageRecoveryReason = "DatasetChanged"
+	StorageRecoveryUnsafeSwitch       StorageRecoveryReason = "UnsafeSwitch"
 )
 
 // StorageRecoveryHold records why and where Orka stopped work for storage

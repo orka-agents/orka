@@ -45,11 +45,6 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
-  // Radix returns focus to a DialogTrigger on close. A dialog opened from
-  // state has no trigger, so focus fell to <body>; remember what had focus
-  // when the dialog opened and return it there while it is still on the page.
-  // When nothing had focus (Safari does not focus a clicked button), Radix's
-  // own handling stays in charge.
   const openerRef = React.useRef<HTMLElement | null>(null)
   return (
     <DialogPortal data-slot="dialog-portal">

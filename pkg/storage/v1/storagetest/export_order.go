@@ -7,12 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runImportedWriteOrder checks that an import carries no write stamp: the
-// order stamps of results and artifacts are relative to the source's
-// controller epochs, which are not copied, so the target's first write under
-// its own fence replaces an imported object whatever stamp the source held,
-// while a writer still bound to the source, or holding a fence the target's
-// takeover superseded, cannot replace it.
 func runImportedWriteOrder[P writeCaseProvider](t *testing.T, newProvider func(t *testing.T) P, target orderTarget[P]) {
 	t.Run("an imported object keeps no write stamp", func(t *testing.T) {
 		source := newProvider(t)

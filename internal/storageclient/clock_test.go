@@ -13,7 +13,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// skewedClockStore reports a provider clock offset from the real one.
 type skewedClockStore struct {
 	*sqlite.Store
 
@@ -62,9 +61,6 @@ func newSkewedClockClient(t *testing.T) (*Client, *skewedClockStore) {
 	return client, skewed
 }
 
-// A dataset whose clock is beyond MaxClockSkew refuses new writes with
-// ErrNotReady until a later check finds it back within bounds. A provider
-// that does not report its clock is not checked.
 func TestClockCheckGatesWrites(t *testing.T) {
 	client, skewed := newSkewedClockClient(t)
 	ctx := t.Context()
@@ -114,8 +110,6 @@ func TestClockCheckGatesWrites(t *testing.T) {
 	}
 }
 
-// unansweredDescriber is a provider that answers Describe only when the call's
-// context ends, as an unreachable backend does.
 type unansweredDescriber struct {
 	storagev1.StateProvider
 	calls chan struct{}
@@ -127,18 +121,12 @@ func (p *unansweredDescriber) Describe(ctx context.Context) (storagev1.ProviderI
 	return storagev1.ProviderInfo{}, ctx.Err()
 }
 
-// A state provider that does not answer keeps neither the artifact
-// provider's clock check nor the lifting of its refusal waiting: with
-// separate providers, each is checked on its own and its result applies as
-// soon as it answers.
 func TestClockCheckOfOneProviderDoesNotWaitForTheOther(t *testing.T) {
 	client, artifacts := newSkewedClockClient(t)
 	info, err := artifacts.Describe(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The artifact dataset was refused at an earlier check; its clock is back
-	// within bounds now.
 	client.ops.setClockSkew(info.DatasetID, &clockSkew{offset: time.Hour})
 	artifacts.set(time.Second, true, nil)
 	unanswered := &unansweredDescriber{StateProvider: artifacts, calls: make(chan struct{}, 1)}
@@ -170,7 +158,6 @@ func TestClockCheckOfOneProviderDoesNotWaitForTheOther(t *testing.T) {
 	}
 }
 
-// A provider that serves both contracts is described once per check.
 func TestClockCheckDescribesASharedProviderOnce(t *testing.T) {
 	client, skewed := newSkewedClockClient(t)
 	counting := &countingDescriber{skewedClockStore: skewed}
@@ -183,7 +170,6 @@ func TestClockCheckDescribesASharedProviderOnce(t *testing.T) {
 	}
 }
 
-// countingDescriber counts Describe calls to the store it wraps.
 type countingDescriber struct {
 	*skewedClockStore
 	calls atomic.Int64
@@ -194,8 +180,6 @@ func (p *countingDescriber) Describe(ctx context.Context) (storagev1.ProviderInf
 	return p.skewedClockStore.Describe(ctx)
 }
 
-// The offset is estimated against the midpoint of the round trip, and only a
-// skew beyond the limit even at the edge of that uncertainty counts.
 func TestEstimateClockSkew(t *testing.T) {
 	sent := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -224,7 +208,6 @@ func TestEstimateClockSkew(t *testing.T) {
 	}
 }
 
-// The monitor checks at once and then on its interval, until it stops.
 func TestClockMonitorChecksUntilStopped(t *testing.T) {
 	client, skewed := newSkewedClockClient(t)
 	skewed.set(storagev1.MaxClockSkew+time.Minute, true, nil)
@@ -264,8 +247,6 @@ func TestClockMonitorChecksUntilStopped(t *testing.T) {
 	}
 }
 
-// unreportedClockStore describes the same dataset as the store it wraps but
-// reports no clock.
 type unreportedClockStore struct{ *skewedClockStore }
 
 func (s unreportedClockStore) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
@@ -274,10 +255,6 @@ func (s unreportedClockStore) Describe(ctx context.Context) (storagev1.ProviderI
 	return info, err
 }
 
-// When separate bindings describe the same dataset, a response without
-// ObservedAt does not suppress a skew the other binding reports, whichever
-// decides first. The bindings are checked in a fixed order with shared
-// claims, as CheckClocks runs them concurrently.
 func TestClockCheckSkewIsNotSuppressedByAnUnreportedClock(t *testing.T) {
 	for _, unreportedFirst := range []bool{true, false} {
 		client, skewed := newSkewedClockClient(t)

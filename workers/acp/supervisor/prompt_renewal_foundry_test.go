@@ -44,8 +44,6 @@ func TestFoundryRejectedRenewalSettlesRemoteAuthority(t *testing.T) {
 	done := serveMutationAsync(server.Handler(), mutationHTTPRequest(t, http.MethodPut,
 		foundryRenewalTestPath, renew, cfg))
 	awaitSignal(t, renewEntered, "renewal did not reach the broker")
-	// Only the mutation authority expires. The original prompt/provider lease
-	// remains live, so its watchdog cannot conceal missing compensation.
 	timer := time.NewTimer(time.Until(renew.Metadata.ExpiresAt) + time.Millisecond)
 	defer timer.Stop()
 	<-timer.C
@@ -97,8 +95,6 @@ func TestFoundryRenewalRejectionWaitsForProofAndRecordsUnknown(t *testing.T) {
 			renew := newFoundryRenewalTestRequest(t, prompt)
 			done := serveMutationAsync(server.Handler(), mutationHTTPRequest(t, http.MethodPut, foundryRenewalTestPath, renew, cfg))
 			awaitSignal(t, renewEntered, "renewal did not reach the broker")
-			// Model a current-generation change while the remote request is in
-			// flight. This forces the post-ack lease validation rejection.
 			server.mu.Lock()
 			state.prompt.lease.Generation++
 			server.mu.Unlock()
@@ -142,9 +138,6 @@ func TestFoundryRenewalLocalLeaseFailureClosesRemoteAuthority(t *testing.T) {
 	}))
 	server.mu.Lock()
 	originalRuntime := state.runtime
-	// The ACP owner may already have removed its active prompt while the
-	// supervisor still holds the pending HTTP projection. Capture that stale
-	// owner for the renewal, then restore the real cleanup owner before ack.
 	state.runtime = &acp.RuntimeSession{}
 	server.mu.Unlock()
 	defer func() {
@@ -210,7 +203,6 @@ func TestFoundryDuplicateRenewalKeepsCommittedAuthority(t *testing.T) {
 			t.Fatalf("duplicate lease renewal status = %d", response.Code)
 		}
 	}
-	// A later exact replay must use the completed local operation record.
 	response := performMutation(t, server.Handler(), http.MethodPut, foundryRenewalTestPath, renew, cfg)
 	if response.Code != http.StatusOK || renewals.Load() != 2 || settlements.Load() != 0 {
 		t.Fatal("successful duplicate renewal repeated or cancelled remote authority")
@@ -223,8 +215,6 @@ func TestFoundryDuplicateRenewalKeepsCommittedAuthority(t *testing.T) {
 	}
 }
 
-// A remote renewal is validated again after its round trip. A slow broker must
-// not turn that second check into a clock-skew rejection of a correct renewal.
 func TestFoundrySlowRemoteRenewalIsAccepted(t *testing.T) {
 	var settlements atomic.Int32
 	server, cfg, state, prompt := newFoundryRenewalTestPrompt(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -250,9 +240,6 @@ func TestFoundrySlowRemoteRenewalIsAccepted(t *testing.T) {
 	}
 }
 
-// The controller replays an ambiguous renewal verbatim. A replay the
-// supervisor never applied arrives after its issue time and must still renew
-// the lease.
 func TestReplayedRenewalIssuedEarlierIsAccepted(t *testing.T) {
 	server, cfg, state, prompt := newFoundryRenewalTestPrompt(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, proof := foundryTestProof(t, r)
@@ -292,8 +279,6 @@ func TestFoundryDisconnectedRenewalStillObtainsRemoteSettlement(t *testing.T) {
 	defer cancel()
 	done := serveMutationAsync(server.Handler(), mutationHTTPRequest(t, http.MethodPut, foundryRenewalTestPath, renew, cfg).WithContext(ctx))
 	awaitSignal(t, renewEntered, "renewal did not reach the broker")
-	// Its acknowledgement is now unknowable. The caller's cancellation must
-	// not also cancel the independent operation that closes remote authority.
 	cancel()
 	response := readFoundryRenewalTestResponse(t, done)
 	if response.Code != http.StatusGone {

@@ -14,12 +14,10 @@ import (
 	"strings"
 )
 
-// estimateTokens returns an approximate token count (~4 chars per token).
 func estimateTokens(text string) int {
 	return (len(text) + 3) / 4
 }
 
-// estimateMessageTokens returns approximate tokens for a Message including tool call content.
 func estimateMessageTokens(m Message) int {
 	tokens := estimateTokens(m.Content)
 	for _, tc := range m.ToolCalls {
@@ -28,15 +26,11 @@ func estimateMessageTokens(m Message) int {
 	return tokens
 }
 
-// messageBlock is a group of messages that must be kept or dropped together.
-// An assistant message with tool calls and its corresponding tool results form one block.
 type messageBlock struct {
 	messages []Message
 	tokens   int
 }
 
-// groupMessageBlocks splits messages into atomic blocks. An assistant message
-// with tool calls is grouped with all immediately following tool-result messages.
 func groupMessageBlocks(messages []Message) []messageBlock {
 	var blocks []messageBlock
 	i := 0
@@ -62,23 +56,8 @@ func groupMessageBlocks(messages []Message) []messageBlock {
 	return blocks
 }
 
-// cutsPerBudget sets how far apart the places truncation may cut are: a
-// quarter of the budget. Closer cuts keep more history; each move of the cut
-// changes the prompt after the first message, so the provider's prompt cache
-// misses once. With messages small next to a quarter, truncation keeps about
-// three quarters of the budget at least and moves the cut once per quarter
-// budget of new conversation.
 const cutsPerBudget = 4
 
-// TruncateMessages keeps the first message and the newest messages that fit
-// within the token budget. Tool-call/tool-result groups are kept or dropped
-// atomically so the LLM never sees orphaned tool results.
-//
-// The cut falls where a block starts a new quarter of the budget, counted from
-// the start of the conversation, so a conversation that grows keeps its cut,
-// and with it the prompt prefix a provider caches, until the newer messages
-// outgrow it. Callers should truncate the whole conversation each step, not
-// the result of an earlier truncation, so the quarters stay where they are.
 func TruncateMessages(messages []Message, tokenBudget int) []Message {
 	if len(messages) == 0 {
 		return messages
@@ -92,7 +71,6 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 		return messages
 	}
 
-	// Always keep the first message
 	first := messages[0]
 	firstTokens := estimateMessageTokens(first)
 	remaining := tokenBudget - firstTokens
@@ -100,7 +78,6 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 		return []Message{first}
 	}
 
-	// Group remaining messages into atomic blocks
 	blocks := groupMessageBlocks(messages[1:])
 
 	if cut, ok := stableCut(blocks, remaining, tokenBudget); ok {
@@ -111,9 +88,6 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 		return result
 	}
 
-	// No quarter boundary fits, as when the newest block alone is most of the
-	// budget: keep the newest blocks that fit.
-	// From the tail, collect blocks that fit
 	var kept []messageBlock
 	for _, block := range slices.Backward(blocks) {
 		if remaining-block.tokens < 0 {
@@ -123,13 +97,11 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 		kept = append([]messageBlock{block}, kept...)
 	}
 
-	// Count how many blocks we dropped
 	droppedBlocks := len(blocks) - len(kept)
 	if droppedBlocks > 0 {
 		noteContent := extractDroppedSummary(blocks[:droppedBlocks])
 		noteTokens := estimateTokens(noteContent)
 
-		// If the note doesn't fit, drop more kept blocks to make room
 		for noteTokens > remaining && len(kept) > 0 {
 			remaining += kept[0].tokens
 			droppedBlocks++
@@ -138,7 +110,6 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 			noteTokens = estimateTokens(noteContent)
 		}
 
-		// If the note still doesn't fit (very tight budget), use a minimal note
 		if noteTokens > remaining {
 			noteContent = "[Earlier messages truncated.]"
 		}
@@ -161,10 +132,6 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 	return result
 }
 
-// stableCut is the first quarter boundary at which the blocks after it and the
-// note for the blocks before it fit in remaining tokens. A boundary is a block
-// that starts a later quarter of the budget than the block before it. At least
-// one block is kept.
 func stableCut(blocks []messageBlock, remaining, tokenBudget int) (int, bool) {
 	quarter := max(tokenBudget/cutsPerBudget, 1)
 	total := 0
@@ -185,13 +152,10 @@ func stableCut(blocks []messageBlock, remaining, tokenBudget int) (int, bool) {
 	return 0, false
 }
 
-// maxContextPerTool is the maximum number of context items (files, URLs, queries) shown per tool.
 const maxContextPerTool = 5
 
-// maxValueLen is the maximum character length for an individual extracted value.
 const maxValueLen = 80
 
-// truncateValue caps a string at maxValueLen, appending "…" if truncated.
 func truncateValue(s string) string {
 	if len(s) <= maxValueLen {
 		return s
@@ -199,8 +163,6 @@ func truncateValue(s string) string {
 	return s[:maxValueLen] + "…"
 }
 
-// extractDroppedSummary builds an enriched truncation note from dropped blocks,
-// including tool names, file paths, URLs, and search queries.
 func extractDroppedSummary(dropped []messageBlock) string {
 	type toolInfo struct {
 		count   int
@@ -256,7 +218,6 @@ func extractDroppedSummary(dropped []messageBlock) string {
 		return fmt.Sprintf("[Earlier conversation truncated (%d messages dropped). Use list_tasks to check completed work.]", totalMsgs)
 	}
 
-	// Build sorted tool summaries
 	toolNames := make([]string, 0, len(tools))
 	for name := range tools {
 		toolNames = append(toolNames, name)
@@ -266,7 +227,6 @@ func extractDroppedSummary(dropped []messageBlock) string {
 	var parts []string
 	for _, name := range toolNames {
 		info := tools[name]
-		// Collect context items
 		var context []string
 		for f := range info.files {
 			context = append(context, truncateValue(f))

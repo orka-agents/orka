@@ -48,9 +48,6 @@ const (
 
 var errInvalidProviderNamespaceSelector = errors.New("invalid provider namespace selector")
 
-// ExecutionWorkspaceClassReconciler resolves provider/pool references and
-// publishes provider-neutral class readiness. Authorization is performed for
-// each Task/Tool caller by WorkspaceClassAuthorizer.
 type ExecutionWorkspaceClassReconciler struct {
 	client.Client
 	APIReader   client.Reader
@@ -78,15 +75,8 @@ func (r *ExecutionWorkspaceClassReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(class, executionWorkspaceClassFinalizer) {
-		// Patch only the finalizer list. A full-object Update re-serializes the
-		// user-authored spec through Go types (e.g. "2m" -> "2m0s" durations),
-		// which the CRD's functional-spec immutability rule rejects, leaving a
-		// legally stored class permanently unreconcilable.
 		base := class.DeepCopy()
 		controllerutil.AddFinalizer(class, executionWorkspaceClassFinalizer)
-		// Optimistic lock: a concurrent finalizer write from another
-		// controller retries as a conflict instead of being silently erased
-		// by a merge computed from this stale read.
 		if err := r.Patch(ctx, class, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -165,9 +155,6 @@ func (r *ExecutionWorkspaceClassReconciler) reconcileClassDeletion(
 		}
 		return ctrl.Result{RequeueAfter: classReadinessRequeue}, nil
 	}
-	// Finalizer-only patch for the same immutable-spec reason as on add, with
-	// the same optimistic lock so a concurrent finalizer write is never
-	// erased from a stale base.
 	base := class.DeepCopy()
 	controllerutil.RemoveFinalizer(class, executionWorkspaceClassFinalizer)
 	if err := r.Patch(ctx, class, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -293,7 +280,7 @@ func (r *ExecutionWorkspaceClassReconciler) resolveClassProvider(
 		if err != nil {
 			return providerName, reasonRequiredFeatures, "provider profile is unavailable", err
 		}
-		if _, _, err := externalACPProfilePolicy(profile, class); err != nil {
+		if _, err := externalACPProfilePolicy(profile, class); err != nil {
 			return providerName, reasonRequiredFeatures, err.Error(), nil
 		}
 	}
@@ -492,7 +479,6 @@ func (r *ExecutionWorkspaceClassReconciler) patchClassStatus(
 	})
 }
 
-// SetupWithManager registers the class reference/readiness controller.
 func (r *ExecutionWorkspaceClassReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&workspacev1alpha1.ExecutionWorkspaceClass{}).

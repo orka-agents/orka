@@ -11,9 +11,6 @@ import (
 	"unicode"
 )
 
-// wholeTextScan evaluates every pattern over the whole text, the behaviour
-// before the keyword index existed; the windowed evaluation must agree with
-// it on every input.
 func wholeTextScan(text string) *secretScan {
 	scan := newSecretScan(text)
 	scan.full = true
@@ -68,12 +65,10 @@ func TestSecretScanWindowsAreLineAlignedAndMerged(t *testing.T) {
 	if got := text[spans[0].start:spans[0].end]; got != "  password =\n\n    \"value\"\nmiddle\nno match here" {
 		t.Fatalf("window = %q", got)
 	}
-	// The single-line prefix and JWT patterns get exactly the keyword's line.
 	spans = scan.windows(authorizationKeywords, 0)
 	if len(spans) != 1 || text[spans[0].start:spans[0].end] != "Authorization: Bearer abc" {
 		t.Fatalf("zero-run window = %+v", spans)
 	}
-	// Adjacent keyword lines merge into one contiguous window.
 	scan = newSecretScan("token: a\nsecret: b\n\n\nunrelated\npassword: c")
 	spans = scan.windows(credentialKeywords, 0)
 	if len(spans) != 2 || spans[0] != (textSpan{start: 0, end: 18}) || spans[1] != (textSpan{start: 31, end: 42}) {
@@ -105,8 +100,6 @@ func TestLooksLikeSecretWindowedMatchesWholeTextOnKnownCases(t *testing.T) {
 	t.Parallel()
 	for _, text := range secretScanKnownCases() {
 		assertWindowedScanMatchesWholeText(t, text)
-		// Every known case embedded in unrelated text, with keyword-free
-		// lines before and after and the text indented and re-cased.
 		assertWindowedScanMatchesWholeText(t, "plain line\n"+text+"\ntrailing line\n")
 		assertWindowedScanMatchesWholeText(t, "  "+strings.ReplaceAll(text, "\n", "\n  "))
 		assertWindowedScanMatchesWholeText(t, strings.ToUpper(text))
@@ -123,9 +116,6 @@ func TestLooksLikeSecretWindowedMatchesWholeTextOnGeneratedDocuments(t *testing.
 	}
 }
 
-// TestLooksLikeSecretWindowedMatchesWholeTextOnCorpus checks every regular
-// file under ORKA_SECRET_SCAN_CORPUS_DIR (a repository checkout, for example)
-// when the variable is set.
 func TestLooksLikeSecretWindowedMatchesWholeTextOnCorpus(t *testing.T) {
 	files := loadSecretScanCorpus(t)
 	for _, file := range files {
@@ -291,8 +281,6 @@ func loadSecretScanCorpus(tb testing.TB) []secretScanCorpusFile {
 	return files
 }
 
-// BenchmarkLooksLikeSecretCorpus measures the flagger over every file under
-// ORKA_SECRET_SCAN_CORPUS_DIR, the pass the workspace baseline capture runs.
 func BenchmarkLooksLikeSecretCorpus(b *testing.B) {
 	files := loadSecretScanCorpus(b)
 	var total int64
@@ -312,8 +300,6 @@ func BenchmarkLooksLikeSecretCorpus(b *testing.B) {
 	}
 }
 
-// BenchmarkSecretLikeLineDigestsCorpus measures the fingerprinter over the
-// corpus files the flagger marks, as the baseline capture does.
 func BenchmarkSecretLikeLineDigestsCorpus(b *testing.B) {
 	files := loadSecretScanCorpus(b)
 	var flagged []string

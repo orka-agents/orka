@@ -51,13 +51,7 @@ export interface TaskTraceViewProps {
   trace: TaskTrace
 }
 
-// Explainable, grouped view of a task's execution derived from its event stream.
-// Approvals and fork provenance are not separate API arrays — they live in the
-// timeline keyed by category — so we surface them by filtering the timeline.
 export function TaskTraceView({ trace }: TaskTraceViewProps) {
-  // The Go backend marshals empty trace groups as JSON null (nil slices), so
-  // default every array before using array methods — otherwise a task with no
-  // events would crash the Trace tab instead of showing the empty state.
   const timeline = trace.timeline ?? []
   const modelRequests = trace.modelRequests ?? []
   const toolCalls = trace.toolCalls ?? []
@@ -70,10 +64,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
   const approvalEvents = timeline.filter((e) => executionEventCategory(e.type) === 'approvals')
   const forkEvents = timeline.filter((e) => executionEventCategory(e.type) === 'fork')
 
-  // A trace with no derived groups and no timeline falls back to a clear empty
-  // state; a trace with a timeline but no structured groups still shows the raw
-  // timeline so nothing is hidden. Errors and warnings render their own visible
-  // sections, so an error- or warning-only trace also counts as structured.
   const hasStructured =
     modelRequests.length > 0 ||
     toolCalls.length > 0 ||
@@ -87,7 +77,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
 
   return (
     <div className="space-y-6" data-testid="task-trace">
-      {/* Lifecycle summary */}
       <Section icon={Activity} title="Lifecycle">
         <div className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
           <TraceStatusPill status={trace.task.phase} />
@@ -113,7 +102,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </div>
       </Section>
 
-      {/* Errors — surfaced prominently above the structured detail. */}
       {errors.length > 0 && (
         <Section icon={CircleAlert} title="Errors" count={errors.length}>
           <ul className="space-y-1.5">
@@ -136,7 +124,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Model requests */}
       {modelRequests.length > 0 && (
         <Section icon={Cpu} title="Model requests" count={modelRequests.length}>
           <ul className="space-y-1.5">
@@ -159,7 +146,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Tool calls */}
       {toolCalls.length > 0 && (
         <Section icon={Wrench} title="Tool calls" count={toolCalls.length}>
           <ul className="space-y-1.5">
@@ -178,7 +164,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Child tasks — linkable to their detail pages. */}
       {childTasks.length > 0 && (
         <Section icon={ListTree} title="Child tasks" count={childTasks.length}>
           <ul className="space-y-1.5">
@@ -200,7 +185,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Workspace */}
       {workspace.length > 0 && (
         <Section icon={FolderGit2} title="Workspace" count={workspace.length}>
           <ul className="space-y-1.5">
@@ -215,7 +199,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Artifacts */}
       {artifacts.length > 0 && (
         <Section icon={Package} title="Artifacts" count={artifacts.length}>
           <ul className="space-y-1.5">
@@ -231,7 +214,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Approvals — derived from the timeline. */}
       {approvalEvents.length > 0 && (
         <Section icon={ShieldCheck} title="Approvals" count={approvalEvents.length}>
           <ul className="space-y-2">
@@ -244,7 +226,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Fork provenance — derived from the timeline. */}
       {forkEvents.length > 0 && (
         <Section icon={GitFork} title="Fork provenance" count={forkEvents.length}>
           <ul className="space-y-2">
@@ -257,7 +238,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Warnings */}
       {warnings.length > 0 && (
         <Section icon={TriangleAlert} title="Warnings" count={warnings.length}>
           <ul className="space-y-1.5">
@@ -271,8 +251,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
         </Section>
       )}
 
-      {/* Raw timeline fallback — shown when the trace has no structured groups
-          but events exist, so nothing is hidden. */}
       {!hasStructured && timeline.length > 0 && (
         <Section icon={Activity} title="Raw timeline" count={timeline.length}>
           <ul className="space-y-2">
@@ -294,8 +272,6 @@ export function TaskTraceView({ trace }: TaskTraceViewProps) {
   )
 }
 
-// Adapt a trace TraceEvent into the ExecutionEvent shape EventRow consumes. The
-// trace event is a subset, so missing identity fields are filled from the task.
 function timelineToEvent(e: TraceEvent, namespace: string, taskName: string) {
   return {
     id: `${taskName}:${e.seq}`,

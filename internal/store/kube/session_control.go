@@ -41,8 +41,6 @@ type sessionLeaseState struct {
 	OperationHash string
 }
 
-// CreateSessionControl creates the immutable Session identity, its empty
-// serialization Lease, and the initial status.
 func (s *Store) CreateSessionControl(ctx context.Context, control *store.SessionControl, fence store.ControllerEpochFence) (*store.SessionControl, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -119,7 +117,6 @@ func (s *Store) CreateSessionControl(ctx context.Context, control *store.Session
 	return s.completeSessionControlCreation(ctx, object, normalized, normalizedFence, snapshot)
 }
 
-// GetSessionControl reads the exact namespaced Session control record.
 func (s *Store) GetSessionControl(ctx context.Context, namespace, sessionName string) (*store.SessionControl, error) {
 	if err := s.requireClient(); err != nil {
 		return nil, err
@@ -144,9 +141,6 @@ func (s *Store) GetSessionControl(ctx context.Context, namespace, sessionName st
 	return &result, nil
 }
 
-// AcquireSessionMutationLease acquires the next monotonic Session lease
-// generation by first CAS-updating the coordination Lease and then mirroring
-// the exact Lease revision into RuntimeSessionControl status.
 func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.AcquireSessionMutationLeaseRequest) (*store.SessionControl, error) {
 	if err := normalizeAcquireSessionMutationLeaseRequest(&request); err != nil {
 		return nil, err
@@ -219,8 +213,6 @@ func (s *Store) AcquireSessionMutationLease(ctx context.Context, request store.A
 	return s.completeSessionLeaseStatus(ctx, object, control, request, fence, snapshot, updatedLease)
 }
 
-// CommitSessionRuntimeGeneration records the newest provider RuntimeSession
-// generation proven live under the exact active Session lease.
 func (s *Store) CommitSessionRuntimeGeneration(ctx context.Context, request store.CommitSessionRuntimeGenerationRequest) (*store.SessionControl, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.SessionName = strings.TrimSpace(request.SessionName)
@@ -288,10 +280,6 @@ func (s *Store) CommitSessionRuntimeGeneration(ctx context.Context, request stor
 	return &result, nil
 }
 
-// ReleaseSessionMutationLease aborts an exact pre-prompt lease after the
-// caller has independently established that no SessionTurn was persisted.
-// SessionControl commits first; retries then finish the coordination-Lease
-// clear by matching the durable release operation.
 func (s *Store) ReleaseSessionMutationLease(ctx context.Context, request store.ReleaseSessionMutationLeaseRequest) (*store.SessionControl, error) {
 	if err := normalizeReleaseSessionMutationLeaseRequest(&request); err != nil {
 		return nil, err
@@ -367,10 +355,6 @@ func (s *Store) finishPendingPrePromptLeaseRelease(ctx context.Context, control 
 	return fresh, freshState, err
 }
 
-// ReconcileSessionControl establishes the independently observed baseline and
-// returns both SessionControl and BranchClaim to Available. A Session Lease is
-// held in reconciliation mode while the two status CAS operations complete;
-// retries finish any partially committed same-operation reconciliation.
 func (s *Store) ReconcileSessionControl(ctx context.Context, request store.ReconcileSessionControlRequest) (*store.SessionControl, error) {
 	if err := normalizeReconcileSessionControlRequest(&request); err != nil {
 		return nil, err
@@ -575,10 +559,6 @@ func (s *Store) completeSessionLeaseStatus(ctx context.Context, object *corev1al
 	return &result, nil
 }
 
-// completeExistingSessionLineage handles an idempotent retry whose exact
-// coordination Lease is already mirrored. A control may have a mirrored Lease
-// but no lineage; appending the lineage remains fenced by that
-// exact Lease and one RuntimeSessionControl status CAS.
 func (s *Store) completeExistingSessionLineage(ctx context.Context, object *corev1alpha1.RuntimeSessionControl, control store.SessionControl, request store.AcquireSessionMutationLeaseRequest, fence store.ControllerEpochFence, snapshot epochSnapshot) (*store.SessionControl, error) {
 	lineage, err := resolveSessionLineage(control.Lineage, *request.Lineage, request.AcquiredAt)
 	if err != nil {
@@ -1179,9 +1159,6 @@ func verifiedBaselineFromAPI(value *corev1alpha1.ControlVerifiedBranchBaseline) 
 	return &store.VerifiedBranchBaseline{RepositoryID: value.RepositoryID, Ref: value.Ref, SHA: value.SHA}
 }
 
-// normalizeSessionControlForCreate applies the shared session control contract
-// and additionally rejects lineage on create (lineage is established with
-// mutation Lease acquisition) and trims the related record IDs.
 func normalizeSessionControlForCreate(control *store.SessionControl, fence store.ControllerEpochFence) (store.SessionControl, store.ControllerEpochFence, error) {
 	if control == nil {
 		return store.NormalizeSessionControlForCreate(nil, fence)
@@ -1195,8 +1172,6 @@ func normalizeSessionControlForCreate(control *store.SessionControl, fence store
 	return store.NormalizeSessionControlForCreate(&trimmed, fence)
 }
 
-// validateVerifiedBaseline tolerates surrounding whitespace on the SHA before
-// applying the shared verified baseline contract.
 func validateVerifiedBaseline(baseline store.VerifiedBranchBaseline) error {
 	baseline.SHA = strings.TrimSpace(baseline.SHA)
 	return store.ValidateVerifiedBaseline(baseline)

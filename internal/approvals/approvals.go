@@ -20,12 +20,9 @@ const (
 
 	ResolvedApprovalBlockingOverflowID = "__orka_blocking_approval_decisions_omitted__"
 
-	// KindPermission marks an agent runtime's permission request held for the
-	// Task's requester. Only that requester may decide it.
 	KindPermission = "permission"
 )
 
-// Option is one choice an agent runtime offered with a permission request.
 type Option struct {
 	OptionID string `json:"optionID"`
 	Name     string `json:"name,omitempty"`
@@ -33,8 +30,7 @@ type Option struct {
 }
 
 type Approval struct {
-	ID string `json:"id"`
-	// Kind is KindPermission for a held permission request; empty otherwise.
+	ID                string          `json:"id"`
 	Kind              string          `json:"kind,omitempty"`
 	Action            string          `json:"action"`
 	RiskSummary       string          `json:"riskSummary,omitempty"`
@@ -56,17 +52,11 @@ type Approval struct {
 	Binding           *CallBinding    `json:"binding,omitempty"`
 	ExecutionOutcome  string          `json:"executionOutcome,omitempty"`
 	ExecutionReason   string          `json:"executionReason,omitempty"`
-	// Options are the choices offered with a permission request.
-	Options []Option `json:"options,omitempty"`
+	Options           []Option        `json:"options,omitempty"`
 
-	// RequestSeq is the stream sequence of the event that requested the
-	// approval, or zero when none was seen. It is never serialized.
 	RequestSeq int64 `json:"-"`
 }
 
-// CallBinding identifies the original v2 call. Runtime-supplied identifiers are
-// digested so public event sanitization cannot change the binding or expose
-// private text. The broker retains executable inputs in a Task-owned Secret.
 type CallBinding struct {
 	TaskAttempt              uint32 `json:"taskAttempt"`
 	PromptID                 string `json:"promptID"`
@@ -80,7 +70,6 @@ type CallBinding struct {
 	RequestDigest            string `json:"requestDigest"`
 }
 
-// Derive returns current approval state from a task event stream.
 func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 	eventsCopy := make([]store.ExecutionEvent, 0, len(input))
 	eventsCopy = append(eventsCopy, input...)
@@ -97,8 +86,6 @@ func Derive(input []store.ExecutionEvent, now time.Time) []Approval {
 				id = event.ID
 			}
 			if _, ok := byID[id]; ok {
-				// Duplicate request events are idempotent: once an approval ID exists,
-				// later replays must not reset terminal decisions back to pending.
 				continue
 			}
 			order = append(order, id)
@@ -261,8 +248,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// EventTypes returns the approval-related execution event types needed to derive
-// current approval state from a task stream.
 func EventTypes() []string {
 	return []string{
 		events.ExecutionEventTypeApprovalRequested,
@@ -274,7 +259,6 @@ func EventTypes() []string {
 	}
 }
 
-// ListEvents reads all approval-related events for a task stream.
 func ListEvents(ctx context.Context, eventStore store.ExecutionEventStore, namespace, taskName string) ([]store.ExecutionEvent, error) {
 	if eventStore == nil {
 		return nil, nil
@@ -305,7 +289,6 @@ func ListEvents(ctx context.Context, eventStore store.ExecutionEventStore, names
 	return out, nil
 }
 
-// Resolved returns terminal approval decisions in a compact worker-facing shape.
 func Resolved(values []Approval) []ResolvedApproval {
 	out := make([]ResolvedApproval, 0, len(values))
 	for _, approval := range values {
@@ -335,10 +318,6 @@ func Resolved(values []Approval) []ResolvedApproval {
 	return out
 }
 
-// FilterEventsForTaskUID keeps approval events emitted for the current
-// immutable Task instance. Untagged events are retained as a migration path for
-// in-flight approval streams created before taskUID was added; task finalizer
-// cleanup still owns removal of old per-name streams when Tasks are deleted.
 func FilterEventsForTaskUID(input []store.ExecutionEvent, taskUID string) []store.ExecutionEvent {
 	taskUID = strings.TrimSpace(taskUID)
 	if taskUID == "" {

@@ -17,17 +17,12 @@ import type { ExecutionEvent, ForkTaskResponse } from '@/schemas/execution-event
 
 export interface ForkDialogProps {
   taskId: string
-  // The event row the fork was launched from. Its seq seeds afterSeq.
   event: ExecutionEvent | null
-  // Checkpoint used when the fork is not launched from an event row (the
-  // runtime controls fork from the latest event).
   afterSeq?: number
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
-// Stable random id for an idempotency key. crypto.randomUUID is available in all
-// supported browsers and the test environment.
 function newIdempotencyKey(): string {
   return globalThis.crypto?.randomUUID?.() ?? `fork-${Date.now()}-${Math.round(Math.random() * 1e9)}`
 }
@@ -39,24 +34,12 @@ export function ForkDialog({ taskId, event, afterSeq: checkpointSeq, open, onOpe
   const [prompt, setPrompt] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [created, setCreated] = useState<ForkTaskResponse | null>(null)
-  // Bumped on every reset so an in-flight submission that resolves after the
-  // dialog was closed (via Escape/overlay/X while pending) does not repopulate
-  // state on the now-closed, mounted component.
   const submissionRef = useRef(0)
-  // The checkpoint (afterSeq) and request body the current key was minted for.
-  // The backend derives the deterministic auto-name solely from the key, so a key
-  // reused for a different request (a different checkpoint, or a name/agent/prompt
-  // that no longer matches the visible form) would return or create a fork for
-  // the wrong request. Bind the key to its request signature and mint a fresh one
-  // when any of it changes. The key is reused across retries of the same request
-  // (and preserved across a pending close) so a network drop doesn't duplicate.
   const idempotencyKeyRef = useRef<string>('')
   const idempotencyKeySignatureRef = useRef<string | null>(null)
 
   const afterSeq = event?.seq ?? checkpointSeq ?? 0
   const nameError = taskNameError(newTaskName.trim())
-  // Signature of the request this key represents. Trimmed to match what submit()
-  // actually sends.
   const requestSignature = JSON.stringify([
     afterSeq,
     newTaskName.trim(),
@@ -66,15 +49,6 @@ export function ForkDialog({ taskId, event, afterSeq: checkpointSeq, open, onOpe
 
   function reset() {
     submissionRef.current += 1
-    // Preserve the idempotency key unless the fork is confirmed created. The POST
-    // can't be aborted, and even a settled *error* is ambiguous — the request may
-    // have reached the backend and created the task before the response was lost
-    // (network drop, timeout). If we cleared the key here, reopening and retrying
-    // the same request would mint a fresh key, so the backend couldn't collapse
-    // the duplicate and would create a second task. Only a confirmed success means
-    // the fork exists and the key has served its purpose, so clear it then; keep
-    // it across pending and error closes. A genuinely different next request
-    // rotates the key in submit() via its request signature anyway.
     if (fork.isSuccess) {
       idempotencyKeyRef.current = ''
       idempotencyKeySignatureRef.current = null
@@ -91,12 +65,6 @@ export function ForkDialog({ taskId, event, afterSeq: checkpointSeq, open, onOpe
     if (fork.isPending || nameError) return
     setError(null)
     const submission = submissionRef.current
-    // Reuse the key across retries of the same request, but mint a fresh one
-    // whenever the request signature differs from what the key was minted for
-    // (a different checkpoint, name, agent, or prompt — e.g. a key preserved from
-    // a pending close whose form fields were then cleared). The backend's
-    // deterministic auto-name derives from the key alone, so a stale key would
-    // resolve to the wrong fork.
     if (!idempotencyKeyRef.current || idempotencyKeySignatureRef.current !== requestSignature) {
       idempotencyKeyRef.current = newIdempotencyKey()
       idempotencyKeySignatureRef.current = requestSignature
@@ -109,7 +77,6 @@ export function ForkDialog({ taskId, event, afterSeq: checkpointSeq, open, onOpe
         prompt: prompt.trim() || undefined,
         idempotencyKey: idempotencyKeyRef.current,
       })
-      // Ignore the result if the dialog was reset/closed while in flight.
       if (submission !== submissionRef.current) return
       setCreated(result)
     } catch (err) {
@@ -122,15 +89,6 @@ export function ForkDialog({ taskId, event, afterSeq: checkpointSeq, open, onOpe
     }
   }
 
-  // The idempotency key is bound to the request signature (checkpoint + name +
-  // agent + prompt), so editing any field naturally invalidates it: submit()
-  // mints a fresh key whenever the current signature differs from the key's. No
-  // separate per-field key clearing is needed.
-
-  // Single close path so every dismissal — Escape, overlay, the X button, and the
-  // footer Close/Cancel buttons — resets form and result state. The dialog stays
-  // mounted under TaskEventTimeline, so skipping reset would reopen on a stale
-  // success screen or leftover input the next time a row is forked.
   function handleOpenChange(next: boolean) {
     if (!next) reset()
     onOpenChange(next)

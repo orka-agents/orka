@@ -8,8 +8,6 @@ import (
 	"github.com/orka-agents/orka/internal/acp"
 )
 
-// ValidateSoulRuntime permits souls only for AI workers and the four built-in
-// harness v2 runtimes. Agents without a soul retain their existing behavior.
 func ValidateSoulRuntime(agent *corev1alpha1.Agent) error {
 	if agent == nil || agent.Spec.Soul == nil || agent.Spec.Runtime == nil {
 		return nil
@@ -25,9 +23,6 @@ func ValidateSoulRuntime(agent *corev1alpha1.Agent) error {
 	return errors.New("agent.spec.soul requires an AI worker or a built-in harness v2 runtime")
 }
 
-// ValidateInlineCopilotInstructions checks only known inline portions of the
-// completed Agent. It does not resolve ConfigMaps; the controller must still
-// validate the resolved configuration before dispatch.
 func ValidateInlineCopilotInstructions(agent *corev1alpha1.Agent) error {
 	if agent == nil || agent.Spec.Runtime == nil {
 		return nil
@@ -50,9 +45,6 @@ func ValidateInlineCopilotInstructions(agent *corev1alpha1.Agent) error {
 	return nil
 }
 
-// ValidateAgentWrite checks the soul and instruction fields an Agent write can
-// validate without resolving ConfigMaps, so an API write cannot persist an
-// Agent that its reconciler would immediately reject.
 func ValidateAgentWrite(agent *corev1alpha1.Agent) error {
 	if err := ValidateSoulRuntime(agent); err != nil {
 		return err

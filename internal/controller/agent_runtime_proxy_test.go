@@ -16,9 +16,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// The transport checks for EOF after forwarding Content-Length bytes. Hold that
-// check until the downstream response has flushed, matching the ordering that
-// previously disconnected the recovery fixture's original prompt stream.
 type runtimeProxyEOFBody struct {
 	io.ReadCloser
 	ctx       context.Context

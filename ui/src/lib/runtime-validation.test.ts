@@ -55,9 +55,8 @@ describe('runtime-validation', () => {
   it('failed task with empty trace never rolls up to pass', () => {
     const checks = deriveRuntimeChecks({
       task: { ...base, status: { phase: 'Failed' } },
-      trace: trace(), // no errors recorded, but phase is authoritative
+      trace: trace(),
     })
-    // The task did reach a terminal state; the failure is its own check.
     expect(checks.find((c) => c.id === 'terminal')?.status).toBe('pass')
     expect(checks.find((c) => c.id === 'outcome')?.status).toBe('fail')
     expect(rollupStatus(checks)).toBe('fail')

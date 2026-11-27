@@ -135,8 +135,6 @@ func nativeIngressReviewFixture(t *testing.T) (*externalRuntimePoolFixture, *nat
 	return nativeIngressReviewFixtureWith(t, nil)
 }
 
-// nativeIngressReviewFixtureWith lets a test adjust the workspace before its
-// first workload is published.
 func nativeIngressReviewFixtureWith(t *testing.T, prepare func(*externalRuntimePoolFixture)) (*externalRuntimePoolFixture, *nativeIngressReviewClient, *nativeIngressReviewTransport, corev1.Pod) {
 	t.Helper()
 	f := newExternalRuntimePoolFixture(t)
@@ -243,8 +241,6 @@ func TestExternalNativeIngressUsesUncachedFrozenTargetsAndRecoversLostCreate(t *
 	if cl.cachedReads != 0 || transport.calls != 1 || len(cl.creates) != 1 {
 		t.Fatalf("out-of-cache namespace recovery failed: cached=%d creates=%v bootstrap=%d", cl.cachedReads, cl.creates, transport.calls)
 	}
-	// Only the isolated provider proxy gets a grant. A policy selecting the
-	// controller would isolate it and lock out its other clients.
 	if err := cl.Client.Get(t.Context(), types.NamespacedName{Namespace: targets[1].Namespace, Name: targets[1].Name}, &networkingv1.NetworkPolicy{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("native ingress created a policy selecting the controller: %v", err)
 	}
@@ -337,7 +333,6 @@ func TestExternalNativeIngressCleanupIgnoresForeignLabelsAndUsesFrozenNamespaces
 					t.Fatal(err)
 				}
 			}
-			// Current operator namespaces are not authority for older grants.
 			f.r.ControllerNamespace, f.r.ProviderProxy.Namespace = "new-core", "new-proxy"
 			f.r.ProviderProxy.BaseURL = "http://provider-auth-proxy.new-proxy.svc:8080"
 			nativeIngressReviewDeletePool(t, f)

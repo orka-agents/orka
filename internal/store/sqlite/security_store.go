@@ -61,9 +61,6 @@ func unmarshalSecurityJSON(payload string, value any) error {
 	return json.Unmarshal([]byte(payload), value)
 }
 
-// Timestamps persist as TEXT and list queries order them lexicographically, so
-// every persisted time is normalized to UTC here regardless of the location
-// callers supplied.
 func utcTime(value time.Time) time.Time {
 	return value.UTC()
 }
@@ -76,7 +73,6 @@ func utcTimePtr(value *time.Time) *time.Time {
 	return &utc
 }
 
-// CreateScanRun inserts a new scan run.
 func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
 	_, err := writeOperationInto(ctx, s, "CreateScanRun", nil, run, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).createScanRunWrite(ctx, run)
@@ -134,8 +130,6 @@ func (s *Store) createScanRunWrite(ctx context.Context, run *store.ScanRun) erro
 	return nil
 }
 
-// UpdateScanRun updates progress without rebinding a run or reactivating an old
-// run after a newer run has been admitted, even when that newer run is terminal.
 func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
 	_, err := writeOperationInto(ctx, s, "UpdateScanRun", nil, run, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).updateScanRunWrite(ctx, run)
@@ -146,9 +140,6 @@ func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
 func (s *Store) updateScanRunWrite(ctx context.Context, run *store.ScanRun) error {
 	run.StartedAt = utcTime(run.StartedAt)
 	run.CompletedAt = utcTimePtr(run.CompletedAt)
-	// The update and the check that tells a missing run from a conflict share
-	// one transaction, so a run created after the update is not reported as a
-	// conflict.
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		result, err := tx.securityDB().ExecContext(ctx,
 			`UPDATE security_scan_runs
@@ -192,7 +183,6 @@ func (s *Store) updateScanRunWrite(ctx context.Context, run *store.ScanRun) erro
 	})
 }
 
-// GetScanRun fetches a scan run by ID.
 func (s *Store) GetScanRun(ctx context.Context, namespace, id string) (*store.ScanRun, error) {
 	var run store.ScanRun
 	err := s.securityDB().QueryRowContext(ctx,
@@ -219,8 +209,6 @@ func (s *Store) GetScanRun(ctx context.Context, namespace, id string) (*store.Sc
 	return &run, nil
 }
 
-// ListScanRuns lists scan runs in admission order, newest first. Caller clocks
-// and late Task timestamps must not change which run owns the current pipeline.
 func (s *Store) ListScanRuns(ctx context.Context, namespace, repositoryScan string, limit int, cursor string) ([]store.ScanRun, string, error) {
 	offset, err := parseOffsetCursor(cursor)
 	if err != nil {
@@ -236,13 +224,10 @@ func (s *Store) ListScanRuns(ctx context.Context, namespace, repositoryScan stri
 	return runs, nextOffsetCursor(offset, len(runs), limit), nil
 }
 
-// ListActiveScanRuns reads reservations without walking completed scan history.
 func (s *Store) ListActiveScanRuns(ctx context.Context, namespace, repositoryScan string) ([]store.ScanRun, error) {
 	return s.listScanRuns(ctx, namespace, repositoryScan, `phase IN ('pending', 'running')`, -1, 0)
 }
 
-// ListScanRunsPendingCancellation includes terminal runs whose late Tasks still
-// need cleanup without walking completed scan history.
 func (s *Store) ListScanRunsPendingCancellation(ctx context.Context, namespace, repositoryScan string) ([]store.ScanRun, error) {
 	return s.listScanRuns(ctx, namespace, repositoryScan, `cancellation_pending = TRUE`, -1, 0)
 }
@@ -286,8 +271,6 @@ func (s *Store) listScanRuns(ctx context.Context, namespace, repositoryScan, pre
 	return runs, nil
 }
 
-// RequestScanRunCancellation freezes ordinary progress before Task deletion.
-// Each new request fences older cleanup attempts so they cannot erase a retry.
 func (s *Store) RequestScanRunCancellation(ctx context.Context, run *store.ScanRun, reason string) error {
 	_, err := writeOperationInto(ctx, s, "RequestScanRunCancellation", nil, run, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).requestScanRunCancellationWrite(ctx, run, reason)
@@ -296,8 +279,6 @@ func (s *Store) RequestScanRunCancellation(ctx context.Context, run *store.ScanR
 }
 
 func (s *Store) requestScanRunCancellationWrite(ctx context.Context, run *store.ScanRun, reason string) error {
-	// The update and the check that tells a missing run from a conflict share
-	// one transaction.
 	version := run.CancellationVersion
 	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
 		err := tx.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
@@ -323,8 +304,6 @@ func (s *Store) requestScanRunCancellationWrite(ctx context.Context, run *store.
 	return nil
 }
 
-// CompleteScanRunCancellation releases active reservations only after cleanup.
-// Late-Task cleanup preserves the result of an already terminal run.
 func (s *Store) CompleteScanRunCancellation(ctx context.Context, run *store.ScanRun) error {
 	_, err := writeOperationInto(ctx, s, "CompleteScanRunCancellation", nil, run, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).completeScanRunCancellationWrite(ctx, run)
@@ -333,8 +312,6 @@ func (s *Store) CompleteScanRunCancellation(ctx context.Context, run *store.Scan
 }
 
 func (s *Store) completeScanRunCancellationWrite(ctx context.Context, run *store.ScanRun) error {
-	// The update and the check that tells a missing run from a conflict share
-	// one transaction.
 	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
 		result, err := tx.securityDB().ExecContext(ctx, `UPDATE security_scan_runs
 			SET cancellation_pending = FALSE,
@@ -365,7 +342,6 @@ func (s *Store) completeScanRunCancellationWrite(ctx context.Context, run *store
 	return nil
 }
 
-// UpsertReviewSlice inserts or updates a deterministic review slice.
 func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice) error {
 	_, err := writeOperationInto(ctx, s, "UpsertReviewSlice", nil, slice, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).upsertReviewSliceWrite(ctx, slice)
@@ -516,7 +492,6 @@ func scanReviewSlice(scanner interface {
 	return &slice, nil
 }
 
-// ListReviewSlices lists review slices for a repository scan.
 func (s *Store) ListReviewSlices(ctx context.Context, filter store.ReviewSliceFilter) ([]store.ReviewSlice, string, error) {
 	offset, err := parseOffsetCursor(filter.Cursor)
 	if err != nil {
@@ -564,7 +539,6 @@ func (s *Store) ListReviewSlices(ctx context.Context, filter store.ReviewSliceFi
 	return slices, nextOffsetCursor(offset, len(slices), filter.Limit), nil
 }
 
-// GetReviewSlice returns one review slice.
 func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, id string) (*store.ReviewSlice, error) {
 	row := s.securityDB().QueryRowContext(ctx,
 		`SELECT id, namespace, repository_scan, source, title, summary, kind, confidence, status,
@@ -585,7 +559,6 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 	return slice, nil
 }
 
-// UpdateReviewSliceStatus updates slice status and review timestamp.
 func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
 	return writeOperationErr(ctx, s, "UpdateReviewSliceStatus", func(ctx context.Context) error {
 		return s.securityWriteStore(ctx).updateReviewSliceStatusWrite(ctx, namespace, repositoryScan, id, lastScanRunID, status)
@@ -614,7 +587,6 @@ func (s *Store) updateReviewSliceStatusWrite(ctx context.Context, namespace, rep
 	return nil
 }
 
-// GetLatestThreatModel returns the current threat model for a repository.
 func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryScan string) (*store.ThreatModel, error) {
 	var model store.ThreatModel
 	err := s.securityDB().QueryRowContext(ctx,
@@ -637,8 +609,6 @@ func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryS
 	return &model, nil
 }
 
-// SaveThreatModel stores the current threat model, replacing any older copies for the repository.
-// When Version is zero, the revision number is incremented from the latest stored model.
 func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
 	_, err := writeOperationInto(ctx, s, "SaveThreatModel", nil, model, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).saveThreatModelWrite(ctx, model)
@@ -652,9 +622,6 @@ func (s *Store) saveThreatModelWrite(ctx context.Context, model *store.ThreatMod
 	})
 }
 
-// SaveThreatModelIfVersion saves model like SaveThreatModel, but only while
-// the latest stored version equals expectedVersion. Otherwise it returns
-// store.ErrConflict and leaves the stored model unchanged.
 func (s *Store) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
 	_, err := writeOperationInto(ctx, s, "SaveThreatModelIfVersion", nil, model, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).saveThreatModelIfVersionWrite(ctx, model, expectedVersion)
@@ -737,7 +704,6 @@ func unmarshalEvidence(payload string) ([]store.FindingEvidenceRef, error) {
 	return evidence, nil
 }
 
-// UpsertFinding inserts or updates a finding keyed by repository fingerprint.
 func (s *Store) UpsertFinding(ctx context.Context, finding *store.Finding) error {
 	_, err := writeOperationInto(ctx, s, "UpsertFinding", nil, finding, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).upsertFindingWrite(ctx, finding)
@@ -749,8 +715,6 @@ func (s *Store) upsertFindingWrite(ctx context.Context, finding *store.Finding) 
 	return s.upsertFinding(ctx, finding, false)
 }
 
-// UpsertObservedFinding inserts or updates a finding from a current scan
-// observation, which may explicitly reopen a remediated finding.
 func (s *Store) UpsertObservedFinding(ctx context.Context, finding *store.Finding) error {
 	_, err := writeOperationInto(ctx, s, "UpsertObservedFinding", nil, finding, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).upsertObservedFindingWrite(ctx, finding)
@@ -993,7 +957,6 @@ func scanFinding(scanner interface {
 	return &finding, nil
 }
 
-// GetFinding returns a finding by ID.
 func (s *Store) GetFinding(ctx context.Context, namespace, id string) (*store.Finding, error) {
 	row := s.securityDB().QueryRowContext(ctx,
 		`SELECT id, namespace, repository_scan, scan_run_id, slice_id, fingerprint, target_key, title, category, summary, severity,
@@ -1014,7 +977,6 @@ func (s *Store) GetFinding(ctx context.Context, namespace, id string) (*store.Fi
 	return finding, nil
 }
 
-// ListFindings lists findings for a repository scan with optional filtering.
 func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([]store.Finding, string, error) {
 	offset, err := parseOffsetCursor(filter.Cursor)
 	if err != nil {
@@ -1119,7 +1081,6 @@ func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([
 	return findings, nextOffsetCursor(offset, len(findings), filter.Limit), nil
 }
 
-// GetFindingCounts returns current open finding counts by severity.
 func (s *Store) GetFindingCounts(ctx context.Context, namespace, repositoryScan string) (store.FindingCounts, error) {
 	row := s.securityDB().QueryRowContext(ctx,
 		`SELECT
@@ -1139,7 +1100,6 @@ func (s *Store) GetFindingCounts(ctx context.Context, namespace, repositoryScan 
 	return counts, nil
 }
 
-// UpdateFindingState updates the user-visible finding state.
 func (s *Store) UpdateFindingState(ctx context.Context, namespace, id, state string) error {
 	return writeOperationErr(ctx, s, "UpdateFindingState", func(ctx context.Context) error {
 		return s.securityWriteStore(ctx).updateFindingStateWrite(ctx, namespace, id, state)
@@ -1177,7 +1137,6 @@ func (s *Store) updateFindingStateWrite(ctx context.Context, namespace, id, stat
 	return nil
 }
 
-// ResolveFindingIfCurrent resolves only the pr_open occurrence and PR selected by the caller.
 func (s *Store) ResolveFindingIfCurrent(ctx context.Context, namespace, id, scanRunID string, prNumber int) (bool, error) {
 	return writeOperation(ctx, s, "ResolveFindingIfCurrent", nil, func(ctx context.Context) (bool, error) {
 		return s.securityWriteStore(ctx).resolveFindingIfCurrentWrite(ctx, namespace, id, scanRunID, prNumber)
@@ -1211,8 +1170,6 @@ func findingUserFinalState(state string) bool {
 	}
 }
 
-// MarkFindingDuplicate keeps an old finding addressable while removing it from
-// canonical lists and counts.
 func (s *Store) MarkFindingDuplicate(ctx context.Context, namespace, id, canonicalID string) error {
 	return writeOperationErr(ctx, s, "MarkFindingDuplicate", func(ctx context.Context) error {
 		return s.securityWriteStore(ctx).markFindingDuplicateWrite(ctx, namespace, id, canonicalID)
@@ -1275,7 +1232,6 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 	return nil
 }
 
-// CreatePatchProposal inserts a new patch proposal.
 func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
 	_, err := writeOperationInto(ctx, s, "CreatePatchProposal", nil, proposal, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).createPatchProposalWrite(ctx, proposal)
@@ -1304,9 +1260,6 @@ func (s *Store) createPatchProposalWrite(ctx context.Context, proposal *store.Pa
 	return uniqueConflict(err)
 }
 
-// BindPatchProposalPublicationEvidence atomically finalizes a proposal with one
-// immutable governed-publication tuple. Identical replay is a no-op; any
-// differing replay conflicts and leaves the first tuple unchanged.
 func (s *Store) BindPatchProposalPublicationEvidence(ctx context.Context, proposal *store.PatchProposal) error {
 	_, err := writeOperationInto(ctx, s, "BindPatchProposalPublicationEvidence", nil, proposal, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).bindPatchProposalPublicationEvidenceWrite(ctx, proposal)
@@ -1507,7 +1460,6 @@ func samePatchProposalPublicationBinding(existing store.PatchProposal, desired *
 	return reflect.DeepEqual(existingEvidence, desiredEvidence)
 }
 
-// UpdatePatchProposal updates an existing patch proposal.
 func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchProposal) error {
 	_, err := writeOperationInto(ctx, s, "UpdatePatchProposal", nil, proposal, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).updatePatchProposalWrite(ctx, proposal)
@@ -1523,8 +1475,6 @@ func (s *Store) updatePatchProposalWrite(ctx context.Context, proposal *store.Pa
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
 	now := time.Now().UTC()
-	// The update and the read that classifies a refused update share one
-	// transaction, so they see the same proposal.
 	var current *store.PatchProposal
 	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
 		result, err := tx.securityDB().ExecContext(ctx,
@@ -1571,7 +1521,6 @@ func (s *Store) updatePatchProposalWrite(ctx context.Context, proposal *store.Pa
 	return nil
 }
 
-// ListPatchProposals lists patch proposals for a finding, newest first.
 func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
 	var proposals []store.PatchProposal
 	err := s.securityReadSnapshot(ctx, func(q securityDB) error {
@@ -1632,7 +1581,6 @@ func listPatchProposals(ctx context.Context, q securityDB, namespace, findingID 
 	return proposals, rows.Err()
 }
 
-// CreateDroppedFinding records a rejected finding diagnostic.
 func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.DroppedFinding) error {
 	_, err := writeOperationInto(ctx, s, "CreateDroppedFinding", nil, dropped, func(ctx context.Context) (noResult, error) {
 		return noResult{}, s.securityWriteStore(ctx).createDroppedFindingWrite(ctx, dropped)
@@ -1667,7 +1615,6 @@ func (s *Store) createDroppedFindingWrite(ctx context.Context, dropped *store.Dr
 	return uniqueConflict(err)
 }
 
-// ListDroppedFindings lists rejected finding diagnostics.
 func (s *Store) ListDroppedFindings(ctx context.Context, filter store.DroppedFindingFilter) ([]store.DroppedFinding, string, error) {
 	offset, err := parseOffsetCursor(filter.Cursor)
 	if err != nil {

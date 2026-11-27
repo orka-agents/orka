@@ -30,7 +30,6 @@ const (
 	testToken     = "0123456789abcdef0123456789abcdef-token"
 )
 
-// countingReader counts Secret reads and can fail them.
 type countingReader struct {
 	client.Reader
 	gets int

@@ -33,8 +33,6 @@ export function useGatewayLedgerPagination(resetKey: string) {
   const [saved, setSaved] = useState<GatewayLedgerPaginationState>(initialState)
   const current = saved.key === scopedResetKey ? saved : initialState()
 
-  // React permits a guarded render-time adjustment when state is derived from a changed input.
-  // Persist the reset so returning to a previously selected namespace cannot resurrect its cursor.
   if (saved.key !== scopedResetKey) setSaved(current)
 
   return {

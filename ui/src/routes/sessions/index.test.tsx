@@ -66,7 +66,6 @@ describe('sessions routes', () => {
     it('renders SessionDetail with sessionId param', () => {
       const Component = SessionDetailRoute.component!
       render(<Component />)
-      // In loading state, shows skeleton
       expect(document.querySelector('.animate-pulse')).toBeInTheDocument()
     })
   })

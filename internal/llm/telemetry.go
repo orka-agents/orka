@@ -9,13 +9,10 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
-// TelemetryIdentity is implemented by providers that can expose their concrete
-// telemetry identity without overloading the user-facing Provider.Name().
 type TelemetryIdentity interface {
 	TelemetryProviderName() string
 }
 
-// ProviderTelemetryName returns the OpenTelemetry GenAI provider name for p.
 func ProviderTelemetryName(p Provider) string {
 	if p == nil {
 		return ""

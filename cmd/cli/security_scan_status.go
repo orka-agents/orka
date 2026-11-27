@@ -111,8 +111,6 @@ exits when the scan finishes: exit code 0 when it succeeded, 1 when it failed.`,
 	return cmd
 }
 
-// resolveScanRunID returns the explicit --scan ID or the repository's latest
-// run.
 func resolveScanRunID(ctx context.Context, c *client.Client, repo, scanID string) (string, error) {
 	if scanID = strings.TrimSpace(scanID); scanID != "" {
 		return scanID, nil
@@ -142,9 +140,6 @@ func scanRunSucceeded(phase string) bool {
 	}
 }
 
-// scanProgressStateKey describes the counts a watch reprints for: the scan
-// phase, slice progress, and every stage's Task counts and failed names.
-// Ages are left out so the passage of time alone never reprints.
 func scanProgressStateKey(progress map[string]any) string {
 	scan := nestedMap(progress, "scan")
 	stages := anySliceToMaps(progress["stages"])
@@ -164,7 +159,6 @@ func scanProgressStateKey(progress map[string]any) string {
 	return strings.Join(parts, "\n")
 }
 
-// renderScanProgress draws the header lines and the per-stage table.
 func renderScanProgress(progress map[string]any) string {
 	var buf bytes.Buffer
 	scan := nestedMap(progress, "scan")

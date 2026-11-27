@@ -133,9 +133,6 @@ func TestACPAdmissionRetryReasonTreatsANonAdmittingPoolAsACapacityWait(t *testin
 	}
 }
 
-// promptRateLimitedTestTask is the status the built-in RuntimePool prompt-429
-// path in executeReservedTask writes: still Submitting and Pending, since the
-// runtime proved it did not accept the prompt.
 func promptRateLimitedTestTask() *corev1alpha1.Task {
 	task := capacityTestTask()
 	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSubmitting

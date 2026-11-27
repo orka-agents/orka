@@ -37,14 +37,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
-// The attention read model answers "what needs a person now?" across the
-// Tasks of one namespace. It is computed on every read from Task objects,
-// their approval event streams, and blocked RepositoryMonitor work actions;
-// nothing is persisted. Every item is a short, safe summary that links to the
-// per-Task API, which stays the only place approval detail is shown and the
-// only place a decision is enforced.
-
-// Attention item kinds, in rank order.
 const (
 	AttentionKindApproval       = "approval"
 	AttentionKindOutcomeUnknown = "outcomeUnknown"
@@ -53,14 +45,12 @@ const (
 	AttentionKindMonitorBlocked = "monitorBlocked"
 )
 
-// Approval sources reported on approval items.
 const (
 	AttentionApprovalSourceParked   = "parked"
 	AttentionApprovalSourceBrokered = "brokered"
 	AttentionApprovalSourceWorker   = "worker"
 )
 
-// Source states reported in AttentionSources.
 const (
 	attentionSourceIncluded    = "included"
 	attentionSourcePartial     = "partial"
@@ -69,8 +59,6 @@ const (
 	attentionSourceNotRequired = "notRequested"
 )
 
-// Reasons a response is incomplete. A bound that was hit means the ranking
-// covers only part of the namespace and must not be read as complete.
 const (
 	attentionIncompleteTaskScanLimit          = "taskScanLimit"
 	attentionIncompleteApprovalCandidateLimit = "approvalCandidateLimit"
@@ -79,10 +67,8 @@ const (
 )
 
 const (
-	attentionDefaultSince = 24 * time.Hour
-	attentionMaxSince     = 7 * 24 * time.Hour
-	// attentionCursorWindowGrace lets a continuation walk that started at the
-	// since limit finish after the limit has moved on.
+	attentionDefaultSince        = 24 * time.Hour
+	attentionMaxSince            = 7 * 24 * time.Hour
 	attentionCursorWindowGrace   = time.Hour
 	attentionDefaultLimit        = 50
 	attentionMaxLimit            = 200
@@ -98,20 +84,12 @@ const (
 	attentionApprovalStatusQuery = "pending"
 )
 
-// attentionBounds limits the work one attention request does. A zero field
-// uses its default.
 type attentionBounds struct {
-	// TaskScan bounds the Tasks listed and filtered.
-	TaskScan int
-	// ApprovalCandidates bounds how many Tasks' event streams are read, and
-	// ApprovalEvents bounds each stream.
+	TaskScan           int
 	ApprovalCandidates int
 	ApprovalEvents     int
-	// MonitorActions bounds the blocked work actions scanned.
-	MonitorActions int
-	// CapabilityTasks bounds the Tasks per page whose decision hints need
-	// SubjectAccessReviews or Gateway lookups; later approvals report null.
-	CapabilityTasks int
+	MonitorActions     int
+	CapabilityTasks    int
 }
 
 var defaultAttentionBounds = attentionBounds{
@@ -132,56 +110,32 @@ func (h *Handlers) attentionLimits() attentionBounds {
 	return limits
 }
 
-// attentionPodWaitingReasons are the container waiting reasons the controller
-// reports with the "pod waiting: " message prefix. Any other text is reported
-// as Unknown so the response never echoes runtime-supplied detail.
 var attentionPodWaitingReasons = map[string]bool{
 	"ErrImagePull": true, "ImagePullBackOff": true, "InvalidImageName": true, "CreateContainerConfigError": true,
 }
 
-// AttentionResponse is one computed attention ranking page.
 type AttentionResponse struct {
-	Namespace   string    `json:"namespace"`
-	GeneratedAt time.Time `json:"generatedAt"`
-	// Since is the start of the window for Failed, OutcomeUnknown and
-	// monitor items. The approvals inbox has no window and omits it.
-	Since *time.Time      `json:"since,omitempty"`
-	Items []AttentionItem `json:"items"`
-	// Total and Counts cover every ranked item, not just this page. When
-	// Incomplete is true they are lower bounds.
-	Total  int            `json:"total"`
-	Counts map[string]int `json:"counts"`
-	// Incomplete is true when a scan bound was hit. The items are then a
-	// partial ranking; IncompleteReasons names each bound.
+	Namespace         string            `json:"namespace"`
+	GeneratedAt       time.Time         `json:"generatedAt"`
+	Since             *time.Time        `json:"since,omitempty"`
+	Items             []AttentionItem   `json:"items"`
+	Total             int               `json:"total"`
+	Counts            map[string]int    `json:"counts"`
 	Incomplete        bool              `json:"incomplete"`
 	IncompleteReasons []string          `json:"incompleteReasons,omitempty"`
 	Sources           AttentionSources  `json:"sources"`
 	Metadata          AttentionListMeta `json:"metadata"`
 }
 
-// AttentionSources reports whether optional sources were included.
 type AttentionSources struct {
-	// Approvals is included; partial when at least one Task that may be
-	// waiting for approval was skipped because the caller may not read its
-	// approvals (a context token without a Task read scope or outside the
-	// token's Task identity), so an empty approval list does not mean none is
-	// pending; or unavailable when execution event storage is not enabled and
-	// no approval can be read. Unavailable takes precedence over partial.
-	// Scan bounds do not set partial; they are reported in IncompleteReasons.
 	Approvals string `json:"approvals"`
-	// Monitors is included, forbidden (the caller may not list
-	// repositorymonitors and monitorworkactions), unavailable (no monitor
-	// store), or notRequested (the approvals inbox).
-	Monitors string `json:"monitors"`
+	Monitors  string `json:"monitors"`
 }
 
-// AttentionListMeta carries the opaque cursor for the next page.
 type AttentionListMeta struct {
 	Continue string `json:"continue,omitempty"`
 }
 
-// AttentionItem is one thing that needs a person. It carries only identifiers,
-// fixed labels and bounded tool/action names; detail stays on the per-Task API.
 type AttentionItem struct {
 	ID       string             `json:"id"`
 	Kind     string             `json:"kind"`
@@ -195,7 +149,6 @@ type AttentionItem struct {
 	Monitor  *AttentionMonitor  `json:"monitor,omitempty"`
 }
 
-// AttentionTaskRef identifies the Task an item belongs to.
 type AttentionTaskRef struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
@@ -203,12 +156,6 @@ type AttentionTaskRef struct {
 	Phase     string `json:"phase,omitempty"`
 }
 
-// AttentionApproval is the safe summary of one decidable approval.
-//
-// CanApprove and CanDecline are hints computed from the same checks the
-// decision endpoint runs: true or false when they settle the answer, null when
-// a check could not be run cheaply or gave no answer. The decision endpoint
-// stays the enforcement point.
 type AttentionApproval struct {
 	ID         string     `json:"id"`
 	Source     string     `json:"source"`
@@ -220,7 +167,6 @@ type AttentionApproval struct {
 	CanDecline *bool      `json:"canDecline"`
 }
 
-// AttentionMonitor identifies one blocked RepositoryMonitor work action.
 type AttentionMonitor struct {
 	Name          string `json:"name"`
 	ActionID      string `json:"actionID"`
@@ -292,8 +238,6 @@ func decodeAttentionCursor(value, scope, namespace string) (*attentionCursor, er
 	return cursor, nil
 }
 
-// attentionEntry is a ranked item plus the Task it came from, kept only on
-// the server to compute decision capabilities for the returned page.
 type attentionEntry struct {
 	item AttentionItem
 	key  attentionSortKey
@@ -301,12 +245,10 @@ type attentionEntry struct {
 }
 
 type attentionScan struct {
-	entries    []attentionEntry
-	incomplete map[string]bool
-	monitors   string
-	approvals  string
-	// approvalsSkipped records that an approval candidate was left out
-	// because the caller may not read its approvals.
+	entries          []attentionEntry
+	incomplete       map[string]bool
+	monitors         string
+	approvals        string
 	approvalsSkipped bool
 }
 
@@ -326,12 +268,10 @@ type attentionRequest struct {
 	now       time.Time
 }
 
-// ListAttention handles GET /api/v1/attention.
 func (h *Handlers) ListAttention(c fiber.Ctx) error {
 	return h.serveAttention(c, attentionScopeAttention)
 }
 
-// ListPendingApprovals handles GET /api/v1/approvals?status=pending.
 func (h *Handlers) ListPendingApprovals(c fiber.Ctx) error {
 	if status := strings.TrimSpace(c.Query("status", attentionApprovalStatusQuery)); status != attentionApprovalStatusQuery {
 		return fiber.NewError(fiber.StatusBadRequest, "status must be pending")
@@ -441,9 +381,6 @@ func parseAttentionRequest(c fiber.Ctx, scope, namespace string, now time.Time) 
 		}
 		req.after = &cursor.After
 		if scope == attentionScopeAttention {
-			// The token is not integrity-protected, so its window is held to
-			// the same bound as a since parameter, with a little grace for a
-			// walk that started near the limit.
 			since := time.Unix(0, cursor.Since).UTC()
 			if since.After(now) || now.Sub(since) > attentionMaxSince+attentionCursorWindowGrace {
 				return req, fiber.NewError(fiber.StatusBadRequest, "invalid continue token")
@@ -466,8 +403,6 @@ func parseAttentionRequest(c fiber.Ctx, scope, namespace string, now time.Time) 
 	return req, nil
 }
 
-// parseAttentionSince accepts a positive Go duration (such as 24h) or an
-// RFC 3339 timestamp, at most attentionMaxSince in the past.
 func parseAttentionSince(raw string, now time.Time) (time.Time, error) {
 	invalid := fiber.NewError(fiber.StatusBadRequest,
 		fmt.Sprintf("since must be a positive duration or RFC 3339 time within %s", attentionMaxSince))
@@ -488,10 +423,6 @@ func parseAttentionSince(raw string, now time.Time) (time.Time, error) {
 	return since, nil
 }
 
-// scanAttention authorizes before it reads: the route policy and the
-// TaskListScopes check already passed, each listed Task then passes the same
-// per-item context-token and Gateway read filters as ListTasks, and only then
-// is a candidate Task's approval event stream read.
 func (h *Handlers) scanAttention(c fiber.Ctx, action string, req attentionRequest) (*attentionScan, error) {
 	ctx := c.Context()
 	limits := h.attentionLimits()
@@ -559,7 +490,6 @@ func (h *Handlers) scanAttention(c fiber.Ctx, action string, req attentionReques
 				continue
 			}
 			if len(entries) > 0 {
-				// Keep one trimmed copy for the decision hints, not the page.
 				kept := task.DeepCopy()
 				kept.ManagedFields = nil
 				for i := range entries {
@@ -585,7 +515,6 @@ func (h *Handlers) scanAttention(c fiber.Ctx, action string, req attentionReques
 }
 
 func (h *Handlers) attentionTaskVisible(c fiber.Ctx, action string, task *corev1alpha1.Task, cache map[gatewayTaskAuthorizationKey]bool) (bool, error) {
-	// Another person's AHP turn stays hidden here, as from ListTasks.
 	if ahpTaskHidden(GetUserInfo(c), task) {
 		return false, nil
 	}
@@ -603,9 +532,6 @@ func (h *Handlers) attentionTaskVisible(c fiber.Ctx, action string, task *corev1
 	return h.taskAccess().gatewayTaskReadableCached(c, action, task, cache)
 }
 
-// contextTokenAllowsTaskRead applies the per-Task read check the per-Task
-// approvals route runs (Task read scopes and the token's Task identity), so
-// the attention view never shows approval data that route would refuse.
 func (h *Handlers) contextTokenAllowsTaskRead(c fiber.Ctx, action string, task *corev1alpha1.Task) (bool, error) {
 	cfg := h.contextTokenAuthorization
 	if !cfg.Enabled() {
@@ -625,10 +551,6 @@ func (h *Handlers) contextTokenAllowsTaskRead(c fiber.Ctx, action string, task *
 	return true, h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, failures)
 }
 
-// attentionApprovalCandidate reports, from the Task object alone, whether its
-// approval stream may hold a decidable approval: a live Task the controller
-// marks as waiting for approval, or a Task parked on an approval that still
-// takes a decision.
 func attentionApprovalCandidate(task *corev1alpha1.Task) bool {
 	if task == nil || !task.DeletionTimestamp.IsZero() {
 		return false
@@ -647,10 +569,6 @@ func attentionApprovalCandidate(task *corev1alpha1.Task) bool {
 	return strings.HasPrefix(task.Status.Message, "waiting for approval ")
 }
 
-// attentionApprovalEntries reads one candidate Task's approval stream and
-// returns its decidable approvals. complete is false when the stream is longer
-// than the per-Task bound; the Task's approvals are then left out rather than
-// derived from a prefix that could miss a later decision.
 func (h *Handlers) attentionApprovalEntries(ctx context.Context, task *corev1alpha1.Task, now time.Time, maxEvents int) ([]attentionEntry, bool, error) {
 	if h.executionEventStore == nil {
 		return nil, true, nil
@@ -681,9 +599,6 @@ func (h *Handlers) listBoundedTaskApprovalEvents(ctx context.Context, namespace,
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
-		// Read no more than the remaining budget plus one event that proves
-		// the stream is over it, so an over-limit stream costs at most one
-		// event past the budget.
 		limit := min(store.MaxExecutionEventLimit, maxEvents-len(out)+1)
 		batch, err := reader.list(ctx, after, limit, approvals.EventTypes())
 		if err != nil {
@@ -703,11 +618,6 @@ func (h *Handlers) listBoundedTaskApprovalEvents(ctx context.Context, namespace,
 	}
 }
 
-// attentionApprovalDecidable mirrors the state checks of DecideTaskApproval.
-// Like deriveTaskApprovalState, only a brokered review's expiresAt is
-// enforced, so it is dropped by the clock even before the controller records
-// its expiry; a worker approval stays decidable past its expiresAt, and a
-// parked sign-off follows its wait's deadline.
 func attentionApprovalDecidable(task *corev1alpha1.Task, approval approvals.Approval, now time.Time) (string, bool) {
 	if approval.Status != approvals.StatusPending || !task.DeletionTimestamp.IsZero() {
 		return "", false
@@ -724,7 +634,6 @@ func attentionApprovalDecidable(task *corev1alpha1.Task, approval approvals.Appr
 		}
 		return AttentionApprovalSourceBrokered, true
 	case parkedWait || approval.Action == taskwait.ParkedApprovalAction:
-		// A parked sign-off is decidable only while its wait is armed.
 		if !taskwait.AcceptsApprovalDecision(task, approval.ID) {
 			return "", false
 		}
@@ -741,11 +650,6 @@ func attentionApprovalDecidable(task *corev1alpha1.Task, approval approvals.Appr
 }
 
 func attentionApprovalEntry(task *corev1alpha1.Task, approval approvals.Approval, source string) attentionEntry {
-	// Action labels are built from call arguments, so only the controller's
-	// fixed parked label is returned. A tool name is returned only for a
-	// brokered approval, which the controller's broker records from the
-	// resolved tool descriptor; worker approval events are written from the
-	// worker Pod, where agent code runs, so their fields are not trusted here.
 	action := ""
 	tool := ""
 	summary := "Approval requested"
@@ -758,8 +662,6 @@ func attentionApprovalEntry(task *corev1alpha1.Task, approval approvals.Approval
 			summary = "Approval requested for " + tool
 		}
 	}
-	// A worker approval's expiresAt is written from the worker Pod and is not
-	// enforced, so it neither ranks the item nor is reported as a deadline.
 	var expiresAt *time.Time
 	if approval.ExpiresAt != nil && source != AttentionApprovalSourceWorker {
 		value := approval.ExpiresAt.UTC()
@@ -788,8 +690,6 @@ func attentionApprovalEntry(task *corev1alpha1.Task, approval approvals.Approval
 	return attentionEntry{item: item, key: attentionItemSortKey(item, task.Namespace, task.Name, string(task.UID)), task: task}
 }
 
-// attentionTaskStateEntry classifies a Task's own state: an unprovable
-// outcome or a failure inside the window, or a running Pod that cannot start.
 func attentionTaskStateEntry(task *corev1alpha1.Task, since time.Time) (attentionEntry, bool) {
 	if task == nil || !task.DeletionTimestamp.IsZero() {
 		return attentionEntry{}, false
@@ -802,8 +702,6 @@ func attentionTaskStateEntry(task *corev1alpha1.Task, since time.Time) (attentio
 		execution.Outcome == corev1alpha1.TaskExecutionOutcomeOutcomeUnknown):
 		kind, summary = AttentionKindOutcomeUnknown, "Task outcome is unknown"
 		at = attentionTaskEndedAt(task)
-		// The outbox projection can record an unknown outcome long after an
-		// earlier completion time; the newer transition is when it began.
 		if execution.LastTransitionTime != nil && execution.LastTransitionTime.After(at) {
 			at = execution.LastTransitionTime.Time
 		}
@@ -888,16 +786,11 @@ func attentionItemSortKey(item AttentionItem, namespace, name, uid string) atten
 	}
 }
 
-// attentionSortKeyID bounds the final tie-breaker, which a continue token
-// carries: an approval ID comes from event content and has no length limit,
-// so the key holds its digest and the item keeps the ID itself.
 func attentionSortKeyID(id string) string {
 	sum := sha256.Sum256([]byte(id))
 	return hex.EncodeToString(sum[:])
 }
 
-// attentionSafeIdentifier keeps a tool name only when it is shaped like an
-// identifier, so the response never carries prose in that field.
 func attentionSafeIdentifier(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > attentionIdentifierMaxBytes {
@@ -921,8 +814,6 @@ func attentionSafeSeverity(value string) string {
 	}
 }
 
-// attentionSafeCode keeps short machine codes such as a work action's blocked
-// reason or desired action, and drops anything that looks like free text.
 func attentionSafeCode(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 64 {
@@ -936,12 +827,6 @@ func attentionSafeCode(value string) string {
 	return value
 }
 
-// scanAttentionMonitors adds blocked RepositoryMonitor work actions inside the
-// window. Monitors are authorized separately from Tasks: a TokenReview caller
-// needs list on repositorymonitors and monitorworkactions, a context-token
-// caller needs the monitor read scopes, and each monitor passes the same
-// context-token filter as the monitor list. A caller without that access
-// still gets the Task items, with sources.monitors set to forbidden.
 func (h *Handlers) scanAttentionMonitors(c fiber.Ctx, req attentionRequest, scan *attentionScan) error {
 	if h.repositoryMonitorStore == nil {
 		scan.monitors = attentionSourceUnavailable
@@ -958,8 +843,6 @@ func (h *Handlers) scanAttentionMonitors(c fiber.Ctx, req attentionRequest, scan
 	scan.monitors = attentionSourceIncluded
 	ctx := c.Context()
 	maxActions := h.attentionLimits().MonitorActions
-	// Monitors are read only for names the bounded action scan reaches, so
-	// the cost stays bounded by the action limit, not the monitor count.
 	monitors := map[string]bool{}
 	monitorAllowed := func(name string) (bool, error) {
 		if allowed, ok := monitors[name]; ok {
@@ -999,8 +882,6 @@ func (h *Handlers) scanAttentionMonitors(c fiber.Ctx, req attentionRequest, scan
 		}
 		for i := range actions {
 			action := &actions[i]
-			// Actions arrive newest first; the rest of the scan is older
-			// than the window.
 			if action.UpdatedAt.Before(req.since) {
 				return nil
 			}
@@ -1083,12 +964,6 @@ func attentionMonitorEntry(action *store.WorkAction) attentionEntry {
 	return attentionEntry{item: item, key: attentionItemSortKey(item, action.MonitorNamespace, action.MonitorName, "")}
 }
 
-// attentionDecisionChecker computes approve/decline hints for the approvals
-// on one page by running the checks DecideTaskApproval runs, without side
-// effects: the context-token Task update scopes (once per request), the
-// route's named SubjectAccessReviews for TokenReview callers (two per Task,
-// for at most attentionBounds.CapabilityTasks Tasks), the Gateway operate check
-// (once per Gateway), and the requester-only approve rule (no I/O).
 type attentionDecisionChecker struct {
 	h            *Handlers
 	c            fiber.Ctx
@@ -1113,7 +988,6 @@ func newAttentionDecisionChecker(h *Handlers, c fiber.Ctx) *attentionDecisionChe
 func (d *attentionDecisionChecker) capabilities(task *corev1alpha1.Task) (canApprove, canDecline *bool) {
 	base := d.decide(task)
 	if requireRequesterApprovesDelegatedWrite(task, d.ui) != nil {
-		// Only the requester may approve; this caller is not them.
 		return new(false), base
 	}
 	return base, base
@@ -1142,7 +1016,6 @@ func (d *attentionDecisionChecker) decide(task *corev1alpha1.Task) *bool {
 
 func (d *attentionDecisionChecker) decideTask(task *corev1alpha1.Task) *bool {
 	access := d.h.taskAccess()
-	// The same ownership lookup the read filter already ran for this Task.
 	identity, gatewayOwned, err := access.gatewayTaskIdentity(d.c, task)
 	if err != nil {
 		return nil
@@ -1154,7 +1027,6 @@ func (d *attentionDecisionChecker) decideTask(task *corev1alpha1.Task) *bool {
 	_, gatewayCached := d.gateways[gatewayKey]
 	tokenReview := d.ui != nil && d.ui.AuthType == AuthTypeTokenReview
 	if tokenReview || (gatewayOwned && !gatewayCached) {
-		// Every Task past the budget would cost new reviews or lookups.
 		if d.reviewed >= d.maxReviewed {
 			return nil
 		}
@@ -1188,10 +1060,6 @@ func (d *attentionDecisionChecker) decideTask(task *corev1alpha1.Task) *bool {
 	return result
 }
 
-// gatewayDecisionHint is the three-way form of authorizeGatewayTaskIdentity
-// with operate access, for read-side hints: false for a denial, nil when a
-// check gave no usable answer. The decision route still enforces the
-// fail-closed form.
 func (d *attentionDecisionChecker) gatewayDecisionHint(access taskAccess, task *corev1alpha1.Task, identity gatewayruntime.TaskOwnerIdentity) *bool {
 	denial := func(err error) *bool {
 		var fiberErr *fiber.Error

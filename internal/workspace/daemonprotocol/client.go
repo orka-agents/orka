@@ -17,13 +17,8 @@ type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// TargetActorHeader selects the Actor behind the Substrate router. The router
-// ignores Host and :authority for routing.
 const TargetActorHeader = "ate-target-actor"
 
-// TargetActor converts a qualified "name.atespace" Actor ID into the router's
-// "atespace/name" target. Unqualified IDs are rejected so a request can never
-// be routed to an Actor in an implied Atespace.
 func TargetActor(actorID string) (string, bool) {
 	name, atespace, qualified := strings.Cut(strings.TrimSpace(actorID), ".")
 	if !qualified || name == "" || atespace == "" || strings.ContainsAny(atespace, "./") || strings.Contains(name, "/") {

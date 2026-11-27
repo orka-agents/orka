@@ -28,22 +28,16 @@ import (
 )
 
 const (
-	// AuthHeader is the header name for authorization
 	AuthHeader = "Authorization"
 
-	// XAPIKeyHeader is the header name for the Anthropic-style API key
 	XAPIKeyHeader = "x-api-key"
 
-	// BearerPrefix is the prefix for bearer tokens
 	BearerPrefix = "Bearer "
 
-	// UserInfoContextKey is the context key for storing user info
 	UserInfoContextKey = "userInfo"
 
-	// AuthTypeTokenReview identifies Kubernetes TokenReview authentication.
 	AuthTypeTokenReview = "tokenReview"
 
-	// AuthTypeOIDC identifies OIDC JWT authentication.
 	AuthTypeOIDC = "oidc"
 )
 
@@ -60,7 +54,6 @@ var (
 
 const tokenCacheCleanupInterval = 1000
 
-// cleanupTokenCache removes expired entries from the token cache.
 func cleanupTokenCache() {
 	tokenCache.Range(func(key, value any) bool {
 		if entry, ok := value.(*tokenCacheEntry); ok {
@@ -78,13 +71,12 @@ func getTokenHash(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// UserInfo contains information about the authenticated user.
 type UserInfo struct {
 	Username  string
 	UID       string
 	Groups    []string
 	Extra     map[string]authenticationv1.ExtraValue
-	Namespace string // Extracted from ServiceAccount username (system:serviceaccount:<ns>:<name>)
+	Namespace string
 
 	AuthType     string
 	Subject      string
@@ -94,7 +86,6 @@ type UserInfo struct {
 	ContextToken *ContextToken
 }
 
-// OIDCConfig holds OpenID Connect JWT validation settings.
 type OIDCConfig struct {
 	Issuer          string
 	Audience        string
@@ -106,35 +97,21 @@ type OIDCConfig struct {
 	Scopes []string
 }
 
-// Enabled reports whether OIDC authentication is configured.
 func (c OIDCConfig) Enabled() bool {
 	return c.Issuer != "" && c.Audience != ""
 }
 
-// AuthConfig holds authentication middleware configuration.
 type AuthConfig struct {
 	OIDC          OIDCConfig
 	ContextTokens ContextTokenConfig
 
-	// TokenReviewAudiences scopes Kubernetes ServiceAccount authentication to
-	// the exact audiences requested by this listener. The cache key includes
-	// the normalized audience set so a token authenticated on an unscoped
-	// listener cannot be replayed against an audience-bound listener.
 	TokenReviewAudiences []string
 
-	// Sessions authenticates Orka session tokens from GitHub sign-in; nil
-	// refuses them.
 	Sessions func(ctx context.Context, token string) (*UserInfo, error)
 
-	// ReportTokenReviewUnavailable opts TokenReview-only listeners into returning
-	// 503 when the backend request or status reports a failure, without authenticating the caller.
-	// Explicit authentication denials still return 401. The default preserves historical
-	// 401 responses; OIDC and context-token validation are unchanged.
 	ReportTokenReviewUnavailable bool
 }
 
-// parseServiceAccountNamespace extracts the namespace from a ServiceAccount username.
-// Format: system:serviceaccount:<namespace>:<name>
 func parseServiceAccountNamespace(username string) string {
 	const prefix = "system:serviceaccount:"
 	if !strings.HasPrefix(username, prefix) {
@@ -148,14 +125,10 @@ func parseServiceAccountNamespace(username string) string {
 	return parts[0]
 }
 
-// verifiedServiceAccount reports a TokenReview caller whose username names a
-// ServiceAccount. TokenReview also authenticates people the API server signs
-// in itself, through its own OIDC or a webhook; they are not ServiceAccounts.
 func verifiedServiceAccount(ui *UserInfo) bool {
 	return ui != nil && ui.AuthType == AuthTypeTokenReview && parseServiceAccountNamespace(ui.Username) != ""
 }
 
-// NewAuthMiddleware creates a new authentication middleware.
 func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 	var cfg AuthConfig
 	if len(configs) > 0 {
@@ -202,8 +175,6 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			if cfg.ReportTokenReviewUnavailable && errors.Is(err, errTokenReviewUnavailable) {
 				return fiber.NewError(fiber.StatusServiceUnavailable, "token authentication is temporarily unavailable")
 			}
-			// The sign-in itself is good, so say what is missing: an
-			// administrator needs this subject to allow the person.
 			if notAllowed, ok := errors.AsType[*oidcSubjectNotAllowedError](err); ok {
 				return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf(
 					"your sign-in is valid, but its subject %q is not allowed to use this Orka installation; ask an administrator to add it to the allowed OIDC subjects",
@@ -215,7 +186,6 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			return fiber.NewError(fiber.StatusUnauthorized, "invalid token")
 		}
 
-		// Store user info in context
 		ctx.Locals(UserInfoContextKey, userInfo)
 
 		return ctx.Next()
@@ -223,8 +193,6 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 }
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
-	// An Orka session token is never tried as an OIDC or ServiceAccount
-	// token, and never sent to the TokenReview API.
 	if strings.HasPrefix(token, sessionTokenPrefix) {
 		if cfg.Sessions == nil {
 			return nil, errors.New("sign-in sessions are not enabled")
@@ -269,16 +237,12 @@ func authenticateContextToken(ctx context.Context, token string, profile Context
 
 var errTokenReviewUnavailable = errors.New("TokenReview backend unavailable")
 
-// errSessionStoreUnavailable is a sign-in session lookup that failed without
-// an answer; it is reported as 503, never as an invalid token.
 var errSessionStoreUnavailable = errors.New("session store unavailable")
 
-// validateToken validates a ServiceAccount token using TokenReview with caching.
 func validateToken(ctx context.Context, c client.Client, token string, audiences ...string) (*UserInfo, error) {
 	audiences = normalizedTokenReviewAudiences(audiences)
 	hash := tokenReviewCacheKey(token, audiences)
 
-	// Check cache
 	if entry, ok := tokenCache.Load(hash); ok {
 		if cached := entry.(*tokenCacheEntry); time.Now().Before(cached.expiry) {
 			return cached.userInfo, nil
@@ -286,7 +250,6 @@ func validateToken(ctx context.Context, c client.Client, token string, audiences
 		tokenCache.Delete(hash)
 	}
 
-	// Create a TokenReview request
 	review := &authenticationv1.TokenReview{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "orka-token-review",
@@ -297,19 +260,14 @@ func validateToken(ctx context.Context, c client.Client, token string, audiences
 		},
 	}
 
-	// Submit the token review. Backend diagnostics are opaque and must not reach
-	// the middleware logger; retain only the availability classification.
 	if err := c.Create(ctx, review); err != nil {
 		return nil, errTokenReviewUnavailable
 	}
 
-	// A status error means the token could not be checked, even if the response
-	// also claims authentication. Never expose its opaque diagnostic in logs.
 	if review.Status.Error != "" {
 		return nil, errTokenReviewUnavailable
 	}
 
-	// Check if the token is valid
 	if !review.Status.Authenticated {
 		tokenCache.Delete(hash)
 		return nil, fiber.NewError(fiber.StatusUnauthorized, "token not authenticated")
@@ -330,7 +288,6 @@ func validateToken(ctx context.Context, c client.Client, token string, audiences
 		AuthType:  AuthTypeTokenReview,
 	}
 
-	// Cache the successful result
 	tokenCache.Store(hash, &tokenCacheEntry{
 		userInfo: userInfo,
 		expiry:   time.Now().Add(cacheTTL),
@@ -360,7 +317,6 @@ func tokenReviewCacheKey(token string, audiences []string) string {
 	return getTokenHash(token + "\x00" + strings.Join(audiences, "\x00"))
 }
 
-// GetUserInfo retrieves user info from the context
 func GetUserInfo(ctx fiber.Ctx) *UserInfo {
 	userInfo, ok := ctx.Locals(UserInfoContextKey).(*UserInfo)
 	if !ok {
@@ -369,8 +325,6 @@ func GetUserInfo(ctx fiber.Ctx) *UserInfo {
 	return userInfo
 }
 
-// GetEffectiveNamespace returns the namespace to use for a request.
-// Priority: explicit namespace > SA namespace from token > "default"
 func GetEffectiveNamespace(ctx fiber.Ctx, explicit string) string {
 	if explicit != "" {
 		return explicit

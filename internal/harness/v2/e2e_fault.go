@@ -8,8 +8,6 @@ import (
 
 const E2EPromptWriteAmbiguityRecordPath = "/internal/v2/acp/e2e/prompt-write-ambiguity-records"
 
-// E2EPromptWriteAmbiguityRecordRequest asks the controller to atomically
-// consume the test-only prompt-write fault for one supervisor operation.
 type E2EPromptWriteAmbiguityRecordRequest struct {
 	Namespace         string           `json:"namespace"`
 	Metadata          MutationMetadata `json:"metadata"`

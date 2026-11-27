@@ -56,8 +56,6 @@ func TestMCPApprovalPendingCallSurvivesTransientAuthorityReads(t *testing.T) {
 			done := f.start(f.request)
 			pending := f.pending()
 			unavailable.Store(true)
-			// Wait for repeated watchdog reads, not just a delay that could
-			// pass without encountering the outage.
 			for range 2 {
 				select {
 				case <-failedReads:
@@ -435,8 +433,6 @@ func TestMCPApprovalEpochGuardDefinitiveFailureDeniesApprovedCall(t *testing.T) 
 			require.EqualValues(t, 1, rejectedReads.Load(), "definitive authority loss must not enter the read retry loop")
 			require.Zero(t, f.count.Load())
 
-			// Once the readable fixture store records the denial, restored
-			// acquisition cannot revive the same approved call after reopen.
 			unavailable.Store(false)
 			f.reopen()
 			replay := awaitMCPApprovalResult(t, f.start(f.request))

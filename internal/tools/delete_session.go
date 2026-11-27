@@ -12,7 +12,6 @@ import (
 	"fmt"
 )
 
-// DeleteSessionTool deletes a session and its transcript data.
 type DeleteSessionTool struct{}
 
 func (t *DeleteSessionTool) Name() string { return deleteSessionToolName }

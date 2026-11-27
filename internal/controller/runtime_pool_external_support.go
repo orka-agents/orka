@@ -30,18 +30,10 @@ const (
 
 var errWorkspaceCredentialConflict = errors.New("workspace supervisor credential bootstrap conflict")
 
-// Native processes use a fresh writable container filesystem for scratch.
-// Keep the special durable-workspace mount separate from Pod volume declarations.
 func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.PodTemplateSpec {
 	result := *template.DeepCopy()
-	// The pinned native runtime runs the supervisor as root under gVisor. Its
-	// public API supports capabilities, but no Kubernetes seccomp or privilege-
-	// escalation controls. Publish only the guarantees it can enforce.
 	result.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsUser: new(int64(0)), RunAsGroup: new(int64(0)), RunAsNonRoot: new(false)}
-	// Native worker placement is fixed by the provider's pinned Linux WorkerPool.
 	result.Spec.NodeSelector = nil
-	// Native Actor health and shutdown are provider-owned. Kubernetes probes,
-	// lifecycle hooks and grace periods cannot describe those guarantees.
 	result.Spec.TerminationGracePeriodSeconds = nil
 	scratch := map[string]bool{}
 	volumes := result.Spec.Volumes[:0]
@@ -66,14 +58,8 @@ func runtimePoolNativeProcessTemplate(template corev1.PodTemplateSpec) corev1.Po
 		for _, variable := range container.Env {
 			switch variable.Name {
 			case "ORKA_ACP_SESSION_BASE_DIR", "ORKA_ACP_MCP_BROKER_URL", "ORKA_ACP_POD_NAME", "ORKA_ACP_POD_NAMESPACE":
-				// The native adapter uses supervisor defaults and SystemInfo
-				// identity instead of these Pod-specific overrides. The
-				// supervisor never reads the Pod name or namespace; dropping
-				// them keeps headroom under the backend's 32-entry limit.
 				continue
 			case "ORKA_ACP_MODEL_CONTEXT_LIMIT", "ORKA_ACP_MODEL_OUTPUT_LIMIT":
-				// Both readers treat an empty limit as unset, so an empty
-				// entry only spends the backend's environment budget.
 				if variable.Value == "" && variable.ValueFrom == nil {
 					continue
 				}
@@ -146,15 +132,8 @@ func runtimePoolWorkspacePodSpecsMatch(expected, actual corev1.PodSpec, injected
 	expectedSpec := normalizeRuntimePoolWorkspacePodSpec(expected)
 	actualSpec := normalizeRuntimePoolWorkspacePodSpec(actual)
 
-	// The provider injects the durable workspace PVC volume from the claim's
-	// volumeClaimTemplates; its per-sandbox claim name cannot be rendered into
-	// the template, so the reserved-name PVC volume is compared by presence of
-	// its mount rather than by claim identity. Any other unexpected volume
-	// still fails the match.
 	actualSpec.Volumes = stripInjectedDurableWorkspaceVolume(expectedSpec.Volumes, actualSpec.Volumes, injectedDurableClaimName)
 
-	// These fields are derived from cluster scheduling/admission state rather
-	// than from the provider-visible Sandbox template.
 	expectedSpec.NodeName, actualSpec.NodeName = "", ""
 	expectedSpec.Priority, actualSpec.Priority = nil, nil
 	expectedSpec.PreemptionPolicy, actualSpec.PreemptionPolicy = nil, nil
@@ -194,9 +173,6 @@ func normalizeRuntimePoolWorkspacePodSpec(spec corev1.PodSpec) corev1.PodSpec {
 	if result.ServiceAccountName == "" {
 		result.ServiceAccountName = runtimePoolDefaultServiceAccountName
 	}
-	// The core API's internal-to-v1 conversion mirrors the effective service
-	// account into this deprecated alias on Pods. Embedded PodSpecs in CRDs do
-	// not receive that conversion, so compare the canonical field once here.
 	result.DeprecatedServiceAccount = result.ServiceAccountName
 	for i := range result.InitContainers {
 		normalizeRuntimePoolWorkspaceContainer(&result.InitContainers[i])
@@ -274,7 +250,6 @@ func normalizeRuntimePoolWorkspaceHTTPGet(action *corev1.HTTPGetAction) {
 	if action.Scheme == "" {
 		action.Scheme = corev1.URISchemeHTTP
 	}
-	// Nil uses HTTP/1.1 whether or not H2CContainerProbe writes its default.
 	if action.Protocol == nil {
 		action.Protocol = new(corev1.HTTPProtocolHTTP1)
 	}
@@ -425,10 +400,6 @@ func stripInjectedDurableWorkspaceVolume(expected, actual []corev1.Volume, injec
 	}
 	result := make([]corev1.Volume, 0, len(actual))
 	for _, volume := range actual {
-		// A read-only PVC source would mount the active repository workspace
-		// read-only despite the writable mount the template declares; it is
-		// retained so the spec comparison fails instead of Serving a
-		// workspace whose clone/edit/commit operations cannot work.
 		if volume.Name == runtimePoolDurableWorkspaceVolume && volume.PersistentVolumeClaim != nil &&
 			!volume.PersistentVolumeClaim.ReadOnly &&
 			injectedClaimName != "" && volume.PersistentVolumeClaim.ClaimName == injectedClaimName {
@@ -464,9 +435,6 @@ func (r *RuntimePoolReconciler) recycleRuntimePoolInstance(
 		} else if a.Identity.InstanceID != string(pod.UID) {
 			return fmt.Errorf("external runtime retirement refers to a different instance")
 		}
-		// Runtime settlement must finish before authorizing provider termination.
-		// The normal retirement reconcile performs authenticated drain and keeps
-		// durable lineage while the replacement is pending.
 		return r.patchRuntimePoolAnnotation(ctx, pool, "orka.ai/external-runtime-retirement-requested", "true")
 	}
 	if pool.Spec.ExecutionWorkspace == nil {
@@ -497,8 +465,6 @@ func (r *RuntimePoolReconciler) validateExternalNativeRetirement(ctx context.Con
 	return nil
 }
 
-// validateRuntimePoolExecutionWorkspace rejects legacy shapes even after the API
-// server prunes their removed backend settings. Plain Deployment pools remain valid.
 func validateRuntimePoolExecutionWorkspace(pool *corev1alpha1.RuntimePool) error {
 	if pool.Spec.ExecutionWorkspace == nil {
 		return nil

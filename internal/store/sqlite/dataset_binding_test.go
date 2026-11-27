@@ -35,9 +35,6 @@ func describeDataset(t *testing.T, s *Store) string {
 	return info.DatasetID
 }
 
-// An embedded binding is accepted only from a store opened under its process
-// lock, in every bootstrap state: new, completed, holding records or adopted
-// from a historical layout.
 func TestDatasetBindingEmbeddedNeedsTheProcessLock(t *testing.T) {
 	unlocked := setupDiskStore(t)
 	_, err := unlocked.BindDataset(t.Context(), embeddedBindRequest(describeDataset(t, unlocked)))
@@ -81,9 +78,6 @@ func TestDatasetBindingEmbeddedNeedsTheProcessLock(t *testing.T) {
 	}
 }
 
-// A fresh binding needs a dataset SQLite created new: an adopted historical
-// dataset is refused even when it holds no record and never completed its
-// bootstrap, as a snapshot key is never minted for it.
 func TestDatasetBindingFreshRefusesAnAdoptedDataset(t *testing.T) {
 	path, db := historicalSchemaDB(t, "abd2c040")
 	require.NoError(t, db.Close())
@@ -102,15 +96,12 @@ func TestDatasetBindingFreshRefusesAnAdoptedDataset(t *testing.T) {
 	require.Nil(t, conflict.Binding)
 }
 
-// The binding is checkpointed before BindDataset returns, as dataset identity
-// is, and it survives a reopen.
 func TestDatasetBindingIsSynchronizedAndSurvivesReopen(t *testing.T) {
 	s, path := lockedTestStore(t)
 	dataset := describeDataset(t, s)
 	bound, err := s.BindDataset(t.Context(), embeddedBindRequest(dataset))
 	require.NoError(t, err)
 
-	// immutable=1 reads only the main database file, not the WAL.
 	raw, err := sql.Open("sqlite", "file:"+path+"?immutable=1")
 	require.NoError(t, err)
 	var installation, state string
@@ -134,8 +125,6 @@ func TestDatasetBindingIsSynchronizedAndSurvivesReopen(t *testing.T) {
 	require.Equal(t, bound, repeat)
 }
 
-// A bound dataset's controller epoch moves only through the advance, as for a
-// dataset an advance recorded an installation in.
 func TestDatasetBindingRefusesMirrorSync(t *testing.T) {
 	s, _ := lockedTestStore(t)
 	dataset := describeDataset(t, s)
@@ -149,8 +138,6 @@ func TestDatasetBindingRefusesMirrorSync(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// The binding methods record durable outcomes, so they refuse to run inside a
-// task-data transaction that could still roll back.
 func TestDatasetBindingRefusesAnEnclosingTransaction(t *testing.T) {
 	s, _ := lockedTestStore(t)
 	dataset := describeDataset(t, s)
@@ -177,8 +164,6 @@ func TestDatasetBindingRefusesAnEnclosingTransaction(t *testing.T) {
 	require.True(t, info.CanBootstrapSnapshotKey, "the refused completion recorded nothing")
 }
 
-// Completing the bootstrap through the contract has the effect the snapshot key
-// activation has: SQLite no longer lets a key be minted for the dataset.
 func TestDatasetBindingCompleteBootstrapEndsKeyMinting(t *testing.T) {
 	s, path := lockedTestStore(t)
 	dataset := describeDataset(t, s)
@@ -189,8 +174,6 @@ func TestDatasetBindingCompleteBootstrapEndsKeyMinting(t *testing.T) {
 	requireCheckpointedDataset(t, path, dataset, true)
 }
 
-// readCheckpointedBinding reads the binding columns from the main database
-// file only (immutable=1 skips the WAL), so it shows what has been synchronized.
 func readCheckpointedBinding(t *testing.T, path string) (string, string) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", "file:"+path+"?immutable=1")
@@ -201,10 +184,6 @@ func readCheckpointedBinding(t *testing.T, path string) (string, string) {
 	return installation, state
 }
 
-// A WAL checkpoint that fails after a binding change committed is reported as
-// an unknown outcome, not a refusal: the change is committed but not yet in
-// the main database file. Repeating the identical request replays it and
-// synchronizes it.
 func TestDatasetBindingSynchronizationFailureIsAnUnknownOutcome(t *testing.T) {
 	s := setupDiskStore(t)
 	s.ownsProcessLock = true
@@ -223,7 +202,6 @@ func TestDatasetBindingSynchronizationFailureIsAnUnknownOutcome(t *testing.T) {
 	_, err = s.db.Exec(`PRAGMA busy_timeout=20`)
 	require.NoError(t, err)
 
-	// An open read snapshot keeps the checkpoint from finishing.
 	snapshot := hold()
 	_, err = s.BindDataset(t.Context(), embeddedBindRequest(dataset))
 	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
@@ -259,9 +237,6 @@ func TestDatasetBindingSynchronizationFailureIsAnUnknownOutcome(t *testing.T) {
 	require.Equal(t, "detached", state, "the later synchronization also carried the earlier detach")
 }
 
-// A dataset the store cannot serve refuses every binding call, the binding
-// read included, and bootstrap completion before anything else, and nothing
-// changes.
 func TestDatasetBindingRefusesAnIncompatibleDataset(t *testing.T) {
 	s, _ := lockedTestStore(t)
 	dataset := describeDataset(t, s)

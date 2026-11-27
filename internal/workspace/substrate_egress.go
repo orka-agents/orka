@@ -19,28 +19,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// Substrate egress schemes accepted by Orka. "tls" compiles to an upstream
-// tls_passthrough rule; "https" is intercepted by the egress gateway, so the
-// Actor must trust the gateway CA bundle.
 const (
 	SubstrateEgressSchemeHTTP  = "http"
 	SubstrateEgressSchemeHTTPS = "https"
 	SubstrateEgressSchemeTLS   = "tls"
 
-	// substrateEgressPolicyName is the upstream singleton name of an Actor's
-	// egress policy resource.
-	substrateEgressPolicyName = "default"
-	// MaxSubstrateEgressRules bounds one Actor policy below the upstream limit
-	// of 256 rules.
-	MaxSubstrateEgressRules = 64
-	maxSubstrateEgressPorts = 16
-	// substrateEgressApplyAttempts bounds optimistic-concurrency retries.
+	substrateEgressPolicyName    = "default"
+	MaxSubstrateEgressRules      = 64
+	maxSubstrateEgressPorts      = 16
 	substrateEgressApplyAttempts = 5
 )
 
-// SubstrateEgressRule allows one DNS host name on explicit ports. It never
-// carries credential values: an optional Credential names a Kubernetes Secret
-// key that the egress gateway resolves and injects at request time.
 type SubstrateEgressRule struct {
 	Scheme     string
 	Host       string
@@ -48,10 +37,6 @@ type SubstrateEgressRule struct {
 	Credential *SubstrateEgressCredential
 }
 
-// SubstrateEgressCredential replaces one request header with a Kubernetes
-// Secret value through the gateway's credential provider. Provider is the
-// credential provider class the gateway was installed with; an empty
-// Provider means injection is not configured and the rule fails closed.
 type SubstrateEgressCredential struct {
 	Header    string
 	Prefix    string
@@ -61,11 +46,8 @@ type SubstrateEgressCredential struct {
 	Key       string
 }
 
-// SubstrateKubernetesSecretsCredentialProvider is the upstream reference
-// credential provider class for ate-secret://k8s.io/default/<ns>/<name>/<key>.
 const SubstrateKubernetesSecretsCredentialProvider = "k8s.io"
 
-// credentialURI returns the upstream reference to the Secret key.
 func (c SubstrateEgressCredential) credentialURI() string {
 	return fmt.Sprintf("ate-secret://%s/default/%s/%s/%s", c.Provider, c.Namespace, c.Name, c.Key)
 }
@@ -105,8 +87,6 @@ func compileSubstrateEgressEffects(credential *SubstrateEgressCredential) *ateap
 	return &ateapipb.HttpRuleEffects{ReplaceHeaders: []*ateapipb.CredentialHeader{{Header: credential.Header, Prefix: credential.Prefix, CredentialUri: credential.credentialURI()}}}
 }
 
-// substrateEgressControl is the subset of the native Control API used to
-// manage an Actor's egress policy. ateapipb.ControlClient satisfies it.
 type substrateEgressControl interface {
 	GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
 	GetActorEgressPolicy(ctx context.Context, in *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
@@ -114,16 +94,11 @@ type substrateEgressControl interface {
 	UpdateActorEgressPolicy(ctx context.Context, in *ateapipb.UpdateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
 }
 
-// ValidateSubstrateEgressRules rejects anything other than DNS host names
-// with an optional leftmost-label wildcard, explicit schemes and valid ports.
 func ValidateSubstrateEgressRules(rules []SubstrateEgressRule) error {
 	_, err := canonicalSubstrateEgressRules(rules)
 	return err
 }
 
-// CompileSubstrateActorEgressPolicy compiles an allowlist into the Actor's
-// native default policy. An empty allowlist compiles to a policy without
-// rules, which denies all egress (and answers external DNS with NXDOMAIN).
 func CompileSubstrateActorEgressPolicy(atespace string, rules []SubstrateEgressRule) (*ateapipb.EgressPolicy, error) {
 	atespace = strings.TrimSpace(atespace)
 	if len(validation.IsDNS1123Label(atespace)) != 0 {
@@ -149,48 +124,18 @@ func CompileSubstrateActorEgressPolicy(atespace string, rules []SubstrateEgressR
 	return policy, nil
 }
 
-// EnsureActorEgressPolicy compiles rules and installs them as the qualified
-// Actor's ("name.atespace") native egress policy, then re-reads the policy
-// and verifies it. Any error means the policy may not match; callers must not
-// resume the Actor.
 func (c *SubstrateNativeClient) EnsureActorEgressPolicy(ctx context.Context, actorID string, rules []SubstrateEgressRule) error {
 	_, err := c.ApplyActorEgressPolicy(ctx, actorID, rules)
 	return err
 }
 
-// SubstrateEgressPolicyState describes an Actor's stored egress policy.
-//
-// Storing a policy does not make it effective at once. The Substrate egress
-// gateway caches each Actor's policy by Actor name (--egress-policy-cache-ttl,
-// 10s by default, plus a fetch of up to 4s that may have read earlier rules)
-// and nothing invalidates an entry.
 type SubstrateEgressPolicyState struct {
-	// Version is 1 for a policy that was created and never replaced.
-	Version int64
-	// CreateTime is when the control plane created the policy.
-	CreateTime time.Time
-	// UpdateTime is when the control plane stored the current rules.
-	UpdateTime time.Time
-	// ActorCreateTime is when the control plane created the Actor.
+	Version         int64
+	CreateTime      time.Time
+	UpdateTime      time.Time
 	ActorCreateTime time.Time
 }
 
-// EnforcedAfter returns the time from which the gateway can only apply the
-// stored rules, given how long it may keep a cached policy: window after the
-// latest of these, each of which can leave other rules cached under this
-// Actor's name.
-//
-//   - UpdateTime: the rules this write replaced.
-//   - CreateTime: a policy deleted and created again starts at version 1, and
-//     the deleted one's rules may still be cached. A new policy and a
-//     recreated one cannot be told apart, so every new policy waits.
-//   - ActorCreateTime: deleting an Actor deletes its policy, and a new Actor
-//     of the same name starts without one.
-//
-// The control plane stamps a new policy's UpdateTime with its CreateTime and
-// creates a policy only for an existing Actor, so UpdateTime alone is the
-// latest. All three are compared so that no store's stamping is relied on.
-// Only a policy that has not been written for a window is enforced at once.
 func (s SubstrateEgressPolicyState) EnforcedAfter(window time.Duration) time.Time {
 	changed := s.UpdateTime
 	for _, candidate := range []time.Time{s.CreateTime, s.ActorCreateTime} {
@@ -204,8 +149,6 @@ func (s SubstrateEgressPolicyState) EnforcedAfter(window time.Duration) time.Tim
 	return changed.Add(window)
 }
 
-// ApplyActorEgressPolicy is EnsureActorEgressPolicy that also reports the
-// stored policy's state, so the caller can wait for it to take effect.
 func (c *SubstrateNativeClient) ApplyActorEgressPolicy(ctx context.Context, actorID string, rules []SubstrateEgressRule) (SubstrateEgressPolicyState, error) {
 	if c == nil || c.Control == nil {
 		return SubstrateEgressPolicyState{}, NewError("apply egress policy", ErrorKindInvalidArgument, "Substrate native client is not configured", false, nil)
@@ -242,7 +185,6 @@ func applySubstrateActorEgressPolicy(ctx context.Context, control substrateEgres
 		case getErr != nil:
 			return fail(substrateControlError("get egress policy", getErr))
 		case substrateEgressRulesEqual(existing.GetRules(), desired.GetRules()):
-			// Verified by a fresh read after any write.
 			actor, actorErr := control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: proto.CloneOf(ref)})
 			if actorErr != nil {
 				return fail(substrateControlError("get actor", actorErr))
@@ -270,7 +212,6 @@ func applySubstrateActorEgressPolicy(ctx context.Context, control substrateEgres
 		}
 		switch status.Code(err) {
 		case codes.OK, codes.Aborted, codes.AlreadyExists:
-			// Re-read: verify our write or reload after a concurrent one.
 			continue
 		default:
 			return fail(substrateControlError("write egress policy", err))
@@ -326,8 +267,6 @@ func canonicalSubstrateEgressRules(rules []SubstrateEgressRule) ([]SubstrateEgre
 			if j > 0 && ports[j-1] == port {
 				return nil, egressRuleError(fmt.Sprintf("egress rule %d repeats port %d", i, port))
 			}
-			// Upstream picks exactly one rule per name and port; a tie is an
-			// admission error, and two schemes on one origin are ambiguous.
 			key := host + ":" + strconv.Itoa(int(port))
 			if previous, ok := claimed[key]; ok {
 				return nil, egressRuleError(fmt.Sprintf("egress host %q port %d is allowed by more than one rule (%s and %s)", host, port, previous, scheme))
@@ -351,10 +290,6 @@ func canonicalSubstrateEgressRules(rules []SubstrateEgressRule) ([]SubstrateEgre
 	return out, nil
 }
 
-// rejectSubstrateEgressOverrides refuses an exact host that a wildcard rule on
-// the same port also matches with a different scheme. The gateway prefers the
-// exact rule ("*.example.com" matches exactly one extra label), so the overlap
-// would replace the wildcard's scheme for that host instead of adding access.
 func rejectSubstrateEgressOverrides(rules []SubstrateEgressRule) error {
 	for _, wildcard := range rules {
 		suffix, ok := strings.CutPrefix(wildcard.Host, "*")
@@ -409,14 +344,9 @@ func validateSubstrateEgressHost(raw string) (string, error) {
 			return "", fmt.Errorf("host %q has a DNS label longer than 63 characters", raw)
 		}
 	}
-	// The gateway rejects any all-numeric final label, however long.
 	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
 		return "", fmt.Errorf("host %q must not end in a numeric label", raw)
 	}
-	// An Actor's resolver tries search suffixes its DNS relay refuses, and
-	// cluster DNS answers only the fully qualified Service name, so a short
-	// one would be allowed but never resolve. The cluster domain is not known
-	// here, so name the form to use rather than rewrite the host.
 	if labels[len(labels)-1] == "svc" {
 		return "", fmt.Errorf("host %q is a short Kubernetes Service name, which Substrate Actors cannot resolve; use the fully qualified name %q "+
 			"(with your cluster domain if it is not cluster.local)", raw, host+".cluster.local")
@@ -428,9 +358,6 @@ func egressRuleError(message string) error {
 	return NewError("validate egress policy", ErrorKindInvalidArgument, message, false, nil)
 }
 
-// substrateEgressRulesEqual compares rule sets independent of order,
-// including each rule's exact gateway effects, so a changed or foreign
-// effect makes the policy unequal and Orka replaces it.
 func substrateEgressRulesEqual(a, b []*ateapipb.EgressRule) bool {
 	return slices.Equal(substrateEgressRuleKeys(a), substrateEgressRuleKeys(b))
 }
@@ -473,7 +400,6 @@ func substrateEgressRuleKeys(rules []*ateapipb.EgressRule) []string {
 	return keys
 }
 
-// substrateEgressEffectsKey canonically encodes a rule's gateway effects.
 func substrateEgressEffectsKey(effects *ateapipb.HttpRuleEffects) string {
 	if effects == nil {
 		return "none"

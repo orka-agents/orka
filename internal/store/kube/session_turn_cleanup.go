@@ -11,8 +11,6 @@ import (
 
 var _ store.SessionTurnCleanupReceiptStore = (*Store)(nil)
 
-// GetSessionTurnCleanupReceipt reads archived finalization evidence only while
-// the completed Session's authoritative Kubernetes resources remain absent.
 func (s *Store) GetSessionTurnCleanupReceipt(ctx context.Context, namespace, sessionName, promptAttemptID string) (*store.SessionTurnCleanupReceipt, error) {
 	if s.sessionCleanup == nil {
 		return nil, ErrSessionCleanupStoreNotConfigured
@@ -81,9 +79,6 @@ func (s *Store) verifySessionCleanupBeforePromptAttemptDeletion(
 	if !marker.ContinuitySession {
 		return nil
 	}
-	// A newer attempt may settle before binding to its Session. Every older
-	// bound attempt still owns frozen runtime cleanup authority, so none may
-	// be removed until Session deletion has archived all of that evidence.
 	for _, object := range candidates {
 		attempt := promptAttemptFromObject(object)
 		if attempt.SessionUID == "" && attempt.SessionLeaseGeneration == 0 {

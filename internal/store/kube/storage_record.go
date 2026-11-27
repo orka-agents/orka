@@ -17,9 +17,6 @@ import (
 
 var _ store.StorageRecordStore = (*Store)(nil)
 
-// GetStorageRecord implements store.StorageRecordStore. It reads the
-// ControllerEpoch object without the cache, so a hold another process
-// recorded, and an operator's acknowledgement, are seen at once.
 func (s *Store) GetStorageRecord(ctx context.Context, name string) (store.StorageRecord, error) {
 	if err := s.requireClient(); err != nil {
 		return store.StorageRecord{}, err
@@ -61,7 +58,6 @@ func storageRecordFromObject(object *corev1alpha1.ControllerEpoch) store.Storage
 	return record
 }
 
-// RecordStorageAcknowledgement implements store.StorageRecordStore.
 func (s *Store) RecordStorageAcknowledgement(ctx context.Context, fence store.ControllerEpochFence, ack store.StorageAcknowledgement) error {
 	if err := validateStorageAcknowledgement(ack); err != nil {
 		return err
@@ -99,7 +95,6 @@ func (s *Store) RecordStorageAcknowledgement(ctx context.Context, fence store.Co
 	})
 }
 
-// RecordStorageWatermark implements store.StorageRecordStore.
 func (s *Store) RecordStorageWatermark(
 	ctx context.Context, fence store.ControllerEpochFence, datasetID string, watermark int64, at time.Time,
 ) error {
@@ -133,10 +128,6 @@ func (s *Store) RecordStorageWatermark(
 	})
 }
 
-// HoldStorage implements store.StorageRecordStore. It records the hold under
-// the controller epoch mutation interlock, waiting while another
-// control-store change holds it, so every change either finishes before the
-// hold is recorded or sees the hold and is refused.
 func (s *Store) HoldStorage(ctx context.Context, fence store.ControllerEpochFence, hold store.StorageRecoveryHold) (store.StorageRecoveryHold, error) {
 	if err := store.ValidateControlIdentifier("storage recovery hold ID", hold.ID); err != nil {
 		return store.StorageRecoveryHold{}, err
@@ -180,10 +171,6 @@ func (s *Store) HoldStorage(ctx context.Context, fence store.ControllerEpochFenc
 	return recorded, nil
 }
 
-// waitForControllerEpochMutation takes the controller epoch mutation
-// interlock for fence, also while a hold is recorded, and keeps trying while
-// another change holds it until ctx ends. A fence the object no longer holds
-// is refused with ErrFenced, as every storage record write is.
 func (s *Store) waitForControllerEpochMutation(ctx context.Context, fence store.ControllerEpochFence) (epochSnapshot, error) {
 	for {
 		_, snapshot, err := s.lockControllerEpochMutation(ctx, fence, true)
@@ -195,16 +182,12 @@ func (s *Store) waitForControllerEpochMutation(ctx context.Context, fence store.
 		}
 		select {
 		case <-ctx.Done():
-			// Only the end of ctx is returned, never the contention, which
-			// matches ErrConflict and would read as a definite refusal.
 			return epochSnapshot{}, fmt.Errorf("wait for the controller epoch mutation interlock: %w", ctx.Err())
 		case <-time.After(controllerEpochMutationRetryDelay):
 		}
 	}
 }
 
-// storageRecordFenceError returns ErrFenced when the object no longer holds
-// fence's epoch, and err otherwise.
 func (s *Store) storageRecordFenceError(ctx context.Context, fence store.ControllerEpochFence, err error) error {
 	normalized, normalizeErr := store.NormalizeEpochFence(fence)
 	if normalizeErr != nil {
@@ -220,8 +203,6 @@ func (s *Store) storageRecordFenceError(ctx context.Context, fence store.Control
 	return err
 }
 
-// storageRecordFenced refuses a storage record write under a fence other
-// than the epoch the object holds.
 func storageRecordFenced(object *corev1alpha1.ControllerEpoch, fence store.ControllerEpochFence) error {
 	if object.Status.Epoch != fence.Epoch || object.Status.HolderID != fence.HolderID {
 		return store.FencedErrorf("controller epoch %q is at %d held by %q, not %d held by %q",
@@ -230,16 +211,8 @@ func storageRecordFenced(object *corev1alpha1.ControllerEpoch, fence store.Contr
 	return nil
 }
 
-// controllerEpochMutationRetryDelay is how long HoldStorage waits before it
-// tries the interlock again.
 const controllerEpochMutationRetryDelay = 100 * time.Millisecond
 
-// ReleaseStorageHold implements store.StorageRecordStore. A retry of a
-// release whose status update committed but whose response was lost
-// succeeds without writing again, when the object still shows exactly that
-// release under fence: no hold, the acknowledgement of id, the condition the
-// release set and the acknowledgements it recorded. Anything else is a
-// conflict.
 func (s *Store) ReleaseStorageHold(
 	ctx context.Context, fence store.ControllerEpochFence, id string, acks []store.StorageAcknowledgement,
 ) error {
@@ -272,8 +245,6 @@ func (s *Store) ReleaseStorageHold(
 	})
 }
 
-// releasedStorageEpochs returns the storage record entries a release of acks
-// records, in contract order.
 func releasedStorageEpochs(acks []store.StorageAcknowledgement) []corev1alpha1.StorageEpochAcknowledgement {
 	if len(acks) == 0 {
 		return nil
@@ -292,12 +263,6 @@ func storageReleaseMessage(id string) string {
 	return truncateMessage(fmt.Sprintf("storage recovery hold %s was acknowledged; storage acknowledgements were recorded again", id))
 }
 
-// storageHoldReleased reports whether object shows the release of hold id
-// that records entries as committed: no hold is recorded, the operator
-// acknowledged id, the StorageRecoveryRequired condition is the one that
-// release sets, and the record holds exactly entries. Times are compared to
-// the second, as the API server stores them. The caller has checked that the
-// object holds its fence, so no other controller epoch made this release.
 func storageHoldReleased(object *corev1alpha1.ControllerEpoch, id string, entries []corev1alpha1.StorageEpochAcknowledgement) bool {
 	if object.Status.StorageRecovery != nil ||
 		strings.TrimSpace(object.Annotations[corev1alpha1.StorageRecoveryAcknowledgedAnnotation]) != id {
@@ -311,8 +276,6 @@ func storageHoldReleased(object *corev1alpha1.ControllerEpoch, id string, entrie
 	return slices.EqualFunc(object.Status.StorageEpochs, entries, storedStorageEpochEqual)
 }
 
-// storedStorageEpochEqual reports whether a stored entry is want, with times
-// compared to the second.
 func storedStorageEpochEqual(stored, want corev1alpha1.StorageEpochAcknowledgement) bool {
 	sameSecond := func(a, b time.Time) bool { return a.Truncate(time.Second).Equal(b.Truncate(time.Second)) }
 	sameWatermarkTime := (stored.WatermarkAcknowledgedAt == nil) == (want.WatermarkAcknowledgedAt == nil) &&
@@ -322,8 +285,6 @@ func storedStorageEpochEqual(stored, want corev1alpha1.StorageEpochAcknowledgeme
 		sameWatermarkTime
 }
 
-// updateStorageRecord applies change to the ControllerEpoch status while
-// fence is the epoch it holds, retrying on write conflicts.
 func (s *Store) updateStorageRecord(
 	ctx context.Context, fence store.ControllerEpochFence, change func(*corev1alpha1.ControllerEpochStatus) (bool, error),
 ) error {
@@ -358,10 +319,6 @@ func (s *Store) updateStorageRecordObject(
 		if err := s.client.Status().Update(ctx, object); err != nil {
 			return err
 		}
-		// An API server still serving an older ControllerEpoch schema
-		// accepts the update but drops the fields it does not know. A record
-		// that does not keep what was written would let a hold vanish, so
-		// the write fails instead.
 		if !storageRecordKept(*want, object.Status) {
 			return store.ValidationErrorf(
 				"controller epoch object %s/%s did not keep its storage record; apply this release's ControllerEpoch CRD",
@@ -371,9 +328,6 @@ func (s *Store) updateStorageRecordObject(
 	})
 }
 
-// storageRecordKept reports whether the status the API server returned keeps
-// the storage record that was written. Times are not compared, because the
-// API server stores them to the second.
 func storageRecordKept(want, got corev1alpha1.ControllerEpochStatus) bool {
 	if len(want.StorageEpochs) != len(got.StorageEpochs) {
 		return false
@@ -428,8 +382,6 @@ func storageEpochEntriesEqual(a, b corev1alpha1.StorageEpochAcknowledgement) boo
 		a.AcknowledgedAt.Equal(&b.AcknowledgedAt) && a.WriteWatermark == b.WriteWatermark && sameWatermarkTime
 }
 
-// truncateMessage keeps a status message within the 1024 bytes the
-// ControllerEpoch schema allows.
 func truncateMessage(message string) string {
 	const limit = 1024
 	if len(message) <= limit {

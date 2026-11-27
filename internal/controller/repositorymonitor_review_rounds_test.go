@@ -35,8 +35,6 @@ func TestRepositoryMonitorReviewRoundsFor(t *testing.T) {
 	seed("pr7-h1-again", 7, "h1", repositoryMonitorReviewVerdictNeedsHuman)
 	seed("pr7-h2", 7, "h2", repositoryMonitorReviewVerdictFailed)
 	seed("pr8-h1", 8, "h1", repositoryMonitorReviewVerdictNeedsChanges)
-	// An exhaustive pass that passed, then a later pass of the same head
-	// that did not: the head never held a pass.
 	seed("pr10-h1", 10, "h1", repositoryMonitorReviewVerdictNeedsChanges)
 	seed("pr10-h2-pass-1", 10, "h2", repositoryMonitorReviewVerdictPassed)
 	seed("pr10-h2-pass-2", 10, "h2", repositoryMonitorReviewVerdictNeedsChanges)
@@ -74,8 +72,6 @@ func TestRepositoryMonitorReviewRoundsSkipUnfinishedExhaustivePasses(t *testing.
 		added bool
 		want  repositoryMonitorReviewRounds
 	}{
-		// A first pass that added a finding was due another pass, but the
-		// author pushed h3 first, so h2 never finished passing.
 		{"an unfinished pass does not reset the count", true, repositoryMonitorReviewRounds{SincePass: 3}},
 		{"a finished pass resets the count", false, repositoryMonitorReviewRounds{SincePass: 1, PassedEarlier: true}},
 	} {
@@ -255,8 +251,6 @@ func TestRepositoryMonitorRoundsToPassRecordsEachPullRequestOnce(t *testing.T) {
 		t.Fatalf("samples = %d after a needs_changes review, want 0", got)
 	}
 
-	// An exhaustive pass that added a finding is followed by another pass,
-	// so the pull request has not passed yet.
 	monitor.Spec.Review.Exhaustive = true
 	findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{{ID: "f-p2", Priority: "P2", Status: repositoryMonitorFindingStatusOpen, FirstReview: "pass-1"}})
 	if err != nil {
@@ -272,8 +266,6 @@ func TestRepositoryMonitorRoundsToPassRecordsEachPullRequestOnce(t *testing.T) {
 	}
 	monitor.Spec.Review.Exhaustive = false
 
-	// A pass recorded before review_first_passed existed, which the round
-	// count ended at, means this pass is not the pull request's first.
 	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, &store.MonitorItem{Number: 40}, &store.ReviewRecord{ID: "after-upgrade", HeadSHA: "h9", Verdict: repositoryMonitorReviewVerdictPassed}, repositoryMonitorReviewRounds{SincePass: 1, PassedEarlier: true})
 	if got := passes() - before; got != 0 {
 		t.Fatalf("samples = %d after an earlier pass, want 0", got)
@@ -284,8 +276,6 @@ func TestRepositoryMonitorRoundsToPassRecordsEachPullRequestOnce(t *testing.T) {
 	if got := passes() - before; got != 1 || firstPassEvents() != 1 {
 		t.Fatalf("samples = %d events = %d after the first pass, want 1 and 1", got, firstPassEvents())
 	}
-	// A review command that passes the same head again, or a later head,
-	// is not the pull request's first pass.
 	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, &store.ReviewRecord{ID: "pass-3", HeadSHA: "h2", Verdict: repositoryMonitorReviewVerdictPassed}, repositoryMonitorReviewRounds{SincePass: 1})
 	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, &store.ReviewRecord{ID: "pass-4", HeadSHA: "h3", Verdict: repositoryMonitorReviewVerdictPassed}, repositoryMonitorReviewRounds{SincePass: 1})
 	if got := passes() - before; got != 1 || firstPassEvents() != 1 {

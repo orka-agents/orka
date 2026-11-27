@@ -39,52 +39,35 @@ import (
 )
 
 const (
-	ahpTurnPollInterval = 2 * time.Second
-	ahpTitleRunes       = 60
-	ahpOptionApprove    = "approve"
-	ahpOptionDeny       = "deny"
-	// ahpFailureTextMax bounds the runtime detail a failed turn reports.
-	ahpFailureTextMax = 500
-	// ahpToolOutputMax bounds the output a running tool call shows.
-	ahpToolOutputMax     = 32 << 10
-	ahpPlanToolName      = "plan"
-	ahpUsageScopeSession = "session"
-	// ahpExchangeMax bounds each message and reply the history keeps, and
-	// ahpHistoryMax how many exchanges; ahpCarryOverMax bounds the history a
-	// new Orka Session starts with.
-	ahpExchangeMax = 4 << 10
-	// ahpPartCompareMax bounds the newest markdown part kept to tell whether
-	// it already is a turn's stored answer.
-	ahpPartCompareMax = 1 << 20
-	ahpHistoryMax     = 20
-	ahpCarryOverMax   = 24 << 10
-	// ahpGenericPromptFailure is the Task message for a prompt that failed
-	// without a more specific reason.
+	ahpTurnPollInterval     = 2 * time.Second
+	ahpTitleRunes           = 60
+	ahpOptionApprove        = "approve"
+	ahpOptionDeny           = "deny"
+	ahpFailureTextMax       = 500
+	ahpToolOutputMax        = 32 << 10
+	ahpPlanToolName         = "plan"
+	ahpUsageScopeSession    = "session"
+	ahpExchangeMax          = 4 << 10
+	ahpPartCompareMax       = 1 << 20
+	ahpHistoryMax           = 20
+	ahpCarryOverMax         = 24 << 10
 	ahpGenericPromptFailure = "prompt failed"
 )
 
-// ahpTurn follows one turn's Task and turns its events into chat actions.
 type ahpTurn struct {
-	// published records that the turn pushed its branch, for the write
-	// that ends the turn.
-	published bool
-	b         *ahpBackend
-	principal ahphost.Principal
-	session   ahpSession
-	id        string
-	task      string
-	startedAt time.Time
-	// finalReply is the reply a settled turn keeps in the session's history,
-	// recorded with the turn's end when hasFinalReply is set; t.mu guards both.
+	published     bool
+	b             *ahpBackend
+	principal     ahphost.Principal
+	session       ahpSession
+	id            string
+	task          string
+	startedAt     time.Time
 	finalReply    string
 	hasFinalReply bool
-	// taskUID is the UID of the turn's Task once it is known; t.mu guards it.
-	// Events, approvals and a Task that carry another UID belong to a Task
-	// created later under the same name.
-	taskUID string
-	emit    ahphost.Emitter
-	ctx     context.Context
-	cancel  context.CancelFunc
+	taskUID       string
+	emit          ahphost.Emitter
+	ctx           context.Context
+	cancel        context.CancelFunc
 
 	mu              sync.Mutex
 	clientCancelled bool
@@ -93,48 +76,25 @@ type ahpTurn struct {
 	textPart        string
 	thoughtPart     string
 	streamedText    bool
-	// shownPart is the newest markdown part of a turn this process recovered,
-	// streamed by the process before it.
-	shownPart string
-	// partText is the newest markdown part this process streamed, unless it
-	// grew past ahpPartCompareMax (partOver).
-	partText string
-	partOver bool
-	// journalMissed reports a chat action the journal refused: what the
-	// chat shows may be missing part of the answer.
-	journalMissed atomic.Bool
-	// lagged reports that live updates stopped before the turn ended, so the
-	// text streamed so far may be only part of its answer.
-	lagged bool
-	// lastText is the end of the newest markdown part, kept for failures.
-	lastText string
-	// reply is the end of the turn's text, kept as the conversation's history.
-	reply string
-	// failure is the runtime's own reason when the prompt failed.
-	failure string
-	// planCall is the synthetic tool call that shows the agent's plan.
-	planCall string
-	// heldTools are the name, kind and input of calls announced before they
-	// were described, kept until each starts.
-	heldTools map[string]harnessv2.ToolCallUpdate
+	shownPart       string
+	partText        string
+	partOver        bool
+	journalMissed   atomic.Bool
+	lagged          bool
+	lastText        string
+	reply           string
+	failure         string
+	planCall        string
+	heldTools       map[string]harnessv2.ToolCallUpdate
 }
 
 type ahpToolCall struct {
 	started, ready, completed bool
 	title                     string
-	// approval is the held permission request waiting for the person, and
-	// ended the last one that ended, resolved, expired or cancelled, also
-	// while the person's decision on it was on its way.
-	approval, ended string
-	// output is the running call's text output so far, bounded.
-	output string
-	// input is the call's input as last reported, by its permission request
-	// or its updates; a confirmation shows it.
-	input json.RawMessage
-	// denyOnly marks a held request reloaded from its record without the
-	// call's input, which is never stored: the person cannot see what they
-	// would approve, so it can only be denied.
-	denyOnly bool
+	approval, ended           string
+	output                    string
+	input                     json.RawMessage
+	denyOnly                  bool
 }
 
 func ahpTurnKey(userKey, session string) string { return userKey + "\x00" + session }
@@ -158,14 +118,8 @@ func ahpTitle(text string) string {
 	return string(runes[:ahpTitleRunes-1]) + "…"
 }
 
-// startTurn creates the turn's Task as the person and follows it.
 func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal, record ahpSession, action *ahptypes.ChatTurnStartedAction, emit ahphost.Emitter) {
 	started := b.now().UTC()
-	// The slot reserved when the message was admitted passes to the running
-	// turn, or is freed if the turn never starts; then a waiting message may
-	// start instead. It is freed once: a turn that fails frees it before the
-	// person sees the error, so a message sent straight back is admitted, and
-	// a later release can never free that message's slot.
 	failed, released := false, false
 	release := func() {
 		if !released {
@@ -184,13 +138,8 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		release()
 		b.emitTurnError(ctx, emit, record, action.TurnId, started, "TurnNotStarted", message)
 	}
-	// Start from the session as stored now: a change accepted since the
-	// message was admitted, such as the approval mode, applies to this turn.
-	// A session that cannot be read runs nothing: the older copy could carry
-	// an approval mode the person has since changed.
 	var current ahpSession
 	if err := b.getRecord(ctx, principal.UserKey, ahpRecordSession, record.Session, &current); errors.Is(err, store.ErrNotFound) {
-		// The session was disposed of while the message waited: run nothing.
 		return
 	} else if err != nil {
 		log.Error(err, "read AHP session", "session", record.Session)
@@ -221,10 +170,6 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	}
 	number := record.Turns + 1
 	name := fmt.Sprintf("%s-t%d", record.OrkaSession, number)
-	// SessionTurns counts the turns the current Orka Session has run, so its
-	// first one creates it, also after a turn whose Task was not created. A
-	// turn recorded before a restart, whose Task never was, left the count
-	// raised and no Orka Session: this turn creates it still.
 	first := record.SessionTurns == 0
 	if !first && b.h.sessionStore != nil {
 		if _, err := b.h.sessionStore.GetSession(ctx, record.Namespace, record.OrkaSession); errors.Is(err, store.ErrNotFound) {
@@ -238,7 +183,6 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	task := b.turnTask(ctx, principal, record, choice, name, prompt, first)
 	ui := ahpPrincipalUserInfo(principal)
 
-	// Subscribe before the Task exists so no event of the turn is missed.
 	sub := b.live.Subscribe(record.Namespace, name)
 	if err := authorizeAndStampToolTaskCreate(ctx, b.h.client, b.h.clientset, ui.ContextToken, b.h.contextTokenAuthorization, "ahpTurn", ui, task); err != nil {
 		sub.Close()
@@ -250,26 +194,13 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		b: b, principal: principal, session: record, id: action.TurnId, task: name, startedAt: started, emit: emit,
 		ctx: turnCtx, cancel: cancel, tools: map[string]*ahpToolCall{},
 	}
-	// The turn is recorded, and registered for this process, before its Task
-	// exists. A controller that stops after creating the Task leaves a turn
-	// that recovery follows to its end, and one that stops before leaves a
-	// turn recovery settles as deleted; neither leaves a Task nothing finds.
-	// Disposal holds the user's lifecycle lock while it cancels the session's
-	// active Task and deletes the session. Holding it through the Task's
-	// creation means disposal either finds and cancels the created Task, or
-	// has already deleted the session, and then nothing is created.
 	unlock := b.lockUser(principal.UserKey)
 	busy, modeChanged := false, false
 	err = b.updateSession(ctx, principal.UserKey, record.Session, func(s *ahpSession) {
-		// A message whose start waited past its reservation can meet a turn
-		// another message started meanwhile; the first one recorded runs.
-		// updateSession holds b.mu, which guards b.turns.
 		if s.ActiveTurn != "" || b.turns[ahpTurnKey(principal.UserKey, record.Session)] != nil {
 			busy = true
 			return
 		}
-		// The Task was built for the approval mode read above; one changed
-		// since must not run under the old mode.
 		if s.ApprovalMode != record.ApprovalMode {
 			modeChanged = true
 			return
@@ -306,11 +237,6 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	b.turns[turnKey] = turn
 	b.mu.Unlock()
 	if err := b.h.client.Create(ctx, task); err != nil {
-		// The Task may exist even so. The turn is taken back only once that
-		// Task is known absent or asked to stop, so it never runs beside the
-		// next turn; until then the session stays busy with it. Its number
-		// stays used, so a Task the server kept under the name never stands
-		// in the next turn's way.
 		if b.cancelTask(context.WithoutCancel(ctx), principal, task.Namespace, name, "") == nil {
 			b.takeBackUncreatedTurn(ctx, principal, record, action.TurnId, emit)
 		} else {
@@ -356,16 +282,12 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 	go turn.run(sub)
 }
 
-// turnTask builds one turn's Task. The Session carries the conversation; the
-// repository comes from the project, cloned by Orka with Orka's credentials.
 func (b *ahpBackend) turnTask(ctx context.Context, principal ahphost.Principal, record ahpSession, choice ahpAgentChoice, name, prompt string, first bool) *corev1alpha1.Task {
 	source := record.BaseBranch
 	if record.SourceBranch != "" {
 		source = record.SourceBranch
 	}
 	workspace := &corev1alpha1.WorkspaceConfig{GitRepo: record.RepoURL, Branch: source, Intent: corev1alpha1.WorkspaceIntentRead}
-	// The namespace's credential goes to github.com only: a project on another
-	// host, which the user may name freely, is cloned anonymously.
 	if ahpOnGitHub(record.RepoURL) {
 		if credential := b.gitCredential(ctx, principal.Namespace); credential != nil {
 			workspace.Intent = corev1alpha1.WorkspaceIntentWrite
@@ -405,7 +327,6 @@ func ahpErrorMessage(err error) string {
 	return "the turn could not start"
 }
 
-// emitTurnError ends a turn that never got a Task.
 func (b *ahpBackend) emitTurnError(ctx context.Context, emit ahphost.Emitter, record ahpSession, turnID string, started time.Time, kind, message string) {
 	_ = emit.Emit(ctx, record.Chat, ahptypes.StateAction{Value: &ahptypes.ChatErrorAction{
 		Type: ahptypes.ActionTypeChatError, TurnId: turnID, Duration: b.now().Sub(started).Milliseconds(),
@@ -415,8 +336,6 @@ func (b *ahpBackend) emitTurnError(ctx context.Context, emit ahphost.Emitter, re
 	_ = emit.Emit(ctx, record.Session, ahpSessionIdle(record.Chat, now)...)
 }
 
-// ahpSessionIdle marks a session's chat idle after a turn and clears the
-// session's activity, which clients read as the end of its work.
 func ahpSessionIdle(chat, now string) []ahptypes.StateAction {
 	return []ahptypes.StateAction{
 		{Value: &ahptypes.SessionChatUpdatedAction{
@@ -429,10 +348,6 @@ func ahpSessionIdle(chat, now string) []ahptypes.StateAction {
 
 func (t *ahpTurn) stop() { t.cancel() }
 
-// cancelIfClientCancelled cancels a turn's Task the client cancelled before
-// it existed: that cancel found nothing to stop. It marked the turn first,
-// and this reads the mark only after the Task exists, so either the cancel
-// finds the Task or this sees the mark.
 func (b *ahpBackend) cancelIfClientCancelled(ctx context.Context, principal ahphost.Principal, turn *ahpTurn, task *corev1alpha1.Task) {
 	turn.mu.Lock()
 	cancelled := turn.clientCancelled
@@ -454,15 +369,12 @@ func (t *ahpTurn) chat(actions ...ahptypes.StateAction) {
 	}
 }
 
-// run follows the turn's live events and its Task until the Task settles.
 func (t *ahpTurn) run(sub *liveevents.Subscription) {
 	defer func() { sub.Close() }()
 	defer t.b.forgetTurn(t)
 	events := sub.C()
 	ticker := time.NewTicker(ahpTurnPollInterval)
 	defer ticker.Stop()
-	// Events are followed only once the Task they must come from is known;
-	// until then they wait in the subscription.
 	if !t.knowTaskUID(ticker.C) {
 		return
 	}
@@ -470,11 +382,6 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 		select {
 		case event, ok := <-events:
 			if !ok {
-				// The subscription fell behind and lost what it could not
-				// hold: the turn ends from the Task's stored result. A new
-				// subscription follows what comes next, and permission requests
-				// held meanwhile are read back from their records, so none
-				// waits unseen until it expires.
 				t.mu.Lock()
 				t.lagged = true
 				t.mu.Unlock()
@@ -493,7 +400,6 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 				return
 			}
 			if err == nil && ahpTaskTerminal(task) {
-				// Deliver anything still queued for this turn first.
 				t.drain(events)
 				t.settle(task)
 				return
@@ -504,9 +410,6 @@ func (t *ahpTurn) run(sub *liveevents.Subscription) {
 	}
 }
 
-// knowTaskUID makes sure the turn knows its Task's UID before it follows any
-// event: a turn recovered from a record without one, whose Task could not be
-// read then, reads it again at each tick. It reports false when the turn ended.
 func (t *ahpTurn) knowTaskUID(ticks <-chan time.Time) bool {
 	for {
 		t.mu.Lock()
@@ -539,10 +442,6 @@ func (t *ahpTurn) knowTaskUID(ticks <-chan time.Time) bool {
 	}
 }
 
-// ownsTask reports whether task is the turn's Task, not one created later
-// under its name. A turn whose Task UID is still unknown, as a recovered one
-// whose Task could not be read, takes the UID of the Task it first finds and
-// keeps it in the record.
 func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
 	t.mu.Lock()
 	if t.taskUID != "" {
@@ -556,21 +455,8 @@ func (t *ahpTurn) ownsTask(task *corev1alpha1.Task) bool {
 	return true
 }
 
-// ahpTaskGoneUID stands for the UID of a turn's Task that was already gone
-// when the turn was recovered. No Task has it, so none created later under the
-// Task's name is taken for the turn's. It is recorded as the Task's UID, so a
-// later recovery knows the Task was gone too.
 const ahpTaskGoneUID = "\x00gone"
 
-// takeBackUncreatedTurn takes back a turn whose Task was not created. A
-// session still recording the turn would refuse every later message: the
-// take-back is tried until it lands. Messages waiting behind the turn run once
-// it has: a drain before then finds the turn still recorded and leaves them.
-// takeBackOnceStopped keeps asking a Task whose creation reported a failure
-// to stop, and takes its turn back once it is known absent or asked to stop.
-// A Task that cannot be stopped keeps the session busy: recovery follows it,
-// or settles the turn once it is gone, rather than let a next turn run beside
-// it.
 func (b *ahpBackend) takeBackOnceStopped(ctx context.Context, principal ahphost.Principal, record ahpSession, turnID, namespace, name string, emit ahphost.Emitter) {
 	err := retry.OnError(b.cancelBackoff, func(error) bool { return true }, func() error {
 		return b.cancelTask(ctx, principal, namespace, name, "")
@@ -600,8 +486,6 @@ func (b *ahpBackend) takeBackUncreatedTurn(ctx context.Context, principal ahphos
 	}
 }
 
-// adoptCreatedTask makes the Task the turn just created its own: from then on
-// only events, approvals and a result of that Task are the turn's.
 func (t *ahpTurn) adoptCreatedTask(ctx context.Context, task *corev1alpha1.Task) {
 	uid := string(task.UID)
 	if uid == "" {
@@ -613,10 +497,6 @@ func (t *ahpTurn) adoptCreatedTask(ctx context.Context, task *corev1alpha1.Task)
 	t.recordTaskUID(ctx, uid)
 }
 
-// recordTaskUID keeps the UID of the turn's Task in its session's record, if
-// the session still runs the turn, so a later recovery follows the same Task.
-// A write the store refuses is tried again: without the UID a later recovery
-// would take whatever Task then holds the name.
 func (t *ahpTurn) recordTaskUID(ctx context.Context, uid string) {
 	if uid == "" {
 		return
@@ -654,8 +534,6 @@ func ahpTaskTerminal(task *corev1alpha1.Task) bool {
 func (t *ahpTurn) handle(event liveevents.Event) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// Events follow the Task's name; one a later Task under that name sent is
-	// not the turn's, nor are its permission requests.
 	if event.TaskUID != "" && t.taskUID != "" && event.TaskUID != t.taskUID {
 		return
 	}
@@ -713,7 +591,6 @@ func (t *ahpTurn) handle(event liveevents.Event) {
 	}
 }
 
-// text appends assistant text, opening a markdown part when needed.
 func (t *ahpTurn) text(content string) {
 	if content == "" {
 		return
@@ -753,12 +630,6 @@ func (t *ahpTurn) thought(content string) {
 	t.chat(ahptypes.StateAction{Value: &ahptypes.ChatReasoningAction{Type: ahptypes.ActionTypeChatReasoning, TurnId: t.id, PartId: t.thoughtPart, Content: content}})
 }
 
-// ahpTypedToolFields lists tool names clients draw as typed calls, with the
-// input fields each reads. The Copilot app draws a "read" or "view" as a file
-// view of the input's path, and shows "View unknown" without one; the Copilot
-// runtime names its calls by ACP kind ("read", "search", "edit") and sends no
-// input. A call so named whose input lacks every field is renamed, so clients
-// show its title instead.
 var ahpTypedToolFields = func() map[string][]string {
 	fields := map[string][]string{}
 	for _, group := range []struct{ names, fields string }{
@@ -773,8 +644,6 @@ var ahpTypedToolFields = func() map[string][]string {
 	return fields
 }()
 
-// ahpToolName names a call for clients: the runtime's tool name, else its
-// ACP kind, renamed when clients would draw it as a typed call it cannot fill.
 func ahpToolName(update *harnessv2.ToolCallUpdate, input json.RawMessage) string {
 	name := update.Name
 	if strings.TrimSpace(name) == "" {
@@ -792,8 +661,6 @@ func ahpToolName(update *harnessv2.ToolCallUpdate, input json.RawMessage) string
 	return key + "_call"
 }
 
-// ahpInputHasAny reports whether a JSON object input has a non-empty string
-// in any of the fields.
 func ahpInputHasAny(input json.RawMessage, fields []string) bool {
 	var values map[string]any
 	if len(input) == 0 || json.Unmarshal(input, &values) != nil {
@@ -845,12 +712,10 @@ func (t *ahpTurn) readyTool(id string, call *ahpToolCall, title string, input js
 	t.chat(ahptypes.StateAction{Value: ready})
 }
 
-// tool advances one tool call through start, ready and complete.
 func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 	if len(update.Diffs) > 0 {
 		t.recordDiffs(update.Diffs)
 	}
-	// What the call was announced with, for updates that do not repeat it.
 	held := t.heldTools[update.ToolCallID]
 	if update.Name != "" {
 		held.Name = update.Name
@@ -865,9 +730,6 @@ func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 	title := ahpRelativeTitle(update.Title)
 	if existing := t.tools[update.ToolCallID]; (existing == nil || !existing.started) && title == "" &&
 		update.Status == harnessv2.ToolCallStatusPending {
-		// A runtime may announce a call before it says what the call does.
-		// Clients keep the name and title a call starts with, so the start
-		// waits for an update that describes it, or for the call to run.
 		if t.heldTools == nil {
 			t.heldTools = map[string]harnessv2.ToolCallUpdate{}
 		}
@@ -877,26 +739,18 @@ func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 	call := t.startTool(update.ToolCallID, ahpToolName(&held, input), title)
 	delete(t.heldTools, update.ToolCallID)
 	if len(input) > 0 {
-		// Kept for a confirmation: a runtime that does not describe the call
-		// in its permission request may have reported it here first.
 		call.input = input
 	} else {
-		// The input a call started with is what clients draw it from, even
-		// when the update that makes it ready does not repeat it.
 		input = call.input
 	}
-	// Later updates usually carry no title; keep the one the call started with.
 	if title == "" {
 		title = call.title
 	}
 	finished := update.Status == harnessv2.ToolCallStatusCompleted || update.Status == harnessv2.ToolCallStatusFailed
 	if call.completed || (call.approval != "" && !finished) {
-		// A held call moves on only after its decision.
 		return
 	}
 	if call.approval != "" {
-		// The call ended while its confirmation was open, for example when the
-		// request expired: close the confirmation before the result.
 		call.approval = ""
 		reason := ahptypes.ToolCallConfirmationReasonUserAction
 		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatToolCallConfirmedAction{
@@ -912,14 +766,12 @@ func (t *ahpTurn) tool(update *harnessv2.ToolCallUpdate) {
 		t.readyTool(update.ToolCallID, call, title, input)
 		content := update.Content
 		if !ahpHasText(content) && call.output != "" {
-			// Keep the output the call streamed when its result carries none.
 			content = []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: call.output}}
 		}
 		t.completeTool(update.ToolCallID, call, update.Status == harnessv2.ToolCallStatusCompleted, title, content)
 	}
 }
 
-// toolOutput shows a running call's output as it arrives.
 func (t *ahpTurn) toolOutput(id string, call *ahpToolCall, update *harnessv2.ToolCallUpdate) {
 	if !ahpHasText(update.Content) {
 		return
@@ -940,8 +792,6 @@ func (t *ahpTurn) toolOutput(id string, call *ahpToolCall, update *harnessv2.Too
 	}})
 }
 
-// showPlan keeps the agent's current plan in one tool call of the turn and
-// on the session, for clients that ask for it.
 func (t *ahpTurn) showPlan(plan *harnessv2.PlanUpdate) {
 	markdown := ahpPlanMarkdown(plan)
 	if t.planCall == "" {
@@ -961,7 +811,6 @@ func (t *ahpTurn) showPlan(plan *harnessv2.PlanUpdate) {
 	}), t.session.Session, "record the plan")
 }
 
-// finishPlan completes the plan's tool call with the last plan.
 func (t *ahpTurn) finishPlan() {
 	if t.planCall == "" {
 		return
@@ -972,8 +821,6 @@ func (t *ahpTurn) finishPlan() {
 	}
 }
 
-// usage reports the prompt's token counts so far. Session-wide totals are
-// left to the completed result.
 func (t *ahpTurn) usage(update *harnessv2.UsageUpdate) {
 	if update.Scope == ahpUsageScopeSession {
 		return
@@ -1018,7 +865,6 @@ func ahpHasText(content []harnessv2.ContentBlock) bool {
 	return false
 }
 
-// ahpTail keeps the last limit bytes of text without splitting a character.
 func ahpTail(text string, limit int) string {
 	if len(text) <= limit {
 		return text
@@ -1030,7 +876,6 @@ func ahpTail(text string, limit int) string {
 	return text[cut:]
 }
 
-// ahpBounded keeps the first limit bytes of text without splitting a character.
 func ahpBounded(text string, limit int) string {
 	if len(text) <= limit {
 		return text
@@ -1042,17 +887,12 @@ func ahpBounded(text string, limit int) string {
 	return text[:cut]
 }
 
-// ahpRuntimeWorkspacePath matches a path inside a runtime's own session
-// workspace, absolute or shortened with a leading ellipsis. Clients see the
-// session's files relative to its working directory instead.
 var ahpRuntimeWorkspacePath = regexp.MustCompile(`(^|\s)(?:\.\.\.|…|/)\S*?/workspace/`)
 
 func ahpRelativeTitle(title string) string {
 	return ahpRuntimeWorkspacePath.ReplaceAllString(title, "$1")
 }
 
-// ahpRelativeInput shows the file paths a call's input names relative to the
-// session's working directory, as its title does. Other input is unchanged.
 func ahpRelativeInput(input json.RawMessage) json.RawMessage {
 	var values map[string]json.RawMessage
 	if json.Unmarshal(input, &values) != nil {
@@ -1097,14 +937,10 @@ func (t *ahpTurn) completeTool(id string, call *ahpToolCall, success bool, title
 	}})
 }
 
-// onApproval shows a held permission request as a confirmation, and settles
-// the confirmation when the request ends without the client's answer.
 func (t *ahpTurn) onApproval(approval *liveevents.Approval) {
 	t.onApprovalFrom(approval, false)
 }
 
-// onApprovalFrom shows a permission request, recovered from its record when
-// the turn missed its live event.
 func (t *ahpTurn) onApprovalFrom(approval *liveevents.Approval, recovered bool) {
 	id := approval.ToolCallID
 	if id == "" {
@@ -1112,8 +948,6 @@ func (t *ahpTurn) onApprovalFrom(approval *liveevents.Approval, recovered bool) 
 	}
 	switch approval.State {
 	case liveevents.ApprovalPending:
-		// A call announced but not yet described starts here, with what it
-		// was announced with.
 		held, wasHeld := t.heldTools[id]
 		delete(t.heldTools, id)
 		name := approval.ToolName
@@ -1127,7 +961,6 @@ func (t *ahpTurn) onApprovalFrom(approval *liveevents.Approval, recovered bool) 
 		if len(call.input) == 0 && len(held.RawInput) > 0 {
 			call.input = held.RawInput
 		}
-		// A running call may ask again; each hold reopens its confirmation.
 		if call.completed || call.approval == approval.ID {
 			return
 		}
@@ -1148,7 +981,6 @@ func (t *ahpTurn) onApprovalFrom(approval *liveevents.Approval, recovered bool) 
 		}
 		call.ended = approval.ID
 		if call.approval != approval.ID {
-			// The person's decision is on its way, or another request waits.
 			return
 		}
 		call.approval = ""
@@ -1160,8 +992,6 @@ func (t *ahpTurn) onApprovalFrom(approval *liveevents.Approval, recovered bool) 
 	}
 }
 
-// recoverApprovals shows the permission requests the turn's Task holds, from
-// their approval records, for those live updates the turn missed.
 func (t *ahpTurn) recoverApprovals() {
 	eventStore := t.b.h.executionEventStore
 	if eventStore == nil {
@@ -1189,9 +1019,6 @@ func (t *ahpTurn) recoverApprovals() {
 	}
 }
 
-// askForConfirmation shows a tool call as waiting for the person's decision,
-// with the call's input when it is known, so they see what they decide on. A
-// denyOnly request offers only Deny.
 func (t *ahpTurn) askForConfirmation(id, title string, input json.RawMessage, denyOnly bool) {
 	options := []ahptypes.ConfirmationOption{
 		{Id: ahpOptionApprove, Label: "Allow", Kind: ahptypes.ConfirmationOptionKindApprove},
@@ -1214,7 +1041,6 @@ func (t *ahpTurn) askForConfirmation(id, title string, input json.RawMessage, de
 	t.chat(ahptypes.StateAction{Value: ready})
 }
 
-// ahpDenyOnlyNote explains a request offered only for denial.
 const ahpDenyOnlyNote = "(Orka cannot show this call's input after missing its live update, so it can only be denied; the agent can ask again.)"
 
 func ahpOptionAllows(approval *liveevents.Approval) bool {
@@ -1233,17 +1059,12 @@ func (t *ahpTurn) awaitingConfirmation(toolCallID string) bool {
 	return call != nil && call.approval != ""
 }
 
-// confirm answers a held permission request with the decision of the
-// connection that confirmed it, as that connection's own identity. A refused
-// approval reopens the confirmation. A refused denial needs nothing: the
-// request expires and is rejected, so the tool does not run either way.
 func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, toolCallID string, approved bool) {
 	t.mu.Lock()
 	call := t.tools[toolCallID]
 	approval := ""
 	if call != nil {
 		if approved && call.denyOnly && call.approval != "" {
-			// The person was not shown what they would approve.
 			log.Info("an AHP approval of a request offered only for denial was refused", "namespace", t.session.Namespace, "task", t.task)
 			t.askForConfirmation(toolCallID, call.title, call.input, true)
 			t.mu.Unlock()
@@ -1265,8 +1086,6 @@ func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, tool
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// A request that ended meanwhile, such as one that expired first, can no
-	// longer be approved: asking again would show a confirmation that fails.
 	if call.completed || call.approval != "" || call.ended == approval {
 		return
 	}
@@ -1274,8 +1093,6 @@ func (t *ahpTurn) confirm(ctx context.Context, principal ahphost.Principal, tool
 	t.askForConfirmation(toolCallID, call.title, call.input, call.denyOnly)
 }
 
-// recordDiffs keeps the reported file edits and lists them in the session's
-// changeset as they happen. Git replaces them once the turn's changes land.
 func (t *ahpTurn) recordDiffs(diffs []harnessv2.ToolCallDiff) {
 	changes := t.changes()
 	project := t.session.WorkDir
@@ -1303,8 +1120,6 @@ func (t *ahpTurn) sessionProjectDir() string {
 	return ahpDirectoryURI(project.Path)
 }
 
-// ahpLineChanges estimates added and removed lines by matching lines as a
-// multiset; it is a summary count, not a diff.
 func ahpLineChanges(before, after string) (int64, int64) {
 	counts := map[string]int{}
 	oldLines := ahpLines(before)
@@ -1329,29 +1144,17 @@ func ahpLines(text string) []string {
 	return strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 }
 
-// showStoredAnswer shows the turn's stored result when the turn did not see
-// its whole answer stream live. The caller holds t.mu.
 func (t *ahpTurn) showStoredAnswer(task *corev1alpha1.Task) {
 	missed := t.journalMissed.Load()
 	if (t.streamedText && !t.lagged && !missed) || task.Status.ResultRef == nil || !task.Status.ResultRef.Available || t.b.h.resultStore == nil {
 		return
 	}
-	// The stored result is whole, like a live final answer, and gets the
-	// same pattern redaction before anyone sees it. After live updates
-	// fell behind it is the turn's answer, in a part of its own beside
-	// the text that streamed, and the reply the conversation keeps.
 	data, err := t.readResult(task)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		// Without the stored answer the turn would end with a partial
-		// reply and nothing saying so.
 		t.text(fmt.Sprintf("\n\nOrka could not read this turn's full answer; it is the result of Task %s.", task.Name))
 	}
 	if err == nil {
 		answer := executionevents.RedactExecutionEventText(string(data))
-		// The newest text shown may already be the whole answer: streamed
-		// before live updates fell behind, or by the process before a
-		// restart. It is not shown twice, and stays the reply the
-		// conversation keeps.
 		newest, known := t.shownPart, !missed
 		if t.streamedText {
 			newest, known = t.partText, !t.partOver && !missed
@@ -1367,13 +1170,11 @@ func (t *ahpTurn) showStoredAnswer(task *corev1alpha1.Task) {
 	}
 }
 
-// settle ends the turn from its Task's terminal phase.
 func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.showStoredAnswer(task)
 	t.finishPlan()
-	// A call announced but never described or run was never shown.
 	t.heldTools = nil
 	for _, id := range t.order {
 		if call := t.tools[id]; call != nil && !call.completed {
@@ -1392,15 +1193,12 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		}
 		s.Published = s.Published || published
 	}), t.session.Session, "record the reply")
-	// A reply that write lost lands with the turn's end, which is tried until
-	// it does: a model switch builds its prompt from the history.
 	t.finalReply, t.hasFinalReply = reply, true
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded:
 		if note := ahpDeliveryNote(task); note != "" {
 			t.textPart = ""
 			t.text(note)
-			// The session's worktree on the host follows what the turn published.
 			go t.b.workspaces.follow(context.WithoutCancel(t.ctx), t.principal, t.session)
 		}
 		t.chat(ahptypes.StateAction{Value: &ahptypes.ChatTurnCompleteAction{Type: ahptypes.ActionTypeChatTurnComplete, TurnId: t.id, Duration: duration}})
@@ -1408,8 +1206,6 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 		if t.clientCancelled {
 			break
 		}
-		// A turn its deadline stopped failed: shown only as cancelled, it
-		// reads as though the person had cancelled it.
 		if task.Status.Execution != nil && task.Status.Execution.Reason == controller.ACPTaskTimeoutReason {
 			message := "the turn ran past its time limit and was stopped"
 			if task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0 {
@@ -1439,13 +1235,8 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 	t.finishSession()
 }
 
-// ahpResultReadDelays are the waits before each retry of reading a turn's
-// stored result after a failed read.
 var ahpResultReadDelays = []time.Duration{250 * time.Millisecond, 750 * time.Millisecond}
 
-// readResult reads the turn's stored result, retrying a failed read a few
-// times: the answer is lost from the chat if it cannot be read now. The
-// caller holds t.mu.
 func (t *ahpTurn) readResult(task *corev1alpha1.Task) ([]byte, error) {
 	data, err := t.b.h.resultStore.GetResult(t.ctx, task.Namespace, task.Name)
 	for _, delay := range ahpResultReadDelays {
@@ -1463,16 +1254,12 @@ func (t *ahpTurn) readResult(task *corev1alpha1.Task) ([]byte, error) {
 		log.Info("read an AHP turn's result", "namespace", task.Namespace, "task", task.Name, "reason", err.Error())
 		return data, err
 	}
-	// Results are kept by the Task's name: one a Task created since under the
-	// name wrote is not the turn's answer.
 	if !t.nameStillOwned(task.Namespace, task.Name) {
 		return nil, store.ErrNotFound
 	}
 	return data, nil
 }
 
-// nameStillOwned reports whether no Task other than the turn's holds its
-// Task's name now, read past the cache. The caller holds t.mu.
 func (t *ahpTurn) nameStillOwned(namespace, name string) bool {
 	uid := t.taskUID
 	if uid == "" {
@@ -1481,20 +1268,15 @@ func (t *ahpTurn) nameStillOwned(namespace, name string) bool {
 	current := &corev1alpha1.Task{}
 	err := t.b.h.uncachedReader().Get(t.ctx, types.NamespacedName{Namespace: namespace, Name: name}, current)
 	if apierrors.IsNotFound(err) {
-		// No Task holds the name: none took it to write the result.
 		return true
 	}
 	if err != nil {
-		// Unverified, the result may be another Task's: it is not shown.
 		log.Info("check an AHP turn's Task before showing its result", "namespace", namespace, "task", name, "reason", err.Error())
 		return false
 	}
 	return string(current.UID) == uid
 }
 
-// failureMessage adds the runtime's own reason to a failed turn's message.
-// A runtime that reports a failure as reply text leaves the Task only the
-// generic prompt failure, so that text is the reason the person needs.
 func (t *ahpTurn) failureMessage(message string) string {
 	if message == "" {
 		message = "the turn failed"
@@ -1519,15 +1301,9 @@ func (t *ahpTurn) settleWithError(kind, message string) {
 	t.finishSession()
 }
 
-// finishSession marks the chat idle and the session free for the next turn.
 func (t *ahpTurn) finishSession() {
 	now := ahpNow(t.b)
 	_ = t.emit.Emit(t.ctx, t.session.Session, ahpSessionIdle(t.session.Chat, now)...)
-	// A session still recording the turn refuses every later message, and
-	// nothing else ends it while this process runs. The turn's publication
-	// lands with its end: a model switch, which only a later turn makes,
-	// must see that the branch was pushed, or it would continue on it.
-	// The caller holds t.mu; a retry runs later, so it uses what it saw now.
 	published, reply, hasReply := t.published, t.finalReply, t.hasFinalReply
 	ended := t.b.updateSessionUntilDone(t.ctx, t.principal.UserKey, t.session.Session, "end the turn", func(s *ahpSession) {
 		if s.ActiveTurn != t.id {
@@ -1541,13 +1317,11 @@ func (t *ahpTurn) finishSession() {
 	})
 	go func() {
 		<-ended
-		// The turn's slot frees when its run loop returns.
 		<-t.ctx.Done()
 		t.b.runPending(context.WithoutCancel(t.ctx), t.principal.UserKey, t.session.Session, t.emit)
 	}()
 }
 
-// ahpDeliveryNote tells the person where a write turn's changes went.
 func ahpDeliveryNote(task *corev1alpha1.Task) string {
 	delivery := task.Status.Delivery
 	if delivery == nil || delivery.Branch == "" {
@@ -1571,12 +1345,6 @@ func (b *ahpBackend) forgetTurn(turn *ahpTurn) {
 	turn.cancel()
 }
 
-// recoverTurns settles turns a previous leader left running, once per user,
-// from their Tasks. It holds the user's lifecycle lock, which disposing of,
-// creating and starting a turn in a session also hold, so the sessions it
-// reads stay as read until their turns are registered, and a concurrent
-// caller waits until the turns are live. It must not be called with the
-// host's lock held: work under the lifecycle lock emits through that lock.
 func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Principal) {
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
@@ -1589,7 +1357,6 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 	b.mu.Unlock()
 	records, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
 	if err != nil {
-		// Nothing was recovered, so a later call scans again.
 		b.mu.Lock()
 		delete(b.recovered, principal.UserKey)
 		b.mu.Unlock()
@@ -1601,21 +1368,13 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 			continue
 		}
 		if record.ActiveTurn == "" {
-			// Ending a turn emits through the host's lock, and running what
-			// waits takes the lifecycle lock this holds: do both off the
-			// caller.
 			go func() {
 				ctx := context.WithoutCancel(ctx)
 				if !b.endUnstartedTurn(ctx, principal, record) {
-					// The chat could not be read: a later call scans again.
 					b.mu.Lock()
 					delete(b.recovered, principal.UserKey)
 					b.mu.Unlock()
 				}
-				// A message queued while the session was idle can be left
-				// behind when the previous leader stopped before running it.
-				// Run what waits: a message whose sender is gone is reported
-				// and dropped.
 				if len(record.Pending) > 0 {
 					b.runPending(ctx, principal.UserKey, record.Session, b.emitterFor(principal))
 				}
@@ -1629,12 +1388,7 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 			task: record.ActiveTask, taskUID: record.ActiveTaskUID, startedAt: started, emit: b.emitterFor(principal), ctx: turnCtx, cancel: cancel,
 			tools: map[string]*ahpToolCall{},
 		}
-		// A turn recorded before Task UIDs were kept takes the UID of the Task
-		// under its name now, before it follows any event, and keeps it in the
-		// record, so a Task created later under the name is never the turn's.
 		if turn.taskUID == "" {
-			// Uncached: a cache that has not seen the Task yet must not mark
-			// it gone for good.
 			task := &corev1alpha1.Task{}
 			err := b.h.uncachedReader().Get(ctx, types.NamespacedName{Namespace: record.Namespace, Name: record.ActiveTask}, task)
 			switch {
@@ -1642,13 +1396,10 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 				turn.taskUID = string(task.UID)
 				turn.recordTaskUID(ctx, turn.taskUID)
 			case apierrors.IsNotFound(err):
-				// The turn's Task is gone: one created under its name from now
-				// on is not the turn's, which ends as deleted.
 				turn.taskUID = ahpTaskGoneUID
 				turn.recordTaskUID(ctx, turn.taskUID)
 			}
 		}
-		// The previous leader may have streamed some or all of the answer.
 		if state, err := ahphost.ChannelState(ctx, b.store, principal.UserKey, record.Chat); err == nil &&
 			state.Chat != nil && state.Chat.ActiveTurn != nil && state.Chat.ActiveTurn.Id == record.ActiveTurn {
 			turn.shownPart = ahpLastMarkdown(state.Chat.ActiveTurn.ResponseParts)
@@ -1660,7 +1411,6 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 	}
 }
 
-// ahpLastMarkdown is the content of a turn's newest markdown part.
 func ahpLastMarkdown(parts []ahptypes.ResponsePart) string {
 	for _, part := range slices.Backward(parts) {
 		if markdown, ok := part.Value.(*ahptypes.MarkdownResponsePart); ok {
@@ -1670,11 +1420,6 @@ func ahpLastMarkdown(parts []ahptypes.ResponsePart) string {
 	return ""
 }
 
-// endUnstartedTurn ends a turn clients were shown started that the session
-// never recorded: the previous leader stopped after the turn's start was
-// journaled but before it ran. A turn this process holds a slot for is about
-// to be recorded, and is left alone. It reports false when the chat's state
-// could not be read, so nothing is known about its turn.
 func (b *ahpBackend) endUnstartedTurn(ctx context.Context, principal ahphost.Principal, record ahpSession) bool {
 	key := ahpTurnKey(principal.UserKey, record.Session)
 	b.mu.Lock()
@@ -1687,7 +1432,6 @@ func (b *ahpBackend) endUnstartedTurn(ctx context.Context, principal ahphost.Pri
 	var syntaxErr *json.SyntaxError
 	var typeErr *json.UnmarshalTypeError
 	if errors.Is(err, store.ErrNotFound) || errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
-		// No state, or one no later read can decode either: nothing to end.
 		return true
 	}
 	if err != nil {
@@ -1707,11 +1451,6 @@ func (b *ahpBackend) endUnstartedTurn(ctx context.Context, principal ahphost.Pri
 	return true
 }
 
-// nextGeneration moves a session to a new Orka Session for another model. A
-// branch a turn already published belongs to the old Orka Session, so the
-// new one continues on a new branch based on it, with its own worktree. It
-// changes only the generation's fields of the session as stored now, so a
-// change made meanwhile, such as the approval mode, stays.
 func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Principal, stale ahpSession, choice ahpAgentChoice, emit ahphost.Emitter) (ahpSession, string, error) {
 	unlock := b.lockUser(principal.UserKey)
 	defer unlock()
@@ -1775,10 +1514,6 @@ func (b *ahpBackend) nextGeneration(ctx context.Context, principal ahphost.Princ
 	return next, note + "\n\n", nil
 }
 
-// dropOldWorktree removes, in the background, the worktree a session moved
-// off, and reports whether it does. Terminals are the user's own and outlive
-// the worktrees they start in: while one runs, the worktree it may be in
-// stays, as when a session is disposed of.
 func (b *ahpBackend) dropOldWorktree(ctx context.Context, principal ahphost.Principal, project ahpProject, branch string) bool {
 	if b.hasTerminals(principal.UserKey) {
 		return false
@@ -1787,7 +1522,6 @@ func (b *ahpBackend) dropOldWorktree(ctx context.Context, principal ahphost.Prin
 	return true
 }
 
-// ahpCarryOver gives a new Orka Session the conversation so far.
 func ahpCarryOver(history []ahpExchange) string {
 	var kept []string
 	size := 0
@@ -1808,7 +1542,6 @@ func ahpCarryOver(history []ahpExchange) string {
 	return "The conversation so far, with another model, for context:\n\n" + strings.Join(kept, "\n\n") + "\n\n---\n\n"
 }
 
-// ahpKeepHistory keeps the newest exchanges.
 func ahpKeepHistory(history []ahpExchange) []ahpExchange {
 	if len(history) > ahpHistoryMax {
 		history = append([]ahpExchange(nil), history[len(history)-ahpHistoryMax:]...)
@@ -1816,15 +1549,10 @@ func ahpKeepHistory(history []ahpExchange) []ahpExchange {
 	return history
 }
 
-// runPending starts the next waiting message as a turn when none is running,
-// with the authority of the connection that sent it. A message whose sender
-// is gone, or whose token no longer holds, does not run: the person sees why.
 func (b *ahpBackend) runPending(ctx context.Context, userKey, session string, emit ahphost.Emitter) {
 	if !b.drainPending(ctx, userKey, session, emit) {
 		return
 	}
-	// A message is left waiting, and nothing else runs it until another turn
-	// ends: try again, off the caller.
 	go func() {
 		ctx := context.WithoutCancel(ctx)
 		for delay := b.retryWait(); ; delay = min(2*delay, 32*b.retryWait()) {
@@ -1836,10 +1564,6 @@ func (b *ahpBackend) runPending(ctx context.Context, userKey, session string, em
 	}()
 }
 
-// drainPending starts the session's waiting messages, as runPending does, and
-// reports whether one is left waiting that only a retry would start: the
-// store refused to take it off the queue, or its start could not be shown
-// and it went back on.
 func (b *ahpBackend) drainPending(ctx context.Context, userKey, session string, emit ahphost.Emitter) bool {
 	for {
 		var record ahpSession
@@ -1852,10 +1576,6 @@ func (b *ahpBackend) drainPending(ctx context.Context, userKey, session string, 
 		}
 		next := record.Pending[0]
 		record.Pending = record.Pending[1:]
-		// Only this version of the message leaves the queue, and only its
-		// own sender may run it; a replacement stays for the next round. A
-		// message still stored in the queue must not start, or it would run
-		// again after this turn.
 		if err := b.updateSession(ctx, userKey, session, func(s *ahpSession) {
 			s.Pending = slices.DeleteFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID && p.Version == next.Version })
 		}); err != nil {
@@ -1882,19 +1602,11 @@ func (b *ahpBackend) drainPending(ctx context.Context, userKey, session string, 
 			}},
 			ahptypes.StateAction{Value: action},
 		); err != nil {
-			// Neither action reached the client, so the message is still in
-			// its queue: put it back in the stored one, with its sender,
-			// unless a replacement was queued meanwhile.
 			b.mu.Lock()
 			if known {
 				b.pendingAuth[key] = stored
 			}
 			b.mu.Unlock()
-			// The message is off the stored queue, so putting it back must
-			// not be lost, and once it is back nothing else starts it: try
-			// again, as for a queue the store would not change. A put-back
-			// the store refuses for now drains again once it lands, after the
-			// retry's own wait.
 			restored := b.updateSessionUntilDone(ctx, userKey, session, "put a message back on the queue", func(s *ahpSession) {
 				if !slices.ContainsFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID }) {
 					s.Pending = slices.Insert(s.Pending, 0, next)
@@ -1932,8 +1644,6 @@ func ahpPendingKey(userKey, session, id string) string {
 	return userKey + "\x00" + session + "\x00" + id
 }
 
-// ahpReorderPending puts queued messages in the client's order; steering
-// messages stay first and messages the order omits keep their place after it.
 func ahpReorderPending(pending []ahpPending, order []string) []ahpPending {
 	position := map[string]int{}
 	for i, id := range order {

@@ -182,7 +182,6 @@ func TestSessionStore(t *testing.T) {
 	})
 
 	t.Run("list sessions", func(t *testing.T) {
-		// session1 already exists from previous subtest
 		session2 := &store.SessionRecord{
 			Namespace:   "ns1",
 			Name:        "session2",
@@ -256,7 +255,6 @@ func TestSessionLocking(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second)
 
-	// Create a session to lock
 	session := &store.SessionRecord{
 		Namespace:   "ns1",
 		Name:        "lock-session",
@@ -422,7 +420,6 @@ func TestSessionMessages(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second)
 
-	// Create session for message tests
 	session := &store.SessionRecord{
 		Namespace:   "ns1",
 		Name:        "msg-session",
@@ -467,7 +464,6 @@ func TestSessionMessages(t *testing.T) {
 			t.Errorf("got message_count=%d, want 2", got.MessageCount)
 		}
 
-		// Append more
 		moreMessages := []store.SessionMessage{
 			{Role: roleUser, Content: "follow up", Timestamp: now},
 		}
@@ -492,7 +488,6 @@ func TestSessionMessages(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("got %d messages, want 2", len(got))
 		}
-		// Should be the newest 2 messages, restored to conversation order.
 		if got[0].Content != "hi there" || got[1].Content != "follow up" {
 			t.Errorf("limited messages: got %#v", got)
 		}
@@ -546,7 +541,6 @@ func TestSessionMessages(t *testing.T) {
 		if msg.Input["num"] != float64(42) {
 			t.Errorf("Input[num]: got %v, want 42", msg.Input["num"])
 		}
-		// ToolCalls is deserialized as []any
 		toolCalls, ok := msg.ToolCalls.([]any)
 		if !ok {
 			t.Fatalf("ToolCalls: expected []any, got %T", msg.ToolCalls)
@@ -562,7 +556,6 @@ func TestCascadeDelete(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second)
 
-	// Create session with messages
 	session := &store.SessionRecord{
 		Namespace:   "ns1",
 		Name:        "cascade-session",
@@ -582,7 +575,6 @@ func TestCascadeDelete(t *testing.T) {
 		t.Fatalf("AppendMessages: %v", err)
 	}
 
-	// Verify messages exist
 	got, err := s.LoadTranscript(ctx, "ns1", "cascade-session", 0)
 	if err != nil {
 		t.Fatalf("LoadTranscript: %v", err)
@@ -591,12 +583,10 @@ func TestCascadeDelete(t *testing.T) {
 		t.Fatalf("got %d messages before delete, want 2", len(got))
 	}
 
-	// Delete session
 	if err := s.DeleteSession(ctx, "ns1", "cascade-session", time.Now().UTC()); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	// Verify messages are also deleted (via CASCADE)
 	got, err = s.LoadTranscript(ctx, "ns1", "cascade-session", 0)
 	if err != nil {
 		t.Fatalf("LoadTranscript after delete: %v", err)
@@ -619,7 +609,6 @@ func TestConcurrentAccess(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Test concurrent writes don't error (SQLite serializes them via MaxOpenConns(1))
 	const n = 20
 	errs := make(chan error, n)
 	for i := range n {
@@ -634,7 +623,6 @@ func TestConcurrentAccess(t *testing.T) {
 		}
 	}
 
-	// Verify all results were saved
 	for i := range n {
 		got, err := s.GetResult(ctx, "ns1", fmt.Sprintf("task-%d", i))
 		if err != nil {
@@ -758,7 +746,6 @@ func TestAppendMessagesZeroTimestamp(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Message with zero timestamp should auto-fill
 	msgs := []store.SessionMessage{
 		{Role: "user", Content: "auto-timestamp"},
 	}
@@ -792,7 +779,6 @@ func TestAppendMessagesNilFields(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Message with nil Input, nil ToolCalls, empty Name, empty ToolCallID
 	msgs := []store.SessionMessage{
 		{Role: "user", Content: "bare message", Timestamp: now},
 	}
@@ -822,7 +808,6 @@ func TestAppendMessagesNilFields(t *testing.T) {
 }
 
 func TestNewDBInvalidPath(t *testing.T) {
-	// Opening a DB at an invalid/unwritable path should fail
 	_, err := NewDB("/nonexistent-dir/sub/sub/test.db")
 	if err == nil {
 		t.Fatal("expected error for invalid DB path, got nil")
@@ -840,7 +825,6 @@ func TestAppendMessagesUnmarshalableInput(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Input with a channel value cannot be JSON marshaled
 	msgs := []store.SessionMessage{
 		{Role: "user", Content: "bad", Input: map[string]any{"ch": make(chan int)}, Timestamp: now},
 	}
@@ -861,7 +845,6 @@ func TestAppendMessagesUnmarshalableToolCalls(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// ToolCalls with a func value cannot be JSON marshaled
 	msgs := []store.SessionMessage{
 		{Role: "assistant", Content: "", ToolCalls: func() {}, Timestamp: now},
 	}
@@ -882,7 +865,6 @@ func TestLoadTranscriptCorruptedInput(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Insert a message with invalid JSON in the input column directly via SQL
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO session_messages (namespace, session_name, role, content, input, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		"ns1", "corrupt-input", "user", "test", "{invalid json", now,
@@ -908,7 +890,6 @@ func TestLoadTranscriptCorruptedToolCalls(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Insert a message with invalid JSON in the tool_calls column directly via SQL
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO session_messages (namespace, session_name, role, content, tool_calls, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		"ns1", "corrupt-tc", "assistant", "test", "not-valid-json!", now,
@@ -934,7 +915,6 @@ func TestGetSessionWithCorruptedMessages(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Insert a message with invalid JSON so LoadTranscript fails during GetSession
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO session_messages (namespace, session_name, role, content, input, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		"ns1", "corrupt-sess", "user", "test", "{bad json", now,
@@ -959,7 +939,6 @@ func TestClosedDBErrors(t *testing.T) {
 
 	ctx := context.Background()
 
-	// All operations on a closed DB should return errors
 	if _, err := s.GetResult(ctx, "ns", "t"); err == nil {
 		t.Error("expected error from GetResult on closed DB")
 	}
@@ -1012,7 +991,6 @@ func TestUpdateDBSizeMetricEdgeCases(t *testing.T) {
 		}
 		defer db.Close() //nolint:errcheck
 		s := NewStore(db, "")
-		// Should not panic
 		s.updateDBSizeMetric()
 	})
 
@@ -1023,7 +1001,6 @@ func TestUpdateDBSizeMetricEdgeCases(t *testing.T) {
 		}
 		defer db.Close() //nolint:errcheck
 		s := NewStore(db, "/tmp/nonexistent-orka-test-file.db")
-		// Should not panic even if file doesn't exist
 		s.updateDBSizeMetric()
 	})
 }
@@ -1032,7 +1009,6 @@ func TestAcquireLockNonexistentSession(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// AcquireLock on a session that doesn't exist should fail (rows affected = 0)
 	err := s.AcquireLock(ctx, "ns1", "no-such-session", "task-x", "", time.Now().UTC())
 	if err == nil {
 		t.Fatal("expected error for nonexistent session, got nil")
@@ -1043,7 +1019,6 @@ func TestDeletePlanNonexistent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Deleting a plan that doesn't exist should be a no-op
 	if err := s.DeletePlan(ctx, "ns1", "never-existed"); err != nil {
 		t.Errorf("DeletePlan nonexistent: %v", err)
 	}
@@ -1053,7 +1028,6 @@ func TestDeleteSessionNonexistent(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Deleting a session that doesn't exist should be a no-op
 	if err := s.DeleteSession(ctx, "ns1", "never-existed", time.Now().UTC()); err != nil {
 		t.Errorf("DeleteSession nonexistent: %v", err)
 	}
@@ -1090,7 +1064,6 @@ func TestListSessionsMetadata(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second)
 
-	// Create session with active task
 	session := &store.SessionRecord{
 		Namespace:   "ns1",
 		Name:        "meta-sess",
@@ -1103,7 +1076,6 @@ func TestListSessionsMetadata(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// Acquire lock so active_task is set
 	if err := s.AcquireLock(ctx, "ns1", "meta-sess", "active-task", "", time.Now().UTC()); err != nil {
 		t.Fatalf("AcquireLock: %v", err)
 	}
@@ -1127,7 +1099,6 @@ func TestLoadTranscriptEmptySession(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()
 
-	// Loading transcript for nonexistent session returns empty slice, not error
 	msgs, err := s.LoadTranscript(ctx, "ns1", "nonexistent", 0)
 	if err != nil {
 		t.Fatalf("LoadTranscript: %v", err)
@@ -1149,9 +1120,8 @@ func TestNilIfEmpty(t *testing.T) {
 func TestContextCancellation(t *testing.T) {
 	s := setupTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
-	// Operations on cancelled context should return errors
 	if err := s.SaveResult(ctx, "ns1", "task1", []byte("data")); err == nil {
 		t.Error("expected error on cancelled context for SaveResult")
 	}

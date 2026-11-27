@@ -17,24 +17,9 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
-// GenAI telemetry derived from the ACP session stream and provider proxy.
-//
-// Every span and metric here is metadata only. Prompts, completions, tool
-// titles, tool arguments and tool results never become attributes or events,
-// whatever OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT says: content
-// capture stays off and fails closed. Spans are written with explicit start
-// timestamps when their outcome is known, so no span is left open on a
-// broken stream.
-
 const (
-	// maxPromptGenAITools bounds per-prompt tool span state: calls still open
-	// plus markers for calls already recorded. Calls past it are not observed.
 	maxPromptGenAITools = harnessv2.MaxRuntimeSessionTombstoneOperations
 
-	// maxGenAIMetricToolNames bounds how many distinct adapter tool names one
-	// supervisor uses as metric labels. Each name is a histogram series, and
-	// MCP and adapter tool names are unbounded. Later names are recorded
-	// under their ACP tool kind, or the fallback; spans keep every name.
 	maxGenAIMetricToolNames = 64
 
 	genAIErrorTypeTool       = "tool_error"
@@ -47,18 +32,13 @@ const (
 	acpToolKindExecute = "execute"
 )
 
-// genAIToolNamePattern admits adapter tool identities that are safe,
-// low-cardinality span names and metric labels.
 var genAIToolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,128}$`)
 
-// acpToolKinds is the closed ACP ToolKind enum.
 var acpToolKinds = map[string]bool{
 	acpToolKindRead: true, "edit": true, "delete": true, "move": true, "search": true,
 	acpToolKindExecute: true, "think": true, "fetch": true, "switch_mode": true, genAIToolNameFallback: true,
 }
 
-// supervisorGenAI holds the GenAI instruments for one supervisor. Nil
-// disables all GenAI telemetry.
 type supervisorGenAI struct {
 	tracer              trace.Tracer
 	operationDuration   metric.Float64Histogram
@@ -70,8 +50,7 @@ type supervisorGenAI struct {
 	requestModel        string
 
 	metricToolNamesMu sync.Mutex
-	// metricToolNames holds the adapter tool names admitted as metric labels.
-	metricToolNames map[string]struct{}
+	metricToolNames   map[string]struct{}
 }
 
 func newSupervisorGenAI(tracer trace.Tracer, meter metric.Meter, providerKind, model string) *supervisorGenAI {
@@ -81,7 +60,6 @@ func newSupervisorGenAI(tracer trace.Tracer, meter metric.Meter, providerKind, m
 	provider, requestModel := genai.AgentRuntimeProvider(providerKind, model)
 	g := &supervisorGenAI{tracer: tracer, agentName: providerKind, providerName: provider, requestModel: requestModel}
 	if meter != nil {
-		// Instrument creation failures leave that instrument disabled.
 		g.operationDuration, _ = meter.Float64Histogram(genai.MetricClientOperationDuration,
 			metric.WithUnit(genai.UnitSeconds), metric.WithExplicitBucketBoundaries(genai.OperationDurationBuckets...))
 		g.tokenUsage, _ = meter.Int64Histogram(genai.MetricClientTokenUsage,
@@ -105,15 +83,13 @@ func (g *supervisorGenAI) modelAttributes() []attribute.KeyValue {
 	return attributes
 }
 
-// promptGenAI records one prompt's invoke_agent span and the model and tool
-// spans beneath it. All methods are safe on a nil receiver.
 type promptGenAI struct {
 	g       *supervisorGenAI
 	start   time.Time
 	session string
 
 	mu     sync.Mutex
-	span   trace.Span // nil when only metrics are enabled
+	span   trace.Span
 	ended  bool
 	usage  *acp.PromptUsage
 	tools  map[string]*promptGenAITool
@@ -121,16 +97,12 @@ type promptGenAI struct {
 }
 
 type promptGenAITool struct {
-	name  string
-	kind  string
-	start time.Time
-	// recorded marks a call whose span is written. The marker stays so that a
-	// repeated or late update for the same ID does not record the call again.
+	name     string
+	kind     string
+	start    time.Time
 	recorded bool
 }
 
-// startInvokeAgent opens the prompt's invoke_agent span under the
-// authenticated acp.supervisor.prompt operation span in ctx.
 func (s *Server) startInvokeAgent(ctx context.Context, state *sessionState, request harnessv2.StartPromptRequest, now time.Time) *promptGenAI {
 	g := s.genai
 	if g == nil {
@@ -155,7 +127,6 @@ func (s *Server) startInvokeAgent(ctx context.Context, state *sessionState, requ
 	return p
 }
 
-// setUsage keeps the agent-reported turn usage for the invoke_agent span.
 func (p *promptGenAI) setUsage(usage *acp.PromptUsage) {
 	if p == nil || usage == nil {
 		return
@@ -165,8 +136,6 @@ func (p *promptGenAI) setUsage(usage *acp.PromptUsage) {
 	p.usage = usage
 }
 
-// observeTool tracks one ACP tool call. The first update starts the call;
-// a completed or failed status records its execute_tool span.
 func (p *promptGenAI) observeTool(update *harnessv2.ToolCallUpdate, name string, at time.Time) {
 	if p == nil || update == nil || update.ToolCallID == "" {
 		return
@@ -249,9 +218,6 @@ func (p *promptGenAI) recordToolLocked(id string, tool *promptGenAITool, end tim
 	}
 }
 
-// genAIToolName returns a content-free, low-cardinality tool name: the
-// adapter's structured identity when it is a plain identifier, else the ACP
-// tool kind. Titles are free text and are never used.
 func genAIToolName(name, kind string) string {
 	if genAIToolNamePattern.MatchString(name) {
 		return name
@@ -262,10 +228,6 @@ func genAIToolName(name, kind string) string {
 	return genAIToolNameFallback
 }
 
-// metricToolName returns the tool name to use as a metric label: the name
-// itself while this supervisor has admitted fewer than
-// maxGenAIMetricToolNames adapter names, then the ACP tool kind or the
-// fallback. ACP kinds and the fallback are a closed set and always pass.
 func (g *supervisorGenAI) metricToolName(name, kind string) string {
 	if acpToolKinds[name] {
 		return name
@@ -295,8 +257,6 @@ func boundedGenAIIdentifier(id string) string {
 	return ""
 }
 
-// finish records the invoke_agent span and metrics once for the prompt's
-// settled result, and closes tool calls that never reported an outcome.
 func (p *promptGenAI) finish(result acp.PromptResult, settledAt time.Time) {
 	if p == nil {
 		return
@@ -323,8 +283,6 @@ func (p *promptGenAI) finish(result acp.PromptResult, settledAt time.Time) {
 	p.end(settledAt, errorType, finishReason, result.Outcome == acp.PromptOutcomeCancelled)
 }
 
-// finishSettlement records the invoke_agent span and metrics for the prompt's
-// canonical settlement, so their outcome and end time match it.
 func (p *promptGenAI) finishSettlement(settlement harnessv2.PromptSettlement) {
 	result := acp.PromptResult{StopReason: acp.StopReason(settlement.StopReason)}
 	switch settlement.TerminalEvent {
@@ -340,8 +298,6 @@ func (p *promptGenAI) finishSettlement(settlement harnessv2.PromptSettlement) {
 	p.finish(result, settlement.SettledAt)
 }
 
-// abandon ends a prompt that never reached settlement, such as one rejected
-// before the agent accepted it.
 func (p *promptGenAI) abandon() {
 	if p == nil {
 		return
@@ -425,15 +381,12 @@ func (p *promptGenAI) end(at time.Time, errorType, finishReason string, cancelle
 	}
 }
 
-// promptGenAIChat is one model call relayed by the provider proxy.
 type promptGenAIChat struct {
 	prompt *promptGenAI
 	start  time.Time
-	// status is the accounted inference outcome; 0 when none was accounted.
 	status int
 }
 
-// startChat begins a chat observation for one admitted inference request.
 func (p *promptGenAI) startChat(now time.Time) *promptGenAIChat {
 	if p == nil {
 		return nil
@@ -441,9 +394,6 @@ func (p *promptGenAI) startChat(now time.Time) *promptGenAIChat {
 	return &promptGenAIChat{prompt: p, start: now}
 }
 
-// end records the chat span and operation duration. cancelled reports that
-// the child or the prompt gate abandoned the request before an outcome was
-// accounted.
 func (c *promptGenAIChat) end(at time.Time, status int, cancelled bool) {
 	if c == nil {
 		return

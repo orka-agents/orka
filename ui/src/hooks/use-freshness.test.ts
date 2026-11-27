@@ -60,7 +60,6 @@ describe('useFreshness', () => {
     act(() => vi.advanceTimersByTime(800))
     expect(result.current).toBe(true)
 
-    // A new change restarts the window.
     act(() => rerender({ v: 'c' }))
     act(() => vi.advanceTimersByTime(800))
     expect(result.current).toBe(true)

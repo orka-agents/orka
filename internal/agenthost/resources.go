@@ -4,9 +4,6 @@ Copyright (c) 2026.
 MIT License - see LICENSE file for details.
 */
 
-// Package agenthost renders the Kubernetes objects that run one AgentHost and
-// defines the contract between the controller, the host workload and the Orka
-// host agent sidecar.
 package agenthost
 
 import (
@@ -25,7 +22,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// Labels and annotations on objects the controller creates in the host namespace.
 const (
 	LabelHostUID       = "orka.ai/agent-host-uid"
 	LabelHostName      = "orka.ai/agent-host-name"
@@ -33,38 +29,23 @@ const (
 	LabelComponent     = "app.kubernetes.io/component"
 	ComponentValue     = "agent-host"
 
-	// AnnotationNonce carries the creation nonce recorded in AgentHost status
-	// before the object was created.
-	AnnotationNonce = "orka.ai/agent-host-nonce"
-	// AnnotationTemplateUID records the template an object was rendered
-	// from. A Pod rendered from an earlier template of the same name is
-	// replaced.
+	AnnotationNonce       = "orka.ai/agent-host-nonce"
 	AnnotationTemplateUID = "orka.ai/agent-host-template-uid"
-	// AnnotationHost names the owning AgentHost as namespace/name.
-	AnnotationHost = "orka.ai/agent-host"
-	// AnnotationGitHubToken records where a Pod's GitHub token comes from, as
-	// Secret name and key, and is empty when the Pod mounts none. A token from
-	// another Secret or key needs a new Pod: the daemon reads its identity
-	// from the token once, when it starts.
+	AnnotationHost        = "orka.ai/agent-host"
 	AnnotationGitHubToken = "orka.ai/agent-host-github-token"
 )
 
-// Environment the host container receives.
 const (
 	HostIDEnv              = "ORKA_HOST_ID"
 	HostNameEnv            = "ORKA_HOST_NAME"
 	ConnectionTokenFileEnv = "ORKA_CONNECTION_TOKEN_FILE"
 	GitHubTokenFileEnv     = "ORKA_GITHUB_TOKEN_FILE"
 	StatusDirEnv           = "ORKA_STATUS_DIR"
-	// HostAgentEnv names a copy of the Orka host agent the host container
-	// can run as its init process: exec "$ORKA_HOST_AGENT" init -- <command>.
-	HostAgentEnv = "ORKA_HOST_AGENT"
+	HostAgentEnv           = "ORKA_HOST_AGENT"
 )
 
-// Secret data keys.
 const (
-	TokenKey = "token"
-	// Connection Secret keys for Standalone access.
+	TokenKey               = "token"
 	ConnectionNamespaceKey = "namespace"
 	ConnectionPodKey       = "pod"
 	ConnectionPortKey      = "port"
@@ -91,17 +72,13 @@ const (
 	secretFileMode int32 = 0o440
 )
 
-// maxBaseLength bounds the AgentHost name part of an object name.
 const maxBaseLength = 40
 
 const (
-	// maxNameLength is the longest object name Kubernetes accepts.
 	maxNameLength    = 253
 	connectionSuffix = "-connection"
 )
 
-// Names derives every object name for one host. They depend only on the
-// AgentHost name and UID, so they are stable for the host's life.
 type Names struct {
 	Namespace             string
 	Base                  string
@@ -110,18 +87,14 @@ type Names struct {
 	NetworkPolicy         string
 	ConnectionTokenSecret string
 	GitHubTokenSecret     string
-	// Connection is the Standalone connection Secret in the AgentHost's own namespace.
-	Connection string
+	Connection            string
 }
 
-// ObjectNames returns the names of a host's objects in hostNamespace.
 func ObjectNames(host *corev1alpha1.AgentHost, hostNamespace string) Names {
 	sum := sha256.Sum256([]byte(host.UID))
 	hash := hex.EncodeToString(sum[:6])
 	prefix := strings.TrimRight(truncate(host.Name, maxBaseLength), "-.")
 	base := prefix + "-" + hash
-	// The connection Secret keeps the host's name when it fits. A name too
-	// long for it is shortened, and the UID hash keeps two such hosts apart.
 	connection := host.Name + connectionSuffix
 	if len(connection) > maxNameLength {
 		keep := maxNameLength - len(connectionSuffix) - len(hash) - 1
@@ -139,8 +112,6 @@ func ObjectNames(host *corev1alpha1.AgentHost, hostNamespace string) Names {
 	}
 }
 
-// OwnerLabels identify the AgentHost that owns an object in the host
-// namespace. Owner references cannot cross namespaces.
 func OwnerLabels(host *corev1alpha1.AgentHost) map[string]string {
 	return map[string]string{
 		LabelComponent:     ComponentValue,
@@ -150,19 +121,13 @@ func OwnerLabels(host *corev1alpha1.AgentHost) map[string]string {
 	}
 }
 
-// ControllerPeer selects the Orka controller Pods allowed to read a host's status port.
 type ControllerPeer struct {
 	Namespace string
 	PodLabels map[string]string
 }
 
-// PodOptions carries the controller's settings for a host Pod.
 type PodOptions struct {
-	// AgentImage is the digest-pinned image holding the Orka host agent.
-	AgentImage string
-	// GitHubTokenSource names where the user's GitHub token comes from, as
-	// Secret name and key. When set, the copied token Secret is mounted into
-	// the host container.
+	AgentImage        string
 	GitHubTokenSource string
 }
 
@@ -175,7 +140,6 @@ func meta(host *corev1alpha1.AgentHost, n Names, name, nonce string) metav1.Obje
 	}
 }
 
-// ConnectionTokenSecret holds the host's connection token.
 func ConnectionTokenSecret(host *corev1alpha1.AgentHost, n Names, nonce string, token []byte) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: meta(host, n, n.ConnectionTokenSecret, nonce),
@@ -184,7 +148,6 @@ func ConnectionTokenSecret(host *corev1alpha1.AgentHost, n Names, nonce string, 
 	}
 }
 
-// GitHubTokenSecret holds the host's copy of the user's GitHub token.
 func GitHubTokenSecret(host *corev1alpha1.AgentHost, n Names, nonce string, token []byte) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: meta(host, n, n.GitHubTokenSecret, nonce),
@@ -193,7 +156,6 @@ func GitHubTokenSecret(host *corev1alpha1.AgentHost, n Names, nonce string, toke
 	}
 }
 
-// StateVolumeClaim is the host's state volume.
 func StateVolumeClaim(
 	host *corev1alpha1.AgentHost,
 	n Names,
@@ -214,11 +176,6 @@ func StateVolumeClaim(
 	return claim
 }
 
-// HostNetworkPolicy denies ingress except the controller to the status port,
-// and allows egress to DNS, TCP 443 and the template's extra rules.
-//
-// DNS reaches the cluster's DNS Pods and link-local addresses, where node-local
-// DNS caches listen; only port 53 is open there, never a metadata API.
 func HostNetworkPolicy(
 	host *corev1alpha1.AgentHost,
 	n Names,
@@ -260,9 +217,6 @@ func HostNetworkPolicy(
 						{Protocol: &tcp, Port: new(intstr.FromInt32(53))},
 					},
 				},
-				// Public HTTPS only: private, shared, link-local and loopback
-				// addresses, which hold in-cluster and internal endpoints, are
-				// reachable only through additionalEgress.
 				{
 					To: []networkingv1.NetworkPolicyPeer{
 						{IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{
@@ -289,7 +243,6 @@ func HostNetworkPolicy(
 	return policy
 }
 
-// HostPod renders the hardened Pod for a validated template.
 func HostPod(
 	host *corev1alpha1.AgentHost,
 	n Names,
@@ -303,8 +256,6 @@ func HostPod(
 	for i := range spec.InitContainers {
 		initContainers = append(initContainers, templateContainer(&spec.InitContainers[i], spec))
 	}
-	// The host agent runs as a native sidecar after the template's init
-	// containers, so it is up before the host container's probes call it.
 	initContainers = append(initContainers, hostAgentSidecar(spec, opts.AgentImage))
 
 	containers := make([]corev1.Container, 0, len(spec.Containers))
@@ -352,9 +303,6 @@ func HostPod(
 	return &corev1.Pod{
 		ObjectMeta: podMeta,
 		Spec: corev1.PodSpec{
-			// The connection token is consumed at start, so a restarted
-			// container could not read it again. The controller replaces a
-			// terminated Pod instead.
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: new(false),
 			EnableServiceLinks:           new(false),
@@ -373,9 +321,6 @@ func HostPod(
 	}
 }
 
-// ConnectionSecret carries what a Standalone client needs: the host's Pod,
-// namespace, loopback port and connection token. It lives in the AgentHost's
-// own namespace.
 func ConnectionSecret(
 	host *corev1alpha1.AgentHost,
 	n Names,
@@ -431,10 +376,6 @@ func templateContainer(source *corev1alpha1.AgentHostContainer, spec *corev1alph
 	return container
 }
 
-// stageContainer copies the connection token from its Secret into the
-// memory-backed volume only the host container mounts, and the host agent into
-// a volume the host mounts read-only, as the host's uid. It runs the host
-// agent's image, so the host image needs no tools of its own.
 func stageContainer(spec *corev1alpha1.AgentHostTemplateSpec, image string) corev1.Container {
 	return corev1.Container{
 		Name:    stageContainerName,
@@ -457,8 +398,6 @@ func stageContainer(spec *corev1alpha1.AgentHostTemplateSpec, image string) core
 	}
 }
 
-// PodAgentImage is the host agent image a host's Pod runs, or "" when it has
-// no host agent.
 func PodAgentImage(pod *corev1.Pod) string {
 	for i := range pod.Spec.InitContainers {
 		if pod.Spec.InitContainers[i].Name == hostAgentContainer {
@@ -496,9 +435,6 @@ func hostAgentSidecar(spec *corev1alpha1.AgentHostTemplateSpec, image string) co
 	}
 }
 
-// decorateHostContainer adds the host contract: identity, credentials, the
-// status directory, the host agent as an init, and probes answered by the
-// host agent.
 func decorateHostContainer(container *corev1.Container, host *corev1alpha1.AgentHost, opts PodOptions) {
 	container.Env = append(container.Env,
 		corev1.EnvVar{Name: HostIDEnv, Value: string(host.UID)},
@@ -531,8 +467,6 @@ func decorateHostContainer(container *corev1.Container, host *corev1alpha1.Agent
 		TimeoutSeconds:   5,
 		FailureThreshold: 3,
 	}
-	// A host whose listener stays down is stopped; with restartPolicy Never the
-	// Pod then terminates and the controller replaces it.
 	container.LivenessProbe = &corev1.Probe{
 		ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: statusPort}},
 		PeriodSeconds:    20,

@@ -39,7 +39,6 @@ describe('ExecutionGraph', () => {
     render(<ExecutionGraph task={task} />)
     expect(screen.getByRole('tree', { name: /execution graph/i })).toBeInTheDocument()
     const items = screen.getAllByRole('treeitem')
-    // root + 2 children
     expect(items).toHaveLength(3)
     expect(screen.getByText('parent-task')).toBeInTheDocument()
     expect(screen.getByText('child-a')).toBeInTheDocument()
@@ -99,7 +98,6 @@ describe('ExecutionGraph', () => {
     render(<ExecutionGraph task={task} />)
     const dots = screen.getAllByTestId('status-dot')
     expect(dots).toHaveLength(2)
-    // Running root pulses; Succeeded child does not.
     const root = screen.getByRole('treeitem', { name: /parent-task \(Running\)/i })
     expect(within(root).getAllByTestId('status-dot')[0].className).toContain('bg-status-running')
   })
@@ -162,13 +160,10 @@ describe('ExecutionGraph', () => {
       },
     })
     render(<ExecutionGraph task={task} />)
-    // The literal phase renders (in the visible badge and the StatusDot sr-only
-    // label), never the "Pending" fallback.
     expect(screen.getAllByText('Terminating').length).toBeGreaterThan(0)
     expect(
       screen.getByRole('treeitem', { name: /odd-child \(Terminating\)/i }),
     ).toBeInTheDocument()
-    // No node is mislabeled as Pending.
     expect(screen.queryByText('Pending')).not.toBeInTheDocument()
   })
 
@@ -182,7 +177,6 @@ describe('ExecutionGraph', () => {
     })
     render(<ExecutionGraph task={task} />)
     const user = userEvent.setup()
-    // Tab focuses the first node button; Tab again the child.
     await user.tab()
     await user.tab()
     expect(document.activeElement?.textContent).toContain('child-a')
@@ -196,7 +190,6 @@ describe('ExecutionGraph', () => {
   it('renders the type icon for the root node', () => {
     const task = makeTask({ spec: { type: 'agent', agentRef: { name: 'o' } } })
     const { container } = render(<ExecutionGraph task={task} />)
-    // root button carries an svg (type icon and/or dot)
     expect(container.querySelector('[role="treeitem"] svg')).toBeInTheDocument()
   })
 
@@ -245,7 +238,6 @@ describe('ExecutionGraph', () => {
     render(<ExecutionGraph task={task} />)
     const chip = await screen.findByText('Failed: pod waiting: ErrImagePull - not found')
     expect(chip).toHaveClass('text-status-failed')
-    // A succeeded child's message is not a result.
     expect(screen.queryByText('Job completed')).not.toBeInTheDocument()
     expect(requested).toEqual(['parent-task'])
   })

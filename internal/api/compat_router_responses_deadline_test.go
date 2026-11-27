@@ -93,8 +93,6 @@ func TestCompatRouterResponsesWriteDeadlineDoesNotLimitInferenceOrKeepAlive(t *t
 	}
 }
 
-// ReverseProxy ignores some Flush errors before its next upstream read.
-// The deadline wrapper must cancel that read rather than waiting for new data.
 func TestCompatRouterResponsesFlushFailureCancelsUpstream(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

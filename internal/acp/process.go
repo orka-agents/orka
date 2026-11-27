@@ -213,9 +213,6 @@ func (p *Process) waitForCleanup(ctx context.Context, timeout time.Duration) (Cl
 }
 
 func (p *Process) signalForStop(signal os.Signal) {
-	// Production supervisors run as root and assign a non-reused UID to each
-	// RuntimeSession. UID-scoped signaling cannot hit a recycled process-group
-	// ID and reaches descendants that detached from the adapter's group.
 	if p.usesUIDProcessScope() {
 		_, _ = signalProcessesForUID(p.uid, signal)
 		return

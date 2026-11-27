@@ -1,4 +1,3 @@
-// Native provider conformance reads credentials only from projected files.
 package main
 
 import (
@@ -18,14 +17,10 @@ const (
 	conformanceTemplate = "orka-direct"
 	credentialBundle    = "/run/substrate-client/credential-bundle.pem"
 	proofContents       = "native-data"
-	// The proof's only outbound destination, reached over plain HTTP.
-	providerProxyHost = "orka-provider-auth-proxy.orka-system.svc.cluster.local"
-	providerProxyPort = 8080
+	providerProxyHost   = "orka-provider-auth-proxy.orka-system.svc.cluster.local"
+	providerProxyPort   = 8080
 )
 
-// providerProxyEgress is the Actor's whole allowlist. Substrate v1 denies an
-// Actor without an egress policy everything, so the proof installs this one
-// before it boots the Actor.
 func providerProxyEgress() []workspace.SubstrateEgressRule {
 	return []workspace.SubstrateEgressRule{{Scheme: "http", Host: providerProxyHost, Ports: []int32{providerProxyPort}}}
 }
@@ -34,7 +29,6 @@ func providerProxyHealthURL() string {
 	return fmt.Sprintf("http://%s:%d/healthz", providerProxyHost, providerProxyPort)
 }
 
-// allowProviderProxyEgress installs and verifies the Actor's egress policy.
 func allowProviderProxyEgress(ctx context.Context, cfg workspace.SubstrateConfig, ref workspace.WorkspaceRef) error {
 	api, err := workspace.NewSubstrateNativeClient(cfg)
 	if err != nil {
@@ -132,9 +126,6 @@ func verifyProviderConnectivity(
 	ctx context.Context, cfg workspace.SubstrateConfig,
 	executor *workspace.SubstrateWorkspaceExecutor, ref workspace.WorkspaceRef,
 ) error {
-	// Exercise outbound DNS and the provider's native egress path before an
-	// agent's retries can obscure the first connection failure. Health is public;
-	// no model request or provider credential is involved in this probe.
 	result, err := executor.Exec(ctx, workspace.ExecRequest{
 		Ref: ref,
 		Command: []string{"curl", "--fail", "--silent", "--show-error", "--connect-timeout", "10", "--max-time", "20",

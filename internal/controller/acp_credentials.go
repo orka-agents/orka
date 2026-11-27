@@ -18,10 +18,6 @@ const (
 	maxACPWorkspaceCredentialBytes   = 32 << 10
 )
 
-// freezeWorkspaceCredentialVersions records only non-secret Secret
-// resourceVersions at reservation. The credential broker later requires the
-// exact version to remain current, so rotation after reservation fails closed
-// instead of silently changing the operation's authority.
 func (d *ACPDispatcher) freezeWorkspaceCredentialVersions(ctx context.Context, task *corev1alpha1.Task) error {
 	if task == nil || task.Status.Execution == nil || task.Spec.Workspace == nil {
 		return nil

@@ -20,13 +20,8 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Execution snapshots arrive sealed by the storage client. SQLite stores the
-// nonce and ciphertext as opaque bytes and never holds the snapshot key.
-
 var _ storagev1.SealedAgentExecutionSnapshotStore = (*Store)(nil)
 
-// CreateSealedAgentExecutionSnapshot implements
-// storagev1.SealedAgentExecutionSnapshotStore.
 func (s *Store) CreateSealedAgentExecutionSnapshot(ctx context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
 	return writeOperationErr(ctx, s, "CreateSealedAgentExecutionSnapshot", func(ctx context.Context) error {
 		return s.createSealedAgentExecutionSnapshotWrite(ctx, snapshot)
@@ -55,8 +50,6 @@ func (s *Store) createSealedAgentExecutionSnapshotWrite(ctx context.Context, sna
 	return nil
 }
 
-// GetSealedAgentExecutionSnapshot implements
-// storagev1.SealedAgentExecutionSnapshotStore.
 func (s *Store) GetSealedAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) (*storagev1.SealedAgentExecutionSnapshot, error) {
 	if err := key.Validate(); err != nil {
 		return nil, err
@@ -75,8 +68,6 @@ func (s *Store) GetSealedAgentExecutionSnapshot(ctx context.Context, key store.A
 	return &snapshot, nil
 }
 
-// ListSealedAgentExecutionSnapshots implements
-// storagev1.SealedAgentExecutionSnapshotStore.
 func (s *Store) ListSealedAgentExecutionSnapshots(ctx context.Context, cursor string, limit int) (*storagev1.SealedAgentExecutionSnapshotPage, error) {
 	if err := validateSealedPageLimit(limit); err != nil {
 		return nil, err
@@ -108,8 +99,6 @@ func (s *Store) ListSealedAgentExecutionSnapshots(ctx context.Context, cursor st
 		return nil, fmt.Errorf("iterate sealed agent execution snapshots: %w", err)
 	}
 	if len(page.Snapshots) == limit {
-		// Probe for a following record by key only, so a full page never
-		// reads one more record's sealed bytes.
 		last := page.Snapshots[limit-1].Key
 		var more bool
 		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_execution_snapshots
@@ -130,8 +119,6 @@ func validateSealedPageLimit(limit int) error {
 	return nil
 }
 
-// encodeKeysetCursor and decodeKeysetCursor carry the last two-part key of a
-// page. The encoding is opaque to callers.
 func encodeKeysetCursor(first, second string) string {
 	encoded, _ := json.Marshal([2]string{first, second})
 	return base64.RawURLEncoding.EncodeToString(encoded)
@@ -152,10 +139,6 @@ func decodeKeysetCursor(cursor string) (string, string, error) {
 	return key[0], key[1], nil
 }
 
-// ListAgentExecutionSnapshotMetadataBefore implements
-// store.AgentExecutionSnapshotLifecycleStore. The cutoff is strict so a
-// retention pass can use one stable timestamp without collecting records
-// created exactly at that boundary.
 func (s *Store) ListAgentExecutionSnapshotMetadataBefore(
 	ctx context.Context,
 	cutoff time.Time,
@@ -190,9 +173,6 @@ func (s *Store) ListAgentExecutionSnapshotMetadataBefore(
 	return metadata, nil
 }
 
-// CountAgentExecutionSnapshotReferences implements
-// store.AgentExecutionSnapshotLifecycleStore. All counts are read by one SQL
-// statement so the result is one consistent SQLite snapshot.
 func (s *Store) CountAgentExecutionSnapshotReferences(
 	ctx context.Context,
 	key store.AgentExecutionSnapshotKey,
@@ -218,9 +198,6 @@ func (s *Store) CountAgentExecutionSnapshotReferences(
 	return counts, nil
 }
 
-// DeleteAgentExecutionSnapshot implements
-// store.AgentExecutionSnapshotLifecycleStore. It deliberately does not alter
-// the Task-scoped broad deletion method below or perform lifecycle policy.
 func (s *Store) DeleteAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) error {
 	return writeOperationErr(ctx, s, "DeleteAgentExecutionSnapshot", func(ctx context.Context) error {
 		return s.deleteAgentExecutionSnapshotWrite(ctx, key)
@@ -238,8 +215,6 @@ func (s *Store) deleteAgentExecutionSnapshotWrite(ctx context.Context, key store
 	return nil
 }
 
-// DeleteAgentExecutionSnapshots implements
-// storagev1.SealedAgentExecutionSnapshotStore.
 func (s *Store) DeleteAgentExecutionSnapshots(ctx context.Context, taskUID string) error {
 	return writeOperationErr(ctx, s, "DeleteAgentExecutionSnapshots", func(ctx context.Context) error {
 		return s.deleteAgentExecutionSnapshotsWrite(ctx, taskUID)

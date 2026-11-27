@@ -117,11 +117,9 @@ func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 	if err := c.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
 		t.Fatalf("persist snapshot: %v", err)
 	}
-	// Idempotent identical persist.
 	if err := c.PersistAgentExecutionSnapshot(ctx, snapshot); err != nil {
 		t.Fatalf("idempotent persist: %v", err)
 	}
-	// Same key with different content is rejected.
 	different := snapshot
 	different.SchemaVersion = snapshot.SchemaVersion + 1
 	if err := c.PersistAgentExecutionSnapshot(ctx, different); !errors.Is(err, store.ErrDuplicateMismatch) {
@@ -136,7 +134,6 @@ func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 		t.Fatalf("snapshot round trip mismatch: %+v", got)
 	}
 
-	// The stored bytes must not contain the plaintext.
 	var ciphertext []byte
 	if err := s.db.QueryRow(`SELECT ciphertext FROM agent_execution_snapshots WHERE task_uid = ?`, "task-uid-1").Scan(&ciphertext); err != nil {
 		t.Fatalf("read raw ciphertext: %v", err)
@@ -145,7 +142,6 @@ func TestAgentExecutionSnapshotRoundTripEncryptedAtRest(t *testing.T) {
 		t.Fatal("snapshot body is stored in plaintext")
 	}
 
-	// Digest mismatch on persist is rejected.
 	bad := snapshot
 	bad.Digest = store.CanonicalAgentExecutionSnapshotDigest([]byte("other"))
 	if err := c.PersistAgentExecutionSnapshot(ctx, bad); err == nil {
@@ -324,7 +320,6 @@ func TestAgentExecutionSnapshotLifecycleReferenceCounts(t *testing.T) {
 	seedSessionTurn("match-1", key.TaskUID, 1)
 	seedSessionTurn("match-2", key.TaskUID, 2)
 	seedSessionTurn("other-task", otherTaskKey.TaskUID, 1)
-	// A lineage configuration digest is not an execution snapshot reference.
 	seedLineage("match-1", key.Digest)
 	seedLineage("match-2", key.Digest)
 	seedLineage("other", otherDigestKey.Digest)
@@ -417,7 +412,6 @@ func TestSessionLineageProjectionIsIdempotentAndRejectsDivergence(t *testing.T) 
 		t.Fatalf("unexpected projected lineage: %+v", projected)
 	}
 
-	// An identical authoritative record projects idempotently.
 	again, err := s.ProjectSessionLineage(ctx, lineage)
 	if err != nil {
 		t.Fatalf("verify projection: %v", err)
@@ -438,14 +432,12 @@ func TestSessionLineageProjectionIsIdempotentAndRejectsDivergence(t *testing.T) 
 		t.Fatalf("expected ErrConflict for changed runtime, got %v", err)
 	}
 
-	// A recreated same-name Session (new UID) never attaches to old state.
 	recreated := lineage
 	recreated.SessionUID = "different-session-uid"
 	if _, err := s.ProjectSessionLineage(ctx, recreated); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict for recreated session UID, got %v", err)
 	}
 
-	// A recreated same-name namespace never attaches to old state.
 	recreatedNamespace := lineage
 	recreatedNamespace.NamespaceUID = "different-ns-uid"
 	if _, err := s.ProjectSessionLineage(ctx, recreatedNamespace); !errors.Is(err, store.ErrConflict) {

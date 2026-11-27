@@ -22,19 +22,16 @@ const (
 	convRecord
 	convRecordPointer
 	convList
-	convStringMap
+	convScalarMap
 )
 
-// conversion is one checked pair from the type mapping table.
 type conversion struct {
-	kind   convKind
-	goType types.Type
-	// wireType is the generated Go type of a scalar wire value.
+	kind     convKind
+	goType   types.Type
 	wireType string
-	// cast is set when the Go type is not identical to wireType.
-	cast   bool
-	record *record
-	elem   *conversion
+	cast     bool
+	record   *record
+	elem     *conversion
 }
 
 const (
@@ -44,8 +41,6 @@ const (
 	jsonValueName    = wirePackage + ".JSONValue"
 )
 
-// scalarKinds pairs Go basic kinds with wire scalar kinds and the Go type
-// protoc-gen-go generates for them.
 var scalarKinds = map[types.BasicKind]struct {
 	wire     protoreflect.Kind
 	wireType string
@@ -59,14 +54,11 @@ var scalarKinds = map[types.BasicKind]struct {
 	types.Float64: {protoreflect.DoubleKind, "float64"},
 }
 
-// classify checks that a Go type and a wire field are a pair from the
-// mapping table and returns how to convert between them.
 func (b *builder) classify(goType types.Type, field protoreflect.FieldDescriptor) (*conversion, error) {
 	switch {
 	case field.IsMap():
-		if isStringMap(goType) && field.MapKey().Kind() == protoreflect.StringKind &&
-			field.MapValue().Kind() == protoreflect.StringKind {
-			return &conversion{kind: convStringMap, goType: goType}, nil
+		if conv := classifyScalarMap(goType, field); conv != nil {
+			return conv, nil
 		}
 		return nil, mismatch(goType, field)
 	case field.IsList():
@@ -111,8 +103,6 @@ func (b *builder) classifySingular(goType types.Type, field protoreflect.FieldDe
 	return nil, mismatch(goType, field)
 }
 
-// wellKnown pairs Go types that have no protobuf scalar with the wire
-// message that carries them.
 var wellKnown = []struct {
 	matches func(types.Type) bool
 	wire    protoreflect.FullName
@@ -139,8 +129,6 @@ func classifyWellKnown(goType types.Type, field protoreflect.FieldDescriptor) *c
 	return nil
 }
 
-// classifyRecord pairs a contract record, or a pointer to one, with the
-// wire message of the same name.
 func (b *builder) classifyRecord(named *types.Named, kind convKind, goType types.Type, field protoreflect.FieldDescriptor) (*conversion, error) {
 	message := field.Message()
 	if message == nil || message.Name() != protoreflect.Name(named.Obj().Name()) {
@@ -153,9 +141,6 @@ func (b *builder) classifyRecord(named *types.Named, kind convKind, goType types
 	return &conversion{kind: kind, goType: goType, record: rec}, nil
 }
 
-// classifyScalar pairs a Go basic type with a wire scalar. An optional
-// (pointer) Go value needs a wire field with explicit presence, and a plain
-// value one without it.
 func classifyScalar(goType types.Type, field protoreflect.FieldDescriptor, kind convKind) *conversion {
 	basic, ok := goType.Underlying().(*types.Basic)
 	if !ok || field.Message() != nil || field.HasPresence() != (kind == convOptional) {
@@ -183,7 +168,6 @@ func mismatch(goType types.Type, field protoreflect.FieldDescriptor) error {
 		types.TypeString(goType, nil), field.FullName(), wire)
 }
 
-// contractRecord returns t when it is a struct type declared by the contract.
 func (b *builder) contractRecord(t types.Type) *types.Named {
 	named, ok := t.(*types.Named)
 	if !ok || named.Obj().Pkg() != b.contract {
@@ -196,6 +180,13 @@ func (b *builder) contractRecord(t types.Type) *types.Named {
 }
 
 func isNamed(t types.Type, path, name string) bool {
+	if alias, ok := t.(*types.Alias); ok {
+		object := alias.Obj()
+		if object.Pkg() != nil && object.Pkg().Path() == path && object.Name() == name {
+			return true
+		}
+		t = types.Unalias(t)
+	}
 	named, ok := t.(*types.Named)
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == path && named.Obj().Name() == name
 }
@@ -222,14 +213,21 @@ func isAnyMap(t types.Type) bool {
 	return ok && key.Kind() == types.String && isEmptyInterface(types.Unalias(m.Elem()))
 }
 
-func isStringMap(t types.Type) bool {
-	m, ok := t.Underlying().(*types.Map)
-	if !ok {
-		return false
+func classifyScalarMap(goType types.Type, field protoreflect.FieldDescriptor) *conversion {
+	m, ok := goType.Underlying().(*types.Map)
+	if !ok || field.MapKey().Kind() != protoreflect.StringKind || field.MapValue().Message() != nil {
+		return nil
 	}
 	key, keyOK := m.Key().(*types.Basic)
 	value, valueOK := m.Elem().(*types.Basic)
-	return keyOK && valueOK && key.Kind() == types.String && value.Kind() == types.String
+	if !keyOK || !valueOK || key.Kind() != types.String {
+		return nil
+	}
+	scalar, ok := scalarKinds[value.Kind()]
+	if !ok || scalar.wire != field.MapValue().Kind() || !isPredeclared(value, scalar.wireType) {
+		return nil
+	}
+	return &conversion{kind: convScalarMap, goType: goType, wireType: scalar.wireType}
 }
 
 func isBytes(t types.Type) bool {
@@ -241,7 +239,6 @@ func isBytes(t types.Type) bool {
 	return ok && basic.Kind() == types.Byte
 }
 
-// isPredeclared reports whether t is exactly the predeclared type name.
 func isPredeclared(t types.Type, name string) bool {
 	basic, ok := t.(*types.Basic)
 	return ok && basic.Name() == name

@@ -116,8 +116,6 @@ type repositoryMonitorWorkflowPollConflictStore struct {
 }
 
 func (s repositoryMonitorWorkflowPollConflictStore) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
-	// Another writer inserts the same deterministic poll after its existence
-	// checks. The second insert returns the real SQLite conflict error.
 	if run.Trigger == "workflow" {
 		if err := s.RepositoryMonitorStore.CreateMonitorRun(ctx, run); err != nil {
 			return err

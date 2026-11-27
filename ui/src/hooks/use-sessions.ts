@@ -5,15 +5,10 @@ import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import type { Session, SessionListItem } from '@/schemas/session'
 
-// Client errors (403/404/400) do not clear on retry; only transient failures
-// do. 408 (request timeout) and 429 (throttled) are client statuses that an
-// ingress or API throttle returns transiently, so they keep retrying.
 const transientClientStatuses = new Set([408, 429])
 export const retryUnlessClientError = (failureCount: number, error: unknown) =>
   failureCount < 3 &&
   !(error instanceof ApiError && error.status >= 400 && error.status < 500 && !transientClientStatuses.has(error.status))
-// Page-by-page session listing for the Sessions view; later pages follow
-// metadata.continue on demand instead of stopping at the first page.
 export function useSessionListPages(limit = '25', refetchInterval: number | false = 15000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)
@@ -35,8 +30,6 @@ export function useSessionListAll(pageLimit = '100', refetchInterval: number | f
   return useQuery({
     queryKey: ['sessions', 'all', namespace, pageLimit],
     enabled: Boolean(token),
-    // Bounded like every full-list walk (maxListWalkPages): unbounded history
-    // on a polling interval grows without limit.
     queryFn: () => walkAllPages(
       (continueToken) => api.get<ListResponse<SessionListItem>>('/sessions', pageParams({ namespace, limit: pageLimit }, continueToken)),
       { subject: 'session list', maxPages: maxListWalkPages },
@@ -46,8 +39,6 @@ export function useSessionListAll(pageLimit = '100', refetchInterval: number | f
   })
 }
 
-// Polls so the overview follows new chat turns; a 403 or 404 (deleted)
-// session stays that way, so polling stops there.
 export function useSession(id: string, refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({

@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Regenerates every checked-in generated file and fails when the result differs
-# from the commit. Each stale file is printed with the command that regenerates
-# it. Run it through `make verify-generated` on a clean working tree.
 set -euo pipefail
 
 make_cmd=${MAKE:-make}

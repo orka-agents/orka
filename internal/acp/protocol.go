@@ -7,7 +7,6 @@ import (
 )
 
 const (
-	// ProtocolVersion is the stable ACP wire protocol negotiated during initialize.
 	ProtocolVersion = 1
 
 	MethodInitialize        = "initialize"
@@ -24,13 +23,8 @@ const (
 )
 
 const (
-	// SessionCapabilityResume is the ACP sessionCapabilities key for
-	// session/resume: reconnecting to an existing provider session without a
-	// history replay (stable in ACP v1 since 2026-04).
 	SessionCapabilityResume = "resume"
-	// SessionCapabilityClose is the ACP sessionCapabilities key for
-	// session/close: an explicit graceful end of a provider session.
-	SessionCapabilityClose = "close"
+	SessionCapabilityClose  = "close"
 )
 
 type Meta map[string]any
@@ -42,9 +36,6 @@ const (
 	sessionMetaRuntimeProfileDigest = protectedSessionMetaPrefix + "profileDigest"
 )
 
-// MergeNewSessionMeta combines provider-specific session metadata with
-// Orka-owned runtime identity metadata. Provider metadata must never be able to
-// replace or shadow the Orka fence, including through case variants.
 func MergeNewSessionMeta(provider, protected Meta) (Meta, error) {
 	merged := make(Meta, len(provider)+len(protected))
 	for key, value := range provider {
@@ -101,7 +92,6 @@ type AgentCapabilities struct {
 	Meta                Meta               `json:"_meta,omitempty"`
 }
 
-// SessionCapability accepts the ACP capability object or a boolean true.
 func (c AgentCapabilities) SessionCapability(name string) bool {
 	switch value := c.SessionCapabilities[name].(type) {
 	case bool:
@@ -181,7 +171,6 @@ type NewSessionResponse struct {
 	Meta          Meta              `json:"_meta,omitempty"`
 }
 
-// ResumeSessionRequest reconnects without replaying conversation history.
 type ResumeSessionRequest struct {
 	SessionID             string      `json:"sessionId"`
 	CWD                   string      `json:"cwd"`
@@ -264,15 +253,11 @@ func (r StopReason) Validate() error {
 func (r StopReason) Successful() bool { return r == StopReasonEndTurn }
 
 type PromptResponse struct {
-	StopReason StopReason `json:"stopReason"`
-	// Usage is the optional ACP turn token usage. It stays raw so a malformed
-	// report can never fail the prompt; see ParsePromptUsage.
-	Usage json.RawMessage `json:"usage,omitempty"`
-	Meta  Meta            `json:"_meta,omitempty"`
+	StopReason StopReason      `json:"stopReason"`
+	Usage      json.RawMessage `json:"usage,omitempty"`
+	Meta       Meta            `json:"_meta,omitempty"`
 }
 
-// PromptUsage is the token usage an ACP agent reported for one prompt turn.
-// Each count is present only when the agent reported it.
 type PromptUsage struct {
 	InputTokens       *int64
 	OutputTokens      *int64
@@ -280,13 +265,8 @@ type PromptUsage struct {
 	CachedWriteTokens *int64
 }
 
-// maxPromptUsageTokens bounds reported counts to an exactly representable,
-// plausible range; anything larger is treated as unreported.
 const maxPromptUsageTokens = 1 << 40
 
-// ParsePromptUsage decodes an ACP PromptResponse usage object. It is
-// telemetry-only: absent, malformed, negative or implausible values yield no
-// count rather than an error.
 func ParsePromptUsage(raw json.RawMessage) *PromptUsage {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
@@ -301,8 +281,6 @@ func ParsePromptUsage(raw json.RawMessage) *PromptUsage {
 		return nil
 	}
 	count := func(value json.RawMessage) *int64 {
-		// Decode through a pointer: JSON null leaves it nil, so a null count
-		// stays unreported instead of becoming an explicit zero.
 		var number *uint64
 		if len(value) == 0 || json.Unmarshal(value, &number) != nil || number == nil || *number > maxPromptUsageTokens {
 			return nil

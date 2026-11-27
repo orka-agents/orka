@@ -70,7 +70,6 @@ describe('ChatToolCall', () => {
   it('clicking toggles expanded state', () => {
     render(<ChatToolCall message={toolCallMsg} />)
     const button = screen.getByRole('button')
-    // Collapsed by default; the Args body is not shown.
     expect(button).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText('Args')).not.toBeInTheDocument()
     fireEvent.click(button)
@@ -108,14 +107,12 @@ describe('ChatToolCall', () => {
     const longArg = { url: `https://example.com/${'a'.repeat(200)}`, digest: 'f'.repeat(128) }
     const { container } = render(<ChatToolCall message={{ ...toolCallMsg, toolName: 'mcp__github__create_pull_request_review_comment', toolArgs: longArg }} />)
     const row = container.firstElementChild as HTMLElement
-    // The side indent only applies from sm up.
     expect(row).toHaveClass('sm:mx-12')
     expect(row).not.toHaveClass('mx-12')
     const name = screen.getByTitle('mcp__github__create_pull_request_review_comment')
     expect(name).toHaveClass('min-w-0', 'truncate')
 
     fireEvent.click(screen.getByRole('button'))
-    // A long URL or hex digest wraps instead of widening the transcript.
     expect(container.querySelector('pre')).toHaveClass('whitespace-pre-wrap', 'wrap-anywhere')
   })
 

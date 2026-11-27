@@ -286,7 +286,6 @@ func TestAwaitCredentialBootstrapSeedsAndReleasesListener(t *testing.T) {
 		t.Fatal("AwaitCredentialBootstrap did not return after seeding")
 	}
 
-	// The listener must be released so the configured supervisor can bind it.
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		reclaimed, err := net.Listen("tcp", address)

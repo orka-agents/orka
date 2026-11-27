@@ -16,22 +16,14 @@ export function useTaskListAll(pageLimit = '100', refetchInterval: number | fals
   const query = useQuery({
     queryKey: ['tasks', 'all', namespace, pageLimit],
     enabled: Boolean(token),
-    // Bounded by maxListWalkPages; views built on this walk are summaries and
-    // must surface `truncated`.
     queryFn: () => walkAllPages(
       (continueToken) => fetchTaskListPage(namespace, pageLimit, continueToken),
       { subject: 'task list', maxPages: maxListWalkPages },
     ),
-    // A 403 is permanent for this identity, and a repeated continuation
-    // cursor is a server-side protocol fault: neither improves on retry, so
-    // stop retrying (and, for 403, polling) instead of generating denied or
-    // looping requests and audit noise.
     retry: (failureCount, error) =>
       !isForbiddenError(error) && !isPaginationProtocolError(error) && failureCount < 3,
     refetchInterval: pollUnlessForbidden(refetchInterval),
   })
-  // Views built on this walk show the error, not a skeleton, while a failed
-  // first load is retried by polling.
   const error = useStickyQueryError(query)
   return { ...query, error, isLoading: query.isLoading && !error }
 }
@@ -41,11 +33,6 @@ export function useTask(id: string, refetchInterval: number | false = 5000) {
   return useQuery({
     queryKey: ['task', id, namespace],
     queryFn: () => api.get<Task>(`/tasks/${id}`, { namespace }),
-    // A forbidden task stays forbidden for this token, and a task that was
-    // loaded once and now 404s stays deleted; polling those only spams the
-    // API. A 404 before the task was ever seen is different: a just-created
-    // Task can transiently 404 while the detail read's cache catches up with
-    // the list, so polling continues until the task appears.
     retry: (failureCount, error) =>
       !isForbiddenError(error) && !isNotFoundError(error) && failureCount < 3,
     refetchInterval: (query) => {
@@ -56,8 +43,6 @@ export function useTask(id: string, refetchInterval: number | false = 5000) {
   })
 }
 
-// The result loads on its own once `enabled` (the Result tab passes "task is
-// terminal"); otherwise it waits for an explicit refetch.
 export function useTaskResult(id: string, enabled = false, taskUID?: string) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
@@ -68,8 +53,6 @@ export function useTaskResult(id: string, enabled = false, taskUID?: string) {
   })
 }
 
-// Child Tasks the controller labeled with this parent: scheduled runs and
-// delegated children.
 export function useTaskChildren(id: string, enabled = true, taskUID?: string, refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   return useQuery({
@@ -107,20 +90,14 @@ export interface TaskCancellation {
   namespace: string
   name: string
   phase: string
-  // True when this request recorded the cancellation; false when the task
-  // already had one or was already Cancelled.
   requested: boolean
   message: string
 }
 
-// useCancelTask stops a Pending or Running task without deleting it, so its
-// result, artifacts and events stay readable.
 export function useCancelTask() {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    // uid pins the request to the task the person confirmed; a task
-    // recreated under the same name since then is refused (409).
     mutationFn: ({ id, uid, reason }: { id: string; uid?: string; reason?: string }) =>
       api.post<TaskCancellation>(`/tasks/${id}/cancel`, { ...(uid && { uid }), ...(reason && { reason }) }, { namespace }),
     onSuccess: (_result, { id }) => {
@@ -220,21 +197,12 @@ export function useTaskEvents(
         queryClient.getQueryData<TaskEventsResponse>(queryKey),
       ),
     enabled: enabled && Boolean(id),
-    // 501 means the feature is off, 404 means the task is gone, and 403 means
-    // this token may not read it; none changes on retry, so only transient
-    // failures are retried.
     retry: (failureCount, error) =>
       !(error instanceof ApiError && (error.status === 501 || error.status === 404 || error.status === 403)) &&
       failureCount < 3,
     refetchInterval: (query) => {
       const error = query.state.error
       if (!(error instanceof ApiError)) return refetchInterval
-      // 501 (feature off) and 403 (forbidden for this token) never change on
-      // their own; a 404 after events were seen means the task is gone.
-      // Consumers without the detail page's enabled-guard (the runtime
-      // canvas spotlight) must not poll those forever. A 404 before any
-      // events were seen keeps polling like the task-detail query: a fresh
-      // task can transiently 404 while caches catch up.
       if (error.status === 501 || error.status === 403) return false
       if (error.status === 404 && query.state.data !== undefined) return false
       return refetchInterval

@@ -11,9 +11,6 @@ import (
 
 var _ storagev1.WriteWatermarkStore = (*Store)(nil)
 
-// AdvanceWriteWatermark implements storagev1.WriteWatermarkStore. The
-// watermark is a column of the dataset's identity row, so it moves with the
-// dataset: a copy restored from an older file holds the older value.
 func (s *Store) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
 	return writeOperation(ctx, s, "AdvanceWriteWatermark", nil, func(ctx context.Context) (storagev1.WriteWatermark, error) {
 		tx, err := s.beginTx(ctx)
@@ -44,7 +41,6 @@ func (s *Store) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWater
 	})
 }
 
-// GetWriteWatermark implements storagev1.WriteWatermarkStore.
 func (s *Store) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
 	var watermark storagev1.WriteWatermark
 	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {

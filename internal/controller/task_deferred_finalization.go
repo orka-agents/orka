@@ -22,38 +22,22 @@ import (
 
 const (
 	deferredFinalizationLabel = "orka.ai/deferred-task-finalization"
-	deferredResultChunkBytes  = 512 << 10 // Each Secret remains below Kubernetes' 1 MiB limit.
+	deferredResultChunkBytes  = 512 << 10
 )
 
-// A storage outage must not keep failed/cancelled work running, erase available
-// output, or turn the missing Job into an execution retry. Publish this immutable
-// intent only after all output chunks exist, then allow cascading Job deletion.
-// Output lives only in Task-owned Secrets until the result provider accepts it.
-// Content-addressed chunks make interrupted staging safe to retry as logs grow.
-// Neither the output nor Secret data is included in errors or logs.
 type deferredTaskFinalization struct {
-	Phase         corev1alpha1.TaskPhase `json:"phase"`
-	OutcomePhase  corev1alpha1.TaskPhase `json:"outcomePhase"`
-	Message       string                 `json:"message"`
-	RecordOutcome bool                   `json:"recordOutcome"`
-	ResultChunks  int                    `json:"resultChunks"`
-	ResultBytes   int                    `json:"resultBytes"`
-	ResultDigest  string                 `json:"resultDigest,omitempty"`
-	// ResultTooLarge records output above store.MaxResultBytes, which is
-	// refused rather than staged: finalization records why the Task has no
-	// result.
-	ResultTooLarge bool `json:"resultTooLarge,omitempty"`
-	// ResultLogTooLarge narrows ResultTooLarge to a stdout result log longer
-	// than its read limit, so finalization does not report a small result as
-	// too large.
-	ResultLogTooLarge bool `json:"resultLogTooLarge,omitempty"`
+	Phase             corev1alpha1.TaskPhase `json:"phase"`
+	OutcomePhase      corev1alpha1.TaskPhase `json:"outcomePhase"`
+	Message           string                 `json:"message"`
+	RecordOutcome     bool                   `json:"recordOutcome"`
+	ResultChunks      int                    `json:"resultChunks"`
+	ResultBytes       int                    `json:"resultBytes"`
+	ResultDigest      string                 `json:"resultDigest,omitempty"`
+	ResultTooLarge    bool                   `json:"resultTooLarge,omitempty"`
+	ResultLogTooLarge bool                   `json:"resultLogTooLarge,omitempty"`
 }
 
-// stopTaskAfterUsageRetentionFailure preserves stop decisions while durable
-// usage bookkeeping is unavailable. The Task remains nonterminal for recovery.
 func (r *TaskReconciler) stopTaskAfterUsageRetentionFailure(ctx context.Context, task *corev1alpha1.Task, err error) error {
-	// Stop requested work even when its bookkeeping cannot be written.
-	// Durable finalization remains pending until storage recovers.
 	intent, lookupErr := r.loadDeferredTaskFinalization(ctx, task)
 	err = errors.Join(err, lookupErr)
 	if intent != nil && !task.Status.Phase.IsTerminal() {
@@ -71,8 +55,6 @@ func (r *TaskReconciler) stopTaskAfterUsageRetentionFailure(ctx context.Context,
 	return err
 }
 
-// Persist output and the original decision before removing a Job whose
-// finalization is blocked on storage. Inactive failed Jobs retain their Pods.
 func (r *TaskReconciler) stopJobForDeferredFinalization(ctx context.Context, task *corev1alpha1.Task, intent deferredTaskFinalization) error {
 	if task.Status.JobName == "" {
 		return nil
@@ -97,8 +79,6 @@ func (r *TaskReconciler) stopJobForDeferredFinalization(ctx context.Context, tas
 	if err := r.stageDeferredTaskFinalization(ctx, task, intent); err != nil {
 		return err
 	}
-	// Use the observed UID and resource version even if a same-name Job is
-	// recreated between staging and deletion.
 	propagation := metav1.DeletePropagationBackground
 	if r.repositoryMonitorValidationSafetyTask(ctx, task) {
 		propagation = metav1.DeletePropagationForeground
@@ -183,8 +163,6 @@ func (r *TaskReconciler) createDeferredFinalizationSecret(ctx context.Context, t
 	return nil
 }
 
-// stageDeferredTaskFinalization is used only before deleting an unsettled Job.
-// A pending intent wins over subsequent observations of the missing Job.
 func (r *TaskReconciler) stageDeferredTaskFinalization(ctx context.Context, task *corev1alpha1.Task, intent deferredTaskFinalization) error {
 	if existing, err := r.loadDeferredTaskFinalization(ctx, task); err != nil || existing != nil {
 		return err
@@ -192,17 +170,12 @@ func (r *TaskReconciler) stageDeferredTaskFinalization(ctx context.Context, task
 	if task.UID == "" {
 		return errors.New("cannot defer Task finalization without a Task UID")
 	}
-	// An unavailable binding lookup must suppress possible validation output
-	// without keeping cancelled or failed work running. Normal finalization
-	// still retries the authoritative classification before recording status.
 	validationTask := r.repositoryMonitorValidationSafetyTask(ctx, task)
 	if !validationTask && !taskJobIdentityRejected(task) && r.ResultStore != nil &&
 		(task.Status.ResultRef == nil || !task.Status.ResultRef.Available) {
 		result, available, err := r.taskPodResult(ctx, task, true)
 		switch {
 		case errors.Is(err, store.ErrTooLarge):
-			// Output that can never be stored is not staged; stopping the
-			// work must not wait on it.
 			intent.ResultTooLarge = true
 			intent.ResultLogTooLarge = errors.Is(err, errStdoutResultLogTooLarge)
 		case err != nil:
@@ -256,8 +229,6 @@ func (r *TaskReconciler) deferredTaskResult(ctx context.Context, task *corev1alp
 	return result, true, nil
 }
 
-// Keep the intent until Kubernetes records the terminal phase. Result acceptance
-// alone is insufficient: session finalization or the status write can still fail.
 func (r *TaskReconciler) cleanupDeferredTaskFinalization(ctx context.Context, task *corev1alpha1.Task) error {
 	if task.Status.JobName == "" || task.UID == "" {
 		return nil
@@ -279,9 +250,6 @@ func (r *TaskReconciler) cleanupDeferredTaskFinalization(ctx context.Context, ta
 	return nil
 }
 
-// taskPodResult shares result decoding between normal collection and outage
-// staging. A Pod that never started has no output to preserve. Read failures for
-// a started Pod block destructive cleanup, so recovery cannot silently lose it.
 func (r *TaskReconciler) taskPodResult(ctx context.Context, task *corev1alpha1.Task, allowUnstarted bool) ([]byte, bool, error) {
 	stdoutResult := taskUsesStdoutResult(task)
 	if (task.Spec.Type != corev1alpha1.TaskTypeContainer && !stdoutResult) || r.KubeClient == nil || task.Status.JobName == "" {
@@ -296,9 +264,6 @@ func (r *TaskReconciler) taskPodResult(ctx context.Context, task *corev1alpha1.T
 			return nil, false, nil
 		}
 		pod := &pods.Items[len(pods.Items)-1]
-		// GetLogs leaves Container empty. The API defaults it only for a
-		// single regular container; init containers never supply this output.
-		// Preserve log errors for ambiguous multi-container Pods.
 		if pod.Status.Phase == corev1.PodPending && len(pod.Spec.Containers) <= 1 {
 			container := ""
 			if len(pod.Spec.Containers) == 1 {

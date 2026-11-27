@@ -170,7 +170,6 @@ func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
 				fixture.request.NativeRestore = nil
 				fixture.server.cfg.Provider.AuthMethodID = "unsupported-test-auth"
 				sealRequest(t, &fixture.request.Metadata.RequestDigest, fixture.request)
-				// An ordinary create must not claim or remove another native operation's journal.
 				unrelatedJournal = filepath.Join(fixture.journal, "unrelated-evidence")
 				if err := os.MkdirAll(fixture.journal, 0o700); err != nil {
 					t.Fatal(err)
@@ -180,10 +179,14 @@ func TestSupervisorCreateUnprovenExitRetainsAndRetriesCleanup(t *testing.T) {
 				}
 			}
 			fixture.server.cfg.CancelGrace = time.Nanosecond
+			logs := captureSupervisorLogs(t)
 			response := performMutation(t, fixture.server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", fixture.request, fixture.cfg)
 			var failure harnessv2.ErrorResponse
 			if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || response.Code != http.StatusConflict || failure.Code != harnessv2.ErrorCodeCleanupUnproven || failure.Retryable {
 				t.Fatalf("unproven create: %d %s", response.Code, response.Body.String())
+			}
+			if line := createFailureLogLine(t, logs); line.Stage == "" || line.TotalMs == nil {
+				t.Fatalf("retained create failure line = %+v", line)
 			}
 			fixture.server.mu.Lock()
 			state := fixture.server.sessions[fixture.request.RuntimeSessionID]

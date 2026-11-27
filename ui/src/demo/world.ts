@@ -1,9 +1,3 @@
-// The fictional organization behind the demo data. Every domain's fixtures
-// draw names from here so cross-links (task -> agent, usage -> task, monitor
-// -> repository, gateway -> session) resolve to objects that exist.
-//
-// Northwind Labs is made up: a mid-size company running Orka for its platform
-// team. Repositories, people, and URLs below are fake.
 
 export const ORG = 'northwind-labs'
 
@@ -18,17 +12,12 @@ export type RepoKey = keyof typeof REPOS
 
 export const PEOPLE = ['maya.chen', 'dev.patel', 'sam.okafor', 'lena.fischer', 'jordan.reyes'] as const
 
-/** Provider CRs (namespace default). Models are served through each provider. */
 export const PROVIDERS = {
   anthropic: { name: 'anthropic', type: 'anthropic', models: ['claude-sonnet-4-5', 'claude-haiku-4-5'] },
   openai: { name: 'openai', type: 'openai', models: ['gpt-5', 'gpt-4.1-mini'] },
   azure: { name: 'azure-openai', type: 'openai', models: ['gpt-4.1'] },
 } as const
 
-/**
- * Agent CRs. `kind: 'ai'` agents run Orka's own tool loop against a provider;
- * `kind: 'agent'` agents run a coding-agent runtime over ACP in a workspace.
- */
 export const AGENTS = {
   triage: { name: 'issue-triager', kind: 'ai', provider: 'openai', model: 'gpt-4.1-mini', description: 'Labels, deduplicates, and routes new GitHub issues.' },
   reviewer: { name: 'code-reviewer', kind: 'agent', runtime: 'claude', provider: 'anthropic', model: 'claude-sonnet-4-5', description: 'Reviews pull requests and leaves inline comments.' },
@@ -47,28 +36,19 @@ export type DemoTaskPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Ca
 export interface DemoTaskSeed {
   name: string
   agent?: AgentKey
-  /** container tasks have no agent */
   type: 'ai' | 'agent' | 'container'
   phase: DemoTaskPhase
   repo?: RepoKey
-  /** minutes before page load the task was created */
   createdAgo: number
-  /** run time in minutes (for terminal tasks) */
   durationMin?: number
   prompt: string
   inputTokens?: number
   outputTokens?: number
-  /** session the task belongs to, if any */
   session?: string
-  /** parent coordinator or scheduled task */
   parent?: string
   createdBy?: (typeof PEOPLE)[number] | 'gateway' | 'monitor' | 'schedule' | 'chat'
 }
 
-/**
- * The task catalog. Task, usage, board, monitor, and gateway fixtures
- * all reference these names.
- */
 export const TASKS: DemoTaskSeed[] = [
   { name: 'checkout-latency-investigation-7k2qp', agent: 'incident', type: 'ai', phase: 'Running', createdAgo: 4, prompt: 'p99 latency on checkout-service jumped from 180ms to 1.4s at 14:02 UTC. Correlate with recent deploys and database metrics, and propose a mitigation.', inputTokens: 48210, outputTokens: 3120, session: 'slack-incidents-c7f3e1', createdBy: 'gateway' },
   { name: 'fix-cart-rounding-bug-x9m4d', agent: 'fixer', type: 'agent', phase: 'Running', repo: 'checkout', createdAgo: 11, prompt: 'Issue #2214: cart totals are off by one cent when a percentage discount applies to items priced in JPY. Reproduce with a failing test, fix the rounding, and open a PR.', inputTokens: 126400, outputTokens: 9850, createdBy: 'monitor' },
@@ -94,7 +74,6 @@ export const TASKS: DemoTaskSeed[] = [
   { name: 'chat-explain-outbox-d4k8m', agent: 'coordinator', type: 'ai', phase: 'Succeeded', repo: 'checkout', createdAgo: 35, durationMin: 1, prompt: 'Explain how the outbox relay in checkout-service guarantees at-least-once delivery.', inputTokens: 21500, outputTokens: 1900, session: 'chat-maya-9b21f0', createdBy: 'chat' },
 ]
 
-/** Sessions: chat transcripts and gateway conversation threads. */
 export const SESSIONS = {
   slackIncidents: { name: 'slack-incidents-c7f3e1', agent: 'incident' as AgentKey, source: 'gateway', title: '#incidents: checkout latency spike' },
   chatMaya: { name: 'chat-maya-9b21f0', agent: 'coordinator' as AgentKey, source: 'chat', title: 'How does the outbox relay work?' },

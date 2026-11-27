@@ -15,8 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// A native provider's admitted router port and path must survive Task dispatch.
-// A hostname-only reconstruction would send private credentials to port 8080.
 func TestExternalRuntimePoolDispatchUsesPinnedNativeRouterEndpoint(t *testing.T) {
 	ctx := context.Background()
 	f := newExternalRuntimePoolFixture(t)

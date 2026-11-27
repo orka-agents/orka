@@ -58,8 +58,6 @@ func TestRepositoryMonitorUpdateBranchRetriesSuccessProjections(t *testing.T) {
 				t.Fatal("work action became terminal before every success projection completed")
 			}
 
-			// A proved mutation must keep retrying its projections even after
-			// the normal command retry budget, without submitting it again.
 			reconciler.Store = monitorStore
 			run.Phase = repositoryMonitorRunPhaseFailed
 			run.Error = "[" + repositoryMonitorRunRetryScheduled + "] " + projectionErr.Error()

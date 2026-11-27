@@ -13,11 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// standaloneRuntimeCleanupFence grants exact session deletion, preceded when
-// necessary by evidence-bound publication finalization, under an older runtime
-// epoch. Mutable Task status never supplies that authority: the
-// terminal attempt, immutable projection and frozen execution binding must
-// agree, and every mutation revalidates those records under the current owner.
 func (d *ACPDispatcher) standaloneRuntimeCleanupFence(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -30,8 +25,6 @@ func (d *ACPDispatcher) standaloneRuntimeCleanupFence(
 	projectionID := standaloneTaskTerminalProjectionIDForUID(task.Namespace, taskUID, task.Status.Execution.Attempt)
 	projection, err := d.Store.GetOutboxProjection(ctx, projectionID)
 	if errors.Is(err, store.ErrNotFound) {
-		// Ordinary same-epoch cleanup does not need a terminal projection.
-		// Without one it still cannot address a previous runtime epoch.
 		return nil, nil
 	}
 	if err != nil {
@@ -88,8 +81,6 @@ func (d *ACPDispatcher) validateStandaloneRuntimeCleanupProjection(
 	if err != nil {
 		return nil, err
 	}
-	// Reuse snapshot integrity validation without trusting current endpoint or
-	// admission readiness. The cleanup client authenticates the frozen boot.
 	runtime := &corev1alpha1.AgentRuntime{}
 	runtime.Namespace, runtime.Name, runtime.UID = task.Namespace, binding.RuntimeRef.Name, binding.RuntimeRef.UID
 	frozen, _, _, err := d.verifiedExternalRuntimeRecoveryTarget(ctx, task, taskUID, runtime)
@@ -128,8 +119,6 @@ func (d *ACPDispatcher) validateStandaloneRuntimeCleanupProjection(
 }
 
 func standaloneRuntimeCleanupBinding(task *corev1alpha1.Task, taskUID types.UID) (*corev1alpha1.AgentExecutionBinding, error) {
-	// taskUID is the frozen source identity; a restored incarnation's live UID
-	// may differ. The live object is bound separately by validateTask.
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAgent ||
 		task.Spec.SessionRef != nil || task.Status.Execution == nil ||
 		!store.IsTerminalPromptExecutionState(store.PromptExecutionState(task.Status.Execution.State)) ||

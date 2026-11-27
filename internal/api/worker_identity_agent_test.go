@@ -13,10 +13,6 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents covers a worker
-// that posts a Task to the API instead of creating it directly: the API
-// writes Tasks as the controller, which admission trusts, so it applies the
-// same rule itself and refuses a parentless Task for an identity-bound Agent.
 func TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 	identityAgent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "reviewer", Namespace: testDefaultNamespace},
@@ -64,8 +60,6 @@ func TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 	status, body = post("system:serviceaccount:"+testDefaultNamespace+":editor", "reviewer")
 	require.False(t, strings.Contains(body, "identity-bound Agent"), "a non-worker is judged by the Agent use check: %d %s", status, body)
 
-	// An OIDC caller whose display name looks like a worker's is judged by
-	// issuer and subject, not as a worker.
 	status, body = postAs(&UserInfo{Username: worker, AuthType: AuthTypeOIDC, Issuer: "https://issuer.example.test", Subject: "alice"}, "reviewer")
 	require.False(t, strings.Contains(body, "identity-bound Agent"), "an OIDC caller is not a worker: %d %s", status, body)
 }

@@ -6,10 +6,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// RecordDecision observes only a newly committed terminal event. Callers must
-// exclude duplicate appends and wait for the append that wrote the event,
-// including a grouped append, to commit.
-// Reading or deriving approval state must never record an observation.
 func RecordDecision(request Approval, decision *store.ExecutionEvent) {
 	if decision == nil || request.Status != StatusPending || request.CreatedAt.IsZero() ||
 		decision.CreatedAt.IsZero() || decision.CreatedAt.Before(request.CreatedAt) ||

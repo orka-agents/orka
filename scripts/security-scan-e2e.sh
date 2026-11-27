@@ -45,7 +45,6 @@ scan_name="${ORKA_SECURITY_SCAN_NAME:-security-goof}"
 bad_scan_name="${ORKA_SECURITY_BAD_SCAN_NAME:-security-goof-malformed-result}"
 authority_observer_name="${ORKA_SECURITY_SCAN_AUTHORITY_OBSERVER_NAME:-security-scan-authority-observer}"
 authority_agent_name="${ORKA_SECURITY_SCAN_AUTHORITY_AGENT:-security-scan-authority-agent}"
-# The deterministic ACP fixture advertises and calls this exact protocol name.
 authority_tool_name="authority-probe"
 authority_policy_name="${ORKA_SECURITY_SCAN_AUTHORITY_POLICY:-authority-observer-gateway}"
 authority_incoming_task="${ORKA_SECURITY_SCAN_AUTHORITY_INCOMING_TASK:-authority-incoming}"

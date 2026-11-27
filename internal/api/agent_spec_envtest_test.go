@@ -22,8 +22,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// Real CRD generation, status subresource and resourceVersion behavior underpin
-// these deterministic read/patch interleavings. Only the scheduling is injected.
 func TestAgentSpecAPIServerConcurrency(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("set KUBEBUILDER_ASSETS to run Agent spec concurrency against an API server")

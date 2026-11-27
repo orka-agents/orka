@@ -10,10 +10,6 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The cases in this file hold providers to memory consolidation runs: one run
-// per Task, a cursor only completed runs move, and a completion that creates
-// its proposals atomically.
-
 func consolidationRun(taskUID string, start, end time.Time) *storagev1.MemoryConsolidationRun {
 	return &storagev1.MemoryConsolidationRun{Namespace: conditionalNamespace, TaskUID: taskUID, TaskName: "run-" + taskUID,
 		Mode: "Propose", Status: storagev1.MemoryConsolidationRunning, WindowStart: start, WindowEnd: end, CreatedAt: end}

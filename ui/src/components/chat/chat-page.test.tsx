@@ -100,8 +100,6 @@ describe('ChatPage', () => {
       expect(useChatStore.getState().messages).toEqual([])
       expect(useChatStore.getState().currentSessionId).toBeNull()
       expect(useChatStore.getState().turnEpoch).toBe(epoch + 1)
-      // The button leaves with the transcript; focus moves to the composer
-      // instead of dropping to <body>.
       expect(screen.queryByRole('button', { name: /New Chat/ })).not.toBeInTheDocument()
       expect(screen.getByPlaceholderText('Message the meta agent...')).toHaveFocus()
     } finally {
@@ -127,7 +125,6 @@ describe('ChatPage', () => {
       expect(useChatStore.getState().messages).toHaveLength(1)
       expect(useChatStore.getState().currentSessionId).toBe('chat-running')
       expect(useChatStore.getState().isStreaming).toBe(true)
-      // The epoch is what orphans (and so cancels and deletes) the turn.
       expect(useChatStore.getState().turnEpoch).toBe(epoch)
     } finally {
       confirmSpy.mockRestore()
@@ -184,8 +181,6 @@ describe('ChatPage', () => {
     expect(surface.className).toContain('-m-4')
     expect(surface.className).toContain('md:-m-6')
     expect(surface.className).not.toMatch(/(^|\s)-m-6(\s|$)/)
-    // The height adds the cancelled padding back so no band is left under
-    // the input and only the transcript scrolls.
     expect(surface.className).toContain('h-[calc(100%+2rem)]')
     expect(surface.className).toContain('md:h-[calc(100%+3rem)]')
     expect(surface.className).not.toMatch(/(^|\s)h-full(\s|$)/)
@@ -257,7 +252,6 @@ describe('ChatPage', () => {
     expect(modelInput).toBeDisabled()
     expect(modelInput).toHaveAccessibleDescription('Choose a provider to override the model.')
 
-    // Picking a Provider CRD re-enables it.
     useChatStore.setState({ selections: { default: { provider: 'openai-proxy', model: 'gpt-5' } } })
     render(<ChatPage />)
     await waitFor(() => expect(screen.getAllByRole('textbox', { name: 'Chat model' })[1]).not.toBeDisabled())
@@ -294,8 +288,6 @@ describe('ChatPage', () => {
     render(<ChatPage />)
     await waitFor(() => expect(useChatStore.getState().provider).toBe('openai-proxy'))
 
-    // Namespace "team" only lists anthropic; the previous namespace's pick is
-    // not in it, but that must not clear team's own valid selection.
     providerList.current = { data: { items: [{ name: 'anthropic', type: 'anthropic', defaultModel: 'claude-sonnet-4-20250514', ready: true }] }, error: null }
     useUIStore.setState({ namespace: 'team' })
     await waitFor(() => expect(useChatStore.getState().activeNamespace).toBe('team'))
@@ -340,8 +332,6 @@ describe('ChatPage', () => {
     for (const text of [longModel, 'chat-0123456789abcdef0123456789abcdef']) {
       const label = screen.getByText(text)
       const badge = label.parentElement as HTMLElement
-      // A centered flex box would show only the middle of overflowing text;
-      // the inner span truncates from the end inside a left-aligned badge.
       expect(label.tagName).toBe('SPAN')
       expect(label).toHaveClass('truncate')
       expect(badge).toHaveAttribute('data-slot', 'badge')

@@ -14,12 +14,8 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
 
-// Allow fully JSON-escaped content and request identity, but not unbounded
-// whitespace or unknown fields. The decoded content still has its own 16 KiB cap.
 const maxGatewayMessageRequestBytes = 6*(protocol.MaxInterimTextBytes+protocol.MaxIdentityBytes) + 1024
 
-// The transaction helper preserves this exact *fiber.Error. Its identity—not
-// arbitrary error text—carries the controller-owned capability failure code.
 var errGatewayInterimDeliveryUnsupported = fiber.NewError(fiber.StatusConflict, gatewayruntime.ErrInterimDeliveryUnsupported.Error())
 
 type gatewayMessageRequest struct {
@@ -27,9 +23,6 @@ type gatewayMessageRequest struct {
 	RequestID string `json:"requestID"`
 }
 
-// SubmitGatewayMessage handles POST /internal/v1/tasks/:namespace/:taskName/gateway-messages.
-// Only the exact active native Task Job's Pod may call it. Runtime/broker callers
-// must use capability-bound authorization, never a ServiceAccount exception here.
 func (h *InternalHandlers) SubmitGatewayMessage(c fiber.Ctx) error {
 	receipt, err := h.submitGatewayMessage(c)
 	if err != nil {
@@ -68,14 +61,11 @@ func (h *InternalHandlers) submitGatewayMessage(c fiber.Ctx) (*gatewayruntime.Ta
 	}, func(ctx context.Context) error {
 		var err error
 		receipt, err = h.gatewayService.EnqueuePreparedTaskMessage(ctx, prepared)
-		// Preserve domain errors before the transaction helper masks unknown failures.
 		return gatewayMessageTransactionError(err)
 	})
 	return receipt, err
 }
 
-// GetGatewayMessageBudget uses the same native caller and writer revocation
-// gates as POST. The GET reads only a snapshot and never reserves quota.
 func (h *InternalHandlers) GetGatewayMessageBudget(c fiber.Ctx) error {
 	namespace, taskName := c.Params("namespace"), c.Params("taskName")
 	authorizer := h.internalCallerAuthorizer()
@@ -107,9 +97,6 @@ func (h *InternalHandlers) GetGatewayMessageBudget(c fiber.Ctx) error {
 	return c.JSON(budget)
 }
 
-// GetGatewayReplyOrigin authenticates durable origin independently of mutable
-// message admission gates. Like POST, it requires the exact native Pod/Job and
-// rechecks revocation and durable state under the authorized writer.
 func (h *InternalHandlers) GetGatewayReplyOrigin(c fiber.Ctx) error {
 	namespace, taskName := c.Params("namespace"), c.Params("taskName")
 	authorizer := h.internalCallerAuthorizer()
@@ -189,8 +176,6 @@ func sendGatewayMessageError(c fiber.Ctx, err error) error {
 	if apiErr, ok := errors.AsType[*fiber.Error](err); ok {
 		status = apiErr.Code
 	}
-	// Do not return authorization/library/store diagnostics, content, routing or
-	// provider metadata. The status and stable code suffice for worker decisions.
 	code, message := "internal_error", "gateway message admission failed"
 	switch status {
 	case fiber.StatusBadRequest:

@@ -18,8 +18,6 @@ func init() {
 	sqlitedriver.MustRegisterDeterministicScalarFunction("orka_usage_link_at_or_before", 2, usageLinkAtOrBefore)
 }
 
-// PR link timestamps live in JSON. Compare them as Go times to preserve
-// nanoseconds, timezone offsets, and dates outside the UnixNano range.
 func usageLinkAtOrBefore(_ *sqlitedriver.FunctionContext, args []driver.Value) (driver.Value, error) {
 	if len(args) != 2 {
 		return nil, errors.New("usage PR link predicate requires two arguments")
@@ -28,7 +26,6 @@ func usageLinkAtOrBefore(_ *sqlitedriver.FunctionContext, args []driver.Value) (
 	if !ok {
 		return nil, errors.New("usage PR link predicate requires an integer asOf")
 	}
-	// Missing or null legacy timestamps decode to Go's zero time.
 	var linkedAt time.Time
 	if args[0] != nil {
 		timestamp, ok := args[0].(string)
@@ -47,12 +44,6 @@ func usageLinkAtOrBefore(_ *sqlitedriver.FunctionContext, args []driver.Value) (
 	return int64(1), nil
 }
 
-// Select whole work cohorts and the separate activity-period Tasks before
-// reading observations. Counter history, including earlier Tasks, must remain
-// available for cumulative deltas and Gateway access checks. Model matching is
-// conservative here; the report applies it to the final measurements. PR state
-// needs only the latest observation at asOf plus historical merge evidence;
-// routine readiness refreshes must not consume the report's record budget.
 const usageCohortQuery = `WITH
  selection(namespace, namespace_uid, as_of, from_at, until_at, repository, kind, model, work_id, record_limit) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)),
  candidate_works AS (

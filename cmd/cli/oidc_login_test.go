@@ -166,7 +166,6 @@ func TestAuthLoginDiscoversOIDCAndRefreshesExpiredToken(t *testing.T) {
 	}
 	firstToken := cfg.Token
 
-	// Expire the saved access token and verify the next command refreshes it automatically.
 	expired := time.Now().UTC().Add(-time.Minute)
 	cfg.TokenExpiresAt = &expired
 	if err := saveConfig(cfg); err != nil {
@@ -202,7 +201,7 @@ func TestSelectOIDCBearerTokenFallsBackToIDTokenWhenAccessTokenOpaque(t *testing
 	tok, exp, err := selectOIDCBearerToken(oidcTokenResponse{
 		AccessToken: "opaque-access-token",
 		IDToken:     idTok,
-		ExpiresIn:   7200, // Longer than the ID token's own exp; must not outlast ID token.
+		ExpiresIn:   7200,
 	}, "https://issuer.example", "orka-api")
 	if err != nil {
 		t.Fatalf("selectOIDCBearerToken error: %v", err)
@@ -255,7 +254,6 @@ func TestSelectOIDCBearerTokenAcceptsFractionalExpAndRequiresSubAndExp(t *testin
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
 	sig := base64.RawURLEncoding.EncodeToString([]byte("sig"))
 
-	// Missing sub must be rejected; fallback to valid id_token with fractional NumericDate exp.
 	noSubPayload := base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"https://issuer.example","aud":"orka-api","exp":1893456000}`))
 	noSubTok := header + "." + noSubPayload + "." + sig
 
@@ -286,8 +284,6 @@ func TestSelectOIDCBearerTokenAcceptsFractionalExpAndRequiresSubAndExp(t *testin
 func TestOIDCRefreshDoesNotAdoptReplacedAccount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	// Persist account B's fresh OIDC session on disk (same server and clientID,
-	// different SessionSubject login ID).
 	freshExpiry := time.Now().UTC().Add(time.Hour)
 	if err := saveConfig(orkaConfig{
 		Server:            "https://orka.example",
@@ -303,8 +299,6 @@ func TestOIDCRefreshDoesNotAdoptReplacedAccount(t *testing.T) {
 		t.Fatalf("saveConfig: %v", err)
 	}
 
-	// Simulate an in-flight command that read account A's expired config before
-	// acquiring the config lock.
 	expired := time.Now().UTC().Add(-time.Minute)
 	accountA := orkaConfig{
 		Server:            "https://orka.example",

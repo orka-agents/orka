@@ -28,8 +28,6 @@ var (
 	validationNetworkInstallSandbox = installValidationNetworkSandboxBinary
 )
 
-// waitForValidationNetworkAccess establishes that the repository endpoint is
-// reachable from the Pod before the controller creates the deny-all policy.
 func waitForValidationNetworkAccess(ctx context.Context, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("validation network access probe requires a probe address")
@@ -56,10 +54,6 @@ func waitForValidationNetworkAccess(ctx context.Context, args []string) error {
 	}
 }
 
-// waitForValidationNetworkPolicy blocks the application container until the
-// controller has created its deny-all NetworkPolicy. The installed seccomp
-// wrapper is the absolute offline boundary; the NetworkPolicy remains a second
-// layer and may overlap with additive namespace policies.
 func waitForValidationNetworkPolicy(ctx context.Context, args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("validation network gate requires a gate file and sandbox destination")

@@ -16,8 +16,6 @@ const REVIEW_EVENTS = ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as const
 
 type ReviewEvent = (typeof REVIEW_EVENTS)[number]
 
-// The controller runs PR reviews only on these built-in runtimes; it refuses
-// other runtimes, external runtimeRef Agents, and Agents with a secretRef.
 const REVIEWER_RUNTIME_TYPES: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode'])
 
 function splitCommaList(value: string) {

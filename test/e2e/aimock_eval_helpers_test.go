@@ -19,8 +19,6 @@ import (
 	"time"
 )
 
-// Capture retains only request bodies, never authentication headers. These
-// helpers must not include bodies or canary values in errors or diagnostics.
 type mockLLMCaptureEntry struct {
 	RequestID string `json:"requestId"`
 	Path      string `json:"path"`
@@ -49,16 +47,12 @@ type mockLLMEvalRequest struct {
 }
 
 const (
-	mockLLMCaptureReadTimeout  = 15 * time.Second
-	mockLLMCaptureFetchTimeout = 12 * time.Second
-	// The settle timeout exceeds the capture proxy's grace for a client that
-	// hangs up before its response ends.
+	mockLLMCaptureReadTimeout    = 15 * time.Second
+	mockLLMCaptureFetchTimeout   = 12 * time.Second
 	mockLLMCaptureSettleTimeout  = 5 * time.Second
 	mockLLMCaptureSettleInterval = 250 * time.Millisecond
 )
 
-// mockLLMCaptureInFlight reports whether a request made since before has
-// neither completed nor failed yet.
 func mockLLMCaptureInFlight(before mockLLMEvalSnapshot, state mockLLMCaptureState) bool {
 	for _, entry := range state.Entries {
 		if !before.requestIDs[entry.RequestID] && !entry.Complete && entry.Error == "" {
@@ -77,8 +71,6 @@ func (m mockLLMInstance) captureJournal() (mockLLMCaptureState, error) {
 func (m mockLLMInstance) captureJournalWithin(ctx context.Context) (mockLLMCaptureState, error) {
 	cmd := exec.CommandContext(ctx, "kubectl", "exec", "-n", m.namespace, "deployment/"+m.name, "-c", "aimock",
 		"--", "node", "-e", mockLLMReadScript(m.port, "/__orka_eval/capture", mockLLMCaptureFetchTimeout))
-	// Bound inherited pipe waits as well as kubectl itself. Neither failure
-	// path may expose captured output through a subprocess error formatter.
 	cmd.WaitDelay = time.Second
 	output, err := cmd.Output()
 	if err != nil {
@@ -94,8 +86,6 @@ func (m mockLLMInstance) captureJournalWithin(ctx context.Context) (mockLLMCaptu
 	return state, nil
 }
 
-// mockLLMReadScript streams one aimock pod-loopback endpoint to stdout. The
-// whole read, including the final stdout flush, ends by the remote deadline.
 func mockLLMReadScript(port int, path string, timeout time.Duration) string {
 	return fmt.Sprintf(`const deadline = setTimeout(() => process.exit(1), %d);
 		fetch("http://127.0.0.1:%d%s", {
@@ -111,8 +101,6 @@ func mockLLMReadScript(port int, path string, timeout time.Duration) string {
 		timeout.Milliseconds(), port, path, timeout.Milliseconds())
 }
 
-// evalSnapshot isolates a sequential case without clearing another case's
-// journal, resetting fixtures, or depending on marker-only filtering.
 func (m mockLLMInstance) evalSnapshot() (mockLLMEvalSnapshot, error) {
 	state, err := m.captureJournal()
 	if err != nil {
@@ -135,9 +123,6 @@ func (m mockLLMInstance) evalRequestsSince(
 	if err != nil {
 		return nil, err
 	}
-	// A Task can finish before the relay of its last response settles, so
-	// re-read briefly while a new request is still in flight. The settle
-	// deadline bounds every re-read; the last complete read is then judged.
 	settle, cancel := context.WithTimeout(context.Background(), mockLLMCaptureSettleTimeout)
 	defer cancel()
 	for mockLLMCaptureInFlight(before, state) {
@@ -164,8 +149,6 @@ func (m mockLLMInstance) evalRequestsSince(
 	return validateMockLLMEvalCapture(before, state, journal, markers)
 }
 
-// evalNoRequestsSince proves an intentionally rejected path never reached the
-// model. It still rejects collector resets, lost identities and capacity failures.
 func (m mockLLMInstance) evalNoRequestsSince(before mockLLMEvalSnapshot) error {
 	state, err := m.captureJournal()
 	if err != nil {
@@ -225,8 +208,6 @@ func validateMockLLMEvalCapture(
 		}
 		index := len(requests)
 		if entry.RequestID == "" || !entry.Complete || entry.Error != "" {
-			// Path, status and the capture's fixed error text identify the
-			// request without exposing its body.
 			return nil, fmt.Errorf("model request %d was not completely observed (path %q, status %d, error %q)",
 				index, entry.Path, entry.Status, entry.Error)
 		}
@@ -253,8 +234,6 @@ func validateMockLLMEvalCapture(
 				served[marker] = true
 			}
 		}
-		// Runtime title/summary requests may use the catch-all and have no
-		// tools. Tool-enabled eval turns must be served by their script.
 		var raw struct {
 			Tools []json.RawMessage `json:"tools"`
 		}
@@ -280,9 +259,6 @@ func validateMockLLMEvalCapture(
 	return requests, nil
 }
 
-// checkModelContentCanaries checks every captured request, including auxiliary
-// requests without the case marker. Decode strings too, so JSON escaping cannot
-// turn the check into a false negative. Errors identify roles, never values.
 func checkModelContentCanaries(requests []mockLLMEvalRequest, canaries map[string]string) error {
 	roles := make([]string, 0, len(canaries))
 	for role, canary := range canaries {
@@ -329,9 +305,6 @@ func jsonContainsCanary(value any, canary string) bool {
 	return false
 }
 
-// evalMessages recovers tool exchanges from oversized raw Chat, Responses,
-// and Anthropic requests. Unknown truncated shapes cannot manufacture a
-// successful tool assertion. Small requests use aimock's canonical messages.
 func (r mockLLMRequest) evalMessages() []mockLLMMessage {
 	if !r.Body.Truncated {
 		return r.Body.Messages

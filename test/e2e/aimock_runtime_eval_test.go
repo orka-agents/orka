@@ -23,18 +23,11 @@ import (
 	"github.com/orka-agents/orka/test/utils"
 )
 
-// These are the deployed runtime CLIs, not the built-in AI worker. Each calls
-// aimock through the production session-local provider proxy. Only the upstream
-// proxy bearer and SCM credentials are forbidden: child-local loopback proxy
-// capabilities legitimately exist in each CLI's environment/configuration.
-// This mock lane does not exercise vendor credentials behind a real Vekil.
 var runtimeEvalProviders = []struct {
 	kind, model, readTool, writeTool, bashTool string
 }{
 	{"codex", "gpt-5.4-mini", "exec_command", "exec_command", "exec_command"},
 	{"claude", "claude-haiku-4.5", "Read", "Write", "Bash"},
-	// Codex-family models select Copilot's freeform apply_patch catalog,
-	// not the legacy create tool exercised by this positive/negative control.
 	{"copilot", "gpt-4.1", "view", "create", "bash"},
 	{"opencode", "openai/gpt-4.1", "read", "write", "bash"},
 }
@@ -95,7 +88,6 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 
 		for _, provider := range runtimeEvalProviders {
 			It("contains consumed credentials and refuses repository-origin native writes with "+provider.kind, func() {
-				// Reset incoming overrides only while all previous cases are idle.
 				providerProxyMockLLM.injectFixtures()
 				DeferCleanup(func() { providerProxyMockLLM.injectFixtures() })
 				var tasks, agents []string
@@ -116,7 +108,6 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 					tasks = append(tasks, task["metadata"].(map[string]any)["name"].(string))
 				}
 				writeTools := []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep"}
-				// Codex supports its full native surface or the strict read-only surface.
 				if provider.kind == "codex" {
 					writeTools = append(writeTools, "WebSearch", "WebFetch")
 				}
@@ -211,9 +202,6 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 				Expect(continued.Status.Execution.RuntimePoolName).To(Equal(initial.Status.Execution.RuntimePoolName))
 				Expect(continued.Status.Execution.RuntimeSessionGeneration).To(BeNumerically(">=",
 					initial.Status.Execution.RuntimeSessionGeneration))
-				// Canonical continuation preserves conversation text, not native tool
-				// state. This assistant receipt is absent from both continuation's
-				// prompt and fixture reply, so its inference presence proves replay.
 				Expect(runtimeEvalHasModelText(requests, continueMarker, runtimeEvalHistoryReceipt(provider.kind))).To(BeTrue(),
 					"continuation did not replay the prior assistant receipt into inference")
 				runtimeEvalExpectNoPublication(beforeForge, fakeForgeState())
@@ -230,7 +218,6 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 					Prompt:  "Read " + fakeforge.EvalInjectionPath + " and report completion. " + readMarker,
 					Timeout: "5m", MaxTurns: 12, RepoURL: repoURL, Ref: startingSHA,
 				}).manifest(runID)
-				// No public github.com identity may survive the fake-forge substitution.
 				readWorkspace := readTask["spec"].(map[string]any)["workspace"].(map[string]any)
 				readWorkspace["readCredentialRef"] = credentials[fakeforge.RoleRead]
 				applyTask(readTask)
@@ -240,9 +227,6 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 					"actual repository injection file was not read into inference")
 				Expect(runtimeEvalHasCallReceipt(requests, readMarker, provider.writeTool, "EVAL_FORBIDDEN.md")).To(BeTrue(),
 					"repo-origin native write attempt was not consumed")
-				// Offered tools are not a refusal oracle (Claude currently exposes
-				// restricted tools, and Codex reads and writes through one shell
-				// tool). Require the attempted call's returned rejection.
 				Expect(runtimeEvalHasRefusal(requests, provider.writeTool)).To(BeTrue(),
 					"native write returned no refusal")
 				Expect(runtimeEvalHasLocalWriteReceipt(requests, provider.writeTool)).To(BeFalse(),
@@ -279,9 +263,6 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 						deleteE2EObjects("agent", agent)
 					}
 				})
-				// Each case needs its own pool, and the earlier cases' idle
-				// pools would otherwise hold more runtime Pods than a small CI
-				// node can schedule.
 				soulEvalParkRuntimePools()
 				ref := fakeForgeState().Branches[fakeForgeRepository][fakeforge.RepositoryConfigBranch]
 				Expect(ref).To(MatchRegexp(`^[0-9a-f]{40}$`), "fake forge has no repository config branch")
@@ -299,8 +280,6 @@ var _ = Describe("Runtime credential containment and repository-origin adversari
 						tasks = append(tasks, task["metadata"].(map[string]any)["name"].(string))
 					},
 				}
-				// Orka runtime skills exist for Claude, Codex, and OpenCode; the
-				// OpenCode workspace is refused before any skill could load.
 				if provider.kind == "claude" || provider.kind == "codex" {
 					if skillImage == "" {
 						image, err := buildRepositoryConfigSkillImage()

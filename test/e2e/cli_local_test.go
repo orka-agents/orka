@@ -115,8 +115,6 @@ var _ = Describe("Orka CLI local binary paths", Ordered, func() {
 			Expect(completion.Stdout).To(ContainSubstring("orka"), "completion output for %s should mention the orka command", shell)
 		}
 
-		// The default install serves no dashboard, so orka dashboard stops
-		// before it prints or opens a URL that carries the token.
 		By("refusing orka dashboard against a controller without the dashboard")
 		fakeToken := "fake-dashboard-value-sentinel-" + suffix
 		dashboard := runOrka(localHome,

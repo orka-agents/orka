@@ -16,9 +16,6 @@ import (
 
 const testDigits = "0123456789"
 
-// resolvedTempDir returns a temp directory with symlinks resolved,
-// so allowed-path checks work on systems where TempDir is a symlink
-// (e.g. macOS: /var -> /private/var).
 func resolvedTempDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -51,13 +48,11 @@ func TestFileReadTool_Parameters(t *testing.T) {
 		t.Fatal("Parameters() returned nil")
 	}
 
-	// Verify it's valid JSON
 	var schema map[string]any
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
 
-	// Check required fields
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
@@ -161,7 +156,6 @@ func TestFileReadTool_Execute_PathTraversal(t *testing.T) {
 		allowedPaths: []string{tmpDir},
 	}
 
-	// Try to read outside allowed directory
 	args := json.RawMessage(`{"path": "/etc/passwd"}`)
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
@@ -177,7 +171,6 @@ func TestFileReadTool_Execute_PathTraversalRelative(t *testing.T) {
 		allowedPaths: []string{tmpDir},
 	}
 
-	// Try to use .. to escape
 	args := json.RawMessage(`{"path": "../../../etc/passwd"}`)
 	_, err := tool.Execute(context.Background(), args)
 	if err == nil {
@@ -308,11 +301,10 @@ func TestFileReadTool_Execute_LimitExceedsMax(t *testing.T) {
 
 	tool := &FileReadTool{
 		workDir:      tmpDir,
-		maxFileSize:  5, // Small max file size
+		maxFileSize:  5,
 		allowedPaths: []string{tmpDir},
 	}
 
-	// Request more than max
 	args := json.RawMessage(`{"path": "` + testFile + `", "limit": 1000000}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -324,7 +316,6 @@ func TestFileReadTool_Execute_LimitExceedsMax(t *testing.T) {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 
-	// Should be limited to maxFileSize
 	if len(readResult.Content) > 5 {
 		t.Errorf("Content length = %d, should be limited to 5", len(readResult.Content))
 	}
@@ -361,7 +352,7 @@ func TestFileReadTool_allowedRootForPath(t *testing.T) {
 		{"/tmp/test.txt", true},
 		{"/etc/passwd", false},
 		{"/home/user/file.txt", false},
-		{"/work", false}, // Not a prefix of /workspace
+		{"/work", false},
 	}
 
 	for _, tt := range tests {
@@ -432,7 +423,6 @@ func TestFileReadTool_Execute_Size(t *testing.T) {
 func TestFileReadTool_Execute_LargeFileTruncated(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "large.txt")
-	// Create a file larger than maxFileSize
 	bigContent := make([]byte, 100)
 	for i := range bigContent {
 		bigContent[i] = 'A'
@@ -443,7 +433,7 @@ func TestFileReadTool_Execute_LargeFileTruncated(t *testing.T) {
 
 	tool := &FileReadTool{
 		workDir:      tmpDir,
-		maxFileSize:  50, // only read 50 bytes
+		maxFileSize:  50,
 		allowedPaths: []string{tmpDir},
 	}
 

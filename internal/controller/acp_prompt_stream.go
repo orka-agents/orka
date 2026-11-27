@@ -12,8 +12,7 @@ import (
 )
 
 const (
-	acpPromptCancellationTimeout = 25 * time.Second
-	// acpRequestedCancellationMessage ends a turn cancelled through the API.
+	acpPromptCancellationTimeout    = 25 * time.Second
 	acpRequestedCancellationMessage = "prompt cancelled by request"
 )
 
@@ -46,10 +45,6 @@ func requestACPPromptCancellation(
 	return result
 }
 
-// streamACPPromptWithCancellation keeps the original accepted stream readable
-// while cancellation settles. A completed settlement alone cannot recover its
-// result text: only this stream, including validated clean EOF, can prove it.
-// Lease renewal and permission decisions still use the execution context.
 func streamACPPromptWithCancellation(
 	runtimeCtx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -62,7 +57,6 @@ func streamACPPromptWithCancellation(
 ) (harnessv2.PromptStreamSummary, *acpPromptCancellationResult, error) {
 	transportCtx, cancelTransport := context.WithCancel(context.WithoutCancel(runtimeCtx))
 	defer cancelTransport()
-	// The callback may update Task status while cancellation is in flight.
 	cancelTask := task.DeepCopy()
 	var accepted atomic.Bool
 	streamDone := make(chan struct{})
@@ -88,8 +82,6 @@ func streamACPPromptWithCancellation(
 		cancellation = requestACPPromptCancellation(drainCtx, runtimeClient, sessionID, cancelTask, fence, reason)
 		if cancellation.err != nil || !cancellation.response.SettlementProven ||
 			cancellation.response.Settlement.TerminalEvent != harnessv2.EventCompleted {
-			// Only a proven completion needs result text from the stream.
-			// Abort promptly when revocation is unproven or no result remains.
 			cancelTransport()
 			return
 		}
@@ -99,8 +91,6 @@ func streamACPPromptWithCancellation(
 			cancelTransport()
 		}
 	})
-	// AfterFunc is asynchronous even when the context is already cancelled.
-	// Prevent a new prompt submission in that case.
 	if runtimeCtx.Err() != nil {
 		cancelTransport()
 	}
@@ -112,8 +102,6 @@ func streamACPPromptWithCancellation(
 	})
 	close(streamDone)
 	if !stopWatching() {
-		// Reuse this exact operation's response in stream-error handling, and
-		// join the watcher before the RuntimeSession can be cleaned up.
 		<-cancelDone
 	}
 	return summary, cancellation, err

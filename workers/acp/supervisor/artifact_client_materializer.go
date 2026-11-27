@@ -17,7 +17,6 @@ import (
 	"github.com/orka-agents/orka/internal/safesymlink"
 )
 
-// Fixed bounds for materializing a baseline workspace archive into a session.
 const (
 	workspaceMaterializerMaxEntries       = 100_000
 	workspaceMaterializerMaxExpandedBytes = 1 << 30
@@ -45,8 +44,6 @@ func NewRemoteWorkspaceMaterializer(client *ArtifactClient) (WorkspaceMaterializ
 	return newRemoteWorkspaceMaterializerWithLimits(client, defaultWorkspaceMaterializerLimits)
 }
 
-// newRemoteWorkspaceMaterializerWithLimits exists so tests can exercise the
-// bounds with small archives; production always uses the package constants.
 func newRemoteWorkspaceMaterializerWithLimits(client *ArtifactClient, limits workspaceMaterializerLimits) (WorkspaceMaterializer, error) {
 	if client == nil {
 		return nil, fmt.Errorf("artifact client is required")
@@ -352,7 +349,6 @@ func writeMaterializedFile(root, target string, size int64, executable bool, rea
 	if err != nil {
 		return fmt.Errorf("create materialized workspace file: %w", err)
 	}
-	// Durability comes from one syncMaterializedTree before installation.
 	written, copyErr := io.CopyN(file, reader, size)
 	if copyErr == nil && written != size {
 		copyErr = io.ErrUnexpectedEOF

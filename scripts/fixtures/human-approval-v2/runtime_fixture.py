@@ -142,9 +142,6 @@ class Handler(BaseHTTPRequestHandler):
         with self.server.lock:
             self.server.counts[run_id or "independent"] = self.server.counts.get(run_id or "independent", 0) + 1
         if holds_cancellation_continuation(request, run_id):
-            # A tool's cancellation denial is a legitimate model continuation.
-            # Keep this conformance case active so actual ACP session/cancel,
-            # rather than an immediate fixture answer, must stop the prompt.
             self.close_connection = True
             if not wait_for_model_disconnect(self.connection, CANCELLATION_CONTINUATION_TIMEOUT_SECONDS):
                 self.send(504, {"error": "cancellation continuation did not disconnect"})
@@ -221,24 +218,17 @@ class Handler(BaseHTTPRequestHandler):
         watcher = None
         response = None
         headers_sent = False
-        # HTTP/1.0 close-delimited output permits incremental forwarding of
-        # decoded upstream chunks without inventing a content length.
         self.close_connection = True
         try:
             upstream.connect()
             upstream_socket = upstream.sock
 
             def watch_disconnect():
-                # The request body is already consumed. A readable EOF now
-                # means the broker cancelled, even if upstream is still quiet.
                 while not done.is_set():
                     try:
                         ready, _, _ = select.select([self.connection], [], [], 0.05)
                         if not ready:
                             continue
-                        # This response closes the connection, so no later
-                        # request bytes need preserving. TLS sockets do not
-                        # support MSG_PEEK; read also consumes close-notify.
                         if self.connection.recv(1):
                             done.wait(0.05)
                             continue
@@ -265,8 +255,6 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.flush()
             headers_sent = True
-            # read1 performs at most one buffered read. read(size) would wait
-            # for more bytes and could hide the early response.created event.
             while chunk := response.read1(64 * 1024):
                 self.wfile.write(chunk)
                 self.wfile.flush()

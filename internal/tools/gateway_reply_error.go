@@ -2,9 +2,6 @@ package tools
 
 import "errors"
 
-// GatewayReplyRejection denotes a definitive admission rejection, not an
-// uncertain write outcome. Its message is controller-owned and safe for models.
-// The original cause remains available to execution-host fencing.
 type GatewayReplyRejection struct {
 	message string
 	cause   error
@@ -13,8 +10,6 @@ type GatewayReplyRejection struct {
 func (e *GatewayReplyRejection) Error() string { return e.message }
 func (e *GatewayReplyRejection) Unwrap() error { return e.cause }
 
-// NewGatewayReplyRejection accepts only the bounded gateway error contract.
-// Unknown codes must retain the host's ambiguous-outcome handling.
 func NewGatewayReplyRejection(code string, cause error) *GatewayReplyRejection {
 	var message string
 	switch code {
@@ -39,7 +34,6 @@ func NewGatewayReplyRejection(code string, cause error) *GatewayReplyRejection {
 }
 
 func safeGatewayReplyError(err error, fallback string) error {
-	// Only this type has controlled model-safe text; never trust arbitrary Error().
 	if rejection, ok := errors.AsType[*GatewayReplyRejection](err); ok {
 		return &gatewayReplyError{message: rejection.Error(), cause: err}
 	}

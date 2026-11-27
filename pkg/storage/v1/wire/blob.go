@@ -17,30 +17,14 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
-// Blob framing. A streaming RPC carries one blob field in the direction it
-// streams. The first message carries every other field and at most
-// MaxChunkBytes of the blob; each later message carries only the next part of
-// the blob, never empty, in the same field. The blob's total size and SHA-256
-// digest travel as headers (HeaderBlobSize, HeaderBlobSHA256), so the
-// receiver can refuse an oversized blob before reading it and checks the
-// reassembled bytes before using them.
-
 var (
-	// errBlobFraming marks a stream that breaks the framing rules.
 	errBlobFraming = errors.New("the blob stream breaks the framing rules")
-	// errBlobShort marks a stream that ended before the declared size.
-	errBlobShort = errors.New("the blob stream ended before the declared size")
-	// errBlobDigest marks a reassembled blob whose digest does not match.
-	errBlobDigest = errors.New("the blob does not match its declared digest")
+	errBlobShort   = errors.New("the blob stream ended before the declared size")
+	errBlobDigest  = errors.New("the blob does not match its declared digest")
 )
 
-// blobPaths caches, per message type, the fields from the message down to
-// its blob field.
 var blobPaths sync.Map
 
-// blobPathOf returns the fields from a framed message down to its blob
-// field. The generator guarantees exactly one such path for every message a
-// streaming RPC frames.
 func blobPathOf(desc protoreflect.MessageDescriptor) []protoreflect.FieldDescriptor {
 	if cached, ok := blobPaths.Load(desc.FullName()); ok {
 		return cached.([]protoreflect.FieldDescriptor)
@@ -77,8 +61,6 @@ func isBlobField(field protoreflect.FieldDescriptor) bool {
 	return value
 }
 
-// takeBlob removes the blob from message and returns it. An absent parent
-// message means an empty blob.
 func takeBlob(message protoreflect.Message, path []protoreflect.FieldDescriptor) []byte {
 	for _, field := range path[:len(path)-1] {
 		if !message.Has(field) {
@@ -92,7 +74,6 @@ func takeBlob(message protoreflect.Message, path []protoreflect.FieldDescriptor)
 	return data
 }
 
-// setBlob stores data in message's blob field, creating its parent messages.
 func setBlob(message protoreflect.Message, path []protoreflect.FieldDescriptor, data []byte) {
 	if len(data) == 0 {
 		return
@@ -103,9 +84,6 @@ func setBlob(message protoreflect.Message, path []protoreflect.FieldDescriptor, 
 	message.Set(path[len(path)-1], protoreflect.ValueOfBytes(data))
 }
 
-// restoreBlob stores a reassembled blob in the first message. A non-empty
-// blob needs the parent messages the first message carried; it never
-// creates a record the sender left out.
 func restoreBlob(message protoreflect.Message, path []protoreflect.FieldDescriptor, data []byte) error {
 	if len(data) == 0 {
 		return nil
@@ -120,8 +98,6 @@ func restoreBlob(message protoreflect.Message, path []protoreflect.FieldDescript
 	return nil
 }
 
-// blobPart returns the blob part a later message carries, and refuses a
-// later message that carries any other field.
 func blobPart(message protoreflect.Message, path []protoreflect.FieldDescriptor) ([]byte, error) {
 	for index, field := range path {
 		other := false
@@ -143,8 +119,6 @@ func blobPart(message protoreflect.Message, path []protoreflect.FieldDescriptor)
 	return nil, nil
 }
 
-// sendBlob sends message with data as its blob, in parts of at most
-// MaxChunkBytes. message must not carry its blob already.
 func sendBlob(send func(any) error, message proto.Message, path []protoreflect.FieldDescriptor, data []byte) error {
 	first := data[:min(len(data), MaxChunkBytes)]
 	setBlob(message.ProtoReflect(), path, first)
@@ -163,7 +137,6 @@ func sendBlob(send func(any) error, message proto.Message, path []protoreflect.F
 	return nil
 }
 
-// blobHeader is the size and digest a framed stream declares.
 type blobHeader struct {
 	size   int64
 	digest []byte
@@ -178,7 +151,6 @@ func describeBlob(data []byte) blobHeader {
 	return blobHeader{size: int64(len(data)), digest: sum[:]}
 }
 
-// parseBlobHeader reads the size and digest headers of a framed stream.
 func parseBlobHeader(header metadata.MD) (blobHeader, error) {
 	sizes, digests := header.Get(HeaderBlobSize), header.Get(HeaderBlobSHA256)
 	if len(sizes) != 1 || len(digests) != 1 {
@@ -195,10 +167,6 @@ func parseBlobHeader(header metadata.MD) (blobHeader, error) {
 	return blobHeader{size: size, digest: digest}, nil
 }
 
-// reassemble reads the rest of a framed stream after its first message and
-// stores the whole blob in first. next returns io.EOF when the stream ends.
-// It never reads more than the declared size, which the caller has already
-// checked against its limit.
 func reassemble(first proto.Message, next func() (proto.Message, error), declared blobHeader) error {
 	path := blobPathOf(first.ProtoReflect().Descriptor())
 	part := takeBlob(first.ProtoReflect(), path)
@@ -208,8 +176,6 @@ func reassemble(first proto.Message, next func() (proto.Message, error), declare
 	if int64(len(part)) > declared.size {
 		return fmt.Errorf("%w: the stream carries more than its declared size", errBlobFraming)
 	}
-	// The buffer grows as parts arrive, so a stream that declares a large
-	// blob and then stalls holds only what it has sent.
 	data := make([]byte, 0, min(declared.size, int64(4*MaxChunkBytes)))
 	data = append(data, part...)
 	for {

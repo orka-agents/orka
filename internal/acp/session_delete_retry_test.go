@@ -69,8 +69,6 @@ func TestRuntimeSessionDeleteWaitersKeepOriginalFailure(t *testing.T) {
 	default:
 	}
 
-	// Park an already-joined waiter before it can observe completion. The
-	// original result must survive even if a new retry finishes first.
 	release := make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer unblock()
@@ -149,8 +147,6 @@ func awaitObservedDeletion(t *testing.T, done <-chan observedDeletion) observedD
 	}
 }
 
-// Ignore TERM so an already-expired observation cannot accidentally succeed
-// before Stop reaches its context check. Stop must still issue KILL.
 func TestACPDeleteRetryHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_ACP_DELETE_RETRY_HELPER") != "1" {
 		return

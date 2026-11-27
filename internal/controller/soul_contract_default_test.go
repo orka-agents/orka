@@ -60,8 +60,6 @@ func TestPendingSoulAgentDoesNotRaceContractPersistence(t *testing.T) {
 	for _, kind := range []corev1alpha1.AgentRuntimeType{corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode} {
 		t.Run(string(kind), func(t *testing.T) {
 			r, task, agent := soulOmittedContractFixture(t, kind)
-			// Pause before admission, not before configuration validation/binding. No
-			// Agent reconciliation is run, reproducing same-apply Agent/Task arrival.
 			r.ACPAdmissionGate = NewACPAdmissionGate()
 			r.ACPAdmissionGate.Close("fixture admission pause", time.Now())
 			if _, err := r.handlePending(context.Background(), task); err != nil {

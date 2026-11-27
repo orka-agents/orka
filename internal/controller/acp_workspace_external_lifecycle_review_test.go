@@ -245,8 +245,6 @@ func TestExternalACPTaskFinalizationBlocksSessionContinuation(t *testing.T) {
 	if workspace.Spec.Attachment != nil || !valid || stampEpoch != 4 || acpTaskRecordedAttachmentEpoch(task) != 4 {
 		t.Fatal("first finalization pass cleared attachment without the exact epoch settlement barrier")
 	}
-	// The provider has released the bearer but the predecessor's Suspend
-	// settlement has not yet changed desiredState. The continuation must wait.
 	workspace.Status.AttachedEpoch = 0
 	workspace.Status.State = workspacev1alpha1.ExecutionWorkspaceStateReady
 	workspace.Status.Conditions = nil
@@ -273,8 +271,6 @@ func TestExternalACPTaskFinalizationUsesFrozenDetachTimeout(t *testing.T) {
 				ctx := context.Background()
 				_, task, _, workspace := externalACPSessionLifecycleFixture(t)
 				finalizingExternalACPTask(task, workspace, attached)
-				// The status projection lags, while the protected Task stamp has
-				// the actual attachment epoch for the second finalization pass.
 				task.Annotations = map[string]string{acpTaskAttachmentEpochAnnotation: "4"}
 				workspace.Status.AttachedEpoch = 4
 				workspace.Spec.Lifecycle.DetachTimeout = metav1.Duration{Duration: 10 * time.Minute}
@@ -300,8 +296,6 @@ func TestExternalACPTaskFinalizationUsesFrozenDetachTimeout(t *testing.T) {
 					t.Fatal(err)
 				}
 				if attached == metav1.ConditionTrue && short {
-					// Retry after the attachment-clearing write so quarantine's
-					// optimistic resourceVersion fence uses the current object.
 					result, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
 					if err != nil {
 						t.Fatal(err)

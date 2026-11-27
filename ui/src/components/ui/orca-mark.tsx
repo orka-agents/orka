@@ -2,9 +2,6 @@ import { useId } from 'react'
 
 import { cn } from '@/lib/utils'
 
-// Geometry of the Orka mark, an orca fin in a ring above the waves, on a 64x64 grid. It is the
-// mark the website and Orka Bridge use (see "Logo files" in website/README.md); change it there
-// first and copy it here.
 const FIN =
   'M2 37.5C8 32.5 14 30 20.5 28.2C25.5 26.8 27.5 23 30 18.5C33.5 12.5 37.5 9 41.6 8.1C43.2 7.8 43.9 9.2 43.1 10.4C40.8 13.8 39.4 17.5 39.3 22.5C39.3 27.5 40.5 30.6 43.6 32.2C48.5 34.5 53.5 37 58 42C52 40.2 47 40.2 41.5 42.4C37 44.3 33.5 45.6 30.5 45.6C25 45.6 21.5 42.4 16 40.9C12 39.9 7 40.2 2 40.8Z'
 
@@ -17,7 +14,6 @@ const VARIANTS = {
     waves:
       'M0 42.6C7 41.6 12 41.6 16 42.6C21 43.9 25 47.2 30 48.7C34 49.8 38 49.7 42 48.9C46 48.2 49 48.4 52 50.2L64 57V64H0ZM32.3 47.3C36 46.8 39 44.8 42.5 43.4C46 42.2 50 42.2 53 43.2L60 46V49C57 48.2 54 47.4 51 47C47.5 46.5 44 47.2 40.5 47.6C37.5 47.9 34.5 48 32.3 47.3Z',
   },
-  // 32 px and smaller: a heavier ring and two waves, which stay sharp at small sizes.
   small: {
     ringRadius: 28,
     ringWidth: 4,
@@ -28,20 +24,12 @@ const VARIANTS = {
   },
 } as const
 
-/**
- * Single source of truth for the Orka mark in the app.
- *
- * The fin and ring are ink and the waves are the secondary text grey, never a status colour,
- * because colour marks a task's state in the dashboard. Both follow the app theme. Use `small`
- * at 32 px and smaller.
- */
 export function OrcaMark({
   small = false,
   className,
   ...props
 }: React.ComponentProps<'svg'> & { small?: boolean }) {
   const v = VARIANTS[small ? 'small' : 'full']
-  // Several marks can share a page, so the clip and mask ids must be unique per instance.
   const id = `orka-mark-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
   return (
     <svg

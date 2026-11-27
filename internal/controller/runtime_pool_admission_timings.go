@@ -1,0 +1,128 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package controller
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+)
+
+const (
+	acpLogKeyRuntimePool                 = "runtimePool"
+	acpLogKeySequence                    = "sequence"
+	acpRuntimeAdmissionTimingsLogMessage = "ACP workspace runtime admission timings"
+	acpRuntimeAdmissionMaxRecords        = 1024
+	acpRuntimeAdmissionRetention         = 30 * time.Minute
+)
+
+type acpRuntimeAdmissionKey struct {
+	pool     types.UID
+	sequence int64
+}
+
+type acpRuntimeAdmissionRecord struct {
+	observed     time.Time
+	seeded       time.Time
+	readmission  bool
+	reopenedFrom corev1alpha1.RuntimePoolLifecycle
+}
+
+type acpRuntimeAdmissionTimings struct {
+	now     func() time.Time
+	mu      sync.Mutex
+	records map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord
+}
+
+var acpRuntimeAdmission = &acpRuntimeAdmissionTimings{
+	now: time.Now, records: map[acpRuntimeAdmissionKey]*acpRuntimeAdmissionRecord{},
+}
+
+func (t *acpRuntimeAdmissionTimings) startupObserved(pool *corev1alpha1.RuntimePool, sequence int64) {
+	if pool == nil || pool.UID == "" || (pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting) {
+		return
+	}
+	now := t.now()
+	key := acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.records[key] != nil {
+		return
+	}
+	if len(t.records) >= acpRuntimeAdmissionMaxRecords {
+		for existing, record := range t.records {
+			if now.Sub(record.observed) >= acpRuntimeAdmissionRetention {
+				delete(t.records, existing)
+			}
+		}
+		if len(t.records) >= acpRuntimeAdmissionMaxRecords {
+			return
+		}
+	}
+	t.records[key] = &acpRuntimeAdmissionRecord{
+		observed: now, readmission: pool.Status.ActiveInstance != nil, reopenedFrom: pool.Status.Lifecycle,
+	}
+}
+
+func (t *acpRuntimeAdmissionTimings) credentialsSeeded(pool *corev1alpha1.RuntimePool, sequence int64) {
+	if pool == nil {
+		return
+	}
+	now := t.now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if record := t.records[acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}]; record != nil && record.seeded.IsZero() {
+		record.seeded = now
+	}
+}
+
+func runtimePoolAdmitting(pool *corev1alpha1.RuntimePool) bool {
+	return pool != nil && pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing &&
+		pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting
+}
+
+func (t *acpRuntimeAdmissionTimings) served(ctx context.Context, reader client.Reader, pool *corev1alpha1.RuntimePool, sequence int64) {
+	if !runtimePoolAdmitting(pool) {
+		return
+	}
+	key := acpRuntimeAdmissionKey{pool: pool.UID, sequence: sequence}
+	t.mu.Lock()
+	open := t.records[key] != nil
+	t.mu.Unlock()
+	if !open {
+		return
+	}
+	stored := &corev1alpha1.RuntimePool{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(pool), stored); err != nil ||
+		stored.UID != pool.UID || !runtimePoolAdmitting(stored) {
+		return
+	}
+	now := t.now()
+	t.mu.Lock()
+	record := t.records[key]
+	delete(t.records, key)
+	t.mu.Unlock()
+	if record == nil {
+		return
+	}
+	values := []any{acpCancelLogKeyNamespace, pool.Namespace, acpLogKeyRuntimePool, pool.Name, acpLogKeySequence, sequence,
+		"readmission", record.readmission, "reopenedFrom", string(record.reopenedFrom),
+		"totalMs", acpPreDispatchMillis(now.Sub(record.observed))}
+	if !record.seeded.IsZero() {
+		values = append(values,
+			"attestAndBootstrapMs", acpPreDispatchMillis(record.seeded.Sub(record.observed)),
+			"probeToServingMs", acpPreDispatchMillis(now.Sub(record.seeded)))
+	}
+	logf.FromContext(ctx).Info(acpRuntimeAdmissionTimingsLogMessage, values...)
+}

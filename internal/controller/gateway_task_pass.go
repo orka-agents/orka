@@ -59,9 +59,6 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 			return nil, err
 		}
 	}
-	// Delegated tools join the grant so children can inherit them, but stay
-	// out of the tool policy, so the broker never lets this Task call them.
-	// Without a root or inherited grant there is nothing to pass on.
 	if grant != nil {
 		for _, name := range delegated {
 			tool, err := r.delegatedGatewayTool(ctx, task.Namespace, name)
@@ -96,8 +93,6 @@ func (r *TaskReconciler) freezeGatewayTaskGrant(ctx context.Context, task *corev
 	return grant, nil
 }
 
-// delegatedGatewayTool loads a Tool named in coordination.delegatedGatewayTools;
-// a name that isn't a valid gateway task pass Tool fails permanently.
 func (r *TaskReconciler) delegatedGatewayTool(ctx context.Context, namespace, name string) (*corev1alpha1.Tool, error) {
 	tool := &corev1alpha1.Tool{}
 	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, tool); err != nil {
@@ -120,15 +115,10 @@ var (
 	errChildGatewayPassesUnprotected = errors.New("child gateway task passes require Task provenance admission")
 )
 
-// noInheritableGatewayGrant reports whether a child has no gateway grant to
-// inherit, as opposed to a broken or not yet linked one.
 func noInheritableGatewayGrant(err error) bool {
 	return errors.Is(err, errNoParentGatewayGrant) || errors.Is(err, errChildGatewayPassesUnprotected)
 }
 
-// inheritGatewayTaskGrant returns the grant a delegated child inherits: its
-// parent's frozen grant, bounded by every waiting ancestor's deadline and
-// linked to that parent.
 func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *corev1alpha1.Task) (*gatewayruntime.TaskGrant, error) {
 	if !r.TaskProvenanceProtected {
 		return nil, permanentACPAgentConfiguration(errChildGatewayPassesUnprotected)
@@ -141,8 +131,6 @@ func (r *TaskReconciler) inheritGatewayTaskGrant(ctx context.Context, task *core
 		}
 		return nil, err
 	}
-	// A parent binds before it runs, so one that could delegate but has no
-	// binding, such as a native AI-worker Task, never will.
 	if parent.Status.AgentExecutionBinding == nil {
 		return nil, permanentACPAgentConfiguration(errNoParentGatewayGrant)
 	}

@@ -11,26 +11,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// maxMemoryProposalApplyAttempts bounds how often an application resolves a
-// target again after the provider reports that it changed.
 const maxMemoryProposalApplyAttempts = 5
 
-// ApplyMemoryProposal applies an accepted memory or consolidation proposal in
-// three steps, so no provider transaction is open while Orka authorizes:
-//
-//  1. The provider resolves the memory the application would return, by ID
-//     only.
-//  2. Orka authorizes that exact memory through apply.AuthorizeExistingMemory
-//     (when set). A new memory is covered by the caller's own create
-//     permission; Orka builds it from the stored proposal and redacts it. A
-//     consolidation proposal also needs apply.AuthorizeMemoryChange (when
-//     set) for every memory it targets.
-//  3. The provider commits only while the proposal still resolves to the same
-//     target. When it changed, for example because a concurrent application
-//     created the memory, the loop resolves and authorizes again.
-//
-// A caller therefore never receives an existing memory it was not authorized
-// to read.
 func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
 	namespace := strings.TrimSpace(apply.Namespace)
 	id := strings.TrimSpace(apply.ID)
@@ -44,8 +26,6 @@ func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProp
 		if err != nil {
 			return nil, err
 		}
-		// A proposal's type and targets never change, so the proposal read
-		// after the resolve names the memories this application changes.
 		proposal, err := c.GetMemoryProposal(ctx, namespace, id)
 		if err != nil {
 			return nil, err
@@ -76,7 +56,6 @@ func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProp
 			return nil, err
 		}
 		if target.MemoryID != "" && (memory == nil || memory.ID != target.MemoryID) {
-			// Never pass on a memory other than the one just authorized.
 			return nil, fmt.Errorf("storage provider returned a memory other than the resolved target %q", target.MemoryID)
 		}
 		return memory, nil
@@ -84,10 +63,6 @@ func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProp
 	return nil, lastErr
 }
 
-// memoryFromProposal builds the memory an accepted proposal creates. The
-// storage client redacted the proposal when it was created; the copy applies
-// the current rule again, so a proposal stored under an older rule cannot
-// become a memory unredacted.
 func memoryFromProposal(proposal *store.MemoryProposal, now time.Time) *store.Memory {
 	return &store.Memory{
 		Namespace:        proposal.Namespace,
@@ -102,8 +77,6 @@ func memoryFromProposal(proposal *store.MemoryProposal, now time.Time) *store.Me
 	}
 }
 
-// tagsFromProposalDescription reads memory tags from the first "Tags:" line of
-// a proposal description, lower-cased, trimmed and without duplicates.
 func tagsFromProposalDescription(description string) []string {
 	for line := range strings.SplitSeq(description, "\n") {
 		key, value, ok := strings.Cut(line, ":")

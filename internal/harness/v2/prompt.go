@@ -29,9 +29,6 @@ func (b ContentBlock) Validate() error {
 	return b.validate(false)
 }
 
-// ValidateToolOutput validates a tool-output block while preserving non-empty
-// whitespace-only text deltas. Prompt and terminal-result content retain the
-// stricter non-whitespace requirement.
 func (b ContentBlock) ValidateToolOutput() error {
 	return b.validate(true)
 }
@@ -171,11 +168,6 @@ func ValidatePromptLeaseRenewal(current, proposed PromptLease, expectedGeneratio
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	// A correct renewal can arrive well after it was issued: the controller
-	// replays an ambiguous renewal verbatim, and a remote renewal is checked
-	// again after its network round trip. So the issue time is bounded by the
-	// lease it renews, not by arrival time; maxExtension still bounds expiry
-	// from now, and a later issue time never lengthens the lease.
 	if proposed.IssuedAt.Before(current.IssuedAt) {
 		return fmt.Errorf("renewed prompt lease is issued before the lease it renews")
 	}
@@ -189,20 +181,19 @@ func ValidatePromptLeaseRenewal(current, proposed PromptLease, expectedGeneratio
 }
 
 type PromptMCPAuthorization struct {
-	RuntimeSessionUID      RuntimeSessionUID `json:"runtimeSessionUID"`
-	SessionGeneration      uint64            `json:"sessionGeneration"`
-	TaskUID                TaskUID           `json:"taskUID"`
-	TaskAttempt            uint32            `json:"taskAttempt"`
-	PromptID               PromptID          `json:"promptID"`
-	LeaseGeneration        uint64            `json:"leaseGeneration"`
-	ToolPolicyDigest       string            `json:"toolPolicyDigest"`
-	ApprovalPolicyDigest   string            `json:"approvalPolicyDigest"`
-	MCPConfigurationDigest string            `json:"mcpConfigurationDigest"`
-	ToolPolicy             MCPToolPolicy     `json:"toolPolicy"`
-	ApprovalPolicy         MCPApprovalPolicy `json:"approvalPolicy"`
-	// NativePermissions must equal the RuntimeSession's launch mode.
-	NativePermissions NativePermissionMode `json:"nativePermissions,omitempty"`
-	ExpiresAt         time.Time            `json:"expiresAt"`
+	RuntimeSessionUID      RuntimeSessionUID    `json:"runtimeSessionUID"`
+	SessionGeneration      uint64               `json:"sessionGeneration"`
+	TaskUID                TaskUID              `json:"taskUID"`
+	TaskAttempt            uint32               `json:"taskAttempt"`
+	PromptID               PromptID             `json:"promptID"`
+	LeaseGeneration        uint64               `json:"leaseGeneration"`
+	ToolPolicyDigest       string               `json:"toolPolicyDigest"`
+	ApprovalPolicyDigest   string               `json:"approvalPolicyDigest"`
+	MCPConfigurationDigest string               `json:"mcpConfigurationDigest"`
+	ToolPolicy             MCPToolPolicy        `json:"toolPolicy"`
+	ApprovalPolicy         MCPApprovalPolicy    `json:"approvalPolicy"`
+	NativePermissions      NativePermissionMode `json:"nativePermissions,omitempty"`
+	ExpiresAt              time.Time            `json:"expiresAt"`
 }
 
 func (a PromptMCPAuthorization) ValidateFor(metadata MutationMetadata, lease PromptLease) error {

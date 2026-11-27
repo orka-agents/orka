@@ -117,6 +117,52 @@ func TestRunACPExternalEffectWithRetryRejectsSuccessAfterBudgetExpiry(t *testing
 	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
 }
 
+type undeliveredDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c undeliveredDeadlineContext) Deadline() (time.Time, bool) {
+	return c.deadline, true
+}
+
+func TestRunACPExternalEffectWithRetryRejectsSuccessAfterUndeliveredDeadline(t *testing.T) {
+	controlStore, fence, closeStore := newACPSessionTestStore(
+		t, filepath.Join(t.TempDir(), "external-effect-undelivered-deadline.db"),
+	)
+	defer closeStore()
+	dispatcher := &ACPDispatcher{Store: controlStore}
+	identity := store.ExternalEffectIdentity{
+		Kind: "workspace.prepare", Namespace: "default", AggregateID: "task-undelivered", OperationID: "workspace-prepare-undelivered",
+	}
+	ctx := undeliveredDeadlineContext{Context: context.Background(), deadline: time.Now().Add(50 * time.Millisecond)}
+
+	calls := 0
+	result, err := runACPExternalEffectWithRetryPolicy(
+		ctx, dispatcher, fence, identity, map[string]string{"source": "immutable"},
+		time.Millisecond, time.Minute,
+		func(callCtx context.Context) (string, error) {
+			calls++
+			deadline, ok := callCtx.Deadline()
+			if !ok {
+				t.Fatal("call context has no deadline")
+			}
+			time.Sleep(time.Until(deadline) + time.Millisecond)
+			if err := callCtx.Err(); err != nil {
+				t.Fatalf("call context error = %v; want the deadline to pass without cancellation", err)
+			}
+			return "late-success", nil
+		},
+	)
+	if result != "" || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("late result = %q, error = %v; want no result and context deadline exceeded", result, err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d; want 1", calls)
+	}
+	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
+}
+
 func TestRunExternalEffectRejectsSuccessReturnedAfterCallDeadline(t *testing.T) {
 	controlStore, fence, closeStore := newACPSessionTestStore(
 		t, filepath.Join(t.TempDir(), "external-effect-late-call.db"),
@@ -125,14 +171,42 @@ func TestRunExternalEffectRejectsSuccessReturnedAfterCallDeadline(t *testing.T) 
 	identity := store.ExternalEffectIdentity{
 		Kind: "acp-mcp-tool", Namespace: "default", AggregateID: "session-late", OperationID: "mcp-call-late",
 	}
-	// An effect that ignores cancellation and returns success after its bounded
-	// call deadline must not be committed as Succeeded; the configured timeout
-	// expired, so the effect is left in flight for explicit reconciliation.
 	result, replayed, err := runExternalEffectWithReplayCallTimeout(
 		context.Background(), controlStore, fence, identity, map[string]string{"call": "custom"},
 		time.Millisecond,
 		func(context.Context) (string, error) {
 			time.Sleep(20 * time.Millisecond)
+			return testBrokeredEffectCommittedResult, nil
+		},
+	)
+	if result != "" || replayed || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("late call result = %q replayed=%v error = %v; want no result and deadline exceeded", result, replayed, err)
+	}
+	assertInFlightExternalEffectWithOneLease(t, controlStore, identity)
+}
+
+func TestRunExternalEffectRejectsSuccessReturnedAfterUndeliveredCallDeadline(t *testing.T) {
+	controlStore, fence, closeStore := newACPSessionTestStore(
+		t, filepath.Join(t.TempDir(), "external-effect-undelivered-call-deadline.db"),
+	)
+	defer closeStore()
+	identity := store.ExternalEffectIdentity{
+		Kind: "acp-mcp-tool", Namespace: "default", AggregateID: "session-undelivered", OperationID: "mcp-call-undelivered",
+	}
+	ctx := undeliveredDeadlineContext{Context: context.Background(), deadline: time.Now().Add(50 * time.Millisecond)}
+
+	result, replayed, err := runExternalEffectWithReplayCallTimeout(
+		ctx, controlStore, fence, identity, map[string]string{"call": "custom"},
+		time.Minute,
+		func(callCtx context.Context) (string, error) {
+			deadline, ok := callCtx.Deadline()
+			if !ok {
+				t.Fatal("call context has no deadline")
+			}
+			time.Sleep(time.Until(deadline) + time.Millisecond)
+			if err := callCtx.Err(); err != nil {
+				t.Fatalf("call context error = %v; want the deadline to pass without cancellation", err)
+			}
 			return testBrokeredEffectCommittedResult, nil
 		},
 	)
@@ -321,10 +395,6 @@ func TestRunExternalEffectKeepsBrokeredClampWhenPublisherTimeoutConfigured(t *te
 }
 
 func TestPublicationSettlementWindowBudgetsSequentialPublisherStages(t *testing.T) {
-	// publishWorkspaceDelta runs up to three sequential publisher-backed
-	// stages under each bounded context (claim-refresh/preflight/prepare and
-	// publish/verify/PR reconcile), so the window must cover
-	// stages x (call timeout + margin) + margin — not a single call timeout.
 	t.Setenv(envACPPublisherEffectTimeout, "")
 	wantDefault := maxSequentialPublisherSettlementStages*(maxACPExternalEffectCallDuration+externalEffectLeaseSettlementMargin) + externalEffectLeaseSettlementMargin
 	if got := publicationSettlementWindow(); got != wantDefault || got != 16*time.Minute {
@@ -366,14 +436,8 @@ func assertInFlightExternalEffectWithOneLease(
 	}
 }
 
-// acpExternalEffectLease is the ledger lease a brokered custom-Tool effect
-// call must fit inside, including the settlement margin.
 const acpExternalEffectLease = maxACPExternalEffectCallDuration + externalEffectLeaseSettlementMargin
 
-// TestRunExternalEffectOnceNeverRunsAStartedEffectAgain covers a forwarded
-// write that a delivery claimed and left in flight: a redelivery of the same
-// identity is refused without calling the effect, where a reclaiming run
-// could send it again once the lease expired.
 func TestRunExternalEffectOnceNeverRunsAStartedEffectAgain(t *testing.T) {
 	controlStore, fence, closeStore := newACPSessionTestStore(
 		t, filepath.Join(t.TempDir(), "external-effect-once.db"),

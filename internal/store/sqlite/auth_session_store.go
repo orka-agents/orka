@@ -20,7 +20,6 @@ import (
 
 var _ store.AuthSessionStore = (*Store)(nil)
 
-// authSessionSchemaStatements defines GitHub sign-in sessions (ADR 0037).
 func authSessionSchemaStatements() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -56,9 +55,6 @@ func authSessionArgs(session store.AuthSession) []any {
 		session.CreatedAt.UTC(), session.ExpiresAt.UTC()}
 }
 
-// CreateAuthSession stores a new session. Its ID and hash must be unique.
-// Sessions that ended are dropped, and a person keeps their
-// MaxAuthSessionsPerSubject most recently issued ones.
 func (s *Store) CreateAuthSession(ctx context.Context, session store.AuthSession) error {
 	if err := validAuthSession(session); err != nil {
 		return err
@@ -74,8 +70,6 @@ func (s *Store) createAuthSession(ctx context.Context, session store.AuthSession
 		return fmt.Errorf("create sign-in session: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Pruning would drop an ended session with the same ID or hash, so the
-	// stored rows are checked first.
 	if err := requireAuthSessionUnused(ctx, tx, session); err != nil {
 		return fmt.Errorf("create sign-in session: %w", err)
 	}
@@ -85,8 +79,6 @@ func (s *Store) createAuthSession(ctx context.Context, session store.AuthSession
 	if _, err := tx.ExecContext(ctx, insertAuthSession, authSessionArgs(session)...); err != nil {
 		return fmt.Errorf("create sign-in session: %w", uniqueConflict(err))
 	}
-	// A person holds a bounded number of sessions; a sign-in beyond it ends
-	// their least recently issued one.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE issuer = ? AND subject = ? AND id NOT IN (
 		SELECT id FROM auth_sessions WHERE issuer = ? AND subject = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
 		session.Issuer, session.Subject, session.Issuer, session.Subject, storagev1.MaxAuthSessionsPerSubject); err != nil {
@@ -95,9 +87,6 @@ func (s *Store) createAuthSession(ctx context.Context, session store.AuthSession
 	return tx.Commit()
 }
 
-// requireAuthSessionUnused returns ErrConflict when a stored session, ended or
-// not, has the session's ID or token hash: reusing an ended session's hash
-// would make its token valid again.
 func requireAuthSessionUnused(ctx context.Context, tx taskDataExecutor, session store.AuthSession) error {
 	var taken int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_sessions WHERE id = ? OR token_hash = ?`,
@@ -110,8 +99,6 @@ func requireAuthSessionUnused(ctx context.Context, tx taskDataExecutor, session 
 	return nil
 }
 
-// pruneAuthSessions drops sessions that ended before now: nothing accepts or
-// renews them again.
 func pruneAuthSessions(ctx context.Context, tx taskDataExecutor, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE revoked_at IS NOT NULL OR expires_at <= ?`, now.UTC()); err != nil {
 		return fmt.Errorf("prune sign-in sessions: %w", err)
@@ -119,7 +106,6 @@ func pruneAuthSessions(ctx context.Context, tx taskDataExecutor, now time.Time) 
 	return nil
 }
 
-// GetAuthSessionByHash returns the session with the given token hash.
 func (s *Store) GetAuthSessionByHash(ctx context.Context, tokenHash string) (store.AuthSession, error) {
 	var session store.AuthSession
 	var revoked sql.NullTime
@@ -139,8 +125,6 @@ func (s *Store) GetAuthSessionByHash(ctx context.Context, tokenHash string) (sto
 	return session, nil
 }
 
-// RevokeAuthSession marks a session revoked. Revoking twice keeps the first
-// time.
 func (s *Store) RevokeAuthSession(ctx context.Context, id string, at time.Time) error {
 	return writeOperationErr(ctx, s, "RevokeAuthSession", func(ctx context.Context) error {
 		return s.revokeAuthSession(ctx, id, at)
@@ -161,8 +145,6 @@ func (s *Store) revokeAuthSession(ctx context.Context, id string, at time.Time) 
 	return nil
 }
 
-// RenewAuthSession revokes a live session and stores its successor
-// atomically, so a session token renews at most once.
 func (s *Store) RenewAuthSession(ctx context.Context, id string, next store.AuthSession, at time.Time) error {
 	if err := validAuthSession(next); err != nil {
 		return err

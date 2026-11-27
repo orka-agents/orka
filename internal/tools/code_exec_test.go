@@ -111,13 +111,11 @@ func TestCodeExecTool_Parameters(t *testing.T) {
 		t.Fatal("Parameters() returned nil")
 	}
 
-	// Verify it's valid JSON
 	var schema map[string]any
 	if err := json.Unmarshal(params, &schema); err != nil {
 		t.Errorf("Parameters() returned invalid JSON: %v", err)
 	}
 
-	// Check required fields
 	if schema[jsonSchemaTypeField] != typeObject {
 		t.Error("Parameters schema should have type: object")
 	}
@@ -148,7 +146,7 @@ func TestCodeExecTool_Execute_Bash(t *testing.T) {
 		{
 			name:    "failing command",
 			code:    "exit 1",
-			wantErr: false, // Execute doesn't error, it returns the exit code in result
+			wantErr: false,
 		},
 	}
 
@@ -213,7 +211,6 @@ func TestCodeExecTool_Execute_Timeout(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := newInProcessCodeExecTestTool(tmpDir, 30*time.Second, nil)
 
-	// Test with custom timeout from args
 	args := json.RawMessage(`{"language": "bash", "code": "echo quick", "timeout": 5}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -233,7 +230,6 @@ func TestCodeExecTool_Execute_TimeoutExceedsMax(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := newInProcessCodeExecTestTool(tmpDir, 30*time.Second, nil)
 
-	// An over-max timeout must not fail the call.
 	args := json.RawMessage(`{"language": "bash", "code": "echo test", "timeout": 120}`)
 	_, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -241,9 +237,6 @@ func TestCodeExecTool_Execute_TimeoutExceedsMax(t *testing.T) {
 	}
 }
 
-// An over-max timeout clamps to maxCodeExecTimeoutSeconds. It must not silently
-// fall back to the 30s default, which would give the caller less time than the
-// 60s they were entitled to ask for.
 func TestCodeExecTool_Execute_TimeoutClampsToMax(t *testing.T) {
 	t.Setenv(codeExecBackendEnv, "")
 
@@ -285,8 +278,6 @@ func TestCodeExecTool_Execute_TimeoutClampsToMax(t *testing.T) {
 	}
 }
 
-// The advertised bound must match the enforced one, so a caller reading the
-// schema never has to discover the limit by being silently clamped.
 func TestCodeExecTool_Schema_AdvertisesTimeoutBounds(t *testing.T) {
 	tool := newInProcessCodeExecTestTool(t.TempDir(), 30*time.Second, nil)
 
@@ -316,7 +307,6 @@ func TestCodeExecTool_Schema_AdvertisesTimeoutBounds(t *testing.T) {
 }
 
 func TestCodeExecTool_Execute_Python(t *testing.T) {
-	// Skip if python3 is not available
 	if _, err := os.Stat("/usr/bin/python3"); os.IsNotExist(err) {
 		t.Skip("python3 not available")
 	}
@@ -341,7 +331,6 @@ func TestCodeExecTool_Execute_Python(t *testing.T) {
 }
 
 func TestCodeExecTool_Execute_JavaScript(t *testing.T) {
-	// Skip if node is not available
 	if _, err := os.Stat("/usr/local/bin/node"); os.IsNotExist(err) {
 		if _, err := os.Stat("/usr/bin/node"); os.IsNotExist(err) {
 			t.Skip("node not available")
@@ -417,7 +406,6 @@ func TestCodeExecTool_Execute_WorkDirCreation(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	// Verify directory was created
 	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
 		t.Error("work directory was not created")
 	}
@@ -521,7 +509,6 @@ func TestCodeExecTool_DenyPatterns_AllowsNormal(t *testing.T) {
 }
 
 func TestCodeExecTool_DenyPatterns_NotAppliedToPython(t *testing.T) {
-	// Skip if python3 is not available
 	if _, err := os.Stat("/usr/bin/python3"); os.IsNotExist(err) {
 		t.Skip("python3 not available")
 	}
@@ -529,7 +516,6 @@ func TestCodeExecTool_DenyPatterns_NotAppliedToPython(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := newInProcessCodeExecTestTool(tmpDir, 30*time.Second, map[string]bool{codeLanguagePython: true, python3BinaryName: true})
 
-	// Python code containing "rm -rf" in a string should NOT be blocked
 	args, _ := json.Marshal(CodeExecArgs{Language: codeLanguagePython, Code: `print("rm -rf / is dangerous")`})
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -545,11 +531,9 @@ func TestCodeExecTool_DenyPatterns_NotAppliedToPython(t *testing.T) {
 }
 
 func TestCodeExecTool_Execute_Node(t *testing.T) {
-	// Test node execution directly via executeNode
 	tmpDir := t.TempDir()
 	tool := newInProcessCodeExecTestTool(tmpDir, 30*time.Second, nil)
 
-	// Test via Execute with "node" language alias
 	args := json.RawMessage(`{"language": "node", "code": "console.log('node-test')"}`)
 	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -656,7 +640,6 @@ func TestCodeExecTool_RunCommand_NonExecError(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := newInProcessCodeExecTestTool(tmpDir, 0, nil)
 
-	// Command that doesn't exist — produces a non-ExitError
 	cmd := exec.CommandContext(context.Background(), "nonexistent-binary-xyz")
 	result := (&InProcessCodeExecutor{}).runCommand(context.Background(), cmd, tool.workDir, tool.codeExecOutputLimitBytes())
 	if result.ExitCode != -1 {
@@ -788,8 +771,6 @@ func TestCodeExecTool_Execute_EmptyStdinEOF(t *testing.T) {
 }
 
 func TestCodeExecTool_Execute_RealTimeout(t *testing.T) {
-	// Keep the process limit above busy developer/CI hosts so the child shell can
-	// fork sleep and exercise timeout handling instead of failing at startup.
 	t.Setenv(codeExecLocalMaxProcessesEnv, "1048576")
 
 	tmpDir := t.TempDir()

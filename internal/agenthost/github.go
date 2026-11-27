@@ -18,17 +18,13 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// maxGitHubUserBytes bounds a GitHub user document.
 const maxGitHubUserBytes = 1 << 20
 
-// GitHubAccounts reads the GitHub account a token belongs to.
 type GitHubAccounts struct {
-	Client *http.Client
-	// BaseURL is the GitHub API; empty means https://api.github.com.
+	Client  *http.Client
 	BaseURL string
 }
 
-// Account returns the account token belongs to, from GET /user.
 func (g GitHubAccounts) Account(ctx context.Context, token string) (corev1alpha1.AgentHostGitHubAccount, error) {
 	client := g.Client
 	if client == nil {

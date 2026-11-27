@@ -335,7 +335,6 @@ func newMemoryProposalReviewCmd() *cobra.Command {
 			}
 			record := toGenericMap(result)
 			if firstString(record, "reviewer") == "" {
-				// Older servers answer a review with no body.
 				fmt.Fprintf(cmd.OutOrStdout(), "Memory proposal reviewed: %s\n", args[0]) //nolint:errcheck
 				return nil
 			}
@@ -369,8 +368,6 @@ func newMemoryProposalApplyCmd() *cobra.Command {
 				args[0],
 				metadataName(result),
 			)
-			// Apply returns the memory; the proposal records who applied it. The
-			// apply already succeeded, so a failed read is only a warning.
 			proposal, err := c.DoJSON(context.Background(), http.MethodGet, path, nil, nil)
 			if err != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not read the recorded applier: %v\n", err)

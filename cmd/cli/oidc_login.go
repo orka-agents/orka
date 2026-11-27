@@ -27,18 +27,13 @@ import (
 )
 
 const (
-	// tokenKindOIDC marks a configured token as an OIDC access token saved by
-	// `orka auth login`, which can refresh itself via its stored refresh token
-	// and is sent only to SessionServer.
 	tokenKindOIDC = "oidc"
 
-	// oidcRefreshWindow is how long before expiry an OIDC access token refreshes.
 	oidcRefreshWindow = 5 * time.Minute
 
 	oidcFormClientID = "client_id"
 )
 
-// oidcPollFloor is the shortest wait between device-code polls; tests lower it.
 var oidcPollFloor time.Duration
 
 type oidcDiscoveryDoc struct {
@@ -227,8 +222,6 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 	}
 	if err := updateConfig(func(cfg *orkaConfig) error {
 		if cfg.TokenKind == tokenKindGitHubSession {
-			// Clear the GitHub session's saved namespace so OIDC namespace
-			// isolation is not tripped by a stale session namespace.
 			cfg.Namespace = ""
 		}
 		cfg.Server = server
@@ -243,8 +236,6 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 		cfg.OIDCClientID = targets.clientID
 		cfg.OIDCTokenEndpoint = discovery.TokenEndpoint
 		cfg.OIDCRefreshToken = tokens.RefreshToken
-		// Record only what the provider actually granted; omitting scope on
-		// refresh reuses the granted scope per RFC 6749 §6.
 		cfg.OIDCScope = strings.TrimSpace(tokens.Scope)
 		return nil
 	}); err != nil {
@@ -258,9 +249,6 @@ func runOIDCLogin(cmd *cobra.Command, opts oidcLoginOptions) error {
 	return nil
 }
 
-// selectOIDCBearerToken picks an Orka-compatible compact JWT (preferring
-// access_token, then id_token) matching expectedIssuer and expectedAudience,
-// and derives its expiry from expires_in or the JWT's exp claim.
 func selectOIDCBearerToken(tokens oidcTokenResponse, expectedIssuer, expectedAudience string) (string, *time.Time, error) {
 	candidates := []string{strings.TrimSpace(tokens.AccessToken), strings.TrimSpace(tokens.IDToken)}
 	var nonEmpty []string
@@ -281,9 +269,6 @@ func selectOIDCBearerToken(tokens oidcTokenResponse, expectedIssuer, expectedAud
 		if !ok {
 			continue
 		}
-		// expires_in applies only to the access_token (RFC 6749 §5.1); when
-		// selecting an id_token or when the JWT carries an earlier exp claim,
-		// prefer the JWT's exp so refresh runs before Orka rejects the token.
 		expiresIn := 0
 		if i == 0 && strings.TrimSpace(tokens.AccessToken) != "" {
 			expiresIn = tokens.ExpiresIn
@@ -387,9 +372,6 @@ func resolveTokenExpiry(expiresIn int, jwtExp int64) *time.Time {
 }
 
 func defaultOIDCLoginScope(issuer, audience string) string {
-	// Microsoft Entra v2 requires a resource scope (such as <app-id>/.default or
-	// api://<app-id>/...) to issue an access token with the app's audience, plus
-	// offline_access for refresh tokens.
 	if strings.Contains(strings.ToLower(issuer), "login.microsoftonline.com") ||
 		strings.Contains(strings.ToLower(issuer), "sts.windows.net") {
 		return fmt.Sprintf("openid profile email offline_access %s/.default", audience)
@@ -522,9 +504,6 @@ func pollOIDCDeviceFlow(ctx context.Context, tokenEndpoint, clientID string, dev
 	}
 }
 
-// configuredOIDCToken returns the saved OIDC token for server, refreshing it
-// with the saved refresh token when it is near or past expiry. Like GitHub
-// sessions, it is sent only to the server it was signed in against.
 func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) string {
 	if server == "" {
 		server = cfg.Server
@@ -556,8 +535,6 @@ func configuredOIDCToken(cmd *cobra.Command, server string, cfg orkaConfig) stri
 
 	saved := loadConfig()
 	if !holdsOIDCSession(saved, cfg) {
-		// Another login replaced or cleared this OIDC session while waiting for
-		// the lock; never adopt another account's credentials for this command.
 		return cfg.Token
 	}
 	cfg = saved
@@ -624,9 +601,6 @@ func oidcTokenNeedsRefresh(cfg orkaConfig) bool {
 	return false
 }
 
-// holdsOIDCSession reports whether saved holds the same OIDC login as read
-// (the same per-login identifier on the same server and client), analogous to
-// holdsSession for GitHub sessions.
 func holdsOIDCSession(saved, read orkaConfig) bool {
 	return saved.TokenKind == tokenKindOIDC && saved.Token != "" &&
 		saved.SessionServer == read.SessionServer &&

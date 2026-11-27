@@ -9,10 +9,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// DatasetInfo identifies the durable dataset, independently of its filename.
-// CanBootstrapSnapshotKey is true only for a never-bootstrapped, newly created
-// dataset containing no application, artifact or control records. It is not a
-// general-purpose emptiness check or permission to replace an installation.
 type DatasetInfo struct {
 	SchemaVersion           int
 	ID                      string
@@ -63,9 +59,6 @@ func readDataset(reader datasetReader) (datasetRecord, error) {
 	return record, nil
 }
 
-// DatasetInfo reads durable bootstrap history while the production caller holds
-// the process lock. No file-existence check is used. An interrupted first start
-// can resume only if no application data has appeared in the meantime.
 func (s *Store) DatasetInfo() (DatasetInfo, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -95,11 +88,7 @@ func (s *Store) DatasetInfo() (DatasetInfo, error) {
 	return info, nil
 }
 
-// datasetHasRecords reports whether any table other than the dataset identity
-// holds a row: an application, artifact or control record.
 func datasetHasRecords(ctx context.Context, tx *sql.Tx) (bool, error) {
-	// Use SQLite's object type, not formatting of its CREATE statement. The
-	// validated layout may contain equivalent SQL with newlines/quoted names.
 	rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' AND name <> 'store_dataset'`)
 	if err != nil {
 		return false, err
@@ -132,11 +121,6 @@ func datasetHasRecords(ctx context.Context, tx *sql.Tx) (bool, error) {
 	return false, nil
 }
 
-// NORMAL synchronous mode does not sync each WAL commit. A full checkpoint
-// synchronizes the WAL and database before startup can rely on dataset identity
-// or completed bootstrap history. Keep the existing mode for ordinary writes.
-// A busy/incomplete checkpoint is a startup failure, including on a retry whose
-// previous completion transaction committed but whose checkpoint failed.
 func synchronizeDatasetMetadata(db *sql.DB) error {
 	var busy, frames, checkpointed int
 	if err := db.QueryRow(`PRAGMA wal_checkpoint(FULL)`).Scan(&busy, &frames, &checkpointed); err != nil {

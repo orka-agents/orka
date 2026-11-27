@@ -51,7 +51,6 @@ kindctl_registry_path() {
 }
 
 kindctl_shell_quote() {
-  # Single-quote for POSIX shells.
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"
 }
 
@@ -136,9 +135,6 @@ kindctl_normalize_tag() {
   fi
   printf '%s\n' "$tag"
 }
-
-# Sets KINDCTL_ROOT, KINDCTL_HASH, KINDCTL_TAG, KINDCTL_BASE, KINDCTL_NAME,
-# KINDCTL_CONTEXT, KINDCTL_KUBECONFIG, KINDCTL_STORE_DIR, KINDCTL_REGISTRY.
 
 kindctl_derive_name_for_root_tag() {
   local root raw_tag hash tag suffix base_cap raw_base base
@@ -226,7 +222,6 @@ kindctl_acquire_lock() {
 }
 
 kindctl_registry_python_update() {
-  # Expects KINDCTL_REGISTRY_OP and operation-specific env vars.
   python3 - <<'PY'
 import json, os, tempfile
 from pathlib import Path
@@ -432,8 +427,6 @@ kindctl_require_owned_cluster() {
 }
 
 kindctl_parse_tag_options() {
-  # Parses --tag from arbitrary command args. Emits sanitized tag on first line,
-  # then remaining args one per line. Use via command substitution with mapfile-less loops.
   local raw_tag="" out=() arg
   while [ "$#" -gt 0 ]; do
     arg="$1"; shift
@@ -444,8 +437,6 @@ kindctl_parse_tag_options() {
       --tag=*)
         raw_tag="${arg#--tag=}" ;;
       --)
-        # Stop parsing kindctl flags at the kubectl command separator; forward
-        # the separator and all remaining args verbatim to the container command.
         out+=("$arg" "$@"); break ;;
       *)
         out+=("$arg") ;;
@@ -456,7 +447,6 @@ kindctl_parse_tag_options() {
 }
 
 kindctl_parse_common_tag_first() {
-  # Sets PARSED_TAG and PARSED_ARGS array.
   local parsed line first=1
   PARSED_TAG=""
   PARSED_ARGS=()
@@ -639,11 +629,6 @@ kindctl_cmd_hibernate_resume() {
 }
 
 kindctl_kind_clusters() {
-  # Fail closed: distinguish a real discovery failure (e.g. Docker unreachable)
-  # from a legitimately empty list. `kind get clusters` exits 0 with no output
-  # when no clusters exist, but nonzero when it cannot reach Docker. Returning
-  # empty on failure would let `prune --dead` classify every still-existing
-  # tracked cluster as dead and delete its registry/kubeconfig state.
   local out status=0
   out="$(kind get clusters 2>/dev/null)" || status=$?
   if [ "$status" -ne 0 ]; then
@@ -795,7 +780,6 @@ EOF_REGISTRY
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     if [ "$mode" = "dead" ]; then
-      # Dead clusters are not live; remove only registry/kubeconfig.
       while IFS=$'\x1f' read -r name root kubeconfig context tag managed setup; do
         if [ "$name" = "$line" ]; then
           rm -f -- "$kubeconfig"
@@ -896,7 +880,6 @@ kindctl_cmd_doctor() {
 $(kindctl_registry_tsv)
 EOF_REGISTRY
 
-  # Opportunistically re-register current workspace's exact derived live cluster.
   kindctl_derive ""
   if kindctl_line_in_text "$KINDCTL_NAME" "$live"; then
     if ! kindctl_registry_is_owned "$KINDCTL_NAME"; then

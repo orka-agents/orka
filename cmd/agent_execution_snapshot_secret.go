@@ -22,9 +22,6 @@ import (
 
 const agentExecutionSnapshotSecretWriteAttempts = 3
 
-// agentExecutionSnapshotSecretOptions selects controller-managed snapshot key
-// bootstrap. When Name is empty the operator supplies the key through the
-// mounted file and the controller never writes the Secret.
 type agentExecutionSnapshotSecretOptions struct {
 	Name string
 	Key  string
@@ -44,8 +41,6 @@ func validateAgentExecutionSnapshotSecretOptions(o agentExecutionSnapshotSecretO
 	return nil
 }
 
-// decodeAgentExecutionSnapshotKey accepts exactly 32 raw bytes or their
-// whitespace-padded base64 encoding.
 func decodeAgentExecutionSnapshotKey(raw []byte) ([]byte, error) {
 	if len(raw) == storageclient.SnapshotKeyBytes {
 		return raw, nil
@@ -58,14 +53,6 @@ func decodeAgentExecutionSnapshotKey(raw []byte) ([]byte, error) {
 	return decoded, nil
 }
 
-// ensureAgentExecutionSnapshotKey returns the snapshot key stored in the
-// chart-created Secret, minting one on the first start. The chart never
-// renders key material, so a fresh install finds an empty Secret; the
-// controller writes 32 random bytes into it and every later start reuses
-// them. When durable dataset history requires a key but the Secret has none, the
-// key was lost and minting a new one would orphan every retained snapshot, so
-// startup fails closed instead. Concurrent writers are reconciled through the
-// Secret's resourceVersion: whoever loses the update reuses the winner's key.
 func ensureAgentExecutionSnapshotKey(
 	ctx context.Context,
 	reader client.Reader,

@@ -255,14 +255,10 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka", Namespace: "tenant",
 			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
-		// A Helm nameOverride changes app.kubernetes.io/name; the platform
-		// marker, not the chart name, decides.
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "renamed", Namespace: "tenant",
 			Labels: map[string]string{"app.kubernetes.io/name": "custom", labels.LabelPlatformIdentity: "true"}}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant",
 			Labels: map[string]string{"app.kubernetes.io/name": "orka"}}},
-		// The AI worker may exchange its own identity, which grants it nothing
-		// new, but not another worker's.
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka-ai-worker", Namespace: "tenant",
 			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka-vendor-worker", Namespace: "tenant",
@@ -289,8 +285,6 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 	}
 }
 
-// An externally managed platform account (for example the chart's
-// serviceAccount.create=false) carries no label; it is refused by name.
 func TestResolveReferencesRejectsConfiguredPlatformServiceAccounts(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {

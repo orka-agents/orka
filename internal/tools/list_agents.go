@@ -16,14 +16,11 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// Agents that use a runtimeRef are listed with runtime "external" and the
-// referenced AgentRuntime name.
 const (
 	externalRuntimeLabel = "external"
 	runtimeRefField      = "runtimeRef"
 )
 
-// ListAgentsTool lists available Agent CRDs.
 type ListAgentsTool struct{}
 
 func (t *ListAgentsTool) Name() string { return listAgentsToolName }
@@ -58,7 +55,6 @@ func (t *ListAgentsTool) Execute(ctx context.Context, args json.RawMessage) (str
 	for _, agent := range agentList.Items {
 		info := map[string]any{nameField: agent.Name}
 
-		// A referenced Provider is authoritative over model.provider.
 		provider := ""
 		if agent.Spec.ProviderRef != nil {
 			provider = agent.Spec.ProviderRef.Name
@@ -83,7 +79,6 @@ func (t *ListAgentsTool) Execute(ctx context.Context, args json.RawMessage) (str
 		}
 
 		if runtime := agent.Spec.Runtime; runtime != nil {
-			// A runtimeRef names an admin-registered AgentRuntime instead of a built-in type.
 			if runtime.RuntimeRef != nil {
 				info[runtimeField] = externalRuntimeLabel
 				info[runtimeRefField] = runtime.RuntimeRef.Name

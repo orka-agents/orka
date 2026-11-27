@@ -88,8 +88,6 @@ func TestSubstrateMCPLegacyIdentityResumesWithoutReplacingActor(t *testing.T) {
 			}
 			current := &corev1alpha1.Tool{}
 			for range 12 {
-				// Reconstruct the controller after every write, including the
-				// injected failure between status and lease migration.
 				if _, err := newReconciler().Reconcile(t.Context(), mcpToolRequest()); err != nil && !strings.Contains(err.Error(), "injected migration write failure") {
 					t.Fatal(err)
 				}
@@ -238,8 +236,6 @@ func TestSubstrateMCPLegacyFinalizationBeforeActorStatus(t *testing.T) {
 			executor := &recordingToolWorkspaceExecutor{}
 			deleted := false
 			for range 12 {
-				// Native template availability and new admission are irrelevant
-				// to cleanup; reconstruct the controller between durable writes.
 				r := &ToolReconciler{Client: c, Scheme: scheme,
 					SubstrateTemplateValidator: func(context.Context, *ExecutionWorkspaceRequest) error {
 						t.Fatal("finalization tried to validate native template admission")

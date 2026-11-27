@@ -16,8 +16,6 @@ func TestValidateSourceRefAcceptsCanonicalObjectBranchAndTags(t *testing.T) {
 		{name: "sha1 object ID", ref: strings.Repeat("a", 40)},
 		{name: "sha256 object ID", ref: strings.Repeat("b", 64)},
 		{name: "branch", ref: "refs/heads/main"},
-		// Lightweight and annotated tags use the same canonical ref syntax. The
-		// service's Git resolver is responsible for peeling annotated tags.
 		{name: "lightweight tag", ref: "refs/tags/v1.2.3"},
 		{name: "annotated tag", ref: "refs/tags/releases/v2.0.0"},
 	} {

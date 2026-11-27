@@ -14,28 +14,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// EnforcementLeaseName names the Lease that marks an unbroken period of
-// Agent use enforcement in the controller's namespace. It carries no holder;
-// only its creation time, which the API server sets, is read.
 const EnforcementLeaseName = "orka-agent-use-enforcement"
 
-// enforcementLeaderAnnotation marks a marker a leading controller created.
-// Only such a marker can continue a period: a controller creates it after it
-// wins leadership, so the leader it replaced, which may not have checked
-// Agent use, no longer serves requests.
 const enforcementLeaderAnnotation = "orka.ai/created-by-leader"
 
 const enforcementLeaderAnnotationValue = "true"
 
-// EndEnforcementPeriod deletes the marker, so the next enforcing leader
-// starts a new period. A controller that does not enforce Agent use calls it
-// before it serves any request and again once it leads, since an enforcing
-// leader may have started a period in between. Tasks and automation sources
-// created before a period's start are not covered by any identity claim,
-// which keeps work created while the check was off from binding an identity
-// whose claim survived the gap. Errors are returned so the caller can refuse
-// to run: a marker left in place would let a later enforcing leader trust
-// the gap.
 func EndEnforcementPeriod(ctx context.Context, c client.Client, namespace string) error {
 	marker := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: EnforcementLeaseName}}
 	if err := c.Delete(ctx, marker); err != nil && !apierrors.IsNotFound(err) {
@@ -44,26 +28,13 @@ func EndEnforcementPeriod(ctx context.Context, c client.Client, namespace string
 	return nil
 }
 
-// enforcementTransitionAnnotation records on the marker the leader Lease's
-// UID and transition count, as "<uid>/<count>", under the last enforcing
-// leader that kept the period. The UID keeps a recreated leader Lease, whose
-// count starts over, from matching an old count.
 const enforcementTransitionAnnotation = "orka.ai/leader-transition"
 
-// LeaderLease names the controller's leader election Lease and how to tell
-// that this process holds it.
 type LeaderLease struct {
-	Key client.ObjectKey
-	// HolderPrefix starts this process's holder identity. controller-runtime
-	// names a holder by its hostname and a random suffix, and a process that
-	// lost leadership exits, so a holder with this pod's hostname that is
-	// still current is this process.
+	Key          client.ObjectKey
 	HolderPrefix string
 }
 
-// transition returns the leader Lease's UID and transition count while this
-// process holds it. Leader election advances the count whenever the holder
-// changes, before the new leader runs anything.
 func (l LeaderLease) transition(ctx context.Context, c client.Client) (string, int32, error) {
 	lease := &coordinationv1.Lease{}
 	if err := c.Get(ctx, l.Key, lease); err != nil {
@@ -82,18 +53,6 @@ func (l LeaderLease) transition(ctx context.Context, c client.Client) (string, i
 	return string(lease.UID), count, nil
 }
 
-// StartEnforcementPeriod starts the period of Agent use enforcement, or
-// continues the one the previous leader kept. An enforcing controller calls
-// it each time it wins leadership, never before.
-//
-// A period continues only when the leader just before this one enforced Agent
-// use too: the marker records the leader Lease's transition count under the
-// last enforcing leader that kept it, and this leader keeps it only when that
-// count is its own or the one just before it, then records its own. Any other
-// leader in between, such as one that did not check Agent use and had not yet
-// deleted the marker, advanced the count, so a new period starts after it
-// stopped serving. Without a leader Lease (leader election off), nothing shows
-// who served in between, and every start begins a new period.
 func StartEnforcementPeriod(ctx context.Context, c client.Client, namespace string, leader *LeaderLease) (time.Time, error) {
 	recorded, leaseUID := "", ""
 	var current int32
@@ -151,10 +110,6 @@ func StartEnforcementPeriod(ctx context.Context, c client.Client, namespace stri
 	return time.Time{}, fmt.Errorf("the Agent use enforcement marker kept changing")
 }
 
-// enforcementContinues reports whether a marker shows that the leader before
-// the one at transition current of the leader Lease leaseUID enforced Agent
-// use: a leader created it and recorded, for the same Lease, current or the
-// transition just before it.
 func enforcementContinues(marker *coordinationv1.Lease, leaseUID string, current int32) bool {
 	if marker.Annotations[enforcementLeaderAnnotation] != enforcementLeaderAnnotationValue {
 		return false
@@ -164,23 +119,18 @@ func enforcementContinues(marker *coordinationv1.Lease, leaseUID string, current
 	return found && err == nil && uid == leaseUID && (int32(recorded) == current || int32(recorded) == current-1)
 }
 
-// EnforcementPeriod holds this controller's period start once it is known.
-// Config copies share it, so a period started after leadership reaches every
-// reconciler.
 type EnforcementPeriod struct {
 	mu      sync.RWMutex
 	since   time.Time
 	started bool
 }
 
-// Start records the period's start.
 func (p *EnforcementPeriod) Start(since time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.since, p.started = since, true
 }
 
-// Since returns the period's start, or started=false before it is known.
 func (p *EnforcementPeriod) Since() (since time.Time, started bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

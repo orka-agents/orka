@@ -14,8 +14,6 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-// The permission tool calls below were recorded from the pinned runtimes in
-// sessions launched to ask. None carries a structured tool name.
 const (
 	copilotAskShell = `{"toolCallId":"call_resp_3","title":"Create empty file","kind":"execute","status":"pending","rawInput":{"command":"touch created.txt","commands":["touch created.txt"]}}`
 	copilotAskWrite = `{"toolCallId":"call_resp_5","title":"Create file","kind":"edit","status":"pending","rawInput":{"fileName":"/workspace/created.txt","diff":"--- a/dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+hi\n"},"locations":[{"path":"/workspace/created.txt"}]}`

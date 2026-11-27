@@ -11,9 +11,6 @@ import (
 	"strings"
 )
 
-// handleCORS answers browser preflight without consulting tenant resources or
-// authenticating an absent credential. Actual requests still use the normal
-// TokenReview and installation authorization path.
 func (r *CompatRouter) handleCORS(w http.ResponseWriter, req *http.Request, path string) bool {
 	w.Header().Add("Vary", "Origin")
 	origin := req.Header.Get("Origin")
@@ -70,8 +67,6 @@ func (r *CompatRouter) handleCORS(w http.ResponseWriter, req *http.Request, path
 	return true
 }
 
-// SDK metadata is allowed in browser preflight but is not forwarded to an
-// installation. Keep this separate from the protocol/credential forwarding list.
 var compatRouterSDKHeaders = []string{
 	"Anthropic-Dangerous-Direct-Browser-Access",
 	"X-Stainless-Lang", "X-Stainless-Package-Version",

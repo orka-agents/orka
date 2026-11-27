@@ -45,17 +45,11 @@ type Config struct {
 	CompletePromptBeforeReplay        bool
 	CompletePromptBeforeConflict      bool
 
-	// These test-only faults prove that the conformance cycle rejects runtimes
-	// which advertise duplicate-safe mutations without honoring replay semantics.
 	BreakDuplicateSafeMutations       bool
 	BreakDigestConflictClassification bool
-	// These faults alter only replies about a settled cancellation probe.
-	// The original prompt stream and its recorded settlement stay unchanged.
-	MutateSettledPromptReplay   func(*harnessv2.PromptAdmissionResponse)
-	MutateSettledPromptConflict func(*harnessv2.Classification)
+	MutateSettledPromptReplay         func(*harnessv2.PromptAdmissionResponse)
+	MutateSettledPromptConflict       func(*harnessv2.Classification)
 
-	// These faults prove that publication-finalization recovery is exact even
-	// when the controller must allocate a fresh operation identity.
 	BreakFreshPublicationFinalizationAppliedAt     bool
 	BreakFreshPublicationFinalizationConflictGuard bool
 	FailFirstSessionDeleteBeforeApply              bool
@@ -274,8 +268,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.config.AllowUnauthenticatedStatus && !s.authorizeBearer(w, r) {
 		return
 	}
-	// Mirror the production supervisor: status requires proof of the
-	// operation capability secret in addition to the controller bearer.
 	if !s.config.AllowUnauthenticatedStatus {
 		binding := harnessv2.StatusCapabilityBinding{
 			RuntimeProfileDigest: s.Fence().RuntimeProfileDigest,

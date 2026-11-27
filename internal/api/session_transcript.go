@@ -8,8 +8,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// sessionTranscriptMessage adds display text without changing the stored tool
-// arguments. Browsers otherwise round JSON numbers before rendering them.
 func sessionTranscriptMessage(message store.SessionMessage) store.SessionMessage {
 	calls, ok := message.ToolCalls.([]any)
 	if !ok {

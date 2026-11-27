@@ -11,15 +11,11 @@ import (
 	"github.com/orka-agents/orka/internal/agentcontext"
 )
 
-// The Task CRD rule alone, with no admission webhook, must keep a soul-bound
-// Task pausable while freezing its execution inputs, and keep the whole spec
-// of an ACP-bound Task frozen.
 func TestTaskImmutabilityRuleOnAPIServer(t *testing.T) {
 	apiClient := newArchivedSessionAPIClient(t)
 	ctx := t.Context()
 	digest := agentcontext.Digest("bound")
 
-	// An ACP binding with a valid shape, produced by the real binder.
 	acpSource := bindingTestTask()
 	binder, _ := newBindingTestReconciler(t, acpSource, bindingTestNamespace())
 	if _, err, handled := binder.ensureAgentExecutionBinding(ctx, acpSource, bindingTestAgent()); err != nil || handled {

@@ -75,17 +75,14 @@ describe('AgentList', () => {
       expect(screen.getByText('agent-a')).toBeInTheDocument()
     })
 
-    // Agent A: name, namespace, provider badge, model badge, tools count
     expect(screen.getByText('anthropic')).toBeInTheDocument()
     expect(screen.getByText('claude-sonnet-4-20250514')).toBeInTheDocument()
     expect(screen.getByText('1 tool')).toBeInTheDocument()
     expect(screen.getByText('Active: 3')).toBeInTheDocument()
 
-    // Agent B: name, runtime badge
     expect(screen.getByText('agent-b')).toBeInTheDocument()
     expect(screen.getByText('Codex ACP')).toBeInTheDocument()
 
-    // Agent C: OpenCode keeps its branded runtime label.
     expect(screen.getByText('agent-c')).toBeInTheDocument()
     expect(screen.getByText('OpenCode ACP')).toBeInTheDocument()
   })
@@ -143,15 +140,12 @@ describe('AgentList', () => {
 
     render(<AgentList />)
     const title = await screen.findByText(longName)
-    // A truncated name keeps its full text available as a tooltip.
     expect(title).toHaveAttribute('title', longName)
     expect(screen.getByText('orka-system')).toHaveAttribute('title', 'orka-system')
-    // Two columns only from lg and three from xl, so md cards span the full width.
     const grid = title.closest('.grid')
     expect(grid).toHaveClass('lg:grid-cols-2', 'xl:grid-cols-3')
     expect(grid).not.toHaveClass('md:grid-cols-2')
     expect(grid).not.toHaveClass('lg:grid-cols-3')
-    // The readiness badge sits under the name instead of beside it in the header row.
     const nameColumn = title.parentElement as HTMLElement
     expect(nameColumn).toContainElement(screen.getByText('Ready'))
   })

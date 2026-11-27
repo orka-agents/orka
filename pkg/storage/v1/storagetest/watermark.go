@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// advanceWatermark advances provider's write watermark as one operation under
-// fence and returns the envelope with the result.
 func advanceWatermark[P suiteProvider](t *testing.T, provider P, fence storagev1.ControllerEpochFence) (storagev1.WriteEnvelope, storagev1.WriteWatermark, error) {
 	t.Helper()
 	envelope := NewWriteEnvelope(t, datasetID(t, provider), fence, "AdvanceWriteWatermark")
@@ -17,9 +15,6 @@ func advanceWatermark[P suiteProvider](t *testing.T, provider P, fence storagev1
 	return envelope, watermark, err
 }
 
-// runWriteWatermark checks that a dataset's write watermark starts at zero,
-// increases by one per committed operation, and is never advanced again by a
-// replay.
 func runWriteWatermark[P suiteProvider](t *testing.T, newProvider func(t *testing.T) P) {
 	t.Run("advances by one per operation", func(t *testing.T) {
 		provider := newProvider(t)
@@ -43,8 +38,6 @@ func runWriteWatermark[P suiteProvider](t *testing.T, newProvider func(t *testin
 		_, second, err := advanceWatermark(t, provider, suiteFence)
 		require.NoError(t, err)
 		require.Equal(t, int64(2), second.Value)
-		// AdvancedAt is the provider's wall clock, which may step back between
-		// advances; Value carries the order.
 		require.False(t, second.AdvancedAt.IsZero())
 
 		replayed, err := provider.AdvanceWriteWatermark(storagev1.WithWriteEnvelope(ctx, first))

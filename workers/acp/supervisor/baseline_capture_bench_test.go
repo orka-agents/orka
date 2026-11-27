@@ -9,10 +9,6 @@ import (
 	"github.com/orka-agents/orka/internal/workspacedelta"
 )
 
-// BenchmarkBaselineCapture measures the trusted baseline capture — walk,
-// hashing, and the secret-like content flagger and fingerprinter — over a
-// staged copy of the regular files under ORKA_SECRET_SCAN_CORPUS_DIR (a
-// repository checkout), as session creation runs it.
 func BenchmarkBaselineCapture(b *testing.B) {
 	source := os.Getenv("ORKA_SECRET_SCAN_CORPUS_DIR")
 	if source == "" {

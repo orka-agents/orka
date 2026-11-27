@@ -42,7 +42,6 @@ func (f *externalRuntimePoolFixture) advertiseNativeProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	if f.currentWorkspace(t).Spec.Workload == nil {
-		// This fixture represents the native kind selected at pool creation.
 		f.pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures = append(f.pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureNativeProcess)
 		pool := runtimePoolTestGetPool(t, f.r, f.pool)
 		pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures = slices.Clone(f.pool.Spec.ExecutionWorkspace.Workload.RequiredFeatures)
@@ -52,8 +51,6 @@ func (f *externalRuntimePoolFixture) advertiseNativeProcess(t *testing.T) {
 	}
 }
 
-// The native backend admits at most 32 environment entries. Main's in-tree
-// native runtime fit its live conformance flags in that budget; keep it.
 func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimit(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.r.E2EPromptWriteAmbiguityMarker = "ORKA_E2E_WS_LC_AMBIGUOUS_OK"
@@ -73,10 +70,6 @@ func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimit(t *testing.T) {
 	}
 }
 
-// Supervisor telemetry shares that budget. A native runtime that cannot
-// suspend has three entries to spare, which every endpoint and protocol
-// combination, and the enable flag, one collector endpoint and one exporter
-// setting shared by traces and metrics, must fit.
 func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimitWithTelemetry(t *testing.T) {
 	const collector = "http://collector.otel.svc:4318"
 	combinations := map[string]map[string]string{
@@ -340,8 +333,6 @@ func TestExternalRuntimePoolPublicationFencesAuthoritativeProvider(t *testing.T)
 			case "unavailable":
 				reader.err = errors.New("provider observation unavailable")
 			case "advanced generation", "draining advanced generation":
-				// The provider published current status for a newer generation
-				// after the reconcile-time fence.
 				reader.provider.Generation++
 				reader.provider.Status.ObservedGeneration = reader.provider.Generation
 				for i := range reader.provider.Status.Conditions {
@@ -352,7 +343,7 @@ func TestExternalRuntimePoolPublicationFencesAuthoritativeProvider(t *testing.T)
 				}
 			}
 			f.r.APIReader = reader
-			_, err = f.r.publishExternalWorkspaceWorkload(t.Context(), f.pool, cfg, f.currentWorkspace(t), auth, providerSecret)
+			_, err = f.r.publishExternalWorkspaceWorkload(t.Context(), f.pool, cfg, f.currentWorkspace(t), auth, providerSecret, false)
 			w := f.currentWorkspace(t)
 			if reader.reads == 0 {
 				t.Fatal("publication used cached provider capabilities")
@@ -418,9 +409,6 @@ func TestExternalRuntimePoolAttestsOnlyFrozenMaterializationKind(t *testing.T) {
 	}
 }
 
-// A suspendable native runtime adds durable-workspace entries to the same
-// 32-entry budget. Telemetry must fit what remains, and the pool must say
-// when it cannot, instead of publishing a request the provider refuses.
 func TestExternalRuntimePoolSuspendableNativeEnvironmentFitsWithTelemetry(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.otel.svc.cluster.local:4317")
 	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
@@ -464,9 +452,6 @@ func TestExternalRuntimePoolSuspendableNativeEnvironmentFitsWithTelemetry(t *tes
 }
 
 func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
-	// Separate OTLP/HTTP collectors need four entries. A Pod-backed runtime has
-	// no environment limit and keeps both signals, and so does a native
-	// runtime with room for four.
 	values := map[string]string{
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc.cluster.local:4318/v1/traces",
 		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc.cluster.local:4318/v1/metrics",
@@ -498,7 +483,6 @@ func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
 		"already over":          {base: nativeRuntimeEnvironmentLimit + 1, entries: 33},
 	} {
 		t.Run(name, func(t *testing.T) {
-			// The runtime template arrives carrying the Pod projection.
 			env, fits, message := fitNativeRuntimeTelemetry(append(base(test.base), pod...), true, split)
 			if fits != test.fits || message == "" || len(env) != test.entries {
 				t.Fatalf("fit = %t %q with %d entries, want %t with %d", fits, message, len(env), test.fits, test.entries)
@@ -514,12 +498,9 @@ func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
 			}
 		})
 	}
-	// Readiness compares against every configured signal: a trace-only Pod
-	// projection is not reported as complete.
 	if _, fits, _ := fitNativeRuntimeTelemetry(append(base(nativeRuntimeEnvironmentLimit-3), pod...), true, split); fits {
 		t.Fatal("trace-only telemetry reported every signal projected")
 	}
-	// An unchanged projection that fits keeps its place in the environment.
 	tracesSignal, metricsSignal, _ := runtimePoolTelemetrySignals(true, split)
 	unchanged := append(append(base(2), encodeRuntimePoolTelemetryEnv(tracesSignal, metricsSignal)...), base(1)...)
 	if env, fits, _ := fitNativeRuntimeTelemetry(unchanged, true, split); !fits || !reflect.DeepEqual(env, unchanged) {
@@ -531,9 +512,6 @@ func TestFitNativeRuntimeTelemetryDropsMetricsThenTraces(t *testing.T) {
 	}
 }
 
-// Native fitting decides which collectors the runtime exports to, so the
-// gateway allowlist admits only those: a dropped metrics collector is not
-// reachable from the sandbox.
 func TestExternalRuntimePoolNativeCollectorEgressFollowsFittedTelemetry(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://traces.otel.svc.cluster.local:4318/v1/traces")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://metrics.otel.svc.cluster.local:4318/v1/metrics")
@@ -564,8 +542,6 @@ func TestExternalRuntimePoolNativeCollectorEgressFollowsFittedTelemetry(t *testi
 	}
 }
 
-// A request without supervisor telemetry clears readiness left by an earlier
-// request instead of describing a runtime that no longer exists.
 func TestExternalRuntimePoolClearsTelemetryReadyWithoutTelemetry(t *testing.T) {
 	f := newExternalRuntimePoolFixture(t)
 	f.advertiseNativeProcess(t)
@@ -582,10 +558,6 @@ func TestExternalRuntimePoolClearsTelemetryReadyWithoutTelemetry(t *testing.T) {
 	}
 }
 
-// loseNextPublishStatusWrite makes the API server refuse the next RuntimePool
-// status write that reports a published workload request, as when the drain,
-// session or supervisor probe path advances the pool first. It counts the
-// writes it refused.
 func (f *externalRuntimePoolFixture) loseNextPublishStatusWrite() *int {
 	lost := new(int)
 	f.r.Client = interceptor.NewClient(f.r.Client.(client.WithWatch), interceptor.Funcs{
@@ -600,9 +572,6 @@ func (f *externalRuntimePoolFixture) loseNextPublishStatusWrite() *int {
 	return lost
 }
 
-// reducedNativeTelemetryEnv configures separate OTLP/HTTP collectors whose
-// exporter settings differ per signal: six entries, more than the room a
-// native runtime that cannot suspend leaves, while traces alone fit.
 var reducedNativeTelemetryEnv = map[string]string{
 	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "http://traces.otel.svc.cluster.local:4318/v1/traces",
 	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc.cluster.local:4318/v1/metrics",
@@ -625,10 +594,6 @@ func assertTelemetryReady(t *testing.T, pool corev1alpha1.RuntimePool, status me
 	}
 }
 
-// Only the publishing reconcile fits telemetry. When its status write loses
-// the optimistic lock, the requeued reconcile does not publish again, so it
-// must re-derive TelemetryReady from the frozen request for the pool to serve
-// with the condition.
 func TestExternalRuntimePoolTelemetryReadySurvivesLostPublishStatusWrite(t *testing.T) {
 	for name, test := range map[string]struct {
 		env    map[string]string
@@ -680,9 +645,6 @@ func TestExternalRuntimePoolTelemetryReadySurvivesLostPublishStatusWrite(t *test
 	}
 }
 
-// A republished request re-derives TelemetryReady even when its own publishing
-// status write is lost: the predecessor's condition must not describe the new
-// runtime.
 func TestExternalRuntimePoolRepublishRederivesTelemetryReady(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.otel.svc.cluster.local:4317")
 	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
@@ -709,7 +671,6 @@ func TestExternalRuntimePoolRepublishRederivesTelemetryReady(t *testing.T) {
 			f.advertiseNativeProcess(t)
 			w := f.publish(t)
 			assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
-			// The provider reports the first, never-started instance stopped.
 			identity := workspacev1alpha1.InstanceIdentity{AllocationID: "first-allocation", InstanceID: "first-instance", RequestRevision: w.Spec.Workload.Revision}
 			w.Status.Allocation = &workspacev1alpha1.AllocationObservation{Sequence: w.Spec.Workload.Sequence, Key: w.Spec.Workload.Key, Identity: identity, State: workspacev1alpha1.AllocationStopped}
 			w.Status.ObservedGeneration = w.Generation
@@ -734,9 +695,6 @@ func TestExternalRuntimePoolRepublishRederivesTelemetryReady(t *testing.T) {
 	}
 }
 
-// A request published under another controller telemetry configuration keeps
-// the condition recorded with it: re-fitting it to the current configuration
-// would describe a projection the runtime does not have.
 func TestExternalRuntimePoolKeepsTelemetryReadyAcrossConfigurationChange(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.otel.svc.cluster.local:4317")
 	f := newExternalRuntimePoolFixture(t)
@@ -753,10 +711,6 @@ func TestExternalRuntimePoolKeepsTelemetryReadyAcrossConfigurationChange(t *test
 	assertTelemetryReady(t, pool, metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
 }
 
-// A configuration change that leaves the frozen projection unchanged is judged
-// against the signals now configured: once metrics are turned off, the
-// trace-only runtime exports every configured signal and does not report
-// metrics as dropped for the environment limit.
 func TestExternalRuntimePoolTelemetryReadyFollowsConfiguredSignalsForUnchangedProjection(t *testing.T) {
 	for key, value := range reducedNativeTelemetryEnv {
 		t.Setenv(key, value)
@@ -774,8 +728,6 @@ func TestExternalRuntimePoolTelemetryReadyFollowsConfiguredSignalsForUnchangedPr
 	assertTelemetryReady(t, runtimePoolTestGetPool(t, f.r, f.pool), metav1.ConditionTrue, corev1alpha1.RuntimePoolReasonTelemetryProjected)
 }
 
-// Empty model limits are equivalent to unset ones for both the supervisor
-// and the controller, so the native template omits them; set limits stay.
 func TestRuntimePoolNativeProcessTemplateOmitsOnlyEmptyModelLimits(t *testing.T) {
 	template := corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runtime", Env: []corev1.EnvVar{
 		{Name: "ORKA_ACP_MODEL_CONTEXT_LIMIT", Value: ""},

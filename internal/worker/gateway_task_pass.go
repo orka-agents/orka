@@ -11,8 +11,6 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 )
 
-// SetGatewayTaskPass installs controller-only per-call authority. Native workers
-// never install it, and refuse before looking up any outbound credentials.
 func (e *ToolExecutor) SetGatewayTaskPass(source func(context.Context, *corev1alpha1.Tool) (string, error), httpClient *http.Client) {
 	e.gatewayTaskPass = source
 	e.client = httpClient
@@ -20,7 +18,6 @@ func (e *ToolExecutor) SetGatewayTaskPass(source func(context.Context, *corev1al
 
 var errGatewayTaskPassTool = errors.New("gateway task pass requires a fixed HTTPS POST endpoint and exclusive header authentication")
 
-// ValidateGatewayTaskPassTool excludes competing credential and routing paths.
 func ValidateGatewayTaskPassTool(tool *corev1alpha1.Tool) error {
 	h := tool.Spec.HTTP
 	if h == nil || !h.GatewayTaskPass {
@@ -35,8 +32,6 @@ func ValidateGatewayTaskPassTool(tool *corev1alpha1.Tool) error {
 	return nil
 }
 
-// onlyGatewayTaskPassFields allows only reviewed fields, so a field added to
-// ToolSpec or HTTPExecution later is refused until it is explicitly permitted.
 func onlyGatewayTaskPassFields(spec corev1alpha1.ToolSpec) bool {
 	h := *spec.HTTP
 	if len(h.Headers) == 0 {

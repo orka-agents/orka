@@ -23,7 +23,6 @@ import (
 
 var metadataKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 
-// DecodeEvent strictly decodes and validates one bounded event envelope.
 func DecodeEvent(body []byte) (*EventEnvelope, error) {
 	if len(body) == 0 {
 		return nil, errors.New("request body is required")
@@ -49,8 +48,6 @@ func DecodeEvent(body []byte) (*EventEnvelope, error) {
 	return &event, nil
 }
 
-// NormalizeEvent trims boundary whitespace while preserving provider-owned identity case.
-// It rejects metadata that exceeds the raw entry bound or has ambiguous normalized keys.
 func NormalizeEvent(event *EventEnvelope) error {
 	if event == nil {
 		return nil
@@ -83,7 +80,6 @@ func NormalizeEvent(event *EventEnvelope) error {
 	return nil
 }
 
-// ValidateEvent enforces V1 text, identity, timestamp, and metadata bounds.
 func ValidateEvent(event *EventEnvelope) error {
 	if event == nil {
 		return errors.New("event is required")
@@ -149,7 +145,6 @@ func ValidateEvent(event *EventEnvelope) error {
 	return nil
 }
 
-// ValidateAllowedMetadata rejects metadata not explicitly allowed by a GatewayClass.
 func ValidateAllowedMetadata(metadata map[string]string, allowed []string) error {
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, key := range allowed {
@@ -163,7 +158,6 @@ func ValidateAllowedMetadata(metadata map[string]string, allowed []string) error
 	return nil
 }
 
-// DecodeCapabilities strictly decodes a bounded capability response.
 func DecodeCapabilities(body []byte) (*CapabilitiesResponse, error) {
 	if len(body) == 0 || len(body) > MaxAdapterResponseBytes {
 		return nil, errors.New("invalid capabilities response size")
@@ -195,7 +189,6 @@ func DecodeCapabilities(body []byte) (*CapabilitiesResponse, error) {
 	return &response, nil
 }
 
-// DecodeDeliveryResponse strictly decodes one bounded terminal delivery result.
 func DecodeDeliveryResponse(body []byte) (*DeliveryResponse, error) {
 	if len(body) == 0 || len(body) > MaxAdapterResponseBytes {
 		return nil, errors.New("invalid delivery response size")
@@ -223,7 +216,6 @@ func DecodeDeliveryResponse(body []byte) (*DeliveryResponse, error) {
 	return &response, nil
 }
 
-// ValidateDeliveryRequest enforces outbound V1 bounds before a network call.
 func ValidateDeliveryRequest(request *DeliveryRequest) error {
 	if request == nil {
 		return errors.New("delivery request is required")
@@ -257,7 +249,6 @@ func ValidateDeliveryRequest(request *DeliveryRequest) error {
 	return nil
 }
 
-// ConstantTimeBearerEqual compares bearer tokens without leaking prefix timing.
 func ConstantTimeBearerEqual(got, want string) bool {
 	got = strings.TrimSpace(got)
 	want = strings.TrimSpace(want)
@@ -267,7 +258,6 @@ func ConstantTimeBearerEqual(got, want string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-// BearerToken extracts a case-sensitive bearer value from an Authorization header.
 func BearerToken(header string) string {
 	parts := strings.Fields(header)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
@@ -276,7 +266,6 @@ func BearerToken(header string) string {
 	return parts[1]
 }
 
-// SanitizeMessage strips controls and bounds adapter-owned messages.
 func SanitizeMessage(message string, limit int) string {
 	message = redact.SensitiveText(strings.TrimSpace(message))
 	message = strings.Map(func(r rune) rune {

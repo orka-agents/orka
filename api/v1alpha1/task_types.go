@@ -18,12 +18,9 @@ import (
 type TaskType string
 
 const (
-	// TaskTypeContainer runs arbitrary container commands
 	TaskTypeContainer TaskType = "container"
-	// TaskTypeAI runs AI agent tasks with LLM integration
-	TaskTypeAI TaskType = "ai"
-	// TaskTypeAgent runs external agent CLI runtimes (e.g., Copilot CLI, Claude Code CLI, Codex CLI)
-	TaskTypeAgent TaskType = "agent"
+	TaskTypeAI        TaskType = "ai"
+	TaskTypeAgent     TaskType = "agent"
 )
 
 // TaskPhase defines the phase of task execution
@@ -40,10 +37,6 @@ const (
 	TaskPhaseCancelled  TaskPhase = "Cancelled"
 )
 
-// IsTerminal reports whether the phase is final: Succeeded, Failed, or
-// Cancelled. Scheduled is not terminal; a recurring parent stays Scheduled.
-// Empty and unknown phases are not terminal, so callers that gate cleanup or
-// accounting on this fail safe by treating the Task as still live.
 func (p TaskPhase) IsTerminal() bool {
 	switch p {
 	case TaskPhaseSucceeded, TaskPhaseFailed, TaskPhaseCancelled:
@@ -58,9 +51,7 @@ func (p TaskPhase) IsTerminal() bool {
 type ConcurrencyPolicy string
 
 const (
-	// AllowConcurrent allows child tasks to run concurrently.
-	AllowConcurrent ConcurrencyPolicy = "Allow"
-	// ForbidConcurrent skips the new run if a previous run is still active.
+	AllowConcurrent  ConcurrencyPolicy = "Allow"
 	ForbidConcurrent ConcurrencyPolicy = "Forbid"
 )
 
@@ -143,12 +134,8 @@ type TaskTransaction struct {
 type TaskWebhookEvent string
 
 const (
-	// TaskWebhookEventApprovalRequested notifies when a human approval for the
-	// Task is requested.
 	TaskWebhookEventApprovalRequested TaskWebhookEvent = "task.approval_requested"
-	// TaskWebhookEventApprovalResolved notifies when a requested approval is
-	// approved, declined, expired, or cancelled.
-	TaskWebhookEventApprovalResolved TaskWebhookEvent = "task.approval_resolved"
+	TaskWebhookEventApprovalResolved  TaskWebhookEvent = "task.approval_resolved"
 )
 
 // TaskSpec defines the desired state of Task
@@ -472,11 +459,7 @@ type AISpec struct {
 type MemoryConsolidationMode string
 
 const (
-	// MemoryConsolidationDryRun reports the operations without creating
-	// proposals.
-	MemoryConsolidationDryRun MemoryConsolidationMode = "DryRun"
-	// MemoryConsolidationPropose also creates a memory proposal for each
-	// accepted operation.
+	MemoryConsolidationDryRun  MemoryConsolidationMode = "DryRun"
 	MemoryConsolidationPropose MemoryConsolidationMode = "Propose"
 )
 
@@ -510,8 +493,6 @@ type MemoryConsolidationSpec struct {
 	Lookback *metav1.Duration `json:"lookback,omitempty"`
 }
 
-// MarshalJSON preserves an explicitly empty native tool policy instead of
-// omitting it. Nil and nonempty lists retain their existing wire representation.
 func (in AISpec) MarshalJSON() ([]byte, error) {
 	type aiSpecJSON AISpec
 	if in.Tools == nil || len(in.Tools) > 0 {
@@ -700,16 +681,9 @@ type TaskSoulBinding struct {
 type TaskWebhookDeliveryState string
 
 const (
-	// TaskWebhookDeliveryPending means the notice still has attempts left.
-	TaskWebhookDeliveryPending TaskWebhookDeliveryState = "Pending"
-	// TaskWebhookDeliveryDelivered means the receiver acknowledged the notice
-	// with a 2xx response.
+	TaskWebhookDeliveryPending   TaskWebhookDeliveryState = "Pending"
 	TaskWebhookDeliveryDelivered TaskWebhookDeliveryState = "Delivered"
-	// TaskWebhookDeliveryFailed means the notice was rejected by policy,
-	// exhausted its bounded attempts, belonged to a parked turn whose
-	// continuation now reports instead, or was an approval notice retired
-	// unsent. It is never retried.
-	TaskWebhookDeliveryFailed TaskWebhookDeliveryState = "Failed"
+	TaskWebhookDeliveryFailed    TaskWebhookDeliveryState = "Failed"
 )
 
 // TaskWebhookDelivery is the durable, provider-neutral record of one signed
@@ -775,17 +749,11 @@ type TaskWebhookDelivery struct {
 type TaskApprovalWebhookTransition string
 
 const (
-	// TaskApprovalWebhookRequested reports a new approval request.
 	TaskApprovalWebhookRequested TaskApprovalWebhookTransition = "Requested"
-	// TaskApprovalWebhookResolved reports an approval's single resolution.
-	TaskApprovalWebhookResolved TaskApprovalWebhookTransition = "Resolved"
-	// TaskApprovalWebhookOverflow reports that later transitions were not
-	// recorded because the notice queue was full.
-	TaskApprovalWebhookOverflow TaskApprovalWebhookTransition = "Overflow"
+	TaskApprovalWebhookResolved  TaskApprovalWebhookTransition = "Resolved"
+	TaskApprovalWebhookOverflow  TaskApprovalWebhookTransition = "Overflow"
 )
 
-// MaxTaskApprovalWebhookNotices bounds status.approvalWebhooks.notices. One
-// slot is reserved for the overflow notice.
 const MaxTaskApprovalWebhookNotices = 16
 
 // TaskApprovalWebhooks is the durable projection of a Task's approval events
@@ -1082,9 +1050,6 @@ type ConnectionBinding struct {
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:selectablefield:JSONPath=.spec.sessionRef.name
-// The execution-authority rule freezes the whole spec for ACP-bound Tasks. For a
-// soul-only binding it compares every field except TaskControlFields; a test
-// regenerates that field list from TaskSpec.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type) || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image) && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) && has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command) || self.spec.command == oldSelf.spec.command) && has(self.spec.args) == has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args) && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env) || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout) && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout) && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority) || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy) == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL) && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL) && has(self.spec.webhookEvents) == has(oldSelf.spec.webhookEvents) && (!has(self.spec.webhookEvents) || self.spec.webhookEvents == oldSelf.spec.webhookEvents) && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef) || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources) && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution) || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule) == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone) && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone) && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy) && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy == oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds) == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds) || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds) && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit) && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit) == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit) || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit) && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) || self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef) && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef) && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt) || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime) == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) || self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace) == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef) && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef) && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy) || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction) == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction == oldSelf.spec.transaction))))",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
@@ -1110,13 +1075,9 @@ type TaskList struct {
 type AgentRuntimeType string
 
 const (
-	// AgentRuntimeCopilot uses GitHub Copilot CLI as the agent runtime.
-	AgentRuntimeCopilot AgentRuntimeType = "copilot"
-	// AgentRuntimeClaude uses Claude Code CLI as the agent runtime
-	AgentRuntimeClaude AgentRuntimeType = "claude"
-	// AgentRuntimeCodex uses OpenAI Codex CLI as the agent runtime
-	AgentRuntimeCodex AgentRuntimeType = "codex"
-	// AgentRuntimeOpencode uses OpenCode CLI's native ACP server as the agent runtime.
+	AgentRuntimeCopilot  AgentRuntimeType = "copilot"
+	AgentRuntimeClaude   AgentRuntimeType = "claude"
+	AgentRuntimeCodex    AgentRuntimeType = "codex"
 	AgentRuntimeOpencode AgentRuntimeType = "opencode"
 )
 
@@ -1125,11 +1086,7 @@ const (
 type PermissionDecisionMode string
 
 const (
-	// PermissionDecisionsPolicy answers every permission request from the
-	// frozen tool policy.
-	PermissionDecisionsPolicy PermissionDecisionMode = "Policy"
-	// PermissionDecisionsRequester holds each permission request the frozen
-	// tool policy would allow for the Task's verified requester to decide.
+	PermissionDecisionsPolicy    PermissionDecisionMode = "Policy"
 	PermissionDecisionsRequester PermissionDecisionMode = "Requester"
 )
 
@@ -1172,8 +1129,6 @@ type AgentRuntimeSpec struct {
 	PermissionDecisions PermissionDecisionMode `json:"permissionDecisions,omitempty"`
 }
 
-// MarshalJSON preserves the distinction between an omitted task tool override
-// and an explicitly empty deny-all override.
 func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 	type agentRuntimeSpecJSON struct {
 		MaxTurns            *int32                 `json:"maxTurns,omitempty"`

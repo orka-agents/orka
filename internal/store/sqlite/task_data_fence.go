@@ -23,9 +23,6 @@ type taskDataExecutor interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-// withTaskDataTransaction runs a database-only operation in one write
-// transaction that later task-data methods called with its context join. It
-// is internal to the store: Orka never runs code inside it.
 func (s *Store) withTaskDataTransaction(ctx context.Context, mutate func(context.Context) error) error {
 	if ctx.Value(taskDataTransactionKey{}) != nil {
 		return fmt.Errorf("nested task data transaction")
@@ -35,8 +32,6 @@ func (s *Store) withTaskDataTransaction(ctx context.Context, mutate func(context
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	// BeginTx is deferred in SQLite. A write statement reserves the writer even
-	// when its predicate matches no rows; no task data is changed here.
 	if _, err := tx.ExecContext(ctx, `UPDATE results SET updated_at = updated_at WHERE 0`); err != nil {
 		return err
 	}
@@ -47,9 +42,6 @@ func (s *Store) withTaskDataTransaction(ctx context.Context, mutate func(context
 	return tx.Commit()
 }
 
-// withTaskDataFence runs a fence-checking method. Without a fence in ctx it
-// runs operation unchanged. With one, it checks the fence and runs operation
-// in the same transaction, so cleanup cannot commit between them.
 func (s *Store) withTaskDataFence(ctx context.Context, operation func(context.Context) error) error {
 	fence, ok := store.TaskDataFenceFrom(ctx)
 	if !ok {
@@ -69,7 +61,6 @@ func (s *Store) withTaskDataFence(ctx context.Context, operation func(context.Co
 	})
 }
 
-// ResolveTaskDataFence returns the current fence without registering a Task.
 func (s *Store) ResolveTaskDataFence(ctx context.Context, namespace, taskName string) (store.TaskDataFence, bool, error) {
 	if err := validateTaskDataScope(namespace, taskName, false); err != nil {
 		return store.TaskDataFence{}, false, err
@@ -102,8 +93,6 @@ func (s *Store) ResolveTaskDataFence(ctx context.Context, namespace, taskName st
 	return fence, registered, nil
 }
 
-// RegisterTaskDataFence registers a Task at the current namespace generation
-// unless it is registered already.
 func (s *Store) RegisterTaskDataFence(ctx context.Context, namespace, taskName string) (store.TaskDataFence, bool, error) {
 	result, err := writeOperation(ctx, s, "RegisterTaskDataFence", nil, func(ctx context.Context) (resultPair[store.TaskDataFence, bool], error) {
 		first, second, err := s.registerTaskDataFenceWrite(ctx, namespace, taskName)
@@ -132,10 +121,6 @@ func (s *Store) registerTaskDataFenceWrite(ctx context.Context, namespace, taskN
 	return fence, true, nil
 }
 
-// ReleaseTaskDataFence removes a Task registration that still has the fence's
-// generation. No data was written under a newer generation, so removing it
-// does not need another cleanup generation; a later cleanup generation is
-// preserved.
 func (s *Store) ReleaseTaskDataFence(ctx context.Context, fence store.TaskDataFence) error {
 	return writeOperationErr(ctx, s, "ReleaseTaskDataFence", func(ctx context.Context) error {
 		return s.releaseTaskDataFenceWrite(ctx, fence)
@@ -153,10 +138,6 @@ func (s *Store) releaseTaskDataFenceWrite(ctx context.Context, fence store.TaskD
 	return err
 }
 
-// CheckTaskDataFence reports whether fence is still current. It reads the
-// cleanup generation and every Job revocation in one transaction, so a
-// reclamation that commits between the reads cannot pair the old generation
-// with a revocation it already deleted.
 func (s *Store) CheckTaskDataFence(ctx context.Context, fence store.TaskDataFence) error {
 	if s.taskDataTx(ctx) != nil {
 		return s.checkTaskDataFence(ctx, fence)
@@ -201,8 +182,6 @@ func validateTaskDataScope(namespace, taskName string, requireTask bool) error {
 func (s *Store) taskDataCleanupGeneration(ctx context.Context, namespace, taskName string) (int64, error) {
 	var generation int64
 	if taskName != "" {
-		// Missing rows inherit the namespace epoch instead of resetting to zero.
-		// Reclaiming and recreating a Task row cannot repeat an old generation.
 		err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 			`SELECT COALESCE(
 			 (SELECT generation FROM task_data_task_generations WHERE namespace = ? AND task_name = ?),

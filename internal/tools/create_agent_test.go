@@ -253,7 +253,6 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 
-	// Fetch the created agent
 	agent := &corev1alpha1.Agent{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
 		Name: agentResult.AgentName, Namespace: agentResult.Namespace,
@@ -261,7 +260,6 @@ func TestCreateAgentTool_Execute_OwnerReference(t *testing.T) {
 		t.Fatalf("failed to get agent: %v", err)
 	}
 
-	// Verify owner reference
 	if len(agent.OwnerReferences) != 1 {
 		t.Fatalf("expected 1 owner reference, got %d", len(agent.OwnerReferences))
 	}
@@ -301,12 +299,10 @@ func TestCreateAgentTool_Execute_AutoNaming(t *testing.T) {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 
-	// Verify naming format: {parentTaskName}-{role}-{shortHash}
 	if !strings.HasPrefix(agentResult.AgentName, parentTaskName+"-reviewer-") {
 		t.Errorf("agent name %q should have prefix %q", agentResult.AgentName, parentTaskName+"-reviewer-")
 	}
 
-	// Verify the short hash is 6 hex chars
 	parts := strings.SplitN(agentResult.AgentName, "-", 4)
 	if len(parts) < 4 {
 		t.Fatalf("expected at least 4 parts in name, got %d: %q", len(parts), agentResult.AgentName)
@@ -349,7 +345,6 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 
-	// Fetch the created agent
 	agent := &corev1alpha1.Agent{}
 	if err := k8sClient.Get(context.Background(), apitypes.NamespacedName{
 		Name: agentResult.AgentName, Namespace: agentResult.Namespace,
@@ -357,7 +352,6 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 		t.Fatalf("failed to get agent: %v", err)
 	}
 
-	// Verify model
 	if agent.Spec.Model == nil {
 		t.Fatal("agent.Spec.Model is nil")
 	}
@@ -368,17 +362,14 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 		t.Errorf("model.name = %q, want %q", agent.Spec.Model.Name, "claude-sonnet-4-20250514")
 	}
 
-	// Verify provider ref
 	if agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != "my-provider" {
 		t.Errorf("providerRef = %v, want my-provider", agent.Spec.ProviderRef)
 	}
 
-	// Verify system prompt
 	if agent.Spec.SystemPrompt == nil || agent.Spec.SystemPrompt.Inline != "You are a Go coder" {
 		t.Errorf("systemPrompt.inline = %v, want %q", agent.Spec.SystemPrompt, "You are a Go coder")
 	}
 
-	// Verify tools
 	if len(agent.Spec.Tools) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(agent.Spec.Tools))
 	}
@@ -389,7 +380,6 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 		t.Errorf("tools[1].name = %q, want %q", agent.Spec.Tools[1].Name, codeExecToolName)
 	}
 
-	// Verify skills
 	if len(agent.Spec.Skills) != 1 {
 		t.Fatalf("expected 1 skill, got %d", len(agent.Spec.Skills))
 	}
@@ -397,7 +387,6 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 		t.Errorf("skills[0].name = %q, want %q", agent.Spec.Skills[0].Name, "go-coding")
 	}
 
-	// Verify coordination
 	if agent.Spec.Coordination == nil {
 		t.Fatal("agent.Spec.Coordination is nil")
 	}
@@ -420,7 +409,6 @@ func TestCreateAgentTool_Execute_AllFields(t *testing.T) {
 		t.Errorf("allowedAgents[0].namespace = %q, want %q", agent.Spec.Coordination.AllowedAgents[0].Namespace, testNamespace)
 	}
 
-	// Verify labels
 	if agent.Labels[labels.LabelParentTask] != labels.SelectorValue(parentTaskName) {
 		t.Errorf("label orka.ai/parent-task = %q, want %q", agent.Labels[labels.LabelParentTask], labels.SelectorValue(parentTaskName))
 	}
@@ -462,7 +450,6 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 		t.Fatalf("failed to get agent: %v", err)
 	}
 
-	// Verify model was inherited from env vars
 	if agent.Spec.Model == nil {
 		t.Fatal("agent.Spec.Model is nil")
 	}
@@ -473,7 +460,6 @@ func TestCreateAgentTool_Execute_InheritedModelProvider(t *testing.T) {
 		t.Errorf("model.name = %q, want %q (inherited)", agent.Spec.Model.Name, testGPT4OModel)
 	}
 
-	// Verify provider ref was inherited
 	if agent.Spec.ProviderRef == nil || agent.Spec.ProviderRef.Name != providerOpenAI {
 		t.Errorf("providerRef = %v, want openai (inherited)", agent.Spec.ProviderRef)
 	}
@@ -514,8 +500,6 @@ func TestCreateAgentTool_Execute_BuiltInRuntimesAreCredentialFree(t *testing.T) 
 
 			k8sClient := newFakeClient(parentTask())
 			tool := NewCreateAgentTool(k8sClient, executionmode.HarnessV2)
-			// Harness-v2 built-in runtimes require model.name (mirroring the
-			// admission contract); the model is incidental to this test.
 			args := json.RawMessage(`{"role":"coder","systemPrompt":"You write code","model":{"name":"test-model"},"runtime":` + tt.runtimeArgs + `}`)
 
 			result, err := tool.Execute(context.Background(), args)
@@ -741,9 +725,7 @@ func TestCreateAgentTool_Execute_RejectsUnsupportedRuntime(t *testing.T) {
 
 func TestCreateAgentTool_Execute_DefaultNamespace(t *testing.T) {
 	t.Setenv(envOrkaTaskName, parentTaskName)
-	// No ORKA_TASK_NAMESPACE set — should default to defaultNamespace
 
-	// Create parent task in defaultNamespace namespace
 	parent := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      parentTaskName,

@@ -2,22 +2,15 @@ package store
 
 import "context"
 
-// ControllerEpochStore owns the durable controller epoch CAS record.
 type ControllerEpochStore interface {
 	GetControllerEpoch(ctx context.Context, name string) (*ControllerEpoch, error)
 	CompareAndSwapControllerEpoch(ctx context.Context, change ControllerEpochCAS) (*ControllerEpoch, error)
 }
 
-// ControllerEpochInstallationReader identifies the installation that owns
-// the controller epoch: the ID Orka binds each storage dataset to when it
-// advances the dataset's epoch.
 type ControllerEpochInstallationReader interface {
-	// ControllerEpochInstallationID returns the installation ID of the epoch
-	// named name. It is stable for the life of the installation.
 	ControllerEpochInstallationID(ctx context.Context, name string) (string, error)
 }
 
-// PromptAttemptStore persists the full prompt execution and delivery state machines.
 type PromptAttemptStore interface {
 	CreatePromptAttempt(ctx context.Context, attempt *PromptAttempt, fence ControllerEpochFence) (*PromptAttempt, error)
 	GetPromptAttempt(ctx context.Context, id string) (*PromptAttempt, error)
@@ -26,14 +19,11 @@ type PromptAttemptStore interface {
 	TransitionPromptAttemptDelivery(ctx context.Context, transition PromptAttemptDeliveryTransition) (*PromptAttempt, error)
 }
 
-// PromptAttemptRetentionStore reclaims Task-owned PromptAttempt records only
-// after the broader durable control plane has crossed its finalization barriers.
 type PromptAttemptRetentionStore interface {
 	PreparePromptAttemptReclamation(ctx context.Context, request ReclaimPromptAttemptsRequest) error
 	ReclaimPromptAttempts(ctx context.Context, request ReclaimPromptAttemptsRequest) (int, error)
 }
 
-// SessionControlStore persists fenced Session mutation leases and atomic turn finalization.
 type SessionControlStore interface {
 	CreateSessionControl(ctx context.Context, control *SessionControl, fence ControllerEpochFence) (*SessionControl, error)
 	GetSessionControl(ctx context.Context, namespace, sessionName string) (*SessionControl, error)
@@ -47,9 +37,6 @@ type SessionControlStore interface {
 	ResumeSessionTurnFinalization(ctx context.Context, request ResumeSessionTurnFinalizationRequest) (*SessionTurn, error)
 }
 
-// BranchClaimStore persists exact branch ownership and verified baselines.
-// CreateBranchClaimWithResult reports whether this exact call inserted the
-// claim, allowing callers to safely clean up only creation they actually won.
 type BranchClaimStore interface {
 	CreateBranchClaim(ctx context.Context, claim *BranchClaim, fence ControllerEpochFence) (*BranchClaim, error)
 	CreateBranchClaimWithResult(ctx context.Context, claim *BranchClaim, fence ControllerEpochFence) (*BranchClaim, bool, error)
@@ -58,7 +45,6 @@ type BranchClaimStore interface {
 	ReclaimBranchClaim(ctx context.Context, request ReclaimBranchClaimRequest) error
 }
 
-// PublicationStore persists clean-room prepare, publish, and independent verification receipts.
 type PublicationStore interface {
 	CreatePublication(ctx context.Context, publication *Publication, fence ControllerEpochFence) (*Publication, error)
 	GetPublication(ctx context.Context, id string) (*Publication, error)
@@ -67,14 +53,10 @@ type PublicationStore interface {
 	TransitionPublication(ctx context.Context, transition PublicationTransition) (*Publication, error)
 }
 
-// ExternalEffectIdentityReader resolves one exact external-effect identity.
-// Kubernetes-backed authorization paths use this instead of broad LIST reads
-// so a just-committed in-flight lease is observed without cache/list races.
 type ExternalEffectIdentityReader interface {
 	GetExternalEffectByIdentity(ctx context.Context, identity ExternalEffectIdentity) (*ExternalEffect, error)
 }
 
-// ExternalEffectStore persists canonical idempotency identities for operations outside SQLite.
 type ExternalEffectStore interface {
 	ExternalEffectIdentityReader
 	ReserveExternalEffect(ctx context.Context, request ReserveExternalEffectRequest) (*ExternalEffect, error)
@@ -82,7 +64,6 @@ type ExternalEffectStore interface {
 	TransitionExternalEffect(ctx context.Context, transition ExternalEffectTransition) (*ExternalEffect, error)
 }
 
-// OutboxProjectionStore persists restart-safe task/status projection records.
 type OutboxProjectionStore interface {
 	EnqueueOutboxProjection(ctx context.Context, projection *OutboxProjection, fence ControllerEpochFence) (*OutboxProjection, error)
 	GetOutboxProjection(ctx context.Context, id string) (*OutboxProjection, error)
@@ -90,7 +71,6 @@ type OutboxProjectionStore interface {
 	CompleteOutboxProjection(ctx context.Context, request CompleteOutboxProjectionRequest) (*OutboxProjection, error)
 }
 
-// DurableControlStore is the complete first-release durable-control-store foundation.
 type DurableControlStore interface {
 	ControllerEpochStore
 	PromptAttemptStore

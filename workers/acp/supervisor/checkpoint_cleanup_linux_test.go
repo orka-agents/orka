@@ -25,8 +25,6 @@ func TestDurableWorkspaceCleanupReclaimsOwnership(t *testing.T) {
 	}
 	for _, action := range []string{"delete", "drain", "close"} {
 		t.Run(action, func(t *testing.T) {
-			// The fixture child has a distinct UID and needs traversal through
-			// the test's parent directories, as it does in the runtime image.
 			testRoot, err := os.MkdirTemp("", "orka-checkpoint-cleanup-")
 			if err != nil {
 				t.Fatal(err)

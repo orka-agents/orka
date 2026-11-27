@@ -820,8 +820,6 @@ func TestKubernetesACPMCPBrokerCredentialResolverChecksTaskSessionGeneration(t *
 	close(epochs.ready)
 	resolver := KubernetesACPMCPBrokerCredentialResolver{Reader: reader}
 
-	// Header pre-authentication accepts the pool bearer and rejects a wrong
-	// bearer or missing pool identity before any body is read.
 	if err := resolver.PreAuthenticateACPMCPBroker(context.Background(), request.Namespace, string(pool.UID), "Bearer "+strings.Repeat("b", 32)); err != nil {
 		t.Fatalf("valid pre-auth error = %v", err)
 	}

@@ -62,8 +62,6 @@ func TestInternalInboxRejectsTaskReuseDuringAuthorization(t *testing.T) {
 					}
 					if key.Name == "coordinator" && !attemptedCleanup {
 						attemptedCleanup = true
-						// Race finalizer cleanup against the last authorization lookup.
-						// If cleanup succeeds, reuse the name before GetMessages runs.
 						cleanupErr = cleanup.DeleteTaskMessages(ctx, "default", "my-task")
 						if cleanupErr == nil {
 							return recreateTask(ctx)
@@ -82,8 +80,6 @@ func TestInternalInboxRejectsTaskReuseDuringAuthorization(t *testing.T) {
 			require.True(t, attemptedCleanup)
 			require.NoError(t, cleanupErr)
 
-			// Cleanup can finish during network authorization. Its generation
-			// change forces a fresh identity check before reading or marking data.
 			stale := doTaskScopedInternalRequest(t, app, request)
 			require.Equal(t, http.StatusForbidden, stale.StatusCode)
 			messages, err := cleanup.GetMessages(t.Context(), "default", "my-task", "coordinator", false)

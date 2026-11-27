@@ -5,9 +5,6 @@ import (
 	"strings"
 )
 
-// Threat-model investigations are stored inside the threat model markdown so
-// operators can read and edit them with the rest of the model. The marker and
-// fenced JSON block make the section machine-readable.
 const (
 	threatModelInvestigationsHeading = "## Cross-component investigations"
 	threatModelInvestigationsMarker  = "<!-- orka:security-investigations -->"
@@ -19,8 +16,6 @@ const (
 	maxInvestigationsSectionsBytes = 64 << 10
 )
 
-// RenderThreatModelInvestigations replaces any investigations section in the
-// threat model with one for items. Invalid items are dropped.
 func RenderThreatModelInvestigations(content string, items []SecurityInvestigation) string {
 	content = stripThreatModelInvestigations(content)
 	items = SanitizeInvestigations(items)
@@ -43,8 +38,6 @@ func RenderThreatModelInvestigations(content string, items []SecurityInvestigati
 	return out.String()
 }
 
-// ThreatModelInvestigations returns the investigations recorded in a threat
-// model, or none when the section is missing or malformed.
 func ThreatModelInvestigations(content string) []SecurityInvestigation {
 	block, _, _, ok := threatModelInvestigationsBlock(content)
 	if !ok {
@@ -57,7 +50,6 @@ func ThreatModelInvestigations(content string) []SecurityInvestigation {
 	return SanitizeInvestigations(items)
 }
 
-// SanitizeInvestigations bounds investigations and drops unsafe paths.
 func SanitizeInvestigations(items []SecurityInvestigation) []SecurityInvestigation {
 	out := make([]SecurityInvestigation, 0, min(len(items), MaxThreatModelInvestigations))
 	seen := map[string]struct{}{}
@@ -107,8 +99,6 @@ func stripThreatModelInvestigations(content string) string {
 	return strings.TrimRight(content[:start], "\n") + "\n" + strings.TrimLeft(content[end:], "\n")
 }
 
-// threatModelInvestigationsBlock locates the last investigations section and
-// returns its JSON and the byte range of the whole section.
 func threatModelInvestigationsBlock(content string) (block string, start, end int, ok bool) {
 	marker := strings.LastIndex(content, threatModelInvestigationsMarker)
 	if marker < 0 {

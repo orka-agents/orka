@@ -17,7 +17,6 @@ vi.mock('@tanstack/react-router', async () => {
     createRootRoute: (opts: any) => opts,
     Link: ({ children, to, ...props }: any) => <a href={to} {...props}>{children}</a>,
     useNavigate: () => mockNavigate,
-    // Like the browser-history router, the fragment mirrors the address bar.
     useLocation: () => ({ pathname: mockPathname, searchStr: mockSearchStr, hash: window.location.hash.slice(1) }),
     Outlet: () => <div data-testid="outlet" />,
   }
@@ -37,7 +36,6 @@ describe('__root route', () => {
     takeHashToken()
     useUIStore.setState({ namespace: 'default', sidebarCollapsed: false, theme: 'light' })
     useAuthStore.setState({ token: 'test-token' })
-    // jsdom doesn't implement matchMedia
     Object.defineProperty(window, 'matchMedia', {
       writable: true,
       value: vi.fn().mockImplementation((query: string) => ({
@@ -146,7 +144,6 @@ describe('__root route', () => {
     mockPathname = '/tasks'
     const RootComponent = Route.component!
     const { container } = render(<RootComponent />)
-    // navigates away, renders null
     expect(container.querySelector('[data-testid="outlet"]')).not.toBeInTheDocument()
   })
 })

@@ -11,22 +11,17 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
-// ReservedServiceAccount names a ServiceAccount no OutboundAccessPolicy may
-// request tokens for. The zero value reserves nothing.
 type ReservedServiceAccount struct {
 	Namespace string
 	Name      string
 }
 
-// Reserves reports whether the ServiceAccount namespace/name is reserved.
 func (r ReservedServiceAccount) Reserves(namespace, name string) bool {
 	return r.Name != "" && r.Namespace == namespace && r.Name == name
 }
 
 var errReservedServiceAccount = errors.New("direct token sources must not use the controller's own ServiceAccount")
 
-// ValidateReservedServiceAccount reports a direct policy whose subject or
-// actor token would be requested for the reserved ServiceAccount.
 func ValidateReservedServiceAccount(policy *corev1alpha1.OutboundAccessPolicy, reserved ReservedServiceAccount) *Issue {
 	if policy == nil || policy.Spec.Direct == nil {
 		return nil
@@ -40,9 +35,6 @@ func ValidateReservedServiceAccount(policy *corev1alpha1.OutboundAccessPolicy, r
 	return nil
 }
 
-// ServiceAccountFromToken returns the ServiceAccount a Kubernetes
-// ServiceAccount token was issued to, from its subject. The token is the
-// process's own mounted token, so its signature is not checked.
 func ServiceAccountFromToken(token string) (ReservedServiceAccount, error) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {

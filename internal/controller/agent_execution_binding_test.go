@@ -172,8 +172,6 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 		t.Fatalf("snapshot ID = %q", binding.Snapshot.ID)
 	}
 
-	// The immutable snapshot is durable, encrypted, and contains the resolved
-	// executable inputs.
 	snapshot, err := snapshots.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{
 		TaskUID: string(task.UID), Digest: binding.Snapshot.Digest,
 	})
@@ -196,7 +194,6 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 		t.Fatal("first binding did not report its execution settings")
 	}
 
-	// A second pass verifies the existing binding instead of re-binding.
 	_, err, handled = reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
 	if err != nil || handled {
 		t.Fatalf("verify pass = handled=%v err=%v", handled, err)
@@ -320,7 +317,6 @@ func TestResolveAgentExecutionCandidateDigestIsStable(t *testing.T) {
 		t.Fatal("snapshot digest is not stable")
 	}
 
-	// Changing an executable input changes the candidate identity.
 	changed := agent.DeepCopy()
 	changed.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "different prompt"}
 	third, err := reconciler.resolveAgentExecutionCandidate(ctx, task, changed)
@@ -332,8 +328,6 @@ func TestResolveAgentExecutionCandidateDigestIsStable(t *testing.T) {
 	}
 }
 
-// A Task validated against a stale cached Agent is not bound while the live
-// Agent is a newer generation, such as one whose ceiling was just tightened.
 func TestEnsureAgentExecutionBindingWaitsForTheLiveAgentGeneration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -361,10 +355,6 @@ func TestEnsureAgentExecutionBindingWaitsForTheLiveAgentGeneration(t *testing.T)
 	}
 }
 
-// A ceiling tightened between the live check and the binding write is caught
-// before the bound Task starts: the next binding pass re-judges it against
-// the live Agent and fails it, while a newer generation it still fits leaves
-// it alone.
 func TestBoundTaskIsRejudgedAgainstATightenedCeilingBeforeItStarts(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -424,12 +414,10 @@ func TestPersistAgentExecutionBindingNeverOverwrites(t *testing.T) {
 	if _, err := reconciler.persistAgentExecutionBinding(ctx, task, candidate); err != nil {
 		t.Fatal(err)
 	}
-	// The identical candidate replays idempotently.
 	if _, err := reconciler.persistAgentExecutionBinding(ctx, task, candidate); err != nil {
 		t.Fatalf("idempotent persist: %v", err)
 	}
 
-	// A mismatched candidate is a permanent conflict and never overwrites.
 	changedAgent := agent.DeepCopy()
 	changedAgent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "changed"}
 	mismatched, err := reconciler.resolveAgentExecutionCandidate(ctx, task, changedAgent)

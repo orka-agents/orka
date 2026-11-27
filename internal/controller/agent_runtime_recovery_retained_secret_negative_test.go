@@ -152,7 +152,6 @@ func TestAgentRuntimeRecoveryRetainedDeletingBootClientRemainsDrainOnly(t *testi
 	if f.server.Counts() != before {
 		t.Fatal("non-drain request reached runtime mutations")
 	}
-	// Runtime identity validation still precedes any authorized old-boot drain.
 	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(f.pod), f.pod); err != nil {
 		t.Fatal(err)
 	}

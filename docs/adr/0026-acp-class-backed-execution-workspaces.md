@@ -10,6 +10,12 @@ ADRs 0024 and 0025 and the generic workspace domain from ADR 0021. Data-only
 suspension and cold resume remain follow-up work (issues #409 and #422) behind
 the fail-closed gates this ADR defines.
 
+Amended by [ADR 0055](0055-substrate-warm-detach-window.md): a Substrate class that
+opts in keeps a detached workspace warm for a bounded window before its frozen Suspend applies.
+
+Amended by [ADR 0057](0057-substrate-continuation-latency.md): RuntimePool demand may precede the
+attachment for a speculative start; prompt demand still requires the attachment handshake.
+
 ## Context
 
 `Task.spec.execution.workspace` previously exposed only the legacy

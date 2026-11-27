@@ -37,8 +37,6 @@ func newConsolidationFixture(t *testing.T, consolidation *corev1alpha1.MemoryCon
 	return newConsolidationFixtureWith(t, consolidation, nil)
 }
 
-// movedCursorStore refuses its first begins as if another run moved the
-// cursor while the run read its inputs.
 type movedCursorStore struct {
 	store.MemoryConsolidationStore
 	refusals int
@@ -56,8 +54,6 @@ func (s *movedCursorStore) BeginMemoryConsolidationRun(ctx context.Context, run 
 func newConsolidationFixtureWith(t *testing.T, consolidation *corev1alpha1.MemoryConsolidationSpec,
 	wrap func(store.MemoryConsolidationStore) store.MemoryConsolidationStore) consolidationFixture {
 	t.Helper()
-	// A run's window ends a commit grace before now; begin as if that long
-	// passed after the test wrote its Sessions.
 	previous := memoryConsolidationNow
 	memoryConsolidationNow = func() time.Time { return time.Now().Add(memoryconsolidation.WindowCommitGrace + 5*time.Second) }
 	t.Cleanup(func() { memoryConsolidationNow = previous })
@@ -230,7 +226,6 @@ func TestMemoryConsolidationValidatesAgainstWhatTheRunRead(t *testing.T) {
 	var begin memoryconsolidation.BeginResponse
 	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begin))
 
-	// While the model works, a cited Session moves on and a target is edited.
 	require.NoError(t, f.store.AppendMessages(t.Context(), "default", "session-0", []store.SessionMessage{
 		{ID: "session-0-later", Role: "user", Content: "A later turn"}}))
 	edited, err := f.store.GetMemory(t.Context(), "default", "mem-c")
@@ -276,8 +271,6 @@ func TestMemoryConsolidationRefusesARevokedWorker(t *testing.T) {
 	require.Equal(t, http.StatusOK, f.post(t, "begin", struct{}{}, &begun))
 	require.NotNil(t, begun.Input)
 
-	// Kubernetes still shows the Job running; only the store knows it was
-	// revoked.
 	require.NoError(t, f.store.RevokeTaskJob(t.Context(), store.TaskJobIdentity{Namespace: "default", TaskUID: "task-uid", JobUID: "job-uid"}))
 	require.Equal(t, http.StatusForbidden, f.post(t, "begin", struct{}{}, nil), "a revoked worker reads no transcripts")
 	submission := memoryconsolidation.Submission{Operations: []memoryconsolidation.Operation{{Type: memoryconsolidation.OperationAdd,
@@ -376,8 +369,6 @@ func TestMemoryConsolidationReportsAWindowCutPastMaxLookback(t *testing.T) {
 	require.True(t, old.Equal(*report.WindowCutFrom))
 }
 
-// A run reads the namespace's open proposals, including those an earlier run
-// left pending, and does not propose the same change again.
 func TestMemoryConsolidationDoesNotRepeatAnOpenProposal(t *testing.T) {
 	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose, MinNewSessions: new(int32(1))})
 	f.seedSessions(t, 1)
@@ -417,8 +408,6 @@ func TestMemoryConsolidationDoesNotRepeatAnOpenProposal(t *testing.T) {
 	require.Contains(t, proposal.Description, "redundant with this one: remembered.")
 }
 
-// Proposals created while a run ran are checked at completion; a reload that
-// reaches its limit marks the report's input truncated.
 func TestMemoryConsolidationReportsALaterProposalReloadThatReachedItsLimit(t *testing.T) {
 	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{MinNewSessions: new(int32(1))})
 	f.seedSessions(t, 1)
@@ -434,8 +423,6 @@ func TestMemoryConsolidationReportsALaterProposalReloadThatReachedItsLimit(t *te
 	require.True(t, report.InputTruncated, "the later proposals a full reload left out were not checked")
 }
 
-// A proposal the run read but a reviewer archived while it ran can no longer
-// be covered: the fact it proposed may already be in memory.
 func TestMemoryConsolidationDoesNotCoverAProposalReviewedWhileItRan(t *testing.T) {
 	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose, MinNewSessions: new(int32(1))})
 	f.seedSessions(t, 1)
@@ -457,9 +444,6 @@ func TestMemoryConsolidationDoesNotCoverAProposalReviewedWhileItRan(t *testing.T
 	require.Empty(t, report.ProposalIDs)
 }
 
-// A run submits operations only. Orka builds each proposal, so a submission
-// cannot choose a proposal's ID, namespace or attribution, or record a review
-// or apply outcome.
 func TestMemoryConsolidationSubmissionCannotSetServerOwnedFields(t *testing.T) {
 	f := newConsolidationFixture(t, &corev1alpha1.MemoryConsolidationSpec{Mode: corev1alpha1.MemoryConsolidationPropose})
 	f.seedSessions(t, 5)

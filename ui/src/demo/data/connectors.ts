@@ -1,10 +1,6 @@
 import type { Connection, ConnectorProvider } from '@/lib/connectors'
 import { ago, DEMO_NAMESPACE, digest } from '../shared'
 
-// ConnectorProviders an operator has configured, and the demo visitor's own
-// linked accounts. GitHub uses Orka's built-in tool catalog; the others are
-// custom MCP-backed tools.
-
 const read = (...names: string[]) => names.map((name) => ({ name, class: 'read' as const }))
 const write = (...names: string[]) => names.map((name) => ({ name, class: 'write' as const }))
 
@@ -54,7 +50,6 @@ export const connectorProviders: ConnectorProvider[] = [
   },
 ]
 
-/** The visitor's link name for a provider, as the controller derives it from provider and subject. */
 export const connectionName = (provider: string) => `${provider}-${digest(`demo-user:${provider}`, 8)}`
 
 export function grantedScopes(provider: string, mode: string): string[] {

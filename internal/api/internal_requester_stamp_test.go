@@ -58,7 +58,6 @@ func TestSealChildRequesterStampAuthenticatesTheLink(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				if task, ok := obj.(*corev1alpha1.Task); ok && task.Name == "swapped" && swapOnce.CompareAndSwap(false, true) {
-					// A trusted worker swaps the requester between validation and the seal.
 					stored := &corev1alpha1.Task{}
 					if err := cl.Get(ctx, client.ObjectKeyFromObject(task), stored); err != nil {
 						return err
@@ -106,8 +105,6 @@ func TestSealChildRequesterStampAuthenticatesTheLink(t *testing.T) {
 	if status := post("missing"); status != http.StatusNotFound {
 		t.Fatalf("missing child = %d, want 404", status)
 	}
-	// A requester swapped between validation and the seal makes the fenced
-	// write conflict; nothing is signed for the substituted identity.
 	if status := post("swapped"); status != http.StatusConflict {
 		t.Fatalf("swapped requester = %d, want 409", status)
 	}
@@ -118,7 +115,6 @@ func TestSealChildRequesterStampAuthenticatesTheLink(t *testing.T) {
 	if unsealed.Annotations[labels.AnnotationRequestedByStamp] != "" || connectors.RequesterStampValid(key, unsealed) {
 		t.Fatalf("the swapped child must not be sealed: %v", unsealed.Annotations)
 	}
-	// A parent without a verified requester seals nothing.
 	delete(parent.Annotations, labels.AnnotationRequestedByStamp)
 	if err := c.Update(context.Background(), parent); err != nil {
 		t.Fatal(err)

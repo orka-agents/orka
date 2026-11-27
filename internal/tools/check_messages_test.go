@@ -119,7 +119,6 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clear env vars first
 			for _, k := range []string{envOrkaTaskName, envOrkaTaskNamespace, envOrkaParentTask, envOrkaControllerURL} {
 				t.Setenv(k, "")
 			}
@@ -129,7 +128,6 @@ func TestCheckMessagesTool_Execute(t *testing.T) {
 					if r.Method != http.MethodGet {
 						t.Errorf("expected GET, got %s", r.Method)
 					}
-					// Verify markRead query param
 					if tt.args != nil && tt.args.MarkRead != nil && !*tt.args.MarkRead {
 						if r.URL.Query().Get("markRead") != queryValFalse {
 							t.Errorf("expected markRead=false, got %s", r.URL.Query().Get("markRead"))
@@ -194,10 +192,6 @@ func TestCheckMessagesTool_Parameters(t *testing.T) {
 	}
 }
 
-// worstCaseMessageBatch builds the largest JSON a controller returns for one
-// contract-conforming batch: MaxMessageBatch messages whose identifiers are at
-// MaxControlIdentifierBytes and whose content totals MaxMessageBatchBytes, all
-// of control bytes that JSON escapes to six bytes each.
 func worstCaseMessageBatch(t *testing.T) []byte {
 	t.Helper()
 	identifier := strings.Repeat("\x01", store.MaxControlIdentifierBytes)

@@ -4,11 +4,10 @@ import (
 	"time"
 )
 
-// SessionRecord represents a full session.
 type SessionRecord struct {
 	Namespace     string
 	Name          string
-	SessionType   string // "task", "chat", or "gateway"
+	SessionType   string
 	ActiveTask    string
 	ActiveTaskUID string
 	MessageCount  int
@@ -20,7 +19,6 @@ type SessionRecord struct {
 	Messages      []SessionMessage
 }
 
-// SessionMetadata is the lightweight listing representation.
 type SessionMetadata struct {
 	Name          string
 	SessionType   string
@@ -33,14 +31,11 @@ type SessionMetadata struct {
 	ActiveTaskUID string
 }
 
-// SessionPageCursor is the position a ListSessionsPage page ended at: the
-// creation time and name of its last session.
 type SessionPageCursor struct {
 	CreatedAt time.Time
 	Name      string
 }
 
-// SessionMessage is a single transcript entry.
 type SessionMessage struct {
 	ID         string            `json:"id"`
 	Order      int64             `json:"order,omitempty"`
@@ -56,41 +51,21 @@ type SessionMessage struct {
 	Timestamp  time.Time         `json:"ts"`
 }
 
-// MaxArtifactBytes is the largest artifact Orka stores. Every artifacts.v1
-// provider accepts artifacts up to this size and rejects larger ones with
-// [ErrTooLarge].
 const MaxArtifactBytes = 10 << 20
 
-// MaxResultBytes is the largest Task result Orka stores, the same limit as the
-// worker result API. Every state.v1 provider accepts results, and prompt
-// result receipt data, up to this size and rejects larger ones with
-// [ErrTooLarge].
 const MaxResultBytes = 10 << 20
 
-// ArtifactOwner identifies the Task whose artifacts an operation addresses.
-// Requests are structs so the identity can grow, for example with the Job and
-// cleanup generation that let a provider refuse an old retry, without another
-// change to every method.
 type ArtifactOwner struct {
 	Namespace string
 	TaskName  string
-	// TaskUID is the owning Task's UID when the caller knows it. It is
-	// reserved: providers accept it and may ignore it until artifact identity
-	// is enforced, after which a write for an older Task with the same name
-	// must not overwrite or delete a newer Task's artifacts. Until then an
-	// artifact is addressed by namespace, Task name and filename alone: a
-	// request without TaskUID reaches the same artifact as one with it, so a
-	// provider must not use TaskUID to find an artifact.
-	TaskUID string
+	TaskUID   string
 }
 
-// ArtifactKey identifies one artifact file.
 type ArtifactKey struct {
 	Owner    ArtifactOwner
 	Filename string
 }
 
-// SaveArtifactRequest stores one artifact file.
 type SaveArtifactRequest struct {
 	Owner       ArtifactOwner
 	Filename    string
@@ -98,29 +73,25 @@ type SaveArtifactRequest struct {
 	Data        []byte
 }
 
-// ArtifactMetadata describes a stored artifact file.
 type ArtifactMetadata struct {
-	Filename    string `json:"filename"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	// CreatedAt is when the provider stored this version of the file, in UTC.
-	CreatedAt time.Time `json:"createdAt"`
+	Filename    string    `json:"filename"`
+	ContentType string    `json:"contentType"`
+	Size        int64     `json:"size"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
-// PlanState represents the autonomous plan state for a coordinator task.
 type PlanState struct {
 	TaskName     string
 	Namespace    string
 	Iteration    int
-	Summary      string // Human-readable progress summary
-	ProgressPct  int    // 0-100 progress estimate
-	GoalComplete bool   // LLM determined goal is met
-	PlanDocument string // Freeform markdown plan managed by LLM
+	Summary      string
+	ProgressPct  int
+	GoalComplete bool
+	PlanDocument string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
 
-// TranscriptSearchFilter constrains transcript-backed recall/search.
 type TranscriptSearchFilter struct {
 	Namespace          string
 	Query              string
@@ -133,16 +104,12 @@ type TranscriptSearchFilter struct {
 	MaxSnippetLength   int
 }
 
-// TranscriptSearchHistoryBound limits a session to its latest MaxMessages at
-// or before ThroughMessageID, using the same logical order as LoadTranscript.
-// Search intersects all bounds for a session before applying search filters.
 type TranscriptSearchHistoryBound struct {
 	SessionName      string `json:"sessionName"`
 	MaxMessages      int    `json:"maxMessages"`
 	ThroughMessageID string `json:"throughMessageId"`
 }
 
-// TranscriptSearchResult is a compact prior transcript hit.
 type TranscriptSearchResult struct {
 	SessionName     string    `json:"sessionName"`
 	MessageID       int64     `json:"messageId"`
@@ -154,8 +121,6 @@ type TranscriptSearchResult struct {
 }
 
 const (
-	// SessionTypeChat identifies Sessions owned by the interactive chat API.
-	SessionTypeChat = "chat"
-	// SessionTypeGateway identifies canonical Sessions exclusively owned by gateway admission/projection.
+	SessionTypeChat    = "chat"
 	SessionTypeGateway = "gateway"
 )

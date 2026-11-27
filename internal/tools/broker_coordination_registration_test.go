@@ -72,7 +72,6 @@ func TestBrokeredWaitPollsSameChildWithinMCPDeadline(t *testing.T) {
 	if got := schema.Properties["timeout"].Default; got != "30s" {
 		t.Fatalf("advertised wait default = %q, want 30s", got)
 	}
-	// Exercise the real polling loop with a short budget instead of sleeping 30s.
 	tool.maxWait = 10 * time.Millisecond
 	ctx := WithToolContext(t.Context(), &ToolContext{
 		Brokered: true, Namespace: brokerTestNamespace, TaskID: parent.Name, TaskUID: string(parent.UID),
@@ -188,8 +187,6 @@ func TestRegisterBrokeredCoordinationToolsIsIdempotentAndBounded(t *testing.T) {
 	}
 }
 
-// BrokeredBuiltInToolNames classifies exactly what the three brokered
-// registrations register, so authorization cannot drift from the broker.
 func TestBrokeredBuiltInToolNamesMatchBrokeredRegistrations(t *testing.T) {
 	registry := NewRegistry()
 	if err := RegisterBrokeredCoordinationTools(registry, newFakeClient()); err != nil {
@@ -494,7 +491,6 @@ func TestBrokeredDelegateTaskEnforcesNamespaceScopeBeforeResourceAccess(t *testi
 }
 
 func TestBrokeredDelegateTaskUsesRegisteredControllerTTSConfiguration(t *testing.T) {
-	// Worker-only environment must not influence brokered execution.
 	t.Setenv("ORKA_CONTEXT_TOKEN_TTS_ENDPOINT", "http://worker-env-must-not-be-used.invalid/token")
 	t.Setenv("ORKA_CONTEXT_TOKEN_CHILD_SCOPE", "orka:admin")
 

@@ -67,7 +67,6 @@ const (
 	testSubstrateActorID    = "actor-1"
 )
 
-// newTestScheme creates a scheme with all types needed for unit tests.
 func newTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(s)
@@ -79,7 +78,6 @@ func newTestScheme() *runtime.Scheme {
 	return s
 }
 
-// newUnitReconciler builds a TaskReconciler backed by a fake client.
 func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskReconciler {
 	fb := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -112,6 +110,7 @@ func newUnitReconciler(scheme *runtime.Scheme, objs ...client.Object) *TaskRecon
 		MessageStore:        ss,
 		PlanStore:           ss,
 		ExecutionEventStore: ss,
+		ControllerNamespace: "orka-system",
 	}
 }
 
@@ -160,10 +159,6 @@ func (s failingExecutionEventStore) GetLatestExecutionEventSeqs(context.Context,
 func (s failingExecutionEventStore) DeleteExecutionEvents(context.Context, string, string, string) error {
 	return s.err
 }
-
-// ---------------------------------------------------------------------------
-// isAutonomousTask
-// ---------------------------------------------------------------------------
 
 func TestIsAutonomousTask_NoAgentRef(t *testing.T) {
 	r := newUnitReconciler(newTestScheme())
@@ -253,10 +248,6 @@ func TestIsAutonomousTask_CrossNamespace(t *testing.T) {
 		t.Error("expected true when cross-namespace agent has autonomous enabled")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// resolveAgent
-// ---------------------------------------------------------------------------
 
 func TestResolveAgent_NilRef(t *testing.T) {
 	r := newUnitReconciler(newTestScheme())
@@ -350,10 +341,6 @@ func TestResolveAgent_CrossNamespaceAllowed(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// resolveProviderRef (pure logic, no client needed)
-// ---------------------------------------------------------------------------
-
 func TestResolveProviderRef_AgentTask(t *testing.T) {
 	r := &TaskReconciler{}
 	task := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent}}
@@ -408,10 +395,6 @@ func TestResolveProviderRef_NilEverything(t *testing.T) {
 		t.Errorf("expected nil, got %v", ref)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// validateTaskAgentCompatibility (pure logic)
-// ---------------------------------------------------------------------------
 
 func TestValidateTaskAgentCompatibility_AgentTaskNoAgent(t *testing.T) {
 	r := &TaskReconciler{}
@@ -1238,10 +1221,6 @@ func TestValidateTaskAgentCompatibility_ContainerTask(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// validateExecutionWorkspace (pure logic)
-// ---------------------------------------------------------------------------
-
 func TestValidateExecutionWorkspace(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -1293,10 +1272,6 @@ func TestValidateExecutionWorkspaceDefersACPProviderChecksUntilContractRouting(t
 		t.Fatalf("validateExecutionWorkspace() error = %v, want provider checks deferred to planAgentExecution", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// shouldRetry / calculateRetryDelay
-// ---------------------------------------------------------------------------
 
 func TestShouldRetry(t *testing.T) {
 	r := &TaskReconciler{}
@@ -1385,7 +1360,6 @@ func TestCalculateRetryDelay(t *testing.T) {
 			}},
 			Status: corev1alpha1.TaskStatus{Attempts: 3},
 		}
-		// 1s * 2 * 2 = 4s
 		if d := r.calculateRetryDelay(task); d != 4*time.Second {
 			t.Errorf("expected 4s, got %v", d)
 		}
@@ -1414,27 +1388,20 @@ func TestCalculateRetryDelay(t *testing.T) {
 			}},
 			Status: corev1alpha1.TaskStatus{Attempts: 2},
 		}
-		// 2s * 2 = 4s (multiplier 0 defaults to 2)
 		if d := r.calculateRetryDelay(task); d != 4*time.Second {
 			t.Errorf("expected 4s, got %v", d)
 		}
 	})
 }
 
-// ---------------------------------------------------------------------------
-// enforceHistoryLimits
-// ---------------------------------------------------------------------------
-
 func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 	scheme := newTestScheme()
 
-	// Parent task
 	parent := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 
-	// Create 5 succeeded + 3 failed child tasks
 	objs := make([]client.Object, 0, 10) //nolint:prealloc
 	objs = append(objs, parent)
 	for i := range 5 {
@@ -1466,8 +1433,6 @@ func TestEnforceHistoryLimits_DefaultLimits(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Defaults: successLimit=3, failedLimit=1
-	// Should have deleted 2 succeeded and 2 failed
 	var remaining corev1alpha1.TaskList
 	_ = r.List(context.Background(), &remaining, client.InNamespace("default"),
 		client.MatchingLabels{labels.LabelParentTask: "parent"})
@@ -1606,10 +1571,6 @@ func TestEnforceHistoryLimits_NoChildTasks(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// validateCoordinationConstraints
-// ---------------------------------------------------------------------------
 
 func TestValidateCoordinationConstraints_NoAnnotation(t *testing.T) {
 	r := newUnitReconciler(newTestScheme())
@@ -1799,7 +1760,6 @@ func TestValidateCoordinationConstraints_DynamicallyCreatedAgent(t *testing.T) {
 			},
 		},
 	}
-	// Dynamically created agent by create_agent tool
 	dynamicAgent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dynamic-agent",
@@ -1850,7 +1810,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 		t.Run(string(tt.phase), func(t *testing.T) {
 			scheme := newTestScheme()
 			parentTask := &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
 				Spec: corev1alpha1.TaskSpec{
 					Type:     corev1alpha1.TaskTypeAI,
 					AgentRef: &corev1alpha1.AgentReference{Name: "parent-agent"},
@@ -1869,6 +1829,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sibling",
 					Namespace: "default",
+					UID:       "sibling-uid",
 					Labels:    map[string]string{labels.LabelParentTask: "parent"},
 				},
 				Status: corev1alpha1.TaskStatus{Phase: tt.phase},
@@ -1877,6 +1838,7 @@ func TestValidateCoordinationConstraints_ConcurrencyLimit(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "child",
 					Namespace: "default",
+					UID:       "child-uid",
 					Annotations: map[string]string{
 						labels.AnnotationCoordinationDepth: "1",
 					},
@@ -1930,6 +1892,7 @@ func coordinationChildTask(name string, status corev1alpha1.TaskStatus) *corev1a
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   "default",
+			UID:         types.UID(name + "-uid"),
 			Annotations: map[string]string{labels.AnnotationCoordinationDepth: "1"},
 			Labels:      map[string]string{labels.LabelParentTask: "parent"},
 		},
@@ -1938,9 +1901,6 @@ func coordinationChildTask(name string, status corev1alpha1.TaskStatus) *corev1a
 	}
 }
 
-// A burst of children reaches admission while the informer cache still shows
-// the sibling admitted by the previous reconcile without its phase. The check
-// must read live sibling state so the limit holds.
 func TestValidateCoordinationConstraints_ConcurrencyLimitIgnoresStaleCache(t *testing.T) {
 	scheme := newTestScheme()
 	parentTask, parentAgent := coordinationConcurrencyFixture(1)
@@ -1967,21 +1927,18 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitIgnoresStaleCache(t *te
 	}
 }
 
-// Children that are all Pending and waiting for admission must not block each
-// other; otherwise a burst of children never starts.
-// createTaskJob creates the Job before it records JobName and Running. If that
-// status write fails, the sibling runs while still looking Pending and
-// unadmitted; its owned Job must still hold the slot.
 func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *testing.T) {
+	isController := true
 	tests := []struct {
 		name     string
 		jobLabel string
 		ownerUID types.UID
+		finished bool
 		wantWait bool
 	}{
 		{name: "owned job", jobLabel: "sibling", ownerUID: "sibling-uid", wantWait: true},
 		{name: "job of a deleted task with the same name", jobLabel: "sibling", ownerUID: "previous-sibling-uid", wantWait: false},
-		{name: "job labeled for another sibling", jobLabel: "other", ownerUID: "sibling-uid", wantWait: false},
+		{name: "completed job of a sibling", jobLabel: "sibling", ownerUID: "sibling-uid", finished: true, wantWait: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2001,8 +1958,12 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *
 						Kind:       "Task",
 						Name:       "sibling",
 						UID:        tt.ownerUID,
+						Controller: &isController,
 					}},
 				},
+			}
+			if tt.finished {
+				job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 			}
 			childTask := coordinationChildTask("child", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending})
 
@@ -2020,134 +1981,6 @@ func TestValidateCoordinationConstraints_ConcurrencyLimitCountsUnrecordedJob(t *
 		})
 	}
 }
-
-// Marked siblings are counted first; once they fill the limit no Job list is
-// needed. Otherwise one batched list finds every unmarked sibling's Job.
-func TestCountChildSiblingSlots(t *testing.T) {
-	scheme := newTestScheme()
-	ownedJob := func(owner *corev1alpha1.Task) *batchv1.Job {
-		return &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-			Name:      owner.Name + "-job",
-			Namespace: owner.Namespace,
-			Labels:    map[string]string{labels.LabelTask: owner.Name},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: owner.Name, UID: owner.UID,
-			}},
-		}}
-	}
-	pending := corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
-	running := coordinationChildTask("running", corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, JobName: "running-job"})
-	unmarked1 := coordinationChildTask("unmarked-1", pending)
-	unmarked1.UID = "unmarked-1-uid"
-	unmarked2 := coordinationChildTask("unmarked-2", pending)
-	unmarked2.UID = "unmarked-2-uid"
-	waiting := coordinationChildTask("waiting", pending)
-	waiting.UID = "waiting-uid"
-	child := coordinationChildTask("child", pending)
-	siblings := []corev1alpha1.Task{*running, *unmarked1, *unmarked2, *waiting, *child}
-
-	t.Run("limit filled by marked siblings skips the Job list", func(t *testing.T) {
-		r := newUnitReconciler(scheme)
-		r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
-			WithInterceptorFuncs(interceptor.Funcs{
-				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
-					return errors.New("unexpected live list")
-				},
-			}).Build()
-		active, err := r.countChildSiblingSlots(context.Background(), child, siblings, 1)
-		if err != nil || active != 1 {
-			t.Fatalf("countChildSiblingSlots() = %d, %v; want 1, nil", active, err)
-		}
-	})
-
-	t.Run("one list counts every unmarked sibling with a Job", func(t *testing.T) {
-		jobLists := 0
-		r := newUnitReconciler(scheme)
-		r.APIReader = fake.NewClientBuilder().WithScheme(scheme).
-			WithObjects(ownedJob(unmarked1), ownedJob(unmarked2)).
-			WithInterceptorFuncs(interceptor.Funcs{
-				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-					jobLists++
-					return c.List(ctx, list, opts...)
-				},
-			}).Build()
-		active, err := r.countChildSiblingSlots(context.Background(), child, siblings, 5)
-		if err != nil || active != 3 {
-			t.Fatalf("countChildSiblingSlots() = %d, %v; want 3, nil", active, err)
-		}
-		if jobLists != 1 {
-			t.Fatalf("live Job lists = %d, want 1", jobLists)
-		}
-	})
-}
-
-func TestValidateCoordinationConstraints_WaitingSiblingsDoNotBlockAdmission(t *testing.T) {
-	scheme := newTestScheme()
-	parentTask, parentAgent := coordinationConcurrencyFixture(1)
-	pending := corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}
-	sibling1 := coordinationChildTask("sibling-1", pending)
-	sibling2 := coordinationChildTask("sibling-2", pending)
-	childTask := coordinationChildTask("child", pending)
-
-	r := newUnitReconciler(scheme, parentTask, parentAgent, sibling1, sibling2, childTask)
-	result, err, done := r.validateCoordinationConstraints(context.Background(), childTask)
-	if err != nil {
-		t.Fatalf("validateCoordinationConstraints() error = %v", err)
-	}
-	if done {
-		t.Fatalf("expected admission while siblings are only waiting, got requeue %+v", result)
-	}
-}
-
-// The maxConcurrentChildren admission check relies on Task reconciles being
-// serialized: it reads live sibling state and records the admission in the same
-// reconcile. Raising Task reconcile concurrency needs a different admission
-// mechanism first (for example an optimistic-concurrency slot on the parent).
-func TestTaskControllerReconcilesSerially(t *testing.T) {
-	if taskControllerMaxConcurrentReconciles != 1 {
-		t.Fatalf("taskControllerMaxConcurrentReconciles = %d; maxConcurrentChildren admission is only race-free with 1",
-			taskControllerMaxConcurrentReconciles)
-	}
-}
-
-func TestChildTaskHoldsConcurrencySlot(t *testing.T) {
-	const slotTestJobName = "child-job"
-	tests := []struct {
-		name   string
-		status corev1alpha1.TaskStatus
-		want   bool
-	}{
-		{name: "slot when new", status: corev1alpha1.TaskStatus{}, want: false},
-		{name: "slot when pending waiting", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending}, want: false},
-		{name: "slot when pending with job", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, JobName: slotTestJobName}, want: true},
-		{name: "slot when pending with binding", status: corev1alpha1.TaskStatus{
-			Phase:                 corev1alpha1.TaskPhasePending,
-			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{},
-		}, want: true},
-		{name: "slot when pending with execution", status: corev1alpha1.TaskStatus{
-			Phase:     corev1alpha1.TaskPhasePending,
-			Execution: &corev1alpha1.TaskExecutionStatus{},
-		}, want: true},
-		{name: "slot when scheduled", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled}, want: false},
-		{name: "slot when running", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}, want: true},
-		{name: "slot when finalizing", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing}, want: true},
-		{name: "slot when succeeded", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, JobName: slotTestJobName}, want: false},
-		{name: "slot when failed", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed, JobName: slotTestJobName}, want: false},
-		{name: "slot when cancelled", status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled}, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			task := &corev1alpha1.Task{Status: tt.status}
-			if got := childTaskHoldsConcurrencySlot(task); got != tt.want {
-				t.Fatalf("childTaskHoldsConcurrencySlot() = %t, want %t", got, tt.want)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ensureWorkerRBAC
-// ---------------------------------------------------------------------------
 
 func TestEnsureWorkerRBAC_CreatesNamespacedResources(t *testing.T) {
 	scheme := newTestScheme()
@@ -2170,7 +2003,6 @@ func TestEnsureWorkerRBAC_CreatesNamespacedResources(t *testing.T) {
 
 	for _, tt := range expected {
 		t.Run(tt.serviceAccount, func(t *testing.T) {
-			// Verify ServiceAccount was created.
 			sa := &corev1.ServiceAccount{}
 			if err := r.Get(context.Background(), types.NamespacedName{
 				Name: tt.serviceAccount, Namespace: testNS,
@@ -2178,7 +2010,6 @@ func TestEnsureWorkerRBAC_CreatesNamespacedResources(t *testing.T) {
 				t.Fatalf("expected SA %s to exist: %v", tt.serviceAccount, err)
 			}
 
-			// Verify only a namespaced binding to the worker ClusterRole was created.
 			rb := &rbacv1.RoleBinding{}
 			if err := r.Get(context.Background(), types.NamespacedName{
 				Name: tt.roleBinding, Namespace: testNS,
@@ -2339,7 +2170,6 @@ func TestWorkerRoleBindingNameTruncatesLongNames(t *testing.T) {
 
 func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	scheme := newTestScheme()
-	// Pre-create all SAs and namespaced RoleBindings.
 	expected := []struct {
 		serviceAccount string
 		roleBinding    string
@@ -2371,7 +2201,6 @@ func TestEnsureWorkerRBAC_Idempotent(t *testing.T) {
 	}
 	r := newUnitReconciler(scheme, objects...)
 
-	// Should not fail when resources already exist.
 	if err := r.ensureWorkerRBAC(context.Background(), testNS); err != nil {
 		t.Fatalf("unexpected error on idempotent call: %v", err)
 	}
@@ -2554,10 +2383,6 @@ func TestEnsureWorkerRoleBindingRecreatesStaleRoleRef(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handleScheduledTask
-// ---------------------------------------------------------------------------
-
 func TestHandleScheduledTask_ValidCron(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -2600,9 +2425,6 @@ func TestHandleScheduledTask_InvalidCron(t *testing.T) {
 	assertInvalidCronTerminalStatus(t, r, task)
 }
 
-// assertInvalidCronTerminalStatus checks that an invalid schedule ends the
-// Task through the standard terminal-failure path, both in memory and in the
-// persisted status.
 func assertInvalidCronTerminalStatus(t *testing.T, r *TaskReconciler, task *corev1alpha1.Task) {
 	t.Helper()
 	persisted := &corev1alpha1.Task{}
@@ -2647,10 +2469,6 @@ func TestHandleScheduledTask_WithTimeZone(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// collectResult
-// ---------------------------------------------------------------------------
-
 func TestCollectResult_ResultAlreadyExists(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -2659,7 +2477,6 @@ func TestCollectResult_ResultAlreadyExists(t *testing.T) {
 	}
 	r := newUnitReconciler(scheme, task)
 
-	// Pre-save a result
 	_ = r.ResultStore.SaveResult(context.Background(), "default", "t1", []byte("result data"))
 
 	err := r.collectResult(context.Background(), task)
@@ -2678,13 +2495,11 @@ func TestCollectResult_NoResultNoKubeClient(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 	}
 	r := newUnitReconciler(scheme, task)
-	// KubeClient is nil by default in unit reconciler
 
 	err := r.collectResult(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// No result and no kube client — should return nil
 }
 
 func TestCollectResult_ContainerWithoutJobDoesNotReadPodLogs(t *testing.T) {
@@ -2738,7 +2553,6 @@ func TestCollectResult_AITaskNoResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// AI task without result in store, no kube client — should not fail
 }
 
 func TestCollectResult_NilResultStore_DoesNotPanic(t *testing.T) {
@@ -2817,10 +2631,6 @@ func TestStdoutResultPodLogOptionsReadsBoundedFullLog(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// readPodLogs — requires KubeClient; we test the error path (no pods found)
-// ---------------------------------------------------------------------------
-
 func TestReadPodLogs_NoPods(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -2834,11 +2644,6 @@ func TestReadPodLogs_NoPods(t *testing.T) {
 		t.Error("expected error when no pods found")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Helpers used by handleScheduled — tested indirectly above but we also
-// verify the suspend path.
-// ---------------------------------------------------------------------------
 
 func TestHandleScheduled_Suspended(t *testing.T) {
 	scheme := newTestScheme()
@@ -2911,10 +2716,6 @@ func TestHandleScheduled_InvalidCronReturnsStatusUpdateError(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// resolveProvider (with fake client)
-// ---------------------------------------------------------------------------
-
 func TestResolveProvider_NilProviderRef(t *testing.T) {
 	r := newUnitReconciler(newTestScheme())
 	task := &corev1alpha1.Task{
@@ -2971,17 +2772,11 @@ func TestResolveProvider_ProviderUseRefusesTaskRelativeProvidersOfARemoteAgent(t
 		t.Fatalf("without Provider use the relative Provider resolves in the Task namespace, got (%v, %v)", resolved, err)
 	}
 
-	// The Agent may have changed since the API checked it, and a direct write
-	// was never checked, so each run refuses it.
 	r.ProviderUseAuthorization = true
 	if _, err := r.resolveProvider(context.Background(), task, agent); err == nil || !strings.Contains(err.Error(), "primary") {
 		t.Fatalf("expected a refusal naming the Provider, got %v", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleDeletion
-// ---------------------------------------------------------------------------
 
 func TestHandleDeletion_NoFinalizer(t *testing.T) {
 	scheme := newTestScheme()
@@ -2992,7 +2787,6 @@ func TestHandleDeletion_NoFinalizer(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	// Set deletion timestamp after creation (can't pass it to fake.NewClientBuilder)
 	task.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	result, err := r.handleDeletion(context.Background(), task)
 	if err != nil {
@@ -3079,13 +2873,10 @@ func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
 	}
 	r := newUnitReconciler(scheme, task)
 	_ = r.ResultStore.SaveResult(context.Background(), "default", "del-result", []byte("data"))
-	// handleDeletion calls r.Update to remove finalizer — this works when DeletionTimestamp
-	// is not set on the local copy (the fake client rejects changes to DeletionTimestamp).
 	_, err := r.handleDeletion(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Result should have been cleaned up
 	_, getErr := r.ResultStore.GetResult(context.Background(), "default", "del-result")
 	if getErr == nil {
 		t.Error("expected result to be deleted")
@@ -3278,10 +3069,6 @@ func TestHandleDeletion_WithMessageStore(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handleCompleted
-// ---------------------------------------------------------------------------
-
 func TestHandleCompleted_NoWebhook(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -3451,10 +3238,6 @@ func TestHandleCompleted_EnforcesScheduledTaskHistoryLimit(t *testing.T) {
 		t.Fatalf("expected newest child to remain, got %s", remaining.Items[0].Name)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleRunning
-// ---------------------------------------------------------------------------
 
 func TestHandleRunning_Timeout(t *testing.T) {
 	scheme := newTestScheme()
@@ -3742,7 +3525,6 @@ func TestSyncACPWaitingForApproval(t *testing.T) {
 		}
 	}
 
-	// No approval has been requested: the condition is not invented.
 	if err := r.syncACPWaitingForApproval(ctx, task); err != nil {
 		t.Fatal(err)
 	}
@@ -3763,7 +3545,6 @@ func TestSyncACPWaitingForApproval(t *testing.T) {
 	}
 	requireWaiting(metav1.ConditionFalse, waitingForApprovalReasonResolved)
 
-	// An expired request no longer blocks the Task.
 	appendApprovalTestEvent(t, r, task, events.ExecutionEventTypeApprovalRequested, map[string]any{
 		"approvalID": "brokered-2", "taskUID": string(task.UID), "targetTool": "deploy",
 		"expiresAt": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
@@ -3816,7 +3597,6 @@ func TestHandleRunning_SurfacesPodWaitingReason(t *testing.T) {
 		t.Fatalf("status = %s %q, want Running %q", task.Status.Phase, task.Status.Message, want)
 	}
 
-	// Once the image pulls, the stale waiting message is cleared.
 	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning}
 	if err := r.Status().Update(ctx, pod); err != nil {
 		t.Fatalf("update pod status: %v", err)
@@ -3828,7 +3608,6 @@ func TestHandleRunning_SurfacesPodWaitingReason(t *testing.T) {
 		t.Fatalf("status = %s %q, want Running with no message", task.Status.Phase, task.Status.Message)
 	}
 
-	// A Task that times out while its image cannot be pulled reports why.
 	task.Status.Message = want
 	task.Status.StartTime = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
 	if err := r.Status().Update(ctx, task); err != nil {
@@ -4188,10 +3967,6 @@ func TestHandleRunning_ChildTaskStatuses(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// createTaskJob
-// ---------------------------------------------------------------------------
-
 func TestCreateTaskJob_ContainerTask(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -4359,10 +4134,6 @@ func TestCreateTaskJob_WithProvider(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// completeTask
-// ---------------------------------------------------------------------------
-
 func TestCompleteTask_Succeeded(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -4452,8 +4223,6 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
-	// Task token attribution runs in the storage client, as production wires
-	// the reconciler.
 	storage := storageclienttest.NewEmbedded(t, r.ExecutionEventStore.(*sqlite.Store))
 	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
@@ -4467,7 +4236,6 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 	usageStore := r.ExecutionEventStore.(store.UsageStore)
 	count := func(v int64) *int64 { return &v }
 	for _, observation := range []store.UsageObservation{
-		// A running snapshot and the final summary of one call count once.
 		{ID: "call-1-running", CounterID: "call-1", Status: "running", InputTokens: count(40), OutputTokens: count(0)},
 		{ID: "call-1-done", CounterID: "call-1", Status: store.UsageStatusCompleted, InputTokens: count(100), OutputTokens: count(20), Complete: true},
 		{ID: "call-2-done", CounterID: "call-2", Status: store.UsageStatusCompleted, InputTokens: count(50), OutputTokens: count(5), Complete: true},
@@ -4494,8 +4262,6 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 	}
 	requireTokens(150, 25)
 
-	// The usage is added in the same write that releases the Session lock, so
-	// a completion replayed after a crash finds no lock and counts nothing.
 	if _, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseSucceeded, "done"); err != nil {
 		t.Fatalf("replayed completeTask() error = %v", err)
 	}
@@ -4504,18 +4270,12 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 	}
 	requireTokens(150, 25)
 
-	// Agent Tasks are ACP Session turns, counted when the turn finalizes, so
-	// they report no usage to add here.
 	agentTask := task.DeepCopy()
 	agentTask.Spec.Type = corev1alpha1.TaskTypeAgent
 	if input, output, err := r.sessionTokenUsage(ctx, agentTask); err != nil || input != 0 || output != 0 {
 		t.Fatalf("sessionTokenUsage(agent) = %d/%d, %v; want 0/0", input, output, err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// retryTask
-// ---------------------------------------------------------------------------
 
 func TestRetryTask(t *testing.T) {
 	scheme := newTestScheme()
@@ -4569,10 +4329,6 @@ func TestRetryTask_NoExistingJob(t *testing.T) {
 		t.Errorf("expected Pending, got %s", task.Status.Phase)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// acquireSessionLock
-// ---------------------------------------------------------------------------
 
 func TestAcquireSessionLock_NoSessionRef(t *testing.T) {
 	scheme := newTestScheme()
@@ -4797,10 +4553,6 @@ func TestAcquireSessionLock_GatewayOwnershipPendingRequeues(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// resolveProvider
-// ---------------------------------------------------------------------------
-
 func TestResolveProvider_Found(t *testing.T) {
 	scheme := newTestScheme()
 	provider := &corev1alpha1.Provider{
@@ -4874,13 +4626,8 @@ func TestResolveProvider_NotFound(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handleScheduled — additional paths
-// ---------------------------------------------------------------------------
-
 func TestHandleScheduled_NotYetTime(t *testing.T) {
 	scheme := newTestScheme()
-	// Use a schedule far in the future
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "sched-future",
@@ -4889,7 +4636,7 @@ func TestHandleScheduled_NotYetTime(t *testing.T) {
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:     corev1alpha1.TaskTypeContainer,
-			Schedule: "0 0 1 1 *", // Jan 1 only
+			Schedule: "0 0 1 1 *",
 		},
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseScheduled},
 	}
@@ -4940,7 +4687,7 @@ func TestHandleScheduled_MissedDeadline(t *testing.T) {
 		},
 		Spec: corev1alpha1.TaskSpec{
 			Type:                    corev1alpha1.TaskTypeContainer,
-			Schedule:                "* * * * *", // every minute
+			Schedule:                "* * * * *",
 			StartingDeadlineSeconds: &deadline,
 		},
 		Status: corev1alpha1.TaskStatus{
@@ -5400,10 +5147,6 @@ func TestHandleScheduled_ExistingChildTaskStillUpdatesScheduleStatus(t *testing.
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handleAutonomousIteration
-// ---------------------------------------------------------------------------
-
 func TestHandleAutonomousIteration_GoalComplete(t *testing.T) {
 	scheme := newTestScheme()
 	agent := &corev1alpha1.Agent{
@@ -5428,7 +5171,6 @@ func TestHandleAutonomousIteration_GoalComplete(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task, agent)
-	// Save plan state indicating goal is complete
 	_ = r.PlanStore.SavePlan(context.Background(), "default", "auto-task", &store.PlanState{
 		GoalComplete: true,
 		Summary:      "All tasks done",
@@ -5574,10 +5316,6 @@ func TestHandleAutonomousIteration_AgentNotFound(t *testing.T) {
 		t.Errorf("expected Failed, got %s", task.Status.Phase)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Reconcile
-// ---------------------------------------------------------------------------
 
 func TestReconcile_NotFound(t *testing.T) {
 	scheme := newTestScheme()
@@ -5726,10 +5464,6 @@ func TestReconcile_CompletedPhase(t *testing.T) {
 	}
 	_ = result
 }
-
-// ---------------------------------------------------------------------------
-// handlePending — transaction token pending
-// ---------------------------------------------------------------------------
 
 func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
 	scheme := newTestScheme()
@@ -6136,10 +5870,6 @@ func assertNoJobsForTask(t *testing.T, r *TaskReconciler, task *corev1alpha1.Tas
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handlePending — namespace task limit
-// ---------------------------------------------------------------------------
-
 func TestTaskPhaseCountsTowardConcurrency(t *testing.T) {
 	tests := []struct {
 		phase corev1alpha1.TaskPhase
@@ -6170,21 +5900,21 @@ func TestTaskPhaseCountsTowardConcurrency(t *testing.T) {
 
 func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 	scheme := newTestScheme()
-	// Create active tasks to hit the limit
 	active1 := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "active1", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "active1", Namespace: "default", UID: "active1-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	active2 := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "active2", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "active2", Namespace: "default", UID: "active2-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, JobName: "active2-job"},
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "pending-limit",
 			Namespace:  "default",
+			UID:        "pending-limit-uid",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
@@ -6204,7 +5934,7 @@ func TestHandlePending_NamespaceTaskLimit(t *testing.T) {
 func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 	scheme := newTestScheme()
 	finalizing := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "finalizing", Namespace: "default", UID: "finalizing-uid"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFinalizing},
 	}
@@ -6212,6 +5942,7 @@ func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "pending-finalizing-limit",
 			Namespace:  "default",
+			UID:        "pending-finalizing-limit-uid",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
 		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
@@ -6230,12 +5961,6 @@ func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 	assertNoJobsForTask(t, r, task)
 }
 
-// ---------------------------------------------------------------------------
-// readPodLogs — pods found but no KubeClient causes panic (guarded by caller)
-// The readPodLogs method is called by collectResult which checks KubeClient != nil.
-// We test this indirectly through collectResult to avoid the nil dereference.
-// ---------------------------------------------------------------------------
-
 func TestCollectResult_ContainerTask_NoKubeClient_NoPods(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -6244,16 +5969,11 @@ func TestCollectResult_ContainerTask_NoKubeClient_NoPods(t *testing.T) {
 		Status:     corev1alpha1.TaskStatus{JobName: "job-collect"},
 	}
 	r := newUnitReconciler(scheme, task)
-	// KubeClient is nil — collectResult should return nil early
 	err := r.collectResult(context.Background(), task)
 	if err != nil {
 		t.Fatalf("expected nil error when KubeClient is nil, got %v", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleCompleted — webhook paths
-// ---------------------------------------------------------------------------
 
 func TestHandleCompleted_WebhookNotConfigured(t *testing.T) {
 	scheme := newTestScheme()
@@ -6295,8 +6015,6 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 	notifier.SetKeySource(taskwebhook.StaticKeySource{Keys: newWebhookTestKeys(t)})
 	r.WebhookNotifier = notifier
 	deliveries := attachTestWebhookDispatcher(t, r)
-	// The reconcile hands the due notice to the delivery runnable and does
-	// not send it itself.
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -6312,7 +6030,6 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 	if delivery := task.Status.WebhookDelivery; delivery == nil || delivery.Attempts != 1 || delivery.LastError != taskwebhook.ErrResolution.Error() {
 		t.Fatalf("unexpected webhook delivery state %#v", delivery)
 	}
-	// Should requeue for webhook retry after the first backoff step.
 	result, err = r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -6321,10 +6038,6 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 		t.Errorf("expected at most %v requeue for webhook retry, got %v", defaultWebhookInitialBackoff, result.RequeueAfter)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Reconcile — additional phase paths
-// ---------------------------------------------------------------------------
 
 func TestReconcile_ScheduledPhase(t *testing.T) {
 	scheme := newTestScheme()
@@ -6459,10 +6172,6 @@ func TestReconcile_CancelledPhase(t *testing.T) {
 	_ = result
 }
 
-// ---------------------------------------------------------------------------
-// handlePending — scheduled task path
-// ---------------------------------------------------------------------------
-
 func TestHandlePending_ScheduledTask(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -6485,10 +6194,6 @@ func TestHandlePending_ScheduledTask(t *testing.T) {
 		t.Errorf("expected Scheduled phase, got %s", task.Status.Phase)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleRunning — autonomous task path
-// ---------------------------------------------------------------------------
 
 func TestHandleRunning_AutonomousTask(t *testing.T) {
 	scheme := newTestScheme()
@@ -6523,15 +6228,10 @@ func TestHandleRunning_AutonomousTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should advance to next iteration (Pending)
 	if task.Status.Phase != corev1alpha1.TaskPhasePending {
 		t.Errorf("expected Pending for next iteration, got %s", task.Status.Phase)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleRunning — child task with result
-// ---------------------------------------------------------------------------
 
 func TestHandleRunning_ChildTaskWithResult(t *testing.T) {
 	scheme := newTestScheme()
@@ -6560,7 +6260,6 @@ func TestHandleRunning_ChildTaskWithResult(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task, job, child)
-	// Save child result
 	_ = r.ResultStore.SaveResult(context.Background(), "default", "child-with-result", []byte("child output"))
 	_, err := r.handleRunning(context.Background(), task)
 	if err != nil {
@@ -6624,10 +6323,6 @@ func TestHandleRunning_ChildTasksSortedByName(t *testing.T) {
 		t.Fatalf("expected child statuses to be sorted by name, got %#v", task.Status.ChildTasks)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// completeTask — with plan store cleanup
-// ---------------------------------------------------------------------------
 
 func TestHandleCompletedRecordsMissingCancelledExecutionEvent(t *testing.T) {
 	scheme := newTestScheme()
@@ -6740,7 +6435,6 @@ func TestCompleteTask_WithPlanStore(t *testing.T) {
 		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
-	// Save a plan
 	_ = r.PlanStore.SavePlan(context.Background(), "default", "comp-plan", &store.PlanState{
 		Summary: "test plan",
 	})
@@ -6748,7 +6442,6 @@ func TestCompleteTask_WithPlanStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Plan should be cleaned up
 	_, planErr := r.PlanStore.GetPlan(context.Background(), "default", "comp-plan")
 	if planErr == nil {
 		t.Error("expected plan to be deleted on completion")
@@ -6783,10 +6476,6 @@ func TestCompleteTask_CancelledKeepsPlan(t *testing.T) {
 		t.Fatalf("plan = %+v, %v; want the plan kept after cancellation", plan, err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleCompleted — webhook success path
-// ---------------------------------------------------------------------------
 
 func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6828,10 +6517,6 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// collectResult — result already saved by worker (AI task)
-// ---------------------------------------------------------------------------
-
 func TestCollectResult_ResultSavedByWorker(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
@@ -6860,12 +6545,7 @@ func TestCollectResult_AITask_NoResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// AI task without result — should return nil (no attempt to read logs)
 }
-
-// ---------------------------------------------------------------------------
-// createTaskJob — job already exists
-// ---------------------------------------------------------------------------
 
 func TestCreateTaskJob_JobAlreadyExists(t *testing.T) {
 	scheme := newTestScheme()
@@ -6882,21 +6562,18 @@ func TestCreateTaskJob_JobAlreadyExists(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	// First call succeeds
 	_, err := r.createTaskJob(context.Background(), task, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error on first call: %v", err)
 	}
 	jobName := task.Status.JobName
 
-	// Reset task status to simulate second reconcile
 	task.Status.Phase = corev1alpha1.TaskPhasePending
 	task.Status.JobName = ""
 	task.Status.Attempts = 0
 	task.Status.StartTime = nil
 	task.Status.Conditions = nil
 
-	// Second call should handle AlreadyExists
 	_, err = r.createTaskJob(context.Background(), task, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error on second call (AlreadyExists): %v", err)
@@ -6917,16 +6594,12 @@ func TestCreateTaskJob_RecoveredJobKeepsItsOwnConnectionBindings(t *testing.T) {
 	if _, err := r.createTaskJob(context.Background(), task, nil, nil); err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
-	// The Job that already exists was dispatched against a frozen
-	// Connection; a later reconcile must adopt those bindings rather than
-	// the ones it would freeze now.
 	job := &batchv1.Job{}
 	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
 		t.Fatal(err)
 	}
 	frozen := []corev1alpha1.ConnectionBinding{{PolicyName: "github-conn", Provider: "github", ConnectionName: "github-abc", UID: "conn-uid", Generation: 2, GrantSequence: 1, Mode: "readOnly"}}
 	encoded, _ := json.Marshal(frozen)
-	// The fake API server assigns no UID; recovery adopts only a recorded one.
 	job.UID = "job-uid-1"
 	for i := range job.Spec.Template.Spec.Containers {
 		if job.Spec.Template.Spec.Containers[i].Name == workerContainerName {
@@ -6943,8 +6616,6 @@ func TestCreateTaskJob_RecoveredJobKeepsItsOwnConnectionBindings(t *testing.T) {
 	if got, present, err := FrozenConnectionBindingsFromJob(stored); err != nil || !present || !ConnectionBindingsEqual(got, frozen) {
 		t.Fatalf("stored job bindings = %+v present = %v err = %v", got, present, err)
 	}
-	// A status write that landed before the crash recorded the Job's
-	// identity but not yet its bindings; the next reconcile dispatches again.
 	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, task); err != nil {
 		t.Fatal(err)
 	}
@@ -7037,10 +6708,6 @@ func TestCreateTaskJob_DoesNotOverwriteCancelledStatus(t *testing.T) {
 		t.Fatalf("start events = %#v, want none for cancelled task", listed)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handlePending — with session ref
-// ---------------------------------------------------------------------------
 
 func TestHandlePending_WithSessionRef(t *testing.T) {
 	scheme := newTestScheme()
@@ -7334,10 +7001,6 @@ func TestHandlePending_WithMissingSessionCreateFalseFailsTask(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handleRunning — child task with empty phase
-// ---------------------------------------------------------------------------
-
 func TestHandleRunning_ChildWithEmptyPhase(t *testing.T) {
 	scheme := newTestScheme()
 	job := &batchv1.Job{
@@ -7374,10 +7037,6 @@ func TestHandleRunning_ChildWithEmptyPhase(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handleRunning — child task result fetch error
-// ---------------------------------------------------------------------------
-
 func TestHandleRunning_ChildResultFetchError(t *testing.T) {
 	scheme := newTestScheme()
 	job := &batchv1.Job{
@@ -7405,7 +7064,6 @@ func TestHandleRunning_ChildResultFetchError(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task, job, child)
-	// Don't save the child's result — fetch will fail
 	_, err := r.handleRunning(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -7459,10 +7117,6 @@ func TestHandleRunning_ChildTaskNilResultStore(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// handleRunning — child task result truncation
-// ---------------------------------------------------------------------------
-
 func TestHandleRunning_ChildResultTruncated(t *testing.T) {
 	scheme := newTestScheme()
 	job := &batchv1.Job{
@@ -7490,7 +7144,6 @@ func TestHandleRunning_ChildResultTruncated(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task, job, child)
-	// Save a large result > 4096 bytes
 	largeResult := make([]byte, 5000)
 	for i := range largeResult {
 		largeResult[i] = 'x'
@@ -7507,10 +7160,6 @@ func TestHandleRunning_ChildResultTruncated(t *testing.T) {
 		t.Error("expected result to be truncated")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleRunning — is child task (skip child status aggregation)
-// ---------------------------------------------------------------------------
 
 func TestHandleRunning_IsChildTask(t *testing.T) {
 	scheme := newTestScheme()
@@ -7538,15 +7187,10 @@ func TestHandleRunning_IsChildTask(t *testing.T) {
 	if result.RequeueAfter != 5*time.Second {
 		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
 	}
-	// Child tasks should not aggregate child statuses
 	if len(task.Status.ChildTasks) != 0 {
 		t.Error("child task should not have child statuses")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// handleRunning — no timeout (nil fields)
-// ---------------------------------------------------------------------------
 
 func TestHandleRunning_NoTimeoutFields(t *testing.T) {
 	scheme := newTestScheme()
@@ -7571,10 +7215,6 @@ func TestHandleRunning_NoTimeoutFields(t *testing.T) {
 		t.Errorf("expected 5s requeue, got %v", result.RequeueAfter)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// resolveProvider — cross-namespace enforcement
-// ---------------------------------------------------------------------------
 
 func TestResolveProvider_CrossNamespaceEnforced(t *testing.T) {
 	scheme := newTestScheme()
@@ -7602,10 +7242,6 @@ func TestResolveProvider_CrossNamespaceEnforced(t *testing.T) {
 		t.Error("expected error for cross-namespace provider with isolation")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// resolveProvider — agent fallback
-// ---------------------------------------------------------------------------
 
 func TestResolveProvider_AgentFallback(t *testing.T) {
 	scheme := newTestScheme()
@@ -7638,10 +7274,6 @@ func TestResolveProvider_AgentFallback(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ensureWorkerRBAC — error paths
-// ---------------------------------------------------------------------------
-
 func TestEnsureWorkerRBAC_SAExistsButRoleBindingsMissing(t *testing.T) {
 	scheme := newTestScheme()
 	sa := &corev1.ServiceAccount{
@@ -7659,8 +7291,6 @@ func TestEnsureWorkerRBAC_SAExistsButRoleBindingsMissing(t *testing.T) {
 		fmt.Sprintf("orka-container-worker-%s", "test-ns2"),
 	}
 	for _, bindingName := range expectedBindings {
-		// The installation may only grant worker access inside its watched
-		// namespace; no cluster-wide binding is created.
 		rb := &rbacv1.RoleBinding{}
 		if err := r.Get(context.Background(), types.NamespacedName{
 			Name: bindingName, Namespace: "test-ns2",
@@ -7674,14 +7304,6 @@ func TestEnsureWorkerRBAC_SAExistsButRoleBindingsMissing(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Verify existing Ginkgo tests are unaffected (build check only)
-// ---------------------------------------------------------------------------
-
-// These standard Go tests live alongside the Ginkgo test file.
-// They deliberately avoid TestMain or any Ginkgo bootstrap to stay independent.
-
-// Ensure the store.ErrNotFound sentinel is used correctly in tests above.
 var _ = store.ErrNotFound
 
 type failingTaskExecutionEventStore struct{}
@@ -7939,9 +7561,6 @@ func TestTaskLifecycleEventKeepsExistingSessionName(t *testing.T) {
 }
 
 func TestTaskLifecycleEventAttributesChatCreatedTasks(t *testing.T) {
-	// A chat-created Task has no sessionRef; its orka.ai/chat-session label
-	// attributes lifecycle events to that chat Session, but only when the
-	// label names an existing chat Session.
 	ctx := context.Background()
 	reconciler := newUnitReconciler(newTestScheme())
 	now := time.Now()
@@ -7991,7 +7610,6 @@ func TestTaskLifecycleEventAttributesChatCreatedTasks(t *testing.T) {
 			if len(listed) != 1 || listed[0].SessionName != tt.wantSession {
 				t.Fatalf("listed events = %#v, want one event attributed to session %q", listed, tt.wantSession)
 			}
-			// Event attribution never changes Session continuity.
 			if got := taskSessionName(task); got != tt.sessionRef {
 				t.Fatalf("taskSessionName() = %q, want %q", got, tt.sessionRef)
 			}

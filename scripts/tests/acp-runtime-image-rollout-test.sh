@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# scripts/tests suites rely on 'set -e' stopping on failed (( )) arithmetic,
-# which macOS's stock bash 3.2 does not honor; failures would be silently
-# masked there. Require a modern bash (for example: brew install bash).
 if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "error: this test suite requires bash >= 4; found ${BASH_VERSION}" >&2
   exit 1
@@ -1003,7 +1000,6 @@ export PATH="${fake_bin}:${PATH}"
 
 assert_converged() {
   local state_dir="$1"
-  # The shipped controller grace period is 360s; the rollout waits 3m longer.
   local want_rollout_timeout="${2:-540s}"
   local admission_line admission_rollout_line smoke_line webhooks_line dependency_line
   local dependency_first_rollout_line dependency_last_rollout_line
@@ -1035,10 +1031,6 @@ assert_converged() {
   [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
   grep -Fxq 'smoke:/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use' "${state_dir}/apply.log"
   [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
-  # Recovery scenarios run the apply script twice into one shared log, so
-  # phase ordering is asserted on the final converged invocation, which always
-  # starts at its namespace claim. The aborted invocation's partial ordering is
-  # enforced by the fake kubectl state guards instead.
   converged_start="$(grep -nE '^(namespace|namespace-metadata):' "${state_dir}/apply.log" | tail -1 | cut -d: -f1)"
   [[ -n "${converged_start}" ]]
   converged_log="${state_dir}/apply-converged.log"
@@ -1162,11 +1154,6 @@ FAKE_KUBE_STATE="${deleted_controller_state}" FAKE_KUBE_LOG="${deleted_controlle
   "${apply_script}" "${overlay}" "${kustomize}" "${fake_bin}/kubectl" >/dev/null
 assert_converged "${deleted_controller_state}"
 
-# The Recreate controller rollout waits for every old Pod's preStop drain, so
-# the wait covers the longest termination grace period among the applied and
-# live Deployments and the existing controller Pods, plus a 3m startup margin,
-# and is never less than 5m. An unset grace period is the Kubernetes default
-# of 30s.
 run_rollout_timeout_scenario() {
   local name="$1" live_grace="$2" applied_grace="$3" want="$4" pod_graces="${5:-}"
   local state_dir="${test_root}/state-rollout-timeout-${name}"
@@ -1183,8 +1170,6 @@ run_rollout_timeout_scenario() {
 run_rollout_timeout_scenario applied-longer 60 "" 540s
 run_rollout_timeout_scenario live-longer 900 "" 1080s
 run_rollout_timeout_scenario applied-shortened 360 60 540s 360
-# A retry after a redeploy that lowered the grace period, while the earlier
-# controller Pod is still terminating under its original grace period.
 run_rollout_timeout_scenario terminating-pod-longer 60 60 540s 360
 run_rollout_timeout_scenario above-floor "" 121 301s
 run_rollout_timeout_scenario floor "" 120 300s

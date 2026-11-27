@@ -92,7 +92,6 @@ func TestSaveAndLoadConfig(t *testing.T) {
 		t.Errorf("Namespace = %q, want %q", got.Namespace, want.Namespace)
 	}
 
-	// Verify file permissions
 	path := configPath()
 	info, err := os.Stat(path)
 	if err != nil {
@@ -122,7 +121,6 @@ func TestSaveConfigCreatesDir(t *testing.T) {
 	}
 }
 
-// testKubeIdentity stands in for a kubeconfigIdentity digest.
 var testKubeIdentity = strings.Repeat("ab", 32)
 
 func TestSaveAndLoadPortForwardCache(t *testing.T) {
@@ -162,15 +160,11 @@ func TestSaveAndLoadPortForwardCache(t *testing.T) {
 	if other := loadPortForwardCache(strings.Repeat("cd", 32)); other != nil {
 		t.Errorf("another context loaded this context's forward: %+v", other)
 	}
-	// A context whose identity shares the file name's prefix still does not
-	// get this context's forward.
 	if other := loadPortForwardCache(testKubeIdentity[:16] + strings.Repeat("cd", 24)); other != nil {
 		t.Errorf("a context sharing the cache file name loaded this context's forward: %+v", other)
 	}
 }
 
-// Each context keeps its own forward, so switching contexts neither reuses
-// nor replaces another context's forward.
 func TestPortForwardCacheIsPerContext(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	other := strings.Repeat("cd", 32)
@@ -207,7 +201,7 @@ func TestLoadPortForwardCacheExpired(t *testing.T) {
 		Service:     "orka-api",
 		Namespace:   "default",
 		KubeContext: testKubeIdentity,
-		Timestamp:   time.Now().Unix() - 3600, // 1 hour ago, exceeds 30 min TTL
+		Timestamp:   time.Now().Unix() - 3600,
 	}
 
 	path := portForwardCachePath(testKubeIdentity)
@@ -245,8 +239,6 @@ func TestLoadPortForwardCacheInvalidJSON(t *testing.T) {
 	}
 }
 
-// clearPortForwardCache removes only the forward for the command's context and
-// namespace.
 func TestClearPortForwardCache(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -426,8 +418,6 @@ func TestNewClientFromCmd_FallbackToConfig(t *testing.T) {
 	}
 }
 
-// With nothing naming a namespace, the client sends none and the server picks
-// it, rather than the CLI assuming Kubernetes' "default".
 func TestNewClientFromCmd_NoNamespaceConfigured(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -455,7 +445,6 @@ func TestNewClientFromCmd_FallbackDefaultServer(t *testing.T) {
 	root.SetArgs([]string{"--token", "tok", "--namespace", "ns"})
 	root.RunE = func(cmd *cobra.Command, _ []string) error {
 		c := newClientFromCmd(cmd)
-		// TestMain hides any ambient kubeconfig, so discovery finds no cluster.
 		if c.BaseURL != defaultServer {
 			t.Errorf("BaseURL = %q, want the default server %q", c.BaseURL, defaultServer)
 		}
@@ -478,7 +467,6 @@ func TestNewClientFromCmd_WithKubeconfig(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	// Create a kubeconfig
 	config := clientcmdapi.NewConfig()
 	config.CurrentContext = testCtxName
 	config.Contexts[testCtxName] = &clientcmdapi.Context{
@@ -501,9 +489,6 @@ func TestNewClientFromCmd_WithKubeconfig(t *testing.T) {
 	root.SetArgs([]string{"--kubeconfig", kubePath, "--server", "http://test:8080"})
 	root.RunE = func(cmd *cobra.Command, _ []string) error {
 		c := newClientFromCmd(cmd)
-		// An explicit --server was not reached through the kubeconfig, so the
-		// kubeconfig user's token is not sent to it, and the context's
-		// namespace, which belongs to that cluster, is not either.
 		if c.Token != "" {
 			t.Errorf("Token = %q, want empty", c.Token)
 		}
@@ -522,13 +507,11 @@ func TestNewClientFromCmd_CachedPortForward(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	// Start a local server to simulate a cached port-forward target
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	// Parse port from URL
 	var port int
 	fmt.Sscanf(srv.URL, "http://127.0.0.1:%d", &port) //nolint:errcheck
 
@@ -542,9 +525,6 @@ func TestNewClientFromCmd_CachedPortForward(t *testing.T) {
 		t.Fatalf("write kubeconfig: %v", err)
 	}
 
-	// Save a port-forward cache pointing to our test server, started for the
-	// same kubeconfig context and namespace by a process that still holds the
-	// port.
 	trustCachedForwards(t)
 	savePortForwardCache(&portForwardCache{
 		Port:        port,
@@ -596,14 +576,12 @@ func TestDiscoverOrkaService_WellKnownName(t *testing.T) {
 
 func TestDiscoverOrkaService_ByLabel(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// No well-known services found
 		if r.URL.Path == serviceCheckPath ||
 			r.URL.Path == "/api/v1/namespaces/default/services/orka" ||
 			r.URL.Path == "/api/v1/namespaces/default/services/orka-controller-manager" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		// Label query returns a service
 		if r.URL.Path == "/api/v1/namespaces/default/services" {
 			resp := map[string]any{
 				"items": []map[string]any{

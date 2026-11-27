@@ -55,8 +55,6 @@ func TestAgentExecutionBindingPreservesCheckpointRestore(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Every queue reconcile reloads this immutable plan before creating
-			// workspace demand. The retained checkpoint must survive that boundary.
 			verified, err := r.loadVerifiedBoundExecution(ctx, bound, bound.Status.AgentExecutionBinding)
 			if err != nil {
 				t.Fatalf("reload checkpoint restore for dispatch: %v", err)

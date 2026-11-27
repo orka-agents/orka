@@ -23,8 +23,6 @@ type FindingFilterResult struct {
 	Dropped []DroppedFindingDiagnostic
 }
 
-// FilterFindings applies deterministic hard false-positive exclusions after
-// schema/evidence validation and before durable finding persistence.
 func FilterFindings(findings []*store.Finding) FindingFilterResult {
 	result := FindingFilterResult{Kept: make([]*store.Finding, 0, len(findings))}
 	for index, finding := range findings {
@@ -352,8 +350,6 @@ func allPathsAreTestOnly(paths []string) bool {
 	return true
 }
 
-// allPathsAreExampleOnly reports evidence confined to demo, example, or
-// vendored third-party directories.
 func allPathsAreExampleOnly(paths []string) bool {
 	if len(paths) == 0 {
 		return false
@@ -568,7 +564,6 @@ func hasMixedSecretAlphabet(value string) bool {
 		case r >= '0' && r <= '9':
 			hasDigit = true
 		case r == '_' || r == '-' || r == '.' || r == '/':
-			// common token alphabet
 		default:
 			return false
 		}

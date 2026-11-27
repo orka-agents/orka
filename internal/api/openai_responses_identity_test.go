@@ -58,9 +58,6 @@ func TestResponsesProductionFunctionArgumentIdentity(t *testing.T) {
 	}
 }
 
-// After an HTTP200 stream has delivered metadata, provider/event failures do
-// not become retry-eligible HTTP capability failures, even if their payload
-// mentions an unsupported stream and a 404 status. Exercise both SDK branches.
 func TestResponsesProductionMetadataErrorDoesNotRetry(t *testing.T) {
 	for _, mode := range []string{"event", "nested-error", "truncated"} {
 		t.Run(mode, func(t *testing.T) {

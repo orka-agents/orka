@@ -20,9 +20,6 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 )
 
-// Preserve the existing functional assertion budgets before event compaction.
-// The dedicated CI lane allows the real one-minute maintenance loop to run;
-// neither controller clocks nor durable retention records are changed by tests.
 const gatewayE2ETerminalRetention = 20 * time.Minute
 
 type gatewayE2ECleanup struct {
@@ -40,9 +37,6 @@ func newGatewayE2ECleanup(apiBaseURL, token string) (*gatewayE2ECleanup, error) 
 	if err != nil {
 		return nil, errors.New("read Gateway cleanup Kubernetes configuration")
 	}
-	// Gateway provenance protection permits only the existing controller
-	// identity to update its Tasks. Use that fixture's token, never a relaxed
-	// admission policy or garbage-collector impersonation.
 	cfg, err = gatewayE2EControllerConfig(cfg, token)
 	if err != nil {
 		return nil, err
@@ -54,8 +48,6 @@ func newGatewayE2ECleanup(apiBaseURL, token string) (*gatewayE2ECleanup, error) 
 	return &gatewayE2ECleanup{e2eCleanup: cleanup}, nil
 }
 
-// Record uncertainty before sending any ingress request: even a lost response
-// may leave an admitted event that has not created its Task yet.
 func (c *gatewayE2ECleanup) beginIngress() error {
 	if c.ingressPending {
 		return errors.New("previous Gateway ingress outcome is still unknown")
@@ -64,8 +56,6 @@ func (c *gatewayE2ECleanup) beginIngress() error {
 	return c.checkpoint("request_gateway_ingress")
 }
 
-// An empty event ID is allowed only after a confirmed rejection. Accepted and
-// duplicate responses both bind the same durable event to its original Task.
 func (c *gatewayE2ECleanup) finishIngress(eventID string) error {
 	if !c.ingressPending {
 		return errors.New("Gateway ingress request was not tracked")
@@ -167,10 +157,6 @@ func gatewayE2ECaptureRuntimeSession(ctx context.Context, cleanup *gatewayE2ECle
 	return errors.New("Gateway runtime Task was not observed before cleanup")
 }
 
-// Gateway Sessions are deliberately hidden from the generic Session API.
-// Only normal Gateway maintenance may archive them and request Task deletion.
-// The observer retains each Task until the shared strict receipt validator has
-// verified runtime retirement and all product finalizers have been released.
 func gatewayE2EWaitForRetentionCleanup(ctx context.Context, cleanup *gatewayE2ECleanup) (resultErr error) {
 	defer func() {
 		cleanup.report.FinishedAt = time.Now().UTC()
@@ -211,8 +197,6 @@ func gatewayE2EWaitForRetentionCleanup(ctx context.Context, cleanup *gatewayE2EC
 			if ready, err := gatewayE2EControlAbsent(ctx, cleanup, record); err != nil || !ready {
 				return false, err
 			}
-			// This is an observed controller deletion request, never a synthetic
-			// test DELETE that could bypass the retention lifecycle under test.
 			record.DeleteRequested = true
 			return true, cleanup.checkpoint("observe_gateway_retention")
 		}); err != nil {
@@ -230,7 +214,7 @@ func gatewayE2EWaitForRetentionCleanup(ctx context.Context, cleanup *gatewayE2EC
 
 func gatewayE2EControlAbsent(ctx context.Context, cleanup *gatewayE2ECleanup, record *e2eTaskCleanupEvidence) (bool, error) {
 	if record.RuntimeSessionControlUID == "" {
-		return true, nil // Native Tasks have no admitted ACP RuntimeSession.
+		return true, nil
 	}
 	control, err := cleanup.sessionControl(ctx, record.SessionName)
 	if err != nil {

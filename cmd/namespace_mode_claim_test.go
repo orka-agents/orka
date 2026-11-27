@@ -36,7 +36,6 @@ func TestClaimNamespaceModeClaimsAnUnlabeledNamespace(t *testing.T) {
 	if got := claimed.Labels[executionmode.NamespaceLabel]; got != "harness-v2" {
 		t.Fatalf("label = %q, want harness-v2", got)
 	}
-	// A later start finds the claim and must accept it without writing.
 	if err := claimNamespaceMode(ctx, namespaces, "orka-system", executionmode.HarnessV2, true); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
@@ -69,8 +68,6 @@ func TestClaimNamespaceModeWithoutClaimingRequiresTheLabel(t *testing.T) {
 
 func TestClaimNamespaceModeLosesTheRaceToAnotherMode(t *testing.T) {
 	client := fake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "orka-system"}})
-	// The first update conflicts, as if another controller claimed the
-	// namespace first; the retry then reads that claim.
 	conflicted := false
 	client.PrependReactor("update", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
 		if conflicted {

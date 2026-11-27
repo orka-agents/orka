@@ -17,14 +17,9 @@ import (
 )
 
 func main() {
-	// Toolbox subcommands run in init containers (and as an unprivileged
-	// supervisor child) with no supervisor configuration. They must run before
-	// process hardening and before any environment is read.
 	if len(os.Args) > 1 && toolbox.IsSubcommand(os.Args[1]) {
 		os.Exit(toolbox.Run(os.Args[1], os.Args[2:], os.Stdout, os.Stderr))
 	}
-	// The operator file helper runs as a RuntimeSession child identity
-	// (launched through the ACP exec helper) with no supervisor configuration.
 	if len(os.Args) > 1 && os.Args[1] == supervisor.OperatorFileHelperSubcommand {
 		os.Exit(supervisor.RunOperatorFileHelper(os.Args[2:], os.Stdin, os.Stdout))
 	}
@@ -35,9 +30,6 @@ func main() {
 		logger.Error("invalid ACP supervisor eviction configuration", "error", err)
 		os.Exit(1)
 	}
-	// A provider-hosted worker forwards its own SIGTERM to this process and
-	// then gives the Actor a bounded window to be suspended. A supervisor that
-	// serves a data-only suspendable workspace must not exit in that window.
 	var evictionTarget atomic.Pointer[supervisor.Server]
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
@@ -55,9 +47,6 @@ func main() {
 		os.Exit(1)
 	}
 	if supervisor.CredentialBootstrapConfigured() {
-		// Provider-hosted supervisors boot credential-free (their workload
-		// template is provider-visible and may be golden-snapshotted) and wait
-		// for the controller to seed the pool credentials.
 		logger.Info("awaiting controller credential bootstrap")
 		seeded, err := supervisor.AwaitCredentialBootstrap(ctx)
 		if err != nil {
@@ -82,16 +71,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err := supervisor.VerifyToolboxes(cfg); err != nil {
-		// The stable FAIL line reaches the container termination message so
-		// the controller fails waiting Tasks with ToolboxUnavailable instead
-		// of letting them wait for a Pod that never becomes Ready.
 		supervisor.ReportToolboxFailure(err)
 		logger.Error("toolbox verification failed", "error", err)
 		os.Exit(1)
 	}
 	if err := supervisor.VerifySkills(cfg); err != nil {
-		// Skill failures use the same stable FAIL line, so the controller
-		// fails waiting Tasks with the skill reason instead of waiting.
 		supervisor.ReportToolboxFailure(err)
 		logger.Error("skill verification failed", "error", err)
 		os.Exit(1)
@@ -112,13 +96,9 @@ func main() {
 		Addr:              cfg.ListenAddress,
 		Handler:           runtimeServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		// Control requests carry small bounded JSON bodies; a full-request
-		// read deadline stops an untrusted Pod-local peer from holding
-		// connections open by dripping chunked bodies. Response streaming
-		// (prompt events) is unaffected by the read deadline.
-		ReadTimeout:    30 * time.Second,
-		IdleTimeout:    2 * time.Minute,
-		MaxHeaderBytes: 32 << 10,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    32 << 10,
 	}
 
 	evictionTarget.Store(runtimeServer)

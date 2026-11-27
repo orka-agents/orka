@@ -73,7 +73,6 @@ func newStatusCmd() *cobra.Command {
 					fmt.Printf("    Scheduled:  %d\n", counts["Scheduled"])
 				}
 
-				// Show autonomous tasks
 				var autonomousTasks []client.TaskSummary
 				for _, t := range tasks {
 					if t.Iteration > 0 {

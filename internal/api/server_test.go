@@ -26,7 +26,6 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-// mockHealthChecker implements store.HealthChecker for tests.
 type mockHealthChecker struct{}
 
 func (m *mockHealthChecker) HealthCheck(_ context.Context) error { return nil }
@@ -110,7 +109,6 @@ func TestServer_APIRoutes_RequireAuth(t *testing.T) {
 
 	server := NewServer(fakeClient, nil, config)
 
-	// These endpoints should require authentication
 	apiEndpoints := []struct {
 		method string
 		path   string
@@ -125,12 +123,10 @@ func TestServer_APIRoutes_RequireAuth(t *testing.T) {
 	for _, ep := range apiEndpoints {
 		t.Run(ep.method+" "+ep.path, func(t *testing.T) {
 			req := httptest.NewRequest(ep.method, ep.path, nil)
-			// No auth header
 			resp, err := server.app.Test(req)
 			if err != nil {
 				t.Fatalf("Test request failed: %v", err)
 			}
-			// Should return 401 Unauthorized
 			if resp.StatusCode != http.StatusUnauthorized {
 				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 			}
@@ -208,7 +204,6 @@ func TestServer_CORS(t *testing.T) {
 
 	server := NewServer(fakeClient, nil, config)
 
-	// Test OPTIONS preflight request
 	req := httptest.NewRequest(http.MethodOptions, "/healthz", nil)
 	req.Header.Set("Origin", "http://localhost:3000")
 	req.Header.Set("Access-Control-Request-Method", "GET")
@@ -218,7 +213,6 @@ func TestServer_CORS(t *testing.T) {
 		t.Fatalf("Test request failed: %v", err)
 	}
 
-	// Should allow CORS
 	corsHeader := resp.Header.Get("Access-Control-Allow-Origin")
 	if corsHeader == "" {
 		t.Error("Missing Access-Control-Allow-Origin header")
@@ -242,7 +236,6 @@ func TestServer_RequestID(t *testing.T) {
 		t.Fatalf("Test request failed: %v", err)
 	}
 
-	// Should have request ID header
 	requestID := resp.Header.Get("X-Request-Id")
 	if requestID == "" {
 		t.Error("Missing X-Request-Id header")
@@ -255,7 +248,7 @@ func TestServer_Start_ContextCancellation(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	config := ServerConfig{
-		Port: 0, // Use port 0 to avoid conflicts
+		Port: 0,
 	}
 
 	server := NewServer(fakeClient, nil, config)
@@ -267,7 +260,6 @@ func TestServer_Start_ContextCancellation(t *testing.T) {
 		errCh <- server.Start(ctx)
 	}()
 
-	// Cancel context to trigger shutdown
 	cancel()
 
 	err := <-errCh
@@ -303,7 +295,6 @@ func TestCustomErrorHandler_NonAPI404_ServesSPA(t *testing.T) {
 		return c.SendString("api")
 	})
 
-	// Request to a non-API, non-health path that doesn't exist
 	req := httptest.NewRequest(http.MethodGet, "/some-ui-route", nil)
 	resp, err := app.Test(req)
 	if err != nil {
@@ -345,7 +336,6 @@ func TestCustomErrorHandler_API404_ReturnsJSON(t *testing.T) {
 		t.Fatalf("Test request failed: %v", err)
 	}
 
-	// API 404s should return JSON error, not SPA fallback
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
@@ -363,7 +353,6 @@ func TestCustomErrorHandler_Health404_ReturnsJSON(t *testing.T) {
 		ErrorHandler: customErrorHandler,
 	})
 
-	// /healthz is excluded from SPA fallback
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	resp, err := app.Test(req)
 	if err != nil {
@@ -376,10 +365,6 @@ func TestCustomErrorHandler_Health404_ReturnsJSON(t *testing.T) {
 }
 
 func TestCustomErrorHandler_CompatAPI404_ReturnsProviderError(t *testing.T) {
-	// An unrouted path under a compatibility API must not be answered with the
-	// dashboard's index page: the caller is a provider SDK, and HTML parsed as
-	// JSON surfaces several frames from the cause. It also has to carry that
-	// provider's error envelope, which is the only shape its client reads.
 	tests := []struct {
 		name      string
 		path      string
@@ -459,7 +444,6 @@ func TestCustomErrorHandler_CompatAPI404_ReturnsProviderError(t *testing.T) {
 }
 
 func TestCustomErrorHandler_OpenAIConversations_ReturnsNotImplemented(t *testing.T) {
-	// Saved conversations remain unsupported; the error names the stateless route.
 	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
 
 	resp, err := app.Test(httptest.NewRequest(http.MethodPost, "/openai/v1/conversations", nil))
@@ -502,7 +486,6 @@ func TestServer_SetupRoutes_WithChat(t *testing.T) {
 		t.Error("chatHandler should be non-nil when chat is enabled")
 	}
 
-	// Chat endpoint should require auth (return 401 without token)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", nil)
 	resp, err := server.app.Test(req)
 	if err != nil {
@@ -524,7 +507,6 @@ func TestServer_SetupRoutes_OpenAI(t *testing.T) {
 
 	server := NewServer(fakeClient, nil, config)
 
-	// OpenAI-compatible endpoints should require auth
 	endpoints := []struct {
 		method string
 		path   string
@@ -570,7 +552,6 @@ func TestServer_SetupRoutes_InternalAPI(t *testing.T) {
 		t.Error("internalHandlers should be non-nil when stores are provided")
 	}
 
-	// Internal endpoints should require auth
 	internalEndpoints := []struct {
 		method string
 		path   string

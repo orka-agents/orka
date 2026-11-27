@@ -31,25 +31,21 @@ import (
 	"github.com/orka-agents/orka/workers/common"
 )
 
-// WaitForTasksTool implements waiting for child tasks to complete
 type WaitForTasksTool struct {
 	k8sClient client.Client
 	maxWait   time.Duration
 }
 
-// WaitForTasksArgs are the arguments for the wait_for_tasks tool
 type WaitForTasksArgs struct {
 	Tasks   []string `json:"tasks"`
 	Timeout string   `json:"timeout,omitempty"`
 }
 
-// WaitForTasksResult represents the aggregated result
 type WaitForTasksResult struct {
 	Completed bool             `json:"completed"`
 	Results   []TaskResultInfo `json:"results"`
 }
 
-// TaskResultInfo holds individual task result information
 type TaskResultInfo struct {
 	Task             string                                     `json:"task"`
 	Agent            string                                     `json:"agent,omitempty"`
@@ -73,14 +69,10 @@ type TaskResultInfo struct {
 	ExecutionOutcome *corev1alpha1.TaskWorkloadExecutionOutcome `json:"executionOutcome,omitempty"`
 	WorkspaceStatus  *corev1alpha1.ExecutionWorkspaceStatus     `json:"workspaceStatus,omitempty"`
 	Delivery         *corev1alpha1.TaskDeliveryStatus           `json:"delivery,omitempty"`
-	// ContinuationTask names the newest Task of the child's continuation
-	// chain when the child parked its turn; the other fields describe it.
-	ContinuationTask string `json:"continuationTask,omitempty"`
-	// WaitState is the parked-turn state of the reported Task, if any.
-	WaitState string `json:"waitState,omitempty"`
+	ContinuationTask string                                     `json:"continuationTask,omitempty"`
+	WaitState        string                                     `json:"waitState,omitempty"`
 }
 
-// FailureDetails provides structured information about a failed task
 type FailureDetails struct {
 	Message    string `json:"message"`
 	RetryCount int    `json:"retryCount"`
@@ -92,33 +84,26 @@ const (
 	maxWaitTaskDataBytes    = 32 * 1024
 )
 
-// NewWaitForTasksTool creates a new wait_for_tasks tool
 func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
 	return &WaitForTasksTool{
 		k8sClient: k8sClient,
 	}
 }
 
-// waitForTasksDeadlineGrace leaves time to assemble and return the result
-// before a caller's context deadline expires.
 const waitForTasksDeadlineGrace = 2 * time.Second
 
-// waitForTasksPollInterval is how often wait_for_tasks re-reads its children.
 var waitForTasksPollInterval = 5 * time.Second
 
-// Name returns the tool name
 func (t *WaitForTasksTool) Name() string {
 	return waitForTasksToolName
 }
 
-// Description returns the tool description
 func (t *WaitForTasksTool) Description() string {
 	return "Wait for one or more child tasks to complete and return their results. " +
 		"For write workspaces, delivery is the controller's publication receipt and headSHA is set only for a verified exact publication. " +
 		"Read these fields after the child finishes; the child cannot report its own post-execution publication receipt."
 }
 
-// Parameters returns the JSON Schema for parameters
 func (t *WaitForTasksTool) Parameters() json.RawMessage {
 	timeoutDefault := "10m"
 	timeoutDescription := "Max wait duration, e.g. '5m' (default: '10m')"
@@ -147,8 +132,6 @@ func (t *WaitForTasksTool) Parameters() json.RawMessage {
 	}`, timeoutDescription, timeoutDefault))
 }
 
-// Execute waits for the specified tasks to complete and returns their results
-//
 //nolint:gocyclo // Task observation, timeout, cancellation, and result assembly share one wait loop.
 func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var waitArgs WaitForTasksArgs
@@ -160,7 +143,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 		return "", fmt.Errorf("at least one task name is required")
 	}
 
-	// Parse timeout
 	timeoutStr := waitArgs.Timeout
 	if timeoutStr == "" {
 		timeoutStr = "10m"
@@ -175,9 +157,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	if t.maxWait > 0 {
 		timeout = min(timeout, t.maxWait)
 	}
-	// A caller's context deadline bounds the wait so a shorter enclosing
-	// execution budget, such as an approved brokered call, yields the normal
-	// in-progress result instead of a cancellation with no result.
 	if ctxDeadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(ctxDeadline) - waitForTasksDeadlineGrace; remaining < timeout {
 			timeout = max(remaining, 0)
@@ -215,10 +194,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	allTerminal := false
-	// A chain that cannot be followed is final only once an authoritative
-	// read agrees: k8sClient may be an informer cache, and two cache misses
-	// do not prove a continuation is gone. Without an authoritative reader, a
-	// missing continuation is final when a second poll confirms it.
 	var authoritative client.Reader
 	if toolCtx != nil {
 		authoritative = toolCtx.PolicyReader
@@ -238,10 +213,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			if err := validateBrokeredWaitTarget(ctx, toolCtx, parent, &task); err != nil {
 				return "", err
 			}
-			// A child that parked its turn continues in a controller-created
-			// continuation Task linked from its own status. Report the newest
-			// Task of that chain and treat the child as finished only when
-			// that Task is terminal and holds no active wait.
 			tail, chainErr := taskwait.ResolveTail(ctx, t.k8sClient, &task)
 			verified := false
 			if chainErr != nil && authoritative != nil && waitChainUnfollowable(chainErr) {
@@ -249,7 +220,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			}
 			if chainErr != nil {
 				missing := apierrors.IsNotFound(chainErr)
-				// An unverified re-read never returns an unfollowable error.
 				confirmed := waitChainUnfollowable(chainErr) && (!missing || verified || missingContinuation[taskName])
 				missingContinuation[taskName] = missing
 				reportBrokenWaitChain(results[taskName], &task, chainErr, confirmed)
@@ -259,7 +229,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				continue
 			}
 			missingContinuation[taskName] = false
-			// Results persist across polls; describe only the Task reported now.
 			results[taskName].ContinuationTask, results[taskName].WaitState = "", ""
 			if tail.Name != task.Name {
 				results[taskName].ContinuationTask = tail.Name
@@ -272,7 +241,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 
 			phase := task.Status.Phase
 
-			// Don't overwrite a task already marked as Retried
 			if results[taskName].Phase != "Retried" {
 				results[taskName].Phase = string(phase)
 			}
@@ -294,9 +262,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				continue
 			}
 
-			// Handle failed tasks — report failure details but do NOT auto-retry.
-			// Retry logic is handled by the coordinator LLM which can make informed
-			// decisions about whether and how to retry.
 			if phase == corev1alpha1.TaskPhaseFailed {
 				if task.Annotations[labels.AnnotationAutoRetry] == trueStr {
 					retryCount, maxRetries := getRetryInfo(&task)
@@ -308,18 +273,12 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				}
 			}
 
-			// Fetch result if available. Controller-side brokered coordination calls
-			// provide ResultStore through ToolContext; worker calls fall back to the
-			// internal HTTP result endpoint.
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
 				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, resultTaskName)
 				if fetchErr == nil {
-					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
 					summaryText := sr.Summary
 					if brokered {
-						// Redact before truncation so a token crossing the summary
-						// boundary cannot leak as an unmatched prefix.
 						summaryText = redact.SensitiveText(summaryText)
 					}
 					summary := common.TruncateSummary(summaryText, maxWaitTaskSummaryChars)
@@ -332,7 +291,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 					results[taskName].BaseSHA = sr.BaseSHA
 					results[taskName].HeadSHA = sr.HeadSHA
 					results[taskName].PushBranch = sr.PushBranch
-					// Set Result to summary only (never include raw diff).
 					results[taskName].Result = summary
 				} else {
 					results[taskName].Result = fmt.Sprintf("error reading result: %v", fetchErr)
@@ -342,7 +300,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			}
 			applyWaitTaskPublication(results[taskName], &task)
 
-			// Add iteration label if present
 			if iterStr, ok := task.Labels[labels.LabelIteration]; ok {
 				results[taskName].Iteration = iterStr
 			}
@@ -357,7 +314,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			break
 		}
 
-		// Wait for the shorter of poll interval or remaining time
 		wait := min(remaining, pollInterval)
 
 		select {
@@ -367,7 +323,6 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 	}
 
-	// Build ordered results
 	resultList := make([]TaskResultInfo, 0, len(waitArgs.Tasks))
 	for _, taskName := range waitArgs.Tasks {
 		result := *results[taskName]
@@ -390,16 +345,10 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	return string(data), nil
 }
 
-// waitChainUnfollowable reports an error that, once confirmed, means the chain
-// has no Task left to follow: a missing continuation or a broken link.
 func waitChainUnfollowable(err error) bool {
 	return apierrors.IsNotFound(err) || errors.Is(err, taskwait.ErrChainBroken)
 }
 
-// resolveWaitTailAuthoritatively follows task's chain again from reader, which
-// bypasses the informer cache. verified is true when the chain was followed, or
-// failed, from the same Task incarnation the caller authorized; only then does
-// the returned error describe the chain.
 func resolveWaitTailAuthoritatively(
 	ctx context.Context,
 	reader client.Reader,
@@ -407,8 +356,6 @@ func resolveWaitTailAuthoritatively(
 ) (tail *corev1alpha1.Task, verified bool, err error) {
 	current := &corev1alpha1.Task{}
 	if getErr := reader.Get(ctx, client.ObjectKeyFromObject(task), current); getErr != nil {
-		// Not wrapped: a failed read of the Task itself says nothing about
-		// its continuation.
 		return nil, false, fmt.Errorf("re-read task %s/%s: %v", task.Namespace, task.Name, getErr)
 	}
 	if current.UID != task.UID {
@@ -421,9 +368,6 @@ func resolveWaitTailAuthoritatively(
 	return tail, true, nil
 }
 
-// reportBrokenWaitChain describes a child whose continuation chain cannot be
-// followed. A confirmed break is final: the parked turn's own success is not
-// the child's outcome, and no later Task of the chain can be found.
 func reportBrokenWaitChain(result *TaskResultInfo, task *corev1alpha1.Task, chainErr error, confirmed bool) {
 	result.Phase = taskPhaseErrorString
 	if !confirmed {
@@ -439,8 +383,6 @@ func reportBrokenWaitChain(result *TaskResultInfo, task *corev1alpha1.Task, chai
 		"but its continuation can no longer be followed, so the work it continued has no reported outcome", chainErr, task.Name)
 }
 
-// Publication happens after the agent exits. Its output cannot supply the
-// authoritative published SHA, even when it contains structured Git metadata.
 func applyWaitTaskPublication(result *TaskResultInfo, task *corev1alpha1.Task) {
 	workspace := taskWorkspace(task)
 	if workspace == nil || workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
@@ -482,10 +424,6 @@ func (t *WaitForTasksTool) validateBrokeredCaller(ctx context.Context, toolCtx *
 	return parent, nil
 }
 
-// validateBrokeredWaitTarget authorizes a child of the authenticated Task or,
-// for a continuation, a child of any verified predecessor in its chain: a
-// resumed coordinator keeps authority over the children it delegated before
-// it parked.
 func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, parent, task *corev1alpha1.Task) error {
 	err := validateBrokeredWaitTargetForParent(ctx, toolCtx, parent, task)
 	if err == nil || toolCtx == nil || !toolCtx.Brokered {
@@ -708,15 +646,13 @@ func brokeredWaitTaskValueIsSensitive(key string, value any) bool {
 	return redact.SensitiveText(probe) != probe
 }
 
-// Ensure WaitForTasksTool implements Tool
 var _ Tool = (*WaitForTasksTool)(nil)
 
-// getRetryInfo extracts retry count and max retries from task annotations.
 func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {
 	if countStr, ok := task.Annotations[labels.AnnotationRetryCount]; ok {
 		retryCount, _ = strconv.Atoi(countStr)
 	}
-	maxRetries = 2 // default
+	maxRetries = 2
 	if maxStr, ok := task.Annotations[labels.AnnotationMaxRetries]; ok {
 		maxRetries, _ = strconv.Atoi(maxStr)
 	}
@@ -725,7 +661,6 @@ func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {
 
 const saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
-// fetchTaskResult fetches a task result from the controller via HTTP GET.
 func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 	controllerURL := os.Getenv(envOrkaControllerURL)
 	if controllerURL == "" {
@@ -740,7 +675,6 @@ func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Add SA token for auth
 	if token, readErr := os.ReadFile(saTokenPath); readErr == nil {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	}
@@ -752,7 +686,7 @@ func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
@@ -761,7 +695,6 @@ func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// The public endpoint returns JSON: {"result": "..."}
 	var result struct {
 		Result string `json:"result"`
 	}

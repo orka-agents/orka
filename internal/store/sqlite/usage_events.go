@@ -8,8 +8,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// recordEventUsage records the usage observation Orka derived from a newly
-// appended execution event, in the event's transaction.
 func recordEventUsage(ctx context.Context, db taskDataExecutor, event store.ExecutionEvent) error {
 	if event.Usage == nil {
 		return nil

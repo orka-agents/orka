@@ -19,8 +19,6 @@ import (
 	"github.com/orka-agents/orka/internal/harness/v2/conformance/conformancetest"
 )
 
-// Delay only bytes after the original accepted frame. The fixture's complete
-// stream and ownership remain unchanged; neither endpoint nor client replays it.
 type delayedConformanceBody struct {
 	io.ReadCloser
 	first  *bytes.Reader
@@ -93,9 +91,6 @@ func TestCheckProbeTimeoutSeparatesOriginalStreamFromControls(t *testing.T) {
 				return nil
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// The upstream can flush acceptance before the transport's final
-				// request-body EOF check. Keep the server from closing that shared
-				// body when it flushes the downstream response.
 				if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
 					t.Errorf("enable full-duplex proxy: %v", err)
 					return

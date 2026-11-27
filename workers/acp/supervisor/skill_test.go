@@ -30,8 +30,6 @@ func supervisorTestSkills() []harnessv2.RuntimeSkill {
 	}
 }
 
-// writeSupervisorTestSkillMounts lays out the read-only skill mounts the
-// controller binds at <root>/<name>.
 func writeSupervisorTestSkillMounts(t *testing.T, root string, skills []harnessv2.RuntimeSkill) {
 	t.Helper()
 	for _, s := range skills {
@@ -46,7 +44,6 @@ func writeSupervisorTestSkillMounts(t *testing.T, root string, skills []harnessv
 		if err := os.WriteFile(filepath.Join(dir, "references", "guide.md"), []byte("guide\n"), 0o444); err != nil {
 			t.Fatal(err)
 		}
-		// The source is read-only, as the runtime mount is.
 		for _, path := range []string{filepath.Join(dir, "references"), dir} {
 			if err := os.Chmod(path, 0o555); err != nil {
 				t.Fatal(err)
@@ -127,8 +124,6 @@ func TestNativeSkillsDirPerRuntime(t *testing.T) {
 		if err != nil || got != dir {
 			t.Errorf("%s skills folder = %q, %v; want %q", provider, got, err, dir)
 		}
-		// Claude's skills form a plugin, which can carry code, so no session
-		// identity may own them; every other copy belongs to the session.
 		if inside := strings.HasPrefix(got, paths.Root+"/"); inside == (provider == providerKindClaude) {
 			t.Errorf("%s skills folder %q has the wrong owner: inside the session root = %t", provider, got, inside)
 		}
@@ -140,9 +135,6 @@ func TestNativeSkillsDirPerRuntime(t *testing.T) {
 	}
 }
 
-// TestNativeSkillsDirMatchesProviderEnvironment ties each placement to the
-// environment the supervisor gives the provider, so a change to the
-// provider's config folder cannot silently strand the projected skills.
 func TestNativeSkillsDirMatchesProviderEnvironment(t *testing.T) {
 	paths := acp.SessionPaths{Root: "/sessions/s", Home: "/sessions/s/home", Config: "/sessions/s/xdg/config"}
 	cases := map[string]struct {
@@ -162,8 +154,6 @@ func TestNativeSkillsDirMatchesProviderEnvironment(t *testing.T) {
 			t.Fatal(err)
 		}
 		if provider == providerKindOpencode && err != nil {
-			// OpenCode needs a full request to render its configuration; its
-			// config folder is fixed by the session paths.
 			env = map[string]string{"OPENCODE_CONFIG_DIR": filepath.Join(paths.Config, "opencode")}
 		}
 		dir, err := nativeSkillsDir(provider, paths)
@@ -174,7 +164,6 @@ func TestNativeSkillsDirMatchesProviderEnvironment(t *testing.T) {
 			t.Errorf("%s skills folder %q does not follow %s=%q", provider, dir, tc.envName, env[tc.envName])
 		}
 	}
-	// Claude reads its skills from the plugin the session options name.
 	claude, err := providerProfile(providerKindClaude, "claude-test", harnessv2.WorkspaceIntentWrite)
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +219,6 @@ func TestMaterializeSessionSkillsCopiesIntoNativeFolder(t *testing.T) {
 					t.Fatalf("claude plugin manifest = %q, %v", manifest, err)
 				}
 			}
-			// The projection never writes to the read-only source.
 			if entries, _ := os.ReadDir(filepath.Join(mounts, skills[0].Name)); len(entries) != 2 {
 				t.Fatalf("source mount changed: %v", entries)
 			}
@@ -306,11 +294,6 @@ func TestVerifySkillsReportsStableFailure(t *testing.T) {
 	}
 }
 
-// TestMaterializedSkillsBelongToTheSessionIdentity proves the projection plus
-// session ownership finalization hands each copy to the child's own UID/GID
-// while the source stays untouched. It needs root, as the runtime Pod does.
-// Claude's shared plugin is the exception; see
-// TestClaudeSkillPluginIsReadOnlyForTheSessionChild.
 func TestMaterializedSkillsBelongToTheSessionIdentity(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		t.Skip("requires root to assign a distinct session identity")
@@ -384,7 +367,6 @@ func TestClaudeSkillProjectionExposesOnlyOrkaSkills(t *testing.T) {
 	if !slices.Equal(restricted["skills"].([]string), []string{"orka:code-review", "orka:release-notes"}) {
 		t.Fatalf("skills filter = %#v", restricted["skills"])
 	}
-	// The skills come from Orka's plugin; no settings file is loaded.
 	plugins := restricted["plugins"].([]map[string]any)
 	if len(plugins) != 1 || plugins[0]["type"] != "local" || plugins[0]["path"] != "/sessions/.claude-skill-plugin" || plugins[0]["skipMcpDiscovery"] != true {
 		t.Fatalf("plugins = %#v", plugins)
@@ -439,8 +421,6 @@ func TestOpenCodeSkillPermissionAllowsOnlyOrkaSkills(t *testing.T) {
 	}
 }
 
-// jsObjectKeyOrder orders keys as JavaScript enumerates an object parsed from
-// JSON: canonical array-index keys ascending, then the rest in source order.
 func jsObjectKeyOrder(keys []string) []string {
 	var indices, others []string
 	for _, key := range keys {
@@ -472,9 +452,6 @@ func TestOpenCodeSkillPermissionAllowsNumericSkillNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// OpenCode flattens the top-level permissions first ("*" sorts first),
-	// then each permission's own rules in JavaScript key order, and the last
-	// matching rule decides.
 	topLevel := openCodeConfigRules(t, data, "*")
 	skillRules := openCodeConfigRules(t, data, "skill")
 	keys := make([]string, 0, len(skillRules))
@@ -499,9 +476,6 @@ func TestOpenCodeSkillPermissionAllowsNumericSkillNames(t *testing.T) {
 	}
 }
 
-// openCodeConfigRules returns one permission's rules in the order OpenCode
-// reads them from the config file (JSON object order), as its fromConfig
-// does: a string is a single "*" rule, an object is one rule per key.
 func openCodeConfigRules(t *testing.T, config []byte, permission string) [][2]string {
 	t.Helper()
 	var root struct {
@@ -537,10 +511,6 @@ func openCodeConfigRules(t *testing.T, config []byte, permission string) [][2]st
 	return rules
 }
 
-// openCodeEvaluate mirrors OpenCode 1.19.0 Permission.evaluate: the last
-// rule whose wildcard matches wins. Configured rules follow OpenCode's
-// defaults, and the configured "*" rule always matches, so the defaults
-// never decide.
 func openCodeEvaluate(rules [][2]string, pattern string) string {
 	action := "ask"
 	for _, rule := range rules {
@@ -562,10 +532,6 @@ func openCodeEvaluate(rules [][2]string, pattern string) string {
 	return action
 }
 
-// TestOpenCodeExternalDirectoryAllowsOnlyProjectedSkillFolders follows
-// OpenCode's read tool: a file outside the workspace asks external_directory
-// with the glob <parent folder>/*. A loaded skill's supporting files must be
-// readable while every other folder outside the workspace stays denied.
 func TestOpenCodeExternalDirectoryAllowsOnlyProjectedSkillFolders(t *testing.T) {
 	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
@@ -614,12 +580,6 @@ func TestOpenCodeExternalDirectoryAllowsOnlyProjectedSkillFolders(t *testing.T) 
 	}
 }
 
-// TestOpenCodeMutationToolsCannotRewriteProjectedSkills follows OpenCode's
-// edit, write, and apply_patch tools: after external_directory they ask the
-// "edit" permission with the file path relative to the project worktree, which
-// is the workspace for a Git repository and "/" otherwise. The skill folders
-// are readable through external_directory, so the edit rules are what keep
-// those tools from rewriting a projected skill.
 func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
 	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
@@ -629,8 +589,6 @@ func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
 			ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: tools},
 		}}
 		request.Profile.Skills = skills
-		// This model gets the edit and write tools; apply_patch is covered by
-		// TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills.
 		data, err := openCodeSessionConfig("anthropic/claude-test", testOpenCodeModelLimits(), intent, request, paths, proxy)
 		if err != nil {
 			t.Fatal(err)
@@ -655,7 +613,6 @@ func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
 			skillsDir + "/release-notes/scripts/deep/check.sh",
 			skillsDir + "/release-notes/new-file.md",
 		} {
-			// The tools reach this check: the skill folder passes external_directory.
 			if got := openCodeEvaluate(openCodeConfigRules(t, data, "external_directory"), filepath.Join(filepath.Dir(file), "*")); got != openCodePermissionAllow {
 				t.Fatalf("external_directory for %s = %s, want allow", file, got)
 			}
@@ -674,8 +631,6 @@ func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
 			}
 		}
 	}
-	// OpenCode hides a tool whose last rule is a blanket deny; the edit tools
-	// must stay available for the workspace.
 	if last := rules[len(rules)-1]; rules[0] != [2]string{"*", openCodePermissionAllow} || last[0] == "*" {
 		t.Fatalf("edit rules must open with the blanket allow and end on a skill folder: %v", rules)
 	}
@@ -695,13 +650,6 @@ func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
 	}
 }
 
-// TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills follows OpenCode
-// 1.19.0's apply_patch, which it exposes instead of edit and write for GPT
-// models: it asks external_directory for a hunk's path and for a move's
-// destination, but the edit permission only for the source path. Moving a
-// workspace file onto a projected skill passes the edit rules, so the skill
-// folders must stay behind the external_directory deny whenever apply_patch
-// can mutate.
 func TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills(t *testing.T) {
 	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
@@ -729,7 +677,6 @@ func TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills(t *testing.T) {
 			t.Fatalf("OpenCode 1.19.0 gives %s the apply_patch tool", model)
 		}
 		data := config(t, model, harnessv2.WorkspaceIntentWrite, mutating)
-		// The source is a workspace file, so the edit check passes.
 		relative, err := filepath.Rel(paths.Workspace, source)
 		if err != nil {
 			t.Fatal(err)
@@ -744,7 +691,6 @@ func TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills(t *testing.T) {
 			}
 		}
 	}
-	// Without a mutating apply_patch the skill folders stay readable.
 	for name, data := range map[string][]byte{
 		"edit and write model": config(t, "anthropic/claude-test", harnessv2.WorkspaceIntentWrite, mutating),
 		"gpt-4 model":          config(t, "openai/gpt-4.1", harnessv2.WorkspaceIntentWrite, mutating),
@@ -759,8 +705,6 @@ func TestOpenCodeApplyPatchCannotMoveFilesOntoProjectedSkills(t *testing.T) {
 	}
 }
 
-// TestOpenCodeSkillEditRulesFailClosed covers a skill folder whose deny rule
-// OpenCode would order before the blanket allow or rewrite.
 func TestOpenCodeSkillEditRulesFailClosed(t *testing.T) {
 	for _, skillsDir := range []string{"/!sessions/config/opencode/skills", "/~/config/opencode/skills"} {
 		if rules, err := openCodeSkillEditRules("/workspace", skillsDir, []string{"code-review"}); err == nil {
@@ -769,8 +713,6 @@ func TestOpenCodeSkillEditRulesFailClosed(t *testing.T) {
 	}
 }
 
-// TestVerifySkillsBoundsAStalledRead keeps a read that never returns from
-// holding the supervisor past the startup probe without a stable reason.
 func TestVerifySkillsBoundsAStalledRead(t *testing.T) {
 	originalTimeout, originalLoad := skillCheckTimeout, loadSkill
 	t.Cleanup(func() { skillCheckTimeout, loadSkill = originalTimeout, originalLoad })

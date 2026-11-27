@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Shared test helpers. Sourced by every test_*.sh file.
-#
-# Loads demo-magic (with -n) + style.sh in a NO_COLOR shell so assertions
-# compare against plain text. Provides assert_* primitives.
 
 set -Eeuo pipefail
 

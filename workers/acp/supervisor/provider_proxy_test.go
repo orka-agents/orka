@@ -37,7 +37,6 @@ func TestProviderProxyConfigValidationAndRedaction(t *testing.T) {
 		{UpstreamBaseURL: "http://vekil.example/v1?token=query", UpstreamBearerToken: secret},
 		{UpstreamBaseURL: "http://vekil.example/../admin", UpstreamBearerToken: secret},
 		{UpstreamBaseURL: "http://vekil.example/v1", UpstreamBearerToken: "bad\nheader"},
-		// Too short to be redacted from events by its exact value.
 		{UpstreamBaseURL: "http://vekil.example/v1", UpstreamBearerToken: "short", ProviderKind: providerKindCodex, Model: "m"},
 	} {
 		if _, _, err := invalid.normalized(); err == nil {
@@ -964,8 +963,6 @@ func TestProviderProxyUpstreamFailureAccountingClearsAfterTerminalStream(t *test
 	}
 }
 
-// Model output can only be derived from a non-error inference response, so
-// the proxy records when the prompt's first such response begins relaying.
 func TestProviderProxyModelOutputPossibleAfterFirstResponseStarts(t *testing.T) {
 	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1085,8 +1082,6 @@ func TestProviderProxyCloseAdmissionRejectsNewRequestsButDrainsInFlight(t *testi
 		_, _ = io.WriteString(w, `{"id":"resp_1","output":[]}`)
 	}))
 	defer upstream.Close()
-	// Runs before upstream.Close so a failed assertion cannot leave the
-	// upstream handler blocked.
 	defer releaseUpstream()
 
 	_, session, binding := activeTestProviderProxySession(t, ProviderProxyConfig{
@@ -1153,8 +1148,6 @@ func TestProviderProxyUpstreamFailureAccountingResetsOnActivation(t *testing.T) 
 		t.Fatal(err)
 	}
 	assertProviderProxyStatus(t, binding.BaseURL+providerOpenAIResponsesV1Path, binding.Credential, http.StatusServiceUnavailable)
-	// The failure detail is attached once the relayed error body has been
-	// observed, which completes after the status line is available.
 	waitProviderProxyIdle(t, session)
 	failed, status, detail := session.upstreamFailureUnrecovered("prompt-one")
 	if !failed || status != http.StatusServiceUnavailable {
@@ -1199,20 +1192,15 @@ func TestRecordRejectedInferenceRequestCountsAsFinalFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	proxy.recordInferenceOutcome(promptID, providerRequestInference, seq, http.StatusOK, "")
-	// Metadata-route rejections carry no inference evidence.
 	proxy.recordRejectedInferenceRequest(promptID, providerRequestMetadata, 0, http.StatusTooManyRequests, "capacity")
 	if failed, _, _ := proxy.upstreamFailureUnrecovered(promptID); failed {
 		t.Fatal("metadata rejection was accounted as an inference failure")
 	}
-	// A proxy-side capacity rejection of an inference request is the
-	// latest-issued outcome, so an end_turn settlement must not be trusted.
 	proxy.recordRejectedInferenceRequest(promptID, providerRequestInference, 0, http.StatusTooManyRequests, "provider session request capacity is exhausted")
 	failed, status, detail := proxy.upstreamFailureUnrecovered(promptID)
 	if !failed || status != http.StatusTooManyRequests || !strings.Contains(detail, "capacity") {
 		t.Fatalf("upstreamFailureUnrecovered() = (%v, %d, %q), want a 429 capacity failure", failed, status, detail)
 	}
-	// The rejection consumed no turn budget, and a later successful inference
-	// recovers the prompt.
 	seq = testAllocateInferenceSeq(proxy)
 	if err := proxy.consumeInferenceRequest(promptID, providerRequestInference, now); err != nil {
 		t.Fatal(err)
@@ -1237,8 +1225,6 @@ func TestSanitizeProviderUpstreamDetailIsBounded(t *testing.T) {
 	if got := sanitizeProviderUpstreamDetail(long); len(got) > providerUpstreamDetailMaxBytes {
 		t.Fatalf("sanitized detail length = %d, want <= %d", len(got), providerUpstreamDetailMaxBytes)
 	}
-	// Separators are dropped, not spaced (a wrapped credential must
-	// reassemble for the redactor), so prose joins across them.
 	if got := sanitizeProviderUpstreamDetail("quota\tex\x1bceeded\n"); got != "quotaexceeded" {
 		t.Fatalf("sanitized control characters = %q", got)
 	}
@@ -1252,8 +1238,6 @@ func TestSanitizeProviderUpstreamDetailIsBounded(t *testing.T) {
 
 func TestSanitizeProviderUpstreamDetailDropsC1ControlsBeforeSplitting(t *testing.T) {
 	const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-	// U+0085 is both a control and Unicode whitespace: splitting into fields
-	// first would fragment the token past the redactor and the path filter.
 	got := sanitizeProviderUpstreamDetail("rejected api_key=" + key[:14] + "\u0085" + key[14:] + " via " + providerProxyPathPrefix[:len(providerProxyPathPrefix)/2] + "\u0085" + providerProxyPathPrefix[len(providerProxyPathPrefix)/2:] + "abc")
 	for _, fragment := range []string{key[:14], key[14:], providerProxyPathPrefix} {
 		if strings.Contains(got, fragment) {
@@ -1266,8 +1250,6 @@ func TestSanitizeProviderUpstreamDetailDropsC1ControlsBeforeSplitting(t *testing
 }
 
 func TestProviderUpstreamErrorDetailRedactsBeforeDisplayBound(t *testing.T) {
-	// The URL password is longer than the display bound, so a pre-redaction
-	// cut would remove the "@" the URL-credential recognizer relies on.
 	password := strings.Repeat("p", providerUpstreamDetailMaxBytes+16)
 	raw := "upstream rejected https://svc:" + password + "@provider.example.com/v1/responses"
 	got := sanitizeProviderUpstreamDetail(providerUpstreamErrorDetail([]byte(raw)))
@@ -1279,9 +1261,6 @@ func TestProviderUpstreamErrorDetailRedactsBeforeDisplayBound(t *testing.T) {
 	}
 }
 
-// credentialShapedUpstreamErrorBody is an upstream error payload that echoes
-// several credential shapes back into error.message; none of them may reach
-// the persisted failure detail.
 const (
 	testLeakedAPIKey    = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
 	testLeakedJWT       = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcmthLXRlc3QifQ.c2lnbmF0dXJlLXRoYXQtbXVzdC1ub3QtbGVhaw"
@@ -1326,8 +1305,6 @@ func TestProviderProxyUpstreamFailureDetailRedactsCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The child still receives the identical upstream bytes; only the
-	// persisted accounting detail is redacted.
 	if response.StatusCode != http.StatusBadRequest || string(body) != credentialShapedUpstreamErrorBody {
 		t.Fatalf("passed-through upstream error = %d %s", response.StatusCode, body)
 	}
@@ -1344,8 +1321,6 @@ func TestProviderProxyUpstreamFailureDetailRedactsCredentials(t *testing.T) {
 }
 
 func TestSanitizeProviderUpstreamDetailRedactsSplitTokens(t *testing.T) {
-	// A control character inside a token must not let the token slip past
-	// the redactor once the control character is stripped.
 	split := "key sk-proj\x00-abcdefghijklmnopqrstuvwxyz0123456789 rejected"
 	if got := sanitizeProviderUpstreamDetail(split); strings.Contains(got, "abcdefghijklmnopqrstuvwxyz0123456789") {
 		t.Fatalf("control-split token survived sanitization: %q", got)
@@ -1355,8 +1330,6 @@ func TestSanitizeProviderUpstreamDetailRedactsSplitTokens(t *testing.T) {
 	}
 }
 
-// childDisconnectedWriter emulates the ACP child closing its side of the
-// relay after the upstream already answered 2xx.
 type childDisconnectedWriter struct {
 	header http.Header
 }
@@ -1364,13 +1337,10 @@ type childDisconnectedWriter struct {
 func (w *childDisconnectedWriter) Header() http.Header { return w.header }
 func (w *childDisconnectedWriter) WriteHeader(int)     {}
 
-// The first chunk reaches the child before its side of the relay breaks.
 func (w *childDisconnectedWriter) Write(p []byte) (int, error) {
 	return len(p), errors.New("write: broken pipe")
 }
 
-// zeroByteDisconnectedWriter emulates a child that abandons the relay before
-// any response byte was delivered.
 type zeroByteDisconnectedWriter struct{ header http.Header }
 
 func (w *zeroByteDisconnectedWriter) Header() http.Header { return w.header }
@@ -1379,9 +1349,6 @@ func (w *zeroByteDisconnectedWriter) Write([]byte) (int, error) {
 	return 0, errors.New("write: broken pipe")
 }
 
-// prefixDisconnectedWriter accepts a fixed prefix from one response write,
-// then reports the child disconnect. This exercises Writer's valid n > 0,
-// err != nil result without claiming the unwritten suffix was delivered.
 type prefixDisconnectedWriter struct {
 	header http.Header
 	limit  int
@@ -1400,8 +1367,6 @@ func TestProviderProxyChildAbandonBeforeAnyByteIsUnaccounted(t *testing.T) {
 		UpstreamBaseURL: testUnreachableUpstreamURL, UpstreamBearerToken: testUpstreamToken,
 	})
 	defer session.close()
-	// An earlier request failed; a later-issued request the child abandoned
-	// before receiving a single body byte must not mask that failure.
 	session.recordInferenceResponse(testPromptOneID, providerRequestInference, http.StatusTooManyRequests, "rate limit exceeded")
 	seq := testAllocateInferenceSeq(session)
 	err := session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
@@ -1491,9 +1456,6 @@ func TestProviderProxyChildDisconnectAccountsOnlyDeliveredStreamBytes(t *testing
 			wantFailures:  1,
 		},
 		{
-			// The error marker sits in the unwritten tail of the short write:
-			// it is not upstream evidence the child received, so the stream
-			// is accounted as incomplete, exactly once.
 			name:          "terminal error is not delivered",
 			delivered:     "data: {\"type\":\"response.created\"}\n\n",
 			undelivered:   "data: {\"type\":\"response.failed\"}\n\n",
@@ -1512,9 +1474,6 @@ func TestProviderProxyChildDisconnectAccountsOnlyDeliveredStreamBytes(t *testing
 			wantFailures:  2,
 		},
 		{
-			// The child took the whole error line except its completing
-			// newline: the delivered bytes still settle as that terminal
-			// error at stream end, exactly once.
 			name:          "terminal error line is delivered without its newline",
 			delivered:     "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.failed\",\"error\":\"quota\"}",
 			undelivered:   "\n\n",
@@ -1589,9 +1548,6 @@ func TestProviderProxyChildDisconnectOnNonStreamedResponseStaysUnaccounted(t *te
 		}
 		proxy.relayUpstreamResponse(context.Background(), &childDisconnectedWriter{header: http.Header{}}, session, testPromptOneID, providerRequestInference, seq, response)
 	}()
-	// A partially delivered JSON body proves nothing about the inference:
-	// it must stay unaccounted, leaving the earlier recorded failure as the
-	// unrecovered final outcome instead of masking it as a success.
 	if failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID); !failed || status != http.StatusTooManyRequests || !strings.Contains(detail, "rate limit") {
 		t.Fatalf("upstreamFailureUnrecovered after child disconnect on partial non-streamed 2xx = %v/%d/%q, want the earlier 429 unrecovered", failed, status, detail)
 	}
@@ -1603,8 +1559,6 @@ func TestProviderProxyChildDisconnectOnNonStreamedResponseStaysUnaccounted(t *te
 func TestProviderProxyChildCancelDuringStreamedSuccessCountsAsSuccess(t *testing.T) {
 	firstChunkSent := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Drain the request body so the server's background read can
-		// observe the proxy closing the upstream connection.
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -1612,8 +1566,6 @@ func TestProviderProxyChildCancelDuringStreamedSuccessCountsAsSuccess(t *testing
 		_, _ = io.WriteString(w, "event: response.completed\ndata: {}\n\n")
 		flusher.Flush()
 		close(firstChunkSent)
-		// Keep the upstream stream open until the proxy's upstream request
-		// is cancelled by the child's disconnect.
 		<-r.Context().Done()
 	}))
 	defer upstream.Close()
@@ -1639,7 +1591,6 @@ func TestProviderProxyChildCancelDuringStreamedSuccessCountsAsSuccess(t *testing
 	if _, err := response.Body.Read(chunk); err != nil {
 		t.Fatalf("read first chunk: %v", err)
 	}
-	// The child got what it needed and drops the stream.
 	cancel()
 	_ = response.Body.Close()
 
@@ -1661,7 +1612,6 @@ func TestProviderProxyChildCancelBeforeHeadersIsNotAnUpstreamFailure(t *testing.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		close(requestSeen)
-		// Never write headers: the child abandons the request first.
 		<-r.Context().Done()
 	}))
 	defer upstream.Close()
@@ -1670,7 +1620,6 @@ func TestProviderProxyChildCancelBeforeHeadersIsNotAnUpstreamFailure(t *testing.
 		UpstreamBaseURL: upstream.URL, UpstreamBearerToken: testUpstreamToken,
 	})
 	defer session.close()
-	// An earlier request already succeeded; the abandoned one is later-issued.
 	session.recordInferenceResponse(testPromptOneID, providerRequestInference, http.StatusOK, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1712,7 +1661,6 @@ func TestProviderProxyChildCancelDuringBodyIsNotAnUpstreamFailure(t *testing.T) 
 		UpstreamBaseURL: upstream.URL, UpstreamBearerToken: testUpstreamToken,
 	})
 	defer session.close()
-	// An earlier request already succeeded; the abandoned one is later-issued.
 	session.recordInferenceResponse(testPromptOneID, providerRequestInference, http.StatusOK, "")
 
 	bodyReader, bodyWriter := io.Pipe()
@@ -1731,8 +1679,6 @@ func TestProviderProxyChildCancelDuringBodyIsNotAnUpstreamFailure(t *testing.T) 
 		}
 		done <- err
 	}()
-	// Deliver a partial body so the proxy is blocked inside the body read,
-	// then abandon the request from the child side.
 	if _, err := bodyWriter.Write([]byte(`{"model":`)); err != nil {
 		t.Fatal(err)
 	}
@@ -1750,8 +1696,6 @@ func TestProviderProxyChildCancelDuringBodyIsNotAnUpstreamFailure(t *testing.T) 
 
 func TestProviderProxyStreamedSuccessOverLimitCountsAsFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// No Content-Length: the body is chunked, so the size is unknown
-		// until the relay reads past the limit.
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher := w.(http.Flusher)
@@ -1772,8 +1716,6 @@ func TestProviderProxyStreamedSuccessOverLimitCountsAsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set(providerAuthorizationHeader, "Bearer "+binding.Credential)
-	// The relay aborts the connection once the body overruns the limit; the
-	// client observes either a transport error or a truncated body.
 	response, err := http.DefaultClient.Do(request)
 	if err == nil {
 		body, readErr := io.ReadAll(response.Body)
@@ -1796,8 +1738,6 @@ func TestProviderProxyStreamedSuccessOverLimitCountsAsFailure(t *testing.T) {
 	}
 }
 
-// recordInferenceResponse is a test convenience that issues a fresh sequence
-// for one accounted response so fixtures can record outcomes in order.
 func (s *providerProxySession) recordInferenceResponse(promptID string, class providerRequestClass, statusCode int, detail string) {
 	s.mu.Lock()
 	s.issuedInference++
@@ -1821,13 +1761,11 @@ func TestProviderProxyInferenceAccountingOrdersByIssuance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The later-issued request fails fast; the earlier one succeeds afterwards.
 	session.recordInferenceOutcome(testPromptOneID, providerRequestInference, second, http.StatusTooManyRequests, "rate limit exceeded")
 	session.recordInferenceOutcome(testPromptOneID, providerRequestInference, first, http.StatusOK, "")
 	if failed, status, detail := session.upstreamFailureUnrecovered(testPromptOneID); !failed || status != http.StatusTooManyRequests || detail != "rate limit exceeded" {
 		t.Fatalf("upstreamFailureUnrecovered = %v/%d/%q, want the later-issued failure to decide", failed, status, detail)
 	}
-	// A failure issued before a success that completes later is recovered.
 	third := testAllocateInferenceSeq(session)
 	_ = session.consumeInferenceRequest(testPromptOneID, providerRequestInference, time.Now())
 	fourth := testAllocateInferenceSeq(session)
@@ -1839,10 +1777,6 @@ func TestProviderProxyInferenceAccountingOrdersByIssuance(t *testing.T) {
 	}
 }
 
-// waitProviderProxyIdle mirrors prompt settlement, which lets in-flight relays
-// drain before the accounting is read: the failure detail is attached once
-// the relayed error body has been observed, after the client may already
-// have read a Content-Length-delimited body to EOF.
 func waitProviderProxyIdle(t *testing.T, session *providerProxySession) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

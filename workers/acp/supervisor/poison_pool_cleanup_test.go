@@ -53,9 +53,6 @@ func newCleanupFailurePeers(t *testing.T) *cleanupFailurePeers {
 	if response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg); response.Code != http.StatusCreated {
 		t.Fatalf("create original session status = %d", response.Code)
 	}
-	// Seed a second initialized resident without requiring a non-root
-	// test process to assign another OS UID. The two fixture servers
-	// have the same harness fence and independent local processes.
 	peerServer, peerCfg, peer := newFoundryTestServer(t, broker)
 	t.Cleanup(fixture.releasePeer)
 	if harnessv2.CompareFence(cfg.Fence, peerCfg.Fence, false) != harnessv2.FenceMatch {
@@ -133,8 +130,6 @@ func TestSupervisorCleanupFailureDrainsIdlePeerOnce(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 
-			// Neither another cleanup failure nor a repeated pool poison may
-			// recursively reschedule residents whose cleanup already failed.
 			server.poisonPool("later_cleanup_failure")
 			server.mu.Lock()
 			defer server.mu.Unlock()

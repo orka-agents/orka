@@ -162,7 +162,6 @@ func TestPermissionHoldAppliesTheRequestersDecision(t *testing.T) {
 	}
 }
 
-// A held request shows the person the call's input live, and never stores it.
 func TestPermissionHoldShowsTheCallInputLiveOnly(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newPermissionHoldFixture(t)
@@ -248,7 +247,6 @@ func TestPermissionHoldIsCancelledWhenThePromptEnds(t *testing.T) {
 		if approval.Status != approvals.StatusCancelled {
 			t.Fatalf("approval status = %s, want cancelled", approval.Status)
 		}
-		// A late decision cannot reopen a cancelled request.
 		if err := f.decide(t, approval.ID, events.ExecutionEventTypeApprovalApproved); err == nil {
 			t.Fatal("a decision after cancellation was recorded")
 		}
@@ -258,7 +256,6 @@ func TestPermissionHoldIsCancelledWhenThePromptEnds(t *testing.T) {
 	})
 }
 
-// refusingCancelStore fails the first cancellations it is asked to record.
 type refusingCancelStore struct {
 	*storetest.FakeExecutionEventStore
 	mu      sync.Mutex
@@ -279,8 +276,6 @@ func (s *refusingCancelStore) AppendExecutionEventIfAbsent(
 	return s.FakeExecutionEventStore.AppendExecutionEventIfAbsent(ctx, event, dedupeKey)
 }
 
-// A cancellation the store refuses at first is recorded once it can be, so
-// the durable request does not stay pending with no hold behind it.
 func TestPermissionHoldRecordsACancellationTheStoreRefusedAtFirst(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newPermissionHoldFixture(t)
@@ -303,7 +298,6 @@ func TestPermissionHoldRecordsACancellationTheStoreRefusedAtFirst(t *testing.T) 
 	})
 }
 
-// refusingExpiryStore fails the first expiries it is asked to record.
 type refusingExpiryStore struct {
 	*storetest.FakeExecutionEventStore
 	mu      sync.Mutex
@@ -324,9 +318,6 @@ func (s *refusingExpiryStore) AppendExecutionEventIfAbsent(
 	return s.FakeExecutionEventStore.AppendExecutionEventIfAbsent(ctx, event, dedupeKey)
 }
 
-// The runtime hears an expiry only once the store records it, so its answer
-// matches what the approvals API reports, also when a decision lands while
-// the store refuses the expiry.
 func TestPermissionHoldAnswersOnlyARecordedOutcome(t *testing.T) {
 	t.Run("expiry recorded late", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
@@ -376,7 +367,6 @@ func TestPermissionHoldDecisionThatWinsTheExpiryRaceIsHonoured(t *testing.T) {
 		f.dispatcher.permissionHoldPollInterval = time.Hour
 		f.resolve(t, context.Background(), context.Background())
 		synctest.Wait()
-		// The decision lands after the last poll but before the expiry write.
 		if err := f.decide(t, f.approval(t).ID, events.ExecutionEventTypeApprovalApproved); err != nil {
 			t.Fatal(err)
 		}

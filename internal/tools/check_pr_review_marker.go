@@ -29,13 +29,11 @@ const (
 	prReviewMarkerTrustedAuthorEnv   = "ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR"
 )
 
-// CheckPRReviewMarkerTool checks whether Orka has already reviewed a PR head SHA.
 type CheckPRReviewMarkerTool struct {
 	k8sClient  client.Client
-	apiBaseURL string // override for testing; empty uses https://api.github.com
+	apiBaseURL string
 }
 
-// CheckPRReviewMarkerArgs are the arguments for check_pr_review_marker.
 type CheckPRReviewMarkerArgs struct {
 	TaskName string `json:"task_name,omitempty"`
 	RepoURL  string `json:"repo_url,omitempty"`
@@ -43,7 +41,6 @@ type CheckPRReviewMarkerArgs struct {
 	HeadSHA  string `json:"head_sha,omitempty"`
 }
 
-// CheckPRReviewMarkerResult is the result of checking review markers.
 type CheckPRReviewMarkerResult struct {
 	Found    bool   `json:"found"`
 	PRNumber int    `json:"pr_number"`
@@ -55,7 +52,6 @@ type CheckPRReviewMarkerResult struct {
 	Message  string `json:"message"`
 }
 
-// NewCheckPRReviewMarkerTool creates a new check_pr_review_marker tool.
 func NewCheckPRReviewMarkerTool(k8sClient client.Client) *CheckPRReviewMarkerTool {
 	return &CheckPRReviewMarkerTool{k8sClient: k8sClient}
 }

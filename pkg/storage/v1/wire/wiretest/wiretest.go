@@ -1,8 +1,3 @@
-// Package wiretest serves storage providers over a real gRPC loopback for
-// tests: TLS 1.3 with a test certificate authority, bearer authentication,
-// the server library and the generated client, over an in-memory listener.
-// Streaming calls use a second connection, as a remote client's bulk
-// connection does. There is no plaintext mode.
 package wiretest
 
 import (
@@ -31,43 +26,26 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
-// ServerName is the TLS server name of the loopback server.
 const ServerName = "storage.wiretest.invalid"
 
-// State serves provider over the loopback and returns a state provider whose
-// families with wire RPCs go through the generated client and server. Every
-// other family is served by provider in process until it gains its RPCs.
 func State(t testing.TB, provider storagev1.StateProvider) storagev1.StateProvider {
 	t.Helper()
 	return stateOverlay{StateProvider: provider, client: Serve(t, wire.ServerConfig{State: provider})}
 }
 
-// Methods returns the names of the contract methods the provider State
-// returns sends over the wire.
 func Methods() []string {
 	return slices.Clone(overlayMethods)
 }
 
-// Artifacts serves provider over the loopback and returns an artifacts.v1
-// provider whose families with wire RPCs go through the generated client and
-// server. Every other family is served by provider in process until it gains
-// its RPCs.
 func Artifacts(t testing.TB, provider storagev1.ArtifactProvider) storagev1.ArtifactProvider {
 	t.Helper()
 	return artifactsOverlay{ArtifactProvider: provider, client: Serve(t, wire.ServerConfig{Artifacts: provider})}
 }
 
-// ArtifactsMethods returns the names of the contract methods the provider
-// Artifacts returns sends over the wire.
 func ArtifactsMethods() []string {
 	return slices.Clone(artifactsOverlayMethods)
 }
 
-// Serve serves the providers in config over the loopback and returns a
-// client bound to their dataset. Streaming RPCs use a second connection, as a
-// remote client's bulk connection does. An unset Info or Authenticator
-// defaults to the loopback's adapter name and bearer authentication. The
-// server and connections stop when the test ends, as Dial's do.
 func Serve(t testing.TB, config wire.ServerConfig) *wire.Client {
 	t.Helper()
 	dial := serve(t, config)
@@ -81,19 +59,11 @@ func Serve(t testing.TB, config wire.ServerConfig) *wire.Client {
 	})
 }
 
-// Dial serves the providers in config over the loopback, as Serve does, and
-// returns an authenticated client connection to them. The server and
-// connection stop when the test ends, and stopping waits for every provider
-// call still running. A test whose provider blocks a call must therefore
-// release it before then: in the test itself, or in a cleanup registered
-// after Dial or Serve, which runs before theirs.
 func Dial(t testing.TB, config wire.ServerConfig) *grpc.ClientConn {
 	t.Helper()
 	return serve(t, config)()
 }
 
-// serve starts a loopback server for config and returns a function that
-// opens authenticated connections to it.
 func serve(t testing.TB, config wire.ServerConfig) func() *grpc.ClientConn {
 	t.Helper()
 	material, err := loadMaterial()
@@ -111,8 +81,6 @@ func serve(t testing.TB, config wire.ServerConfig) func() *grpc.ClientConn {
 		t.Fatalf("create storage server: %v", err)
 	}
 	listener := bufconn.Listen(1 << 20)
-	// Stop waits for running handlers, so a provider method a cancelled call
-	// left running has returned before the test closes the provider.
 	grpcServer := grpc.NewServer(append(storageServer.ServerOptions(),
 		grpc.Creds(credentials.NewTLS(material.serverTLS())), grpc.WaitForHandlers(true))...)
 	storageServer.Register(grpcServer)
@@ -139,9 +107,6 @@ func serve(t testing.TB, config wire.ServerConfig) func() *grpc.ClientConn {
 	}
 }
 
-// material is the process-wide test certificate authority, server
-// certificate and bearer token. Creating them once keeps per-case loopbacks
-// cheap.
 type material struct {
 	roots       *x509.CertPool
 	certificate tls.Certificate
@@ -220,7 +185,6 @@ func (m *material) clientTLS() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: m.roots, ServerName: ServerName}
 }
 
-// bearerToken sends the loopback's bearer token, only over TLS.
 type bearerToken string
 
 func (token bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
@@ -229,7 +193,6 @@ func (token bearerToken) GetRequestMetadata(context.Context, ...string) (map[str
 
 func (bearerToken) RequireTransportSecurity() bool { return true }
 
-// bearerAuthenticator accepts exactly the loopback's bearer token.
 type bearerAuthenticator struct {
 	bearer string
 }

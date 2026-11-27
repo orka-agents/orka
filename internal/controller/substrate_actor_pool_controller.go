@@ -31,14 +31,12 @@ const (
 	substrateActorPoolFinalizer = "orka.ai/substrate-actor-pool-cleanup"
 )
 
-// SubstratePoolExecutor is the executor surface the pool controller needs.
 type SubstratePoolExecutor interface {
 	ConvergeSubstrateActors(ctx context.Context, prefix string, target int, template workspace.TemplateRef) (int, int, error)
 	PruneSubstrateActors(ctx context.Context, prefix string, target int) (int, error)
 	SubstratePoolTelemetry(ctx context.Context, prefix string, template workspace.TemplateRef, workerPool workspace.TemplateRef) (workspace.Density, error)
 }
 
-// SubstrateActorPoolReconciler reconciles SubstrateActorPool objects.
 type SubstrateActorPoolReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -54,7 +52,6 @@ type SubstrateActorPoolReconciler struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=substrateactorpools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=substrateactorpools/finalizers,verbs=update
 
-// Reconcile updates pool density and optionally pre-creates warm actors.
 func (r *SubstrateActorPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	pool := &corev1alpha1.SubstrateActorPool{}
@@ -281,8 +278,6 @@ func (r *SubstrateActorPoolReconciler) writeSubstrateActorPoolStatus(
 	return ctrl.Result{RequeueAfter: substrateActorPoolRequeue}, nil
 }
 
-// updateSubstrateActorPoolExecutorError reports an executor failure. Provider
-// capacity exhaustion is a retryable wait, not a pool failure.
 func (r *SubstrateActorPoolReconciler) updateSubstrateActorPoolExecutorError(
 	ctx context.Context,
 	pool *corev1alpha1.SubstrateActorPool,
@@ -317,7 +312,6 @@ func validateSubstrateActorPoolTargetActors(poolNamespace, poolName string, targ
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *SubstrateActorPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.SubstrateActorPool{}).

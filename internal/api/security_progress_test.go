@@ -67,8 +67,6 @@ func setupScanProgressHandlers(t *testing.T, objs ...runtime.Object) (*fiber.App
 
 func TestGetSecurityScanProgressGroupsRunTasksByStage(t *testing.T) {
 	scan := scanProgressScan()
-	// A Task that merely copies the labels but is not controlled by the
-	// RepositoryScan must not be counted or named.
 	impostor := scanProgressTask("impostor-review", "run-1", security.StageReview, corev1alpha1.TaskPhaseFailed)
 	impostor.OwnerReferences = nil
 	app, handlers := setupScanProgressHandlers(t,
@@ -79,7 +77,6 @@ func TestGetSecurityScanProgressGroupsRunTasksByStage(t *testing.T) {
 		scanProgressTask("goof-review-1", "run-1", security.StageReview, corev1alpha1.TaskPhaseSucceeded),
 		scanProgressTask("goof-review-2", "run-1", security.StageReview, corev1alpha1.TaskPhaseRunning),
 		scanProgressTask("goof-review-3", "run-1", security.StageReview, corev1alpha1.TaskPhaseFailed),
-		// An older run's Task must not be counted.
 		scanProgressTask("goof-review-old", "run-0", security.StageReview, corev1alpha1.TaskPhaseSucceeded),
 	)
 	require.NoError(t, handlers.securityStore.CreateScanRun(context.Background(), &store.ScanRun{
@@ -107,7 +104,6 @@ func TestGetSecurityScanProgressGroupsRunTasksByStage(t *testing.T) {
 	require.Equal(t, []string{"goof-review-3"}, review.FailedTasks)
 	require.Equal(t, 0, body.Stages[3].Tasks)
 
-	// A run that belongs to another repository is not visible through this one.
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/security/repositories/scan-1/scans/run-other/progress?namespace=demo", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)

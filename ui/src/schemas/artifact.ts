@@ -1,8 +1,5 @@
 import { z } from 'zod'
 
-// Mirrors internal/store ArtifactMetadata (JSON tags filename/contentType/size/
-// createdAt). The list endpoint returns { artifacts: [] }; downloads are served
-// from /tasks/:id/artifacts/:filename.
 export const artifactMetadataSchema = z.object({
   filename: z.string(),
   contentType: z.string().optional(),

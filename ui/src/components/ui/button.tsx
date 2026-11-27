@@ -10,10 +10,6 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/90",
-        // The theme's destructive/foreground pair already switches with the
-        // .dark class; Tailwind's dark: variant follows the OS setting
-        // instead, so a dark:bg override paired white text with the light
-        // dark-theme rose (~2.7:1).
         destructive:
           "bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
         outline:

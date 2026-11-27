@@ -15,8 +15,6 @@ import type { AgentSpec } from '@/schemas/agent'
 
 const promptClassName = 'max-h-64 overflow-auto rounded-md bg-muted p-4 text-sm whitespace-pre-wrap'
 
-// A ConfigMap prompt names its source, then shows the referenced key when the
-// caller may read that ConfigMap.
 function SystemPromptCard({ agentName, prompt }: { agentName: string; prompt: NonNullable<AgentSpec['systemPrompt']> }) {
   const ref = prompt.inline ? null : prompt.configMapRef
   const resolved = useAgentSystemPrompt(agentName, ref)
@@ -49,8 +47,6 @@ function SystemPromptCard({ agentName, prompt }: { agentName: string; prompt: No
   )
 }
 
-// A missing or unreadable Agent keeps the page heading (and so the tab
-// title) and a way back to the list.
 function AgentUnavailable({ title, icon, headline, hint, alert = false }: {
   title: string
   icon: LucideIcon
@@ -101,9 +97,6 @@ export function AgentDetail({ agentId }: { agentId: string }) {
     return <div className="space-y-4"><Skeleton className="h-8 w-64" /><Skeleton className="h-64 w-full" /></div>
   }
 
-  // A 403 or 404 wins over cached data (React Query keeps the last
-  // successful `data` when a refetch fails); any other failure only replaces
-  // the page when nothing was loaded.
   const missing = isNotFoundError(error)
   const forbidden = isForbiddenError(error)
   if (forbidden || (error && !missing && !agent)) {
@@ -151,8 +144,6 @@ export function AgentDetail({ agentId }: { agentId: string }) {
           title={agent.metadata.name}
           description={agent.metadata.namespace}
           action={
-            // aria-disabled, not disabled: disabling the focused button would drop
-            // keyboard focus to <body> when the delete fails.
             <Button
               variant="destructive"
               size="sm"

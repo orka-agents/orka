@@ -136,8 +136,6 @@ func TestACPDispatcherPermissionResolutionRetryBounds(t *testing.T) {
 				preflights, writes := 0, 0
 				runtimeClient := permissionResolutionRetryClient(t, func(context.Context, string) error {
 					preflights++
-					// Deliver a known-unsent result close to expiry without giving
-					// the retry loop a new operation or a fresh validity window.
 					time.Sleep(test.preflightDelay)
 					return harnessv2.MarkPreMutationRetryable(errors.New("synthetic authority lookup unavailable"))
 				}, func(*http.Request) (*http.Response, error) {

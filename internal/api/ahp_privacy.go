@@ -21,45 +21,23 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// An Agent Host Protocol turn belongs to the person who sent it. People
-// signing in to AHP share a namespace, so the Tasks AHP turns create, and the
-// Orka Sessions those Tasks share, are shown through the API only to that
-// person: anyone else gets 404, as for something that does not exist.
-// Verified ServiceAccounts, which operators use, keep the access RBAC grants
-// them.
-
-// ahpNamePrefix starts the name of every Orka Session AHP creates, and so of
-// every Task an AHP turn creates.
 const ahpNamePrefix = labels.AHPNamePrefix
 
-// ahpSessionName returns a session name as the controller reads it, without
-// surrounding space, and whether it is an AHP session's. Checks read names
-// so: one with a space would otherwise pass for a different session.
 func ahpSessionName(name string) (string, bool) {
 	name = strings.TrimSpace(name)
 	return name, strings.HasPrefix(name, ahpNamePrefix)
 }
 
-// ahpPerson reports a caller held to AHP privacy: anyone but a verified
-// ServiceAccount. TokenReview also authenticates people the API server signs
-// in itself, through its own OIDC or a webhook; they carry no Orka issuer and
-// subject, so they own no AHP turn and see none.
 func ahpPerson(ui *UserInfo) bool {
 	return ui != nil && !verifiedServiceAccount(ui)
 }
 
-// ahpOwns reports whether the person sent the turn that created the Task. A
-// caller with no issuer and subject owns none.
 func ahpOwns(ui *UserInfo, task *corev1alpha1.Task) bool {
 	requester := task.Spec.RequestedBy
 	return requester != nil && ui.Issuer != "" && ui.Subject != "" &&
 		requester.Issuer == ui.Issuer && requester.Subject == ui.Subject
 }
 
-// ahpTurnTask reports a Task an AHP turn created: labelled so, or, as Tasks
-// from before the label were, named for an AHP session it continues for a
-// recorded requester. People cannot create such a Task: the API refuses a
-// Task that continues an AHP session not theirs.
 func ahpTurnTask(task *corev1alpha1.Task) bool {
 	if task.Labels[labels.LabelAHPTurn] == labels.LabelAHPTurnValue {
 		return true
@@ -72,11 +50,6 @@ func ahpTurnTask(task *corev1alpha1.Task) bool {
 	return strings.HasPrefix(task.Name, ahpNamePrefix) && ahp && task.Spec.RequestedBy != nil
 }
 
-// ahpSessionContinuation reports a session reference that continues an AHP
-// session. Only AHP's turns and forks of them create Tasks that do, marked
-// private; a Task created any other way is not, so everyone in the namespace
-// could read what the conversation leads it to say. The generic create paths
-// refuse such a Task, even for the session's owner.
 func ahpSessionContinuation(ref *corev1alpha1.SessionReference) bool {
 	if ref == nil {
 		return false
@@ -85,18 +58,12 @@ func ahpSessionContinuation(ref *corev1alpha1.SessionReference) bool {
 	return ahp
 }
 
-// errAHPSessionContinuation explains the refusal to the session's owner and to
-// ServiceAccounts; anyone else is told the session does not exist.
 const errAHPSessionContinuation = "a Task cannot continue an AHP session; continue it from the AHP client"
 
-// ahpTaskHidden reports an AHP turn's Task the caller may not see.
 func ahpTaskHidden(ui *UserInfo, task *corev1alpha1.Task) bool {
 	return ahpPerson(ui) && ahpTurnTask(task) && !ahpOwns(ui, task)
 }
 
-// ahpTaskPrivate guards a /tasks/:id route. A turn's Task that is gone can no
-// longer show whose it was, so the records kept under its name stay hidden from
-// people.
 func (h *Handlers) ahpTaskPrivate(handler fiber.Handler) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		if err := h.ahpTaskCheck(c); err != nil {
@@ -106,7 +73,6 @@ func (h *Handlers) ahpTaskPrivate(handler fiber.Handler) fiber.Handler {
 	}
 }
 
-// ahpSessionPrivate guards a /sessions/:id route.
 func (h *Handlers) ahpSessionPrivate(handler fiber.Handler) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		if err := h.ahpSessionCheck(c); err != nil {
@@ -123,7 +89,6 @@ func (h *Handlers) ahpTaskCheck(c fiber.Ctx) error {
 	}
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
-		// The handler reports the namespace the caller may not use.
 		return nil
 	}
 	name := c.Params("id")
@@ -162,11 +127,6 @@ func (h *Handlers) ahpSessionCheck(c fiber.Ctx) error {
 	return nil
 }
 
-// ahpSessionOwnersIn returns, for each of the named sessions that is an AHP
-// session some turn's Task continues, one such Task, which carries the turn's
-// requester. It reads labelled turns first, and scans the namespace's other
-// Tasks only for sessions they leave unowned, which turns from before the
-// label may own.
 func ahpSessionOwnersIn(ctx context.Context, r client.Reader, namespace string, sessions []string) (map[string]*corev1alpha1.Task, error) {
 	owners := map[string]*corev1alpha1.Task{}
 	wanted := map[string]bool{}
@@ -203,9 +163,6 @@ func ahpSessionOwnersIn(ctx context.Context, r client.Reader, namespace string, 
 	return owners, nil
 }
 
-// ahpSessionHiddenIn reports an AHP Orka Session the caller may not see: one
-// another person's turns use, or one named like AHP's that no turn's Task
-// names any more, which nothing can show to be the caller's.
 func ahpSessionHiddenIn(ctx context.Context, r client.Reader, ui *UserInfo, namespace, session string) (bool, error) {
 	session, ahp := ahpSessionName(session)
 	if !ahpPerson(ui) || !ahp {
@@ -227,12 +184,6 @@ func ahpSessionHiddenBy(ui *UserInfo, session string, owners map[string]*corev1a
 	return owner == nil || !ahpOwns(ui, owner)
 }
 
-// ahpUsageHidden reports usage of an AHP turn, or in an AHP session, that the
-// person may not see: all but the usage that names them as its requester.
-// A session's name says nothing of whose its usage is, since a name is free
-// again once a session and its Tasks are gone, so usage that names no
-// requester, such as a chat's or one recorded before requesters were, is
-// no person's.
 func ahpUsageHidden(ui *UserInfo, requester *store.UsageRequester) bool {
 	return requester == nil || ui.Issuer == "" || ui.Subject == "" ||
 		requester.Issuer != ui.Issuer || requester.Subject != ui.Subject

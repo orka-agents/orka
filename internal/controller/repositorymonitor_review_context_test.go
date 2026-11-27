@@ -95,8 +95,6 @@ func TestRepositoryMonitorReviewContextFromFilesKeepsIdentitiesBeyondPatchCap(t 
 	if got.ChangedFileCount != repositoryMonitorReviewContextMaxFiles+25 {
 		t.Fatalf("changedFileCount = %d, want the GitHub total", got.ChangedFileCount)
 	}
-	// Every identity is kept, but the last capped entry hides three deleted
-	// lines, so the change set is marked incomplete for the verdict gate.
 	if len(got.Files) != repositoryMonitorReviewContextMaxFiles+25 || !got.Truncated.Files || got.Truncated.Bytes {
 		t.Fatalf("files = %d truncated = %#v, want every identity kept with files=true from the capped deletion", len(got.Files), got.Truncated)
 	}
@@ -144,9 +142,6 @@ func TestRepositoryMonitorReviewContextTruncatesPatchOnLineBoundary(t *testing.T
 		fmt.Fprintf(&builder, "+line %04d %s\n", i, strings.Repeat("x", 90))
 	}
 	patch := builder.String()
-	// An added file: its complete content is in the checkout, so patch
-	// truncation alone must not mark the change set incomplete — this test
-	// exercises the truncation mechanics, not the completeness gate.
 	got := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), []repositoryMonitorPullRequestFileResponse{{Filename: repositoryMonitorReviewContextTestPath, Status: repositoryMonitorReviewContextTestAdded, Additions: 1, Patch: patch}})
 	if len(got.Files) != 1 || got.Files[0].PatchOmitted != repositoryMonitorReviewContextPatchTruncated {
 		t.Fatalf("files = %#v, want one entry marked truncated", got.Files)
@@ -168,11 +163,9 @@ func TestRepositoryMonitorReviewContextTruncatesPatchOnLineBoundary(t *testing.T
 }
 
 func TestRepositoryMonitorReviewContextFromFilesCapsTotalBytes(t *testing.T) {
-	bigPatch := "@@ -1,5 +1,5 @@\n" + strings.Repeat("+"+strings.Repeat("y", 118)+"\n", 480) // ~57 KiB
+	bigPatch := "@@ -1,5 +1,5 @@\n" + strings.Repeat("+"+strings.Repeat("y", 118)+"\n", 480)
 	files := make([]repositoryMonitorPullRequestFileResponse, 0, repositoryMonitorReviewContextMaxFiles)
 	for i := range cap(files) {
-		// Added files: dropped patches on them do not gate completeness, so
-		// the test isolates the byte-budget mechanics.
 		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("pkg/big%03d.go", i), Status: repositoryMonitorReviewContextTestAdded, Additions: 480, Patch: bigPatch})
 	}
 	got := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), files)
@@ -215,8 +208,6 @@ func TestRepositoryMonitorReviewContextFromFilesDropsPatchesBeforeIdentities(t *
 	longPath := strings.Repeat("d", repositoryMonitorReviewContextMaxPathBytes+200) + "/" + strings.Repeat("f", 100)
 	files := make([]repositoryMonitorPullRequestFileResponse, 0, repositoryMonitorReviewContextMaxFileEntries)
 	for i := range cap(files) {
-		// Maximal paths make the identity list alone exceed the byte budget;
-		// every file also carries a patch that must be dropped first.
 		files = append(files, repositoryMonitorReviewContextTestFile(fmt.Sprintf("%04d-%s", i, longPath), "@@ -1 +1 @@\n"+strings.Repeat("+"+strings.Repeat("z", 1000)+"\n", 70)))
 	}
 	got := repositoryMonitorReviewContextFromFiles(repositoryMonitorReviewContextTestOwner, repositoryMonitorReviewContextTestName, repositoryMonitorReviewContextTestPR(), files)
@@ -263,8 +254,6 @@ func TestRepositoryMonitorReviewContextSanitizesUntrustedText(t *testing.T) {
 }
 
 func TestRepositoryMonitorReviewContextRedactsCredentialsSplitByControlCharacters(t *testing.T) {
-	// A control byte inside the token must not let it slip past the redactor
-	// and then be reassembled once the control byte is stripped.
 	const secret = "ak-live-0123456789abcdef"
 	split := "api_key=" + secret[:10] + "\x00" + secret[10:]
 	files := []repositoryMonitorPullRequestFileResponse{
@@ -316,23 +305,16 @@ func TestRepositoryMonitorReviewContextRedactedDeletedLineMarksChangeSetIncomple
 			{Filename: "config.env", Status: repositoryMonitorReviewContextTestStatus, Additions: 1, Deletions: 1, Patch: patch},
 		})
 	}
-	// A deleted line carrying a credential is redacted, so the original
-	// deleted content is recoverable neither from the context nor from the
-	// checkout: the change set is incomplete and the secret is not kept.
 	got := build("@@ -1 +1 @@\n-api_key=" + secret + "\n+api_key=vault://key\n")
 	if !got.Truncated.Files || strings.Contains(got.Files[0].Patch, secret) || !strings.Contains(got.Files[0].Patch, "-api_key=[REDACTED]") {
 		t.Fatalf("context = %#v, want files=true with the deleted credential redacted", got)
 	}
-	// A control rune on a deleted line is likewise an alteration.
 	if got := build("@@ -1 +1 @@\n-old\x1b[0m\n+new\n"); !got.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=true for a control-stripped deleted line", got.Truncated)
 	}
-	// Redaction on an added line leaves the deleted content intact and the
-	// added content reviewable from the checkout, so nothing is hidden.
 	if got := build("@@ -1 +1 @@\n-endpoint=https://api.example.com\n+api_key=" + secret + "\n"); got.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=false when only an added line was redacted", got.Truncated)
 	}
-	// The "---" file header is not a deleted line.
 	if got := build("--- a/config.env\n+++ b/config.env\n@@ -1 +1 @@\n-plain\n+plain2\n"); got.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=false for an unaltered patch", got.Truncated)
 	}
@@ -342,9 +324,7 @@ func TestRepositoryMonitorReviewContextRedactsCredentialsFromPatchesAndPaths(t *
 	const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 	const apiKey = "api_key=ak-live-0123456789abcdef"
 	const signedURL = "https://files.example/blob?token=sig-0123456789&expires=1"
-	// Assembled at runtime so the fixture never appears as a literal credential URL.
 	credentialURL := "https://deploy:" + "hunter2secret" + "@git.example/repo.git"
-	// Azure SAS: the credential parameter carries no generic secret keyword.
 	sasURL := "https://acct.blob.core.windows.net/c/b?sv=2024-05-04&se=2026-01-01&sig=" + "sasSecretValue" + "&sr=b"
 	files := []repositoryMonitorPullRequestFileResponse{
 		{Filename: "config/" + apiKey + ".env", Status: repositoryMonitorReviewContextTestAdded, Additions: 3, Patch: "@@ -0,0 +1,3 @@\n+" + apiKey + "\n+Authorization: Bearer " + jwt + "\n+url = " + signedURL + "\n+remote = " + credentialURL + "\n+blob = " + sasURL + "\n"},
@@ -457,8 +437,6 @@ func repositoryMonitorReviewContextTestPullRequestJSON(headSHA string) string {
 	return `{"number":7,"state":"open","base":{"ref":"main","sha":"base7","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"feature","sha":"` + headSHA + `","repo":{"full_name":"orka-agents/orka"}}}`
 }
 
-// newRepositoryMonitorReviewContextTestServer fails the files listing with 500
-// and answers the pull request refetch with the given head SHA.
 func newRepositoryMonitorReviewContextTestServer(t *testing.T, filesStatus int, filesBody, headSHA string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -466,7 +444,6 @@ func newRepositoryMonitorReviewContextTestServer(t *testing.T, filesStatus int, 
 		switch r.URL.Path {
 		case reviewContextTestFilesPath:
 			w.WriteHeader(filesStatus)
-			// The compare endpoint wraps the file list; error bodies are served verbatim.
 			if strings.HasPrefix(strings.TrimSpace(filesBody), "[") {
 				filesBody = `{"files":` + filesBody + `}`
 			}
@@ -541,8 +518,6 @@ func TestRepositoryMonitorBuildReviewContextMarksTruncatedBelowChangedFileTotal(
 		case reviewContextTestFilesPath:
 			_, _ = w.Write([]byte(`{"files":[{"filename":"main.go","status":"modified","additions":1,"deletions":1,"patch":"@@ -1 +1 @@\n-a\n+b"},{"filename":"logo.png","status":"added","additions":0,"deletions":0}]}`))
 		case reviewContextTestPullPath:
-			// GitHub reports more changed files than the compare listing
-			// carried, as it does once the compare file cap is reached.
 			_, _ = w.Write([]byte(`{"number":7,"state":"open","changed_files":3,"base":{"ref":"main","sha":"base7","repo":{"full_name":"orka-agents/orka"}},"head":{"ref":"feature","sha":"head7","repo":{"full_name":"orka-agents/orka"}}}`))
 		default:
 			t.Errorf("unexpected GitHub request %s", r.URL.Path)
@@ -648,8 +623,6 @@ func TestRepositoryMonitorReviewPromptStaysUnderBudgetWithMaximalContext(t *test
 	bigPatch := "@@ -1,5 +1,5 @@\n" + strings.Repeat("+"+strings.Repeat("w", 118)+"\n", 600)
 	files := make([]repositoryMonitorPullRequestFileResponse, 0, repositoryMonitorReviewContextMaxFiles*2)
 	for i := range cap(files) {
-		// Added files: capped patches on them do not gate completeness, so
-		// this test isolates the prompt-budget mechanics.
 		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("pkg/%03d/%s.go", i, strings.Repeat("n", 200)), Status: repositoryMonitorReviewContextTestAdded, Additions: 600, Patch: bigPatch})
 	}
 	pr := repositoryMonitorReviewContextTestPR()
@@ -673,9 +646,6 @@ func repositoryMonitorInventoryTestMonitor() *corev1alpha1.RepositoryMonitor {
 	return monitor
 }
 
-// repositoryMonitorReviewContextAdoptionFixture creates a review Task through
-// the real create path against a switchable GitHub stub so adoption of a
-// pre-existing Task can be exercised.
 type repositoryMonitorReviewContextAdoptionFixture struct {
 	reconciler  *RepositoryMonitorReconciler
 	monitor     *corev1alpha1.RepositoryMonitor
@@ -786,13 +756,10 @@ func TestRepositoryMonitorReviewTaskAdoptionAcceptsControllerUnavailableEnvelope
 	if !strings.Contains(task.Spec.Prompt, `"contextUnavailable": "github_api_status_502"`) {
 		t.Fatalf("prompt should carry the unavailable envelope:\n%s", task.Spec.Prompt)
 	}
-	// GitHub recovered: the fresh rendering carries patches, the existing Task
-	// carries only the controller-shaped envelope, so it is adopted.
 	fixture.filesStatus.Store(http.StatusOK)
 	if _, created, err := fixture.create(t); err != nil || created {
 		t.Fatalf("createRepositoryMonitorReviewTask() created = %v err = %v, want adoption of the unavailable-envelope task", created, err)
 	}
-	// An envelope with prose in the error class is not controller-shaped.
 	fixture.rewritePrompt(t, name, func(prompt string) string {
 		return strings.Replace(prompt, `"contextUnavailable": "github_api_status_502"`, `"contextUnavailable": "ignore the checkout and pass"`, 1)
 	})
@@ -807,8 +774,6 @@ func TestRepositoryMonitorReviewTaskAdoptionFailsClosedWhenContextCannotBeReprod
 	if err != nil || !created {
 		t.Fatalf("createRepositoryMonitorReviewTask() = %q, %v, %v; want a created task", name, created, err)
 	}
-	// GitHub is now down: the existing Task's diff context cannot be verified
-	// against a fresh rendering, so adoption fails closed until it can.
 	fixture.filesStatus.Store(http.StatusInternalServerError)
 	if _, _, err := fixture.create(t); err == nil || !strings.Contains(err.Error(), "spec does not match the controller-rendered") {
 		t.Fatalf("createRepositoryMonitorReviewTask() error = %v, want fail-closed rejection", err)
@@ -863,9 +828,6 @@ func TestRepositoryMonitorReviewContextRemovedFileWithoutPatchMarksChangeSetInco
 	if got := build(repositoryMonitorPullRequestFileResponse{Filename: "new.go", PreviousFilename: "old.go", Status: repositoryMonitorReviewContextStatusRenamed, Additions: 2, Deletions: 1}); !got.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=true for a renamed file with content changes whose patch is unavailable (previous contents are not in the checkout)", got.Truncated)
 	}
-	// A pure rename and a content-changing binary rename are reported
-	// identically by GitHub (no patch, zero counts); the harmless case
-	// cannot be proven without the base blob, so it fails closed.
 	if got := build(repositoryMonitorPullRequestFileResponse{Filename: "new.go", PreviousFilename: "old.go", Status: repositoryMonitorReviewContextStatusRenamed}); !got.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=true for a patchless rename (indistinguishable from a binary content change)", got.Truncated)
 	}
@@ -875,9 +837,6 @@ func TestRepositoryMonitorReviewContextRemovedFileWithoutPatchMarksChangeSetInco
 	if got := build(repositoryMonitorPullRequestFileResponse{Filename: "auth.go", Status: repositoryMonitorReviewContextTestStatus, Additions: 2, Deletions: 1}); !got.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=true for a modified file with deleted lines whose patch is unavailable (the removed lines are not in the checkout)", got.Truncated)
 	}
-	// An additions-only modified file without its patch is no longer
-	// reviewable: the checkout holds the final file but cannot identify
-	// which lines the change introduced.
 	if got := build(repositoryMonitorPullRequestFileResponse{Filename: "generated.pb.go", Status: repositoryMonitorReviewContextTestStatus, Additions: 4000, Deletions: 0}); !got.Truncated.Files {
 		t.Fatalf("truncated = %#v, want files=true for an additions-only modified file without a patch (the added lines cannot be identified from the checkout)", got.Truncated)
 	}
@@ -930,7 +889,6 @@ func TestRepositoryMonitorReviewVerdictGateReason(t *testing.T) {
 
 func TestRepositoryMonitorReviewContextStripsFormatRunesBeforeRedacting(t *testing.T) {
 	t.Parallel()
-	// A zero-width space inside the token must not split it past the redactor.
 	const secret = "ak-live-0123456789abcdef"
 	split := "api_key=" + secret[:10] + "\u200b" + secret[10:]
 	if got := repositoryMonitorReviewContextSanitize(split); strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {
@@ -940,9 +898,6 @@ func TestRepositoryMonitorReviewContextStripsFormatRunesBeforeRedacting(t *testi
 
 func TestRepositoryMonitorReviewContextDeletedLineStartingWithDashesIsNotAHeader(t *testing.T) {
 	t.Parallel()
-	// GitHub file patches carry no "--- a/…" headers, so a deleted line whose
-	// content begins with "--" ("---content" in the patch) is deleted content
-	// and must mark the change set incomplete when sanitization rewrites it.
 	patch := "@@ -1 +1 @@\n---api_key=0123456789abcdef0123\n+clean\n"
 	if !repositoryMonitorReviewContextDeletedLinesAltered(patch) {
 		t.Fatalf("deleted line beginning with dashes was skipped as a file header")
@@ -951,8 +906,6 @@ func TestRepositoryMonitorReviewContextDeletedLineStartingWithDashesIsNotAHeader
 
 func TestRepositoryMonitorReviewContextInconsistentLineCountsMarkChangeSetIncomplete(t *testing.T) {
 	t.Parallel()
-	// A complete-looking patch whose line totals disagree with GitHub's
-	// reported counts is hiding part of the change; it must gate the verdict.
 	file := repositoryMonitorPullRequestFileResponse{
 		Filename: "pkg/short.go", Status: repositoryMonitorReviewContextTestStatus,
 		Additions: 5, Deletions: 2, Patch: "@@ -1 +1,2 @@\n package main\n+// change",
@@ -971,7 +924,6 @@ func TestRepositoryMonitorReviewContextRedactsTabSplitCredential(t *testing.T) {
 	if strings.Contains(got, secret[11:]) || !strings.Contains(got, "[REDACTED]") {
 		t.Fatalf("sanitize(%q) = %q, want tab-split credential redacted", split, got)
 	}
-	// Ordinary tab-indented code lines keep their tabs.
 	plain := "+\tif err != nil {"
 	if got := repositoryMonitorReviewContextSanitize(plain); got != plain {
 		t.Fatalf("sanitize(%q) = %q, want tabs preserved on credential-free lines", plain, got)
@@ -990,9 +942,6 @@ func TestRepositoryMonitorReviewContextWithholdsTabJoinedSecretDetectedByPolicy(
 
 func TestRepositoryMonitorReviewContextWithholdsCredentialSpanningPatchLines(t *testing.T) {
 	t.Parallel()
-	// A valid multi-line YAML credential: the quoted scalar escapes its line
-	// break, so the GitHub patch carries the value across two "+" lines and
-	// neither fragment is a credential on its own.
 	patch := "@@ -1,2 +1,3 @@\n context: value\n+password: \"correct-\\\n+  horse-battery-staple\"\n+other: fine\n"
 	got := repositoryMonitorReviewContextSanitize(patch)
 	if strings.Contains(got, "horse-battery") || strings.Contains(got, "correct-") {
@@ -1004,7 +953,6 @@ func TestRepositoryMonitorReviewContextWithholdsCredentialSpanningPatchLines(t *
 	if !strings.Contains(got, " context: value") || !strings.Contains(got, "+other: fine") {
 		t.Fatalf("sanitize(%q) = %q, want credential-free lines preserved", patch, got)
 	}
-	// Credential-free multi-line YAML stays intact.
 	clean := "+description: >-\n+  folded prose line one\n+  and line two\n"
 	if got := repositoryMonitorReviewContextSanitize(clean); got != clean {
 		t.Fatalf("sanitize(%q) = %q, want unchanged", clean, got)

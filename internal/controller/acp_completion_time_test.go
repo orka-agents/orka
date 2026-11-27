@@ -64,8 +64,6 @@ func TestACPTerminalStatusPreservesCompletionTimeAfterConflict(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				// The API has committed another writer's terminal status, but the
-				// first cache read still returns the earlier incomplete Task.
 				reads, conflicts := 0, 0
 				cached := interceptor.NewClient(kube, interceptor.Funcs{
 					Get: func(ctx context.Context, c client.WithWatch, objectKey client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -90,8 +88,6 @@ func TestACPTerminalStatusPreservesCompletionTimeAfterConflict(t *testing.T) {
 					State: test.delivery, Outcome: corev1alpha1.TaskDeliveryOutcome(test.delivery),
 				}
 				if writer == "direct" {
-					// The live cancel-request lookup reads through the uncached API
-					// reader, as in production; the status write reads the cache.
 					dispatcher := &ACPDispatcher{Client: cached, APIReader: kube}
 					if err := test.settle(dispatcher, ctx, task, delivery, "terminal delivery settled"); err != nil {
 						t.Fatal(err)

@@ -146,8 +146,6 @@ func TestExecutionEventFallbackMarkerCannotReuseMiddleCopy(t *testing.T) {
 				rows := markerWhitespaceRows(t, journal, 3)
 				last := NewExecutionEventResponse(rows[2])
 				wantSummary, wantKind := "pa", "word=fixture-value"
-				// Session recovery intentionally masks all later runtime text;
-				// logical field boundaries are not persisted for later turns.
 				if twoCopies || reopen {
 					wantSummary, wantKind = events.ExecutionEventRedactedValue, events.ExecutionEventRedactedValue
 				}

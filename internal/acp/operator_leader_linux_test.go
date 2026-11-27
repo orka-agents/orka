@@ -11,7 +11,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// waitForZombie blocks until pid has exited, leaving it unreaped.
 func waitForZombie(t *testing.T, pid int) {
 	t.Helper()
 	var info unix.Siginfo
@@ -36,12 +35,6 @@ func exitingCommand(t *testing.T) *exec.Cmd {
 	return exec.Command(shell, "-c", "exit 7")
 }
 
-// An operator leader runs under the session's UID as a direct child of the
-// supervisor. Stopping the adapter (a prompt cancellation does it while
-// operator commands are admitted) reaps every exited process of that UID. If
-// it took the leader, the owner would lose the exit status and the leader's
-// PID, which is its process group ID, could be reused while the owner still
-// signals that group.
 func TestSessionReaperLeavesOperatorLeadersToTheirOwner(t *testing.T) {
 	cmd := exitingCommand(t)
 	release, err := StartOperatorCommand(cmd)
@@ -55,7 +48,6 @@ func TestSessionReaperLeavesOperatorLeadersToTheirOwner(t *testing.T) {
 	reapExitedProcessesForUID(os.Getuid())
 	reapExitedProcessesForUIDExcept(os.Getuid(), 0)
 
-	// Still a zombie: the PID is allocated and names only this command.
 	waitForZombie(t, pid)
 	var exitErr *exec.ExitError
 	if err := cmd.Wait(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
@@ -63,9 +55,6 @@ func TestSessionReaperLeavesOperatorLeadersToTheirOwner(t *testing.T) {
 	}
 }
 
-// Once the owner has reaped the leader and released it, the PID is ordinary
-// again. A stale entry would hide whichever later process is given that PID
-// from the reaper, and the session's cleanup could never be proven.
 func TestReleasedOperatorLeaderIsReapedLikeAnyOtherProcess(t *testing.T) {
 	cmd := exitingCommand(t)
 	release, err := StartOperatorCommand(cmd)
@@ -97,16 +86,12 @@ func TestStartOperatorCommandRegistersNothingWhenTheStartFails(t *testing.T) {
 	}
 }
 
-// A leader's PID is free for reuse once its owner has reaped it, which is
-// before the owner releases it. If a later operator command is given that PID
-// in between, the earlier release must leave the later command withheld.
 func TestReleasingAReusedPIDLeavesTheLaterOperatorLeaderWithheld(t *testing.T) {
 	const pid = 4242
 	earlier := &operatorLeaderRegistration{pid: pid}
 	later := &operatorLeaderRegistration{pid: pid}
 	operatorLeaders.mu.Lock()
 	operatorLeaders.pids[pid] = earlier
-	// The later command starts and registers under the same PID.
 	operatorLeaders.pids[pid] = later
 	operatorLeaders.mu.Unlock()
 	t.Cleanup(func() { releaseOperatorLeader(later) })

@@ -39,16 +39,10 @@ type workspaceManifest struct {
 	Entries      []workspaceEntry `json:"entries"`
 }
 
-// workspaceManifestCanonicalLimits bounds the manifest digest input by the
-// entries it describes instead of the 2 MiB v2 wire cap, so any tree that
-// already passed the configured workspace limits can also be digested. JSON
-// escaping expands a string byte to at most six bytes.
 func workspaceManifestCanonicalLimits(manifest workspaceManifest) (maxBytes, maxItems int) {
 	const (
-		fixedBytes = 1 << 10 // schema, OIDs, member keys, and punctuation
-		entryBytes = 192     // keys, mode, OID, size, and punctuation per entry
-		// The root object plus its six members, then one object with at most
-		// five members per entry.
+		fixedBytes = 1 << 10
+		entryBytes = 192
 		fixedItems = 7
 		entryItems = 6
 	)
