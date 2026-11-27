@@ -53,9 +53,13 @@ func FileCredential(path string) func() (string, error) {
 }
 
 func CanonicalAuthority(value string) string {
-	authority := strings.TrimSuffix(strings.TrimSpace(value), "/")
-	if authority == "" {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
 		return DefaultAuthority
+	}
+	authority := strings.TrimSuffix(trimmed, "/")
+	if authority == "" {
+		return trimmed
 	}
 	parsed, err := url.Parse(authority)
 	if err != nil || parsed.Host == "" {
