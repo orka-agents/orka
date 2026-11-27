@@ -131,15 +131,16 @@ func (r *RepositoryScanReconciler) evaluateControllerPatchVerification(
 	}
 	spec := scan.Spec.PatchVerification
 	patchedCommit := ""
+	baseCommit := ""
 	if publication.publication != nil {
 		patchedCommit = strings.TrimSpace(publication.publication.ExpectedCommitSHA)
+		baseCommit = strings.TrimSpace(publication.publication.SourceBaselineSHA)
 	}
 	if patchedCommit == "" || store.ValidateGitObjectID("patched commit", patchedCommit) != nil {
 		return false, "controller patch verification requires a valid published commit SHA", nil
 	}
-	baseCommit := strings.TrimSpace(finding.CommitSHA)
 	if spec.RequireFailBeforePass && (baseCommit == "" || store.ValidateGitObjectID("base commit", baseCommit) != nil) {
-		return false, "controller fail->pass verification requires a pinned base commit SHA on the finding", nil
+		return false, "controller fail->pass verification requires a valid publication source baseline SHA", nil
 	}
 
 	var baseTask *corev1alpha1.Task

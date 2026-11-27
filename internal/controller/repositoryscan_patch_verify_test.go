@@ -41,7 +41,7 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 		Command:               "pytest tests/test_security.py",
 		RequireFailBeforePass: true,
 	}
-	fixture.finding.CommitSHA = strings.Repeat("b", 40)
+	fixture.finding.CommitSHA = strings.Repeat("c", 40)
 	if err := fixture.store.UpsertFinding(ctx, fixture.finding); err != nil {
 		t.Fatal(err)
 	}
@@ -55,12 +55,13 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 	}
 	assertPatchIngestState(t, fixture, scanRunPhasePending, findingStatePatchPending)
 
+	sourceBaselineSHA := strings.Repeat("1", 40)
 	baseTaskName := patchVerifyTaskName(
 		fixture.scan.Name,
 		fixture.finding.ID,
 		task.Name,
 		patchVerifyPhaseBase,
-		fixture.finding.CommitSHA,
+		sourceBaselineSHA,
 		fixture.scan.Spec.PatchVerification.Image,
 		fixture.scan.Spec.PatchVerification.Command,
 	)
@@ -71,8 +72,8 @@ func TestIngestPatchTaskControllerVerificationFailBeforePass(t *testing.T) {
 	if baseTask.Spec.Type != corev1alpha1.TaskTypeContainer || baseTask.Spec.Image != testPatchVerificationImage {
 		t.Fatalf("unexpected base verification task spec: %#v", baseTask.Spec)
 	}
-	if baseTask.Spec.Workspace == nil || baseTask.Spec.Workspace.Ref != fixture.finding.CommitSHA {
-		t.Fatalf("base verification workspace ref = %#v, want %q", baseTask.Spec.Workspace, fixture.finding.CommitSHA)
+	if baseTask.Spec.Workspace == nil || baseTask.Spec.Workspace.Ref != sourceBaselineSHA {
+		t.Fatalf("base verification workspace ref = %#v, want %q", baseTask.Spec.Workspace, sourceBaselineSHA)
 	}
 	if baseTask.Labels[labels.LabelSecurityStage] != security.StagePatchVerify {
 		t.Fatalf("base verification stage label = %q, want %q", baseTask.Labels[labels.LabelSecurityStage], security.StagePatchVerify)
@@ -182,7 +183,7 @@ func TestIngestPatchTaskControllerVerificationRejectsBasePass(t *testing.T) {
 		fixture.finding.ID,
 		task.Name,
 		patchVerifyPhaseBase,
-		fixture.finding.CommitSHA,
+		strings.Repeat("1", 40),
 		fixture.scan.Spec.PatchVerification.Image,
 		fixture.scan.Spec.PatchVerification.Command,
 	)
@@ -235,7 +236,7 @@ func TestIngestPatchTaskControllerVerificationRejectsBaseOrchestrationFailure(t 
 		fixture.finding.ID,
 		task.Name,
 		patchVerifyPhaseBase,
-		fixture.finding.CommitSHA,
+		strings.Repeat("1", 40),
 		fixture.scan.Spec.PatchVerification.Image,
 		fixture.scan.Spec.PatchVerification.Command,
 	)
